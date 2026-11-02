@@ -3,5 +3,26 @@ name = "harness-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
 [lints]
 workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dirs.workspace = true
+harness-core.workspace = true
+harness-protocol.workspace = true
+harness-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+harness-agent-native.workspace = true
+harness-tools.workspace = true
+tempfile.workspace = true
