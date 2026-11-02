@@ -5,6 +5,7 @@ mod assets;
 pub mod auth;
 mod http;
 pub mod prefs;
+pub mod search;
 pub mod secrets;
 mod ws;
 

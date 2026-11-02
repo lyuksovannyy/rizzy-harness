@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_ms INTEGER NOT NULL,
     head_seq   INTEGER NOT NULL,
     running    INTEGER NOT NULL DEFAULT 0,
+    incognito  INTEGER NOT NULL DEFAULT 0,
     owner_id   TEXT,
     agent_id   TEXT,
     profile    TEXT
@@ -177,7 +178,48 @@ CREATE TABLE IF NOT EXISTS ui_sessions (
     user_id    TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     expires_ms INTEGER NOT NULL
 );
+-- Full-text index over chats (derived from events; rebuildable). Title and
+-- message text are separate columns so ranking can weight titles higher.
+CREATE VIRTUAL TABLE IF NOT EXISTS chat_fts USING fts5(
+    session_id UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
 "#;
+
+/// Marks the start/end of a matched term in search snippets. Control
+/// characters, so they can never collide with chat text or HTML.
+pub const HIT_START: char = '\u{2}';
+pub const HIT_END: char = '\u{3}';
+
+/// One chat matching a search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub session_id: SessionId,
+    pub title: String,
+    /// Best matching excerpt, terms wrapped in `HIT_START` / `HIT_END`.
+    pub snippet: String,
+    /// bm25: lower is better.
+    pub score: f64,
+    pub updated_ms: i64,
+}
+
+/// What a newly appended event contributes to the search index.
+fn index_text(kind: &str, payload: &serde_json::Value) -> Option<(&'static str, String)> {
+    let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    match kind {
+        "session_created" => text("title").map(|t| ("title", t)),
+        "user_message" | "assistant_message" => text("text")
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| ("body", t)),
+        _ => None,
+    }
+}
+
+fn is_incognito(payload: &serde_json::Value) -> bool {
+    payload.get("incognito").and_then(|v| v.as_bool()) == Some(true)
+}
 
 impl Store {
     pub fn open(path: &Path, durability: Durability) -> Result<Self> {
@@ -285,8 +327,8 @@ impl Store {
                         .map(str::to_string)
                 };
                 tx.execute(
-                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6 WHERE session_id = ?1",
-                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile")],
+                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7 WHERE session_id = ?1",
+                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload)],
                 )?;
             }
             "agent_changed" => {
@@ -314,8 +356,120 @@ impl Store {
             }
             _ => {}
         }
+        if let Some((col, text)) = index_text(&e.kind, &e.payload) {
+            let incognito: bool = tx.query_row(
+                "SELECT incognito FROM sessions WHERE session_id = ?1",
+                params![sid],
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
+            )?;
+            if !incognito {
+                Self::index_row(&tx, &sid, col, &text)?;
+            }
+        }
         tx.commit()?;
         Ok(AppendOutcome::Applied)
+    }
+
+    fn index_row(conn: &Connection, sid: &str, col: &str, text: &str) -> Result<()> {
+        let (title, body) = if col == "title" {
+            (text, "")
+        } else {
+            ("", text)
+        };
+        conn.execute(
+            "INSERT INTO chat_fts (session_id, title, body) VALUES (?1, ?2, ?3)",
+            params![sid, title, body],
+        )?;
+        Ok(())
+    }
+
+    /// Drop and rebuild the search index from the event log.
+    pub fn rebuild_search_index(&self) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM chat_fts", [])?;
+        let rows: Vec<(String, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT e.session_id, e.kind, e.payload FROM events e
+                 JOIN sessions s ON s.session_id = e.session_id
+                 WHERE s.incognito = 0
+                   AND e.kind IN ('session_created', 'user_message', 'assistant_message')
+                 ORDER BY e.session_id, e.seq",
+            )?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (sid, kind, payload) in rows {
+            let payload: serde_json::Value = serde_json::from_str(&payload)?;
+            if let Some((col, text)) = index_text(&kind, &payload) {
+                Self::index_row(&tx, &sid, col, &text)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Run a prepared FTS5 query (build it with care: it is FTS5 syntax).
+    /// `owner`: `Some(id)` limits to that user's sessions; `None` searches all.
+    /// Returns the best hit per session, best first.
+    pub fn search(
+        &self,
+        fts_query: &str,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT f.session_id, s.title,
+                    snippet(chat_fts, -1, char(2), char(3), '…', 14),
+                    bm25(chat_fts, 0.0, 3.0, 1.0) AS score, s.updated_ms
+             FROM chat_fts f JOIN sessions s ON s.session_id = f.session_id
+             WHERE chat_fts MATCH ?1 AND s.incognito = 0
+               AND (?2 IS NULL OR s.owner_id = ?2)
+             ORDER BY score LIMIT 200",
+        )?;
+        let rows = stmt.query_map(params![fts_query, owner], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut out: Vec<SearchHit> = Vec::new();
+        for row in rows {
+            let (sid, title, snippet, score, updated_ms) = row?;
+            let session_id: SessionId = sid
+                .parse()
+                .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?;
+            // Rows arrive best-first; keep the first (best) per session.
+            if out.iter().any(|h| h.session_id == session_id) {
+                continue;
+            }
+            out.push(SearchHit {
+                session_id,
+                title,
+                snippet,
+                score,
+                updated_ms,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The indexed text of one session (titles and messages), for scoring.
+    pub fn session_search_text(&self, sid: SessionId) -> Result<String> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare_cached("SELECT title || ' ' || body FROM chat_fts WHERE session_id = ?1")?;
+        let parts = stmt
+            .query_map(params![sid.to_string()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(parts.join("\n"))
     }
 
     pub fn head_seq(&self, sid: SessionId) -> Result<u64> {
