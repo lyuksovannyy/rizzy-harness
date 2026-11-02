@@ -4,6 +4,7 @@
 mod assets;
 pub mod auth;
 mod http;
+pub mod prefs;
 pub mod secrets;
 mod ws;
 
@@ -82,6 +83,15 @@ pub struct CreateSpec {
     pub model: Option<String>,
     pub approval_mode: Option<harness_core::policy::ApprovalMode>,
     pub agent_id: Option<String>,
+}
+
+/// Per-message choices on a prompt.
+#[derive(Debug, Clone, Default)]
+pub struct PromptOpts {
+    /// Run this turn as another agent (the session's agent is unchanged).
+    pub agent_id: Option<String>,
+    /// `low` | `medium` | `high` | `max`; dropped if the model lacks support.
+    pub effort: Option<String>,
 }
 
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
@@ -189,6 +199,24 @@ impl Master {
         agent_id: Option<&str>,
         session_model: Option<&str>,
     ) -> Result<harness_core::agent::AgentSpec, CommandError> {
+        self.agent_spec_with(agent_id, session_model, None)
+    }
+
+    /// Like `agent_spec`, with an optional per-message effort that replaces
+    /// the agent's. The model-capability gate applies either way.
+    pub fn agent_spec_with(
+        &self,
+        agent_id: Option<&str>,
+        session_model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<harness_core::agent::AgentSpec, CommandError> {
+        if let Some(e) = effort
+            && !matches!(e, "low" | "medium" | "high" | "max")
+        {
+            return Err(CommandError::Rejected(format!(
+                "effort must be low, medium, high or max, not {e:?}"
+            )));
+        }
         let set = self.agents();
         let agent = match agent_id {
             Some(id) => set
@@ -199,6 +227,9 @@ impl Master {
                 .ok_or_else(|| CommandError::UnknownAgent("(default)".into()))?,
         };
         let mut spec = agent.spec.clone();
+        if let Some(e) = effort {
+            spec.effort = Some(e.to_string());
+        }
         let models = self.models();
         let model = spec
             .model
@@ -456,8 +487,9 @@ impl Master {
         &self,
         sid: SessionId,
         text: String,
-        agent_id: Option<String>,
+        opts: PromptOpts,
     ) -> Result<(), CommandError> {
+        let PromptOpts { agent_id, effort } = opts;
         let row = self
             .inner
             .mirror
@@ -468,7 +500,7 @@ impl Master {
             .filter(|id| self.agents().get(id).is_some())
             .map(str::to_string);
         let chosen = agent_id.or(mention).or(row.agent_id.clone());
-        let agent = self.agent_spec(chosen.as_deref(), Some(&row.model))?;
+        let agent = self.agent_spec_with(chosen.as_deref(), Some(&row.model), effort.as_deref())?;
         self.send_command(&row.node_id, |req_id| MasterToNode::Prompt {
             req_id,
             session_id: sid,

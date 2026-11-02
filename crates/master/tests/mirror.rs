@@ -75,7 +75,9 @@ async fn empty_and_stale_mirrors_catch_up_on_attach() {
             .count()
     };
     for (i, text) in ["one two three", "four five"].into_iter().enumerate() {
-        m1.prompt(sid, text.into(), None).await.unwrap();
+        m1.prompt(sid, text.into(), Default::default())
+            .await
+            .unwrap();
         let st = n.store().clone();
         wait_for(|| ended(&st) == i + 1).await;
     }
@@ -100,7 +102,9 @@ async fn empty_and_stale_mirrors_catch_up_on_attach() {
     assert_eq!(stale.events_after(sid, 0, 10_000).unwrap(), node_log);
 
     // Live events keep flowing to the current master after catch-up.
-    m3.prompt(sid, "six".into(), None).await.unwrap();
+    m3.prompt(sid, "six".into(), Default::default())
+        .await
+        .unwrap();
     let st = n.store().clone();
     wait_for(|| ended(&st) == 3).await;
     let full = n.store().events_after(sid, 0, 10_000).unwrap();
@@ -112,7 +116,11 @@ async fn empty_and_stale_mirrors_catch_up_on_attach() {
 async fn commands_to_unknown_sessions_and_offline_nodes_fail_cleanly() {
     let m = master(Store::open_in_memory().unwrap());
     let err = m
-        .prompt(harness_core::SessionId::new(), "x".into(), None)
+        .prompt(
+            harness_core::SessionId::new(),
+            "x".into(),
+            Default::default(),
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("unknown session"));

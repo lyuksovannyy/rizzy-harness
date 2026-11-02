@@ -17,6 +17,7 @@ pub fn router(master: Master) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
+        .route("/api/me/settings", get(get_settings).put(put_settings))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{id}",
@@ -278,6 +279,28 @@ async fn change_password(
     auth::set_password(&m.inner.mirror, &uid, b.new, false).await?;
     // Every session was revoked; give this browser a fresh one.
     session_response(&m, &uid).await
+}
+
+async fn get_settings(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<crate::prefs::Prefs>> {
+    let who = require(&m, &headers).await?;
+    Ok(Json(
+        crate::prefs::Prefs::load(&m, who.user_id.as_deref()).await,
+    ))
+}
+
+async fn put_settings(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(p): Json<crate::prefs::Prefs>,
+) -> ApiResult<Json<crate::prefs::Prefs>> {
+    let who = require(&m, &headers).await?;
+    p.validate(&m)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    p.save(&m, who.user_id.as_deref()).await?;
+    Ok(Json(p))
 }
 
 fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
@@ -566,6 +589,9 @@ struct PromptBody {
     /// stays unchanged.
     #[serde(default)]
     agent_id: Option<String>,
+    /// Reasoning effort for this message only (if the model supports it).
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 async fn prompt(
@@ -579,7 +605,15 @@ async fn prompt(
         return Err(ApiError(StatusCode::BAD_REQUEST, "empty prompt".into()));
     }
     let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.prompt(sid, b.text, b.agent_id).await?;
+    m.prompt(
+        sid,
+        b.text,
+        crate::PromptOpts {
+            agent_id: b.agent_id,
+            effort: b.effort,
+        },
+    )
+    .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
