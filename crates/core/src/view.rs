@@ -83,10 +83,10 @@ impl SessionView {
 
     /// Apply one event. Seq must be exactly `head_seq + 1`.
     pub fn apply(&mut self, e: &RawEvent) -> Result<(), FoldError> {
-        if let Some(id) = self.session_id {
-            if id != e.session_id {
-                return Err(FoldError::WrongSession);
-            }
+        if let Some(id) = self.session_id
+            && id != e.session_id
+        {
+            return Err(FoldError::WrongSession);
         }
         if e.seq != self.head_seq + 1 {
             return Err(FoldError::OutOfOrder {
@@ -193,12 +193,11 @@ impl SessionView {
                     if let Item::Tool {
                         approval: Some(a), ..
                     } = item
+                        && a.approval_id == r.approval_id
                     {
-                        if a.approval_id == r.approval_id {
-                            a.decision = Some(r.decision);
-                            a.by = Some(r.by);
-                            break;
-                        }
+                        a.decision = Some(r.decision);
+                        a.by = Some(r.by);
+                        break;
                     }
                 }
             }
