@@ -7,6 +7,9 @@ import type {
   NodeInfo,
   Prefs,
   Profile,
+  ProviderKind,
+  ProviderModel,
+  ProviderState,
   RawEvent,
   Role,
   SearchHit,
@@ -88,6 +91,16 @@ export const api = {
     ),
   classifier: () => call<unknown>("GET", "/api/me/classifier"),
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
+  provider: () => call<ProviderState>("GET", "/api/admin/provider"),
+  testProvider: (b: { kind: ProviderKind; base_url?: string; api_key?: string }) =>
+    call<{ ok: boolean; models?: string[]; error?: string }>("POST", "/api/admin/provider/test", b),
+  saveProvider: (b: {
+    kind: ProviderKind;
+    base_url?: string;
+    api_key?: string;
+    model?: string;
+    models: ProviderModel[];
+  }) => call<ProviderState>("PUT", "/api/admin/provider", b),
   settings: () => call<Prefs>("GET", "/api/me/settings"),
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),

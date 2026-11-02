@@ -732,8 +732,10 @@ pre.diff .del {
   flex-direction: column;
   gap: 14px;
 }
-.check {
+.check,
+.form label.check {
   display: inline-flex;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
   color: var(--fg);
@@ -877,3 +879,75 @@ mark {
 .small {
   font-size: 12px;
 }
+
+/* ---------- Onboarding & accents ---------- */
+.onboarding {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+}
+.onboard-card {
+  width: min(560px, 100%);
+}
+.steps {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.model-pick ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.model-pick li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.model-pick li:last-child {
+  border-bottom: none;
+}
+.model-pick li > label:first-child {
+  flex: 1;
+}
+.star {
+  font-size: 16px;
+}
+.star.on {
+  color: var(--warn);
+}
+.engines {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.swatches {
+  margin-top: 6px;
+}
+.swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+.swatch.on {
+  border-color: var(--fg);
+}
+.sw-blue { background: #4f8cff; }
+.sw-violet { background: #8b5cf6; }
+.sw-green { background: #22a55b; }
+.sw-orange { background: #f08a24; }
+.sw-pink { background: #e5488f; }
+.sw-gray { background: #8a8a8a; }
+:root[data-accent="violet"] { --accent: #8b5cf6; }
+:root[data-accent="green"] { --accent: #22a55b; }
+:root[data-accent="orange"] { --accent: #f08a24; }
+:root[data-accent="pink"] { --accent: #e5488f; }
+:root[data-accent="gray"] { --accent: #8a8a8a; }

@@ -5,8 +5,8 @@ for coding agents, with the agent loop running on the machine that owns the
 code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
-**Status:** Phase 1 (single machine, master with embedded node). Remote nodes
-are Phase 2.
+**Status:** Phases 1–5 done (single machine, accounts, UI, bar intelligence,
+onboarding). Remote nodes are Phase 8.
 
 ## Quick start
 
@@ -23,8 +23,9 @@ cargo build --release
 ```
 
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
-(so nobody else can take over a fresh server) and creates your **admin**
-account. Admins add other people under **Users**; new accounts get a temporary
+(so nobody else can take over a fresh server), creates your **admin**
+account, and walks you through connecting an AI provider, your name and time
+zone, and a search engine. Admins add other people under **Users**; new accounts get a temporary
 password and must change it at first login. Everyone sees only their own
 chats. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
@@ -46,7 +47,8 @@ Everything lives in the data directory (`~/.local/share/harness`, or
 
 `harness.toml`: provider. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600
-`secrets.toml` (`api_key_secret`; the onboarding UI will write it).
+`secrets.toml` (`api_key_secret`; onboarding and Settings → AI provider write
+it for you).
 
 ```toml
 [provider]
@@ -116,6 +118,10 @@ node web/e2e/phase3.cjs target/debug/harness
 
 ```bash
 node web/e2e/phase4.cjs target/debug/harness
+```
+
+```bash
+node web/e2e/phase5.cjs target/debug/harness
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

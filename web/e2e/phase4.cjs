@@ -11,6 +11,18 @@ fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.writeFileSync(`${S}/data/harness.toml`, '[provider]\nkind = "mock"\nmock_delay_ms = 5\n');
 fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}"]\n`);
 const URL_ = 'http://127.0.0.1:7799/';
+
+/** Finish first-run onboarding with defaults (demo provider for admins). */
+async function skipOnboarding(page, admin) {
+  if (admin) {
+    await page.waitForSelector('text=Connect an AI provider');
+    await page.click('text=Skip: use the built-in demo');
+  }
+  await page.waitForSelector('text=About you');
+  await page.click('button:has-text("Continue")');
+  await page.waitForSelector('h2:has-text("Search engine")');
+  await page.click('button:has-text("Finish")');
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };
@@ -29,6 +41,7 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
     await p.fill('input[placeholder="username"]', 'alex');
     await p.fill('input[type=password]', 'admin password');
     await p.click('text=Create account');
+    await skipOnboarding(p, true);
     await p.waitForSelector('h1.greeting');
 
     const mode = () => p.innerText('.mode-switch button[aria-checked=true]');

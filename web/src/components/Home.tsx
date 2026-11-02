@@ -8,6 +8,7 @@ import { Similar, type SimilarHandle } from "./Similar";
 
 export function Home(props: {
   username: string;
+  timeZone?: string | null;
   agents: Agent[];
   defaultAgent: string;
   models: ModelInfo[];
@@ -34,7 +35,7 @@ export function Home(props: {
   return (
     <section className="home">
       <div className="column">
-        <h1 className="greeting">{greeting(now, props.username)}</h1>
+        <h1 className="greeting">{greeting(now, props.username, props.timeZone)}</h1>
         <p className="muted subtitle">{t("home.subtitle")}</p>
         <Composer
           where="home"

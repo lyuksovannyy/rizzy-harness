@@ -92,7 +92,8 @@ export function Composer(props: {
 
   // Keep selections valid as lists load.
   useEffect(() => {
-    if (!model && props.models.length) {
+    // Also resets when the provider changed and the old model is gone.
+    if (props.models.length && !props.models.some((m) => m.id === model)) {
       setModel(props.defaultModel ?? props.models.find((m) => m.default)?.id ?? props.models[0]!.id);
     }
   }, [props.models, props.defaultModel, model]);

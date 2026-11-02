@@ -14,6 +14,7 @@ import { Sidebar } from "./Sidebar";
 // Everything but the home screen loads on demand (new-tab speed budget).
 const Conversation = lazy(() => import("./Conversation"));
 const Settings = lazy(() => import("./Settings"));
+const Onboarding = lazy(() => import("./Onboarding"));
 
 const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
 const COLLAPSED_KEY = "harness.sidebarCollapsed";
@@ -71,6 +72,9 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const refreshSessions = useCallback(() => {
     api.sessions().then((r) => setSessions(r.sessions)).catch(unauthorized);
   }, [unauthorized]);
+  const refreshModels = useCallback(() => {
+    api.models().then((r) => setModels(r.models)).catch(unauthorized);
+  }, [unauthorized]);
   const refreshNodes = useCallback(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
   }, [unauthorized]);
@@ -87,7 +91,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
         setServerDefaultAgent(r.default);
       })
       .catch(unauthorized);
-    api.models().then((r) => setModels(r.models)).catch(unauthorized);
+    refreshModels();
     api.settings().then(setPrefs).catch(unauthorized);
     api
       .classifier()
@@ -96,7 +100,13 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       })
       .catch(() => {});
     return () => live.close();
-  }, [live, refreshSessions, refreshNodes, unauthorized]);
+  }, [live, refreshSessions, refreshNodes, refreshModels, unauthorized]);
+
+  // Accent colour from preferences.
+  useEffect(() => {
+    if (prefs?.accent) document.documentElement.dataset.accent = prefs.accent;
+    else delete document.documentElement.dataset.accent;
+  }, [prefs?.accent]);
 
   useSyncExternalStore(
     (l) => live.subscribe(l),
@@ -165,6 +175,21 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     go(r);
   };
 
+  if (prefs && !prefs.onboarded) {
+    return (
+      <Suspense fallback={<div className="splash" />}>
+        <Onboarding
+          me={me}
+          prefs={prefs}
+          onDone={(p) => {
+            setPrefs(p);
+            refreshModels();
+          }}
+        />
+      </Suspense>
+    );
+  }
+
   return (
     <div className={`shell ${collapsed ? "collapsed" : ""} ${drawer ? "drawer-open" : ""}`}>
       {!collapsed && (
@@ -209,10 +234,18 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               models={models}
             />
           ) : route.kind === "settings" ? (
-            <Settings me={me} agents={agents} models={models} onPrefs={setPrefs} />
+            <Settings
+              me={me}
+              agents={agents}
+              models={models}
+              prefs={prefs}
+              onPrefs={setPrefs}
+              onProviderChanged={refreshModels}
+            />
           ) : (
             <Home
-              username={me.username}
+              username={prefs?.display_name || me.username}
+              timeZone={prefs?.timezone}
               agents={agents}
               defaultAgent={defaultAgent}
               models={models}

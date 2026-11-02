@@ -9,10 +9,35 @@ export function bucket(hour: number): Bucket {
   return "night";
 }
 
-/** A greeting for `now` (local time). Stable within a day, varies by day. */
-export function greeting(now: Date, name: string): string {
-  const day = Math.floor(
-    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 86_400_000,
-  );
-  return tPick(`greeting.${bucket(now.getHours())}`, day, { name });
+/** Hour and calendar day of `now` in `timeZone` (browser zone if unset/invalid). */
+export function localParts(now: Date, timeZone?: string | null): { hour: number; day: number } {
+  const fmt = (tz?: string) =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      hourCycle: "h23",
+    });
+  let f: Intl.DateTimeFormat;
+  try {
+    f = fmt(timeZone ?? undefined);
+  } catch {
+    f = fmt();
+  }
+  const parts = Object.fromEntries(f.formatToParts(now).map((p) => [p.type, p.value]));
+  const day = Math.floor(Date.UTC(+parts.year!, +parts.month! - 1, +parts.day!) / 86_400_000);
+  return { hour: +parts.hour! % 24, day };
+}
+
+/** A greeting for `now` in the user's zone. Stable within a day, varies by day. */
+export function greeting(now: Date, name: string, timeZone?: string | null): string {
+  const { hour, day } = localParts(now, timeZone);
+  return tPick(`greeting.${bucket(hour)}`, day, { name });
+}
+
+/** The browser's IANA zone, e.g. `Europe/Riga`. */
+export function browserTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }

@@ -14,6 +14,18 @@ fs.writeFileSync(`${S}/p3/proj/main.rs`, 'fn main() {}\n');
 fs.writeFileSync(`${S}/p3/data/harness.toml`, '[provider]\nkind = "mock"\nmock_delay_ms = 25\n');
 fs.writeFileSync(`${S}/p3/data/node.toml`, `workspace_roots = ["${S}/p3"]\n`);
 const URL = 'http://127.0.0.1:7798/';
+
+/** Finish first-run onboarding with defaults (demo provider for admins). */
+async function skipOnboarding(page, admin) {
+  if (admin) {
+    await page.waitForSelector('text=Connect an AI provider');
+    await page.click('text=Skip: use the built-in demo');
+  }
+  await page.waitForSelector('text=About you');
+  await page.click('button:has-text("Continue")');
+  await page.waitForSelector('h2:has-text("Search engine")');
+  await page.click('button:has-text("Finish")');
+}
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const start = () => spawn(BIN, ['--data-dir', `${S}/p3/data`, 'serve', '--bind', '127.0.0.1:7798'], { detached: true, stdio: 'ignore' });
 const log = (...a) => console.log('•', ...a);
@@ -31,6 +43,7 @@ const log = (...a) => console.log('•', ...a);
   await p.fill('input[placeholder="username"]', 'alex');
   await p.fill('input[type=password]', 'admin password');
   await p.click('text=Create account');
+  await skipOnboarding(p, true);
   await p.waitForSelector('h1.greeting');
   log('greeting:', await p.innerText('h1.greeting'));
   await p.screenshot({ path: `${S}/p3-1-home.png` });
@@ -116,6 +129,7 @@ const log = (...a) => console.log('•', ...a);
   await pw.nth(1).fill('bobs own password');
   await pw.nth(2).fill('bobs own password');
   await q.click('text=Save password');
+  await skipOnboarding(q, false);
   await q.waitForSelector('h1.greeting');
   log('bob agentic disabled:', await q.locator('.mode-switch button:has-text("Agentic")').isDisabled(),
       '| hint:', await q.innerText('.hint'), '| bob chats:', await q.locator('.session-item').count());

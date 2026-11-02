@@ -109,6 +109,30 @@ export interface Prefs {
   search_url: string;
   default_agent: string | null;
   default_model: string | null;
+  display_name?: string | null;
+  timezone?: string | null;
+  country?: string | null;
+  city?: string | null;
+  accent?: string | null;
+  onboarded?: boolean;
+}
+
+export type ProviderKind = "openai" | "anthropic" | "mock";
+
+export interface ProviderModel {
+  id: string;
+  effort: boolean;
+  vision: boolean;
+}
+
+export interface ProviderState {
+  kind: ProviderKind;
+  base_url: string;
+  model: string;
+  /** `stored`, `none`, or `env:NAME` — never the key itself. */
+  key: string;
+  configured: boolean;
+  models: ProviderModel[];
 }
 
 export interface SearchHit {

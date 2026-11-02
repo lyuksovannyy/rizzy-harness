@@ -641,3 +641,46 @@ chat works.
 
 **Next:** Phase 5, onboarding.
 
+
+### 2026-11-03 — Phase 5 (onboarding): done
+
+**Done**
+* First run: claim code → admin account (Phase 2) → wizard. Admins on an unconfigured
+  server get three steps (provider, about you, search engine); everyone else two.
+  "Skip" keeps the built-in mock so the UI stays usable with no key.
+* Provider setup without restart: Anthropic or any OpenAI-compatible endpoint (presets for
+  OpenAI, DeepSeek, OpenRouter, Ollama, custom). "Test connection" calls `GET {base}/models`
+  with the typed key; the admin picks which models to offer, a default, and which accept
+  effort. Apply = validate → build → write `harness.toml` → key into `secrets.toml` (0600,
+  never in `harness.toml`, never returned by the API) → hot-swap the provider behind both
+  runtimes. The new key joins the shared redaction set at once, so tool output and logs
+  scrub it without a restart.
+* Profile: display name, IANA time zone (prefilled from the browser, validated server-side),
+  optional country/city; the greeting uses the saved zone, not the browser's.
+* Settings gains Profile / Preferences (search engine, default agent/model, accent colour) /
+  AI provider (admin) tabs, sharing the form components with the wizard.
+
+**Evidence**
+* Rust 107 (fake OpenAI server: wrong key → 401 surfaced, model list, hot swap, persisted
+  config, key file mode, runtime-added key scrubbed); Vitest 19.
+* `web/e2e/phase5.cjs`: fresh data dir → claim → wizard with a fake provider (bad key error,
+  model pick) → first chat answered by the fake provider's default model → key only in
+  `secrets.toml` (0600) → search engine redirect → accent → a member gets two steps.
+  `phase3.cjs`/`phase4.cjs` still green. Initial JS 78.0 KB gzip.
+* Found by the e2e and fixed: the bar kept the model chosen before the provider switch
+  ("mock"), so the first chat went to the demo; the bar now resets a model the server no
+  longer offers. Checkbox rows in forms rendered as columns (CSS specificity).
+
+**Not done (on purpose)**
+* The memory preset step: there is no memory service until Phase 7, and a picker that
+  changes nothing would be a lie. It lands with Phase 7.
+* Location is never inferred; "learned later, with confirmation" is Phase 7 too.
+
+**Risks**
+* Provider apply is admin-only but affects every account at once; there is no per-user
+  provider or key yet (teams/workspaces later).
+* The wizard depends on `GET /models`; a gateway without it cannot be set up from the UI
+  (only via `harness.toml`). A typed-model fallback is a small follow-up if it bites.
+
+**Next:** Phase 6, chat capability (web search tool, attachments, token meter, rolling
+summary, incognito TTL).

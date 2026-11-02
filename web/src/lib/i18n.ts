@@ -34,7 +34,9 @@ const en = {
   "agentic.noWorker": "No worker node is online.",
   "effort.default": "Effort: default",
   "settings.title": "Settings",
+  "settings.profile": "Profile",
   "settings.preferences": "Preferences",
+  "settings.provider": "AI provider",
   "settings.password": "Password",
   "settings.users": "Users",
 } as const;

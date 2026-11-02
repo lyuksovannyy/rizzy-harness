@@ -19,6 +19,13 @@ describe("greeting", () => {
       "morning", "morning", "afternoon", "afternoon", "evening", "evening", "night", "night", "night",
     ]);
   });
+  it("uses the given time zone", () => {
+    // 2026-11-03 07:30 UTC is 09:30 in Riga and 23:30 the day before in Los Angeles.
+    const t = new Date(Date.UTC(2026, 10, 3, 7, 30));
+    expect(greeting(t, "alex", "Europe/Riga")).toMatch(/morning|Morning|Rise/);
+    expect(greeting(t, "alex", "America/Los_Angeles")).toMatch(/late|midnight|Still here/);
+    expect(greeting(t, "alex", "Not/AZone")).toContain("alex");
+  });
   it("includes the name, is stable within a day, and varies across days", () => {
     const a = greeting(new Date(2026, 10, 3, 9, 0), "alex");
     expect(a).toContain("alex");
