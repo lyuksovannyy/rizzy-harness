@@ -58,12 +58,12 @@ api_key_env = "DEEPSEEK_API_KEY"
 kind = "anthropic"                   # Anthropic API key only (no subscription login)
 model = "<model id>"
 api_key_secret = "anthropic"         # [keys] anthropic = "..." in secrets.toml
-effort = "high"                      # only sent to models with effort = true below
-
-[[models]]
-id = "<model id>"
-effort = true
 ```
+
+`effort = "low" | "medium" | "high" | "max"` is only sent to models declared
+with `[[models]] id = "..."` and `effort = true`. Do not enable it for
+Anthropic models yet: extended thinking combined with tool calls is not
+supported until risk R8 in `PLAN.md` is fixed.
 
 Local Ollama: `base_url = "http://localhost:11434/v1"`, no key.
 
