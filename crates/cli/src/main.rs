@@ -85,9 +85,14 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn build_provider(
-    cfg: &Config,
-) -> anyhow::Result<(Arc<dyn Provider>, Vec<Secret<String>>, Vec<String>)> {
+/// The provider, the secret values to scrub, and env vars to hide from tools.
+struct BuiltProvider {
+    provider: Arc<dyn Provider>,
+    secrets: Vec<Secret<String>>,
+    env_remove: Vec<String>,
+}
+
+fn build_provider(cfg: &Config) -> anyhow::Result<BuiltProvider> {
     let p = &cfg.provider;
     Ok(match p.kind {
         ProviderKind::Mock => BuiltProvider {
