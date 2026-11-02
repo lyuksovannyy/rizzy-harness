@@ -123,9 +123,7 @@ pub struct SessionCreated {
     pub node_id: String,
     #[serde(default)]
     pub approval_mode: crate::policy::ApprovalMode,
-    /// Absent in logs written before v2; those sessions were agentic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<Profile>,
+    pub profile: Profile,
     /// The agent active when the session started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -350,14 +348,14 @@ mod tests {
         assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
     }
 
-    /// Payloads written by v1 parse, and re-serialize byte-identically, so
-    /// the v2 fields are purely additive.
+    /// Optional fields are omitted when empty, so payloads stay minimal and
+    /// round-trip exactly.
     #[test]
-    fn v1_payloads_roundtrip_unchanged() {
-        let v1 = [
+    fn optional_fields_are_omitted_and_roundtrip() {
+        let minimal = [
             (
                 "session_created",
-                json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native", "node_id": "local", "approval_mode": "ask"}),
+                json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native", "node_id": "local", "approval_mode": "ask", "profile": "agentic"}),
             ),
             ("turn_started", json!({"turn_id": "t1"})),
             (
@@ -373,25 +371,16 @@ mod tests {
                 json!({"turn_id": "t1", "call_id": "c", "tool": "bash", "input": {}}),
             ),
         ];
-        for (kind, payload) in v1 {
+        for (kind, payload) in minimal {
             let k = EventKind::from_parts(kind, payload.clone()).unwrap();
             let (k2, p2) = k.into_parts();
             assert_eq!(k2, kind);
             assert_eq!(p2, payload, "{kind} changed shape");
         }
-        let EventKind::SessionCreated(c) = EventKind::from_parts(
-            "session_created",
-            json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native", "node_id": "local"}),
-        )
-        .unwrap() else {
-            unreachable!()
-        };
-        assert_eq!(c.profile, None);
-        assert!(!c.incognito);
     }
 
     #[test]
-    fn v2_fields_roundtrip() {
+    fn agent_and_variant_fields_roundtrip() {
         let agent = AgentRef {
             agent_id: "coder".into(),
             name: "Coder".into(),
@@ -405,7 +394,7 @@ mod tests {
                 backend: "native".into(),
                 node_id: "master".into(),
                 approval_mode: Default::default(),
-                profile: Some(Profile::Chat),
+                profile: Profile::Chat,
                 agent_id: Some("general".into()),
                 incognito: true,
             }),

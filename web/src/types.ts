@@ -22,7 +22,7 @@ export interface SessionCreated {
   backend: string;
   node_id: string;
   approval_mode: ApprovalMode;
-  profile?: Profile;
+  profile: Profile;
   agent_id?: string;
   incognito?: boolean;
 }

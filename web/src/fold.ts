@@ -80,8 +80,8 @@ export function apply(v: SessionView, e: RawEvent): void {
         backend: p.backend,
         node_id: p.node_id,
         approval_mode: p.approval_mode ?? "ask",
+        profile: p.profile,
       };
-      if (p.profile != null) meta!.profile = p.profile;
       if (p.agent_id != null) meta!.agent_id = p.agent_id;
       if (p.incognito) meta!.incognito = true;
       v.meta = meta;

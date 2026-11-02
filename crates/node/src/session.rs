@@ -71,7 +71,7 @@ impl Session {
             approvals: Mutex::new(HashMap::new()),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
-            profile: Some(profile),
+            profile,
             agent_id,
             incognito: false,
             title,

@@ -57,34 +57,34 @@ pub struct SessionRow {
     pub updated_ms: i64,
     pub head_seq: u64,
     pub running: bool,
-    /// The user who created the session; `None` for sessions predating
-    /// accounts or created directly on a node.
+    /// The user who created the session; `None` when created with the API
+    /// token or directly on a node.
     pub owner_id: Option<String>,
     /// The session's active agent (from `session_created` / `agent_changed`).
     pub agent_id: Option<String>,
-    /// `chat` or `agentic`; `None` for sessions predating profiles.
+    /// `chat` or `agentic`; `None` until `session_created` has been mirrored.
     pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    Owner,
-    /// Reserved for teams; unused in v1.
+    /// Manages accounts; always allowed agentic sessions.
+    Admin,
     Member,
 }
 
 impl Role {
     fn as_str(self) -> &'static str {
         match self {
-            Role::Owner => "owner",
+            Role::Admin => "admin",
             Role::Member => "member",
         }
     }
 
     fn parse(s: &str) -> Result<Self> {
         match s {
-            "owner" => Ok(Role::Owner),
+            "admin" => Ok(Role::Admin),
             "member" => Ok(Role::Member),
             other => Err(StoreError::Corrupt(format!("role {other}"))),
         }
@@ -99,6 +99,29 @@ pub struct UserRow {
     pub password_hash: String,
     pub role: Role,
     pub created_ms: i64,
+    pub disabled: bool,
+    /// Raw grant; admins are allowed agentic regardless.
+    pub can_agentic: bool,
+    pub must_change_password: bool,
+}
+
+/// A user to create.
+#[derive(Debug, Clone)]
+pub struct NewUser {
+    pub user_id: String,
+    pub username: String,
+    pub password_hash: String,
+    pub role: Role,
+    pub can_agentic: bool,
+    pub must_change_password: bool,
+}
+
+/// Fields to change on a user; `None` leaves a field as is.
+#[derive(Debug, Clone, Default)]
+pub struct UserPatch {
+    pub role: Option<Role>,
+    pub disabled: Option<bool>,
+    pub can_agentic: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -116,7 +139,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL,
     head_seq   INTEGER NOT NULL,
-    running    INTEGER NOT NULL DEFAULT 0
+    running    INTEGER NOT NULL DEFAULT 0,
+    owner_id   TEXT,
+    agent_id   TEXT,
+    profile    TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     session_id TEXT NOT NULL,
@@ -141,7 +167,10 @@ CREATE TABLE IF NOT EXISTS users (
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL,
-    created_ms    INTEGER NOT NULL
+    created_ms    INTEGER NOT NULL,
+    disabled      INTEGER NOT NULL DEFAULT 0,
+    can_agentic   INTEGER NOT NULL DEFAULT 0,
+    must_change_password INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS ui_sessions (
     token_hash TEXT PRIMARY KEY,
@@ -170,24 +199,6 @@ impl Store {
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        // Additive migrations for databases created by older versions.
-        let has_owner: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'owner_id'")?
-            .exists([])?;
-        if !has_owner {
-            conn.execute_batch("ALTER TABLE sessions ADD COLUMN owner_id TEXT")?;
-        }
-        for (col, ddl) in [
-            ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
-            ("profile", "ALTER TABLE sessions ADD COLUMN profile TEXT"),
-        ] {
-            let exists: bool = conn
-                .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")?
-                .exists([col])?;
-            if !exists {
-                conn.execute_batch(ddl)?;
-            }
-        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -454,55 +465,130 @@ impl Store {
         Ok(n as u64)
     }
 
-    pub fn create_user(
-        &self,
-        user_id: &str,
-        username: &str,
-        password_hash: &str,
-        role: Role,
-    ) -> Result<()> {
+    pub fn create_user(&self, u: &NewUser) -> Result<()> {
         let conn = self.lock();
         let res = conn.execute(
-            "INSERT INTO users (user_id, username, password_hash, role, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![user_id, username, password_hash, role.as_str(), harness_core::now_ms()],
+            "INSERT INTO users (user_id, username, password_hash, role, created_ms, can_agentic, must_change_password)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                u.user_id,
+                u.username,
+                u.password_hash,
+                u.role.as_str(),
+                harness_core::now_ms(),
+                u.can_agentic,
+                u.must_change_password
+            ],
         );
         match res {
             Ok(_) => Ok(()),
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Err(StoreError::Conflict(format!("user {username}")))
+                Err(StoreError::Conflict(format!("user {}", u.username)))
             }
             Err(e) => Err(e.into()),
         }
     }
 
+    const USER_COLS: &str = "user_id, username, password_hash, role, created_ms, disabled, can_agentic, must_change_password";
+
+    fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(UserRow, String)> {
+        Ok((
+            UserRow {
+                user_id: r.get(0)?,
+                username: r.get(1)?,
+                password_hash: r.get(2)?,
+                // Parsed by the caller so errors stay typed.
+                role: Role::Member,
+                created_ms: r.get(4)?,
+                disabled: r.get::<_, i64>(5)? != 0,
+                can_agentic: r.get::<_, i64>(6)? != 0,
+                must_change_password: r.get::<_, i64>(7)? != 0,
+            },
+            r.get(3)?,
+        ))
+    }
+
+    fn finish_user((mut u, role): (UserRow, String)) -> Result<UserRow> {
+        u.role = Role::parse(&role)?;
+        Ok(u)
+    }
+
     fn user_where(&self, clause: &str, arg: &str) -> Result<Option<UserRow>> {
         let conn = self.lock();
-        let sql = format!(
-            "SELECT user_id, username, password_hash, role, created_ms FROM users WHERE {clause}"
-        );
-        let row = conn
-            .query_row(&sql, params![arg], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .optional()?;
-        row.map(|(user_id, username, password_hash, role, created_ms)| {
-            Ok(UserRow {
-                user_id,
-                username,
-                password_hash,
-                role: Role::parse(&role)?,
-                created_ms,
-            })
-        })
-        .transpose()
+        let sql = format!("SELECT {} FROM users WHERE {clause}", Self::USER_COLS);
+        conn.query_row(&sql, params![arg], Self::user_from_row)
+            .optional()?
+            .map(Self::finish_user)
+            .transpose()
+    }
+
+    /// All users, by username.
+    pub fn list_users(&self) -> Result<Vec<UserRow>> {
+        let conn = self.lock();
+        let sql = format!("SELECT {} FROM users ORDER BY username", Self::USER_COLS);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::user_from_row)?;
+        rows.map(|r| Self::finish_user(r?)).collect()
+    }
+
+    /// Apply a patch. Errors with `Corrupt` if the user does not exist.
+    pub fn update_user(&self, user_id: &str, p: &UserPatch) -> Result<()> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE users SET
+               role = COALESCE(?2, role),
+               disabled = COALESCE(?3, disabled),
+               can_agentic = COALESCE(?4, can_agentic)
+             WHERE user_id = ?1",
+            params![user_id, p.role.map(Role::as_str), p.disabled, p.can_agentic],
+        )?;
+        if n == 0 {
+            return Err(StoreError::Corrupt(format!("no user {user_id}")));
+        }
+        Ok(())
+    }
+
+    pub fn set_password_hash(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        must_change: bool,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE users SET password_hash = ?2, must_change_password = ?3 WHERE user_id = ?1",
+            params![user_id, password_hash, must_change],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a user; their UI sessions go with them (foreign key cascade).
+    pub fn delete_user(&self, user_id: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM users WHERE user_id = ?1", params![user_id])?;
+        Ok(())
+    }
+
+    /// Admins that can still log in.
+    pub fn active_admin_count(&self) -> Result<u64> {
+        let conn = self.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Log a user out everywhere. Returns how many sessions were removed.
+    pub fn ui_sessions_delete_for_user(&self, user_id: &str) -> Result<usize> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "DELETE FROM ui_sessions WHERE user_id = ?1",
+            params![user_id],
+        )?)
     }
 
     pub fn user_by_username(&self, username: &str) -> Result<Option<UserRow>> {
@@ -540,7 +626,8 @@ impl Store {
             .optional()?
         };
         match user_id {
-            Some(id) => self.user_by_id(&id),
+            // A disabled user's sessions are dead even before cleanup.
+            Some(id) => Ok(self.user_by_id(&id)?.filter(|u| !u.disabled)),
             None => Ok(None),
         }
     }

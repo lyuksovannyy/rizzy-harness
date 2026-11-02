@@ -13,7 +13,7 @@ fn events() -> Vec<RawEvent> {
     let t = || "t1".to_string();
     let kinds = vec![
         EventKind::SessionCreated(SessionCreated {
-            profile: None,
+            profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
             title: "fixture".into(),

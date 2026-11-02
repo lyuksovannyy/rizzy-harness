@@ -328,7 +328,7 @@ async fn recovers_interrupted_turn_on_start() {
         let store = Store::open(&path, Durability::Full).unwrap();
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
-                profile: None,
+                profile: harness_core::event::Profile::Agentic,
                 agent_id: None,
                 incognito: false,
                 title: "t".into(),

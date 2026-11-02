@@ -3,11 +3,18 @@
 //! * People log in with username + password (Argon2id). A successful login
 //!   sets a random session id in an `HttpOnly; SameSite=Strict` cookie; only
 //!   its SHA-256 is stored, so a leaked database does not leak sessions.
-//! * The first account (the owner) is created with a one-time **claim code**
+//! * The first account (an admin) is created with a one-time **claim code**
 //!   from `<data>/claim-code` (0600), so whoever reaches a fresh server first
 //!   cannot take it over. The file is deleted once claimed.
+//! * Only admins create further accounts (no self-signup). New accounts get a
+//!   temporary password and must change it at first login.
+//! * Everyone, admins included, sees only their own conversations.
+//! * Agentic sessions run shell commands on a worker node, so they need the
+//!   `can_agentic` grant (admins always have it).
 //! * A 256-bit **API token** in `<data>/api-token` (0600) is accepted as
-//!   `Authorization: Bearer` for scripts and tests; it acts as the owner.
+//!   `Authorization: Bearer` for scripts and tests. It is the machine owner's
+//!   root key: admin rights and access to every session.
+//! * Failed logins are throttled per username.
 //! * No secret is ever logged or accepted in a URL.
 //! * Every request's `Host` must be allowlisted (DNS-rebinding defence), and
 //!   any `Origin` sent must match an allowed host (CSRF / cross-site WS).
@@ -18,7 +25,7 @@ use std::sync::{Arc, OnceLock};
 
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash};
-use harness_store::{Role, UserRow};
+use harness_store::{NewUser, Role, UserRow};
 use sha2::{Digest, Sha256};
 
 use axum::extract::{Request, State};
@@ -45,9 +52,15 @@ pub struct Auth {
     allowed_hosts: Vec<String>,
     secure_cookie: bool,
     claim: Arc<tokio::sync::Mutex<Option<Claim>>>,
+    /// Lowercase username -> recent failure times (ms).
+    failures: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>,
 }
 
-/// The one-time code that creates the owner account.
+/// Failed logins allowed per username within `THROTTLE_WINDOW_MS`.
+pub const THROTTLE_MAX_FAILURES: usize = 5;
+pub const THROTTLE_WINDOW_MS: i64 = 15 * 60 * 1000;
+
+/// The one-time code that creates the first admin account.
 pub struct Claim {
     pub code: Secret<String>,
     /// Deleted after a successful claim.
@@ -61,20 +74,43 @@ pub struct Principal {
     pub user_id: Option<String>,
     pub username: String,
     pub role: Role,
+    /// Effective: admins always may.
+    pub can_agentic: bool,
+    pub must_change_password: bool,
 }
 
 impl Principal {
     fn from_user(u: UserRow) -> Self {
         Self {
+            can_agentic: u.role == Role::Admin || u.can_agentic,
+            must_change_password: u.must_change_password,
             user_id: Some(u.user_id),
             username: u.username,
             role: u.role,
         }
     }
 
-    /// May this principal see a session owned by `owner_id`?
+    fn api_token() -> Self {
+        Self {
+            user_id: None,
+            username: "api-token".into(),
+            role: Role::Admin,
+            can_agentic: true,
+            must_change_password: false,
+        }
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.role == Role::Admin
+    }
+
+    /// May this principal see a session owned by `owner_id`? Only its own;
+    /// the API token (machine owner's key) sees everything.
     pub fn can_see(&self, owner_id: Option<&str>) -> bool {
-        self.role == Role::Owner || (owner_id.is_some() && owner_id == self.user_id.as_deref())
+        match &self.user_id {
+            None => true,
+            Some(me) => owner_id == Some(me.as_str()),
+        }
     }
 }
 
@@ -201,6 +237,72 @@ pub async fn verify_password(password: String, phc: Option<String>) -> bool {
     .unwrap_or(false)
 }
 
+/// Create an account after validating the username and password.
+pub async fn create_account(
+    store: &Store,
+    username: String,
+    password: String,
+    role: Role,
+    can_agentic: bool,
+    must_change_password: bool,
+) -> Result<UserRow, AccountError> {
+    validate_username(&username).map_err(AccountError::Invalid)?;
+    validate_password(&password).map_err(AccountError::Invalid)?;
+    let user = NewUser {
+        user_id: harness_core::new_id(),
+        username,
+        password_hash: hash_password(password).await,
+        role,
+        can_agentic,
+        must_change_password,
+    };
+    let uid = user.user_id.clone();
+    store
+        .call(move |s| s.create_user(&user))
+        .await
+        .map_err(|e| match e {
+            harness_store::StoreError::Conflict(_) => AccountError::Taken,
+            other => AccountError::Internal(other.to_string()),
+        })?;
+    store
+        .call(move |s| s.user_by_id(&uid))
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| AccountError::Internal("user vanished".into()))
+}
+
+/// Set a password. `must_change` forces another change at next login (admin
+/// resets). Signs the user out everywhere.
+pub async fn set_password(
+    store: &Store,
+    user_id: &str,
+    password: String,
+    must_change: bool,
+) -> Result<(), AccountError> {
+    validate_password(&password).map_err(AccountError::Invalid)?;
+    let phc = hash_password(password).await;
+    let uid = user_id.to_string();
+    store
+        .call(move |s| {
+            s.set_password_hash(&uid, &phc, must_change)?;
+            s.ui_sessions_delete_for_user(&uid)
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| AccountError::Internal(e.to_string()))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccountError {
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error("that username is taken")]
+    Taken,
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
 impl Auth {
     pub fn new(token: Secret<String>, allowed_hosts: Vec<String>, secure_cookie: bool) -> Self {
         Self {
@@ -208,7 +310,33 @@ impl Auth {
             allowed_hosts,
             secure_cookie,
             claim: Arc::new(tokio::sync::Mutex::new(None)),
+            failures: Arc::default(),
         }
+    }
+
+    fn failures_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<i64>>> {
+        self.failures.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Is this username currently locked out by repeated failures?
+    pub fn login_throttled(&self, username: &str, now_ms: i64) -> bool {
+        let mut map = self.failures_lock();
+        let list = map.entry(username.to_ascii_lowercase()).or_default();
+        list.retain(|t| now_ms - *t < THROTTLE_WINDOW_MS);
+        list.len() >= THROTTLE_MAX_FAILURES
+    }
+
+    pub fn record_login_failure(&self, username: &str, now_ms: i64) {
+        self.failures_lock()
+            .entry(username.to_ascii_lowercase())
+            .or_default()
+            .push(now_ms);
+    }
+
+    pub fn clear_login_failures(&self, username: &str) {
+        self.failures_lock().remove(&username.to_ascii_lowercase());
     }
 
     /// Enable first-run claiming with this code.
@@ -223,7 +351,7 @@ impl Auth {
         ct_eq(self.token.expose(), candidate)
     }
 
-    /// Create the owner if `code` matches the pending claim. Serialized so two
+    /// Create the first admin if `code` matches the pending claim. Serialized so two
     /// racing claims cannot both succeed.
     pub async fn claim(
         &self,
@@ -254,24 +382,15 @@ impl Auth {
         if !ct_eq(&norm(claim.code.expose()), &norm(code)) {
             return Err(ClaimError::BadCode);
         }
-        validate_username(&username).map_err(ClaimError::Invalid)?;
-        validate_password(&password).map_err(ClaimError::Invalid)?;
-        let phc = hash_password(password).await;
-        let user_id = harness_core::new_id();
-        let (uid, uname) = (user_id.clone(), username.clone());
-        store
-            .call(move |s| s.create_user(&uid, &uname, &phc, Role::Owner))
+        let user = create_account(store, username, password, Role::Admin, true, false)
             .await
-            .map_err(|e| ClaimError::Internal(e.to_string()))?;
+            .map_err(|e| match e {
+                AccountError::Invalid(m) => ClaimError::Invalid(m),
+                other => ClaimError::Internal(other.to_string()),
+            })?;
         let _ = std::fs::remove_file(&claim.path);
         *guard = None;
-        let uid = user_id.clone();
-        store
-            .call(move |s| s.user_by_id(&uid))
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| ClaimError::Internal("user vanished".into()))
+        Ok(user)
     }
 
     fn host_allowed(&self, host: &str) -> bool {
@@ -359,11 +478,7 @@ pub async fn authenticate(master: &Master, headers: &HeaderMap) -> Option<Princi
             .inner
             .auth
             .token_matches(bearer.trim())
-            .then(|| Principal {
-                user_id: None,
-                username: "api-token".into(),
-                role: Role::Owner,
-            });
+            .then(Principal::api_token);
     }
     let id = cookie_value(headers)?;
     // Session ids are 64 hex chars; reject anything else before touching the DB.
@@ -430,7 +545,7 @@ mod tests {
     #[test]
     fn token_file_is_private_and_stable() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("ui-token");
+        let p = dir.path().join("api-token");
         let a = load_or_create_token(&p).unwrap();
         let b = load_or_create_token(&p).unwrap();
         assert_eq!(a.expose(), b.expose());
@@ -478,6 +593,42 @@ mod tests {
         assert!(verify_password("correct horse battery".into(), Some(phc.clone())).await);
         assert!(!verify_password("wrong".into(), Some(phc)).await);
         assert!(!verify_password("anything".into(), None).await);
+    }
+
+    #[test]
+    fn throttle_window() {
+        let a = Auth::new(Secret::new("t".into()), vec![], false);
+        for i in 0..THROTTLE_MAX_FAILURES as i64 {
+            assert!(!a.login_throttled("Bob", i));
+            a.record_login_failure("bob", i);
+        }
+        assert!(a.login_throttled("BOB", 10));
+        assert!(!a.login_throttled("alice", 10));
+        assert!(
+            !a.login_throttled("bob", THROTTLE_WINDOW_MS + 10),
+            "window expired"
+        );
+        a.record_login_failure("carol", 0);
+        a.clear_login_failures("Carol");
+        assert!(!a.login_throttled("carol", 1));
+    }
+
+    #[test]
+    fn visibility_is_own_only() {
+        let admin = Principal {
+            user_id: Some("a".into()),
+            username: "a".into(),
+            role: Role::Admin,
+            can_agentic: true,
+            must_change_password: false,
+        };
+        assert!(admin.can_see(Some("a")));
+        assert!(
+            !admin.can_see(Some("b")),
+            "admins do not read other people's chats"
+        );
+        assert!(!admin.can_see(None));
+        assert!(Principal::api_token().can_see(Some("b")));
     }
 
     #[test]

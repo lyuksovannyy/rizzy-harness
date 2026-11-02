@@ -44,6 +44,9 @@ pub async fn upgrade(
     let Some(who) = auth::authenticate(&m, &headers).await else {
         return (StatusCode::UNAUTHORIZED, "not logged in").into_response();
     };
+    if who.must_change_password {
+        return (StatusCode::FORBIDDEN, "change your password first").into_response();
+    }
     ws.on_upgrade(move |socket| run(m, who, socket))
 }
 

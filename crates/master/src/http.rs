@@ -16,6 +16,12 @@ pub fn router(master: Master) -> Router {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
+        .route("/api/me/password", post(change_password))
+        .route("/api/users", get(list_users).post(create_user))
+        .route(
+            "/api/users/{id}",
+            axum::routing::patch(update_user).delete(delete_user),
+        )
         .route("/api/nodes", get(nodes))
         .route("/api/models", get(models))
         .route("/api/agents", get(agents))
@@ -65,10 +71,42 @@ impl From<harness_store::StoreError> for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-async fn require(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
+/// Any logged-in principal, even one that must change its password first.
+async fn require_any(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
     auth::authenticate(master, headers)
         .await
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))
+}
+
+/// A logged-in principal with no pending password change.
+async fn require(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
+    let who = require_any(master, headers).await?;
+    if who.must_change_password {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "change your password first".into(),
+        ));
+    }
+    Ok(who)
+}
+
+async fn require_admin(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
+    let who = require(master, headers).await?;
+    if !who.is_admin() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "admins only".into()));
+    }
+    Ok(who)
+}
+
+impl From<auth::AccountError> for ApiError {
+    fn from(e: auth::AccountError) -> Self {
+        let code = match &e {
+            auth::AccountError::Invalid(_) => StatusCode::BAD_REQUEST,
+            auth::AccountError::Taken => StatusCode::CONFLICT,
+            auth::AccountError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, e.to_string())
+    }
 }
 
 /// Resolve a session the principal may see (404 otherwise, so ids of other
@@ -139,20 +177,34 @@ struct LoginBody {
 
 async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<Response> {
     let name = b.username.trim().to_ascii_lowercase();
+    let now = harness_core::now_ms();
+    if m.inner.auth.login_throttled(&name, now) {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many failed attempts; try again in 15 minutes".into(),
+        ));
+    }
+    let lookup = name.clone();
     let user = m
         .inner
         .mirror
-        .call(move |s| s.user_by_username(&name))
+        .call(move |s| s.user_by_username(&lookup))
         .await?;
     let phc = user.as_ref().map(|u| u.password_hash.clone());
-    // Verified even for unknown users, so timing does not reveal usernames.
-    if !auth::verify_password(b.password, phc).await {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "wrong username or password".into(),
-        ));
-    }
-    let user = user.expect("verified implies user exists");
+    // Verified even for unknown users, so timing does not reveal usernames;
+    // disabled accounts get the same answer as a wrong password.
+    let ok = auth::verify_password(b.password, phc).await;
+    let user = match user {
+        Some(u) if ok && !u.disabled => u,
+        _ => {
+            m.inner.auth.record_login_failure(&name, now);
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "wrong username or password".into(),
+            ));
+        }
+    };
+    m.inner.auth.clear_login_failures(&name);
     session_response(&m, &user.user_id).await
 }
 
@@ -168,7 +220,7 @@ async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
 }
 
 async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
+    let who = require_any(&m, &headers).await?;
     Ok(Json(
         json!({ "ok": true, "app": harness_core::APP_NAME, "user": who }),
     ))
@@ -190,6 +242,194 @@ async fn agents(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<s
     Ok(Json(
         json!({ "agents": set.list(), "default": set.default_id() }),
     ))
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    current: String,
+    new: String,
+}
+
+async fn change_password(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<PasswordBody>,
+) -> ApiResult<Response> {
+    let who = require_any(&m, &headers).await?;
+    let Some(uid) = who.user_id.clone() else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "the API token has no password".into(),
+        ));
+    };
+    let lookup = uid.clone();
+    let phc = m
+        .inner
+        .mirror
+        .call(move |s| s.user_by_id(&lookup))
+        .await?
+        .map(|u| u.password_hash);
+    if !auth::verify_password(b.current, phc).await {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "current password is wrong".into(),
+        ));
+    }
+    auth::set_password(&m.inner.mirror, &uid, b.new, false).await?;
+    // Every session was revoked; give this browser a fresh one.
+    session_response(&m, &uid).await
+}
+
+fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
+    json!({
+        "user_id": u.user_id,
+        "username": u.username,
+        "role": u.role,
+        "disabled": u.disabled,
+        "can_agentic": u.role == harness_store::Role::Admin || u.can_agentic,
+        "must_change_password": u.must_change_password,
+        "created_ms": u.created_ms,
+    })
+}
+
+async fn list_users(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let users = m.inner.mirror.call(|s| s.list_users()).await?;
+    Ok(Json(
+        json!({ "users": users.iter().map(user_json).collect::<Vec<_>>() }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct NewUserBody {
+    username: String,
+    /// Temporary; the user must change it at first login.
+    password: String,
+    #[serde(default = "member")]
+    role: harness_store::Role,
+    #[serde(default)]
+    can_agentic: bool,
+}
+
+fn member() -> harness_store::Role {
+    harness_store::Role::Member
+}
+
+async fn create_user(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<NewUserBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let u = auth::create_account(
+        &m.inner.mirror,
+        b.username.trim().to_ascii_lowercase(),
+        b.password,
+        b.role,
+        b.can_agentic,
+        true,
+    )
+    .await?;
+    Ok(Json(user_json(&u)))
+}
+
+#[derive(Deserialize)]
+struct UserPatchBody {
+    #[serde(default)]
+    role: Option<harness_store::Role>,
+    #[serde(default)]
+    disabled: Option<bool>,
+    #[serde(default)]
+    can_agentic: Option<bool>,
+    /// New temporary password; forces a change at next login.
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// Refuse changes that would lock everyone out or edit your own access.
+async fn guard_admin_change(
+    m: &Master,
+    who: &auth::Principal,
+    target: &harness_store::UserRow,
+    removes_admin: bool,
+) -> ApiResult<()> {
+    if who.user_id.as_deref() == Some(target.user_id.as_str()) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "you cannot change your own role or access, or delete yourself".into(),
+        ));
+    }
+    if removes_admin && target.role == harness_store::Role::Admin && !target.disabled {
+        let admins = m.inner.mirror.call(|s| s.active_admin_count()).await?;
+        if admins <= 1 {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "this is the last active admin".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn load_user(m: &Master, id: &str) -> ApiResult<harness_store::UserRow> {
+    let id = id.to_string();
+    m.inner
+        .mirror
+        .call(move |s| s.user_by_id(&id))
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "unknown user".into()))
+}
+
+async fn update_user(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<UserPatchBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require_admin(&m, &headers).await?;
+    let target = load_user(&m, &id).await?;
+    let changes_access = b.role.is_some() || b.disabled.is_some() || b.can_agentic.is_some();
+    if changes_access {
+        let removes_admin = b.disabled == Some(true) || b.role == Some(harness_store::Role::Member);
+        guard_admin_change(&m, &who, &target, removes_admin).await?;
+        let patch = harness_store::UserPatch {
+            role: b.role,
+            disabled: b.disabled,
+            can_agentic: b.can_agentic,
+        };
+        let uid = target.user_id.clone();
+        let disable = b.disabled == Some(true);
+        m.inner
+            .mirror
+            .call(move |s| {
+                s.update_user(&uid, &patch)?;
+                if disable {
+                    s.ui_sessions_delete_for_user(&uid)?;
+                }
+                Ok::<_, harness_store::StoreError>(())
+            })
+            .await?;
+    }
+    if let Some(pw) = b.password {
+        auth::set_password(&m.inner.mirror, &target.user_id, pw, true).await?;
+    }
+    Ok(Json(user_json(&load_user(&m, &id).await?)))
+}
+
+async fn delete_user(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require_admin(&m, &headers).await?;
+    let target = load_user(&m, &id).await?;
+    guard_admin_change(&m, &who, &target, true).await?;
+    let uid = target.user_id.clone();
+    m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
@@ -283,6 +523,16 @@ async fn create_session(
     Json(b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
+    // Agentic sessions run shell commands on a worker node.
+    if b.profile.unwrap_or(harness_core::event::Profile::Agentic)
+        == harness_core::event::Profile::Agentic
+        && !who.can_agentic
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "agentic sessions are not enabled for this account; ask an admin".into(),
+        ));
+    }
     let title = b
         .title
         .filter(|t| !t.trim().is_empty())

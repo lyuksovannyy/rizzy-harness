@@ -189,7 +189,11 @@ async fn serve(
                 "refusing to listen on {bind} without TLS. Use 127.0.0.1, or pass --insecure-bind on a trusted private network"
             );
         }
-        tracing::warn!(%bind, "listening on a non-loopback address WITHOUT TLS (--insecure-bind)");
+        tracing::warn!(
+            %bind,
+            "listening on a non-loopback address WITHOUT TLS (--insecure-bind): passwords and \
+             session cookies travel in clear text. Use only on a trusted VPN/tailnet."
+        );
     }
     let cfg = Config::load(&dir.join("harness.toml"))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
@@ -299,14 +303,9 @@ async fn serve(
     Ok(())
 }
 
-/// `<data>/api-token`, migrating the pre-accounts `ui-token` name.
+/// `<data>/api-token`: the scripts' bearer token.
 fn api_token_path(dir: &Path) -> PathBuf {
-    let new = dir.join("api-token");
-    let old = dir.join("ui-token");
-    if !new.exists() && old.exists() {
-        let _ = std::fs::rename(&old, &new);
-    }
-    new
+    dir.join("api-token")
 }
 
 fn doctor(dir: &Path) -> anyhow::Result<()> {

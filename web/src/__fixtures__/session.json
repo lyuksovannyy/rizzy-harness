@@ -8,6 +8,7 @@
         "cwd": "/w",
         "model": "mock",
         "node_id": "local",
+        "profile": "agentic",
         "title": "fixture"
       },
       "seq": 1,
@@ -507,6 +508,7 @@
       "cwd": "/w",
       "model": "mock",
       "node_id": "local",
+      "profile": "agentic",
       "title": "fixture"
     },
     "pending_approvals": [

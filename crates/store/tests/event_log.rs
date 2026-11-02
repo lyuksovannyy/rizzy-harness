@@ -23,7 +23,7 @@ fn created(sid: SessionId) -> RawEvent {
         sid,
         1,
         EventKind::SessionCreated(SessionCreated {
-            profile: None,
+            profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
             title: "t".into(),
