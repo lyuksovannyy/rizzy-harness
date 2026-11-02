@@ -1,6 +1,7 @@
 //! Domain types shared by every harness crate: the event schema, the session
 //! fold, approval policy types and small utilities.
 
+pub mod backend;
 pub mod event;
 pub mod policy;
 pub mod secret;

@@ -1,0 +1,47 @@
+//! The agent backend boundary (brief §2.6). The node's session actor is the
+//! host: it owns seq assignment, persistence and approvals. A backend runs one
+//! turn and reports through the host. The native loop implements this today;
+//! an ACP backend driving external agents will implement it later.
+
+use std::path::PathBuf;
+
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+use crate::RawEvent;
+use crate::event::{EventKind, TurnEndReason, Usage};
+use crate::policy::{Decision, ToolRisk};
+
+#[async_trait::async_trait]
+pub trait TurnHost: Send + Sync {
+    /// Append an event to the session log (assigns seq, persists, publishes).
+    async fn emit(&self, kind: EventKind);
+
+    /// Ask whether a tool call may run. The host applies node policy first
+    /// and only asks the user if policy requires it. Emits the approval events.
+    async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision;
+}
+
+pub struct TurnCtx<'a> {
+    pub turn_id: String,
+    /// Every event of this session before this turn, in seq order.
+    pub history: Vec<RawEvent>,
+    pub user_text: String,
+    pub cwd: PathBuf,
+    pub model: String,
+    pub cancel: CancellationToken,
+    pub host: &'a dyn TurnHost,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnOutcome {
+    pub reason: TurnEndReason,
+    pub usage: Option<Usage>,
+    pub error: Option<String>,
+}
+
+#[async_trait::async_trait]
+pub trait AgentBackend: Send + Sync {
+    fn name(&self) -> &'static str;
+    async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome;
+}
