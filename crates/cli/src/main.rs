@@ -181,20 +181,21 @@ async fn serve(
     })
     .await?;
 
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+    // Use the bound address (port 0 resolves here) for the Host allowlist.
+    let addr = listener.local_addr()?;
     let token = auth::load_or_create_token(&dir.join("ui-token"))?;
     let master = Master::new(
         mirror,
-        auth::Auth::new(token, allowed_hosts(bind, &extra_hosts), false),
+        auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), false),
     );
     master
         .add_link(node.attach().await, true)
         .await
         .map_err(anyhow::Error::msg)?;
 
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("binding {bind}"))?;
-    let addr = listener.local_addr()?;
     // Printed (not logged) so tests and users can find the port; never the token.
     println!("{APP_NAME} listening on http://{addr}");
     println!(
