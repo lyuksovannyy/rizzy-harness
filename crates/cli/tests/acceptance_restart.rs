@@ -41,7 +41,7 @@ fn start(data: &Path) -> Server {
     };
     // Keep draining stdout so the child never blocks on a full pipe.
     std::thread::spawn(move || for _ in lines {});
-    let token = std::fs::read_to_string(data.join("ui-token")).unwrap();
+    let token = std::fs::read_to_string(data.join("api-token")).unwrap();
     Server {
         child: Some(child),
         addr,

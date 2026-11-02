@@ -12,6 +12,7 @@ use crate::{CommandError, Master, auth};
 
 pub fn router(master: Master) -> Router {
     let api = Router::new()
+        .route("/api/setup", get(setup_status).post(setup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
@@ -60,11 +61,23 @@ impl From<harness_store::StoreError> for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-async fn require(master: &Master, headers: &HeaderMap) -> ApiResult<()> {
-    if auth::is_authenticated(master, headers).await {
-        Ok(())
-    } else {
-        Err(ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))
+async fn require(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
+    auth::authenticate(master, headers)
+        .await
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))
+}
+
+/// Resolve a session the principal may see (404 otherwise, so ids of other
+/// users' sessions are not confirmed).
+async fn visible_session(
+    m: &Master,
+    who: &auth::Principal,
+    id: &str,
+) -> ApiResult<harness_store::SessionRow> {
+    let sid = parse_sid(id)?;
+    match m.inner.mirror.call(move |s| s.session(sid)).await? {
+        Some(r) if who.can_see(r.owner_id.as_deref()) => Ok(r),
+        _ => Err(ApiError(StatusCode::NOT_FOUND, "unknown session".into())),
     }
 }
 
@@ -73,23 +86,70 @@ fn parse_sid(id: &str) -> ApiResult<SessionId> {
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad session id".into()))
 }
 
-#[derive(Deserialize)]
-struct LoginBody {
-    token: String,
+async fn setup_status(State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
+    let users = m.inner.mirror.call(|s| s.user_count()).await?;
+    Ok(Json(json!({ "claimed": users > 0 })))
 }
 
-async fn login(State(m): State<Master>, Json(body): Json<LoginBody>) -> ApiResult<Response> {
-    if !m.inner.auth.token_matches(body.token.trim()) {
-        // Constant-ish delay to blunt online guessing.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token".into()));
-    }
-    let id = auth::create_ui_session(&m.inner.mirror).await?;
+#[derive(Deserialize)]
+struct SetupBody {
+    claim_code: String,
+    username: String,
+    password: String,
+}
+
+async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<Response> {
+    use auth::ClaimError;
+    let user = m
+        .inner
+        .auth
+        .claim(&m.inner.mirror, &b.claim_code, b.username, b.password)
+        .await
+        .map_err(|e| {
+            let code = match &e {
+                ClaimError::AlreadyClaimed => StatusCode::CONFLICT,
+                ClaimError::BadCode => StatusCode::FORBIDDEN,
+                ClaimError::Invalid(_) => StatusCode::BAD_REQUEST,
+                ClaimError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            ApiError(code, e.to_string())
+        })?;
+    tracing::info!(username = %user.username, "server claimed by owner");
+    session_response(&m, &user.user_id).await
+}
+
+async fn session_response(m: &Master, user_id: &str) -> ApiResult<Response> {
+    let id = auth::create_ui_session(&m.inner.mirror, user_id).await?;
     Ok((
         [(header::SET_COOKIE, m.inner.auth.session_cookie(&id))],
         Json(json!({"ok": true})),
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    username: String,
+    password: String,
+}
+
+async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<Response> {
+    let name = b.username.trim().to_ascii_lowercase();
+    let user = m
+        .inner
+        .mirror
+        .call(move |s| s.user_by_username(&name))
+        .await?;
+    let phc = user.as_ref().map(|u| u.password_hash.clone());
+    // Verified even for unknown users, so timing does not reveal usernames.
+    if !auth::verify_password(b.password, phc).await {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "wrong username or password".into(),
+        ));
+    }
+    let user = user.expect("verified implies user exists");
+    session_response(&m, &user.user_id).await
 }
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
@@ -104,8 +164,10 @@ async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
 }
 
 async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    Ok(Json(json!({ "ok": true, "app": harness_core::APP_NAME })))
+    let who = require(&m, &headers).await?;
+    Ok(Json(
+        json!({ "ok": true, "app": harness_core::APP_NAME, "user": who }),
+    ))
 }
 
 async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
@@ -124,6 +186,7 @@ fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
         "updated_ms": r.updated_ms,
         "head_seq": r.head_seq,
         "running": r.running,
+        "owner_id": r.owner_id,
     })
 }
 
@@ -131,10 +194,14 @@ async fn list_sessions(
     State(m): State<Master>,
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
+    let who = require(&m, &headers).await?;
     let rows = m.inner.mirror.call(|s| s.sessions()).await?;
     Ok(Json(json!({
-        "sessions": rows.iter().map(session_json).collect::<Vec<_>>()
+        "sessions": rows
+            .iter()
+            .filter(|r| who.can_see(r.owner_id.as_deref()))
+            .map(session_json)
+            .collect::<Vec<_>>()
     })))
 }
 
@@ -143,12 +210,8 @@ async fn get_session(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    let sid = parse_sid(&id)?;
-    match m.inner.mirror.call(move |s| s.session(sid)).await? {
-        Some(r) => Ok(Json(session_json(&r))),
-        None => Err(ApiError(StatusCode::NOT_FOUND, "unknown session".into())),
-    }
+    let who = require(&m, &headers).await?;
+    Ok(Json(session_json(&visible_session(&m, &who, &id).await?)))
 }
 
 #[derive(Deserialize)]
@@ -165,8 +228,8 @@ async fn events(
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    let sid = parse_sid(&id)?;
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
     let limit = q.limit.unwrap_or(1000).min(5000);
     let evs = m
         .inner
@@ -194,7 +257,7 @@ async fn create_session(
     headers: HeaderMap,
     Json(b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
+    let who = require(&m, &headers).await?;
     let title = b
         .title
         .filter(|t| !t.trim().is_empty())
@@ -202,6 +265,14 @@ async fn create_session(
     let sid = m
         .create_session(b.node_id, title, b.cwd, b.model, b.approval_mode)
         .await?;
+    if let Some(uid) = who.user_id {
+        // The node's session_created event is mirrored before the create ack
+        // arrives (same ordered link), so the row exists here.
+        m.inner
+            .mirror
+            .call(move |s| s.set_session_owner(sid, &uid))
+            .await?;
+    }
     Ok(Json(json!({ "session_id": sid })))
 }
 
@@ -216,11 +287,12 @@ async fn prompt(
     Path(id): Path<String>,
     Json(b): Json<PromptBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
+    let who = require(&m, &headers).await?;
     if b.text.trim().is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "empty prompt".into()));
     }
-    m.prompt(parse_sid(&id)?, b.text).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.prompt(sid, b.text).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -229,8 +301,9 @@ async fn cancel(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    m.cancel(parse_sid(&id)?).await?;
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.cancel(sid).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -245,8 +318,8 @@ async fn approval(
     Path((id, approval_id)): Path<(String, String)>,
     Json(b): Json<ApprovalBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    m.respond_approval(parse_sid(&id)?, approval_id, b.decision)
-        .await?;
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.respond_approval(sid, approval_id, b.decision).await?;
     Ok(Json(json!({ "ok": true })))
 }

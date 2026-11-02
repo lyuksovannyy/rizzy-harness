@@ -43,8 +43,10 @@ enum Cmd {
         #[arg(long = "allowed-host")]
         allowed_hosts: Vec<String>,
     },
-    /// Print the UI login token.
+    /// Print the API token (for scripts; the UI uses username + password).
     Token,
+    /// Print the one-time code that claims a fresh install.
+    ClaimCode,
     /// Check the environment.
     Doctor,
     /// Node commands.
@@ -186,28 +188,47 @@ async fn serve(
         .with_context(|| format!("binding {bind}"))?;
     // Use the bound address (port 0 resolves here) for the Host allowlist.
     let addr = listener.local_addr()?;
-    let token = auth::load_or_create_token(&dir.join("ui-token"))?;
-    let master = Master::new(
-        mirror,
-        auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), false),
-    );
+    let token = auth::load_or_create_token(&api_token_path(dir))?;
+    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), false);
+    let unclaimed = mirror.call(|s| s.user_count()).await? == 0;
+    if unclaimed {
+        let path = dir.join("claim-code");
+        let code = auth::load_or_create_secret(&path, auth::new_claim_code)?;
+        auth = auth.with_claim(auth::Claim { code, path });
+    } else {
+        // A leftover code from an interrupted claim must not stay usable.
+        let _ = std::fs::remove_file(dir.join("claim-code"));
+    }
+    let master = Master::new(mirror, auth);
     master
         .add_link(node.attach().await, true)
         .await
         .map_err(anyhow::Error::msg)?;
 
-    // Printed (not logged) so tests and users can find the port; never the token.
+    // Printed (not logged) so tests and users can find the port; never a secret.
     println!("{APP_NAME} listening on http://{addr}");
-    println!(
-        "log in with the token from {} (or run `{APP_NAME} token`)",
-        dir.join("ui-token").display()
-    );
+    if unclaimed {
+        println!(
+            "first run: open the page and enter the claim code from {} (or run `{APP_NAME} claim-code`)",
+            dir.join("claim-code").display()
+        );
+    }
     axum::serve(listener, harness_master::router(master))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
     Ok(())
+}
+
+/// `<data>/api-token`, migrating the pre-accounts `ui-token` name.
+fn api_token_path(dir: &Path) -> PathBuf {
+    let new = dir.join("api-token");
+    let old = dir.join("ui-token");
+    if !new.exists() && old.exists() {
+        let _ = std::fs::rename(&old, &new);
+    }
+    new
 }
 
 fn doctor(dir: &Path) -> anyhow::Result<()> {
@@ -255,9 +276,9 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let p = dir.join("ui-token");
+        let p = api_token_path(dir);
         check(
-            "ui-token permissions",
+            "api-token permissions",
             match std::fs::metadata(&p) {
                 Ok(m) if m.permissions().mode() & 0o077 == 0 => Ok("0600".into()),
                 Ok(m) => Err(format!(
@@ -292,10 +313,19 @@ async fn main() -> anyhow::Result<()> {
             allowed_hosts,
         } => serve(&dir, bind, insecure_bind, allowed_hosts).await,
         Cmd::Token => {
-            let t = auth::load_or_create_token(&dir.join("ui-token"))?;
+            let t = auth::load_or_create_token(&api_token_path(&dir))?;
             println!("{}", t.expose());
             Ok(())
         }
+        Cmd::ClaimCode => match std::fs::read_to_string(dir.join("claim-code")) {
+            Ok(code) => {
+                println!("{}", code.trim());
+                Ok(())
+            }
+            Err(_) => bail!(
+                "no pending claim code: this install is already claimed (or `serve` has not run yet)"
+            ),
+        },
         Cmd::Doctor => doctor(&dir),
         Cmd::Node {
             cmd: NodeCmd::Join { .. },

@@ -22,11 +22,16 @@ cargo build --release
 ./target/release/harness serve
 ```
 
-Open http://127.0.0.1:7777 and paste the token printed by:
+Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
+(so nobody else can take over a fresh server) and then creates your account.
+Print the code with:
 
 ```bash
-./target/release/harness token
+./target/release/harness claim-code
 ```
+
+Scripts can call the API with `Authorization: Bearer <token>`, using the token
+printed by `harness token`.
 
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.

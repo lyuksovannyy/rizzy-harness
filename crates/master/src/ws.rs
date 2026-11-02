@@ -41,10 +41,10 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !auth::is_authenticated(&m, &headers).await {
+    let Some(who) = auth::authenticate(&m, &headers).await else {
         return (StatusCode::UNAUTHORIZED, "not logged in").into_response();
-    }
-    ws.on_upgrade(move |socket| run(m, socket))
+    };
+    ws.on_upgrade(move |socket| run(m, who, socket))
 }
 
 type Sink = futures::stream::SplitSink<WebSocket, Message>;
@@ -82,7 +82,14 @@ async fn catch_up(m: &Master, sink: &mut Sink, sid: SessionId, last: &mut u64) -
     }
 }
 
-async fn run(m: Master, socket: WebSocket) {
+async fn may_see(m: &Master, who: &auth::Principal, sid: SessionId) -> bool {
+    match m.inner.mirror.call(move |s| s.session(sid)).await {
+        Ok(Some(r)) => who.can_see(r.owner_id.as_deref()),
+        _ => false,
+    }
+}
+
+async fn run(m: Master, who: auth::Principal, socket: WebSocket) {
     let mut live = m.subscribe();
     let (mut sink, mut stream) = socket.split();
     let mut subs: HashMap<SessionId, u64> = HashMap::new();
@@ -104,6 +111,12 @@ async fn run(m: Master, socket: WebSocket) {
                 };
                 match cmd {
                     ClientMsg::Subscribe { session_id, after_seq } => {
+                        if !may_see(&m, &who, session_id).await {
+                            if !send(&mut sink, json!({"type": "error", "message": "unknown session", "session_id": session_id})).await {
+                                break;
+                            }
+                            continue;
+                        }
                         let last = subs.entry(session_id).or_insert(after_seq);
                         *last = after_seq;
                         if !catch_up(&m, &mut sink, session_id, last).await {

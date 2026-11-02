@@ -25,6 +25,7 @@ harness-node = { path = "crates/node" }
 harness-master = { path = "crates/master" }
 
 anyhow = "1.0.104"
+argon2 = "0.6.0"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["ws"] }
 bytes = "1.12.1"
@@ -43,6 +44,7 @@ rusqlite = { version = "0.41.1", features = ["bundled"] }
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 subtle = "2.6.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"

@@ -30,8 +30,13 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const api = {
-  me: () => call<{ ok: boolean; app: string }>("GET", "/api/me"),
-  login: (token: string) => call<{ ok: boolean }>("POST", "/api/login", { token }),
+  me: () =>
+    call<{ ok: boolean; app: string; user: { username: string; role: string } }>("GET", "/api/me"),
+  setupStatus: () => call<{ claimed: boolean }>("GET", "/api/setup"),
+  setup: (claim_code: string, username: string, password: string) =>
+    call<{ ok: boolean }>("POST", "/api/setup", { claim_code, username, password }),
+  login: (username: string, password: string) =>
+    call<{ ok: boolean }>("POST", "/api/login", { username, password }),
   logout: () => call<{ ok: boolean }>("POST", "/api/logout"),
   nodes: () => call<{ nodes: NodeInfo[] }>("GET", "/api/nodes"),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "/api/sessions"),

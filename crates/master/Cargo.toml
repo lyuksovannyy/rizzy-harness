@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+argon2.workspace = true
 axum.workspace = true
 futures.workspace = true
 getrandom.workspace = true
@@ -21,6 +22,7 @@ mime_guess.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

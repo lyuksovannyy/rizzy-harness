@@ -21,6 +21,8 @@ pub enum StoreError {
     },
     #[error("corrupt row: {0}")]
     Corrupt(String),
+    #[error("already exists: {0}")]
+    Conflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -55,6 +57,44 @@ pub struct SessionRow {
     pub updated_ms: i64,
     pub head_seq: u64,
     pub running: bool,
+    /// The user who created the session; `None` for sessions predating
+    /// accounts or created directly on a node.
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Owner,
+    /// Reserved for teams; unused in v1.
+    Member,
+}
+
+impl Role {
+    fn as_str(self) -> &'static str {
+        match self {
+            Role::Owner => "owner",
+            Role::Member => "member",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "owner" => Ok(Role::Owner),
+            "member" => Ok(Role::Member),
+            other => Err(StoreError::Corrupt(format!("role {other}"))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRow {
+    pub user_id: String,
+    pub username: String,
+    /// PHC string (`$argon2id$...`).
+    pub password_hash: String,
+    pub role: Role,
+    pub created_ms: i64,
 }
 
 #[derive(Clone)]
@@ -92,6 +132,18 @@ CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS users (
+    user_id       TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    created_ms    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ui_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    expires_ms INTEGER NOT NULL
+);
 "#;
 
 impl Store {
@@ -113,6 +165,14 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Additive migrations for databases created by older versions.
+        let has_owner: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'owner_id'")?
+            .exists([])?;
+        if !has_owner {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN owner_id TEXT")?;
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -269,37 +329,33 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running FROM sessions ORDER BY updated_ms DESC",
+            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id FROM sessions ORDER BY updated_ms DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
-                r.get::<_, i64>(8)?,
+                SessionRow {
+                    // Placeholder; parsed below where errors can be typed.
+                    session_id: SessionId(Default::default()),
+                    node_id: r.get(1)?,
+                    title: r.get(2)?,
+                    cwd: r.get(3)?,
+                    model: r.get(4)?,
+                    created_ms: r.get(5)?,
+                    updated_ms: r.get(6)?,
+                    head_seq: r.get::<_, i64>(7)? as u64,
+                    running: r.get::<_, i64>(8)? != 0,
+                    owner_id: r.get(9)?,
+                },
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (sid, node_id, title, cwd, model, created_ms, updated_ms, head, running) = row?;
-            out.push(SessionRow {
-                session_id: sid
-                    .parse()
-                    .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?,
-                node_id,
-                title,
-                cwd,
-                model,
-                created_ms,
-                updated_ms,
-                head_seq: head as u64,
-                running: running != 0,
-            });
+            let (sid, mut session) = row?;
+            session.session_id = sid
+                .parse()
+                .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?;
+            out.push(session);
         }
         Ok(out)
     }
@@ -345,6 +401,123 @@ impl Store {
         Ok(conn
             .query_row("SELECT v FROM kv WHERE k = ?1", params![k], |r| r.get(0))
             .optional()?)
+    }
+
+    pub fn set_session_owner(&self, sid: SessionId, owner_id: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE sessions SET owner_id = ?2 WHERE session_id = ?1",
+            params![sid.to_string(), owner_id],
+        )?;
+        Ok(())
+    }
+
+    // ---- accounts ----
+
+    pub fn user_count(&self) -> Result<u64> {
+        let conn = self.lock();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    pub fn create_user(
+        &self,
+        user_id: &str,
+        username: &str,
+        password_hash: &str,
+        role: Role,
+    ) -> Result<()> {
+        let conn = self.lock();
+        let res = conn.execute(
+            "INSERT INTO users (user_id, username, password_hash, role, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, username, password_hash, role.as_str(), harness_core::now_ms()],
+        );
+        match res {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StoreError::Conflict(format!("user {username}")))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn user_where(&self, clause: &str, arg: &str) -> Result<Option<UserRow>> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT user_id, username, password_hash, role, created_ms FROM users WHERE {clause}"
+        );
+        let row = conn
+            .query_row(&sql, params![arg], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .optional()?;
+        row.map(|(user_id, username, password_hash, role, created_ms)| {
+            Ok(UserRow {
+                user_id,
+                username,
+                password_hash,
+                role: Role::parse(&role)?,
+                created_ms,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn user_by_username(&self, username: &str) -> Result<Option<UserRow>> {
+        self.user_where("username = ?1", username)
+    }
+
+    pub fn user_by_id(&self, user_id: &str) -> Result<Option<UserRow>> {
+        self.user_where("user_id = ?1", user_id)
+    }
+
+    /// Store a UI session. Only a hash of the cookie value is kept.
+    pub fn ui_session_create(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        expires_ms: i64,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO ui_sessions (token_hash, user_id, expires_ms) VALUES (?1, ?2, ?3)",
+            params![token_hash, user_id, expires_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The user behind a UI session, if it exists and `now_ms < expires_ms`.
+    pub fn ui_session_user(&self, token_hash: &str, now_ms: i64) -> Result<Option<UserRow>> {
+        let user_id: Option<String> = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT user_id FROM ui_sessions WHERE token_hash = ?1 AND expires_ms > ?2",
+                params![token_hash, now_ms],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
+        match user_id {
+            Some(id) => self.user_by_id(&id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn ui_session_delete(&self, token_hash: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM ui_sessions WHERE token_hash = ?1",
+            params![token_hash],
+        )?;
+        Ok(())
     }
 
     pub fn kv_set(&self, k: &str, v: &str) -> Result<()> {
