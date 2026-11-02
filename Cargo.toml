@@ -21,6 +21,7 @@ harness-store = { path = "crates/store" }
 harness-protocol = { path = "crates/protocol" }
 harness-tools = { path = "crates/tools" }
 harness-agent-native = { path = "crates/agent-native" }
+harness-agents = { path = "crates/agents" }
 harness-node = { path = "crates/node" }
 harness-master = { path = "crates/master" }
 
@@ -46,6 +47,7 @@ rusqlite = { version = "0.41.1", features = ["bundled"] }
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+serde-saphyr = "=2.0.0"
 sha2 = "0.11.1"
 subtle = "2.6.1"
 tempfile = "3.27.0"

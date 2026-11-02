@@ -247,8 +247,5 @@ fn fixture_is_current() {
     // Compare values, not text: JSON key order depends on serde_json's
     // `preserve_order` feature, which other crates may enable workspace-wide.
     let on_disk: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
-    assert_eq!(
-        on_disk, doc,
-        "fixture is stale; run with UPDATE_FIXTURES=1"
-    );
+    assert_eq!(on_disk, doc, "fixture is stale; run with UPDATE_FIXTURES=1");
 }
