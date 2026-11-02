@@ -9,6 +9,105 @@ Status notes are appended at the bottom (`## Status`).
 
 ---
 
+## 0. Product direction (revised 2026-11-02)
+
+Phase 1 was framed as a coding-agent harness. The product is broader: a **self-hosted,
+ChatGPT-style personal assistant** that is also the browser's new-tab page, with plain chat on
+the central server and agentic work delegated to worker nodes. Sections 1–4 (architecture,
+event log, node protocol, threat model) still hold. The phased build order in §8 is under
+revision and will be rewritten once the layout mockup lands (chat + omnibox first, onboarding last).
+
+### Principles
+
+* **The harness process stays light; the server around it may not.** The central server is the
+  user's hub and can host local models and helper services next to the harness. Soft budget for
+  the harness itself, measured every phase: idle < 50 MB RSS, and no core feature *requires* a
+  local ML model. Breaking it needs a written reason here.
+* **Everything heavy is a service = a URL.** Memory server, embedding model, reranker, later
+  speech. Each is *managed* (the master installs, starts and health-checks it), *LAN* (another
+  own machine) or *cloud API*. Locality only changes the URL; the code path is identical. Local
+  models run in existing runtimes with OpenAI-compatible APIs (e.g. Ollama, llama.cpp server).
+* **Use maintained dependencies instead of hand-rolling.** Exact pins, committed lockfiles,
+  `cargo-deny` in CI (licences, advisories, duplicates), APIs checked on docs.rs before use.
+  Phase 1's hand-rolled SSE parser, markdown renderer and provider client get re-evaluated
+  against maintained libraries (the renderer must sanitize).
+* **Single owner now, built for teams.** `users` table with roles (only `owner` used in v1),
+  `owner_id` on every conversation, node and memory row, username + password (Argon2) replacing
+  the shared UI token, a first-run claim code printed to the console. No team UI in v1.
+
+### Omnibox (the new-tab bar)
+
+* One input with a visible **mode switch** (Ask / Search / Open chat / …). **Tab** cycles modes,
+  **Enter** runs the selected one. Focused on load; first paint must be near-instant.
+* A tiny **in-browser classifier** (linear model over character n-grams + cheap features: word
+  count, URL-like, question words, `?`, title match) preselects the most probable mode. Rules
+  give the cold start. Each Tab override is a label, stored per user; weights retrain on the
+  master and sync down. Top-1 accuracy is logged from day one, and the rules stay if the model
+  is not clearly better. Behind a `ModeClassifier` interface.
+* Search runs a user-chosen search-engine URL template (picked in onboarding).
+* **Similar earlier chats** are shown under the bar as suggestions, never a redirect. v1 uses
+  SQLite FTS5 (BM25) over titles and user messages; vectors optional later. Time-sensitive asks
+  ("weather today") are excluded.
+* Hosted decision models were evaluated and **not** used for the bar: Jev (TypeSafe AI, closed
+  cloud API; would send every keystroke to a third party) and Laya (Apache-2.0, ModernBERT-large
+  421M; too heavy per keystroke, near-random until fine-tuned).
+
+### Conversations
+
+* One conversation model with two **profiles**; messages carry an `author` (user or agent id)
+  so group chats can be added later without a schema break.
+* **Chat** runs on the master: documents, web search, research. Low token use by default: short
+  system prompt, few tools with schemas loaded on demand, cheaper default model, rolling history
+  summary, a token meter in the UI.
+* **Agentic** runs on a node (the embedded node counts). Modes, to confirm with the mockup:
+  **Standard** (full toolset), **Lean** (small toolset, low tokens), **Orchestrator** (a lead
+  agent spawns subagents) with user-visible hard caps on subagents and tokens/cost per turn.
+* **Group chats** with several AIs and @mentions: deferred (turn-taking, AI↔AI loops, cost).
+
+### Memory
+
+* Not built from scratch: an **existing, separate memory server** behind a `MemoryStore`
+  trait, local preferred, LAN or cloud allowed. OpenViking (volcengine, AGPLv3, Python HTTP
+  service) is the first candidate. AGPL is acceptable only while we run it unmodified as a
+  separate process over HTTP; no code is copied. It is compared with two other maintained memory
+  servers (licence, API stability, ops weight, can skills be disabled) before choosing.
+* Quality presets: **Fast** (small embedding model, no reranker), **Balanced** (medium +
+  reranker), **Best** (large + reranker). Concrete models are picked by benchmark on reference
+  hardware; onboarding shows RAM and latency per preset.
+* No memory server configured → FTS5 recall only, so a bare install still works.
+* Memory is visible and editable on a Memory page, each fact linked to its source chat.
+
+### Onboarding
+
+1. Claim the install (first-run code) and create the owner account.
+2. **Model provider** (the only hard requirement): Anthropic API (API key only; never
+   subscription OAuth) or any OpenAI-compatible endpoint. One test call; show the model list.
+   Keys typed in the UI go to a 0600 secrets file (later the OS keyring), are never sent back to
+   the browser, logged, or put in the event log. Env-var references stay for headless installs.
+3. Name, timezone (auto-filled), optional country/city, search engine.
+4. Memory preset (with the measured numbers). Layout and accent live in Settings, not here.
+
+Country/city exist so the AI knows where to look for local information (transit, news, shops).
+Location learned later from chats is *proposed* as memory and saved only after the user confirms.
+
+### Agent backends
+
+v1: API providers only. Driving on-device harnesses (Claude Code, Codex, OpenCode) as
+subprocesses (e.g. over ACP) is deferred; the `AgentBackend` trait already allows it.
+
+A judge model may later power an agentic **auto-approval** mode. Rules fixed now: it runs on
+the node after `node.toml` and can only turn "ask" into "allow" within node policy; it fails
+closed (low confidence, timeout or error → ask); tool arguments are scrubbed before any cloud
+judge sees them; every verdict is an event (`approval_resolved{by: judge, score}`, an additive
+`ResolvedBy` variant); it is tested against prompt injection before release.
+
+### Open
+
+* The layout mockup.
+* "openbot" (orchestration reference): unverified, look up before borrowing.
+
+---
+
 ## 1. Architecture
 
 ```
@@ -244,6 +343,9 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 ---
 
 ## 8. Phases and gates
+
+> Phases 2–5 below are the original coding-first order and are **under revision** (see §0).
+> Phase 0 and Phase 1 are done and stay valid.
 
 * **Phase 0** — workspace, CI (fmt, clippy -D warnings, test, web build), this plan.
 * **Phase 1** — master + embedded node, native loop, OpenAI-compatible provider
