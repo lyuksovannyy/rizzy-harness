@@ -10,5 +10,5 @@ export default defineConfig({
       "/api": { target: "http://127.0.0.1:7777", ws: true },
     },
   },
-  build: { outDir: "dist", emptyOutDir: true, sourcemap: false },
+  build: { outDir: "dist", emptyOutDir: true, sourcemap: false, manifest: true },
 });

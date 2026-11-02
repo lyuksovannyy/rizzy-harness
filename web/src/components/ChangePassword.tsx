@@ -28,7 +28,7 @@ export function ChangePassword(props: { forced: boolean; onDone: () => void; onC
   };
 
   return (
-    <div className={props.forced ? "login" : "panel"}>
+    <div className={props.forced ? "login" : "stack"}>
       <form className="card narrow" onSubmit={submit}>
         <h2>{props.forced ? "Choose your password" : "Change password"}</h2>
         {props.forced && (

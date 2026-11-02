@@ -88,6 +88,29 @@ export interface SessionView {
   variant_selection: Record<string, string>;
 }
 
+export type Effort = "low" | "medium" | "high" | "max";
+
+export interface Agent {
+  id: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+}
+
+export interface ModelInfo {
+  id: string;
+  provider: string;
+  effort: boolean;
+  vision: boolean;
+  default: boolean;
+}
+
+export interface Prefs {
+  search_url: string;
+  default_agent: string | null;
+  default_model: string | null;
+}
+
 export interface SessionRow {
   session_id: string;
   node_id: string;
@@ -98,6 +121,9 @@ export interface SessionRow {
   updated_ms: number;
   head_seq: number;
   running: boolean;
+  owner_id: string | null;
+  agent_id: string | null;
+  profile: Profile | null;
 }
 
 export interface NodeInfo {

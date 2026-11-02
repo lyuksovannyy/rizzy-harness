@@ -1,4 +1,17 @@
-import type { Decision, Me, NodeInfo, RawEvent, Role, SessionRow, User } from "./types";
+import type {
+  Agent,
+  Decision,
+  Effort,
+  Me,
+  ModelInfo,
+  NodeInfo,
+  Prefs,
+  Profile,
+  RawEvent,
+  Role,
+  SessionRow,
+  User,
+} from "./types";
 
 export class HttpError extends Error {
   constructor(
@@ -52,13 +65,20 @@ export const api = {
   events: (id: string, after = 0) =>
     call<{ events: RawEvent[] }>("GET", `/api/sessions/${id}/events?after=${after}`),
   createSession: (b: {
-    profile: "chat" | "agentic";
+    profile: Profile;
     cwd?: string;
     title?: string;
     node_id?: string;
-  }) =>
-    call<{ session_id: string }>("POST", "/api/sessions", b),
-  prompt: (id: string, text: string) => call("POST", `/api/sessions/${id}/prompt`, { text }),
+    agent_id?: string;
+    model?: string;
+  }) => call<{ session_id: string }>("POST", "/api/sessions", b),
+  prompt: (id: string, text: string, opts: { agent_id?: string; effort?: Effort } = {}) =>
+    call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
+  setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
+  agents: () => call<{ agents: Agent[]; default: string }>("GET", "/api/agents"),
+  models: () => call<{ models: ModelInfo[] }>("GET", "/api/models"),
+  settings: () => call<Prefs>("GET", "/api/me/settings"),
+  saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
   approve: (id: string, approvalId: string, decision: Decision) =>
     call("POST", `/api/sessions/${id}/approvals/${approvalId}`, { decision }),

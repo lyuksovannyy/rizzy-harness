@@ -41,8 +41,7 @@ export function Users({ me }: { me: Me }) {
   };
 
   return (
-    <section className="panel">
-      <h2>Users</h2>
+    <section className="stack">
       <p className="muted">
         Only admins create accounts. New users get a temporary password and must change it at first
         login. Agentic access runs shell commands on worker nodes: grant it only to people you would

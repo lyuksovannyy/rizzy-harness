@@ -541,3 +541,44 @@ chat works.
 
 **Next:** Phase 3 UI shell.
 
+### 2026-11-03 — Phase 3 (UI shell): done
+
+**Done**
+* ChatGPT-style shell per the mockup: collapsible sidebar (drawer on mobile) with
+  New chat, chat search (title filter), Recents with running dot and node badge,
+  user menu → Settings / Log out.
+* Home: localized time-of-day greeting with the user's name (stable per day) + the
+  composer.
+* Composer: agent selector, `@` mention popup (↑/↓/Enter/Esc) with a
+  "→ @agent for this message" chip, model selector, effort only for models that
+  declare it, Search / Ask / Agentic switch (Tab / Shift+Tab), node + folder row
+  for Agentic (recent folders remembered), Agentic disabled with the reason.
+  Search redirects to the per-user search URL (default DuckDuckGo).
+* Conversation: header (title, agent, model, node, folder), markdown via
+  react-markdown + remark-gfm (HTML escaped, safe links, copy buttons), agent
+  labels on turns run by another agent, agent switches shown, tool cards and
+  approvals carried over, Stop.
+* Settings: Preferences (search URL, default agent/model), Password, Users (admins).
+* Backend: `GET/PUT /api/me/settings`, per-message `effort` (gated).
+* Hidden until they work: attachments, mic, Incognito. Classifier and
+  similar-chats panel are Phase 4.
+
+**Evidence**
+* Vitest 12 (logic modules + reducer fixture); Rust 94; `cargo deny` green.
+* Bundle budget enforced in CI (`npm run size`): initial 74.8 KB gzip (≤ 110),
+  total 126.2 KB (≤ 300); conversation, markdown and settings load lazily.
+* `web/e2e/phase3.cjs` against the real binary: claim → greeting → Ask streams →
+  Tab to Agentic → approval → allow → output → `@writer` routes one turn (exact
+  text asserted) → agent switch → Shift+Tab to Search redirects → admin creates
+  bob → bob sees Agentic disabled and none of alex's chats → kill -9 mid-stream
+  recovers → mobile layout. No page errors.
+* Bugs found by the run and fixed: mention caret restored a frame late (first
+  typed character landed at the end); "Log out" wrapping; mobile send button wrap.
+
+**Risks / gaps**
+* Session model cannot be changed mid-chat (pick at start; effort per message).
+* Code blocks are not syntax-highlighted (weight); revisit with a lazy highlighter.
+* The e2e script is run manually, not in CI (needs the built binary + Chromium).
+
+**Next:** Phase 4, bar intelligence (FTS similar-chats panel, mode classifier).
+

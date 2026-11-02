@@ -1,0 +1,203 @@
+import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { api, HttpError } from "../api";
+import { Live } from "../live";
+import { t } from "../lib/i18n";
+import { agenticBlockReason } from "../lib/modes";
+import { buildSearchUrl } from "../lib/searchUrl";
+import { titleFrom } from "../lib/title";
+import type { Agent, Me, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
+import type { Submission } from "./Composer";
+import { Home } from "./Home";
+import { Sidebar } from "./Sidebar";
+
+// Everything but the home screen loads on demand (new-tab speed budget).
+const Conversation = lazy(() => import("./Conversation"));
+const Settings = lazy(() => import("./Settings"));
+
+const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
+const COLLAPSED_KEY = "harness.sidebarCollapsed";
+
+type Route = { kind: "home" } | { kind: "session"; id: string } | { kind: "settings" };
+
+function parseRoute(): Route {
+  const h = location.hash;
+  const m = h.match(/^#\/s\/([0-9a-f-]{36})$/);
+  if (m) return { kind: "session", id: m[1]! };
+  if (h === "#/settings") return { kind: "settings" };
+  return { kind: "home" };
+}
+
+function go(r: Route) {
+  location.hash = r.kind === "session" ? `#/s/${r.id}` : r.kind === "settings" ? "#/settings" : "#/";
+}
+
+function useRoute(): Route {
+  const [r, setR] = useState(parseRoute);
+  useEffect(() => {
+    const on = () => setR(parseRoute());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return r;
+}
+
+export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
+  const [live] = useState(() => new Live());
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [serverDefaultAgent, setServerDefaultAgent] = useState("general");
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [prefs, setPrefs] = useState<Prefs | null>(null);
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [drawer, setDrawer] = useState(false);
+  const route = useRoute();
+
+  const unauthorized = useCallback(
+    (e: unknown) => {
+      if (e instanceof HttpError && e.status === 401) onLogout();
+    },
+    [onLogout],
+  );
+  const refreshSessions = useCallback(() => {
+    api.sessions().then((r) => setSessions(r.sessions)).catch(unauthorized);
+  }, [unauthorized]);
+  const refreshNodes = useCallback(() => {
+    api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
+  }, [unauthorized]);
+
+  useEffect(() => {
+    live.onSessionsChanged = refreshSessions;
+    live.onNodesChanged = refreshNodes;
+    refreshSessions();
+    refreshNodes();
+    api
+      .agents()
+      .then((r) => {
+        setAgents(r.agents);
+        setServerDefaultAgent(r.default);
+      })
+      .catch(unauthorized);
+    api.models().then((r) => setModels(r.models)).catch(unauthorized);
+    api.settings().then(setPrefs).catch(unauthorized);
+    return () => live.close();
+  }, [live, refreshSessions, refreshNodes, unauthorized]);
+
+  useSyncExternalStore(
+    (l) => live.subscribe(l),
+    () => live.version,
+  );
+
+  const toggleCollapsed = () => {
+    setCollapsed((c) => {
+      try {
+        localStorage.setItem(COLLAPSED_KEY, c ? "0" : "1");
+      } catch {
+        /* storage unavailable */
+      }
+      return !c;
+    });
+  };
+
+  const logout = async () => {
+    await api.logout().catch(() => {});
+    onLogout();
+  };
+
+  const workers = nodes.filter((n) => n.connected && n.profile === "agentic");
+  const agenticBlocked = agenticBlockReason(me.can_agentic, workers.length);
+  const defaultAgent = prefs?.default_agent ?? serverDefaultAgent;
+  const selected = route.kind === "session" ? route.id : null;
+
+  const submit = async (s: Submission) => {
+    if (s.mode === "search") {
+      location.href = buildSearchUrl(prefs?.search_url ?? DEFAULT_SEARCH, s.text);
+      return;
+    }
+    const agentic = s.mode === "agentic";
+    const { session_id } = await api.createSession({
+      profile: agentic ? "agentic" : "chat",
+      title: titleFrom(s.text),
+      agent_id: s.agentId,
+      model: s.model || undefined,
+      node_id: agentic ? s.nodeId : undefined,
+      cwd: agentic ? s.cwd : undefined,
+    });
+    refreshSessions();
+    go({ kind: "session", id: session_id });
+    await api.prompt(session_id, s.text, s.effort ? { effort: s.effort } : {});
+  };
+
+  const navigate = (r: Route) => {
+    setDrawer(false);
+    go(r);
+  };
+
+  return (
+    <div className={`shell ${collapsed ? "collapsed" : ""} ${drawer ? "drawer-open" : ""}`}>
+      {!collapsed && (
+        <Sidebar
+          me={me}
+          sessions={sessions}
+          nodes={nodes}
+          selected={selected}
+          conn={live.state}
+          onSelect={(id) => navigate({ kind: "session", id })}
+          onNew={() => navigate({ kind: "home" })}
+          onSettings={() => navigate({ kind: "settings" })}
+          onLogout={logout}
+          onCollapse={() => (drawer ? setDrawer(false) : toggleCollapsed())}
+        />
+      )}
+      {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
+      <main className="main">
+        <div className="topbar">
+          <button
+            className="icon"
+            aria-label={t("nav.expand")}
+            onClick={() => (collapsed ? toggleCollapsed() : setDrawer(true))}
+          >
+            ☰
+          </button>
+          {collapsed && (
+            <button className="icon" aria-label={t("nav.newChat")} onClick={() => navigate({ kind: "home" })}>
+              ✎
+            </button>
+          )}
+        </div>
+        <Suspense fallback={<div className="muted pad">Loading…</div>}>
+          {route.kind === "session" ? (
+            <Conversation
+              key={route.id}
+              live={live}
+              sessionId={route.id}
+              row={sessions.find((s) => s.session_id === route.id) ?? null}
+              nodes={nodes}
+              agents={agents}
+              models={models}
+            />
+          ) : route.kind === "settings" ? (
+            <Settings me={me} agents={agents} models={models} onPrefs={setPrefs} />
+          ) : (
+            <Home
+              username={me.username}
+              agents={agents}
+              defaultAgent={defaultAgent}
+              models={models}
+              workers={workers}
+              prefs={prefs}
+              agenticBlocked={agenticBlocked}
+              onSubmit={submit}
+            />
+          )}
+        </Suspense>
+      </main>
+    </div>
+  );
+}

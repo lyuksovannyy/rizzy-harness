@@ -102,6 +102,18 @@ UI dev server with hot reload (proxies `/api` to a running `harness serve`):
 cd web && npm run dev
 ```
 
+Web bundle budget (also in CI):
+
+```bash
+cd web && npm run build && npm run size
+```
+
+End-to-end UI flows against the real binary (needs Playwright + Chromium):
+
+```bash
+node web/e2e/phase3.cjs target/debug/harness
+```
+
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)
 SIGKILLs the real binary mid-turn, restarts it, resumes a WebSocket client from
 its cursor, and asserts the client and server logs are identical.

@@ -1,77 +1,88 @@
+import { useState } from "react";
 import type { ConnState } from "../live";
+import { t } from "../lib/i18n";
 import type { Me, NodeInfo, SessionRow } from "../types";
 import { NodeBadge } from "./NodeBadge";
 
-function ago(ms: number): string {
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) return `${Math.round(s / 3600)}h`;
-  return `${Math.round(s / 86400)}d`;
-}
-
 export function Sidebar(props: {
+  me: Me;
   sessions: SessionRow[];
   nodes: NodeInfo[];
   selected: string | null;
   conn: ConnState;
   onSelect: (id: string) => void;
-  me: Me;
   onNew: () => void;
-  onUsers: () => void;
-  onPassword: () => void;
+  onSettings: () => void;
   onLogout: () => void;
+  onCollapse: () => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
   const nodeById = new Map(props.nodes.map((n) => [n.node_id, n]));
+  const q = query.trim().toLowerCase();
+  const shown = q ? props.sessions.filter((s) => s.title.toLowerCase().includes(q)) : props.sessions;
+
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
         <span className="brand">harness</span>
         <span className={`conn conn-${props.conn}`} title={`connection: ${props.conn}`} />
+        <span className="spacer" />
+        <button
+          className="icon"
+          aria-label={t("nav.search")}
+          title={t("nav.search")}
+          onClick={() => setSearching((v) => !v)}
+        >
+          ⌕
+        </button>
+        <button className="icon" aria-label={t("nav.collapse")} title={t("nav.collapse")} onClick={props.onCollapse}>
+          ⟨
+        </button>
       </div>
-      <button className="primary wide" onClick={props.onNew}>
-        + New session
+      <button className="nav-item new-chat" onClick={props.onNew}>
+        ✎ {t("nav.newChat")}
       </button>
+      {searching && (
+        <input
+          className="sidebar-search"
+          autoFocus
+          placeholder={t("nav.search")}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && (setQuery(""), setSearching(false))}
+        />
+      )}
+      <div className="section-label">{t("nav.recents")}</div>
       <nav className="session-list">
-        {props.sessions.length === 0 && <div className="muted pad">No sessions yet.</div>}
-        {props.sessions.map((s) => (
+        {shown.length === 0 && (
+          <div className="muted pad">{q ? t("nav.noMatches") : t("nav.noChats")}</div>
+        )}
+        {shown.map((s) => (
           <button
             key={s.session_id}
             className={`session-item ${s.session_id === props.selected ? "active" : ""}`}
             onClick={() => props.onSelect(s.session_id)}
+            title={s.title}
           >
-            <div className="session-title">
-              {s.running && <span className="dot running" title="running" />}
-              <span className="ellipsis">{s.title || "Untitled"}</span>
-            </div>
-            <div className="session-meta">
-              <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />
-              <span className="ellipsis mono">{s.cwd.split("/").slice(-2).join("/")}</span>
-              <span className="muted">{ago(s.updated_ms)}</span>
-            </div>
+            {s.running && <span className="dot running" title="running" />}
+            <span className="ellipsis grow">{s.title || t("session.untitled")}</span>
+            {s.profile === "agentic" && <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />}
           </button>
         ))}
       </nav>
       <div className="sidebar-foot">
-        <span className="ellipsis" title={props.me.role}>
-          {props.me.username}
-          {props.me.role === "admin" && <span className="muted"> · admin</span>}
-        </span>
-        <span className="row">
-          {props.me.role === "admin" && (
-            <button className="link" onClick={props.onUsers}>
-              Users
-            </button>
-          )}
-          {props.me.user_id && (
-            <button className="link" onClick={props.onPassword}>
-              Password
-            </button>
-          )}
-          <button className="link" onClick={props.onLogout}>
-            Log out
-          </button>
-        </span>
+        <button className="nav-item user" onClick={props.onSettings} title={t("nav.settings")}>
+          <span className="avatar">{props.me.username.slice(0, 1).toUpperCase()}</span>
+          <span className="ellipsis grow">
+            {props.me.username}
+            {props.me.role === "admin" && <span className="muted"> · admin</span>}
+          </span>
+          <span className="muted">⚙</span>
+        </button>
+        <button className="link" onClick={props.onLogout}>
+          {t("nav.logout")}
+        </button>
       </div>
     </aside>
   );
