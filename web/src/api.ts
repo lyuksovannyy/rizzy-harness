@@ -1,4 +1,4 @@
-import type { Decision, NodeInfo, RawEvent, SessionRow } from "./types";
+import type { Decision, Me, NodeInfo, RawEvent, Role, SessionRow, User } from "./types";
 
 export class HttpError extends Error {
   constructor(
@@ -30,8 +30,17 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const api = {
-  me: () =>
-    call<{ ok: boolean; app: string; user: { username: string; role: string } }>("GET", "/api/me"),
+  me: () => call<{ ok: boolean; app: string; user: Me }>("GET", "/api/me"),
+  changePassword: (current: string, next: string) =>
+    call<{ ok: boolean }>("POST", "/api/me/password", { current, new: next }),
+  users: () => call<{ users: User[] }>("GET", "/api/users"),
+  createUser: (b: { username: string; password: string; role: Role; can_agentic: boolean }) =>
+    call<User>("POST", "/api/users", b),
+  updateUser: (
+    id: string,
+    b: { role?: Role; disabled?: boolean; can_agentic?: boolean; password?: string },
+  ) => call<User>("PATCH", `/api/users/${id}`, b),
+  deleteUser: (id: string) => call<{ ok: boolean }>("DELETE", `/api/users/${id}`),
   setupStatus: () => call<{ claimed: boolean }>("GET", "/api/setup"),
   setup: (claim_code: string, username: string, password: string) =>
     call<{ ok: boolean }>("POST", "/api/setup", { claim_code, username, password }),
@@ -42,7 +51,12 @@ export const api = {
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "/api/sessions"),
   events: (id: string, after = 0) =>
     call<{ events: RawEvent[] }>("GET", `/api/sessions/${id}/events?after=${after}`),
-  createSession: (b: { cwd: string; title?: string; node_id?: string }) =>
+  createSession: (b: {
+    profile: "chat" | "agentic";
+    cwd?: string;
+    title?: string;
+    node_id?: string;
+  }) =>
     call<{ session_id: string }>("POST", "/api/sessions", b),
   prompt: (id: string, text: string) => call("POST", `/api/sessions/${id}/prompt`, { text }),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),

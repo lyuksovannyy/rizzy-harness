@@ -1,5 +1,5 @@
 import type { ConnState } from "../live";
-import type { NodeInfo, SessionRow } from "../types";
+import type { Me, NodeInfo, SessionRow } from "../types";
 import { NodeBadge } from "./NodeBadge";
 
 function ago(ms: number): string {
@@ -16,7 +16,10 @@ export function Sidebar(props: {
   selected: string | null;
   conn: ConnState;
   onSelect: (id: string) => void;
+  me: Me;
   onNew: () => void;
+  onUsers: () => void;
+  onPassword: () => void;
   onLogout: () => void;
 }) {
   const nodeById = new Map(props.nodes.map((n) => [n.node_id, n]));
@@ -50,10 +53,25 @@ export function Sidebar(props: {
         ))}
       </nav>
       <div className="sidebar-foot">
-        <span className="muted">{props.nodes.filter((n) => n.connected).length} node(s) online</span>
-        <button className="link" onClick={props.onLogout}>
-          Log out
-        </button>
+        <span className="ellipsis" title={props.me.role}>
+          {props.me.username}
+          {props.me.role === "admin" && <span className="muted"> · admin</span>}
+        </span>
+        <span className="row">
+          {props.me.role === "admin" && (
+            <button className="link" onClick={props.onUsers}>
+              Users
+            </button>
+          )}
+          {props.me.user_id && (
+            <button className="link" onClick={props.onPassword}>
+              Password
+            </button>
+          )}
+          <button className="link" onClick={props.onLogout}>
+            Log out
+          </button>
+        </span>
       </div>
     </aside>
   );

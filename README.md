@@ -23,8 +23,11 @@ cargo build --release
 ```
 
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
-(so nobody else can take over a fresh server) and then creates your account.
-Print the code with:
+(so nobody else can take over a fresh server) and creates your **admin**
+account. Admins add other people under **Users**; new accounts get a temporary
+password and must change it at first login. Everyone sees only their own
+chats. Agentic sessions run shell commands on a worker node, so an admin has
+to grant them per user. Print the claim code with:
 
 ```bash
 ./target/release/harness claim-code

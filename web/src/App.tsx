@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "./api";
 import { Live } from "./live";
-import type { NodeInfo, SessionRow } from "./types";
+import type { Me, NodeInfo, SessionRow } from "./types";
 import { Login } from "./components/Login";
 import { Sidebar } from "./components/Sidebar";
 import { SessionPane } from "./components/SessionPane";
 import { NewSession } from "./components/NewSession";
+import { ChangePassword } from "./components/ChangePassword";
+import { Users } from "./components/Users";
 
 function useHashRoute(): [string | null, (id: string | null) => void] {
   const read = () => {
@@ -25,24 +27,30 @@ function useHashRoute(): [string | null, (id: string | null) => void] {
 }
 
 export function App() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  useEffect(() => {
+  // undefined = loading, null = logged out
+  const [me, setMe] = useState<Me | null | undefined>(undefined);
+  const refresh = useCallback(() => {
     api
       .me()
-      .then(() => setAuthed(true))
-      .catch((e) => setAuthed(e instanceof HttpError && e.status === 401 ? false : false));
+      .then((r) => setMe(r.user))
+      .catch(() => setMe(null));
   }, []);
-  if (authed === null) return <div className="splash">Loading…</div>;
-  if (!authed) return <Login onDone={() => setAuthed(true)} />;
-  return <Shell onLogout={() => setAuthed(false)} />;
+  useEffect(refresh, [refresh]);
+  if (me === undefined) return <div className="splash">Loading…</div>;
+  if (me === null) return <Login onDone={refresh} />;
+  if (me.must_change_password) return <ChangePassword forced onDone={refresh} />;
+  return <Shell me={me} onLogout={() => setMe(null)} />;
 }
 
-function Shell({ onLogout }: { onLogout: () => void }) {
+type View = "sessions" | "users" | "password";
+
+function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [live] = useState(() => new Live());
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [selected, select] = useHashRoute();
   const [creating, setCreating] = useState(false);
+  const [view, setView] = useState<View>("sessions");
 
   const refreshSessions = useCallback(() => {
     api
@@ -84,16 +92,32 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         nodes={nodes}
         selected={selected}
         conn={live.state}
+        me={me}
         onSelect={(id) => {
           setCreating(false);
+          setView("sessions");
           select(id);
         }}
-        onNew={() => setCreating(true)}
+        onNew={() => {
+          setView("sessions");
+          setCreating(true);
+        }}
+        onUsers={() => setView("users")}
+        onPassword={() => setView("password")}
         onLogout={logout}
       />
       <main className="main">
-        {creating ? (
+        {view === "users" && me.role === "admin" ? (
+          <Users me={me} />
+        ) : view === "password" ? (
+          <ChangePassword
+            forced={false}
+            onDone={() => setView("sessions")}
+            onCancel={() => setView("sessions")}
+          />
+        ) : creating ? (
           <NewSession
+            me={me}
             nodes={nodes}
             onCancel={() => setCreating(false)}
             onCreated={(id) => {

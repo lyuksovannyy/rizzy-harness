@@ -525,3 +525,66 @@ pre.diff .del {
     padding-right: 16px;
   }
 }
+
+/* Accounts */
+.panel {
+  margin: 32px auto;
+  width: min(920px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-self: flex-start;
+}
+.panel h2,
+.card h2,
+.card h3 {
+  margin: 0;
+}
+.card.narrow {
+  width: min(420px, calc(100vw - 32px));
+}
+.row.end {
+  justify-content: flex-end;
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-direction: row !important;
+  color: var(--fg);
+}
+.check input {
+  width: auto;
+}
+table.users {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.users th,
+table.users td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+table.users select {
+  width: auto;
+}
+.panel .row input:not([type="checkbox"]):not([type="radio"]) {
+  width: auto;
+  flex: 1;
+  min-width: 140px;
+}
+.panel .row select {
+  width: auto;
+}
+.new-session .row.start {
+  justify-content: flex-start;
+  gap: 18px;
+}
+@media (max-width: 760px) {
+  table.users td:last-child .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

@@ -106,4 +106,25 @@ export interface NodeInfo {
   version: string;
   connected: boolean;
   embedded: boolean;
+  profile: Profile;
+}
+
+export type Role = "admin" | "member";
+
+export interface Me {
+  user_id: string | null;
+  username: string;
+  role: Role;
+  can_agentic: boolean;
+  must_change_password: boolean;
+}
+
+export interface User {
+  user_id: string;
+  username: string;
+  role: Role;
+  disabled: boolean;
+  can_agentic: boolean;
+  must_change_password: boolean;
+  created_ms: number;
 }

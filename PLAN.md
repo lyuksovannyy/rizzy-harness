@@ -31,9 +31,14 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   `cargo-deny` in CI (licences, advisories, duplicates), APIs checked on docs.rs before use.
   Phase 1's hand-rolled SSE parser, markdown renderer and provider client get re-evaluated
   against maintained libraries (the renderer must sanitize).
-* **Single owner now, built for teams.** `users` table with roles (only `owner` used in v1),
-  `owner_id` on every conversation, node and memory row, username + password (Argon2) replacing
-  the shared UI token, a first-run claim code printed to the console. No team UI in v1.
+* **Multiple accounts, admin-gated; team workspaces later.** The first account is an
+  admin created with a one-time claim code. Only admins create accounts (temporary password,
+  changed at first login). Everyone sees only their own conversations. Agentic sessions (a
+  shell on a worker node) need a per-user grant. Localhost by default; remote only with an
+  explicit flag. Shared team workspaces are a later phase.
+* **No compatibility code before the first release.** Nothing has shipped, so the schema is
+  created complete, with no migrations, aliases or renames; a dev data dir is simply wiped
+  when the schema changes. Migrations start with the first tagged release.
 
 ### Omnibox (the new-tab bar)
 
@@ -222,8 +227,8 @@ Wire/storage form (`RawEvent`) — what the store and protocol carry:
 * Typed form (`harness_core::EventKind`) is a serde enum with
   `tag = "kind", content = "payload"`. Unknown kinds deserialize to an error at
   the typed layer only; the raw layer never fails on them.
-* Payload changes are additive only (new optional fields). A breaking change is
-  a new kind.
+* From the first release on, payload changes are additive only (new optional
+  fields) and a breaking change is a new kind. Before it, the schema changes freely.
 
 Kinds (v1):
 
@@ -319,13 +324,17 @@ login page.
 | # | Threat | Mitigation |
 |---|---|---|
 | T1 | Network attacker reaches the master UI | Bind `127.0.0.1` by default. Non-loopback bind requires TLS (Phase 2) or the explicit `--insecure-bind` flag (tailnet/WireGuard mode), which logs a warning on every start. |
-| T2 | Malicious website in the user's browser (CSRF, DNS rebinding, cross-site WS) | Accounts with Argon2id passwords; the first (owner) account needs a one-time claim code from a 0600 file. Login sets a random `HttpOnly; SameSite=Strict` cookie whose SHA-256 alone is stored; unknown usernames are verified against a dummy hash so timing does not reveal them. A separate 256-bit API token (0600 file) serves scripts as `Bearer`. Sessions carry `owner_id`; a non-owner role sees only its own sessions over REST and WS (teams later). Every request checks `Host` against an allowlist (anti-rebinding) and every state-changing request and the WS upgrade check `Origin`. Token compared in constant time. |
+| T2 | Malicious website in the user's browser (CSRF, DNS rebinding, cross-site WS) | Accounts with Argon2id passwords; the first (admin) account needs a one-time claim code from a 0600 file. Login sets a random `HttpOnly; SameSite=Strict` cookie whose SHA-256 alone is stored; unknown usernames are verified against a dummy hash so timing does not reveal them. A separate 256-bit API token (0600 file) serves scripts as `Bearer`. Every request checks `Host` against an allowlist (anti-rebinding) and every state-changing request and the WS upgrade check `Origin`. Token compared in constant time. |
 | T3 | Secrets leak via logs, URLs, event log | Provider keys are referenced by env-var name in config, held in `Secret<String>` (redacted `Debug`), never put in events. Tool output is scrubbed of known secret values before it is stored. No token in any URL (no `?token=`). `tracing` never logs headers. |
 | T4 | Prompt injection from repo content makes the model run harmful commands | Default approval mode `ask`: every mutating tool (bash, edit, write) needs a human click; read-only tools are confined to the session workspace. No network sandbox in v1 (open risk R2). |
 | T5 | Compromised master widens node permissions | **Node-local policy (`node.toml`) is authoritative** and is not settable over the protocol: allowed workspace roots, max approval mode (`ask` default; master can request stricter, never looser), tool denylist, whether remote-created sessions are allowed at all. The node logs every command it received in its own store. |
 | T6 | Compromised master approves things on nodes | Accepted in v1: the master is the approval channel, so a compromised master can approve anything inside node policy. Bounded by T5. Future: approvals signed by a user device key verified on the node (R1). |
 | T7 | Rogue node / stolen node key | Node keys pinned after operator approval; revocation deletes the pin and drops the link. A node only writes its own sessions; the master rejects events for sessions owned by another node. |
 | T8 | MITM on the node link | WSS plus Ed25519 mutual challenge-response with pinned keys, so a mis-issued TLS cert alone is not enough. |
+| T10 | Another account reads or drives someone else's work | Every session carries `owner_id`; REST and WS show a session only to its owner, admins included (admins manage accounts, not chats). Only the API token, the machine owner's key on disk, sees all. |
+| T11 | A low-trust account gets a shell | Agentic sessions run bash on a node, so they need a per-user `can_agentic` grant (default off; admins always on). Chat sessions have no file or shell tools. |
+| T12 | Password guessing / account takeover | Login throttle (5 failures per username per 15 min → 429). Trade-off accepted: an attacker can lock out a known username for 15 minutes. No self-signup; admin-created accounts start with a temporary password that must be changed; disabling, deleting or resetting a password signs the user out everywhere. The last active admin cannot be removed or demoted, and admins cannot change their own access. |
+| T13 | Credentials sniffed on the network | Default bind is 127.0.0.1. `--insecure-bind` serves plain HTTP with a loud warning (VPN/tailnet only); real TLS arrives with the node link (Phase 8). |
 | T9 | Runaway processes | Bash runs in its own process group; cancel/timeout sends SIGTERM then SIGKILL to the group. Cancel propagates master → node as `session.cancel`. Output is capped. |
 
 ---
@@ -396,8 +405,8 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 * **R4** OpenAI-compatible servers differ on streamed tool-call chunking
   (index vs id); the parser keys by `index` and tolerates missing ids. Tested
   against recorded chunk shapes, not every vendor.
-* **R5** The UI token is a single shared secret (single-user v1). Multi-user is
-  out of scope.
+* **R5** Remote access has no TLS yet (`--insecure-bind` is plain HTTP). Until
+  Phase 8, remote use must go through a VPN/tailnet or a TLS-terminating proxy.
 * **R6** Two-db embedded mode doubles disk usage on the master machine.
 * **R7** `genai` has a single maintainer on crates.io. Mitigated by the exact pin
   and the `Provider` seam; a swap touches one file.
@@ -512,4 +521,23 @@ onto the existing `NodeLink`, network-drop tests.
   exists (Phase 8), so no agent promises a tool it cannot have.
 
 **Next:** Phase 3, the UI shell per the mockup.
+
+### 2026-11-03 — Multi-account (admin-gated): done
+
+**Done:** admin role from the claim; admin-only account creation with temporary
+passwords and forced change; per-user privacy (admins too); per-user agentic grant;
+admin API (`/api/users`, `/api/me/password`); last-admin/self guards; sign-out on
+disable/delete/reset; login throttle; minimal Users panel, password screens and a
+Chat/Agentic choice in the web UI. Removed every compatibility shim (migrations,
+role alias, token-file rename); the schema is created complete.
+
+**Evidence:** `cargo test --workspace` green incl. 5 account HTTP tests (forced
+change, privacy, grant, disable/reset/delete, last-admin, throttle); Playwright on
+the real binary: claim → admin creates bob → bob's forced password change → bob
+sees none of the admin's chats, has no Users link, Agentic disabled with reason,
+chat works.
+
+**Risks:** username lockout by throttle (accepted, T12); no TLS for remote (R5).
+
+**Next:** Phase 3 UI shell.
 
