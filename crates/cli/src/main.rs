@@ -90,13 +90,13 @@ fn build_provider(
 ) -> anyhow::Result<(Arc<dyn Provider>, Vec<Secret<String>>, Vec<String>)> {
     let p = &cfg.provider;
     Ok(match p.kind {
-        ProviderKind::Mock => (
-            Arc::new(Mock {
+        ProviderKind::Mock => BuiltProvider {
+            provider: Arc::new(Mock {
                 delay: Duration::from_millis(p.mock_delay_ms),
             }),
-            vec![],
-            vec![],
-        ),
+            secrets: vec![],
+            env_remove: vec![],
+        },
         ProviderKind::Openai => {
             let (key, env_remove) = match &p.api_key_env {
                 Some(var) => {
@@ -107,11 +107,11 @@ fn build_provider(
                 None => (None, vec![]),
             };
             let secrets = key.iter().cloned().collect();
-            (
-                Arc::new(OpenAiCompat::new(p.base_url.clone(), key)),
+            BuiltProvider {
+                provider: Arc::new(OpenAiCompat::new(p.base_url.clone(), key)),
                 secrets,
                 env_remove,
-            )
+            }
         }
     })
 }
@@ -146,7 +146,11 @@ async fn serve(
     }
     let cfg = Config::load(&dir.join("harness.toml"))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
-    let (provider, secrets, env_remove) = build_provider(&cfg)?;
+    let BuiltProvider {
+        provider,
+        secrets,
+        env_remove,
+    } = build_provider(&cfg)?;
     tracing::info!(provider = provider.name(), model = %cfg.provider.model, "provider");
 
     let node_store = Store::open(&dir.join("node.db"), Durability::Full)?;
