@@ -146,6 +146,31 @@ judge sees them; every verdict is an event (`approval_resolved{by: judge, score}
 * OpenBot (CopilotKit, MIT): named "coworkers" with role descriptions. opencode-workspace:
   explore / researcher / coder / scribe / reviewer specialists. Ideas only, no code.
 * "Buzz" (agent roles): not found; unverified.
+* **Amazon "Infinity"** (researched 2026-11-03; `github.com/hydro-project/infinity`,
+  Apache-2.0, Rust, AWS + UC Berkeley Hydro project, announced 2026-10-23 as an early
+  research release, no tagged releases). Agent runtime for extreme concurrency plus
+  "Infinity Code". Underneath: agents run as short *slices* (load history → call model →
+  dispatch tool → stop; never block); every input (user text, tool result, child report,
+  timer) is a message on the thread's queue; a ConversationStore + a StateStore of
+  processed message ids give at-least-once delivery with dedup; one ordered worker per
+  thread (SQS FIFO + Lambda on AWS); compaction at ~75% of context; tools speak RAP
+  (ack now, POST the result to a callback later; MCP via a bridge); sleep and spawn-child
+  are built-in tools; Infinity Code isolates each child in its own git worktree/jj
+  workspace and reaches other machines over SSH.
+  **Decisions for us:**
+  - Adopt the *ideas*, not the runtime: we already have per-session single-writer
+    ordering and an event log with replay; the gap Infinity highlights is that our turns
+    hold a task while waiting (approvals, long tools). For Phase 8 (orchestration) and
+    Phase 6 (research), model long waits as *messages back into the session* (the
+    "front door" pattern) so a waiting turn costs no running task and survives restarts.
+  - Sub-agents (Ultracode `delegate`) report back as synthetic tool results and each
+    gets its own worktree (matches our Phase 3-later worktree plan).
+  - RAP-style async tools (callback when done) are the shape for deep research and other
+    long jobs; evaluate `rap-protocol` crates when Phase 6 starts (Apache-2.0, so code
+    reuse is allowed), but do not depend on a pre-release runtime before then.
+  - Nothing in Infinity covers memory or the mode classifier; Phases 4 and 7 are unaffected.
+  - Unverified: the AWS post itself (blocked here) and the 75k-agents figure (idle agents,
+    simulated model).
 
 ---
 
@@ -581,4 +606,38 @@ chat works.
 * The e2e script is run manually, not in CI (needs the built binary + Chromium).
 
 **Next:** Phase 4, bar intelligence (FTS similar-chats panel, mode classifier).
+
+### 2026-11-03 — Phase 4 (bar intelligence): done
+
+**Done**
+* FTS5 chat index on the mirror (title/body columns, filled in the append transaction,
+  incognito never indexed, rebuildable from the log); queries built from quoted tokens so
+  FTS5 syntax in user input is inert.
+* "You may have asked this before" panel under the bar: >= 3 meaningful words, not
+  time-sensitive (word list shared between Rust and web), >= 60% word coverage, at most 3,
+  owner-only; ↓ moves into the list, Enter opens, Esc returns; never auto-opens.
+* Sidebar search is full-text (messages, not just titles), with highlighted snippets.
+* Mode prediction: rules (URL/short → Search, question/greeting → Ask, path/code/dev verb
+  → Agentic, never Agentic when blocked) plus an online logistic-regression model
+  (hashed features, 4096×3) that takes over only after 30 labels and only while more
+  accurate than the rules on the same 100-message window. A manual choice sticks for the
+  message; an "auto" marker shows when the prediction is in charge.
+* Only weights and accuracy windows are stored (`/api/me/classifier`, validated); no
+  typed text; Search-mode text never leaves the browser.
+
+**Evidence**
+* Rust 103 (store search, query building incl. injection inputs, suggestion rules,
+  privacy, classifier validation); Vitest 18 (44-example rules table, model learns a
+  user-specific split > 90%, earned switch, serialization).
+* `web/e2e/phase4.cjs` and `phase3.cjs` green on the real binary; initial JS 77.6 KB gzip.
+* Found by the Phase 3 re-run and fixed: "hello there" was predicted as Search
+  (greetings/thanks now count as conversational).
+
+**Risks**
+* Suggestion quality is lexical (no synonyms); embeddings come with the memory service
+  (Phase 7). The coverage threshold (0.6) is a guess to tune with real use.
+* The classifier learns per browser session and saves debounced; two tabs typing at once
+  can overwrite each other's update (last write wins; harmless but lossy).
+
+**Next:** Phase 5, onboarding.
 

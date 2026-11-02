@@ -51,12 +51,22 @@ export function Composer(props: {
   draftKey?: string;
   onSubmit: (s: Submission) => Promise<void>;
   onStop?: () => void;
+  /** Home: the classifier's guess for this text (null = no opinion). */
+  predict?: (text: string) => Mode | null;
+  /** Home: called after a successful submit with the mode actually used. */
+  onLearn?: (text: string, mode: Mode) => void;
+  /** Home: text/mode changes, for the similar-chats panel. */
+  onTextChange?: (text: string, mode: Mode) => void;
+  /** Home: ArrowDown at the end of the text; return true if handled. */
+  onArrowDown?: () => boolean;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() =>
     props.draftKey ? (localStorage.getItem(props.draftKey) ?? "") : "",
   );
   const [mode, setMode] = useState<Mode>("ask");
+  // Once the user picks a mode for this message, the classifier stays quiet.
+  const [manual, setManual] = useState(false);
   const [model, setModel] = useState(
     () => props.defaultModel ?? props.models.find((m) => m.default)?.id ?? props.models[0]?.id ?? "",
   );
@@ -92,6 +102,15 @@ export function Composer(props: {
   useEffect(() => {
     if (mode === "agentic" && props.agenticBlocked) setMode("ask");
   }, [mode, props.agenticBlocked]);
+  const { predict, onTextChange } = props;
+  useEffect(() => {
+    if (!home || manual || !predict) return;
+    const guess = text.trim() ? predict(text) : "ask";
+    if (guess) setMode(guess);
+  }, [home, manual, predict, text]);
+  useEffect(() => {
+    onTextChange?.(text, mode);
+  }, [onTextChange, text, mode]);
   useEffect(() => {
     if (!props.draftKey) return;
     try {
@@ -145,7 +164,9 @@ export function Composer(props: {
         cwd: cwd.trim(),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
+      if (home) props.onLearn?.(body, mode);
       setText("");
+      setManual(false);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -175,7 +196,17 @@ export function Composer(props: {
     }
     if (e.key === "Tab" && home) {
       e.preventDefault();
+      setManual(true);
       setMode((m) => cycleMode(m, enabled, e.shiftKey ? -1 : 1));
+      return;
+    }
+    if (
+      e.key === "ArrowDown" &&
+      props.onArrowDown &&
+      e.currentTarget.selectionStart === text.length &&
+      props.onArrowDown()
+    ) {
+      e.preventDefault();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -274,7 +305,12 @@ export function Composer(props: {
           )}
           <span className="spacer" />
           {home && (
-            <div className="mode-switch" role="radiogroup" aria-label="mode" title={t("mode.hint")}>
+            <div
+              className={`mode-switch ${!manual && text.trim() ? "auto" : ""}`}
+              role="radiogroup"
+              aria-label="mode"
+              title={t("mode.hint")}
+            >
               {MODES.map((m) => {
                 const disabled = !enabled.includes(m);
                 return (
@@ -287,6 +323,7 @@ export function Composer(props: {
                     disabled={disabled}
                     title={disabled ? (props.agenticBlocked ?? undefined) : undefined}
                     onClick={() => {
+                      setManual(true);
                       setMode(m);
                       ta.current?.focus();
                     }}

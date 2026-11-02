@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
 import type { Agent, ModelInfo, NodeInfo, Prefs } from "../types";
+import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
+import { Similar, type SimilarHandle } from "./Similar";
 
 export function Home(props: {
   username: string;
@@ -13,7 +15,13 @@ export function Home(props: {
   prefs: Prefs | null;
   agenticBlocked: string | null;
   onSubmit: (s: Submission) => Promise<void>;
+  predict: (text: string) => Mode | null;
+  onLearn: (text: string, mode: Mode) => void;
+  onOpen: (sessionId: string) => void;
 }) {
+  const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
+  const onTextChange = useCallback((text: string, mode: Mode) => setTyped({ text, mode }), []);
+  const similar = useRef<SimilarHandle>(null);
   const [agentId, setAgentId] = useState(props.defaultAgent);
   useEffect(() => setAgentId(props.defaultAgent), [props.defaultAgent]);
   // Re-render the greeting if the page stays open across a time bucket.
@@ -38,7 +46,12 @@ export function Home(props: {
           defaultModel={props.prefs?.default_model}
           agenticBlocked={props.agenticBlocked}
           onSubmit={props.onSubmit}
+          predict={props.predict}
+          onLearn={props.onLearn}
+          onTextChange={onTextChange}
+          onArrowDown={() => similar.current?.focusFirst() ?? false}
         />
+        <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} />
       </div>
     </section>
   );

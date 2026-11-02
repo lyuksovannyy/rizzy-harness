@@ -9,6 +9,7 @@ import type {
   Profile,
   RawEvent,
   Role,
+  SearchHit,
   SessionRow,
   User,
 } from "./types";
@@ -22,9 +23,10 @@ export class HttpError extends Error {
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method,
+    signal,
     credentials: "same-origin",
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -77,6 +79,15 @@ export const api = {
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
   agents: () => call<{ agents: Agent[]; default: string }>("GET", "/api/agents"),
   models: () => call<{ models: ModelInfo[] }>("GET", "/api/models"),
+  search: (q: string, suggest = false, signal?: AbortSignal) =>
+    call<{ results: SearchHit[] }>(
+      "GET",
+      `/api/search?q=${encodeURIComponent(q)}${suggest ? "&suggest=true" : ""}`,
+      undefined,
+      signal,
+    ),
+  classifier: () => call<unknown>("GET", "/api/me/classifier"),
+  saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
   settings: () => call<Prefs>("GET", "/api/me/settings"),
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),

@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api } from "../api";
 import type { ConnState } from "../live";
 import { t } from "../lib/i18n";
-import type { Me, NodeInfo, SessionRow } from "../types";
+import type { Me, NodeInfo, SearchHit, SessionRow } from "../types";
+import { Highlight } from "./Highlight";
 import { NodeBadge } from "./NodeBadge";
 
 export function Sidebar(props: {
@@ -18,9 +20,27 @@ export function Sidebar(props: {
 }) {
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
+  const [hits, setHits] = useState<SearchHit[] | null>(null);
   const nodeById = new Map(props.nodes.map((n) => [n.node_id, n]));
-  const q = query.trim().toLowerCase();
-  const shown = q ? props.sessions.filter((s) => s.title.toLowerCase().includes(q)) : props.sessions;
+  const q = query.trim();
+  useEffect(() => {
+    if (!q) {
+      setHits(null);
+      return;
+    }
+    const ctl = new AbortController();
+    const timer = setTimeout(() => {
+      api
+        .search(q, false, ctl.signal)
+        .then((r) => setHits(r.results))
+        .catch(() => {});
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      ctl.abort();
+    };
+  }, [q]);
+  const shown = hits === null ? props.sessions : [];
 
   return (
     <aside className="sidebar">
@@ -53,11 +73,23 @@ export function Sidebar(props: {
           onKeyDown={(e) => e.key === "Escape" && (setQuery(""), setSearching(false))}
         />
       )}
-      <div className="section-label">{t("nav.recents")}</div>
+      <div className="section-label">{hits === null ? t("nav.recents") : t("nav.search")}</div>
       <nav className="session-list">
-        {shown.length === 0 && (
-          <div className="muted pad">{q ? t("nav.noMatches") : t("nav.noChats")}</div>
-        )}
+        {hits !== null && hits.length === 0 && <div className="muted pad">{t("nav.noMatches")}</div>}
+        {hits?.map((h) => (
+          <button
+            key={h.session_id}
+            className={`session-item hit ${h.session_id === props.selected ? "active" : ""}`}
+            onClick={() => props.onSelect(h.session_id)}
+            title={h.title}
+          >
+            <span className="ellipsis">{h.title}</span>
+            <span className="ellipsis muted small">
+              <Highlight text={h.snippet} />
+            </span>
+          </button>
+        ))}
+        {hits === null && shown.length === 0 && <div className="muted pad">{t("nav.noChats")}</div>}
         {shown.map((s) => (
           <button
             key={s.session_id}

@@ -126,6 +126,9 @@ const log = (...a) => console.log('•', ...a);
   await p.waitForSelector('h1.greeting');
   await p.focus('.composer textarea');
   await p.keyboard.type('slow: 300');
+  // Mock commands look like search terms to the mode predictor; pick Ask.
+  await p.click('.mode-switch button:has-text("Ask")');
+  await p.focus('.composer textarea');
   await p.keyboard.press('Enter');
   await p.waitForSelector('.msg.assistant.streaming');
   await sleep(800);

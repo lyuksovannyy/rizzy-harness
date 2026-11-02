@@ -6,6 +6,12 @@ const QUESTION_WORDS = new Set([
   "would", "is", "are", "does", "do", "did", "explain", "compare", "summarize", "summarise",
   "tell", "write", "draft", "translate", "help",
 ]);
+/** Short, but conversational: never a web search. */
+const CHAT_WORDS = new Set([
+  "hi", "hello", "hey", "yo", "sup", "howdy", "morning", "evening", "thanks", "thank", "thx", "ty",
+  "ok", "okay", "cool", "nice", "great", "yes", "no", "yep", "nope", "bye", "goodbye", "continue",
+  "go", "again", "more", "why", "what", "sorry", "please",
+]);
 const DEV_VERBS = new Set([
   "fix", "refactor", "implement", "run", "build", "test", "deploy", "debug", "install", "migrate",
   "rename", "add", "remove", "update", "upgrade", "lint", "format", "commit", "review", "scaffold",
@@ -22,6 +28,7 @@ export interface Signals {
   dev: boolean;
   question: boolean;
   mention: boolean;
+  chatty: boolean;
 }
 
 export function signals(text: string): Signals {
@@ -37,6 +44,7 @@ export function signals(text: string): Signals {
     dev: DEV_VERBS.has(first),
     question: t.endsWith("?") || QUESTION_WORDS.has(first),
     mention: /^@[\w-]+/.test(t),
+    chatty: CHAT_WORDS.has(first.replace(/[^\p{L}]/gu, "")),
   };
 }
 
@@ -45,7 +53,7 @@ export function ruleMode(text: string, agenticAllowed: boolean): Mode {
   if (s.words.length === 0) return "ask";
   if (s.url) return "search";
   if (agenticAllowed && (s.path || s.code || (s.dev && s.words.length >= 3))) return "agentic";
-  if (s.question || s.mention) return "ask";
+  if (s.question || s.mention || s.chatty) return "ask";
   if (s.words.length <= 2) return "search";
   return "ask";
 }

@@ -1,0 +1,104 @@
+// "You may have asked this before": earlier chats matching what is being
+// typed. Suggestions only; nothing opens unless clicked.
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { api } from "../api";
+import type { Mode } from "../lib/modes";
+import type { SearchHit } from "../types";
+import { Highlight } from "./Highlight";
+import timeSensitive from "../lib/time-sensitive.json";
+
+const DEBOUNCE_MS = 200;
+
+function looksTimeSensitive(text: string): boolean {
+  const lower = text.toLowerCase();
+  const words = lower.split(/[^\p{L}\p{N}]+/u);
+  return (
+    timeSensitive.words.some((w) => words.includes(w)) ||
+    timeSensitive.phrases.some((p) => lower.includes(p))
+  );
+}
+
+function ago(ms: number): string {
+  const d = Math.max(0, Date.now() - ms) / 1000;
+  if (d < 3600) return `${Math.max(1, Math.round(d / 60))}m ago`;
+  if (d < 86400) return `${Math.round(d / 3600)}h ago`;
+  return `${Math.round(d / 86400)}d ago`;
+}
+
+export interface SimilarHandle {
+  /** Focus the first suggestion; false if there is none. */
+  focusFirst: () => boolean;
+}
+
+export const Similar = forwardRef<SimilarHandle, { text: string; mode: Mode; onOpen: (id: string) => void }>(
+  function Similar({ text, mode, onOpen }, ref) {
+    const [hits, setHits] = useState<SearchHit[]>([]);
+    const list = useRef<HTMLUListElement>(null);
+    useImperativeHandle(ref, () => ({
+      focusFirst: () => {
+        const b = list.current?.querySelector("button");
+        if (!b) return false;
+        b.focus();
+        return true;
+      },
+    }));
+
+    useEffect(() => {
+      // Search-mode text never leaves the browser; time-sensitive asks get no matches.
+      const q = text.trim();
+      if (mode === "search" || q.split(/\s+/).length < 3 || looksTimeSensitive(q)) {
+        setHits([]);
+        return;
+      }
+      const ctl = new AbortController();
+      const timer = setTimeout(() => {
+        api
+          .search(q, true, ctl.signal)
+          .then((r) => setHits(r.results))
+          .catch(() => {});
+      }, DEBOUNCE_MS);
+      return () => {
+        clearTimeout(timer);
+        ctl.abort();
+      };
+    }, [text, mode]);
+
+    if (hits.length === 0) return null;
+    const back = () => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+    return (
+      <div className="similar" aria-label="earlier chats">
+        <div className="similar-label muted">You may have asked this before</div>
+        <ul ref={list}>
+          {hits.map((h, i) => (
+            <li key={h.session_id}>
+              <button
+                type="button"
+                onClick={() => onOpen(h.session_id)}
+                onKeyDown={(e) => {
+                  const items = list.current?.querySelectorAll("button");
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    (items?.[i + 1] as HTMLButtonElement | undefined)?.focus();
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    if (i === 0) back();
+                    else (items?.[i - 1] as HTMLButtonElement | undefined)?.focus();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    back();
+                  }
+                }}
+              >
+                <span className="similar-title ellipsis">{h.title}</span>
+                <span className="similar-snippet ellipsis muted">
+                  <Highlight text={h.snippet} />
+                </span>
+                <span className="muted similar-age">{ago(h.updated_ms)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  },
+);

@@ -114,6 +114,10 @@ End-to-end UI flows against the real binary (needs Playwright + Chromium):
 node web/e2e/phase3.cjs target/debug/harness
 ```
 
+```bash
+node web/e2e/phase4.cjs target/debug/harness
+```
+
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)
 SIGKILLs the real binary mid-turn, restarts it, resumes a WebSocket client from
 its cursor, and asserts the client and server logs are identical.

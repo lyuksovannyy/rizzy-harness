@@ -1,8 +1,9 @@
-import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
 import { t } from "../lib/i18n";
-import { agenticBlockReason } from "../lib/modes";
+import { type ClassifierState, decide, emptyState, parseState, record, serialize } from "../lib/classifier";
+import { agenticBlockReason, type Mode } from "../lib/modes";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
@@ -58,6 +59,8 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   });
   const [drawer, setDrawer] = useState(false);
   const route = useRoute();
+  const classifier = useRef<ClassifierState>(emptyState());
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const unauthorized = useCallback(
     (e: unknown) => {
@@ -86,6 +89,12 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       .catch(unauthorized);
     api.models().then((r) => setModels(r.models)).catch(unauthorized);
     api.settings().then(setPrefs).catch(unauthorized);
+    api
+      .classifier()
+      .then((v) => {
+        classifier.current = parseState(v);
+      })
+      .catch(() => {});
     return () => live.close();
   }, [live, refreshSessions, refreshNodes, unauthorized]);
 
@@ -133,6 +142,23 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     go({ kind: "session", id: session_id });
     await api.prompt(session_id, s.text, s.effort ? { effort: s.effort } : {});
   };
+
+  const agenticAllowed = agenticBlocked === null;
+  const predict = useCallback(
+    (text: string) => decide(classifier.current, text, agenticAllowed).mode,
+    [agenticAllowed],
+  );
+  const learn = useCallback(
+    (text: string, mode: Mode) => {
+      record(classifier.current, text, mode, agenticAllowed);
+      // Only weights and accuracy counters are saved, never the text.
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        void api.saveClassifier(serialize(classifier.current)).catch(() => {});
+      }, 1000);
+    },
+    [agenticAllowed],
+  );
 
   const navigate = (r: Route) => {
     setDrawer(false);
@@ -194,6 +220,9 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               prefs={prefs}
               agenticBlocked={agenticBlocked}
               onSubmit={submit}
+              predict={predict}
+              onLearn={learn}
+              onOpen={(id) => navigate({ kind: "session", id })}
             />
           )}
         </Suspense>
