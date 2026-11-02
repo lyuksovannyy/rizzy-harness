@@ -3,5 +3,32 @@ name = "harness-master"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+
 [lints]
 workspace = true
+
+[dependencies]
+axum.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+harness-core.workspace = true
+harness-node.workspace = true
+harness-protocol.workspace = true
+harness-store.workspace = true
+hex.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+harness-agent-native.workspace = true
+harness-tools.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio-tungstenite.workspace = true
