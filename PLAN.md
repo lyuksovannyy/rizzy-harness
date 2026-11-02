@@ -14,8 +14,8 @@ Status notes are appended at the bottom (`## Status`).
 Phase 1 was framed as a coding-agent harness. The product is broader: a **self-hosted,
 ChatGPT-style personal assistant** that is also the browser's new-tab page, with plain chat on
 the central server and agentic work delegated to worker nodes. Sections 1–4 (architecture,
-event log, node protocol, threat model) still hold. The phased build order in §8 is under
-revision and will be rewritten once the layout mockup lands (chat + omnibox first, onboarding last).
+event log, node protocol, threat model) still hold. The build order in §8 was
+rewritten after the layout mockup (foundations, UI shell and bar first, onboarding after).
 
 ### Principles
 
@@ -59,10 +59,45 @@ revision and will be rewritten once the layout mockup lands (chat + omnibox firs
 * **Chat** runs on the master: documents, web search, research. Low token use by default: short
   system prompt, few tools with schemas loaded on demand, cheaper default model, rolling history
   summary, a token meter in the UI.
-* **Agentic** runs on a node (the embedded node counts). Modes, to confirm with the mockup:
-  **Standard** (full toolset), **Lean** (small toolset, low tokens), **Orchestrator** (a lead
-  agent spawns subagents) with user-visible hard caps on subagents and tokens/cost per turn.
-* **Group chats** with several AIs and @mentions: deferred (turn-taking, AI↔AI loops, cost).
+* **Agentic** runs on a node (the embedded node counts), picked in the bar's node picker.
+* **No session modes.** DSH-style Standard/PTC/Minimal selectors were considered and dropped;
+  everything a mode would configure lives on the **agent** (below).
+* **Group chats** (several AIs answering freely): deferred (turn-taking, AI↔AI loops, cost).
+  **Parallel answers** (same prompt to N models, pick or merge) replace them: the event log
+  stores answer variants now (`variant_group`, `variant_index`, `variant_selected`); the
+  side-by-side UI comes later.
+* **Incognito** (chat only in v1): events live in a TTL'd ephemeral table, purged on close or
+  after N hours, excluded from search, similar-chat suggestions and memory. The UI states that
+  the provider still receives the text.
+
+### Agents
+
+* The single user-facing primitive for "who works and how": name, avatar, system prompt,
+  allowed tools, attached skills, default model + effort, token budget (lean / standard).
+  Stored on the master as markdown with YAML frontmatter.
+* Built-ins (editable, clonable): **General** (default), **Coder**, **Writer**, **Scout**
+  (read-only research), **Ultracode** (orchestrator: has the `delegate` tool to spawn other
+  agents, with user-visible caps on subagent count and tokens/cost per turn). Users create
+  agents and choose the default.
+* The same agents serve chat and agentic sessions; tools the runtime lacks are unavailable.
+  Node policy still wins: an agent's tool list is a request, not a permission.
+* Switching agent mid-session is allowed (`agent_changed` event; history carries over; the
+  prompt cache resets). One agent answers per turn; an `@mention` routes that turn to the named
+  agent (mention popup lists agents; the selector shows the override). Several agents in one
+  turn only through an orchestrator.
+* Event fields: `author` (agent id) on assistant/tool events; agent snapshot (name + prompt
+  hash) in `turn_started` so old turns stay explainable after an agent is edited.
+
+### Home screen and bar (from the mockup)
+
+* Sidebar v1: New chat, chat search, Recents, user menu. Projects and Library later; Images,
+  Scheduled, Plugins and Explore cut.
+* Home: localized, time-of-day greeting with the user's name (strings in i18n catalogs from day one).
+* Bar: `+` attach · input · agent selector · model + effort (effort only when the model
+  supports it, from a model capability registry) · mic (later) · mode switch
+  **Search / Ask / Agentic** with an **Incognito** toggle · node picker when Agentic.
+  Agentic is disabled with a "set up a worker node" link when no node is online.
+* Under the bar: earlier chats that may already answer the question.
 
 ### Memory
 
@@ -101,10 +136,11 @@ closed (low confidence, timeout or error → ask); tool arguments are scrubbed b
 judge sees them; every verdict is an event (`approval_resolved{by: judge, score}`, an additive
 `ResolvedBy` variant); it is tested against prompt injection before release.
 
-### Open
+### References checked
 
-* The layout mockup.
-* "openbot" (orchestration reference): unverified, look up before borrowing.
+* OpenBot (CopilotKit, MIT): named "coworkers" with role descriptions. opencode-workspace:
+  explore / researcher / coder / scribe / reviewer specialists. Ideas only, no code.
+* "Buzz" (agent roles): not found; unverified.
 
 ---
 
@@ -344,24 +380,38 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 
 ## 8. Phases and gates
 
-> Phases 2–5 below are the original coding-first order and are **under revision** (see §0).
-> Phase 0 and Phase 1 are done and stay valid.
+Revised 2026-11-02 for the v2 direction (§0). Every phase also checks the harness idle RSS
+against the 50 MB soft budget.
 
-* **Phase 0** — workspace, CI (fmt, clippy -D warnings, test, web build), this plan.
-* **Phase 1** — master + embedded node, native loop, OpenAI-compatible provider
-  with streaming, bash/read/edit/write/grep/glob with approvals, event log, SPA
-  (session list, chat, tool cards, approvals). **Gate:** an automated test kills
-  the real binary mid-turn, restarts it, reconnects a WS client from its cursor
-  and asserts contiguous seqs, no duplicates, and identical folded state.
-* **Phase 2** — `node join`, pairing, WSS link, replication over the network,
-  node badge. **Gate:** simulated network drops mid-turn ⇒ no gaps/dups;
-  cancel from master kills the remote process tree.
-* **Phase 3** — worktree per session, checkpoints, diffs, revert/fork, terminal.
-* **Phase 4** — `harness-mcp` (rmcp, stdio + streamable HTTP, `server_tool`
-  namespacing, per-session enablement), `harness-skills` (SKILL.md frontmatter,
-  progressive loading).
-* **Phase 5** — ACP backend, Anthropic provider (API key only; no subscription
-  OAuth), compaction, subagents, full-text search.
+* **Phase 0** (done): workspace, CI, this plan.
+* **Phase 1** (done): master + embedded node, native loop, OpenAI-compatible streaming,
+  tools with approvals, event log, coding SPA. **Gate:** SIGKILL mid-turn → restart → WS
+  resume from cursor → identical log and fold.
+* **Phase 2: Foundations** (backend). Additive event fields (`author`, agent snapshot,
+  `agent_changed`, `profile`/`agent_id`/`incognito` on `session_created`, answer variants);
+  `users` + roles + `owner_id`, Argon2 login, first-run claim code replacing the shared token;
+  0600 secrets file; Anthropic API + OpenAI-compatible providers via a maintained crate if one
+  fits, model capability registry; chat runtime on the master reusing `NodeRuntime` without
+  filesystem tools; agent definitions + built-ins; `cargo-deny` in CI. **Gate:** Phase 1
+  acceptance still green; tests for claim/login, schema round-trips, both providers against
+  local mock servers.
+* **Phase 3: UI shell** per the mockup: sidebar, greeting, bar (agent selector, model + effort,
+  Search/Ask/Agentic, incognito, node picker, @mentions), chat view with a maintained
+  sanitizing markdown renderer, tool cards and approvals; Search redirect. **Gate:** Playwright
+  flows; first-paint and bundle-size budget.
+* **Phase 4: Bar intelligence.** FTS5 similar-chats panel; in-browser mode classifier (rules
+  cold start, Tab labels, accuracy logged). **Gate:** a repeated question surfaces the old chat.
+* **Phase 5: Onboarding.** Claim → account → provider (test call, model list) → name,
+  timezone, optional country/city, search engine → memory preset placeholder. **Gate:** fresh
+  data dir → onboarding → first chat, in Playwright.
+* **Phase 6: Chat capability.** Web search tool, document attachments, token meter, rolling
+  history summary, incognito. **Gate:** incognito leaves no rows after TTL.
+* **Phase 7: Memory service.** Evaluate OpenViking vs two others, `MemoryStore` adapter,
+  managed/LAN/cloud config, benchmarked presets, Memory page, confirmed location proposals.
+* **Phase 8: Remote nodes + orchestration.** `node join`, Ed25519 pairing, WSS, network-drop
+  tests, remote cancel; `delegate` tool and the Ultracode agent with caps.
+* **Phase 9: Later.** Parallel-answers UI + merge, voice, worktrees/checkpoints, MCP + skills,
+  external harnesses (ACP), Projects, Library.
 
 ---
 
