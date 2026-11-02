@@ -1,8 +1,8 @@
 //! The native agent loop: stream a completion, run requested tools (through the
 //! host's approval gate), feed results back, repeat until the model stops.
 
+pub mod llm;
 pub mod mock;
-pub mod openai;
 pub mod provider;
 
 use std::collections::HashSet;
@@ -15,7 +15,7 @@ use harness_core::{RawEvent, Secret, new_id, secret::scrub};
 use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
-pub use provider::{ChatMsg, ChatRequest, Completion, Provider, ProviderError, ToolSpec};
+pub use provider::{ChatMsg, ChatRequest, Completion, Effort, Provider, ProviderError, ToolSpec};
 
 /// Flush coalesced deltas at least this often...
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
@@ -32,6 +32,8 @@ pub struct NativeConfig {
     pub secrets: Vec<Secret<String>>,
     pub allow_outside_workspace: bool,
     pub tool_timeout: Duration,
+    /// Reasoning effort requested from the provider, if the model supports it.
+    pub effort: Option<Effort>,
 }
 
 impl Default for NativeConfig {
@@ -42,6 +44,7 @@ impl Default for NativeConfig {
             secrets: Vec::new(),
             allow_outside_workspace: false,
             tool_timeout: Duration::from_secs(600),
+            effort: None,
         }
     }
 }
@@ -201,6 +204,7 @@ impl AgentBackend for NativeBackend {
                 model: ctx.model.clone(),
                 messages: messages.clone(),
                 tools: tools.clone(),
+                effort: self.config.effort,
             };
             let (tx, rx) = mpsc::unbounded_channel();
             let turn_id = ctx.turn_id.clone();

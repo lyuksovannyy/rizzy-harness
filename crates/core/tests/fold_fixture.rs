@@ -244,8 +244,11 @@ fn fixture_is_current() {
     }
     let on_disk =
         std::fs::read_to_string(&path).expect("fixture missing; run with UPDATE_FIXTURES=1");
+    // Compare values, not text: JSON key order depends on serde_json's
+    // `preserve_order` feature, which other crates may enable workspace-wide.
+    let on_disk: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
     assert_eq!(
-        on_disk, text,
+        on_disk, doc,
         "fixture is stale; run with UPDATE_FIXTURES=1"
     );
 }

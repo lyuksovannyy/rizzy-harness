@@ -1,5 +1,6 @@
-//! `harness.toml`: master-side configuration. Secrets are referenced by
-//! environment-variable name, never stored in the file.
+//! `harness.toml`: master-side configuration. API keys are never stored here:
+//! they are referenced by environment-variable name (`api_key_env`) or by name
+//! in the 0600 `secrets.toml` (`api_key_secret`).
 
 use std::path::Path;
 
@@ -11,6 +12,19 @@ use serde::Deserialize;
 #[derive(Default)]
 pub struct Config {
     pub provider: ProviderConfig,
+    /// Known models and what they support. Unlisted models are assumed to
+    /// support tools but not effort, so effort is never sent blindly.
+    pub models: Vec<ModelConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConfig {
+    pub id: String,
+    #[serde(default)]
+    pub effort: bool,
+    #[serde(default)]
+    pub vision: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -18,6 +32,8 @@ pub struct Config {
 pub enum ProviderKind {
     /// Any OpenAI-compatible chat-completions endpoint.
     Openai,
+    /// Anthropic Messages API, API key only (no subscription OAuth: ToS).
+    Anthropic,
     /// Built-in scripted provider (no network, for testing the UI).
     Mock,
 }
@@ -26,10 +42,15 @@ pub enum ProviderKind {
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,
+    /// Empty means the kind's official endpoint.
     pub base_url: String,
     pub model: String,
     /// Name of the environment variable holding the API key.
     pub api_key_env: Option<String>,
+    /// Name of the key in `secrets.toml`.
+    pub api_key_secret: Option<String>,
+    /// Default reasoning effort, sent only if the model lists `effort = true`.
+    pub effort: Option<harness_agent_native::Effort>,
     /// Delay between mock chunks, in milliseconds.
     pub mock_delay_ms: u64,
 }
@@ -38,9 +59,11 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             kind: ProviderKind::Mock,
-            base_url: "https://api.openai.com/v1".into(),
+            base_url: String::new(),
             model: "mock".into(),
             api_key_env: None,
+            api_key_secret: None,
+            effort: None,
             mock_delay_ms: 40,
         }
     }
@@ -61,11 +84,21 @@ impl Config {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        if self.provider.kind == ProviderKind::Openai {
-            if self.provider.model.is_empty() || self.provider.model == "mock" {
-                bail!("[provider] model must be set for kind = \"openai\"");
+        let p = &self.provider;
+        if p.api_key_env.is_some() && p.api_key_secret.is_some() {
+            bail!("[provider] set api_key_env or api_key_secret, not both");
+        }
+        if p.kind != ProviderKind::Mock {
+            if p.model.is_empty() || p.model == "mock" {
+                bail!("[provider] model must be set for a real provider");
             }
-            let u = &self.provider.base_url;
+            if p.kind == ProviderKind::Anthropic
+                && p.api_key_env.is_none()
+                && p.api_key_secret.is_none()
+            {
+                bail!("[provider] Anthropic needs an API key (api_key_env or api_key_secret)");
+            }
+            let u = self.base_url();
             let local = u.starts_with("http://127.0.0.1")
                 || u.starts_with("http://localhost")
                 || u.starts_with("http://[::1]");
@@ -74,6 +107,20 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// The configured base URL, or the kind's official endpoint.
+    pub fn base_url(&self) -> &str {
+        match (self.provider.base_url.as_str(), self.provider.kind) {
+            ("", ProviderKind::Anthropic) => "https://api.anthropic.com/v1",
+            ("", _) => "https://api.openai.com/v1",
+            (u, _) => u,
+        }
+    }
+
+    /// Whether `model` is known to accept a reasoning-effort setting.
+    pub fn supports_effort(&self, model: &str) -> bool {
+        self.models.iter().any(|m| m.id == model && m.effort)
     }
 }
 
@@ -95,5 +142,25 @@ mod tests {
         .unwrap();
         assert!(bad.validate().is_err());
         assert!(toml::from_str::<Config>("[provider]\napi_key = \"sk-x\"\n").is_err());
+    }
+
+    #[test]
+    fn anthropic_needs_key_and_defaults_endpoint() {
+        let c: Config = toml::from_str(
+            "[provider]\nkind = \"anthropic\"\nmodel = \"claude-x\"\napi_key_secret = \"anthropic\"\neffort = \"high\"\n\n[[models]]\nid = \"claude-x\"\neffort = true\n",
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.base_url(), "https://api.anthropic.com/v1");
+        assert!(c.supports_effort("claude-x"));
+        assert!(!c.supports_effort("other"));
+        let nokey: Config =
+            toml::from_str("[provider]\nkind = \"anthropic\"\nmodel = \"claude-x\"\n").unwrap();
+        assert!(nokey.validate().is_err());
+        let both: Config = toml::from_str(
+            "[provider]\nkind = \"openai\"\nmodel = \"m\"\napi_key_env = \"A\"\napi_key_secret = \"b\"\n",
+        )
+        .unwrap();
+        assert!(both.validate().is_err());
     }
 }

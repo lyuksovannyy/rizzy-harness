@@ -9,9 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use harness_agent_native::{
-    NativeBackend, NativeConfig, Provider, mock::Mock, openai::OpenAiCompat,
-};
+use harness_agent_native::llm::{ApiKind, LlmProvider};
+use harness_agent_native::{NativeBackend, NativeConfig, Provider, mock::Mock};
 use harness_core::{APP_NAME, Secret};
 use harness_master::{Master, auth};
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
@@ -94,7 +93,7 @@ struct BuiltProvider {
     env_remove: Vec<String>,
 }
 
-fn build_provider(cfg: &Config) -> anyhow::Result<BuiltProvider> {
+fn build_provider(cfg: &Config, dir: &Path) -> anyhow::Result<BuiltProvider> {
     let p = &cfg.provider;
     Ok(match p.kind {
         ProviderKind::Mock => BuiltProvider {
@@ -104,23 +103,63 @@ fn build_provider(cfg: &Config) -> anyhow::Result<BuiltProvider> {
             secrets: vec![],
             env_remove: vec![],
         },
-        ProviderKind::Openai => {
-            let (key, env_remove) = match &p.api_key_env {
-                Some(var) => {
+        ProviderKind::Openai | ProviderKind::Anthropic => {
+            let (key, env_remove) = match (&p.api_key_env, &p.api_key_secret) {
+                (Some(var), _) => {
                     let v = std::env::var(var)
                         .with_context(|| format!("environment variable {var} is not set"))?;
                     (Some(Secret::new(v)), vec![var.clone()])
                 }
-                None => (None, vec![]),
+                (None, Some(name)) => {
+                    let path = dir.join("secrets.toml");
+                    let v = harness_master::secrets::get(&path, name)?.with_context(|| {
+                        format!("secret {name:?} not found in {}", path.display())
+                    })?;
+                    (Some(v), vec![])
+                }
+                (None, None) => (None, vec![]),
+            };
+            let kind = if p.kind == ProviderKind::Anthropic {
+                ApiKind::Anthropic
+            } else {
+                ApiKind::Openai
             };
             let secrets = key.iter().cloned().collect();
             BuiltProvider {
-                provider: Arc::new(OpenAiCompat::new(p.base_url.clone(), key)),
+                provider: Arc::new(LlmProvider::new(kind, cfg.base_url(), key)?),
                 secrets,
                 env_remove,
             }
         }
     })
+}
+
+/// The default model plus every model listed in `[[models]]`.
+fn model_list(cfg: &Config, provider: &str) -> Vec<harness_master::ModelInfo> {
+    let mut out: Vec<harness_master::ModelInfo> = cfg
+        .models
+        .iter()
+        .map(|m| harness_master::ModelInfo {
+            id: m.id.clone(),
+            provider: provider.to_string(),
+            effort: m.effort,
+            vision: m.vision,
+            default: m.id == cfg.provider.model,
+        })
+        .collect();
+    if !out.iter().any(|m| m.default) {
+        out.insert(
+            0,
+            harness_master::ModelInfo {
+                id: cfg.provider.model.clone(),
+                provider: provider.to_string(),
+                effort: false,
+                vision: false,
+                default: true,
+            },
+        );
+    }
+    out
 }
 
 fn allowed_hosts(bind: SocketAddr, extra: &[String]) -> Vec<String> {
@@ -157,8 +196,9 @@ async fn serve(
         provider,
         secrets,
         env_remove,
-    } = build_provider(&cfg)?;
-    tracing::info!(provider = provider.name(), model = %cfg.provider.model, "provider");
+    } = build_provider(&cfg, dir)?;
+    let provider_name = provider.name();
+    tracing::info!(provider = provider_name, model = %cfg.provider.model, "provider");
 
     let node_store = Store::open(&dir.join("node.db"), Durability::Full)?;
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
@@ -169,6 +209,10 @@ async fn serve(
             env_remove,
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
+            effort: cfg
+                .provider
+                .effort
+                .filter(|_| cfg.supports_effort(&cfg.provider.model)),
             ..Default::default()
         },
     );
@@ -200,6 +244,7 @@ async fn serve(
         let _ = std::fs::remove_file(dir.join("claim-code"));
     }
     let master = Master::new(mirror, auth);
+    master.set_models(model_list(&cfg, provider_name));
     master
         .add_link(node.attach().await, true)
         .await

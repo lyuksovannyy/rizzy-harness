@@ -17,6 +17,7 @@ pub fn router(master: Master) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/nodes", get(nodes))
+        .route("/api/models", get(models))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/events", get(events))
@@ -173,6 +174,11 @@ async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde
 async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
     require(&m, &headers).await?;
     Ok(Json(json!({ "nodes": m.nodes() })))
+}
+
+async fn models(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
+    require(&m, &headers).await?;
+    Ok(Json(json!({ "models": m.models() })))
 }
 
 fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {

@@ -4,6 +4,7 @@
 mod assets;
 pub mod auth;
 mod http;
+pub mod secrets;
 mod ws;
 
 use std::collections::{HashMap, HashSet};
@@ -27,6 +28,17 @@ pub enum Live {
     Event(RawEvent),
     SessionsChanged,
     NodesChanged,
+}
+
+/// A model the UI may offer, with what it supports (PLAN.md §0: capabilities
+/// come from configuration, never guessed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub provider: String,
+    pub effort: bool,
+    pub vision: bool,
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +65,7 @@ pub struct MasterInner {
     live: broadcast::Sender<Live>,
     acks: Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>,
     pub auth: auth::Auth,
+    models: Mutex<Vec<ModelInfo>>,
 }
 
 #[derive(Clone)]
@@ -88,8 +101,17 @@ impl Master {
                 live,
                 acks: Mutex::new(HashMap::new()),
                 auth,
+                models: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    pub fn set_models(&self, models: Vec<ModelInfo>) {
+        *lock(&self.inner.models) = models;
+    }
+
+    pub fn models(&self) -> Vec<ModelInfo> {
+        lock(&self.inner.models).clone()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Live> {

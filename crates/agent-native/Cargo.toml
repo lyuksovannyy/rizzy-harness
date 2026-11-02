@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
+genai.workspace = true
 harness-core.workspace = true
 harness-tools.workspace = true
 reqwest.workspace = true

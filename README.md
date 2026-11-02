@@ -41,8 +41,9 @@ the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 Everything lives in the data directory (`~/.local/share/harness`, or
 `--data-dir` / `HARNESS_DATA_DIR`).
 
-`harness.toml`: provider. API keys are referenced by environment-variable
-name and never written to disk:
+`harness.toml`: provider. API keys never go in this file: reference an
+environment variable (`api_key_env`) or a key stored in the 0600
+`secrets.toml` (`api_key_secret`; the onboarding UI will write it).
 
 ```toml
 [provider]
@@ -52,7 +53,19 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
-Local Ollama: `base_url = "http://localhost:11434/v1"`, no `api_key_env`.
+```toml
+[provider]
+kind = "anthropic"                   # Anthropic API key only (no subscription login)
+model = "<model id>"
+api_key_secret = "anthropic"         # [keys] anthropic = "..." in secrets.toml
+effort = "high"                      # only sent to models with effort = true below
+
+[[models]]
+id = "<model id>"
+effort = true
+```
+
+Local Ollama: `base_url = "http://localhost:11434/v1"`, no key.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.

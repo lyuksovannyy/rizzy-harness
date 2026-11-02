@@ -25,11 +25,23 @@ pub struct ToolSpec {
     pub schema: Value,
 }
 
+/// Reasoning effort, mapped per provider (OpenAI `reasoning_effort`,
+/// Anthropic thinking budget). Only sent when the model supports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMsg>,
     pub tools: Vec<ToolSpec>,
+    pub effort: Option<Effort>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

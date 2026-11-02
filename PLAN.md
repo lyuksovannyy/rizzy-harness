@@ -334,8 +334,19 @@ login page.
 
 * **SQLite via `rusqlite` (bundled)**, not sqlx: synchronous, simple, no
   compile-time DB, single static binary. Calls go through `spawn_blocking`.
-* **HTTP client `reqwest` 0.13 with rustls**; SSE parsed by hand (≈40 lines)
-  rather than an unmaintained `eventsource-stream` (last release 2022).
+* **Providers via `genai` 0.7.2, pinned exactly** (replaced the Phase 1
+  hand-rolled OpenAI SSE client). Covers Anthropic Messages API and any
+  OpenAI-compatible endpoint, streamed tool calls, reasoning effort, custom
+  endpoints. Chosen over `rig-core` (an agent framework that would compete
+  with our loop) and `async-openai` (OpenAI only). Verified from its source:
+  `AuthData` redacts in `Debug`; its OpenTelemetry spans (which can carry
+  prompts) sit behind the non-default `otel` feature. Used only in
+  `agent-native/src/llm.rs`, behind our `Provider` trait.
+* **Secrets file** `<data>/secrets.toml` (0600, atomic writes, refuses to read
+  if group/other-readable) for keys entered in the UI; config references keys
+  by name (`api_key_secret`) or env var (`api_key_env`).
+* **Model registry** in `harness.toml` (`[[models]] id, effort, vision`);
+  effort is only sent to models listed with `effort = true`.
 * **Process-group kill via `nix::sys::signal::killpg`** (safe API, no `unsafe`
   in our code); `tokio::process::Command::process_group(0)`.
 * **Approval modes:** `ask_all` (every tool), `ask` (default: mutating tools),
@@ -375,6 +386,15 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 * **R5** The UI token is a single shared secret (single-user v1). Multi-user is
   out of scope.
 * **R6** Two-db embedded mode doubles disk usage on the master machine.
+* **R7** `genai` has a single maintainer on crates.io. Mitigated by the exact pin
+  and the `Provider` seam; a swap touches one file.
+* **R8** Anthropic extended thinking + tool use requires replaying signed
+  thinking blocks on the next request. Our history does not store them yet;
+  untested against the real API (no key in this environment). Until fixed, do
+  not enable `effort` for Anthropic models used with tools.
+* **R9** `genai` enables serde_json `preserve_order` workspace-wide (feature
+  unification). Harmless (map equality ignores order), but anything comparing
+  JSON *text* must compare values instead; the fixture test does.
 
 ---
 
