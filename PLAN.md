@@ -264,3 +264,34 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 ---
 
 ## Status
+
+### 2026-11-02 — Phase 0 and Phase 1: done
+
+**Done**
+* Workspace (8 crates), CI (`fmt --check`, `clippy -D warnings`, `test`, web typecheck/test/build), `unsafe_code = "forbid"` workspace-wide.
+* Event log tests written before the code that uses them (`crates/store/tests/event_log.rs`),
+  including a 50-round lossy-link simulation (drops, duplicates, reordering) that must converge byte-identically.
+* Native loop + OpenAI-compatible streaming provider (tested against a local SSE server) + mock provider.
+* Tools: bash (process group, SIGTERM→SIGKILL, timeout, background children reaped, secret env vars removed),
+  read, write, edit (exact match, uniqueness enforced), grep, glob; workspace confinement incl. symlink escapes.
+* Approvals with node-local policy clamping; policy-denied tools; cancel during approval and during a running process.
+* Master mirror with the replication rule, command routing with acks, token→cookie auth, Host/Origin checks, CSP/frame-deny.
+* SPA: login, session list with node badges, streaming chat, tool cards (diff view for edits), approval prompts, Stop, drafts.
+
+**Evidence**
+* `cargo test --workspace`: 63 tests green; web: reducer fixture test green.
+* Acceptance (`crates/cli/tests/acceptance_restart.rs`): SIGKILL mid-stream and mid-approval → restart → WS resume
+  from cursor → client log == server log, folds equal, contiguous seqs, turn closed as `interrupted`. Passed 10/10 runs.
+* `crates/master/tests/mirror.rs`: an empty and a stale mirror both catch up on attach via hello→resume→snapshot.
+* Rust and TS reducers are pinned to one fixture (`web/src/__fixtures__/session.json`).
+* Manual browser run (Playwright): approval → allow → output; kill -9 mid-stream → UI goes offline, reconnects,
+  shows identical partial text plus "turn interrupted".
+
+**Risks / known gaps**
+* stdout/stderr are interleaved in `tool_output_delta` (always tagged `stdout`); the final output is correct.
+* Each turn loads the session's whole history from SQLite; fine now, revisit with compaction (Phase 5).
+* No OS sandbox for bash (R2). The UI token is single-user (R5).
+* Not tested against real vendors yet (no keys in CI); SSE parsing is tested against recorded chunk shapes (R4).
+
+**Next:** Phase 2. Threat model T7/T8 first, then `harness node join`, Ed25519 pairing, WSS bridge
+onto the existing `NodeLink`, network-drop tests.
