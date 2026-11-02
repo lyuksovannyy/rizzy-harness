@@ -55,6 +55,9 @@ impl Session {
             approvals: Mutex::new(HashMap::new()),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
+            profile: None,
+            agent_id: None,
+            incognito: false,
             title,
             cwd: cwd.display().to_string(),
             model,
@@ -204,6 +207,7 @@ impl Session {
             .await
             .unwrap_or_default();
         self.emit(EventKind::TurnStarted(TurnStarted {
+            agent: None,
             turn_id: turn_id.clone(),
         }))
         .await;

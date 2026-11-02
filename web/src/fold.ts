@@ -10,6 +10,9 @@ export function emptyView(): SessionView {
     running_turn: null,
     pending_approvals: [],
     unknown_events: 0,
+    active_agent: null,
+    running_agent: null,
+    variant_selection: {},
   };
 }
 
@@ -29,6 +32,8 @@ const KNOWN = new Set([
   "checkpoint",
   "turn_ended",
   "error",
+  "agent_changed",
+  "variant_selected",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -66,8 +71,9 @@ export function apply(v: SessionView, e: RawEvent): void {
   }
   const p = e.payload ?? {};
   switch (e.kind) {
-    case "session_created":
-      v.meta = {
+    case "session_created": {
+      // Match serde: optional fields are omitted when absent.
+      const meta: SessionView["meta"] = {
         title: p.title,
         cwd: p.cwd,
         model: p.model,
@@ -75,9 +81,16 @@ export function apply(v: SessionView, e: RawEvent): void {
         node_id: p.node_id,
         approval_mode: p.approval_mode ?? "ask",
       };
+      if (p.profile != null) meta!.profile = p.profile;
+      if (p.agent_id != null) meta!.agent_id = p.agent_id;
+      if (p.incognito) meta!.incognito = true;
+      v.meta = meta;
+      v.active_agent = p.agent_id ?? null;
       break;
+    }
     case "turn_started":
       v.running_turn = p.turn_id;
+      v.running_agent = p.agent ?? null;
       break;
     case "user_message":
       v.items.push({ type: "user", turn_id: p.turn_id, text: p.text });
@@ -85,7 +98,15 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "assistant_delta": {
       const a = lastAssistant(v, p.message_id);
       if (a) a.text += p.text;
-      else v.items.push({ type: "assistant", message_id: p.message_id, text: p.text, done: false });
+      else
+        v.items.push({
+          type: "assistant",
+          message_id: p.message_id,
+          text: p.text,
+          done: false,
+          author: p.author ?? null,
+          variant: p.variant ?? null,
+        });
       break;
     }
     case "assistant_message": {
@@ -93,8 +114,17 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (a) {
         a.text = p.text;
         a.done = true;
+        if (p.author != null) a.author = p.author;
+        if (p.variant != null) a.variant = p.variant;
       } else if (p.text !== "") {
-        v.items.push({ type: "assistant", message_id: p.message_id, text: p.text, done: true });
+        v.items.push({
+          type: "assistant",
+          message_id: p.message_id,
+          text: p.text,
+          done: true,
+          author: p.author ?? null,
+          variant: p.variant ?? null,
+        });
       }
       break;
     }
@@ -102,6 +132,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       v.items.push({
         type: "tool",
         call_id: p.call_id,
+        author: p.author ?? null,
         tool: p.tool,
         input: p.input,
         live_output: "",
@@ -141,10 +172,18 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "turn_ended":
       v.running_turn = null;
+      v.running_agent = null;
       v.items.push({ type: "turn_end", turn_id: p.turn_id, reason: p.reason });
       break;
     case "error":
       v.items.push({ type: "error", message: p.message });
+      break;
+    case "agent_changed":
+      v.active_agent = p.agent.agent_id;
+      v.items.push({ type: "agent_changed", agent: p.agent });
+      break;
+    case "variant_selected":
+      v.variant_selection[p.group] = p.message_id;
       break;
   }
 }

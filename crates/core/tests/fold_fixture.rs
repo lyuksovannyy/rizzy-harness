@@ -13,6 +13,9 @@ fn events() -> Vec<RawEvent> {
     let t = || "t1".to_string();
     let kinds = vec![
         EventKind::SessionCreated(SessionCreated {
+            profile: None,
+            agent_id: None,
+            incognito: false,
             title: "fixture".into(),
             cwd: "/w".into(),
             model: "mock".into(),
@@ -20,22 +23,31 @@ fn events() -> Vec<RawEvent> {
             node_id: "local".into(),
             approval_mode: ApprovalMode::Ask,
         }),
-        EventKind::TurnStarted(TurnStarted { turn_id: t() }),
+        EventKind::TurnStarted(TurnStarted {
+            agent: None,
+            turn_id: t(),
+        }),
         EventKind::UserMessage(UserMessage {
             turn_id: t(),
             text: "fix the bug".into(),
         }),
         EventKind::AssistantDelta(AssistantDelta {
+            author: None,
+            variant: None,
             turn_id: t(),
             message_id: "m1".into(),
             text: "Let me ".into(),
         }),
         EventKind::AssistantDelta(AssistantDelta {
+            author: None,
+            variant: None,
             turn_id: t(),
             message_id: "m1".into(),
             text: "look.".into(),
         }),
         EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
             turn_id: t(),
             message_id: "m1".into(),
             text: "Let me look.".into(),
@@ -46,6 +58,7 @@ fn events() -> Vec<RawEvent> {
             }],
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
             turn_id: t(),
             call_id: "c1".into(),
             tool: "bash".into(),
@@ -76,6 +89,7 @@ fn events() -> Vec<RawEvent> {
             truncated: false,
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
             turn_id: t(),
             call_id: "c2".into(),
             tool: "read".into(),
@@ -90,12 +104,15 @@ fn events() -> Vec<RawEvent> {
         }),
         // A message with no preceding deltas.
         EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
             turn_id: t(),
             message_id: "m2".into(),
             text: "Found it.".into(),
             tool_calls: vec![],
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
             turn_id: t(),
             call_id: "c3".into(),
             tool: "edit".into(),
@@ -124,6 +141,69 @@ fn events() -> Vec<RawEvent> {
                 input_tokens: 1,
                 output_tokens: 2,
             }),
+        }),
+        // v2: agents, authors, variants.
+        EventKind::AgentChanged(AgentChanged {
+            agent: AgentRef {
+                agent_id: "coder".into(),
+                name: "Coder".into(),
+                prompt_hash: "h1".into(),
+            },
+        }),
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t2".into(),
+            agent: Some(AgentRef {
+                agent_id: "writer".into(),
+                name: "Writer".into(),
+                prompt_hash: "h2".into(),
+            }),
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t2".into(),
+            text: "@writer draft the changelog".into(),
+        }),
+        EventKind::AssistantDelta(AssistantDelta {
+            turn_id: "t2".into(),
+            message_id: "m3".into(),
+            text: "Draft A".into(),
+            author: Some("writer".into()),
+            variant: Some(Variant {
+                group: "g1".into(),
+                index: 0,
+            }),
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t2".into(),
+            message_id: "m3".into(),
+            text: "Draft A.".into(),
+            tool_calls: vec![],
+            author: Some("writer".into()),
+            variant: Some(Variant {
+                group: "g1".into(),
+                index: 0,
+            }),
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t2".into(),
+            message_id: "m4".into(),
+            text: "Draft B.".into(),
+            tool_calls: vec![],
+            author: Some("writer".into()),
+            variant: Some(Variant {
+                group: "g1".into(),
+                index: 1,
+            }),
+        }),
+        EventKind::ToolCallStarted(ToolCallStarted {
+            turn_id: "t2".into(),
+            call_id: "c4".into(),
+            tool: "read".into(),
+            input: json!({"path": "CHANGELOG.md"}),
+            author: Some("writer".into()),
+        }),
+        EventKind::VariantSelected(VariantSelected {
+            group: "g1".into(),
+            message_id: "m4".into(),
         }),
     ];
     let mut out: Vec<RawEvent> = kinds

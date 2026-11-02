@@ -118,6 +118,12 @@ export function SessionPane(props: {
                     {it.message}
                   </div>
                 );
+              case "agent_changed":
+                return (
+                  <div key={i} className="turn-end">
+                    switched to {it.agent.name}
+                  </div>
+                );
               case "turn_end":
                 return it.reason === "completed" ? (
                   <hr key={i} className="turn-sep" />

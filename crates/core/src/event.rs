@@ -70,6 +70,8 @@ pub enum EventKind {
     Checkpoint(Checkpoint),
     TurnEnded(TurnEnded),
     Error(ErrorEvent),
+    AgentChanged(AgentChanged),
+    VariantSelected(VariantSelected),
 }
 
 impl EventKind {
@@ -106,6 +108,8 @@ impl EventKind {
             EventKind::Checkpoint(_) => "checkpoint",
             EventKind::TurnEnded(_) => "turn_ended",
             EventKind::Error(_) => "error",
+            EventKind::AgentChanged(_) => "agent_changed",
+            EventKind::VariantSelected(_) => "variant_selected",
         }
     }
 }
@@ -119,11 +123,53 @@ pub struct SessionCreated {
     pub node_id: String,
     #[serde(default)]
     pub approval_mode: crate::policy::ApprovalMode,
+    /// Absent in logs written before v2; those sessions were agentic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
+    /// The agent active when the session started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Incognito sessions are excluded from search, suggestions and memory.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub incognito: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Where a session runs and which toolset family it gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    /// On the master: documents, web, research. No filesystem or shell.
+    Chat,
+    /// On a node, in a workspace.
+    Agentic,
+}
+
+/// Which agent ran something, frozen at that time so old turns stay
+/// explainable after the agent definition is edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRef {
+    pub agent_id: String,
+    pub name: String,
+    /// Hash of the system prompt + tool list the agent had for this turn.
+    pub prompt_hash: String,
+}
+
+/// Groups parallel answers to the same prompt (e.g. several models).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Variant {
+    pub group: String,
+    pub index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnStarted {
     pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +183,11 @@ pub struct AssistantDelta {
     pub turn_id: String,
     pub message_id: String,
     pub text: String,
+    /// Agent id that produced this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<Variant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +204,10 @@ pub struct AssistantMessage {
     pub text: String,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<Variant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,6 +216,8 @@ pub struct ToolCallStarted {
     pub call_id: String,
     pub tool: String,
     pub input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +308,20 @@ pub struct TurnEnded {
     pub usage: Option<Usage>,
 }
 
+/// The session's active agent changed (selector, not an @mention: a mention
+/// only affects one turn and is recorded in that turn's `TurnStarted`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentChanged {
+    pub agent: AgentRef,
+}
+
+/// The user picked one of several parallel answers to continue from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VariantSelected {
+    pub group: String,
+    pub message_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErrorEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +337,7 @@ mod tests {
     #[test]
     fn parts_roundtrip() {
         let k = EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
             turn_id: "t".into(),
             call_id: "c".into(),
             tool: "bash".into(),
@@ -276,6 +348,93 @@ mod tests {
         assert_eq!(kind, k.name());
         assert_eq!(payload["tool"], "bash");
         assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
+    }
+
+    /// Payloads written by v1 parse, and re-serialize byte-identically, so
+    /// the v2 fields are purely additive.
+    #[test]
+    fn v1_payloads_roundtrip_unchanged() {
+        let v1 = [
+            (
+                "session_created",
+                json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native", "node_id": "local", "approval_mode": "ask"}),
+            ),
+            ("turn_started", json!({"turn_id": "t1"})),
+            (
+                "assistant_delta",
+                json!({"turn_id": "t1", "message_id": "m1", "text": "hi"}),
+            ),
+            (
+                "assistant_message",
+                json!({"turn_id": "t1", "message_id": "m1", "text": "hi", "tool_calls": []}),
+            ),
+            (
+                "tool_call_started",
+                json!({"turn_id": "t1", "call_id": "c", "tool": "bash", "input": {}}),
+            ),
+        ];
+        for (kind, payload) in v1 {
+            let k = EventKind::from_parts(kind, payload.clone()).unwrap();
+            let (k2, p2) = k.into_parts();
+            assert_eq!(k2, kind);
+            assert_eq!(p2, payload, "{kind} changed shape");
+        }
+        let EventKind::SessionCreated(c) = EventKind::from_parts(
+            "session_created",
+            json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native", "node_id": "local"}),
+        )
+        .unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(c.profile, None);
+        assert!(!c.incognito);
+    }
+
+    #[test]
+    fn v2_fields_roundtrip() {
+        let agent = AgentRef {
+            agent_id: "coder".into(),
+            name: "Coder".into(),
+            prompt_hash: "abc".into(),
+        };
+        let kinds = vec![
+            EventKind::SessionCreated(SessionCreated {
+                title: "t".into(),
+                cwd: "".into(),
+                model: "m".into(),
+                backend: "native".into(),
+                node_id: "master".into(),
+                approval_mode: Default::default(),
+                profile: Some(Profile::Chat),
+                agent_id: Some("general".into()),
+                incognito: true,
+            }),
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "t".into(),
+                agent: Some(agent.clone()),
+            }),
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: "t".into(),
+                message_id: "m".into(),
+                text: "x".into(),
+                tool_calls: vec![],
+                author: Some("coder".into()),
+                variant: Some(Variant {
+                    group: "g".into(),
+                    index: 1,
+                }),
+            }),
+            EventKind::AgentChanged(AgentChanged { agent }),
+            EventKind::VariantSelected(VariantSelected {
+                group: "g".into(),
+                message_id: "m".into(),
+            }),
+        ];
+        for k in kinds {
+            let (kind, payload) = k.clone().into_parts();
+            assert_eq!(kind, k.name());
+            assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
+        }
     }
 
     #[test]
@@ -304,6 +463,7 @@ mod tests {
         assert_eq!(
             k,
             EventKind::TurnStarted(TurnStarted {
+                agent: None,
                 turn_id: "t1".into()
             })
         );

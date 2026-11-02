@@ -1,6 +1,8 @@
 //! The reference reducer: a session's display state as a fold over its log.
 //! `web/src/fold.ts` is a port of this and must stay in step.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,9 +20,12 @@ pub enum Item {
         message_id: String,
         text: String,
         done: bool,
+        author: Option<String>,
+        variant: Option<Variant>,
     },
     Tool {
         call_id: String,
+        author: Option<String>,
         tool: String,
         input: Value,
         live_output: String,
@@ -33,6 +38,9 @@ pub enum Item {
     TurnEnd {
         turn_id: String,
         reason: TurnEndReason,
+    },
+    AgentChanged {
+        agent: AgentRef,
     },
 }
 
@@ -70,6 +78,12 @@ pub struct SessionView {
     pub pending_approvals: Vec<String>,
     /// Count of events with kinds this build does not understand.
     pub unknown_events: u64,
+    /// The session's selected agent (selector), if any.
+    pub active_agent: Option<String>,
+    /// The agent running the current turn (may differ via @mention).
+    pub running_agent: Option<AgentRef>,
+    /// Parallel-answer group -> chosen message id.
+    pub variant_selection: BTreeMap<String, String>,
 }
 
 impl SessionView {
@@ -112,8 +126,14 @@ impl SessionView {
 
     fn apply_kind(&mut self, k: EventKind) {
         match k {
-            EventKind::SessionCreated(m) => self.meta = Some(m),
-            EventKind::TurnStarted(t) => self.running_turn = Some(t.turn_id),
+            EventKind::SessionCreated(m) => {
+                self.active_agent = m.agent_id.clone();
+                self.meta = Some(m);
+            }
+            EventKind::TurnStarted(t) => {
+                self.running_turn = Some(t.turn_id);
+                self.running_agent = t.agent;
+            }
             EventKind::UserMessage(m) => self.items.push(Item::User {
                 turn_id: m.turn_id,
                 text: m.text,
@@ -131,6 +151,8 @@ impl SessionView {
                         message_id: d.message_id,
                         text: d.text,
                         done: false,
+                        author: d.author,
+                        variant: d.variant,
                     }),
                 }
             }
@@ -139,9 +161,21 @@ impl SessionView {
                     matches!(i, Item::Assistant { message_id, .. } if *message_id == m.message_id)
                 });
                 match found {
-                    Some(Item::Assistant { text, done, .. }) => {
+                    Some(Item::Assistant {
+                        text,
+                        done,
+                        author,
+                        variant,
+                        ..
+                    }) => {
                         *text = m.text;
                         *done = true;
+                        if m.author.is_some() {
+                            *author = m.author;
+                        }
+                        if m.variant.is_some() {
+                            *variant = m.variant;
+                        }
                     }
                     _ => {
                         if !m.text.is_empty() {
@@ -149,6 +183,8 @@ impl SessionView {
                                 message_id: m.message_id,
                                 text: m.text,
                                 done: true,
+                                author: m.author,
+                                variant: m.variant,
                             })
                         }
                     }
@@ -156,6 +192,7 @@ impl SessionView {
             }
             EventKind::ToolCallStarted(t) => self.items.push(Item::Tool {
                 call_id: t.call_id,
+                author: t.author,
                 tool: t.tool,
                 input: t.input,
                 live_output: String::new(),
@@ -204,12 +241,20 @@ impl SessionView {
             EventKind::Checkpoint(_) => {}
             EventKind::TurnEnded(t) => {
                 self.running_turn = None;
+                self.running_agent = None;
                 self.items.push(Item::TurnEnd {
                     turn_id: t.turn_id,
                     reason: t.reason,
                 });
             }
             EventKind::Error(e) => self.items.push(Item::Error { message: e.message }),
+            EventKind::AgentChanged(a) => {
+                self.active_agent = Some(a.agent.agent_id.clone());
+                self.items.push(Item::AgentChanged { agent: a.agent });
+            }
+            EventKind::VariantSelected(v) => {
+                self.variant_selection.insert(v.group, v.message_id);
+            }
         }
     }
 }
@@ -238,6 +283,7 @@ mod tests {
                 sid,
                 1,
                 EventKind::TurnStarted(TurnStarted {
+                    agent: None,
                     turn_id: "t".into(),
                 }),
             ),
@@ -245,6 +291,8 @@ mod tests {
                 sid,
                 2,
                 EventKind::AssistantDelta(AssistantDelta {
+                    author: None,
+                    variant: None,
                     turn_id: "t".into(),
                     message_id: "m".into(),
                     text: "he".into(),
@@ -254,6 +302,8 @@ mod tests {
                 sid,
                 3,
                 EventKind::AssistantDelta(AssistantDelta {
+                    author: None,
+                    variant: None,
                     turn_id: "t".into(),
                     message_id: "m".into(),
                     text: "llo".into(),
@@ -263,6 +313,7 @@ mod tests {
                 sid,
                 4,
                 EventKind::ToolCallStarted(ToolCallStarted {
+                    author: None,
                     turn_id: "t".into(),
                     call_id: "c".into(),
                     tool: "bash".into(),
@@ -301,6 +352,7 @@ mod tests {
             sid,
             1,
             EventKind::TurnStarted(TurnStarted {
+                agent: None,
                 turn_id: "t".into(),
             }),
         );

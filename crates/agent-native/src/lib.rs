@@ -212,6 +212,8 @@ impl AgentBackend for NativeBackend {
                 host,
                 |text| {
                     EventKind::AssistantDelta(AssistantDelta {
+                        author: None,
+                        variant: None,
                         turn_id: turn_id.clone(),
                         message_id: mid.clone(),
                         text,
@@ -241,6 +243,8 @@ impl AgentBackend for NativeBackend {
                 usage.output_tokens += u.output_tokens;
             }
             host.emit(EventKind::AssistantMessage(AssistantMessage {
+                author: None,
+                variant: None,
                 turn_id: ctx.turn_id.clone(),
                 message_id,
                 text: completion.text.clone(),
@@ -261,6 +265,7 @@ impl AgentBackend for NativeBackend {
 
             for call in completion.tool_calls {
                 host.emit(EventKind::ToolCallStarted(ToolCallStarted {
+                    author: None,
                     turn_id: ctx.turn_id.clone(),
                     call_id: call.call_id.clone(),
                     tool: call.tool.clone(),
@@ -581,6 +586,8 @@ mod tests {
             mk(
                 2,
                 EventKind::AssistantMessage(AssistantMessage {
+                    author: None,
+                    variant: None,
                     turn_id: "t".into(),
                     message_id: "m".into(),
                     text: "".into(),

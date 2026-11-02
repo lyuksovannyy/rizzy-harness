@@ -23,6 +23,9 @@ fn created(sid: SessionId) -> RawEvent {
         sid,
         1,
         EventKind::SessionCreated(SessionCreated {
+            profile: None,
+            agent_id: None,
+            incognito: false,
             title: "t".into(),
             cwd: "/w".into(),
             model: "m".into(),
@@ -40,6 +43,7 @@ fn script(sid: SessionId, n: u64) -> Vec<RawEvent> {
         sid,
         2,
         EventKind::TurnStarted(TurnStarted {
+            agent: None,
             turn_id: "t1".into(),
         }),
     ));
@@ -48,6 +52,8 @@ fn script(sid: SessionId, n: u64) -> Vec<RawEvent> {
             sid,
             seq,
             EventKind::AssistantDelta(AssistantDelta {
+                author: None,
+                variant: None,
                 turn_id: "t1".into(),
                 message_id: "m1".into(),
                 text: format!("chunk{seq} "),

@@ -318,6 +318,9 @@ async fn recovers_interrupted_turn_on_start() {
         let store = Store::open(&path, Durability::Full).unwrap();
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
+                profile: None,
+                agent_id: None,
+                incognito: false,
                 title: "t".into(),
                 cwd: ws.display().to_string(),
                 model: "mock".into(),
@@ -326,9 +329,11 @@ async fn recovers_interrupted_turn_on_start() {
                 approval_mode: Default::default(),
             }),
             EventKind::TurnStarted(TurnStarted {
+                agent: None,
                 turn_id: "t1".into(),
             }),
             EventKind::ToolCallStarted(ToolCallStarted {
+                author: None,
                 turn_id: "t1".into(),
                 call_id: "c1".into(),
                 tool: "bash".into(),

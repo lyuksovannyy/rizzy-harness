@@ -13,6 +13,8 @@ export type Decision = "allow" | "deny" | "allow_session";
 export type ResolvedBy = "user" | "policy" | "cancelled" | "interrupted";
 export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted";
 
+export type Profile = "chat" | "agentic";
+
 export interface SessionCreated {
   title: string;
   cwd: string;
@@ -20,6 +22,20 @@ export interface SessionCreated {
   backend: string;
   node_id: string;
   approval_mode: ApprovalMode;
+  profile?: Profile;
+  agent_id?: string;
+  incognito?: boolean;
+}
+
+export interface AgentRef {
+  agent_id: string;
+  name: string;
+  prompt_hash: string;
+}
+
+export interface Variant {
+  group: string;
+  index: number;
 }
 
 export interface ToolResult {
@@ -37,10 +53,18 @@ export interface ApprovalState {
 
 export type Item =
   | { type: "user"; turn_id: string; text: string }
-  | { type: "assistant"; message_id: string; text: string; done: boolean }
+  | {
+      type: "assistant";
+      message_id: string;
+      text: string;
+      done: boolean;
+      author: string | null;
+      variant: Variant | null;
+    }
   | {
       type: "tool";
       call_id: string;
+      author: string | null;
       tool: string;
       input: any; // eslint-disable-line @typescript-eslint/no-explicit-any
       live_output: string;
@@ -48,7 +72,8 @@ export type Item =
       approval: ApprovalState | null;
     }
   | { type: "error"; message: string }
-  | { type: "turn_end"; turn_id: string; reason: TurnEndReason };
+  | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
+  | { type: "agent_changed"; agent: AgentRef };
 
 export interface SessionView {
   session_id: string | null;
@@ -58,6 +83,9 @@ export interface SessionView {
   running_turn: string | null;
   pending_approvals: string[];
   unknown_events: number;
+  active_agent: string | null;
+  running_agent: AgentRef | null;
+  variant_selection: Record<string, string>;
 }
 
 export interface SessionRow {
