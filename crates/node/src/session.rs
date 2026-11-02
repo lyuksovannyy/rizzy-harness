@@ -10,7 +10,7 @@ use harness_core::backend::{TurnCtx, TurnHost};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ToolRisk};
 use harness_core::view::SessionView;
-use harness_core::{RawEvent, SessionId, new_id, now_ms, secret::scrub};
+use harness_core::{RawEvent, SessionId, new_id, now_ms};
 use harness_protocol::NodeToMaster;
 use harness_store::{AppendOutcome, StoreError};
 use serde_json::Value;
@@ -157,7 +157,7 @@ impl Session {
         let (kind, mut payload) = kind.into_parts();
         if !self.node.cfg.secrets.is_empty() {
             let raw = payload.to_string();
-            let clean = scrub(&raw, &self.node.cfg.secrets);
+            let clean = self.node.cfg.secrets.scrub(&raw);
             if clean != raw {
                 payload = serde_json::from_str(&clean).unwrap_or(Value::Null);
             }

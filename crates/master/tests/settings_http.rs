@@ -34,7 +34,7 @@ async fn start() -> T {
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
-        secrets: vec![],
+        secrets: Default::default(),
         profile: Profile::Chat,
     })
     .await
@@ -145,7 +145,41 @@ async fn settings_defaults_validation_and_isolation() {
     .await;
     assert_eq!(st, StatusCode::OK);
     let (_, _, v) = req(&t, Method::GET, "/api/me/settings", None, Some(&admin)).await;
-    assert_eq!(v, good);
+    for k in ["search_url", "default_agent", "default_model"] {
+        assert_eq!(v[k], good[k], "{k}");
+    }
+    assert_eq!(v["onboarded"], false);
+
+    // Profile fields: valid ones stick, bad ones are refused.
+    let profile = json!({"search_url": "https://e.com/?q={q}", "display_name": "Alex", "timezone": "Europe/Riga", "country": "Latvia", "city": "Riga", "accent": "green", "onboarded": true});
+    let (st, _, _) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(profile.clone()),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, _, v) = req(&t, Method::GET, "/api/me/settings", None, Some(&admin)).await;
+    assert_eq!(v["timezone"], "Europe/Riga");
+    assert_eq!(v["onboarded"], true);
+    for bad in [
+        json!({"search_url": "https://e.com/?q={q}", "timezone": "Europe/Riga; DROP"}),
+        json!({"search_url": "https://e.com/?q={q}", "accent": "neon"}),
+        json!({"search_url": "https://e.com/?q={q}", "display_name": "x".repeat(65)}),
+        json!({"search_url": "https://e.com/?q={q}", "city": "  "}),
+    ] {
+        let (st, _, v) = req(
+            &t,
+            Method::PUT,
+            "/api/me/settings",
+            Some(bad.clone()),
+            Some(&admin),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad} -> {v}");
+    }
 
     // Another user keeps their own defaults.
     let (_, _, bob) = req(

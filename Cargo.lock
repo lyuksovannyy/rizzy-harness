@@ -1126,6 +1126,7 @@ dependencies = [
 name = "harness-master"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argon2",
  "axum",
  "futures",

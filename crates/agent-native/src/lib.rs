@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use harness_core::backend::{AgentBackend, TurnCtx, TurnOutcome};
 use harness_core::event::*;
-use harness_core::{RawEvent, Secret, new_id, secret::scrub};
+use harness_core::{RawEvent, new_id};
 use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
@@ -29,7 +29,7 @@ pub struct NativeConfig {
     /// Env vars removed from tool processes (they hold secrets).
     pub env_remove: Vec<String>,
     /// Values scrubbed from tool output before it is stored or sent to the model.
-    pub secrets: Vec<Secret<String>>,
+    pub secrets: harness_core::SecretSet,
     pub allow_outside_workspace: bool,
     pub tool_timeout: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
@@ -41,7 +41,7 @@ impl Default for NativeConfig {
         Self {
             system_prompt: default_system_prompt(),
             env_remove: Vec::new(),
-            secrets: Vec::new(),
+            secrets: Default::default(),
             allow_outside_workspace: false,
             tool_timeout: Duration::from_secs(600),
             effort: None,
@@ -304,7 +304,7 @@ impl AgentBackend for NativeBackend {
                     .run_tool(&ctx, host, &call, &mut allowed_for_session)
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
-                let output = scrub(&outcome.output, &self.config.secrets);
+                let output = self.config.secrets.scrub(&outcome.output);
                 host.emit(EventKind::ToolCallFinished(ToolCallFinished {
                     call_id: call.call_id.clone(),
                     ok: outcome.ok,
@@ -412,7 +412,7 @@ impl NativeBackend {
                 EventKind::ToolOutputDelta(ToolOutputDelta {
                     call_id: call_id.clone(),
                     stream: OutputStream::Stdout,
-                    text: scrub(&text, secrets),
+                    text: secrets.scrub(&text),
                 })
             },
         )
@@ -599,7 +599,9 @@ mod tests {
             }),
             harness_tools::builtin(),
             NativeConfig {
-                secrets: vec![Secret::new("sk-supersecret-123".into())],
+                secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(
+                    "sk-supersecret-123".into(),
+                )]),
                 ..Default::default()
             },
         );

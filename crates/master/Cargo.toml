@@ -10,6 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+harness-agent-native.workspace = true
 argon2.workspace = true
 axum.workspace = true
 futures.workspace = true

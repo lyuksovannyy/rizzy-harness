@@ -33,7 +33,7 @@ async fn start() -> T {
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
-        secrets: vec![],
+        secrets: Default::default(),
         profile: Profile::Chat,
     })
     .await

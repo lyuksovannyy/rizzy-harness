@@ -32,7 +32,9 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
-        secrets: vec![harness_core::Secret::new("sk-node-secret-1".into())],
+        secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(
+            "sk-node-secret-1".into(),
+        )]),
         profile: harness_core::event::Profile::Agentic,
     }
 }

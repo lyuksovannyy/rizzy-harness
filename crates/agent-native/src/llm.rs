@@ -189,6 +189,98 @@ impl Provider for LlmProvider {
     }
 }
 
+/// A provider that can be replaced while sessions are running (onboarding /
+/// settings change the provider without a restart). A turn keeps the provider
+/// it started with.
+pub struct SwappableProvider {
+    inner: std::sync::RwLock<std::sync::Arc<dyn Provider>>,
+}
+
+impl SwappableProvider {
+    pub fn new(p: std::sync::Arc<dyn Provider>) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(p),
+        }
+    }
+
+    pub fn set(&self, p: std::sync::Arc<dyn Provider>) {
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = p;
+    }
+
+    pub fn current(&self) -> std::sync::Arc<dyn Provider> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for SwappableProvider {
+    fn name(&self) -> &'static str {
+        self.current().name()
+    }
+
+    async fn complete(
+        &self,
+        req: &ChatRequest,
+        deltas: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        let p = self.current();
+        p.complete(req, deltas).await
+    }
+}
+
+/// List model ids from `GET {base}/models` (OpenAI-compatible and Anthropic
+/// both answer `{"data": [{"id": ...}]}`). Doubles as a key check.
+pub async fn list_models(
+    kind: ApiKind,
+    base_url: &str,
+    api_key: Option<&Secret<String>>,
+) -> Result<Vec<String>, ProviderError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| ProviderError::Http(e.to_string()))?;
+    let url = format!("{}models", normalize_base(base_url));
+    let mut rb = client.get(&url);
+    match (kind, api_key) {
+        (ApiKind::Anthropic, Some(k)) => {
+            rb = rb
+                .header("x-api-key", k.expose())
+                .header("anthropic-version", "2023-06-01");
+        }
+        (ApiKind::Anthropic, None) => {
+            rb = rb.header("anthropic-version", "2023-06-01");
+        }
+        (ApiKind::Openai, Some(k)) => rb = rb.bearer_auth(k.expose()),
+        (ApiKind::Openai, None) => {}
+    }
+    let resp = rb
+        .send()
+        .await
+        .map_err(|e| ProviderError::Http(e.without_url().to_string()))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(ProviderError::Status {
+            status,
+            body: body.chars().take(300).collect(),
+        });
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| ProviderError::Stream(e.to_string()))?;
+    let mut ids: Vec<String> = v["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

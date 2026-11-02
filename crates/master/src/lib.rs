@@ -3,8 +3,10 @@
 
 mod assets;
 pub mod auth;
+pub mod config;
 mod http;
 pub mod prefs;
+pub mod providers;
 pub mod search;
 pub mod secrets;
 mod ws;
@@ -72,6 +74,7 @@ pub struct MasterInner {
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<harness_agents::AgentSet>,
+    providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -140,12 +143,23 @@ impl Master {
                 acks: Mutex::new(HashMap::new()),
                 auth,
                 models: Mutex::new(Vec::new()),
+                providers: Mutex::new(None),
                 agents: Mutex::new(harness_agents::AgentSet::from_agents(
                     harness_agents::builtins(),
                     harness_agents::DEFAULT_AGENT,
                 )),
             }),
         }
+    }
+
+    /// Hand the master the live provider so admins can reconfigure it.
+    pub fn set_provider_runtime(&self, rt: Arc<providers::ProviderRuntime>) {
+        self.set_models(rt.models());
+        *lock(&self.inner.providers) = Some(rt);
+    }
+
+    pub fn provider_runtime(&self) -> Option<Arc<providers::ProviderRuntime>> {
+        lock(&self.inner.providers).clone()
     }
 
     pub fn set_models(&self, models: Vec<ModelInfo>) {

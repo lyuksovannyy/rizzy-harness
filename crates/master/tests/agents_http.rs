@@ -34,7 +34,7 @@ async fn runtime(root: &std::path::Path, id: &str, profile: Profile) -> NodeRunt
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
-        secrets: vec![],
+        secrets: Default::default(),
         profile,
     })
     .await

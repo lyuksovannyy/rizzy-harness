@@ -27,7 +27,7 @@ async fn node(dir: &std::path::Path) -> NodeRuntime {
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
-        secrets: vec![],
+        secrets: Default::default(),
         profile: harness_core::event::Profile::Agentic,
     })
     .await

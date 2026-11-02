@@ -7,8 +7,8 @@ mod session;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use harness_core::SessionId;
 use harness_core::backend::AgentBackend;
-use harness_core::{Secret, SessionId};
 use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, SessionHead};
 use harness_store::Store;
 use tokio::sync::mpsc;
@@ -37,7 +37,7 @@ pub struct NodeConfig {
     pub backend: Arc<dyn AgentBackend>,
     pub default_model: String,
     /// Values scrubbed from every event payload before it is stored.
-    pub secrets: Vec<Secret<String>>,
+    pub secrets: harness_core::SecretSet,
     /// Which sessions this runtime hosts: `Agentic` (workspace + tools, the
     /// normal node) or `Chat` (the master's workspace-less chat runtime).
     pub profile: harness_core::event::Profile,

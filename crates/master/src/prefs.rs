@@ -16,7 +16,26 @@ pub struct Prefs {
     pub default_agent: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// What the UI calls the user ("Good morning, <display_name>").
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// IANA name, e.g. `Europe/Riga`; pre-filled from the browser.
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// Optional; tells the AI where to look for local information.
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    /// One of `ACCENTS`.
+    #[serde(default)]
+    pub accent: Option<String>,
+    /// Set when the user finished (or skipped) onboarding.
+    #[serde(default)]
+    pub onboarded: bool,
 }
+
+pub const ACCENTS: &[&str] = &["blue", "violet", "green", "orange", "pink", "gray"];
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -24,7 +43,24 @@ impl Default for Prefs {
             search_url: DEFAULT_SEARCH_URL.into(),
             default_agent: None,
             default_model: None,
+            display_name: None,
+            timezone: None,
+            country: None,
+            city: None,
+            accent: None,
+            onboarded: false,
         }
+    }
+}
+
+fn short_text(name: &str, v: &Option<String>) -> Result<(), String> {
+    match v {
+        Some(t)
+            if t.trim().is_empty() || t.chars().count() > 64 || t.chars().any(char::is_control) =>
+        {
+            Err(format!("{name} must be 1-64 printable characters"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -37,6 +73,23 @@ impl Prefs {
         let u = self.search_url.trim();
         if !u.starts_with("https://") || !u.contains("{q}") || u.len() > 2048 {
             return Err("search_url must be an https:// URL containing {q}".into());
+        }
+        short_text("display_name", &self.display_name)?;
+        short_text("country", &self.country)?;
+        short_text("city", &self.city)?;
+        if let Some(tz) = &self.timezone
+            && (tz.is_empty()
+                || tz.len() > 64
+                || !tz
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_+-".contains(&b)))
+        {
+            return Err("timezone must be an IANA name such as Europe/Riga".into());
+        }
+        if let Some(a) = &self.accent
+            && !ACCENTS.contains(&a.as_str())
+        {
+            return Err(format!("accent must be one of {}", ACCENTS.join(", ")));
         }
         if let Some(a) = &self.default_agent
             && m.agents().get(a).is_none()

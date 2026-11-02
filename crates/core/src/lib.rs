@@ -9,7 +9,7 @@ pub mod secret;
 pub mod view;
 
 pub use event::{EventKind, RawEvent, SessionId};
-pub use secret::Secret;
+pub use secret::{Secret, SecretSet};
 
 /// The product's working name. Change it here (and in Cargo package names).
 pub const APP_NAME: &str = "harness";

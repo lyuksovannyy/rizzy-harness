@@ -1,23 +1,20 @@
 //! The single `harness` binary.
 
-mod config;
-
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use harness_agent_native::llm::{ApiKind, LlmProvider};
-use harness_agent_native::{NativeBackend, NativeConfig, Provider, mock::Mock};
+use harness_agent_native::{NativeBackend, NativeConfig, Provider};
+use harness_core::APP_NAME;
 use harness_core::event::Profile;
-use harness_core::{APP_NAME, Secret};
 use harness_master::{Master, auth};
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::{Durability, Store};
 
-use config::{Config, ProviderKind};
+use harness_master::config::Config;
+use harness_master::providers::ProviderRuntime;
 
 #[derive(Parser)]
 #[command(name = APP_NAME, version, about = "Self-hosted coding-agent harness")]
@@ -87,82 +84,6 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// The provider, the secret values to scrub, and env vars to hide from tools.
-struct BuiltProvider {
-    provider: Arc<dyn Provider>,
-    secrets: Vec<Secret<String>>,
-    env_remove: Vec<String>,
-}
-
-fn build_provider(cfg: &Config, dir: &Path) -> anyhow::Result<BuiltProvider> {
-    let p = &cfg.provider;
-    Ok(match p.kind {
-        ProviderKind::Mock => BuiltProvider {
-            provider: Arc::new(Mock {
-                delay: Duration::from_millis(p.mock_delay_ms),
-            }),
-            secrets: vec![],
-            env_remove: vec![],
-        },
-        ProviderKind::Openai | ProviderKind::Anthropic => {
-            let (key, env_remove) = match (&p.api_key_env, &p.api_key_secret) {
-                (Some(var), _) => {
-                    let v = std::env::var(var)
-                        .with_context(|| format!("environment variable {var} is not set"))?;
-                    (Some(Secret::new(v)), vec![var.clone()])
-                }
-                (None, Some(name)) => {
-                    let path = dir.join("secrets.toml");
-                    let v = harness_master::secrets::get(&path, name)?.with_context(|| {
-                        format!("secret {name:?} not found in {}", path.display())
-                    })?;
-                    (Some(v), vec![])
-                }
-                (None, None) => (None, vec![]),
-            };
-            let kind = if p.kind == ProviderKind::Anthropic {
-                ApiKind::Anthropic
-            } else {
-                ApiKind::Openai
-            };
-            let secrets = key.iter().cloned().collect();
-            BuiltProvider {
-                provider: Arc::new(LlmProvider::new(kind, cfg.base_url(), key)?),
-                secrets,
-                env_remove,
-            }
-        }
-    })
-}
-
-/// The default model plus every model listed in `[[models]]`.
-fn model_list(cfg: &Config, provider: &str) -> Vec<harness_master::ModelInfo> {
-    let mut out: Vec<harness_master::ModelInfo> = cfg
-        .models
-        .iter()
-        .map(|m| harness_master::ModelInfo {
-            id: m.id.clone(),
-            provider: provider.to_string(),
-            effort: m.effort,
-            vision: m.vision,
-            default: m.id == cfg.provider.model,
-        })
-        .collect();
-    if !out.iter().any(|m| m.default) {
-        out.insert(
-            0,
-            harness_master::ModelInfo {
-                id: cfg.provider.model.clone(),
-                provider: provider.to_string(),
-                effort: false,
-                vision: false,
-                default: true,
-            },
-        );
-    }
-    out
-}
-
 fn allowed_hosts(bind: SocketAddr, extra: &[String]) -> Vec<String> {
     let port = bind.port();
     let mut v = vec![bind.to_string()];
@@ -197,13 +118,12 @@ async fn serve(
     }
     let cfg = Config::load(&dir.join("harness.toml"))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
-    let BuiltProvider {
-        provider,
-        secrets,
-        env_remove,
-    } = build_provider(&cfg, dir)?;
-    let provider_name = provider.name();
-    tracing::info!(provider = provider_name, model = %cfg.provider.model, "provider");
+    let secrets = harness_core::SecretSet::default();
+    let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
+    let runtime = Arc::new(runtime);
+    // Both runtimes share one swappable provider: settings can change it live.
+    let provider: Arc<dyn Provider> = runtime.provider.clone();
+    tracing::info!(provider = provider.name(), model = %cfg.provider.model, "provider");
 
     let node_store = Store::open(&dir.join("node.db"), Durability::Full)?;
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
@@ -272,7 +192,7 @@ async fn serve(
         let _ = std::fs::remove_file(dir.join("claim-code"));
     }
     let master = Master::new(mirror, auth);
-    master.set_models(model_list(&cfg, provider_name));
+    master.set_provider_runtime(runtime);
     let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
     for e in &agent_errors {
         tracing::warn!(error = %e, "skipping agent definition");

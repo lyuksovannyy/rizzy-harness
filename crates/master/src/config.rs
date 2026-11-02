@@ -5,9 +5,9 @@
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[derive(Default)]
 pub struct Config {
@@ -17,7 +17,7 @@ pub struct Config {
     pub models: Vec<ModelConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     pub id: String,
@@ -27,7 +27,7 @@ pub struct ModelConfig {
     pub vision: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     /// Any OpenAI-compatible chat-completions endpoint.
@@ -38,7 +38,7 @@ pub enum ProviderKind {
     Mock,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,
@@ -46,10 +46,13 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub model: String,
     /// Name of the environment variable holding the API key.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
     /// Name of the key in `secrets.toml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_secret: Option<String>,
     /// Default reasoning effort, sent only if the model lists `effort = true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<harness_agent_native::Effort>,
     /// Delay between mock chunks, in milliseconds.
     pub mock_delay_ms: u64,
@@ -83,7 +86,7 @@ impl Config {
         }
     }
 
-    fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         let p = &self.provider;
         if p.api_key_env.is_some() && p.api_key_secret.is_some() {
             bail!("[provider] set api_key_env or api_key_secret, not both");
@@ -106,6 +109,19 @@ impl Config {
                 bail!("[provider] base_url must be https:// (plain http only for localhost)");
             }
         }
+        Ok(())
+    }
+
+    /// Write atomically (temp file + rename). Holds no secrets.
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        let text = format!(
+            "# Written by {} (onboarding / settings). Keys live in secrets.toml.\n{}",
+            harness_core::APP_NAME,
+            toml::to_string(self).context("serializing config")?
+        );
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
         Ok(())
     }
 

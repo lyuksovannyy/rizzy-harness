@@ -23,6 +23,8 @@ pub fn router(master: Master) -> Router {
             get(get_classifier).put(put_classifier),
         )
         .route("/api/search", get(search))
+        .route("/api/admin/provider", get(get_provider).put(put_provider))
+        .route("/api/admin/provider/test", post(test_provider))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{id}",
@@ -430,6 +432,156 @@ async fn put_classifier(
     );
     m.inner.mirror.call(move |s| s.kv_set(&key, &v)).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---- provider setup (admins) ----
+
+fn provider_json(rt: &crate::providers::ProviderRuntime) -> serde_json::Value {
+    let cfg = rt.config();
+    let p = &cfg.provider;
+    let key = match (&p.api_key_env, &p.api_key_secret) {
+        (Some(v), _) => format!("env:{v}"),
+        (None, Some(_)) => "stored".to_string(),
+        (None, None) => "none".to_string(),
+    };
+    json!({
+        "kind": p.kind,
+        "base_url": cfg.base_url(),
+        "model": p.model,
+        "key": key,
+        "configured": p.kind != crate::config::ProviderKind::Mock,
+        "models": cfg.models.iter().map(|m| json!({"id": m.id, "effort": m.effort, "vision": m.vision})).collect::<Vec<_>>(),
+    })
+}
+
+fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRuntime>> {
+    m.provider_runtime().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider is not managed by this server".into(),
+        )
+    })
+}
+
+async fn get_provider(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    Ok(Json(provider_json(&*runtime(&m)?)))
+}
+
+#[derive(Deserialize)]
+struct ProviderBody {
+    kind: crate::config::ProviderKind,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// A new key; omitted = keep the stored one (if any).
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    models: Vec<ModelBody>,
+}
+
+#[derive(Deserialize)]
+struct ModelBody {
+    id: String,
+    #[serde(default)]
+    effort: bool,
+    #[serde(default)]
+    vision: bool,
+}
+
+fn secret_name(kind: crate::config::ProviderKind) -> &'static str {
+    match kind {
+        crate::config::ProviderKind::Anthropic => "anthropic",
+        _ => "openai",
+    }
+}
+
+/// The key to use for a test/apply: the new one if given, else the
+/// currently configured one when the provider kind is unchanged.
+fn effective_key(
+    rt: &crate::providers::ProviderRuntime,
+    b: &ProviderBody,
+) -> Option<harness_core::Secret<String>> {
+    if let Some(k) = b.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
+        return Some(harness_core::Secret::new(k.trim().to_string()));
+    }
+    let cfg = rt.config();
+    if cfg.provider.kind == b.kind {
+        crate::providers::resolve_key(&cfg, rt.data_dir())
+            .ok()
+            .and_then(|(k, _)| k)
+    } else {
+        None
+    }
+}
+
+fn effective_base(b: &ProviderBody) -> String {
+    let mut c = crate::config::Config::default();
+    c.provider.kind = b.kind;
+    c.provider.base_url = b.base_url.clone().unwrap_or_default().trim().to_string();
+    c.base_url().to_string()
+}
+
+async fn test_provider(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<ProviderBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let key = effective_key(&rt, &b);
+    match crate::providers::list_models(b.kind, &effective_base(&b), key.as_ref()).await {
+        Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
+    }
+}
+
+async fn put_provider(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<ProviderBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let mut cfg = rt.config();
+    let kind_changed = cfg.provider.kind != b.kind;
+    cfg.provider.kind = b.kind;
+    cfg.provider.base_url = b.base_url.clone().unwrap_or_default().trim().to_string();
+    if let Some(model) = b.model.as_ref().filter(|m| !m.trim().is_empty()) {
+        cfg.provider.model = model.trim().to_string();
+    } else if b.kind == crate::config::ProviderKind::Mock {
+        cfg.provider.model = "mock".into();
+    }
+    cfg.models = b
+        .models
+        .iter()
+        .map(|x| crate::providers::model_config(&x.id, x.effort, x.vision))
+        .collect();
+    if let Some(k) = b.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
+        let name = secret_name(b.kind);
+        crate::secrets::set(
+            &rt.data_dir().join("secrets.toml"),
+            name,
+            Some(&harness_core::Secret::new(k.trim().to_string())),
+        )
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        cfg.provider.api_key_secret = Some(name.into());
+        cfg.provider.api_key_env = None;
+    } else if kind_changed {
+        // The old key belongs to another provider.
+        cfg.provider.api_key_secret = None;
+        cfg.provider.api_key_env = None;
+    }
+    rt.apply(cfg)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    m.set_models(rt.models());
+    tracing::info!(kind = ?b.kind, "provider reconfigured");
+    Ok(Json(provider_json(&rt)))
 }
 
 fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
