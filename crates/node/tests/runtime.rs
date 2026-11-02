@@ -33,6 +33,7 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
         )),
         default_model: "mock".into(),
         secrets: vec![harness_core::Secret::new("sk-node-secret-1".into())],
+        profile: harness_core::event::Profile::Agentic,
     }
 }
 
@@ -87,6 +88,8 @@ impl Harness {
     async fn create(&mut self) -> SessionId {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
+            profile: None,
+            agent: None,
             req_id: "c".into(),
             session_id: sid,
             title: "t".into(),
@@ -119,6 +122,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
     assert_eq!(c.approval_mode, harness_core::policy::ApprovalMode::Ask);
 
     h.send(MasterToNode::Prompt {
+        agent: None,
         req_id: "p".into(),
         session_id: sid,
         text: "run: echo sk-node-secret-1 > out.txt; echo written".into(),
@@ -154,6 +158,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        agent: None,
         req_id: "p".into(),
         session_id: sid,
         text: "run: sleep 100".into(),
@@ -179,6 +184,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     // Now approve a long-running command and cancel it while it runs.
     let pidfile = h.ws.join("pid");
     h.send(MasterToNode::Prompt {
+        agent: None,
         req_id: "p2".into(),
         session_id: sid,
         text: format!("run: (sleep 1000) & echo $! > {}; wait", pidfile.display()),
@@ -237,6 +243,7 @@ async fn policy_denied_tool_never_runs() {
     .await;
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        agent: None,
         req_id: "p".into(),
         session_id: sid,
         text: "run: touch nope".into(),
@@ -260,6 +267,8 @@ async fn cwd_outside_roots_is_refused() {
     })
     .await;
     h.send(MasterToNode::Create {
+        profile: None,
+        agent: None,
         req_id: "c".into(),
         session_id: SessionId::new(),
         title: "t".into(),
@@ -281,6 +290,7 @@ async fn resume_replays_in_batches() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        agent: None,
         req_id: "p".into(),
         session_id: sid,
         text: "hello world".into(),
@@ -388,6 +398,7 @@ async fn recovers_interrupted_turn_on_start() {
     let mut link = node.attach().await;
     link.to_node
         .send(MasterToNode::Prompt {
+            agent: None,
             req_id: "p".into(),
             session_id: sid,
             text: "continue".into(),

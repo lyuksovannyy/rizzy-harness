@@ -1,0 +1,42 @@
+# cargo-deny: licences, advisories, bans, sources. Run: cargo deny check
+
+[graph]
+all-features = false
+
+[advisories]
+# RustSec advisory DB; unmaintained crates are reported for workspace deps.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Permissive licences only. Anything else (incl. AGPL/GPL) fails CI.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+# MPL-2.0 is file-level copyleft: obligations apply only if we modify the
+# crate's own files, which we do not. Allowed for this one crate only, so any
+# new MPL dependency is still reviewed.
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

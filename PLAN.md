@@ -345,6 +345,19 @@ login page.
 * **Secrets file** `<data>/secrets.toml` (0600, atomic writes, refuses to read
   if group/other-readable) for keys entered in the UI; config references keys
   by name (`api_key_secret`) or env var (`api_key_env`).
+* **Two runtimes in one process.** The embedded worker node (`local`, agentic,
+  `node.db`) and the master's chat runtime (`master`, chat profile, `chat.db`,
+  no file or shell tools) both run the same `NodeRuntime`/session code; each
+  announces its profile in `node.hello` (`profile:chat` / `profile:agentic`)
+  and the master routes new sessions by profile.
+* **Agents travel with commands.** The master owns agent definitions and puts
+  the resolved `AgentSpec` on `session.create` / `session.prompt` /
+  `session.set_agent`; nodes never store definitions. Effort is stripped by the
+  master unless the model is registered with `effort = true`.
+* **YAML via `serde-saphyr`** (pure Rust, released 2026-10) for agent and,
+  later, skill frontmatter; `serde_yaml` is deprecated and its forks idle.
+* **`cargo-deny`** in CI: permissive licences only; MPL-2.0 allowed solely for
+  `option-ext` (via `dirs`, unmodified); internal crates are `publish = false`.
 * **Model registry** in `harness.toml` (`[[models]] id, effort, vision`);
   effort is only sent to models listed with `effort = true`.
 * **Process-group kill via `nix::sys::signal::killpg`** (safe API, no `unsafe`
@@ -467,3 +480,36 @@ against the 50 MB soft budget.
 
 **Next:** Phase 2. Threat model T7/T8 first, then `harness node join`, Ed25519 pairing, WSS bridge
 onto the existing `NodeLink`, network-drop tests.
+
+### 2026-11-02 — Phase 2 (foundations): done
+
+**Done**
+* Additive event schema: `author`, agent snapshot per turn, `agent_changed`,
+  `profile`/`agent_id`/`incognito` on `session_created`, answer variants.
+  v1 payloads round-trip byte-identically (test).
+* Accounts: claim code, Argon2id login, hashed cookie sessions, `owner_id`,
+  visibility enforced on REST and WS. API token kept for scripts.
+* Providers through `genai` (Anthropic + OpenAI-compatible), `secrets.toml`,
+  model registry with effort gating, `GET /api/models`.
+* Agents: built-ins General/Coder/Writer/Scout, user overrides, agent tool
+  lists enforced in the loop, `@mention` per turn, session agent switch,
+  `GET /api/agents`, `POST /api/sessions/{id}/agent`.
+* Chat runtime on the master; agentic sessions refuse cleanly with no worker.
+* `cargo-deny` job.
+
+**Evidence**
+* `cargo test --workspace`: 86 passing; clippy `-D warnings`, fmt, web
+  typecheck + fixture test green; `cargo deny check` green.
+* Phase 1 acceptance (SIGKILL + resume) still green.
+* Provider tests against local servers speaking both wire formats.
+* Smoke on the real binary: both runtimes register; a chat session runs as
+  Writer with the agent recorded on the turn.
+
+**Risks**
+* R8 (Anthropic thinking + tools replay) open; R7 (genai single maintainer).
+* The web UI does not yet expose agents, profiles or models: that is Phase 3.
+* Ultracode/orchestration agent deliberately not shipped until `delegate`
+  exists (Phase 8), so no agent promises a tool it cannot have.
+
+**Next:** Phase 3, the UI shell per the mockup.
+

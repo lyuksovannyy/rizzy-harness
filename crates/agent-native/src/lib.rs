@@ -73,15 +73,28 @@ impl NativeBackend {
         }
     }
 
-    fn tool_specs(&self) -> Vec<ToolSpec> {
+    /// Tools offered to the model: the runtime's tools, narrowed to what the
+    /// agent asks for. (Node policy still gates execution separately.)
+    fn tool_specs(&self, agent: Option<&harness_core::agent::AgentSpec>) -> Vec<ToolSpec> {
         self.tools
             .iter()
+            .filter(|t| agent.is_none_or(|a| a.tools.allows(t.name())))
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 schema: t.schema(),
             })
             .collect()
+    }
+}
+
+fn parse_effort(s: &str) -> Option<Effort> {
+    match s {
+        "low" => Some(Effort::Low),
+        "medium" => Some(Effort::Medium),
+        "high" => Some(Effort::High),
+        "max" => Some(Effort::Max),
+        _ => None,
     }
 }
 
@@ -187,14 +200,25 @@ impl AgentBackend for NativeBackend {
 
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
         let host = ctx.host;
-        let mut messages = vec![ChatMsg::System(format!(
-            "{}\n\nWorking directory: {}",
-            self.config.system_prompt,
-            ctx.cwd.display()
-        ))];
+        let agent = ctx.agent.as_ref();
+        let author = agent.map(|a| a.agent_id.clone());
+        let base_prompt = agent
+            .map(|a| a.system_prompt.as_str())
+            .unwrap_or(&self.config.system_prompt);
+        let system = if ctx.cwd.as_os_str().is_empty() {
+            base_prompt.to_string()
+        } else {
+            format!("{base_prompt}\n\nWorking directory: {}", ctx.cwd.display())
+        };
+        let mut messages = vec![ChatMsg::System(system)];
         messages.extend(history_to_messages(&ctx.history));
         messages.push(ChatMsg::User(ctx.user_text.clone()));
-        let tools = self.tool_specs();
+        let tools = self.tool_specs(agent);
+        // The master only puts an effort on the spec when the model supports it.
+        let effort = agent
+            .and_then(|a| a.effort.as_deref())
+            .and_then(parse_effort)
+            .or(self.config.effort);
         let mut usage = Usage::default();
         let mut allowed_for_session: HashSet<String> = HashSet::new();
 
@@ -204,7 +228,7 @@ impl AgentBackend for NativeBackend {
                 model: ctx.model.clone(),
                 messages: messages.clone(),
                 tools: tools.clone(),
-                effort: self.config.effort,
+                effort,
             };
             let (tx, rx) = mpsc::unbounded_channel();
             let turn_id = ctx.turn_id.clone();
@@ -216,7 +240,7 @@ impl AgentBackend for NativeBackend {
                 host,
                 |text| {
                     EventKind::AssistantDelta(AssistantDelta {
-                        author: None,
+                        author: author.clone(),
                         variant: None,
                         turn_id: turn_id.clone(),
                         message_id: mid.clone(),
@@ -247,7 +271,7 @@ impl AgentBackend for NativeBackend {
                 usage.output_tokens += u.output_tokens;
             }
             host.emit(EventKind::AssistantMessage(AssistantMessage {
-                author: None,
+                author: author.clone(),
                 variant: None,
                 turn_id: ctx.turn_id.clone(),
                 message_id,
@@ -269,7 +293,7 @@ impl AgentBackend for NativeBackend {
 
             for call in completion.tool_calls {
                 host.emit(EventKind::ToolCallStarted(ToolCallStarted {
-                    author: None,
+                    author: author.clone(),
                     turn_id: ctx.turn_id.clone(),
                     call_id: call.call_id.clone(),
                     tool: call.tool.clone(),
@@ -318,7 +342,16 @@ impl NativeBackend {
         call: &ToolCallRef,
         allowed_for_session: &mut HashSet<String>,
     ) -> ToolOutcome {
-        let Some(tool) = self.tools.iter().find(|t| t.name() == call.tool) else {
+        let offered = ctx
+            .agent
+            .as_ref()
+            .is_none_or(|a| a.tools.allows(&call.tool));
+        let Some(tool) = self
+            .tools
+            .iter()
+            .find(|t| t.name() == call.tool)
+            .filter(|_| offered)
+        else {
             return ToolOutcome::err(format!("unknown tool `{}`", call.tool));
         };
         if !call.input.is_object() {
@@ -456,9 +489,47 @@ mod tests {
             user_text: text.into(),
             cwd: cwd.to_path_buf(),
             model: "mock".into(),
+            agent: None,
             cancel: Default::default(),
             host,
         }
+    }
+
+    fn scout() -> harness_core::agent::AgentSpec {
+        harness_core::agent::AgentSpec {
+            agent_id: "scout".into(),
+            name: "Scout".into(),
+            system_prompt: "read only".into(),
+            tools: harness_core::agent::ToolSelection::List(vec!["read".into()]),
+            model: None,
+            effort: None,
+            budget: Default::default(),
+            prompt_hash: "h".into(),
+        }
+    }
+
+    /// An agent that does not list `bash` cannot run it, even if the model
+    /// asks; and everything it produces carries its id as author.
+    #[tokio::test]
+    async fn agent_tool_list_is_enforced_and_author_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let mut c = ctx(&host, "run: touch hacked", dir.path());
+        c.agent = Some(scout());
+        let b = backend();
+        assert_eq!(b.tool_specs(c.agent.as_ref()).len(), 1);
+        b.run_turn(c).await;
+        assert!(!dir.path().join("hacked").exists());
+        assert!(host.asked.lock().unwrap().is_empty(), "never even asked");
+        let ev = host.events.lock().unwrap();
+        assert!(ev.iter().any(|e| matches!(e,
+            EventKind::ToolCallFinished(f) if !f.ok && f.output.contains("unknown tool"))));
+        assert!(ev.iter().all(|e| match e {
+            EventKind::AssistantMessage(m) => m.author.as_deref() == Some("scout"),
+            EventKind::AssistantDelta(d) => d.author.as_deref() == Some("scout"),
+            EventKind::ToolCallStarted(t) => t.author.as_deref() == Some("scout"),
+            _ => true,
+        }));
     }
 
     #[tokio::test]

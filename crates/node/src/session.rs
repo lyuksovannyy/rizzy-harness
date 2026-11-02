@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use harness_core::agent::AgentSpec;
 use harness_core::backend::{TurnCtx, TurnHost};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ToolRisk};
@@ -35,15 +36,30 @@ pub(crate) struct Session {
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
 }
 
+/// Everything needed to start a session, already validated by the runtime.
+pub(crate) struct NewSession {
+    pub title: String,
+    pub cwd: PathBuf,
+    pub model: String,
+    pub mode: ApprovalMode,
+    pub profile: Profile,
+    pub agent_id: Option<String>,
+}
+
 impl Session {
     pub(crate) async fn create(
         node: Arc<Inner>,
         id: SessionId,
-        title: String,
-        cwd: PathBuf,
-        model: String,
-        mode: ApprovalMode,
+        new: NewSession,
     ) -> Result<Arc<Self>, StoreError> {
+        let NewSession {
+            title,
+            cwd,
+            model,
+            mode,
+            profile,
+            agent_id,
+        } = new;
         let s = Arc::new(Self {
             node: node.clone(),
             id,
@@ -55,8 +71,8 @@ impl Session {
             approvals: Mutex::new(HashMap::new()),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
-            profile: None,
-            agent_id: None,
+            profile: Some(profile),
+            agent_id,
             incognito: false,
             title,
             cwd: cwd.display().to_string(),
@@ -179,7 +195,21 @@ impl Session {
         }
     }
 
-    pub(crate) async fn prompt(self: &Arc<Self>, text: String) -> Result<(), String> {
+    /// Record a change of the session's active agent.
+    pub(crate) async fn set_agent(&self, agent: AgentSpec) -> Result<(), String> {
+        self.append(EventKind::AgentChanged(AgentChanged {
+            agent: agent.agent_ref(),
+        }))
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    pub(crate) async fn prompt(
+        self: &Arc<Self>,
+        text: String,
+        agent: Option<AgentSpec>,
+    ) -> Result<(), String> {
         let turn_id = new_id();
         let cancel = CancellationToken::new();
         {
@@ -193,11 +223,17 @@ impl Session {
             });
         }
         let this = self.clone();
-        tokio::spawn(async move { this.run_turn(turn_id, text, cancel).await });
+        tokio::spawn(async move { this.run_turn(turn_id, text, agent, cancel).await });
         Ok(())
     }
 
-    async fn run_turn(self: Arc<Self>, turn_id: String, text: String, cancel: CancellationToken) {
+    async fn run_turn(
+        self: Arc<Self>,
+        turn_id: String,
+        text: String,
+        agent: Option<AgentSpec>,
+        cancel: CancellationToken,
+    ) {
         let id = self.id;
         let history = self
             .node
@@ -207,7 +243,7 @@ impl Session {
             .await
             .unwrap_or_default();
         self.emit(EventKind::TurnStarted(TurnStarted {
-            agent: None,
+            agent: agent.as_ref().map(AgentSpec::agent_ref),
             turn_id: turn_id.clone(),
         }))
         .await;
@@ -229,7 +265,11 @@ impl Session {
                     history,
                     user_text: text,
                     cwd: this.cwd.clone(),
-                    model: this.model.clone(),
+                    model: agent
+                        .as_ref()
+                        .and_then(|a| a.model.clone())
+                        .unwrap_or_else(|| this.model.clone()),
+                    agent,
                     cancel: c,
                     host: &*this,
                 })

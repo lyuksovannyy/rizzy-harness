@@ -11,6 +11,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use harness_agent_native::llm::{ApiKind, LlmProvider};
 use harness_agent_native::{NativeBackend, NativeConfig, Provider, mock::Mock};
+use harness_core::event::Profile;
 use harness_core::{APP_NAME, Secret};
 use harness_master::{Master, auth};
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
@@ -203,7 +204,7 @@ async fn serve(
     let node_store = Store::open(&dir.join("node.db"), Durability::Full)?;
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
     let backend = NativeBackend::new(
-        provider,
+        provider.clone(),
         harness_tools::builtin(),
         NativeConfig {
             env_remove,
@@ -223,7 +224,30 @@ async fn serve(
         store: node_store,
         backend: Arc::new(backend),
         default_model: cfg.provider.model.clone(),
+        secrets: secrets.clone(),
+        profile: Profile::Agentic,
+    })
+    .await?;
+
+    // The master's own chat runtime: same session code, no workspace and no
+    // file or shell tools (web tools arrive in Phase 6).
+    let chat_backend = NativeBackend::new(
+        provider,
+        Vec::new(),
+        NativeConfig {
+            secrets: secrets.clone(),
+            ..Default::default()
+        },
+    );
+    let chat = NodeRuntime::start(NodeConfig {
+        node_id: "master".into(),
+        hostname: hostname(),
+        policy: NodePolicy::default(),
+        store: Store::open(&dir.join("chat.db"), Durability::Full)?,
+        backend: Arc::new(chat_backend),
+        default_model: cfg.provider.model.clone(),
         secrets,
+        profile: Profile::Chat,
     })
     .await?;
 
@@ -245,8 +269,17 @@ async fn serve(
     }
     let master = Master::new(mirror, auth);
     master.set_models(model_list(&cfg, provider_name));
+    let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
+    for e in &agent_errors {
+        tracing::warn!(error = %e, "skipping agent definition");
+    }
+    master.set_agents(agents);
     master
         .add_link(node.attach().await, true)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    master
+        .add_link(chat.attach().await, true)
         .await
         .map_err(anyhow::Error::msg)?;
 

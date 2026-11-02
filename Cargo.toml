@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT"
 rust-version = "1.89"
 repository = "https://github.com/lyuksovannyy/rizzy-harness"
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

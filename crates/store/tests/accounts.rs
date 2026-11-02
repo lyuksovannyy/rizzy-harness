@@ -57,6 +57,37 @@ fn session_owner_is_recorded() {
     assert_eq!(s.sessions().unwrap()[0].owner_id.as_deref(), Some("u1"));
 }
 
+#[test]
+fn session_row_tracks_agent_and_profile() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    let ev = |seq: u64, kind: &str, payload: serde_json::Value| RawEvent {
+        session_id: sid,
+        seq,
+        ts_ms: seq as i64,
+        kind: kind.into(),
+        payload,
+    };
+    s.append(
+        "master",
+        &ev(1, "session_created", json!({"title": "t", "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "agent_id": "general"})),
+    )
+    .unwrap();
+    let r = &s.sessions().unwrap()[0];
+    assert_eq!(r.agent_id.as_deref(), Some("general"));
+    assert_eq!(r.profile.as_deref(), Some("chat"));
+    s.append(
+        "master",
+        &ev(
+            2,
+            "agent_changed",
+            json!({"agent": {"agent_id": "writer", "name": "Writer", "prompt_hash": "h"}}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("writer"));
+}
+
 /// A master.db created before accounts existed gains the new column on open.
 #[test]
 fn migrates_v1_database() {

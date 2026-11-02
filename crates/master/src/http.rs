@@ -18,11 +18,13 @@ pub fn router(master: Master) -> Router {
         .route("/api/me", get(me))
         .route("/api/nodes", get(nodes))
         .route("/api/models", get(models))
+        .route("/api/agents", get(agents))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/prompt", post(prompt))
         .route("/api/sessions/{id}/cancel", post(cancel))
+        .route("/api/sessions/{id}/agent", post(set_agent))
         .route("/api/sessions/{id}/approvals/{approval_id}", post(approval))
         .route("/api/ws", get(crate::ws::upgrade));
     api.fallback(crate::assets::serve)
@@ -49,6 +51,7 @@ impl From<CommandError> for ApiError {
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             CommandError::Rejected(_) => StatusCode::CONFLICT,
             CommandError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            CommandError::UnknownAgent(_) => StatusCode::BAD_REQUEST,
         };
         ApiError(code, e.to_string())
     }
@@ -181,6 +184,14 @@ async fn models(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<s
     Ok(Json(json!({ "models": m.models() })))
 }
 
+async fn agents(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
+    require(&m, &headers).await?;
+    let set = m.agents();
+    Ok(Json(
+        json!({ "agents": set.list(), "default": set.default_id() }),
+    ))
+}
+
 fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
     json!({
         "session_id": r.session_id,
@@ -193,6 +204,8 @@ fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
         "head_seq": r.head_seq,
         "running": r.running,
         "owner_id": r.owner_id,
+        "agent_id": r.agent_id,
+        "profile": r.profile,
     })
 }
 
@@ -249,7 +262,13 @@ async fn events(
 struct CreateBody {
     #[serde(default)]
     title: Option<String>,
+    /// Required for agentic sessions; ignored for chat.
+    #[serde(default)]
     cwd: String,
+    #[serde(default)]
+    profile: Option<harness_core::event::Profile>,
+    #[serde(default)]
+    agent_id: Option<String>,
     #[serde(default)]
     node_id: Option<String>,
     #[serde(default)]
@@ -269,7 +288,15 @@ async fn create_session(
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".into());
     let sid = m
-        .create_session(b.node_id, title, b.cwd, b.model, b.approval_mode)
+        .create_session(crate::CreateSpec {
+            profile: b.profile,
+            node_id: b.node_id,
+            title,
+            cwd: b.cwd,
+            model: b.model,
+            approval_mode: b.approval_mode,
+            agent_id: b.agent_id,
+        })
         .await?;
     if let Some(uid) = who.user_id {
         // The node's session_created event is mirrored before the create ack
@@ -285,6 +312,10 @@ async fn create_session(
 #[derive(Deserialize)]
 struct PromptBody {
     text: String,
+    /// Run this turn as another agent (mention popup); the session's agent
+    /// stays unchanged.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 async fn prompt(
@@ -298,7 +329,7 @@ async fn prompt(
         return Err(ApiError(StatusCode::BAD_REQUEST, "empty prompt".into()));
     }
     let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.prompt(sid, b.text).await?;
+    m.prompt(sid, b.text, b.agent_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -310,6 +341,23 @@ async fn cancel(
     let who = require(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     m.cancel(sid).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct AgentBody {
+    agent_id: String,
+}
+
+async fn set_agent(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<AgentBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.set_agent(sid, &b.agent_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

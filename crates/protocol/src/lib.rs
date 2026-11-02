@@ -1,6 +1,8 @@
 //! Master <-> node messages. PLAN.md §3. JSON, `{"type": "..."}`-tagged.
 //! Changes must be additive within a major `PROTOCOL_VERSION`.
 
+use harness_core::agent::AgentSpec;
+use harness_core::event::Profile;
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::{RawEvent, SessionId};
 use serde::{Deserialize, Serialize};
@@ -62,12 +64,29 @@ pub enum MasterToNode {
         /// A request only; the node clamps it to its own policy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approval_mode: Option<ApprovalMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<Profile>,
+        /// The session's initial agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentSpec>,
     },
     #[serde(rename = "session.prompt")]
     Prompt {
         req_id: String,
         session_id: SessionId,
         text: String,
+        /// The agent that runs this turn (the session's agent, or an
+        /// @mention override). Resolved by the master; the node does not
+        /// store agent definitions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentSpec>,
+    },
+    /// Change the session's active agent (records `agent_changed`).
+    #[serde(rename = "session.set_agent")]
+    SetAgent {
+        req_id: String,
+        session_id: SessionId,
+        agent: AgentSpec,
     },
     #[serde(rename = "session.cancel")]
     Cancel {
@@ -93,6 +112,7 @@ impl MasterToNode {
         match self {
             MasterToNode::Create { req_id, .. }
             | MasterToNode::Prompt { req_id, .. }
+            | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::ApprovalRespond { req_id, .. } => Some(req_id),
             MasterToNode::Welcome { .. } | MasterToNode::Resume { .. } => None,

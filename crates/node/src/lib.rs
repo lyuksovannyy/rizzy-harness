@@ -16,6 +16,16 @@ use tokio::sync::mpsc;
 pub use policy::NodePolicy;
 use session::Session;
 
+/// The fields of a `session.create` command.
+struct CreateArgs {
+    title: String,
+    cwd: String,
+    model: Option<String>,
+    approval_mode: Option<harness_core::policy::ApprovalMode>,
+    profile: Option<harness_core::event::Profile>,
+    agent: Option<harness_core::agent::AgentSpec>,
+}
+
 /// Max events per `session.snapshot` batch.
 const SNAPSHOT_BATCH: usize = 500;
 
@@ -28,6 +38,9 @@ pub struct NodeConfig {
     pub default_model: String,
     /// Values scrubbed from every event payload before it is stored.
     pub secrets: Vec<Secret<String>>,
+    /// Which sessions this runtime hosts: `Agentic` (workspace + tools, the
+    /// normal node) or `Chat` (the master's workspace-less chat runtime).
+    pub profile: harness_core::event::Profile,
 }
 
 /// Both ends of a link as seen from the master: commands in, messages out.
@@ -110,7 +123,13 @@ impl NodeRuntime {
                 node_id: self.inner.cfg.node_id.clone(),
                 hostname: self.inner.cfg.hostname.clone(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                capabilities: vec!["native".into()],
+                capabilities: vec![
+                    "native".into(),
+                    match self.inner.cfg.profile {
+                        harness_core::event::Profile::Chat => "profile:chat".into(),
+                        harness_core::event::Profile::Agentic => "profile:agentic".into(),
+                    },
+                ],
                 sessions: heads
                     .into_iter()
                     .map(|(session_id, head_seq)| SessionHead {
@@ -175,18 +194,42 @@ impl NodeRuntime {
                 cwd,
                 model,
                 approval_mode,
+                profile,
+                agent,
                 ..
             } => {
                 self.audit("session.create", session_id).await;
-                self.create(session_id, title, cwd, model, approval_mode)
-                    .await
+                self.create(
+                    session_id,
+                    CreateArgs {
+                        title,
+                        cwd,
+                        model,
+                        approval_mode,
+                        profile,
+                        agent,
+                    },
+                )
+                .await
             }
             MasterToNode::Prompt {
-                session_id, text, ..
+                session_id,
+                text,
+                agent,
+                ..
             } => {
                 self.audit("session.prompt", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.prompt(text).await,
+                    Some(s) => s.prompt(text, agent).await,
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::SetAgent {
+                session_id, agent, ..
+            } => {
+                self.audit("session.set_agent", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.set_agent(agent).await,
                     None => Err("unknown session".into()),
                 }
             }
@@ -222,24 +265,52 @@ impl NodeRuntime {
         }
     }
 
-    async fn create(
-        &self,
-        sid: SessionId,
-        title: String,
-        cwd: String,
-        model: Option<String>,
-        approval_mode: Option<harness_core::policy::ApprovalMode>,
-    ) -> Result<(), String> {
+    async fn create(&self, sid: SessionId, args: CreateArgs) -> Result<(), String> {
+        use harness_core::event::Profile;
+        let CreateArgs {
+            title,
+            cwd,
+            model,
+            approval_mode,
+            profile,
+            agent,
+        } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
         }
+        let hosted = self.inner.cfg.profile;
+        let profile = profile.unwrap_or(Profile::Agentic);
+        if profile != hosted {
+            return Err(format!(
+                "this runtime hosts {hosted:?} sessions, not {profile:?}"
+            ));
+        }
         let policy = &self.inner.cfg.policy;
-        let cwd = policy.check_cwd(&cwd)?;
+        // Chat sessions have no workspace; their runtime offers no file tools.
+        let cwd = match profile {
+            Profile::Agentic => policy.check_cwd(&cwd)?,
+            Profile::Chat => std::path::PathBuf::new(),
+        };
         let mode = policy.effective_mode(approval_mode);
-        let model = model.unwrap_or_else(|| self.inner.cfg.default_model.clone());
-        let s = Session::create(self.inner.clone(), sid, title, cwd, model, mode)
-            .await
-            .map_err(|e| e.to_string())?;
+        let model = agent
+            .as_ref()
+            .and_then(|a| a.model.clone())
+            .or(model)
+            .unwrap_or_else(|| self.inner.cfg.default_model.clone());
+        let s = Session::create(
+            self.inner.clone(),
+            sid,
+            session::NewSession {
+                title,
+                cwd,
+                model,
+                mode,
+                profile,
+                agent_id: agent.map(|a| a.agent_id),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         self.inner
             .sessions
             .lock()

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -19,6 +20,7 @@ axum.workspace = true
 clap.workspace = true
 dirs.workspace = true
 harness-agent-native.workspace = true
+harness-agents.workspace = true
 harness-core.workspace = true
 harness-master.workspace = true
 harness-node.workspace = true

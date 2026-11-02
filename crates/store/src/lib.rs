@@ -60,6 +60,10 @@ pub struct SessionRow {
     /// The user who created the session; `None` for sessions predating
     /// accounts or created directly on a node.
     pub owner_id: Option<String>,
+    /// The session's active agent (from `session_created` / `agent_changed`).
+    pub agent_id: Option<String>,
+    /// `chat` or `agentic`; `None` for sessions predating profiles.
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -173,6 +177,17 @@ impl Store {
         if !has_owner {
             conn.execute_batch("ALTER TABLE sessions ADD COLUMN owner_id TEXT")?;
         }
+        for (col, ddl) in [
+            ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
+            ("profile", "ALTER TABLE sessions ADD COLUMN profile TEXT"),
+        ] {
+            let exists: bool = conn
+                .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")?
+                .exists([col])?;
+            if !exists {
+                conn.execute_batch(ddl)?;
+            }
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -252,9 +267,26 @@ impl Store {
                         .unwrap_or_default()
                         .to_string()
                 };
+                let opt = |k: &str| {
+                    e.payload
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
                 tx.execute(
-                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4 WHERE session_id = ?1",
-                    params![sid, s("title"), s("cwd"), s("model")],
+                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6 WHERE session_id = ?1",
+                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile")],
+                )?;
+            }
+            "agent_changed" => {
+                let agent = e
+                    .payload
+                    .pointer("/agent/agent_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                tx.execute(
+                    "UPDATE sessions SET agent_id = ?2 WHERE session_id = ?1",
+                    params![sid, agent],
                 )?;
             }
             "turn_started" => {
@@ -329,7 +361,7 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id FROM sessions ORDER BY updated_ms DESC",
+            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id, agent_id, profile FROM sessions ORDER BY updated_ms DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -346,6 +378,8 @@ impl Store {
                     head_seq: r.get::<_, i64>(7)? as u64,
                     running: r.get::<_, i64>(8)? != 0,
                     owner_id: r.get(9)?,
+                    agent_id: r.get(10)?,
+                    profile: r.get(11)?,
                 },
             ))
         })?;

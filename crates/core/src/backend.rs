@@ -29,6 +29,8 @@ pub struct TurnCtx<'a> {
     pub user_text: String,
     pub cwd: PathBuf,
     pub model: String,
+    /// The agent running this turn; `None` means the backend's defaults.
+    pub agent: Option<crate::agent::AgentSpec>,
     pub cancel: CancellationToken,
     pub host: &'a dyn TurnHost,
 }

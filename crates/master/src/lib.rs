@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use harness_core::event::Profile;
 use harness_core::{RawEvent, SessionId, new_id};
 use harness_node::NodeLink;
 use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
@@ -48,6 +49,8 @@ pub struct NodeInfo {
     pub version: String,
     pub connected: bool,
     pub embedded: bool,
+    /// Which sessions the node hosts (from its `profile:*` capability).
+    pub profile: Profile,
 }
 
 struct NodeConn {
@@ -66,6 +69,28 @@ pub struct MasterInner {
     acks: Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
+    agents: Mutex<harness_agents::AgentSet>,
+}
+
+/// What the UI asks for when starting a session.
+#[derive(Debug, Clone, Default)]
+pub struct CreateSpec {
+    pub profile: Option<Profile>,
+    pub node_id: Option<String>,
+    pub title: String,
+    pub cwd: String,
+    pub model: Option<String>,
+    pub approval_mode: Option<harness_core::policy::ApprovalMode>,
+    pub agent_id: Option<String>,
+}
+
+/// A leading `@agent-id` in a prompt routes that turn to the agent.
+pub fn leading_mention(text: &str) -> Option<&str> {
+    let rest = text.trim_start().strip_prefix('@')?;
+    let id = rest
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ':')
+        .next()?;
+    (!id.is_empty()).then_some(id)
 }
 
 #[derive(Clone)]
@@ -85,6 +110,8 @@ pub enum CommandError {
     Rejected(String),
     #[error("store: {0}")]
     Store(#[from] harness_store::StoreError),
+    #[error("unknown agent {0:?}")]
+    UnknownAgent(String),
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -102,6 +129,10 @@ impl Master {
                 acks: Mutex::new(HashMap::new()),
                 auth,
                 models: Mutex::new(Vec::new()),
+                agents: Mutex::new(harness_agents::AgentSet::from_agents(
+                    harness_agents::builtins(),
+                    harness_agents::DEFAULT_AGENT,
+                )),
             }),
         }
     }
@@ -128,12 +159,59 @@ impl Master {
     }
 
     /// The id of the embedded node, if any (the default target for new sessions).
-    pub fn default_node(&self) -> Option<String> {
-        self.nodes()
+    /// The node a new session of `profile` goes to when none is chosen:
+    /// an embedded one first.
+    pub fn default_node(&self, profile: Profile) -> Option<String> {
+        let nodes: Vec<_> = self
+            .nodes()
             .into_iter()
-            .find(|n| n.embedded && n.connected)
-            .or_else(|| self.nodes().into_iter().find(|n| n.connected))
-            .map(|n| n.node_id)
+            .filter(|n| n.connected && n.profile == profile)
+            .collect();
+        nodes
+            .iter()
+            .find(|n| n.embedded)
+            .or(nodes.first())
+            .map(|n| n.node_id.clone())
+    }
+
+    pub fn set_agents(&self, agents: harness_agents::AgentSet) {
+        *lock(&self.inner.agents) = agents;
+    }
+
+    pub fn agents(&self) -> harness_agents::AgentSet {
+        lock(&self.inner.agents).clone()
+    }
+
+    /// Resolve an agent id (or the default) to the spec a node runs, dropping
+    /// effort when the model is not known to support it.
+    pub fn agent_spec(
+        &self,
+        agent_id: Option<&str>,
+        session_model: Option<&str>,
+    ) -> Result<harness_core::agent::AgentSpec, CommandError> {
+        let set = self.agents();
+        let agent = match agent_id {
+            Some(id) => set
+                .get(id)
+                .ok_or_else(|| CommandError::UnknownAgent(id.into()))?,
+            None => set
+                .default_agent()
+                .ok_or_else(|| CommandError::UnknownAgent("(default)".into()))?,
+        };
+        let mut spec = agent.spec.clone();
+        let models = self.models();
+        let model = spec
+            .model
+            .clone()
+            .or(session_model.map(str::to_string))
+            .or_else(|| models.iter().find(|m| m.default).map(|m| m.id.clone()));
+        let effort_ok = model
+            .as_deref()
+            .is_some_and(|m| models.iter().any(|x| x.id == m && x.effort));
+        if !effort_ok {
+            spec.effort = None;
+        }
+        Ok(spec)
     }
 
     /// Attach a node link. The first message must be `node.hello`.
@@ -149,10 +227,15 @@ impl Master {
             hostname,
             version,
             sessions,
-            ..
+            capabilities,
         } = first
         else {
             return Err("first message was not node.hello".into());
+        };
+        let profile = if capabilities.iter().any(|c| c == "profile:chat") {
+            Profile::Chat
+        } else {
+            Profile::Agentic
         };
         if protocol_version != PROTOCOL_VERSION {
             return Err(format!(
@@ -171,6 +254,7 @@ impl Master {
                     version: version.clone(),
                     connected: false,
                     embedded,
+                    profile,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -179,6 +263,7 @@ impl Master {
             entry.info.hostname = hostname;
             entry.info.version = version;
             entry.info.connected = true;
+            entry.info.profile = profile;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
             entry.generation += 1;
@@ -338,36 +423,74 @@ impl Master {
             .ok_or(CommandError::UnknownSession)
     }
 
-    pub async fn create_session(
-        &self,
-        node_id: Option<String>,
-        title: String,
-        cwd: String,
-        model: Option<String>,
-        approval_mode: Option<harness_core::policy::ApprovalMode>,
-    ) -> Result<SessionId, CommandError> {
-        let node_id = node_id
-            .or_else(|| self.default_node())
-            .ok_or_else(|| CommandError::NodeOffline("(none)".into()))?;
+    pub async fn create_session(&self, spec: CreateSpec) -> Result<SessionId, CommandError> {
+        let profile = spec.profile.unwrap_or(Profile::Agentic);
+        let node_id = spec
+            .node_id
+            .or_else(|| self.default_node(profile))
+            .ok_or_else(|| {
+                CommandError::NodeOffline(match profile {
+                    Profile::Chat => "(chat runtime)".into(),
+                    Profile::Agentic => "(no worker node; set one up for agentic sessions)".into(),
+                })
+            })?;
+        let agent = self.agent_spec(spec.agent_id.as_deref(), spec.model.as_deref())?;
         let sid = SessionId::new();
         self.send_command(&node_id, |req_id| MasterToNode::Create {
             req_id,
             session_id: sid,
-            title,
-            cwd,
-            model,
-            approval_mode,
+            title: spec.title,
+            cwd: spec.cwd,
+            model: spec.model,
+            approval_mode: spec.approval_mode,
+            profile: Some(profile),
+            agent: Some(agent),
         })
         .await?;
         Ok(sid)
     }
 
-    pub async fn prompt(&self, sid: SessionId, text: String) -> Result<(), CommandError> {
-        let node = self.owner(sid).await?;
-        self.send_command(&node, |req_id| MasterToNode::Prompt {
+    /// Run a turn. The agent is, in order: `agent_id` (explicit, e.g. from the
+    /// mention popup), a leading `@agent` in the text, the session's agent.
+    pub async fn prompt(
+        &self,
+        sid: SessionId,
+        text: String,
+        agent_id: Option<String>,
+    ) -> Result<(), CommandError> {
+        let row = self
+            .inner
+            .mirror
+            .call(move |s| s.session(sid))
+            .await?
+            .ok_or(CommandError::UnknownSession)?;
+        let mention = leading_mention(&text)
+            .filter(|id| self.agents().get(id).is_some())
+            .map(str::to_string);
+        let chosen = agent_id.or(mention).or(row.agent_id.clone());
+        let agent = self.agent_spec(chosen.as_deref(), Some(&row.model))?;
+        self.send_command(&row.node_id, |req_id| MasterToNode::Prompt {
             req_id,
             session_id: sid,
             text,
+            agent: Some(agent),
+        })
+        .await
+    }
+
+    /// Change the session's active agent for future turns.
+    pub async fn set_agent(&self, sid: SessionId, agent_id: &str) -> Result<(), CommandError> {
+        let row = self
+            .inner
+            .mirror
+            .call(move |s| s.session(sid))
+            .await?
+            .ok_or(CommandError::UnknownSession)?;
+        let agent = self.agent_spec(Some(agent_id), Some(&row.model))?;
+        self.send_command(&row.node_id, |req_id| MasterToNode::SetAgent {
+            req_id,
+            session_id: sid,
+            agent,
         })
         .await
     }
