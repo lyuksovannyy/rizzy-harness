@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.89"
+repository = "https://github.com/lyuksovannyy/rizzy-harness"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+
+[workspace.dependencies]
+harness-core = { path = "crates/core" }
+harness-store = { path = "crates/store" }
+harness-protocol = { path = "crates/protocol" }
+harness-tools = { path = "crates/tools" }
+harness-agent-native = { path = "crates/agent-native" }
+harness-node = { path = "crates/node" }
+harness-master = { path = "crates/master" }
+
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["ws"] }
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
+futures = "0.3.34"
+getrandom = "0.4.3"
+globset = "0.4.21"
+hex = "0.4.3"
+ignore = "0.4.34"
+mime_guess = "2.0.5"
+nix = { version = "0.31.3", features = ["signal", "process"] }
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+rust-embed = "8.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+subtle = "2.6.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-tungstenite = "0.30.0"
+tokio-util = "0.7.20"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
+
+[profile.release]
+lto = "thin"
+strip = true
