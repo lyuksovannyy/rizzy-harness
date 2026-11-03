@@ -130,6 +130,19 @@ pub struct UserPatch {
     pub can_agentic: Option<bool>,
 }
 
+/// A chat waiting for the user.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Attention {
+    pub session_id: SessionId,
+    pub title: String,
+    /// `approval` or `question`.
+    pub reason: &'static str,
+    /// The event that started needing attention (for "seen").
+    pub seq: u64,
+    pub parent_id: Option<String>,
+    pub updated_ms: i64,
+}
+
 /// A remote node the master trusts (pinned key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRow {
@@ -160,7 +173,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     owner_id   TEXT,
     agent_id   TEXT,
     profile    TEXT,
-    parent_id  TEXT
+    parent_id  TEXT,
+    -- Attention: approvals waiting, or the last turn ended with a question.
+    pending_approvals INTEGER NOT NULL DEFAULT 0,
+    last_asks  INTEGER NOT NULL DEFAULT 0,
+    asks_user  INTEGER NOT NULL DEFAULT 0,
+    attention_seq INTEGER NOT NULL DEFAULT 0
+);
+-- How far each user has looked at each chat (questions stop needing
+-- attention once seen).
+CREATE TABLE IF NOT EXISTS seen (
+    user_id    TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    PRIMARY KEY (user_id, session_id)
 );
 CREATE TABLE IF NOT EXISTS events (
     session_id TEXT NOT NULL,
@@ -414,13 +440,44 @@ impl Store {
             }
             "turn_started" => {
                 tx.execute(
-                    "UPDATE sessions SET running = 1 WHERE session_id = ?1",
+                    "UPDATE sessions SET running = 1, asks_user = 0, last_asks = 0 WHERE session_id = ?1",
                     params![sid],
                 )?;
             }
             "turn_ended" => {
+                let completed =
+                    e.payload.get("reason").and_then(|v| v.as_str()) == Some("completed");
                 tx.execute(
-                    "UPDATE sessions SET running = 0 WHERE session_id = ?1",
+                    "UPDATE sessions SET running = 0,
+                        asks_user = CASE WHEN ?2 AND last_asks = 1 THEN 1 ELSE 0 END,
+                        attention_seq = CASE WHEN ?2 AND last_asks = 1 THEN ?3 ELSE attention_seq END
+                     WHERE session_id = ?1",
+                    params![sid, completed, e.seq as i64],
+                )?;
+            }
+            "assistant_message" => {
+                let text = e
+                    .payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim_end();
+                if !text.is_empty() {
+                    tx.execute(
+                        "UPDATE sessions SET last_asks = ?2 WHERE session_id = ?1",
+                        params![sid, text.ends_with('?')],
+                    )?;
+                }
+            }
+            "approval_requested" => {
+                tx.execute(
+                    "UPDATE sessions SET pending_approvals = pending_approvals + 1, attention_seq = ?2 WHERE session_id = ?1",
+                    params![sid, e.seq as i64],
+                )?;
+            }
+            "approval_resolved" => {
+                tx.execute(
+                    "UPDATE sessions SET pending_approvals = MAX(0, pending_approvals - 1) WHERE session_id = ?1",
                     params![sid],
                 )?;
             }
@@ -707,6 +764,61 @@ impl Store {
             "UPDATE nodes SET revoked_ms = ?2 WHERE node_id = ?1 AND revoked_ms IS NULL",
             params![node_id, now_ms],
         )? > 0)
+    }
+
+    /// Record that `user` has looked at a chat up to `seq`.
+    pub fn mark_seen(&self, user: &str, sid: SessionId, seq: u64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO seen (user_id, session_id, seq) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id, session_id) DO UPDATE SET seq = MAX(seq, excluded.seq)",
+            params![user, sid.to_string(), seq as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Chats that need something from the user: a pending approval, or a
+    /// finished turn that ended with a question the user has not seen.
+    /// `owner`: `Some` limits to that user's chats. Newest first.
+    pub fn attention(&self, owner: Option<&str>, viewer: &str) -> Result<Vec<Attention>> {
+        let conn = self.lock();
+        let mut st = conn.prepare_cached(
+            "SELECT s.session_id, s.title, s.pending_approvals, s.attention_seq, s.parent_id, s.updated_ms
+             FROM sessions s
+             LEFT JOIN seen v ON v.session_id = s.session_id AND v.user_id = ?2
+             WHERE (?1 IS NULL OR s.owner_id = ?1)
+               AND (s.pending_approvals > 0
+                    OR (s.asks_user = 1 AND s.attention_seq > COALESCE(v.seq, 0)))
+             ORDER BY s.updated_ms DESC LIMIT 20",
+        )?;
+        let rows = st.query_map(params![owner, viewer], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (sid, title, approvals, seq, parent_id, updated_ms) = row?;
+            out.push(Attention {
+                session_id: sid
+                    .parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?,
+                title,
+                reason: if approvals > 0 {
+                    "approval"
+                } else {
+                    "question"
+                },
+                seq: seq as u64,
+                parent_id,
+                updated_ms,
+            });
+        }
+        Ok(out)
     }
 
     pub fn attachment_put(

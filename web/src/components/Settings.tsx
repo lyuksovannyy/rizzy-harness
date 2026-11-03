@@ -5,11 +5,29 @@ import { t } from "../lib/i18n";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
 import { ACCENTS, ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
+import { enableNotify, notifyEnabled, notifySupported } from "../lib/notify";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Nodes } from "./Nodes";
 import { Users } from "./Users";
 
 export type Tab = "profile" | "preferences" | "memory" | "provider" | "nodes" | "password" | "users";
+
+function NotifyToggle() {
+  const [on, setOn] = useState(notifyEnabled());
+  if (!notifySupported()) {
+    return (
+      <div className="muted small">
+        Desktop notifications need a secure page: open this server on localhost, or start it with --tls.
+      </div>
+    );
+  }
+  return (
+    <label className="check">
+      <input type="checkbox" checked={on} onChange={async (e) => setOn(await enableNotify(e.target.checked))} />
+      Desktop notifications when a chat needs you (while a tab is open)
+    </label>
+  );
+}
 
 function PrefsEditor(props: {
   initial: Prefs;
@@ -97,6 +115,8 @@ export default function Settings(props: {
           <PrefsEditor initial={prefs} onSaved={props.onPrefs}>
             {(p, set) => (
               <>
+                <h3>Notifications</h3>
+                <NotifyToggle />
                 <h3>Search engine</h3>
                 <SearchEngineFields prefs={p} onChange={set} />
                 <div className="form stack">

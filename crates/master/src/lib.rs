@@ -557,7 +557,11 @@ impl Master {
             Ok(AppendOutcome::Applied) => {
                 let structural = matches!(
                     e.kind.as_str(),
-                    "session_created" | "turn_started" | "turn_ended"
+                    "session_created"
+                        | "turn_started"
+                        | "turn_ended"
+                        | "approval_requested"
+                        | "approval_resolved"
                 );
                 if e.kind == "tool_call_started"
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")

@@ -93,3 +93,11 @@ describe("search url and titles", () => {
     expect(titleFrom("   ")).toBe(t("session.untitled"));
   });
 });
+
+import { newlyWaiting } from "./notify";
+describe("notify", () => {
+  it("only reports chats that just started waiting", () => {
+    expect(newlyWaiting(["a", "b"], ["b", "c", "d"])).toEqual(["c", "d"]);
+    expect(newlyWaiting([], [])).toEqual([]);
+  });
+});

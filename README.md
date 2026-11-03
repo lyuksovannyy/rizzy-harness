@@ -108,7 +108,10 @@ model = "Systran/faster-whisper-small"
 
 In a git repository every agentic turn is checkpointed (under
 `refs/harness/`, without touching your index or branches) and its file
-changes can be undone from the chat.
+changes can be undone from the chat. Folders without git get a private
+checkpoint repository in the data directory (nothing is written into the
+folder). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+in `node.toml`). "Rewind" undoes a turn and everything after it.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
@@ -121,6 +124,17 @@ allow_outside_workspace = false
 ```
 
 `harness doctor` checks the setup.
+
+## Using it from other devices (WireGuard)
+
+Bind the UI to this machine's WireGuard address; it is then reachable only by
+your WireGuard peers. Add `--tls` so the browser treats the page as secure
+(dictation and notifications need that), and trust `keys/ui-cert.pem` in the
+data directory once on each device:
+
+```bash
+./target/release/harness serve --bind 10.8.0.1:7777 --tls
+```
 
 ## Remote worker nodes
 
@@ -195,6 +209,10 @@ node web/e2e/phase8.cjs target/debug/harness
 
 ```bash
 node web/e2e/phase9.cjs target/debug/harness
+```
+
+```bash
+node web/e2e/attention.cjs target/debug/harness
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

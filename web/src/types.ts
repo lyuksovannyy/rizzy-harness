@@ -251,3 +251,12 @@ export interface MemoryCfg {
   active_model: string | null;
   presets: { id: Preset; model: string; size: string }[];
 }
+
+export interface AttentionItem {
+  session_id: string;
+  title: string;
+  reason: "approval" | "question";
+  seq: number;
+  parent_id: string | null;
+  updated_ms: number;
+}

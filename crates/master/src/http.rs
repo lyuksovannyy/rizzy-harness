@@ -55,7 +55,9 @@ pub fn router(master: Master) -> Router {
             "/api/memory/{id}",
             axum::routing::patch(update_memory).delete(delete_memory),
         )
+        .route("/api/attention", get(attention))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/{id}/seen", post(mark_seen))
         .route(
             "/api/sessions/{id}",
             get(get_session).delete(delete_session),
@@ -1379,4 +1381,42 @@ async fn transcribe(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
     Ok(Json(json!({ "text": text })))
+}
+
+/// Chats waiting for the caller (approvals, unanswered questions).
+async fn attention(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let owner = who.user_id.clone();
+    let viewer = owner.clone().unwrap_or_default();
+    let items = m
+        .inner
+        .mirror
+        .call(move |s| s.attention(owner.as_deref(), &viewer))
+        .await?;
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+struct SeenBody {
+    seq: u64,
+}
+
+async fn mark_seen(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<SeenBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    let viewer = who.user_id.clone().unwrap_or_default();
+    m.inner
+        .mirror
+        .call(move |s| s.mark_seen(&viewer, sid, b.seq))
+        .await?;
+    let _ = m.inner.live.send(crate::Live::SessionsChanged);
+    Ok(Json(json!({ "ok": true })))
 }

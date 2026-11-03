@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
-import type { Agent, ModelInfo, NodeInfo, Prefs } from "../types";
+import type { Agent, ModelInfo, NodeInfo, Prefs, AttentionItem } from "../types";
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
+import { Attention } from "./Attention";
 import { Similar, type SimilarHandle } from "./Similar";
 
 export function Home(props: {
@@ -22,7 +23,9 @@ export function Home(props: {
   /** Memory proposals waiting for the user. */
   toReview?: number;
   voice?: boolean;
+  attention?: AttentionItem[];
 }) {
+  const [similarCount, setSimilarCount] = useState(0);
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
   const onTextChange = useCallback((text: string, mode: Mode) => setTyped({ text, mode }), []);
   const similar = useRef<SimilarHandle>(null);
@@ -56,7 +59,8 @@ export function Home(props: {
           onArrowDown={() => similar.current?.focusFirst() ?? false}
           voice={props.voice}
         />
-        <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} />
+        <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} onCount={setSimilarCount} />
+        {similarCount === 0 && <Attention items={props.attention ?? []} onOpen={props.onOpen} />}
         {!!props.toReview && (
           <a className="review-link small" href="#/settings/memory">
             {props.toReview === 1 ? t("home.toReviewOne") : t("home.toReview", { n: String(props.toReview) })}

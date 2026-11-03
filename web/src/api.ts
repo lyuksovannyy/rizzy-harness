@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AttentionItem,
   Decision,
   Effort,
   FactKind,
@@ -89,6 +90,8 @@ export const api = {
     model?: string;
     incognito?: boolean;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
+  attention: () => call<{ items: AttentionItem[] }>("GET", "/api/attention"),
+  markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),
   features: () => call<{ voice: boolean; memory: boolean }>("GET", "/api/features"),
   transcribe: async (audio: Blob): Promise<string> => {
     const res = await fetch("/api/transcribe", {

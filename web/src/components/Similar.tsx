@@ -30,9 +30,12 @@ export interface SimilarHandle {
   focusFirst: () => boolean;
 }
 
-export const Similar = forwardRef<SimilarHandle, { text: string; mode: Mode; onOpen: (id: string) => void }>(
-  function Similar({ text, mode, onOpen }, ref) {
+export const Similar = forwardRef<
+  SimilarHandle,
+  { text: string; mode: Mode; onOpen: (id: string) => void; onCount?: (n: number) => void }
+>(function Similar({ text, mode, onOpen, onCount }, ref) {
     const [hits, setHits] = useState<SearchHit[]>([]);
+    useEffect(() => onCount?.(hits.length), [hits.length, onCount]);
     const list = useRef<HTMLUListElement>(null);
     useImperativeHandle(ref, () => ({
       focusFirst: () => {
@@ -100,5 +103,4 @@ export const Similar = forwardRef<SimilarHandle, { text: string; mode: Mode; onO
         </ul>
       </div>
     );
-  },
-);
+  });

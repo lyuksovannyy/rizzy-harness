@@ -921,3 +921,45 @@ unversioned, pin the image.
   or files outside the repository).
 * Applying sub-agent results is `git apply` without three-way merge: any overlap is a
   conflict that a human or the orchestrator resolves.
+
+### 2026-11-03 — Follow-ups: WireGuard, checkpoints for every folder, "waiting for you"
+
+**Remote access = WireGuard (decided).** `serve --bind <wg address>` needs no flag
+when the address belongs to a WireGuard interface (kernel `DEVTYPE=wireguard`); any
+other non-loopback address still needs `--insecure-bind`, and binding to all
+interfaces is refused unless forced. **But WireGuard alone is not enough for the
+browser:** plain HTTP on a non-localhost address is not a *secure context*, so
+browsers block the microphone (dictation) and notifications. Measured with Chromium:
+`http://<ip>` → `isSecureContext=false`, no `getUserMedia`; `--tls` → both available.
+Hence `serve --tls`: HTTPS with a self-signed certificate for localhost, the bind
+address, the hostname and `--allowed-host` names (regenerated when they change; trust
+`keys/ui-cert.pem` once). Cookies get `Secure`. R5 is closed for WireGuard + `--tls`.
+Not tested here: a real WireGuard interface (no kernel module in this container); the
+uevent check and the refusal of a real non-WireGuard interface are tested.
+
+**Checkpoints for every folder, latest 10.** Folders inside a repository use its git
+(refs under `refs/harness/`, index/HEAD/branches untouched). Other folders get a
+private shadow repository in the node's data dir (`checkpoints/<hash>.git`; nothing
+written into the folder; dependency/build dirs excluded). `node.toml
+checkpoints_keep` (default 10, 0 = off) keeps only the latest N checkpoints per folder;
+order is logged in the git dir because commit dates have one-second resolution (a
+test caught pruning the wrong one). Shadow repos are gc'd right away. **Rewind** undoes a
+turn and every later turn in one step; undo/rewind record the restored state; an
+expired checkpoint says so. Snapshots give up after 60 s instead of hanging a turn.
+
+**"Waiting for you".** The mirror tracks pending approvals and turns that ended with a
+question (last answer ends in `?`), per user "seen" marks, and `/api/attention`.
+Home shows these chats under the bar in yellow; as soon as the typed text has
+similar-chat results, those replace the list. Opening a question marks it seen;
+approvals stay until decided. Sub-agent approvals appear here too (fixes the Phase 8
+risk). The tab title shows the count. Browser notifications (opt-in in Preferences)
+fire when a chat starts waiting and you are not looking at it.
+
+**Limits, stated plainly:** notifications work only while a tab is open (no Web Push
+server) and only on localhost or `--tls`. "Asked a question" is a heuristic (trailing
+`?`): it misses questions phrased without one and flags rhetorical ones.
+
+**Evidence:** Rust 142 (shadow repo, keep-latest pruning, rewind; attention for
+questions/approvals, seen, re-trigger). `web/e2e/attention.cjs` (yellow list,
+notification recorded, replaced by search results while typing, cleared on open);
+phases 3–9 e2e green.

@@ -1115,3 +1115,16 @@ details.summary p {
 .mic.recording {
   color: var(--danger, #d33);
 }
+
+/* Chats waiting for the user, under the bar */
+.attention .similar-label {
+  color: var(--fg);
+}
+.attention button {
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent);
+}
+.attention button:hover,
+.attention button:focus-visible {
+  background: color-mix(in srgb, var(--warn) 34%, transparent);
+}

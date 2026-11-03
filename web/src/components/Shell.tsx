@@ -6,7 +6,8 @@ import { type ClassifierState, decide, emptyState, parseState, record, serialize
 import { agenticBlockReason, type Mode } from "../lib/modes";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
-import type { Agent, Me, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
+import { newlyWaiting, notifyEnabled } from "../lib/notify";
+import type { Agent, AttentionItem, Me, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import { Sidebar } from "./Sidebar";
@@ -58,6 +59,8 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [memoryVersion, setMemoryVersion] = useState(0);
   const [toReview, setToReview] = useState(0);
   const [voice, setVoice] = useState(false);
+  const [attention, setAttention] = useState<AttentionItem[]>([]);
+  const waiting = useRef<string[] | null>(null);
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === "1";
@@ -76,9 +79,37 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     },
     [onLogout],
   );
+  const refreshAttention = useCallback(() => {
+    api
+      .attention()
+      .then((r) => {
+        const ids = r.items.map((a) => a.session_id);
+        // Notify about chats that just started waiting (not on first load).
+        if (waiting.current && notifyEnabled()) {
+          for (const id of newlyWaiting(waiting.current, ids)) {
+            const a = r.items.find((x) => x.session_id === id)!;
+            const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
+            if (viewing) continue;
+            const n = new Notification(a.title || "harness", {
+              body: a.reason === "approval" ? "Needs your approval" : "Asked you a question",
+              tag: id,
+            });
+            n.onclick = () => {
+              window.focus();
+              location.hash = `#/s/${id}`;
+              n.close();
+            };
+          }
+        }
+        waiting.current = ids;
+        setAttention(r.items);
+      })
+      .catch(() => {});
+  }, []);
   const refreshSessions = useCallback(() => {
     api.sessions().then((r) => setSessions(r.sessions)).catch(unauthorized);
-  }, [unauthorized]);
+    refreshAttention();
+  }, [unauthorized, refreshAttention]);
   const refreshModels = useCallback(() => {
     api.models().then((r) => setModels(r.models)).catch(unauthorized);
   }, [unauthorized]);
@@ -120,6 +151,24 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       .then((r) => setToReview(r.memories.filter((f) => f.status === "proposed").length))
       .catch(() => setToReview(0));
   }, [memoryVersion]);
+
+  // Tab title shows how many chats wait for the user.
+  useEffect(() => {
+    document.title = attention.length ? `(${attention.length}) harness` : "harness";
+  }, [attention.length]);
+
+  // Looking at a chat that asked a question counts as seeing it.
+  const viewing = route.kind === "session" ? route.id : null;
+  useEffect(() => {
+    const a = attention.find((x) => x.session_id === viewing && x.reason === "question");
+    if (!a) return;
+    const mark = () => {
+      if (document.visibilityState === "visible") void api.markSeen(a.session_id, a.seq).catch(() => {});
+    };
+    mark();
+    document.addEventListener("visibilitychange", mark);
+    return () => document.removeEventListener("visibilitychange", mark);
+  }, [viewing, attention]);
 
   // Accent colour from preferences.
   useEffect(() => {
@@ -286,6 +335,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               onOpen={(id) => navigate({ kind: "session", id })}
               toReview={toReview}
               voice={voice}
+              attention={attention}
             />
           )}
         </Suspense>
