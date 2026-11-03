@@ -103,6 +103,16 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
     },
+    /// Undo the file changes of one finished turn (git checkpoint).
+    #[serde(rename = "session.restore")]
+    Restore {
+        req_id: String,
+        session_id: SessionId,
+        turn_id: String,
+        /// Overwrite files edited after the turn too.
+        #[serde(default)]
+        force: bool,
+    },
     /// Delete a session and its log (cancels a running turn first).
     #[serde(rename = "session.delete")]
     Delete {
@@ -131,6 +141,7 @@ impl MasterToNode {
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::Delete { req_id, .. }
+            | MasterToNode::Restore { req_id, .. }
             | MasterToNode::ApprovalRespond { req_id, .. } => Some(req_id),
             MasterToNode::Welcome { .. } | MasterToNode::Resume { .. } => None,
         }

@@ -424,3 +424,71 @@ async fn recovers_interrupted_turn_on_start() {
         }
     }
 }
+
+/// Agentic turns in a git repo get before/after snapshots, and a turn's
+/// file changes can be undone over the protocol.
+#[tokio::test]
+async fn git_checkpoints_and_undo() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        ..Default::default()
+    })
+    .await;
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&h.ws)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success()
+        )
+    };
+    git(&["init", "-q"]);
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let sid = h.create().await;
+    h.send(MasterToNode::Prompt {
+        agent: None,
+        attachments: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: "run: echo v2 > keep.txt; echo new > made.txt".into(),
+    });
+    let EventKind::Checkpoint(after) = h
+        .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
+        .await
+    else {
+        unreachable!()
+    };
+    let mut files = after.files.clone();
+    files.sort();
+    assert_eq!(files, ["keep.txt", "made.txt"]);
+    let turn = after.turn_id.clone();
+    h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v2\n"
+    );
+
+    h.send(MasterToNode::Restore {
+        req_id: "r".into(),
+        session_id: sid,
+        turn_id: turn,
+        force: false,
+    });
+    h.until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::Restored))
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert!(!h.ws.join("made.txt").exists());
+}

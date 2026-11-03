@@ -96,6 +96,17 @@ pub struct SessionView {
     pub usage: Usage,
     /// Context size of the latest turn (its last model call's input).
     pub context_tokens: u64,
+    /// Git snapshots per turn (agentic sessions in a repository).
+    pub checkpoints: BTreeMap<String, CheckpointState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointState {
+    pub before: Option<String>,
+    pub after: Option<String>,
+    /// Files the turn changed.
+    pub files: Vec<String>,
+    pub restored: bool,
 }
 
 impl SessionView {
@@ -251,7 +262,17 @@ impl SessionView {
                     }
                 }
             }
-            EventKind::Checkpoint(_) => {}
+            EventKind::Checkpoint(c) => {
+                let st = self.checkpoints.entry(c.turn_id).or_default();
+                match c.phase {
+                    CheckpointPhase::Before => st.before = Some(c.git_ref),
+                    CheckpointPhase::After => {
+                        st.after = Some(c.git_ref);
+                        st.files = c.files;
+                    }
+                    CheckpointPhase::Restored => st.restored = true,
+                }
+            }
             EventKind::TurnEnded(t) => {
                 if let Some(u) = &t.usage {
                     self.usage.input_tokens += u.input_tokens;

@@ -1,6 +1,6 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
 import type { Live } from "../live";
@@ -9,6 +9,51 @@ import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ToolCard } from "./ToolCard";
+
+function Undo(props: { sessionId: string; turnId: string; files: string[]; restored: boolean; running: boolean }) {
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async (force: boolean) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.restoreTurn(props.sessionId, props.turnId, force);
+    } catch (x) {
+      setErr(x instanceof Error ? x.message : String(x));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="undo small">
+      <details>
+        <summary>
+          {props.files.length} file{props.files.length === 1 ? "" : "s"} changed{props.restored ? " · undone" : ""}
+        </summary>
+        <ul className="mono">
+          {props.files.map((f) => (
+            <li key={f}>{f}</li>
+          ))}
+        </ul>
+      </details>
+      {!props.restored && (
+        <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false)}>
+          Undo file changes
+        </button>
+      )}
+      {err && (
+        <div className="error-text">
+          {err}{" "}
+          {err.includes("changed after the turn") && (
+            <button type="button" className="link" onClick={() => void run(true)}>
+              Undo anyway
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
@@ -155,12 +200,21 @@ export default function Conversation(props: {
                       <p>{it.text}</p>
                     </details>
                   );
-                case "turn_end":
-                  return it.reason === "completed" ? null : (
-                    <div key={i} className={`divider r-${it.reason}`}>
-                      turn {it.reason}
+                case "turn_end": {
+                  const cp = view.checkpoints[it.turn_id];
+                  const undo =
+                    cp && cp.after && cp.files.length > 0 ? (
+                      <Undo key={`u${i}`} sessionId={sessionId} turnId={it.turn_id} files={cp.files} restored={cp.restored} running={running} />
+                    ) : null;
+                  return it.reason === "completed" ? (
+                    undo
+                  ) : (
+                    <div key={i}>
+                      <div className={`divider r-${it.reason}`}>turn {it.reason}</div>
+                      {undo}
                     </div>
                   );
+                }
               }
             })
           )}

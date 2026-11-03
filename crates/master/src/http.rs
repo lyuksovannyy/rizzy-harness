@@ -57,6 +57,10 @@ pub fn router(master: Master) -> Router {
         .route("/api/sessions/{id}/prompt", post(prompt))
         .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/agent", post(set_agent))
+        .route(
+            "/api/sessions/{id}/turns/{turn}/restore",
+            post(restore_turn),
+        )
         .route("/api/sessions/{id}/approvals/{approval_id}", post(approval))
         .route("/api/ws", get(crate::ws::upgrade));
     api.fallback(crate::assets::serve)
@@ -1285,5 +1289,23 @@ async fn revoke_node(
     if !m.revoke_node(&id).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "no such node".into()));
     }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct RestoreBody {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn restore_turn(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path((id, turn)): Path<(String, String)>,
+    Json(b): Json<RestoreBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.restore_turn(sid, turn, b.force).await?;
     Ok(Json(json!({ "ok": true })))
 }

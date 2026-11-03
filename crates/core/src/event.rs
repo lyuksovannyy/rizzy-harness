@@ -324,6 +324,8 @@ pub struct ApprovalResolved {
 pub enum CheckpointPhase {
     Before,
     After,
+    /// The turn's file changes were undone (back to its `before` snapshot).
+    Restored,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,6 +333,9 @@ pub struct Checkpoint {
     pub turn_id: String,
     pub phase: CheckpointPhase,
     pub git_ref: String,
+    /// `after`: files the turn changed; `restored`: files put back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

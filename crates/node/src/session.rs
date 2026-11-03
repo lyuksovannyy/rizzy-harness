@@ -38,6 +38,14 @@ pub(crate) struct Session {
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
 }
 
+/// A sub-agent's private worktree.
+struct Isolation {
+    root: PathBuf,
+    worktree: PathBuf,
+    base: String,
+    cwd: PathBuf,
+}
+
 /// Everything needed to start a session, already validated by the runtime.
 pub(crate) struct NewSession {
     pub title: String,
@@ -268,6 +276,7 @@ impl Session {
         }))
         .await;
         self.emit(EventKind::UserMessage(msg)).await;
+        let checkpoint = self.checkpoint(&turn_id, CheckpointPhase::Before).await;
 
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
@@ -307,6 +316,9 @@ impl Session {
             }))
             .await;
         }
+        if let Some((root, before)) = checkpoint {
+            self.checkpoint_after(&turn_id, &root, &before).await;
+        }
         let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
             TurnEndReason::Cancelled
         } else {
@@ -325,6 +337,91 @@ impl Session {
         (reason, usage)
     }
 
+    /// Snapshot the workspace before a turn (agentic sessions in a git repo).
+    async fn checkpoint(&self, turn_id: &str, phase: CheckpointPhase) -> Option<(PathBuf, String)> {
+        if self.profile != Profile::Agentic {
+            return None;
+        }
+        let root = crate::git::repo_root(&self.cwd).await?;
+        let r = format!("refs/harness/{}/{turn_id}/before", self.id);
+        match crate::git::snapshot(&root, &r, "harness: before turn").await {
+            Ok(sha) => {
+                self.emit(EventKind::Checkpoint(Checkpoint {
+                    turn_id: turn_id.into(),
+                    phase,
+                    git_ref: sha.clone(),
+                    files: vec![],
+                }))
+                .await;
+                Some((root, sha))
+            }
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+                None
+            }
+        }
+    }
+
+    async fn checkpoint_after(&self, turn_id: &str, root: &std::path::Path, before: &str) {
+        let r = format!("refs/harness/{}/{turn_id}/after", self.id);
+        let res = async {
+            let sha = crate::git::snapshot(root, &r, "harness: after turn").await?;
+            let files = crate::git::changed(root, before, &sha).await?;
+            Ok::<_, String>((sha, files))
+        }
+        .await;
+        match res {
+            Ok((sha, files)) => {
+                self.emit(EventKind::Checkpoint(Checkpoint {
+                    turn_id: turn_id.into(),
+                    phase: CheckpointPhase::After,
+                    git_ref: sha,
+                    files: files.into_iter().map(|(_, p)| p).collect(),
+                }))
+                .await
+            }
+            Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint failed"),
+        }
+    }
+
+    /// Undo a turn's file changes (see `git::restore`).
+    pub(crate) async fn restore(&self, turn_id: &str, force: bool) -> Result<(), String> {
+        if self.is_running() {
+            return Err("wait for the running turn to finish".into());
+        }
+        let id = self.id;
+        let events = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())?;
+        let view = SessionView::fold(&events).map_err(|e| e.to_string())?;
+        let cp = view
+            .checkpoints
+            .get(turn_id)
+            .ok_or("this turn has no checkpoint")?;
+        if cp.restored {
+            return Err("already undone".into());
+        }
+        let (Some(before), Some(after)) = (&cp.before, &cp.after) else {
+            return Err("this turn's checkpoint is incomplete".into());
+        };
+        let root = crate::git::repo_root(&self.cwd)
+            .await
+            .ok_or("the session folder is no longer a git repository")?;
+        let files = crate::git::restore(&root, before, after, force).await?;
+        self.emit(EventKind::Checkpoint(Checkpoint {
+            turn_id: turn_id.into(),
+            phase: CheckpointPhase::Restored,
+            git_ref: before.clone(),
+            files,
+        }))
+        .await;
+        Ok(())
+    }
+
     /// Run a delegated sub-task in a new child session and wait for it.
     async fn run_child(
         &self,
@@ -335,12 +432,19 @@ impl Session {
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         let child_id = SessionId::new();
         let short: String = task.chars().take(60).collect();
+        // A sub-agent that can change files works in its own git worktree,
+        // so parallel sub-agents do not trample each other.
+        let iso = self.isolate(&agent, child_id).await;
+        let cwd = iso
+            .as_ref()
+            .map(|i| i.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
         let child = Session::create(
             self.node.clone(),
             child_id,
             NewSession {
                 title: format!("@{}: {short}", agent.agent_id),
-                cwd: self.cwd.clone(),
+                cwd,
                 model: agent.model.clone().unwrap_or_else(|| self.model.clone()),
                 mode: self.mode,
                 profile: self.profile,
@@ -368,6 +472,10 @@ impl Session {
             attachments: vec![],
         };
         let (reason, usage) = child.run_turn(msg, Some(agent), cancel).await;
+        let merge_note = match iso {
+            Some(i) => Some(self.merge_back(i, child_id).await),
+            None => None,
+        };
         let text = self
             .node
             .cfg
@@ -382,12 +490,87 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_default();
+        let text = match merge_note {
+            Some(n) => format!("{text}\n\n[{n}]"),
+            None => text,
+        };
         Ok(harness_core::backend::DelegateOutcome {
             child: child_id,
             text,
             reason,
             usage,
         })
+    }
+
+    /// Prepare a worktree for a sub-agent with write access, seeded with the
+    /// current working state (uncommitted edits included).
+    async fn isolate(&self, agent: &AgentSpec, child: SessionId) -> Option<Isolation> {
+        if self.profile != Profile::Agentic
+            || !["write", "edit", "bash"]
+                .iter()
+                .any(|t| agent.allows_tool(t))
+        {
+            return None;
+        }
+        let root = crate::git::repo_root(&self.cwd).await?;
+        let res = async {
+            let base = crate::git::snapshot(
+                &root,
+                &format!("refs/harness/{child}/base"),
+                "harness: sub-agent base",
+            )
+            .await?;
+            let wt = crate::git::worktrees_dir(&root)
+                .await?
+                .join(child.to_string());
+            crate::git::worktree_add(&root, &wt, &base).await?;
+            let rel = self
+                .cwd
+                .strip_prefix(&root)
+                .unwrap_or(std::path::Path::new(""));
+            let cwd = wt.join(rel);
+            // The node's policy still decides where sessions may work.
+            if let Err(e) = self.node.cfg.policy.check_cwd(&cwd.display().to_string()) {
+                crate::git::worktree_remove(&root, &wt).await;
+                return Err(e);
+            }
+            Ok::<_, String>(Isolation {
+                root: root.clone(),
+                worktree: wt,
+                base,
+                cwd,
+            })
+        }
+        .await;
+        match res {
+            Ok(i) => Some(i),
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "no worktree for sub-agent; sharing the folder");
+                None
+            }
+        }
+    }
+
+    /// Bring a sub-agent's changes back into the main working directory.
+    async fn merge_back(&self, iso: Isolation, child: SessionId) -> String {
+        let result_ref = format!("refs/harness/{child}/result");
+        let note =
+            match crate::git::snapshot(&iso.worktree, &result_ref, "harness: sub-agent result")
+                .await
+            {
+                Err(e) => format!("its changes could not be collected: {e}"),
+                Ok(result) => match crate::git::apply(&iso.root, &iso.base, &result).await {
+                    Ok(0) => "no file changes".to_string(),
+                    Ok(n) => format!("{n} changed file(s) applied to the workspace"),
+                    Err(e) => format!(
+                        "its changes conflict with the workspace and were NOT applied ({e}); \
+                     to apply by hand: git diff {} {} | git apply",
+                        iso.base, result
+                    ),
+                },
+            };
+        crate::git::worktree_remove(&iso.root, &iso.worktree).await;
+        note
     }
 
     pub(crate) fn is_running(&self) -> bool {

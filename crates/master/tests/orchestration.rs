@@ -55,6 +55,7 @@ async fn session(m: &Master, ws: &str, agent: &str) -> SessionId {
             title: "orchestrate".into(),
             cwd: ws.into(),
             agent_id: Some(agent.into()),
+            approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
             ..Default::default()
         })
         .await
@@ -177,4 +178,92 @@ async fn cancelling_the_parent_cancels_children() {
     let kevs = turns_ended(&m, kid.session_id, 1).await;
     let kend = kevs.iter().rev().find(|e| e.kind == "turn_ended").unwrap();
     assert_eq!(kend.payload["reason"], "cancelled");
+}
+
+fn git(dir: &str, args: &[&str]) {
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn parallel_coders_get_worktrees_and_merge_back() {
+    let (m, ws, _d) = setup().await;
+    git(&ws, &["init", "-q"]);
+    std::fs::write(format!("{ws}/shared.txt"), "base\n").unwrap();
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-qm", "init"]);
+    // Uncommitted user work is visible to the sub-agents.
+    std::fs::write(format!("{ws}/draft.txt"), "wip\n").unwrap();
+
+    let sid = session(&m, &ws, "ultracode").await;
+    m.prompt(
+        sid,
+        "delegate: coder=run: cat draft.txt > a.txt | coder=run: echo b > b.txt".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 1).await;
+    let outs = outputs(&evs);
+    assert!(
+        outs.iter().all(|o| o.contains("1 changed file(s) applied")),
+        "{outs:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{ws}/a.txt")).unwrap(),
+        "wip\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{ws}/b.txt")).unwrap(),
+        "b\n"
+    );
+    // The children worked elsewhere, and their worktrees are gone.
+    let kids: Vec<_> = m
+        .inner_mirror()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .collect();
+    assert!(
+        kids.iter().all(|k| k.cwd.contains("harness-worktrees")),
+        "{kids:?}"
+    );
+    assert!(kids.iter().all(|k| !std::path::Path::new(&k.cwd).exists()));
+
+    // Two sub-agents editing the same file: one applies, the other is kept aside.
+    m.prompt(
+        sid,
+        "delegate: coder=run: echo one > shared.txt | coder=run: echo two > shared.txt".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let outs: Vec<String> = outputs(&evs).into_iter().skip(2).collect();
+    assert_eq!(
+        outs.iter()
+            .filter(|o| o.contains("applied to the workspace"))
+            .count(),
+        1,
+        "{outs:#?}"
+    );
+    assert_eq!(
+        outs.iter().filter(|o| o.contains("NOT applied")).count(),
+        1,
+        "{outs:#?}"
+    );
+    let now = std::fs::read_to_string(format!("{ws}/shared.txt")).unwrap();
+    assert!(now == "one\n" || now == "two\n");
 }

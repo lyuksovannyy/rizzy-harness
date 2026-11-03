@@ -386,6 +386,14 @@
   ],
   "expected": {
     "active_agent": "coder",
+    "checkpoints": {
+      "t1": {
+        "after": null,
+        "before": "refs/x",
+        "files": [],
+        "restored": false
+      }
+    },
     "context_tokens": 1,
     "head_seq": 29,
     "items": [

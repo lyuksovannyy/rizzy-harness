@@ -1075,3 +1075,15 @@ details.summary p {
   display: block;
   padding: 4px 12px 8px;
 }
+.undo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  color: var(--fg-2);
+  margin: 4px 0 12px;
+}
+.undo ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}

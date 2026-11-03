@@ -90,6 +90,14 @@ export interface SessionView {
   usage: Usage;
   /** Context size of the latest turn (its last model call's input). */
   context_tokens: number;
+  checkpoints: Record<string, CheckpointState>;
+}
+
+export interface CheckpointState {
+  before: string | null;
+  after: string | null;
+  files: string[];
+  restored: boolean;
 }
 
 export interface Usage {

@@ -15,6 +15,7 @@ export function emptyView(): SessionView {
     variant_selection: {},
     usage: { input_tokens: 0, output_tokens: 0, context_tokens: 0 },
     context_tokens: 0,
+    checkpoints: {},
   };
 }
 
@@ -175,8 +176,15 @@ export function apply(v: SessionView, e: RawEvent): void {
       }
       break;
     }
-    case "checkpoint":
+    case "checkpoint": {
+      const c = (v.checkpoints[p.turn_id] ??= { before: null, after: null, files: [], restored: false });
+      if (p.phase === "before") c.before = p.git_ref;
+      else if (p.phase === "after") {
+        c.after = p.git_ref;
+        c.files = p.files ?? [];
+      } else if (p.phase === "restored") c.restored = true;
       break;
+    }
     case "turn_ended":
       if (p.usage) {
         v.usage.input_tokens += p.usage.input_tokens;

@@ -89,6 +89,8 @@ export const api = {
     model?: string;
     incognito?: boolean;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
+  restoreTurn: (id: string, turn: string, force = false) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force }),
   deleteSession: (id: string) => call<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
   prompt: (
     id: string,

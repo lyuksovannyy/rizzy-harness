@@ -1,6 +1,7 @@
 //! Node runtime: owns sessions, runs agent turns, is the single writer of each
 //! session's event log, and talks to the master over a `NodeLink`.
 
+mod git;
 pub mod policy;
 mod session;
 
@@ -231,6 +232,18 @@ impl NodeRuntime {
                     },
                 )
                 .await
+            }
+            MasterToNode::Restore {
+                session_id,
+                turn_id,
+                force,
+                ..
+            } => {
+                self.audit("session.restore", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.restore(&turn_id, force).await,
+                    None => Err("unknown session".into()),
+                }
             }
             MasterToNode::Delete { session_id, .. } => {
                 self.audit("session.delete", session_id).await;

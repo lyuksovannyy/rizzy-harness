@@ -9,7 +9,11 @@ fn builtins_parse_and_scout_is_read_only() {
     assert_eq!(ultra.delegates, ["coder", "scout", "writer"]);
     let caps = ultra.spec.caps.unwrap();
     assert_eq!((caps.max_subagents, caps.max_tokens), (4, 200_000));
-    assert!(all.iter().filter(|a| a.id != "ultracode").all(|a| a.delegates.is_empty() && a.spec.caps.is_none()));
+    assert!(
+        all.iter()
+            .filter(|a| a.id != "ultracode")
+            .all(|a| a.delegates.is_empty() && a.spec.caps.is_none())
+    );
     let scout = all.iter().find(|a| a.id == "scout").unwrap();
     for t in ["bash", "write", "edit"] {
         assert!(!scout.spec.tools.allows(t), "scout must not get {t}");

@@ -710,6 +710,23 @@ impl Master {
         .await
     }
 
+    /// Undo one turn's file changes on the owning node.
+    pub async fn restore_turn(
+        &self,
+        sid: SessionId,
+        turn_id: String,
+        force: bool,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        self.send_command(&node, |req_id| MasterToNode::Restore {
+            req_id,
+            session_id: sid,
+            turn_id,
+            force,
+        })
+        .await
+    }
+
     /// Delete a session everywhere. The mirror copy goes (with a tombstone)
     /// even if the node is offline; the node is told again when it returns.
     pub async fn delete_session(&self, sid: SessionId) -> Result<(), CommandError> {
