@@ -53,9 +53,17 @@ pub struct AgentSpec {
     pub budget: Budget,
     /// Hash of everything above that changes behaviour.
     pub prompt_hash: String,
+    /// Tools withheld for this turn whatever `tools` says (e.g. `remember`
+    /// in an incognito chat). Set by the master per session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_tools: Vec<String>,
 }
 
 impl AgentSpec {
+    pub fn allows_tool(&self, tool: &str) -> bool {
+        self.tools.allows(tool) && !self.deny_tools.iter().any(|t| t == tool)
+    }
+
     pub fn agent_ref(&self) -> AgentRef {
         AgentRef {
             agent_id: self.agent_id.clone(),

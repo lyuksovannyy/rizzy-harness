@@ -135,6 +135,7 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
             effort: fm.effort,
             budget: fm.budget,
             prompt_hash,
+            deny_tools: vec![],
         },
     })
 }

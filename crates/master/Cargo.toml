@@ -23,6 +23,7 @@ harness-protocol.workspace = true
 harness-store.workspace = true
 harness-tools.workspace = true
 harness-web.workspace = true
+harness-memory.workspace = true
 hex.workspace = true
 jiff.workspace = true
 mime_guess.workspace = true
@@ -39,6 +40,7 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 harness-agent-native.workspace = true
 harness-agents.workspace = true
 harness-tools.workspace = true

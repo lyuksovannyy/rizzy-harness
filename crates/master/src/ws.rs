@@ -149,6 +149,8 @@ async fn run(m: Master, who: auth::Principal, socket: WebSocket) {
                     },
                     Ok(Live::SessionsChanged) => send(&mut sink, json!({"type": "sessions_changed"})).await,
                     Ok(Live::NodesChanged) => send(&mut sink, json!({"type": "nodes_changed"})).await,
+                    // No content: each client refetches its own memories.
+                    Ok(Live::MemoryChanged) => send(&mut sink, json!({"type": "memory_changed"})).await,
                     Err(RecvError::Lagged(_)) => {
                         let mut ok = true;
                         for (sid, last) in subs.iter_mut() {

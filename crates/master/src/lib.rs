@@ -34,6 +34,7 @@ pub enum Live {
     Event(RawEvent),
     SessionsChanged,
     NodesChanged,
+    MemoryChanged,
 }
 
 /// A model the UI may offer, with what it supports (PLAN.md §0: capabilities
@@ -78,6 +79,9 @@ pub struct MasterInner {
     providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
     /// Sessions with a re-sent `session.delete` in flight.
     redeleting: Mutex<HashSet<SessionId>>,
+    memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
+    /// The built-in store, when that is the backend (embedder switched live).
+    builtin_memory: Mutex<Option<Arc<harness_memory::SqliteMemory>>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -154,6 +158,8 @@ impl Master {
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),
                 redeleting: Mutex::new(HashSet::new()),
+                memory: Mutex::new(None),
+                builtin_memory: Mutex::new(None),
                 agents: Mutex::new(harness_agents::AgentSet::from_agents(
                     harness_agents::builtins(),
                     harness_agents::DEFAULT_AGENT,
@@ -170,6 +176,63 @@ impl Master {
 
     pub fn provider_runtime(&self) -> Option<Arc<providers::ProviderRuntime>> {
         lock(&self.inner.providers).clone()
+    }
+
+    pub fn set_memory(&self, m: Arc<dyn harness_memory::MemoryStore>) {
+        *lock(&self.inner.memory) = Some(m);
+    }
+
+    pub fn set_builtin_memory(&self, m: Arc<harness_memory::SqliteMemory>) {
+        *lock(&self.inner.builtin_memory) = Some(m);
+    }
+
+    pub fn builtin_memory(&self) -> Option<Arc<harness_memory::SqliteMemory>> {
+        lock(&self.inner.builtin_memory).clone()
+    }
+
+    pub fn memory(&self) -> Option<Arc<dyn harness_memory::MemoryStore>> {
+        lock(&self.inner.memory).clone()
+    }
+
+    /// A mirrored `remember` call becomes a proposal for the chat's owner
+    /// (never for incognito chats). The call id makes replays harmless.
+    async fn file_proposal(&self, e: &RawEvent) {
+        let Some(mem) = self.memory() else { return };
+        let (Some(text), Some(call_id)) = (
+            e.payload.pointer("/input/text").and_then(|v| v.as_str()),
+            e.payload.get("call_id").and_then(|v| v.as_str()),
+        ) else {
+            return;
+        };
+        let sid = e.session_id;
+        let Ok(Some(row)) = self.inner.mirror.call(move |s| s.session(sid)).await else {
+            return;
+        };
+        if row.incognito {
+            return;
+        }
+        let kind = match e.payload.pointer("/input/kind").and_then(|v| v.as_str()) {
+            Some("preference") => harness_memory::FactKind::Preference,
+            Some("location") => harness_memory::FactKind::Location,
+            _ => harness_memory::FactKind::Fact,
+        };
+        let res = mem
+            .add(harness_memory::NewFact {
+                owner_id: row.owner_id,
+                text: text.to_string(),
+                kind,
+                status: harness_memory::Status::Proposed,
+                source_session: Some(sid),
+                dedupe_key: Some(format!("{sid}:{call_id}")),
+            })
+            .await;
+        match res {
+            Ok(Some(_)) => {
+                let _ = self.inner.live.send(Live::MemoryChanged);
+            }
+            Ok(None) => {}
+            Err(err) => tracing::warn!(error = %err, "could not file a memory proposal"),
+        }
     }
 
     pub fn set_models(&self, models: Vec<ModelInfo>) {
@@ -445,6 +508,11 @@ impl Master {
                     e.kind.as_str(),
                     "session_created" | "turn_started" | "turn_ended"
                 );
+                if e.kind == "tool_call_started"
+                    && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
+                {
+                    self.file_proposal(&e).await;
+                }
                 let _ = self.inner.live.send(Live::Event(e));
                 if structural {
                     let _ = self.inner.live.send(Live::SessionsChanged);
@@ -554,6 +622,19 @@ impl Master {
         if let Some(c) = context {
             // prompt_hash still identifies the agent definition, not the context.
             agent.system_prompt = format!("{}\n\n{c}", agent.system_prompt);
+        }
+        if row.incognito {
+            // Incognito chats neither write nor read memory.
+            agent.deny_tools.push("remember".into());
+        } else if let Some(mem) = self.memory() {
+            match mem.recall(row.owner_id.as_deref(), &text, 6).await {
+                Ok(facts) => {
+                    if let Some(block) = harness_memory::context_block(&facts) {
+                        agent.system_prompt = format!("{}\n\n{block}", agent.system_prompt);
+                    }
+                }
+                Err(err) => tracing::warn!(error = %err, "memory recall failed"),
+            }
         }
         self.send_command(&row.node_id, |req_id| MasterToNode::Prompt {
             req_id,

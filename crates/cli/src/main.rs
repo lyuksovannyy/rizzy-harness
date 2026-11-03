@@ -157,7 +157,11 @@ async fn serve(
 
     // The master's own chat runtime: same session code, no workspace and no
     // file or shell tools; only the web tools from `[web]`.
-    let (web_tools, web_key) = harness_master::providers::web_tools(&cfg, dir)?;
+    let (mut web_tools, web_key) = harness_master::providers::web_tools(&cfg, dir)?;
+    let (memory, builtin_memory) = harness_master::providers::memory(&cfg, dir, &secrets)?;
+    if memory.is_some() {
+        web_tools.push(Arc::new(harness_memory::Remember));
+    }
     if let Some(k) = web_key {
         secrets.add(k);
     }
@@ -206,6 +210,13 @@ async fn serve(
     let master = Master::new(mirror, auth);
     master.set_provider_runtime(runtime);
     master.start_incognito_purge(cfg.chat.incognito_ttl());
+    if let Some(mem) = memory {
+        tracing::info!(backend = mem.name(), "memory");
+        master.set_memory(mem);
+    }
+    if let Some(b) = builtin_memory {
+        master.set_builtin_memory(b);
+    }
     let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
     for e in &agent_errors {
         tracing::warn!(error = %e, "skipping agent definition");

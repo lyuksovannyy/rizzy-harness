@@ -136,7 +136,7 @@ impl NativeBackend {
     fn tool_specs(&self, agent: Option<&harness_core::agent::AgentSpec>) -> Vec<ToolSpec> {
         self.tools
             .iter()
-            .filter(|t| agent.is_none_or(|a| a.tools.allows(t.name())))
+            .filter(|t| agent.is_none_or(|a| a.allows_tool(t.name())))
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -486,10 +486,7 @@ impl NativeBackend {
         allowed_for_session: &mut HashSet<String>,
         observed: &[String],
     ) -> ToolOutcome {
-        let offered = ctx
-            .agent
-            .as_ref()
-            .is_none_or(|a| a.tools.allows(&call.tool));
+        let offered = ctx.agent.as_ref().is_none_or(|a| a.allows_tool(&call.tool));
         let Some(tool) = self
             .tools
             .iter()
@@ -650,6 +647,7 @@ mod tests {
             effort: None,
             budget: Default::default(),
             prompt_hash: "h".into(),
+            deny_tools: vec![],
         }
     }
 

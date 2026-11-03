@@ -186,6 +186,14 @@ impl ProviderRuntime {
         model_list(&self.config(), self.provider.name())
     }
 
+    /// Validate and persist a config change that does not touch the provider.
+    pub fn save(&self, cfg: Config) -> anyhow::Result<()> {
+        cfg.validate()?;
+        cfg.save(&self.data_dir.join("harness.toml"))?;
+        *self.config.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
+        Ok(())
+    }
+
     /// Validate, build, persist to `harness.toml`, then switch. Running turns
     /// finish on the old provider; the next turn uses the new one.
     pub fn apply(&self, cfg: Config) -> anyhow::Result<()> {
@@ -221,4 +229,74 @@ pub fn model_config(id: &str, effort: bool, vision: bool) -> ModelConfig {
         effort,
         vision,
     }
+}
+
+fn secret(data_dir: &Path, name: &Option<String>) -> anyhow::Result<Option<Secret<String>>> {
+    match name {
+        None => Ok(None),
+        Some(n) => {
+            let path = data_dir.join("secrets.toml");
+            Ok(Some(crate::secrets::get(&path, n)?.with_context(|| {
+                format!("secret {n:?} not found in {}", path.display())
+            })?))
+        }
+    }
+}
+
+/// The embedder for `[memory]`, if one is configured.
+pub fn embedder(
+    cfg: &Config,
+    data_dir: &Path,
+    secrets: &SecretSet,
+) -> anyhow::Result<Option<harness_memory::Embedder>> {
+    let m = &cfg.memory;
+    if m.embeddings_url.is_empty() {
+        return Ok(None);
+    }
+    let key = secret(data_dir, &m.embeddings_key_secret)?;
+    if let Some(k) = &key {
+        secrets.add(k.clone());
+    }
+    Ok(Some(harness_memory::Embedder::new(
+        &m.embeddings_url,
+        &m.model(),
+        key,
+    )))
+}
+
+/// The configured store, and the built-in one again when that is it.
+pub type MemorySetup = (
+    Option<Arc<dyn harness_memory::MemoryStore>>,
+    Option<Arc<harness_memory::SqliteMemory>>,
+);
+
+/// The memory store for `[memory]`. The built-in store is also returned on
+/// its own so its embedder can be switched live.
+pub fn memory(
+    cfg: &Config,
+    data_dir: &Path,
+    secrets: &SecretSet,
+) -> anyhow::Result<MemorySetup> {
+    use crate::config::MemoryBackend;
+    Ok(match cfg.memory.backend {
+        MemoryBackend::Off => (None, None),
+        MemoryBackend::Mem0 => {
+            let key = secret(data_dir, &cfg.memory.mem0_key_secret)?;
+            if let Some(k) = &key {
+                secrets.add(k.clone());
+            }
+            let m: Arc<dyn harness_memory::MemoryStore> =
+                Arc::new(harness_memory::Mem0Memory::new(&cfg.memory.mem0_url, key));
+            (Some(m), None)
+        }
+        MemoryBackend::Builtin => {
+            let s = Arc::new(
+                harness_memory::SqliteMemory::open(&data_dir.join("memory.db"))
+                    .map_err(|e| anyhow::anyhow!("opening memory.db: {e}"))?,
+            );
+            s.set_embedder(embedder(cfg, data_dir, secrets)?);
+            let m: Arc<dyn harness_memory::MemoryStore> = s.clone();
+            (Some(m), Some(s))
+        }
+    })
 }

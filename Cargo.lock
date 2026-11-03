@@ -1134,6 +1134,7 @@ dependencies = [
  "harness-agents",
  "harness-core",
  "harness-master",
+ "harness-memory",
  "harness-node",
  "harness-store",
  "harness-tools",
@@ -1200,12 +1201,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "async-trait",
  "axum",
  "futures",
  "getrandom 0.4.3",
  "harness-agent-native",
  "harness-agents",
  "harness-core",
+ "harness-memory",
  "harness-node",
  "harness-protocol",
  "harness-store",
@@ -1226,6 +1229,25 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "harness-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "harness-core",
+ "harness-tools",
+ "jiff",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
 ]
 

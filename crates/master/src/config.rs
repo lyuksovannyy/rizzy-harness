@@ -17,6 +17,63 @@ pub struct Config {
     pub models: Vec<ModelConfig>,
     pub chat: ChatConfig,
     pub web: WebConfig,
+    pub memory: MemoryConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryBackend {
+    /// SQLite in the data dir; keyword recall, plus vectors if embeddings are set.
+    #[default]
+    Builtin,
+    /// A self-hosted mem0 server (restart to switch).
+    Mem0,
+    Off,
+}
+
+/// Long-term memory. Embedding settings apply live; the backend needs a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    pub backend: MemoryBackend,
+    /// OpenAI-compatible base URL serving `/embeddings` (e.g. Ollama's
+    /// `http://localhost:11434/v1`). Empty: keyword recall only.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub embeddings_url: String,
+    /// Empty: the preset's model.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub embeddings_model: String,
+    pub preset: harness_memory::Preset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embeddings_key_secret: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mem0_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem0_key_secret: Option<String>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            backend: MemoryBackend::Builtin,
+            embeddings_url: String::new(),
+            embeddings_model: String::new(),
+            preset: harness_memory::Preset::Balanced,
+            embeddings_key_secret: None,
+            mem0_url: String::new(),
+            mem0_key_secret: None,
+        }
+    }
+}
+
+impl MemoryConfig {
+    pub fn model(&self) -> String {
+        if self.embeddings_model.is_empty() {
+            self.preset.ollama_model().to_string()
+        } else {
+            self.embeddings_model.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -156,6 +213,13 @@ impl Config {
         let p = &self.provider;
         if p.api_key_env.is_some() && p.api_key_secret.is_some() {
             bail!("[provider] set api_key_env or api_key_secret, not both");
+        }
+        if self.memory.backend == MemoryBackend::Mem0 && self.memory.mem0_url.is_empty() {
+            bail!("[memory] backend = \"mem0\" needs mem0_url");
+        }
+        let eu = &self.memory.embeddings_url;
+        if !eu.is_empty() && !eu.starts_with("http://") && !eu.starts_with("https://") {
+            bail!("[memory] embeddings_url must be an http(s) URL");
         }
         match self.web.search {
             SearchKind::Searxng if self.web.searxng_url.is_empty() => {

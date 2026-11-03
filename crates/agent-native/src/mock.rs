@@ -5,6 +5,7 @@
 //! * `read: <path>`  -> one `read` tool call, then a summary
 //! * `search: <q>`  -> one `web_search` tool call, then a summary
 //! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
+//! * `remember: <t>` -> one `remember` tool call (a memory proposal)
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * anything else   -> echoes the message back, streamed word by word
 
@@ -111,6 +112,9 @@ impl Provider for Mock {
         }
         if let Some(q) = user.strip_prefix("search:") {
             return Ok(call("web_search", json!({"query": q.trim()})));
+        }
+        if let Some(t) = user.strip_prefix("remember:") {
+            return Ok(call("remember", json!({"text": t.trim(), "kind": "fact"})));
         }
         if let Some(u) = user.strip_prefix("fetch:") {
             return Ok(call("web_fetch", json!({"url": u.trim()})));

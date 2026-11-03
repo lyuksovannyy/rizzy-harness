@@ -39,6 +39,12 @@ pub fn router(master: Master) -> Router {
                 crate::attachments::MAX_UPLOAD,
             )),
         )
+        .route("/api/memory", get(list_memory).post(add_memory))
+        .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
+        .route(
+            "/api/memory/{id}",
+            axum::routing::patch(update_memory).delete(delete_memory),
+        )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
             "/api/sessions/{id}",
@@ -1035,4 +1041,195 @@ async fn approval(
     let sid = visible_session(&m, &who, &id).await?.session_id;
     m.respond_approval(sid, approval_id, b.decision).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+fn memory_store(m: &Master) -> ApiResult<std::sync::Arc<dyn harness_memory::MemoryStore>> {
+    m.memory().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "memory is not set up on this server".into(),
+        )
+    })
+}
+
+fn memory_err(e: harness_memory::MemoryError) -> ApiError {
+    match e {
+        harness_memory::MemoryError::Invalid(msg) => ApiError(StatusCode::BAD_REQUEST, msg),
+        other => ApiError(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+    }
+}
+
+async fn list_memory(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let mem = memory_store(&m)?;
+    let facts = mem.list(who.user_id.as_deref()).await.map_err(memory_err)?;
+    Ok(Json(json!({ "memories": facts, "backend": mem.name() })))
+}
+
+#[derive(Deserialize)]
+struct NewMemoryBody {
+    text: String,
+    #[serde(default)]
+    kind: harness_memory::FactKind,
+}
+
+/// Added by the user directly: active at once.
+async fn add_memory(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<NewMemoryBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let mem = memory_store(&m)?;
+    let f = mem
+        .add(harness_memory::NewFact {
+            owner_id: who.user_id.clone(),
+            text: b.text,
+            kind: b.kind,
+            status: harness_memory::Status::Active,
+            source_session: None,
+            dedupe_key: None,
+        })
+        .await
+        .map_err(memory_err)?;
+    let _ = m.inner.live.send(crate::Live::MemoryChanged);
+    Ok(Json(json!(f)))
+}
+
+/// The fact, if it belongs to the caller (404 otherwise, never 403).
+async fn own_fact(
+    m: &Master,
+    who: &auth::Principal,
+    id: &str,
+) -> ApiResult<(
+    std::sync::Arc<dyn harness_memory::MemoryStore>,
+    harness_memory::Fact,
+)> {
+    let mem = memory_store(m)?;
+    match mem.get(id).await.map_err(memory_err)? {
+        Some(f) if f.owner_id == who.user_id => Ok((mem, f)),
+        _ => Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into())),
+    }
+}
+
+#[derive(Deserialize)]
+struct MemoryPatch {
+    #[serde(default)]
+    text: Option<String>,
+    /// `active` confirms a proposal.
+    #[serde(default)]
+    status: Option<harness_memory::Status>,
+}
+
+async fn update_memory(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<MemoryPatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let (mem, _) = own_fact(&m, &who, &id).await?;
+    let f = mem
+        .update(&id, b.text, b.status)
+        .await
+        .map_err(memory_err)?;
+    let _ = m.inner.live.send(crate::Live::MemoryChanged);
+    Ok(Json(json!(f)))
+}
+
+async fn delete_memory(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let (mem, _) = own_fact(&m, &who, &id).await?;
+    mem.delete(&id).await.map_err(memory_err)?;
+    let _ = m.inner.live.send(crate::Live::MemoryChanged);
+    Ok(Json(json!({ "ok": true })))
+}
+
+fn memory_cfg_json(m: &Master, cfg: &crate::config::Config) -> serde_json::Value {
+    use harness_memory::Preset;
+    let mc = &cfg.memory;
+    let presets: Vec<serde_json::Value> = [Preset::Fast, Preset::Balanced, Preset::Best]
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p,
+                "model": p.ollama_model(),
+                "size": match p { Preset::Fast => "~50 MB", Preset::Balanced => "~280 MB", Preset::Best => "~670 MB" },
+            })
+        })
+        .collect();
+    json!({
+        "backend": mc.backend,
+        "embeddings_url": mc.embeddings_url,
+        "embeddings_model": mc.embeddings_model,
+        "preset": mc.preset,
+        "model": mc.model(),
+        "active_model": m.builtin_memory().and_then(|b| b.embedder_model()),
+        "presets": presets,
+    })
+}
+
+async fn get_memory_cfg(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    Ok(Json(memory_cfg_json(&m, &runtime(&m)?.config())))
+}
+
+#[derive(Deserialize)]
+struct MemoryCfgBody {
+    /// Empty turns vector recall off (keyword recall stays).
+    #[serde(default)]
+    embeddings_url: String,
+    #[serde(default)]
+    embeddings_model: String,
+    #[serde(default)]
+    preset: harness_memory::Preset,
+}
+
+/// Change embeddings live. A non-empty URL is tested with one embedding
+/// call first, so a typo cannot silently degrade recall.
+async fn put_memory_cfg(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<MemoryCfgBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let mut cfg = rt.config();
+    if cfg.memory.backend != crate::config::MemoryBackend::Builtin {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "embeddings settings apply to the built-in memory only".into(),
+        ));
+    }
+    cfg.memory.embeddings_url = b.embeddings_url.trim().to_string();
+    cfg.memory.embeddings_model = b.embeddings_model.trim().to_string();
+    cfg.memory.preset = b.preset;
+    cfg.validate()
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let emb = crate::providers::embedder(&cfg, rt.data_dir(), &rt.secrets)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if let Some(e) = &emb {
+        e.embed(&["test".to_string()]).await.map_err(|err| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("{err} (is the model `{}` pulled?)", e.model),
+            )
+        })?;
+    }
+    rt.save(cfg.clone())
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(bm) = m.builtin_memory() {
+        bm.set_embedder(emb);
+    }
+    Ok(Json(memory_cfg_json(&m, &cfg)))
 }
