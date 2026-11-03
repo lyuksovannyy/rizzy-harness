@@ -26,6 +26,8 @@ harness-web.workspace = true
 hex.workspace = true
 jiff.workspace = true
 mime_guess.workspace = true
+# PDF text for attachments (MIT). Parsing runs in spawn_blocking: it can panic.
+pdf-extract = "0.12.1"
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true

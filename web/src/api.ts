@@ -14,6 +14,7 @@ import type {
   Role,
   SearchHit,
   SessionRow,
+  UploadedAttachment,
   User,
 } from "./types";
 
@@ -76,9 +77,25 @@ export const api = {
     node_id?: string;
     agent_id?: string;
     model?: string;
+    incognito?: boolean;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
-  prompt: (id: string, text: string, opts: { agent_id?: string; effort?: Effort } = {}) =>
-    call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
+  deleteSession: (id: string) => call<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
+  prompt: (
+    id: string,
+    text: string,
+    opts: { agent_id?: string; effort?: Effort; attachments?: string[] } = {},
+  ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
+  upload: async (file: File): Promise<UploadedAttachment> => {
+    const res = await fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/octet-stream" },
+      body: file,
+    });
+    const data = (await res.json().catch(() => null)) as UploadedAttachment & { error?: string };
+    if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
+    return data;
+  },
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
   agents: () => call<{ agents: Agent[]; default: string }>("GET", "/api/agents"),
   models: () => call<{ models: ModelInfo[] }>("GET", "/api/models"),

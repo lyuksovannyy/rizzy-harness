@@ -5,8 +5,8 @@ for coding agents, with the agent loop running on the machine that owns the
 code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
-**Status:** Phases 1–5 done (single machine, accounts, UI, bar intelligence,
-onboarding). Remote nodes are Phase 8.
+**Status:** Phases 1–6 done (single machine, accounts, UI, bar intelligence,
+onboarding, chat capability). Remote nodes are Phase 8.
 
 ## Quick start
 
@@ -72,6 +72,20 @@ supported until risk R8 in `PLAN.md` is fixed.
 
 Local Ollama: `base_url = "http://localhost:11434/v1"`, no key.
 
+Chats and web tools (restart after changing):
+
+```toml
+[chat]
+incognito_ttl_minutes = 1440         # incognito chats deleted after this idle time
+summarize_after_tokens = 24000       # 0 = never summarise older turns
+
+[web]
+search = "searxng"                   # none | searxng | brave
+searxng_url = "http://localhost:8888" # JSON format must be enabled in SearXNG
+# brave_key_secret = "brave"         # for search = "brave" ([keys] brave = "..." in secrets.toml)
+fetch = true                         # web_fetch: public addresses only, URLs from you or a search
+```
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 
@@ -122,6 +136,10 @@ node web/e2e/phase4.cjs target/debug/harness
 
 ```bash
 node web/e2e/phase5.cjs target/debug/harness
+```
+
+```bash
+node web/e2e/phase6.cjs target/debug/harness
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

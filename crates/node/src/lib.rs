@@ -240,11 +240,12 @@ impl NodeRuntime {
                 session_id,
                 text,
                 agent,
+                attachments,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.prompt(text, agent).await,
+                    Some(s) => s.prompt(text, agent, attachments).await,
                     None => Err("unknown session".into()),
                 }
             }

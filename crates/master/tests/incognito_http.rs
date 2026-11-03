@@ -229,3 +229,138 @@ async fn deleting_a_chat_removes_it_everywhere() {
         "deleted text left on disk"
     );
 }
+
+async fn upload(t: &T, cookie: &str, name: &str, body: &[u8]) -> (StatusCode, Value) {
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/attachments?name={name}", t.base))
+        .header("cookie", cookie)
+        .body(body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let st = r.status();
+    (st, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn attachments_are_owned_and_used_once() {
+    let t = start(None).await;
+    let alex = login(&t).await;
+    let (st, a) = upload(&t, &alex, "notes.md", b"# hi\nbuy milk").await;
+    assert_eq!(st, StatusCode::OK, "{a}");
+    assert_eq!(a["name"], "notes.md");
+    let (st, _) = upload(&t, &alex, "x.bin", &[0, 1, 2]).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    let id = a["attachment_id"].as_str().unwrap().to_string();
+
+    // Another account cannot use alex's upload.
+    req(
+        &t,
+        Method::POST,
+        "/api/users",
+        Some(json!({"username": "bob", "password": "temporary pw"})),
+        &alex,
+    )
+    .await;
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/login", t.base))
+        .json(&json!({"username": "bob", "password": "temporary pw"}))
+        .send()
+        .await
+        .unwrap();
+    let bob = r.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/me/password", t.base))
+        .header("cookie", &bob)
+        .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
+        .send()
+        .await
+        .unwrap();
+    let bob = r.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let (_, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "chat"})),
+        &bob,
+    )
+    .await;
+    let bsid = v["session_id"].as_str().unwrap().to_string();
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{bsid}/prompt"),
+        Some(json!({"text": "read it", "attachments": [id]})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Alex sends it: the text is in the event; the upload is consumed.
+    let (_, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "chat"})),
+        &alex,
+    )
+    .await;
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "read it", "attachments": [id]})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "again", "attachments": [id]})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let mut found = false;
+    for _ in 0..200 {
+        let (_, v) = req(
+            &t,
+            Method::GET,
+            &format!("/api/sessions/{sid}/events"),
+            None,
+            &alex,
+        )
+        .await;
+        let evs = v["events"].as_array().unwrap();
+        if let Some(u) = evs.iter().find(|e| e["kind"] == "user_message") {
+            assert_eq!(u["payload"]["attachments"][0]["text"], "# hi\nbuy milk");
+        }
+        if evs.iter().any(|e| {
+            e["kind"] == "assistant_message"
+                && e["payload"]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("buy milk")
+        }) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(found, "the model saw the attachment text");
+}

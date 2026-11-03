@@ -52,7 +52,7 @@ export interface ApprovalState {
 }
 
 export type Item =
-  | { type: "user"; turn_id: string; text: string }
+  | { type: "user"; turn_id: string; text: string; attachments?: string[] }
   | {
       type: "assistant";
       message_id: string;
@@ -73,7 +73,8 @@ export type Item =
     }
   | { type: "error"; message: string }
   | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
-  | { type: "agent_changed"; agent: AgentRef };
+  | { type: "agent_changed"; agent: AgentRef }
+  | { type: "summary"; through_seq: number; text: string };
 
 export interface SessionView {
   session_id: string | null;
@@ -86,6 +87,23 @@ export interface SessionView {
   active_agent: string | null;
   running_agent: AgentRef | null;
   variant_selection: Record<string, string>;
+  usage: Usage;
+  /** Context size of the latest turn (its last model call's input). */
+  context_tokens: number;
+}
+
+export interface Usage {
+  input_tokens: number;
+  output_tokens: number;
+  context_tokens: number;
+}
+
+export interface UploadedAttachment {
+  attachment_id: string;
+  name: string;
+  mime: string;
+  chars: number;
+  truncated: boolean;
 }
 
 export type Effort = "low" | "medium" | "high" | "max";
@@ -157,6 +175,7 @@ export interface SessionRow {
   owner_id: string | null;
   agent_id: string | null;
   profile: Profile | null;
+  incognito: boolean;
 }
 
 export interface NodeInfo {

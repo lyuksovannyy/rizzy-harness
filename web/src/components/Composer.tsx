@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
-import type { Agent, Effort, ModelInfo, NodeInfo } from "../types";
+import { api } from "../api";
+import type { Agent, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -32,7 +33,12 @@ export interface Submission {
   effort: Effort | null;
   nodeId: string;
   cwd: string;
+  /** Home, Ask mode: a temporary chat. */
+  incognito: boolean;
+  attachments: string[];
 }
+
+const MAX_ATTACHMENTS = 5;
 
 export function Composer(props: {
   /** `home` shows the mode switch and model picker; `session` is a reply box. */
@@ -77,6 +83,10 @@ export function Composer(props: {
   const [pick, setPick] = useState(0);
   const [popupClosed, setPopupClosed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [incognito, setIncognito] = useState(false);
+  const [files, setFiles] = useState<UploadedAttachment[]>([]);
+  const [uploading, setUploading] = useState(0);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [err, setErr] = useState<string | null>(null);
   const ta = useRef<HTMLTextAreaElement>(null);
   // Caret to restore right after React commits a programmatic text change,
@@ -147,7 +157,7 @@ export function Composer(props: {
 
   const submit = async () => {
     const body = text.trim();
-    if (!body || busy || props.running) return;
+    if (!body || busy || uploading || props.running) return;
     if (mode === "agentic" && (!cwd.trim() || !nodeId)) {
       setErr(t("composer.folder"));
       return;
@@ -163,15 +173,35 @@ export function Composer(props: {
         effort: effortOk ? effort : null,
         nodeId,
         cwd: cwd.trim(),
+        incognito: home && mode === "ask" && incognito,
+        attachments: files.map((f) => f.attachment_id),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
       setText("");
+      setFiles([]);
       setManual(false);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const addFiles = async (list: FileList | null) => {
+    if (!list) return;
+    const picked = Array.from(list).slice(0, MAX_ATTACHMENTS - files.length);
+    setErr(null);
+    for (const f of picked) {
+      setUploading((n) => n + 1);
+      try {
+        const up = await api.upload(f);
+        setFiles((prev) => [...prev, up]);
+      } catch (x) {
+        setErr(`${f.name}: ${x instanceof Error ? x.message : String(x)}`);
+      } finally {
+        setUploading((n) => n - 1);
+      }
     }
   };
 
@@ -259,7 +289,50 @@ export function Composer(props: {
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
           onKeyDown={onKeyDown}
         />
+        {files.length > 0 && (
+          <ul className="chips" aria-label={t("composer.attachments")}>
+            {files.map((f) => (
+              <li key={f.attachment_id} className="chip" title={`${f.chars.toLocaleString()} ${t("composer.chars")}`}>
+                📄 {f.name}
+                {f.truncated && <span className="muted"> ({t("composer.truncated")})</span>}
+                <button
+                  type="button"
+                  className="link"
+                  aria-label={`${t("composer.remove")} ${f.name}`}
+                  onClick={() => setFiles((prev) => prev.filter((x) => x !== f))}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="composer-row">
+          {mode !== "search" && (
+            <>
+              <button
+                type="button"
+                className="icon attach"
+                aria-label={t("composer.attach")}
+                title={t("composer.attachHint")}
+                disabled={files.length >= MAX_ATTACHMENTS || uploading > 0}
+                onClick={() => fileInput.current?.click()}
+              >
+                {uploading > 0 ? "…" : "+"}
+              </button>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                accept=".txt,.md,.markdown,.csv,.json,.xml,.yaml,.yml,.toml,.html,.log,.pdf,.rs,.ts,.tsx,.js,.py,.go,.java,.c,.h,.cpp,.sh,.sql,text/*,application/pdf"
+                onChange={(e) => {
+                  void addFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </>
+          )}
           {mode !== "search" && (
             <select
               className="pill"
@@ -305,6 +378,17 @@ export function Composer(props: {
             </select>
           )}
           <span className="spacer" />
+          {home && mode === "ask" && (
+            <button
+              type="button"
+              className={`pill incognito ${incognito ? "on" : ""}`}
+              aria-pressed={incognito}
+              title={t("composer.incognitoHint")}
+              onClick={() => setIncognito((v) => !v)}
+            >
+              {t("composer.incognito")}
+            </button>
+          )}
           {home && (
             <div
               className={`mode-switch ${!manual && text.trim() ? "auto" : ""}`}
@@ -344,7 +428,7 @@ export function Composer(props: {
               type="button"
               className="send"
               onClick={() => void submit()}
-              disabled={busy || !text.trim()}
+              disabled={busy || uploading > 0 || !text.trim()}
               aria-label={t("composer.send")}
             >
               ↑

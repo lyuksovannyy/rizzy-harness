@@ -13,6 +13,8 @@ export function emptyView(): SessionView {
     active_agent: null,
     running_agent: null,
     variant_selection: {},
+    usage: { input_tokens: 0, output_tokens: 0, context_tokens: 0 },
+    context_tokens: 0,
   };
 }
 
@@ -34,6 +36,7 @@ const KNOWN = new Set([
   "error",
   "agent_changed",
   "variant_selected",
+  "history_summarized",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -92,9 +95,13 @@ export function apply(v: SessionView, e: RawEvent): void {
       v.running_turn = p.turn_id;
       v.running_agent = p.agent ?? null;
       break;
-    case "user_message":
-      v.items.push({ type: "user", turn_id: p.turn_id, text: p.text });
+    case "user_message": {
+      const item: Extract<Item, { type: "user" }> = { type: "user", turn_id: p.turn_id, text: p.text };
+      const names = ((p.attachments ?? []) as { name: string }[]).map((a) => a.name);
+      if (names.length) item.attachments = names;
+      v.items.push(item);
       break;
+    }
     case "assistant_delta": {
       const a = lastAssistant(v, p.message_id);
       if (a) a.text += p.text;
@@ -171,6 +178,11 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "checkpoint":
       break;
     case "turn_ended":
+      if (p.usage) {
+        v.usage.input_tokens += p.usage.input_tokens;
+        v.usage.output_tokens += p.usage.output_tokens;
+        v.context_tokens = p.usage.context_tokens ?? 0;
+      }
       v.running_turn = null;
       v.running_agent = null;
       v.items.push({ type: "turn_end", turn_id: p.turn_id, reason: p.reason });
@@ -184,6 +196,9 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "variant_selected":
       v.variant_selection[p.group] = p.message_id;
+      break;
+    case "history_summarized":
+      v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
       break;
   }
 }

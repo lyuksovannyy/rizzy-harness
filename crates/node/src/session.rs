@@ -211,6 +211,7 @@ impl Session {
         self: &Arc<Self>,
         text: String,
         agent: Option<AgentSpec>,
+        attachments: Vec<Attachment>,
     ) -> Result<(), String> {
         let turn_id = new_id();
         let cancel = CancellationToken::new();
@@ -225,17 +226,23 @@ impl Session {
             });
         }
         let this = self.clone();
-        tokio::spawn(async move { this.run_turn(turn_id, text, agent, cancel).await });
+        let msg = UserMessage {
+            turn_id: turn_id.clone(),
+            text,
+            attachments,
+        };
+        tokio::spawn(async move { this.run_turn(msg, agent, cancel).await });
         Ok(())
     }
 
     async fn run_turn(
         self: Arc<Self>,
-        turn_id: String,
-        text: String,
+        msg: UserMessage,
         agent: Option<AgentSpec>,
         cancel: CancellationToken,
     ) {
+        let turn_id = msg.turn_id.clone();
+        let user_text = msg.model_text();
         let id = self.id;
         let history = self
             .node
@@ -249,11 +256,7 @@ impl Session {
             turn_id: turn_id.clone(),
         }))
         .await;
-        self.emit(EventKind::UserMessage(UserMessage {
-            turn_id: turn_id.clone(),
-            text: text.clone(),
-        }))
-        .await;
+        self.emit(EventKind::UserMessage(msg)).await;
 
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
@@ -265,7 +268,7 @@ impl Session {
                 .run_turn(TurnCtx {
                     turn_id: tid,
                     history,
-                    user_text: text,
+                    user_text,
                     cwd: this.cwd.clone(),
                     model: agent
                         .as_ref()

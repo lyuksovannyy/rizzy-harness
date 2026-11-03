@@ -2,12 +2,17 @@
 // new-tab home screen stays small.
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { api } from "../api";
+import { t } from "../lib/i18n";
 import type { Live } from "../live";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ToolCard } from "./ToolCard";
+
+function compact(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
+}
 
 export default function Conversation(props: {
   live: Live;
@@ -39,6 +44,12 @@ export default function Conversation(props: {
   const activeAgent = view?.active_agent ?? props.row?.agent_id ?? "general";
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
+  const incognito = !!(meta?.incognito ?? props.row?.incognito);
+  const remove = async () => {
+    if (!confirm(t("conv.deleteConfirm"))) return;
+    await api.deleteSession(sessionId).catch(() => {});
+    location.hash = "#/";
+  };
 
   return (
     <section className="conversation">
@@ -50,9 +61,29 @@ export default function Conversation(props: {
             <span className="muted">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <span className="mono muted ellipsis">{meta?.cwd}</span>}
+            {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
+              <span
+                className="muted meter"
+                title={`${view.usage.input_tokens.toLocaleString()} in · ${view.usage.output_tokens.toLocaleString()} out`}
+              >
+                {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
+                {compact(view.context_tokens)} {t("conv.context")}
+              </span>
+            )}
           </div>
         </div>
+        <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={() => void remove()}>
+          🗑
+        </button>
       </header>
+      {incognito && (
+        <div className="incognito-banner">
+          <span>{t("conv.incognito")}</span>
+          <button type="button" className="link" onClick={() => void remove()}>
+            {t("conv.deleteNow")}
+          </button>
+        </div>
+      )}
 
       <div
         className="timeline"
@@ -72,6 +103,15 @@ export default function Conversation(props: {
                   return (
                     <div key={i} className="msg user">
                       <div className="bubble">{it.text}</div>
+                      {it.attachments && (
+                        <ul className="chips">
+                          {it.attachments.map((n, j) => (
+                            <li key={j} className="chip">
+                              📄 {n}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   );
                 case "assistant":
@@ -96,6 +136,14 @@ export default function Conversation(props: {
                     <div key={i} className="divider">
                       {it.agent.name}
                     </div>
+                  );
+                case "summary":
+                  // Only the latest summary is what the model sees now.
+                  return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
+                    <details key={i} className="divider summary">
+                      <summary>{t("conv.summary")}</summary>
+                      <p>{it.text}</p>
+                    </details>
                   );
                 case "turn_end":
                   return it.reason === "completed" ? null : (
@@ -128,7 +176,10 @@ export default function Conversation(props: {
             onStop={() => void api.cancel(sessionId)}
             onSubmit={async (s) => {
               stick.current = true;
-              await api.prompt(sessionId, s.text, s.effort ? { effort: s.effort } : {});
+              await api.prompt(sessionId, s.text, {
+                ...(s.effort ? { effort: s.effort } : {}),
+                ...(s.attachments.length ? { attachments: s.attachments } : {}),
+              });
             }}
           />
         </div>

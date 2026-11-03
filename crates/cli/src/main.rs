@@ -138,6 +138,7 @@ async fn serve(
                 .provider
                 .effort
                 .filter(|_| cfg.supports_effort(&cfg.provider.model)),
+            summarize_after_tokens: cfg.chat.summarize_after_tokens,
             ..Default::default()
         },
     );
@@ -169,6 +170,7 @@ async fn serve(
         web_tools,
         NativeConfig {
             secrets: secrets.clone(),
+            summarize_after_tokens: cfg.chat.summarize_after_tokens,
             ..Default::default()
         },
     );

@@ -163,6 +163,18 @@ CREATE TABLE IF NOT EXISTS deleted_sessions (
     session_id TEXT PRIMARY KEY,
     ts_ms      INTEGER NOT NULL
 );
+-- Uploaded documents waiting to be sent with a message (text extracted).
+-- Consumed (deleted) when the message is sent: the text then lives in the
+-- message's event. Unsent uploads expire.
+CREATE TABLE IF NOT EXISTS attachments (
+    attachment_id TEXT PRIMARY KEY,
+    owner_id      TEXT,
+    name          TEXT NOT NULL,
+    mime          TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    truncated     INTEGER NOT NULL,
+    created_ms    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_ms  INTEGER NOT NULL,
@@ -543,6 +555,68 @@ impl Store {
                     .map_err(|_| StoreError::Corrupt(format!("session id {s}")))
             })
             .collect()
+    }
+
+    pub fn attachment_put(
+        &self,
+        id: &str,
+        owner: Option<&str>,
+        a: &harness_core::event::Attachment,
+    ) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO attachments (attachment_id, owner_id, name, mime, text, truncated, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, owner, a.name, a.mime, a.text, a.truncated, harness_core::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove and return the given uploads, all or nothing. `owner` must
+    /// match (`None` = the API token, which may use any upload).
+    pub fn attachments_take(
+        &self,
+        ids: &[String],
+        owner: Option<&str>,
+    ) -> Result<Option<Vec<harness_core::event::Attachment>>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let mut out = Vec::new();
+        for id in ids {
+            let row = tx
+                .query_row(
+                    "SELECT name, mime, text, truncated, owner_id FROM attachments WHERE attachment_id = ?1",
+                    params![id],
+                    |r| {
+                        Ok((
+                            harness_core::event::Attachment {
+                                name: r.get(0)?,
+                                mime: r.get(1)?,
+                                text: r.get(2)?,
+                                truncated: r.get::<_, i64>(3)? != 0,
+                            },
+                            r.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            match row {
+                Some((a, o)) if owner.is_none() || o.as_deref() == owner => out.push(a),
+                _ => return Ok(None),
+            }
+            tx.execute(
+                "DELETE FROM attachments WHERE attachment_id = ?1",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(out))
+    }
+
+    /// Drop uploads never sent, created before `before_ms`.
+    pub fn purge_attachments(&self, before_ms: i64) -> Result<usize> {
+        Ok(self.lock().execute(
+            "DELETE FROM attachments WHERE created_ms < ?1",
+            params![before_ms],
+        )?)
     }
 
     /// Fold the WAL back into the database file and truncate it, so deleted

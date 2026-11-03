@@ -72,3 +72,23 @@ pub trait Provider: Send + Sync {
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError>;
 }
+
+/// Rough token count (4 characters per token). Used to decide when to
+/// summarise and by the mock provider; real usage comes from the provider.
+pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
+    let chars: usize = messages
+        .iter()
+        .map(|m| match m {
+            ChatMsg::System(t) | ChatMsg::User(t) => t.len(),
+            ChatMsg::Assistant { text, tool_calls } => {
+                text.len()
+                    + tool_calls
+                        .iter()
+                        .map(|c| c.input.to_string().len() + c.tool.len())
+                        .sum::<usize>()
+            }
+            ChatMsg::Tool { content, .. } => content.len(),
+        })
+        .sum();
+    (chars / 4) as u64 + 1
+}

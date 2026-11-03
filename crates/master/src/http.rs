@@ -33,6 +33,12 @@ pub fn router(master: Master) -> Router {
         .route("/api/nodes", get(nodes))
         .route("/api/models", get(models))
         .route("/api/agents", get(agents))
+        .route(
+            "/api/attachments",
+            post(upload).layer(axum::extract::DefaultBodyLimit::max(
+                crate::attachments::MAX_UPLOAD,
+            )),
+        )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
             "/api/sessions/{id}",
@@ -897,6 +903,40 @@ struct PromptBody {
     /// Reasoning effort for this message only (if the model supports it).
     #[serde(default)]
     effort: Option<String>,
+    /// Upload ids from `POST /api/attachments`; consumed by this message.
+    #[serde(default)]
+    attachments: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    name: String,
+}
+
+/// Raw file body, name in the query. Returns the extracted size for the chip.
+async fn upload(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Query(q): Query<UploadQuery>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let a = crate::attachments::extract(&q.name, body.to_vec())
+        .await
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let id = harness_core::new_id();
+    let (aid, owner, att) = (id.clone(), who.user_id.clone(), a.clone());
+    m.inner
+        .mirror
+        .call(move |s| s.attachment_put(&aid, owner.as_deref(), &att))
+        .await?;
+    Ok(Json(json!({
+        "attachment_id": id,
+        "name": a.name,
+        "mime": a.mime,
+        "chars": a.text.chars().count(),
+        "truncated": a.truncated,
+    })))
 }
 
 async fn prompt(
@@ -909,7 +949,31 @@ async fn prompt(
     if b.text.trim().is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "empty prompt".into()));
     }
+    if b.attachments.len() > crate::attachments::MAX_PER_MESSAGE {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "at most {} attachments per message",
+                crate::attachments::MAX_PER_MESSAGE
+            ),
+        ));
+    }
     let sid = visible_session(&m, &who, &id).await?.session_id;
+    let attachments = if b.attachments.is_empty() {
+        Vec::new()
+    } else {
+        let (ids, owner) = (b.attachments.clone(), who.user_id.clone());
+        m.inner
+            .mirror
+            .call(move |s| s.attachments_take(&ids, owner.as_deref()))
+            .await?
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "unknown or already used attachment; upload it again".into(),
+                )
+            })?
+    };
     m.prompt(
         sid,
         b.text,
@@ -921,6 +985,7 @@ async fn prompt(
                     .await
                     .model_context(&who.username, jiff::Timestamp::now()),
             ),
+            attachments,
         },
     )
     .await?;

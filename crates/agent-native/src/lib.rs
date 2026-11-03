@@ -15,7 +15,9 @@ use harness_core::{RawEvent, new_id};
 use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
-pub use provider::{ChatMsg, ChatRequest, Completion, Effort, Provider, ProviderError, ToolSpec};
+pub use provider::{
+    ChatMsg, ChatRequest, Completion, Effort, Provider, ProviderError, ToolSpec, estimate_tokens,
+};
 
 /// Flush coalesced deltas at least this often...
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
@@ -34,6 +36,9 @@ pub struct NativeConfig {
     pub tool_timeout: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
     pub effort: Option<Effort>,
+    /// Summarise older turns once the history is estimated above this many
+    /// tokens (0 = never).
+    pub summarize_after_tokens: usize,
 }
 
 impl Default for NativeConfig {
@@ -45,8 +50,61 @@ impl Default for NativeConfig {
             allow_outside_workspace: false,
             tool_timeout: Duration::from_secs(600),
             effort: None,
+            summarize_after_tokens: 0,
         }
     }
+}
+
+/// System prompt of the summarising call (the mock recognises it).
+pub const SUMMARY_PROMPT: &str = "Summarize the conversation below for your own later use. \
+Keep facts, decisions, names, numbers, file paths, open questions and the user's stated \
+preferences; drop pleasantries. Write at most 300 words in the conversation's language.";
+
+/// Turns kept verbatim after a summary.
+const KEEP_TURNS: usize = 2;
+
+/// The latest summary in a history, and the events after it.
+pub fn split_summary(history: &[RawEvent]) -> (Option<String>, &[RawEvent]) {
+    let mut found: Option<(String, u64)> = None;
+    for e in history {
+        if let Ok(EventKind::HistorySummarized(h)) = e.typed() {
+            found = Some((h.text, h.through_seq));
+        }
+    }
+    match found {
+        None => (None, history),
+        Some((text, through)) => {
+            let start = history.partition_point(|e| e.seq <= through);
+            (Some(text), &history[start..])
+        }
+    }
+}
+
+/// Plain transcript for the summariser (tool output shortened).
+fn transcript(prev: Option<&str>, events: &[RawEvent]) -> String {
+    let mut out = String::new();
+    if let Some(p) = prev {
+        out.push_str(&format!("Earlier summary:\n{p}\n\n"));
+    }
+    for m in history_to_messages(events) {
+        match m {
+            ChatMsg::User(t) => out.push_str(&format!("User: {t}\n\n")),
+            ChatMsg::Assistant { text, tool_calls } => {
+                if !text.is_empty() {
+                    out.push_str(&format!("Assistant: {text}\n\n"));
+                }
+                for c in tool_calls {
+                    out.push_str(&format!("Assistant called {} {}\n", c.tool, c.input));
+                }
+            }
+            ChatMsg::Tool { content, .. } => {
+                let short: String = content.chars().take(2000).collect();
+                out.push_str(&format!("Tool result: {short}\n\n"));
+            }
+            ChatMsg::System(_) => {}
+        }
+    }
+    out
 }
 
 pub fn default_system_prompt() -> String {
@@ -117,7 +175,7 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
         match k {
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
-                out.push(ChatMsg::User(m.text));
+                out.push(ChatMsg::User(m.model_text()));
             }
             EventKind::AssistantMessage(m) => {
                 close_open(&mut out, &mut open);
@@ -223,8 +281,32 @@ impl AgentBackend for NativeBackend {
         } else {
             format!("{base_prompt}\n\nWorking directory: {}", ctx.cwd.display())
         };
+        let mut usage = Usage::default();
+        let (mut summary, mut recent) = split_summary(&ctx.history);
+        let limit = self.config.summarize_after_tokens;
+        if limit > 0
+            && provider::estimate_tokens(&history_to_messages(recent)) as usize > limit
+            && let Some((text, through_seq, u)) =
+                self.summarize(&ctx, summary.as_deref(), recent).await
+        {
+            usage.input_tokens += u.input_tokens;
+            usage.output_tokens += u.output_tokens;
+            host.emit(EventKind::HistorySummarized(HistorySummarized {
+                turn_id: ctx.turn_id.clone(),
+                through_seq,
+                text: text.clone(),
+            }))
+            .await;
+            let start = recent.partition_point(|e| e.seq <= through_seq);
+            recent = &recent[start..];
+            summary = Some(text);
+        }
+        let system = match &summary {
+            Some(t) => format!("{system}\n\nSummary of the earlier conversation:\n{t}"),
+            None => system,
+        };
         let mut messages = vec![ChatMsg::System(system)];
-        messages.extend(history_to_messages(&ctx.history));
+        messages.extend(history_to_messages(recent));
         messages.push(ChatMsg::User(ctx.user_text.clone()));
         let tools = self.tool_specs(agent);
         // The master only puts an effort on the spec when the model supports it.
@@ -232,7 +314,6 @@ impl AgentBackend for NativeBackend {
             .and_then(|a| a.effort.as_deref())
             .and_then(parse_effort)
             .or(self.config.effort);
-        let mut usage = Usage::default();
         let mut allowed_for_session: HashSet<String> = HashSet::new();
 
         for _ in 0..MAX_STEPS {
@@ -282,6 +363,7 @@ impl AgentBackend for NativeBackend {
             if let Some(u) = &completion.usage {
                 usage.input_tokens += u.input_tokens;
                 usage.output_tokens += u.output_tokens;
+                usage.context_tokens = u.input_tokens;
             }
             host.emit(EventKind::AssistantMessage(AssistantMessage {
                 author: author.clone(),
@@ -349,6 +431,53 @@ impl AgentBackend for NativeBackend {
 }
 
 impl NativeBackend {
+    /// Summarise everything before the last `KEEP_TURNS` turns. Returns the
+    /// summary, the last seq it covers and the call's usage; `None` when
+    /// there is nothing old enough or the call fails (the turn then simply
+    /// sends the full history).
+    async fn summarize(
+        &self,
+        ctx: &TurnCtx<'_>,
+        prev: Option<&str>,
+        recent: &[RawEvent],
+    ) -> Option<(String, u64, Usage)> {
+        let starts: Vec<u64> = recent
+            .iter()
+            .filter(|e| e.kind == "turn_started")
+            .map(|e| e.seq)
+            .collect();
+        if starts.len() <= KEEP_TURNS {
+            return None;
+        }
+        let through = starts[starts.len() - KEEP_TURNS] - 1;
+        let old = &recent[..recent.partition_point(|e| e.seq <= through)];
+        // If the kept turns alone are what is large, summarising the rest
+        // saves little and would repeat on every turn: skip it.
+        let old_tokens = provider::estimate_tokens(&history_to_messages(old)) as usize;
+        if old_tokens < self.config.summarize_after_tokens / 4 {
+            return None;
+        }
+        let req = ChatRequest {
+            model: ctx.model.clone(),
+            messages: vec![
+                ChatMsg::System(SUMMARY_PROMPT.into()),
+                ChatMsg::User(transcript(prev, old)),
+            ],
+            tools: vec![],
+            effort: None,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let c = tokio::select! {
+            r = self.provider.complete(&req, tx) => r.ok()?,
+            _ = ctx.cancel.cancelled() => return None,
+        };
+        let text = c.text.trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        Some((text, through, c.usage.unwrap_or_default()))
+    }
+
     async fn run_tool(
         &self,
         ctx: &TurnCtx<'_>,
@@ -674,6 +803,7 @@ mod tests {
                 EventKind::UserMessage(UserMessage {
                     turn_id: "t".into(),
                     text: "hi".into(),
+                    attachments: vec![],
                 }),
             ),
             mk(
@@ -696,6 +826,7 @@ mod tests {
                 EventKind::UserMessage(UserMessage {
                     turn_id: "t2".into(),
                     text: "again".into(),
+                    attachments: vec![],
                 }),
             ),
         ];
@@ -703,5 +834,150 @@ mod tests {
         assert_eq!(m.len(), 4);
         assert!(matches!(&m[2], ChatMsg::Tool { call_id, .. } if call_id == "c1"));
         assert!(matches!(&m[3], ChatMsg::User(t) if t == "again"));
+    }
+
+    /// Records every request, answers like the mock.
+    struct Rec {
+        inner: mock::Mock,
+        reqs: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Rec {
+        fn name(&self) -> &'static str {
+            "rec"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            self.reqs.lock().unwrap().push(req.clone());
+            self.inner.complete(req, deltas).await
+        }
+    }
+
+    fn turn_events(sid: SessionId, seq: &mut u64, n: usize) -> Vec<RawEvent> {
+        let mut out = vec![];
+        let mut push = |k: EventKind, out: &mut Vec<RawEvent>| {
+            *seq += 1;
+            let (kind, payload) = k.into_parts();
+            out.push(RawEvent {
+                session_id: sid,
+                seq: *seq,
+                ts_ms: 0,
+                kind,
+                payload,
+            });
+        };
+        let t = format!("t{n}");
+        push(
+            EventKind::TurnStarted(TurnStarted {
+                agent: None,
+                turn_id: t.clone(),
+            }),
+            &mut out,
+        );
+        push(
+            EventKind::UserMessage(UserMessage {
+                turn_id: t.clone(),
+                text: format!("question {n} {}", "word ".repeat(200)),
+                attachments: vec![],
+            }),
+            &mut out,
+        );
+        push(
+            EventKind::AssistantMessage(AssistantMessage {
+                author: None,
+                variant: None,
+                turn_id: t.clone(),
+                message_id: format!("m{n}"),
+                text: format!("answer {n}"),
+                tool_calls: vec![],
+            }),
+            &mut out,
+        );
+        push(
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: t,
+                reason: TurnEndReason::Completed,
+                usage: None,
+            }),
+            &mut out,
+        );
+        out
+    }
+
+    #[tokio::test]
+    async fn long_history_is_summarised_once_and_reused() {
+        let sid = SessionId::new();
+        let mut seq = 1; // seq 1 = session_created (not needed here)
+        let mut history = vec![];
+        for n in 1..=4 {
+            history.extend(turn_events(sid, &mut seq, n));
+        }
+        let rec = Arc::new(Rec {
+            inner: mock::Mock {
+                delay: Duration::from_millis(0),
+            },
+            reqs: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(
+            rec.clone(),
+            vec![],
+            NativeConfig {
+                summarize_after_tokens: 300,
+                ..Default::default()
+            },
+        );
+        let host = RecHost::new(Decision::Allow);
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = ctx(&host, "next", dir.path());
+        c.history = history.clone();
+        let out = b.run_turn(c).await;
+        assert_eq!(out.reason, TurnEndReason::Completed);
+        let events = host.events.lock().unwrap().clone();
+        let EventKind::HistorySummarized(h) = &events[0] else {
+            panic!("{events:?}")
+        };
+        // Turns 1-2 summarised, turns 3-4 kept: turn 3 starts at seq 10.
+        assert_eq!(h.through_seq, 9);
+        assert_eq!(h.text, "Summary of 2 earlier messages.");
+        let reqs = rec.reqs.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        let main = &reqs[1];
+        let ChatMsg::System(sys) = &main.messages[0] else {
+            panic!()
+        };
+        assert!(sys.contains("Summary of the earlier conversation:\nSummary of 2"));
+        let users: Vec<_> = main
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMsg::User(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users.len(), 3, "turns 3, 4 and the new message");
+        assert!(users[0].starts_with("question 3"));
+        // Usage covers the summary call too.
+        assert!(out.usage.unwrap().input_tokens > estimate_tokens(&main.messages));
+
+        // Next turn: the stored summary is reused, no new summarising call
+        // while the recent part stays small.
+        drop(reqs);
+        let mut history2 = history;
+        seq += 1;
+        let (kind, payload) = events[0].clone().into_parts();
+        history2.push(RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 0,
+            kind,
+            payload,
+        });
+        let (sum, recent) = split_summary(&history2);
+        assert_eq!(sum.as_deref(), Some("Summary of 2 earlier messages."));
+        assert_eq!(recent.first().map(|e| e.seq), Some(10));
     }
 }

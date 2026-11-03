@@ -167,6 +167,7 @@ impl Provider for LlmProvider {
                         out.usage = Some(Usage {
                             input_tokens: u.prompt_tokens.unwrap_or(0).max(0) as u64,
                             output_tokens: u.completion_tokens.unwrap_or(0).max(0) as u64,
+                            context_tokens: 0,
                         });
                     }
                     if let Some(content) = end.captured_content {

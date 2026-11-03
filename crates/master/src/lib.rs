@@ -2,6 +2,7 @@
 //! node, and serves the web UI. It never runs tools itself.
 
 mod assets;
+pub mod attachments;
 pub mod auth;
 pub mod config;
 mod http;
@@ -102,6 +103,8 @@ pub struct PromptOpts {
     pub effort: Option<String>,
     /// Appended to the agent's system prompt (user name, local time, place).
     pub context: Option<String>,
+    /// Documents for this message (already extracted and owner-checked).
+    pub attachments: Vec<harness_core::event::Attachment>,
 }
 
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
@@ -534,6 +537,7 @@ impl Master {
             agent_id,
             effort,
             context,
+            attachments,
         } = opts;
         let row = self
             .inner
@@ -556,6 +560,7 @@ impl Master {
             session_id: sid,
             text,
             agent: Some(agent),
+            attachments,
         })
         .await
     }
@@ -662,6 +667,13 @@ impl Master {
         tokio::spawn(async move {
             loop {
                 this.purge_incognito(ttl).await;
+                // Uploads never sent with a message expire with the same TTL.
+                let before = harness_core::now_ms() - ttl.as_millis() as i64;
+                let _ = this
+                    .inner
+                    .mirror
+                    .call(move |s| s.purge_attachments(before))
+                    .await;
                 tokio::time::sleep(every).await;
             }
         });

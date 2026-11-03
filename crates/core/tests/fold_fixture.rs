@@ -30,6 +30,7 @@ fn events() -> Vec<RawEvent> {
         EventKind::UserMessage(UserMessage {
             turn_id: t(),
             text: "fix the bug".into(),
+            attachments: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -140,6 +141,7 @@ fn events() -> Vec<RawEvent> {
             usage: Some(Usage {
                 input_tokens: 1,
                 output_tokens: 2,
+                context_tokens: 1,
             }),
         }),
         // v2: agents, authors, variants.
@@ -161,6 +163,17 @@ fn events() -> Vec<RawEvent> {
         EventKind::UserMessage(UserMessage {
             turn_id: "t2".into(),
             text: "@writer draft the changelog".into(),
+            attachments: vec![Attachment {
+                name: "notes.md".into(),
+                mime: "text/markdown".into(),
+                text: "- fixed a bug".into(),
+                truncated: false,
+            }],
+        }),
+        EventKind::HistorySummarized(HistorySummarized {
+            turn_id: "t2".into(),
+            through_seq: 3,
+            text: "User asked to fix a bug.".into(),
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: "t2".into(),

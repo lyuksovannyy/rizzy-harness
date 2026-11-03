@@ -147,10 +147,14 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       model: s.model || undefined,
       node_id: agentic ? s.nodeId : undefined,
       cwd: agentic ? s.cwd : undefined,
+      ...(s.incognito ? { incognito: true } : {}),
     });
     refreshSessions();
     go({ kind: "session", id: session_id });
-    await api.prompt(session_id, s.text, s.effort ? { effort: s.effort } : {});
+    await api.prompt(session_id, s.text, {
+      ...(s.effort ? { effort: s.effort } : {}),
+      ...(s.attachments.length ? { attachments: s.attachments } : {}),
+    });
   };
 
   const agenticAllowed = agenticBlocked === null;
@@ -195,7 +199,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       {!collapsed && (
         <Sidebar
           me={me}
-          sessions={sessions}
+          sessions={sessions.filter((x) => !x.incognito)}
           nodes={nodes}
           selected={selected}
           conn={live.state}

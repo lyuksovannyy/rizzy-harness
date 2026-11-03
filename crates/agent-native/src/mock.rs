@@ -56,9 +56,23 @@ impl Provider for Mock {
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
         let usage = Some(Usage {
-            input_tokens: req.messages.len() as u64,
+            input_tokens: estimate_tokens(&req.messages),
             output_tokens: 1,
+            context_tokens: 0,
         });
+        if let Some(ChatMsg::System(p)) = req.messages.first()
+            && p == crate::SUMMARY_PROMPT
+        {
+            let n = match req.messages.get(1) {
+                Some(ChatMsg::User(t)) => t.matches("User: ").count(),
+                _ => 0,
+            };
+            return Ok(Completion {
+                text: format!("Summary of {n} earlier messages."),
+                tool_calls: vec![],
+                usage,
+            });
+        }
         // After a tool result, summarise it and stop.
         if let Some(ChatMsg::Tool { content, .. }) = req.messages.last() {
             let first = content.lines().next().unwrap_or("").to_string();

@@ -87,6 +87,9 @@ pub enum MasterToNode {
         /// store agent definitions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentSpec>,
+        /// Documents with their extracted text (extracted on the master).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<harness_core::event::Attachment>,
     },
     /// Change the session's active agent (records `agent_changed`).
     #[serde(rename = "session.set_agent")]

@@ -127,6 +127,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
 
     h.send(MasterToNode::Prompt {
         agent: None,
+        attachments: vec![],
         req_id: "p".into(),
         session_id: sid,
         text: "run: echo sk-node-secret-1 > out.txt; echo written".into(),
@@ -163,6 +164,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
         agent: None,
+        attachments: vec![],
         req_id: "p".into(),
         session_id: sid,
         text: "run: sleep 100".into(),
@@ -189,6 +191,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     let pidfile = h.ws.join("pid");
     h.send(MasterToNode::Prompt {
         agent: None,
+        attachments: vec![],
         req_id: "p2".into(),
         session_id: sid,
         text: format!("run: (sleep 1000) & echo $! > {}; wait", pidfile.display()),
@@ -248,6 +251,7 @@ async fn policy_denied_tool_never_runs() {
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
         agent: None,
+        attachments: vec![],
         req_id: "p".into(),
         session_id: sid,
         text: "run: touch nope".into(),
@@ -296,6 +300,7 @@ async fn resume_replays_in_batches() {
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
         agent: None,
+        attachments: vec![],
         req_id: "p".into(),
         session_id: sid,
         text: "hello world".into(),
@@ -404,6 +409,7 @@ async fn recovers_interrupted_turn_on_start() {
     link.to_node
         .send(MasterToNode::Prompt {
             agent: None,
+            attachments: vec![],
             req_id: "p".into(),
             session_id: sid,
             text: "continue".into(),

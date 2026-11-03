@@ -15,6 +15,14 @@ pub enum Item {
     User {
         turn_id: String,
         text: String,
+        /// Attachment file names.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
+    /// Turns before this point reach the model only as a summary.
+    Summary {
+        through_seq: u64,
+        text: String,
     },
     Assistant {
         message_id: String,
@@ -84,6 +92,10 @@ pub struct SessionView {
     pub running_agent: Option<AgentRef>,
     /// Parallel-answer group -> chosen message id.
     pub variant_selection: BTreeMap<String, String>,
+    /// Tokens used by all turns so far.
+    pub usage: Usage,
+    /// Context size of the latest turn (its last model call's input).
+    pub context_tokens: u64,
 }
 
 impl SessionView {
@@ -137,6 +149,7 @@ impl SessionView {
             EventKind::UserMessage(m) => self.items.push(Item::User {
                 turn_id: m.turn_id,
                 text: m.text,
+                attachments: m.attachments.into_iter().map(|a| a.name).collect(),
             }),
             EventKind::AssistantDelta(d) => {
                 let found = self.items.iter_mut().rev().find_map(|i| match i {
@@ -240,6 +253,11 @@ impl SessionView {
             }
             EventKind::Checkpoint(_) => {}
             EventKind::TurnEnded(t) => {
+                if let Some(u) = &t.usage {
+                    self.usage.input_tokens += u.input_tokens;
+                    self.usage.output_tokens += u.output_tokens;
+                    self.context_tokens = u.context_tokens;
+                }
                 self.running_turn = None;
                 self.running_agent = None;
                 self.items.push(Item::TurnEnd {
@@ -255,6 +273,10 @@ impl SessionView {
             EventKind::VariantSelected(v) => {
                 self.variant_selection.insert(v.group, v.message_id);
             }
+            EventKind::HistorySummarized(h) => self.items.push(Item::Summary {
+                through_seq: h.through_seq,
+                text: h.text,
+            }),
         }
     }
 }

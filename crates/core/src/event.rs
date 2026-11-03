@@ -72,6 +72,7 @@ pub enum EventKind {
     Error(ErrorEvent),
     AgentChanged(AgentChanged),
     VariantSelected(VariantSelected),
+    HistorySummarized(HistorySummarized),
 }
 
 impl EventKind {
@@ -110,6 +111,7 @@ impl EventKind {
             EventKind::Error(_) => "error",
             EventKind::AgentChanged(_) => "agent_changed",
             EventKind::VariantSelected(_) => "variant_selected",
+            EventKind::HistorySummarized(_) => "history_summarized",
         }
     }
 }
@@ -173,6 +175,51 @@ pub struct TurnStarted {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserMessage {
     pub turn_id: String,
+    pub text: String,
+    /// Documents attached to this message, with their extracted text (the
+    /// log alone must be enough to rebuild what the model saw).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub text: String,
+    /// The extracted text was cut to the size limit.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl UserMessage {
+    /// What the model sees: the message, then each attachment in a tagged block.
+    pub fn model_text(&self) -> String {
+        let mut out = self.text.clone();
+        for a in &self.attachments {
+            out.push_str(&format!(
+                "\n\n<attachment name=\"{}\" type=\"{}\"{}>\n{}\n</attachment>",
+                a.name.replace('"', "'"),
+                a.mime,
+                if a.truncated {
+                    " truncated=\"true\""
+                } else {
+                    ""
+                },
+                a.text
+            ));
+        }
+        out
+    }
+}
+
+/// Older turns were replaced by a summary for the model (the log keeps them;
+/// only what is sent to the provider shrinks).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistorySummarized {
+    pub turn_id: String,
+    /// Every event with `seq <= through_seq` is covered by `text`.
+    pub through_seq: u64,
     pub text: String,
 }
 
@@ -294,8 +341,12 @@ pub enum TurnEndReason {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Summed over every model call in the turn.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens of the turn's last model call: the context size.
+    #[serde(default)]
+    pub context_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

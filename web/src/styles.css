@@ -486,8 +486,15 @@ select {
   min-height: 0;
 }
 .conv-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 10px 16px 8px 56px;
   border-bottom: 1px solid var(--line);
+}
+.conv-title {
+  flex: 1;
+  min-width: 0;
 }
 .shell:not(.collapsed) .conv-head {
   padding-left: 16px;
@@ -951,3 +958,72 @@ mark {
 :root[data-accent="orange"] { --accent: #f08a24; }
 :root[data-accent="pink"] { --accent: #e5488f; }
 :root[data-accent="gray"] { --accent: #8a8a8a; }
+
+/* Phase 6: attachments, incognito, token meter, summaries */
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.composer > .chips {
+  margin: 0 0 6px;
+}
+.msg.user .chips {
+  justify-content: flex-end;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--bg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip .link {
+  padding: 0 2px;
+}
+.attach {
+  font-size: 18px;
+  line-height: 1;
+}
+.pill.incognito.on {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+.incognito-banner .link {
+  white-space: nowrap;
+}
+.incognito-banner {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 auto;
+  width: min(760px, 100%);
+  padding: 8px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.meter {
+  font-variant-numeric: tabular-nums;
+}
+details.summary {
+  cursor: pointer;
+}
+details.summary p {
+  text-align: left;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
