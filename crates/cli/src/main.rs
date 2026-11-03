@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod net;
+
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use harness_agent_native::{NativeBackend, NativeConfig, Provider};
@@ -33,9 +35,15 @@ enum Cmd {
         /// Address to listen on. Non-loopback requires --insecure-bind until TLS lands.
         #[arg(long, default_value = "127.0.0.1:7777")]
         bind: SocketAddr,
-        /// Allow a non-loopback bind without TLS (only on a trusted tailnet/VPN).
+        /// Allow a non-loopback address that is not a WireGuard interface
+        /// (only on a network you trust). WireGuard addresses need no flag.
         #[arg(long)]
         insecure_bind: bool,
+        /// Serve the UI over HTTPS with a self-signed certificate (trust
+        /// `keys/ui-cert.pem` once). Needed off-localhost for notifications
+        /// and the microphone: browsers only allow them on secure pages.
+        #[arg(long)]
+        tls: bool,
         /// Extra `host:port` values accepted in Host/Origin headers.
         #[arg(long = "allowed-host")]
         allowed_hosts: Vec<String>,
@@ -123,20 +131,27 @@ async fn serve(
     dir: &Path,
     bind: SocketAddr,
     insecure_bind: bool,
+    tls: bool,
     extra_hosts: Vec<String>,
     node_listen: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
-    if !bind.ip().is_loopback() {
-        if !insecure_bind {
-            bail!(
-                "refusing to listen on {bind} without TLS. Use 127.0.0.1, or pass --insecure-bind on a trusted private network"
-            );
+    match net::exposure(bind, insecure_bind)? {
+        net::Exposure::Loopback => {}
+        net::Exposure::WireGuard(iface) => {
+            tracing::info!(%bind, %iface, "serving on a WireGuard interface (peers only)");
+            if !tls {
+                tracing::warn!(
+                    "without --tls, browsers treat this page as insecure: notifications and \
+                     the microphone will not work outside localhost"
+                );
+            }
         }
-        tracing::warn!(
+        net::Exposure::Insecure => tracing::warn!(
             %bind,
-            "listening on a non-loopback address WITHOUT TLS (--insecure-bind): passwords and \
-             session cookies travel in clear text. Use only on a trusted VPN/tailnet."
-        );
+            "listening on an address that is not WireGuard (--insecure-bind){}. Use only on a \
+             network you trust.",
+            if tls { "" } else { " and WITHOUT TLS: passwords and cookies travel in clear text" }
+        ),
     }
     let cfg = Config::load(&dir.join("harness.toml"))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
@@ -201,7 +216,7 @@ async fn serve(
     // Use the bound address (port 0 resolves here) for the Host allowlist.
     let addr = listener.local_addr()?;
     let token = auth::load_or_create_token(&api_token_path(dir))?;
-    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), false);
+    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls);
     let unclaimed = mirror.call(|s| s.user_count()).await? == 0;
     if unclaimed {
         let path = dir.join("claim-code");
@@ -252,18 +267,47 @@ async fn serve(
         );
     }
     // Printed (not logged) so tests and users can find the port; never a secret.
-    println!("{APP_NAME} listening on http://{addr}");
+    let scheme = if tls { "https" } else { "http" };
+    println!("{APP_NAME} listening on {scheme}://{addr}");
     if unclaimed {
         println!(
             "first run: open the page and enter the claim code from {} (or run `{APP_NAME} claim-code`)",
             dir.join("claim-code").display()
         );
     }
-    axum::serve(listener, harness_master::router(master))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    if tls {
+        let mut names = vec!["localhost".to_string(), "127.0.0.1".into(), hostname()];
+        if !addr.ip().is_unspecified() {
+            names.push(addr.ip().to_string());
+        }
+        names.extend(extra_hosts.iter().map(|h| {
+            h.rsplit_once(':')
+                .map(|(h, _)| h)
+                .unwrap_or(h)
+                .trim_matches(['[', ']'])
+                .to_string()
+        }));
+        names.sort();
+        names.dedup();
+        let cert = harness_link::MasterCert::load_or_create_for(dir, "ui", &names)?;
+        println!(
+            "HTTPS certificate {} ({}); trust {} once in your browser or OS",
+            cert.fingerprint(),
+            names.join(", "),
+            dir.join("keys/ui-cert.pem").display()
+        );
+        let l = net::TlsListener::new(listener, cert.server_config()?)?;
+        axum::serve(l, harness_master::router(master))
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    } else {
+        axum::serve(listener, harness_master::router(master))
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    }
     Ok(())
 }
 
@@ -455,9 +499,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Serve {
             bind,
             insecure_bind,
+            tls,
             allowed_hosts,
             node_listen,
-        } => serve(&dir, bind, insecure_bind, allowed_hosts, node_listen).await,
+        } => serve(&dir, bind, insecure_bind, tls, allowed_hosts, node_listen).await,
         Cmd::Token => {
             let t = auth::load_or_create_token(&api_token_path(&dir))?;
             println!("{}", t.expose());

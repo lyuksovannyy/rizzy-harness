@@ -17,7 +17,7 @@ harness-protocol.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 hex.workspace = true
-rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true

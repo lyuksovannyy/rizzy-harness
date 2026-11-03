@@ -25,6 +25,8 @@ harness-core.workspace = true
 harness-master.workspace = true
 harness-memory.workspace = true
 harness-link.workspace = true
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 tokio-util.workspace = true
 harness-node.workspace = true
 harness-store.workspace = true

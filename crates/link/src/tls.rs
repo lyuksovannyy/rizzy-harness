@@ -47,6 +47,38 @@ impl MasterCert {
         Ok(me)
     }
 
+    /// A self-signed certificate for `sans` (names or IP addresses) stored
+    /// as `keys/<stem>-cert.der` / `-key.der`; regenerated when the names change.
+    pub fn load_or_create_for(dir: &Path, stem: &str, sans: &[String]) -> Result<Self> {
+        let keys = dir.join("keys");
+        let (c, k, n) = (
+            keys.join(format!("{stem}-cert.der")),
+            keys.join(format!("{stem}-key.der")),
+            keys.join(format!("{stem}-names.txt")),
+        );
+        let want = sans.join("\n");
+        if let (Ok(cert_der), Ok(key_der), Ok(names)) = (
+            std::fs::read(&c),
+            std::fs::read(&k),
+            std::fs::read_to_string(&n),
+        ) && names == want
+        {
+            return Ok(Self { cert_der, key_der });
+        }
+        let ck = rcgen::generate_simple_self_signed(sans.to_vec())
+            .map_err(|e| LinkError::Tls(e.to_string()))?;
+        let me = Self {
+            cert_der: ck.cert.der().to_vec(),
+            key_der: ck.signing_key.serialize_der(),
+        };
+        crate::write_private(&k, &me.key_der)?;
+        crate::write_private(&c, &me.cert_der)?;
+        std::fs::write(&n, want)?;
+        // PEM copy for importing into a browser or OS trust store.
+        std::fs::write(keys.join(format!("{stem}-cert.pem")), ck.cert.pem())?;
+        Ok(me)
+    }
+
     pub fn fingerprint(&self) -> String {
         fingerprint(&self.cert_der)
     }
