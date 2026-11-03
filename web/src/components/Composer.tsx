@@ -36,6 +36,8 @@ export interface Submission {
   /** Home, Ask mode: a temporary chat. */
   incognito: boolean;
   attachments: string[];
+  /** Home, Ask: also answer with this model, side by side. */
+  compareWith: string | null;
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -65,6 +67,8 @@ export function Composer(props: {
   onTextChange?: (text: string, mode: Mode) => void;
   /** Home: ArrowDown at the end of the text; return true if handled. */
   onArrowDown?: () => boolean;
+  /** The server can transcribe dictation. */
+  voice?: boolean;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() =>
@@ -84,9 +88,44 @@ export function Composer(props: {
   const [popupClosed, setPopupClosed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [incognito, setIncognito] = useState(false);
+  const [compareWith, setCompareWith] = useState<string | null>(null);
   const [files, setFiles] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [rec, setRec] = useState<"idle" | "recording" | "transcribing">("idle");
+  const recorder = useRef<MediaRecorder | null>(null);
+
+  const toggleMic = async () => {
+    if (rec === "recording") {
+      recorder.current?.stop();
+      return;
+    }
+    setErr(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const r = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      r.ondataavailable = (e) => chunks.push(e.data);
+      r.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setRec("transcribing");
+        try {
+          const said = await api.transcribe(new Blob(chunks, { type: r.mimeType || "audio/webm" }));
+          if (said) setText((t) => (t.trim() ? `${t.trimEnd()} ${said}` : said));
+          ta.current?.focus();
+        } catch (x) {
+          setErr(x instanceof Error ? x.message : String(x));
+        } finally {
+          setRec("idle");
+        }
+      };
+      recorder.current = r;
+      r.start();
+      setRec("recording");
+    } catch (x) {
+      setErr(`microphone: ${x instanceof Error ? x.message : String(x)}`);
+    }
+  };
   const [err, setErr] = useState<string | null>(null);
   const ta = useRef<HTMLTextAreaElement>(null);
   // Caret to restore right after React commits a programmatic text change,
@@ -175,6 +214,7 @@ export function Composer(props: {
         cwd: cwd.trim(),
         incognito: home && mode === "ask" && incognito,
         attachments: files.map((f) => f.attachment_id),
+        compareWith: home && mode === "ask" && compareWith && compareWith !== model ? compareWith : null,
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
@@ -362,6 +402,24 @@ export function Composer(props: {
               ))}
             </select>
           )}
+          {home && mode === "ask" && props.models.length > 1 && (
+            <select
+              className="pill"
+              aria-label="compare with"
+              title="Also answer with another model, side by side"
+              value={compareWith ?? ""}
+              onChange={(e) => setCompareWith(e.target.value || null)}
+            >
+              <option value="">compare: off</option>
+              {props.models
+                .filter((m) => m.id !== model)
+                .map((m) => (
+                  <option key={m.id} value={m.id}>
+                    vs {m.id}
+                  </option>
+                ))}
+            </select>
+          )}
           {mode !== "search" && effortOk && (
             <select
               className="pill"
@@ -378,6 +436,18 @@ export function Composer(props: {
             </select>
           )}
           <span className="spacer" />
+          {props.voice && mode !== "search" && (
+            <button
+              type="button"
+              className={`icon mic ${rec}`}
+              aria-label={rec === "recording" ? "stop dictation" : "dictate"}
+              title={rec === "recording" ? "Stop and transcribe" : "Dictate (audio goes to this server's transcription service)"}
+              disabled={rec === "transcribing"}
+              onClick={() => void toggleMic()}
+            >
+              {rec === "recording" ? "■" : rec === "transcribing" ? "…" : "🎙"}
+            </button>
+          )}
           {home && mode === "ask" && (
             <button
               type="button"

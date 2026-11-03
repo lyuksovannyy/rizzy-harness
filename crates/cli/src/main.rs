@@ -189,7 +189,7 @@ async fn serve(
         store: Store::open(&dir.join("chat.db"), Durability::Full)?,
         backend: Arc::new(chat_backend),
         default_model: cfg.provider.model.clone(),
-        secrets,
+        secrets: secrets.clone(),
         profile: Profile::Chat,
         incognito_ttl: Some(cfg.chat.incognito_ttl()),
     })
@@ -220,6 +220,9 @@ async fn serve(
     }
     if let Some(b) = builtin_memory {
         master.set_builtin_memory(b);
+    }
+    if let Some(t) = harness_master::providers::transcriber(&cfg, dir, &secrets)? {
+        master.set_transcriber(t);
     }
     let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
     for e in &agent_errors {

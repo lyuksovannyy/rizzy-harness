@@ -164,7 +164,13 @@ impl Provider for Mock {
                 usage,
             });
         }
-        let words = std::iter::once("You said: ".to_string())
+        // `mock-*` models (parallel answers in tests) tag their replies.
+        let lead = if req.model.starts_with("mock-") {
+            format!("[{}] You said: ", req.model)
+        } else {
+            "You said: ".to_string()
+        };
+        let words = std::iter::once(lead)
             .chain(user.split_inclusive(' ').map(str::to_string))
             .collect();
         let text = self.stream_words(words, &deltas).await;

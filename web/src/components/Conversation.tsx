@@ -66,6 +66,7 @@ export default function Conversation(props: {
   nodes: NodeInfo[];
   agents: Agent[];
   models: ModelInfo[];
+  voice?: boolean;
 }) {
   const { live, sessionId } = props;
   useEffect(() => {
@@ -153,6 +154,42 @@ export default function Conversation(props: {
             <div className="muted pad">Loading…</div>
           ) : (
             view.items.map((it, i) => {
+              // Parallel answers: render the whole group once, side by side.
+              if (it.type === "assistant" && it.variant) {
+                const g = it.variant.group;
+                const first = view.items.findIndex((x) => x.type === "assistant" && x.variant?.group === g);
+                if (first !== i) return null;
+                const answers = view.items.filter(
+                  (x): x is Extract<typeof x, { type: "assistant" }> => x.type === "assistant" && x.variant?.group === g,
+                );
+                const chosen =
+                  view.variant_selection[g] ?? answers.find((a) => a.variant?.index === 0)?.message_id;
+                const busy = running && view.running_turn === g;
+                return (
+                  <div key={i} className="variants" style={{ gridTemplateColumns: `repeat(${answers.length}, minmax(0, 1fr))` }}>
+                    {answers.map((a) => (
+                      <div key={a.message_id} className={`msg assistant variant ${a.message_id === chosen ? "chosen" : ""}`}>
+                        <div className="variant-head small">
+                          <span className="mono">{a.variant?.model}</span>
+                          {a.message_id === chosen ? (
+                            <span className="muted">continuing from this</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="link"
+                              disabled={busy}
+                              onClick={() => void api.selectVariant(sessionId, g, a.message_id)}
+                            >
+                              Continue with this
+                            </button>
+                          )}
+                        </div>
+                        <Markdown text={a.text} />
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
               switch (it.type) {
                 case "user":
                   return (
@@ -237,6 +274,7 @@ export default function Conversation(props: {
             agenticBlocked={null}
             running={running}
             draftKey={`harness.draft.${sessionId}`}
+            voice={props.voice}
             onStop={() => void api.cancel(sessionId)}
             onSubmit={async (s) => {
               stick.current = true;

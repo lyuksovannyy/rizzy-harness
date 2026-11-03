@@ -89,13 +89,27 @@ export const api = {
     model?: string;
     incognito?: boolean;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
+  features: () => call<{ voice: boolean; memory: boolean }>("GET", "/api/features"),
+  transcribe: async (audio: Blob): Promise<string> => {
+    const res = await fetch("/api/transcribe", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": audio.type || "audio/webm" },
+      body: audio,
+    });
+    const data = (await res.json().catch(() => null)) as { text?: string; error?: string } | null;
+    if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
+    return data?.text ?? "";
+  },
+  selectVariant: (id: string, group: string, message_id: string) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
   restoreTurn: (id: string, turn: string, force = false) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force }),
   deleteSession: (id: string) => call<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
   prompt: (
     id: string,
     text: string,
-    opts: { agent_id?: string; effort?: Effort; attachments?: string[] } = {},
+    opts: { agent_id?: string; effort?: Effort; attachments?: string[]; compare?: string[] } = {},
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
   upload: async (file: File): Promise<UploadedAttachment> => {
     const res = await fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {

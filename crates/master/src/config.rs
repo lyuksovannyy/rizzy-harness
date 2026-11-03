@@ -18,6 +18,20 @@ pub struct Config {
     pub chat: ChatConfig,
     pub web: WebConfig,
     pub memory: MemoryConfig,
+    pub voice: VoiceConfig,
+}
+
+/// Dictation: audio goes to an OpenAI-compatible `/audio/transcriptions`
+/// endpoint (a local Whisper server, or a cloud API). Off when `url` is empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VoiceConfig {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -57,6 +57,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [memoryVersion, setMemoryVersion] = useState(0);
   const [toReview, setToReview] = useState(0);
+  const [voice, setVoice] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === "1";
@@ -100,6 +101,10 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       .catch(unauthorized);
     refreshModels();
     api.settings().then(setPrefs).catch(unauthorized);
+    api
+      .features()
+      .then((f) => setVoice(f.voice))
+      .catch(() => {});
     api
       .classifier()
       .then((v) => {
@@ -168,6 +173,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     await api.prompt(session_id, s.text, {
       ...(s.effort ? { effort: s.effort } : {}),
       ...(s.attachments.length ? { attachments: s.attachments } : {}),
+      ...(s.compareWith ? { compare: [s.model, s.compareWith] } : {}),
     });
   };
 
@@ -250,6 +256,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               nodes={nodes}
               agents={agents}
               models={models}
+              voice={voice}
             />
           ) : route.kind === "settings" ? (
             <Settings
@@ -278,6 +285,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               onLearn={learn}
               onOpen={(id) => navigate({ kind: "session", id })}
               toReview={toReview}
+              voice={voice}
             />
           )}
         </Suspense>

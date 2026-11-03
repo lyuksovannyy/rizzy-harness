@@ -1087,3 +1087,31 @@ details.summary p {
   margin: 4px 0 0;
   padding-left: 18px;
 }
+.variants {
+  display: grid;
+  gap: 12px;
+  margin: 8px 0;
+}
+.msg.variant {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+.msg.variant.chosen {
+  border-color: var(--accent);
+}
+.variant-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+@media (max-width: 700px) {
+  .variants {
+    grid-template-columns: 1fr !important;
+  }
+}
+.mic.recording {
+  color: var(--danger, #d33);
+}

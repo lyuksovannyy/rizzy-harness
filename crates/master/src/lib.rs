@@ -11,6 +11,7 @@ pub mod prefs;
 pub mod providers;
 pub mod search;
 pub mod secrets;
+pub mod voice;
 mod ws;
 
 use std::collections::{HashMap, HashSet};
@@ -87,6 +88,7 @@ pub struct MasterInner {
     remote_stops: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
+    transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -114,6 +116,8 @@ pub struct PromptOpts {
     pub context: Option<String>,
     /// Documents for this message (already extracted and owner-checked).
     pub attachments: Vec<harness_core::event::Attachment>,
+    /// Parallel answers from these models (2-4, chat only).
+    pub compare: Vec<String>,
 }
 
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
@@ -167,6 +171,7 @@ impl Master {
                 builtin_memory: Mutex::new(None),
                 remote_stops: Mutex::new(HashMap::new()),
                 node_listener: Mutex::new(None),
+                transcriber: Mutex::new(None),
                 agents: Mutex::new(harness_agents::AgentSet::from_agents(
                     harness_agents::builtins(),
                     harness_agents::DEFAULT_AGENT,
@@ -187,6 +192,14 @@ impl Master {
 
     pub fn set_memory(&self, m: Arc<dyn harness_memory::MemoryStore>) {
         *lock(&self.inner.memory) = Some(m);
+    }
+
+    pub fn set_transcriber(&self, t: voice::Transcriber) {
+        *lock(&self.inner.transcriber) = Some(Arc::new(t));
+    }
+
+    pub fn transcriber(&self) -> Option<Arc<voice::Transcriber>> {
+        lock(&self.inner.transcriber).clone()
     }
 
     /// The mirror store (tests and tools).
@@ -644,7 +657,12 @@ impl Master {
             effort,
             context,
             attachments,
+            compare,
         } = opts;
+        let models = self.models();
+        if let Some(bad) = compare.iter().find(|c| !models.iter().any(|m| &m.id == *c)) {
+            return Err(CommandError::Rejected(format!("unknown model {bad:?}")));
+        }
         let row = self
             .inner
             .mirror
@@ -680,6 +698,23 @@ impl Master {
             text,
             agent: Some(agent),
             attachments,
+            compare,
+        })
+        .await
+    }
+
+    pub async fn select_variant(
+        &self,
+        sid: SessionId,
+        group: String,
+        message_id: String,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        self.send_command(&node, |req_id| MasterToNode::SelectVariant {
+            req_id,
+            session_id: sid,
+            group,
+            message_id,
         })
         .await
     }

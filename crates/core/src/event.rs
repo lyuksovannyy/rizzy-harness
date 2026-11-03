@@ -166,6 +166,9 @@ pub struct AgentRef {
 pub struct Variant {
     pub group: String,
     pub index: u32,
+    /// The model that wrote this answer (parallel answers compare models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -471,6 +474,7 @@ mod tests {
                 variant: Some(Variant {
                     group: "g".into(),
                     index: 1,
+                    model: None,
                 }),
             }),
             EventKind::AgentChanged(AgentChanged { agent }),

@@ -296,3 +296,23 @@ pub fn memory(cfg: &Config, data_dir: &Path, secrets: &SecretSet) -> anyhow::Res
         }
     })
 }
+
+/// The dictation service from `[voice]`, if configured.
+pub fn transcriber(
+    cfg: &Config,
+    data_dir: &Path,
+    secrets: &SecretSet,
+) -> anyhow::Result<Option<crate::voice::Transcriber>> {
+    if cfg.voice.url.is_empty() {
+        return Ok(None);
+    }
+    let key = secret(data_dir, &cfg.voice.key_secret)?;
+    if let Some(k) = &key {
+        secrets.add(k.clone());
+    }
+    Ok(Some(crate::voice::Transcriber::new(
+        &cfg.voice.url,
+        &cfg.voice.model,
+        key,
+    )))
+}

@@ -229,7 +229,11 @@ impl Session {
         text: String,
         agent: Option<AgentSpec>,
         attachments: Vec<Attachment>,
+        compare: Vec<String>,
     ) -> Result<(), String> {
+        if !compare.is_empty() && (self.profile != Profile::Chat || compare.len() > 4) {
+            return Err("parallel answers need a chat and at most 4 models".into());
+        }
         let turn_id = new_id();
         let cancel = CancellationToken::new();
         {
@@ -249,7 +253,7 @@ impl Session {
             attachments,
         };
         tokio::spawn(async move {
-            this.run_turn(msg, agent, cancel).await;
+            this.run_turn(msg, agent, compare, cancel).await;
         });
         Ok(())
     }
@@ -258,6 +262,7 @@ impl Session {
         self: Arc<Self>,
         msg: UserMessage,
         agent: Option<AgentSpec>,
+        compare: Vec<String>,
         cancel: CancellationToken,
     ) -> (TurnEndReason, Option<Usage>) {
         let turn_id = msg.turn_id.clone();
@@ -295,6 +300,7 @@ impl Session {
                         .and_then(|a| a.model.clone())
                         .unwrap_or_else(|| this.model.clone()),
                     agent,
+                    compare,
                     cancel: c,
                     host: &*this,
                 })
@@ -384,6 +390,39 @@ impl Session {
         }
     }
 
+    /// Record which parallel answer the conversation continues from.
+    pub(crate) async fn select_variant(
+        &self,
+        group: String,
+        message_id: String,
+    ) -> Result<(), String> {
+        if self.is_running() {
+            return Err("wait for the answers to finish".into());
+        }
+        let id = self.id;
+        let events = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())?;
+        let known = events.iter().any(|e| {
+            matches!(e.typed(), Ok(EventKind::AssistantMessage(m))
+                if m.message_id == message_id && m.variant.as_ref().is_some_and(|v| v.group == group))
+        });
+        if !known {
+            return Err("no such answer".into());
+        }
+        self.append(EventKind::VariantSelected(VariantSelected {
+            group,
+            message_id,
+        }))
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
     /// Undo a turn's file changes (see `git::restore`).
     pub(crate) async fn restore(&self, turn_id: &str, force: bool) -> Result<(), String> {
         if self.is_running() {
@@ -471,7 +510,7 @@ impl Session {
             text: task,
             attachments: vec![],
         };
-        let (reason, usage) = child.run_turn(msg, Some(agent), cancel).await;
+        let (reason, usage) = child.run_turn(msg, Some(agent), vec![], cancel).await;
         let merge_note = match iso {
             Some(i) => Some(self.merge_back(i, child_id).await),
             None => None,

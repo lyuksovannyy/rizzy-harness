@@ -90,6 +90,17 @@ pub enum MasterToNode {
         /// Documents with their extracted text (extracted on the master).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<harness_core::event::Attachment>,
+        /// Parallel answers from these models (chat turns, no tools).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        compare: Vec<String>,
+    },
+    /// The user picked one of several parallel answers.
+    #[serde(rename = "session.select_variant")]
+    SelectVariant {
+        req_id: String,
+        session_id: SessionId,
+        group: String,
+        message_id: String,
     },
     /// Change the session's active agent (records `agent_changed`).
     #[serde(rename = "session.set_agent")]
@@ -142,6 +153,7 @@ impl MasterToNode {
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::Delete { req_id, .. }
             | MasterToNode::Restore { req_id, .. }
+            | MasterToNode::SelectVariant { req_id, .. }
             | MasterToNode::ApprovalRespond { req_id, .. } => Some(req_id),
             MasterToNode::Welcome { .. } | MasterToNode::Resume { .. } => None,
         }

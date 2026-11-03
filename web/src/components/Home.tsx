@@ -21,6 +21,7 @@ export function Home(props: {
   onOpen: (sessionId: string) => void;
   /** Memory proposals waiting for the user. */
   toReview?: number;
+  voice?: boolean;
 }) {
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
   const onTextChange = useCallback((text: string, mode: Mode) => setTyped({ text, mode }), []);
@@ -53,6 +54,7 @@ export function Home(props: {
           onLearn={props.onLearn}
           onTextChange={onTextChange}
           onArrowDown={() => similar.current?.focusFirst() ?? false}
+          voice={props.voice}
         />
         <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} />
         {!!props.toReview && (

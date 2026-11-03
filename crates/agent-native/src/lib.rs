@@ -275,6 +275,20 @@ fn parse_effort(s: &str) -> Option<Effort> {
 /// got a result (interrupted turns) get a synthetic one so the transcript stays
 /// valid for providers that require every call to be answered.
 pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
+    // Parallel answers: only the chosen one (default: the first) is history.
+    let mut chosen: std::collections::HashMap<String, String> = Default::default();
+    for e in history {
+        if let Ok(EventKind::VariantSelected(v)) = e.typed() {
+            chosen.insert(v.group, v.message_id);
+        }
+    }
+    let keep = |m: &AssistantMessage| match &m.variant {
+        None => true,
+        Some(v) => match chosen.get(&v.group) {
+            Some(id) => *id == m.message_id,
+            None => v.index == 0,
+        },
+    };
     let mut out = Vec::new();
     let mut open: Vec<String> = Vec::new();
     let close_open = |out: &mut Vec<ChatMsg>, open: &mut Vec<String>| {
@@ -292,6 +306,7 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
                 close_open(&mut out, &mut open);
                 out.push(ChatMsg::User(m.model_text()));
             }
+            EventKind::AssistantMessage(m) if !keep(&m) => {}
             EventKind::AssistantMessage(m) => {
                 close_open(&mut out, &mut open);
                 open = m.tool_calls.iter().map(|c| c.call_id.clone()).collect();
@@ -423,6 +438,9 @@ impl AgentBackend for NativeBackend {
         let mut messages = vec![ChatMsg::System(system)];
         messages.extend(history_to_messages(recent));
         messages.push(ChatMsg::User(ctx.user_text.clone()));
+        if !ctx.compare.is_empty() {
+            return self.compare(&ctx, messages, usage, author).await;
+        }
         let tools = self.tool_specs(agent);
         // The master only puts an effort on the spec when the model supports it.
         let effort = agent
@@ -628,6 +646,104 @@ impl AgentBackend for NativeBackend {
 }
 
 impl NativeBackend {
+    /// Parallel answers: one completion per model, no tools, each recorded
+    /// as a variant of the same group (the turn id).
+    async fn compare(
+        &self,
+        ctx: &TurnCtx<'_>,
+        messages: Vec<ChatMsg>,
+        mut usage: Usage,
+        author: Option<String>,
+    ) -> TurnOutcome {
+        let host = ctx.host;
+        let runs = ctx.compare.iter().enumerate().map(|(i, model)| {
+            let messages = messages.clone();
+            let author = author.clone();
+            async move {
+                let message_id = new_id();
+                let variant = Variant {
+                    group: ctx.turn_id.clone(),
+                    index: i as u32,
+                    model: Some(model.clone()),
+                };
+                let req = ChatRequest {
+                    model: model.clone(),
+                    messages,
+                    tools: vec![],
+                    effort: None,
+                };
+                let (tx, rx) = mpsc::unbounded_channel();
+                let (turn_id, mid, v2, a2) = (
+                    ctx.turn_id.clone(),
+                    message_id.clone(),
+                    variant.clone(),
+                    author.clone(),
+                );
+                let step = coalesce(
+                    self.provider.complete(&req, tx),
+                    rx,
+                    &ctx.cancel,
+                    host,
+                    |text| {
+                        EventKind::AssistantDelta(AssistantDelta {
+                            author: a2.clone(),
+                            variant: Some(v2.clone()),
+                            turn_id: turn_id.clone(),
+                            message_id: mid.clone(),
+                            text,
+                        })
+                    },
+                )
+                .await;
+                match step {
+                    Step::Done(Ok(c)) => {
+                        host.emit(EventKind::AssistantMessage(AssistantMessage {
+                            author,
+                            variant: Some(variant),
+                            turn_id: ctx.turn_id.clone(),
+                            message_id,
+                            text: c.text,
+                            tool_calls: vec![],
+                        }))
+                        .await;
+                        Ok(c.usage)
+                    }
+                    Step::Done(Err(e)) => Err(format!("{model}: {e}")),
+                    Step::Cancelled => Err("cancelled".into()),
+                }
+            }
+        });
+        let results = futures::future::join_all(runs).await;
+        let mut errors = vec![];
+        for r in results {
+            match r {
+                Ok(Some(u)) => {
+                    usage.input_tokens += u.input_tokens;
+                    usage.output_tokens += u.output_tokens;
+                    usage.context_tokens = usage.context_tokens.max(u.input_tokens);
+                }
+                Ok(None) => {}
+                Err(e) => errors.push(e),
+            }
+        }
+        if ctx.cancel.is_cancelled() {
+            return TurnOutcome {
+                reason: TurnEndReason::Cancelled,
+                usage: Some(usage),
+                error: None,
+            };
+        }
+        TurnOutcome {
+            reason: if errors.len() == ctx.compare.len() {
+                TurnEndReason::Error
+            } else {
+                TurnEndReason::Completed
+            },
+            usage: Some(usage),
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
+        }
+    }
+
     /// Summarise everything before the last `KEEP_TURNS` turns. Returns the
     /// summary, the last seq it covers and the call's usage; `None` when
     /// there is nothing old enough or the call fails (the turn then simply
@@ -829,6 +945,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             model: "mock".into(),
             agent: None,
+            compare: vec![],
             cancel: Default::default(),
             host,
         }
@@ -1176,5 +1293,85 @@ mod tests {
         let (sum, recent) = split_summary(&history2);
         assert_eq!(sum.as_deref(), Some("Summary of 2 earlier messages."));
         assert_eq!(recent.first().map(|e| e.seq), Some(10));
+    }
+
+    #[tokio::test]
+    async fn compare_runs_models_in_parallel_and_history_follows_the_choice() {
+        let rec = Arc::new(Rec {
+            inner: mock::Mock {
+                delay: Duration::from_millis(5),
+            },
+            reqs: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(
+            rec.clone(),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        );
+        let host = RecHost::new(Decision::Allow);
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = ctx(&host, "hello", dir.path());
+        c.compare = vec!["mock".into(), "mock-big".into()];
+        let out = b.run_turn(c).await;
+        assert_eq!(out.reason, TurnEndReason::Completed);
+        assert!(
+            rec.reqs.lock().unwrap().iter().all(|r| r.tools.is_empty()),
+            "no tools in compare turns"
+        );
+        let evs = host.events.lock().unwrap().clone();
+        let answers: Vec<AssistantMessage> = evs
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::AssistantMessage(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.len(), 2);
+        let big = answers
+            .iter()
+            .find(|m| m.variant.as_ref().unwrap().model.as_deref() == Some("mock-big"))
+            .unwrap();
+        assert!(big.text.starts_with("[mock-big] You said: hello"));
+
+        // History: first answer by default, the chosen one after a selection.
+        let sid = harness_core::SessionId::new();
+        let mut seq = 0;
+        let mut raw: Vec<RawEvent> = evs
+            .into_iter()
+            .map(|k| {
+                seq += 1;
+                let (kind, payload) = k.into_parts();
+                RawEvent {
+                    session_id: sid,
+                    seq,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                }
+            })
+            .collect();
+        let texts = |raw: &[RawEvent]| -> Vec<String> {
+            history_to_messages(raw)
+                .into_iter()
+                .filter_map(|m| match m {
+                    ChatMsg::Assistant { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(texts(&raw), ["You said: hello"]);
+        let (kind, payload) = EventKind::VariantSelected(VariantSelected {
+            group: big.variant.as_ref().unwrap().group.clone(),
+            message_id: big.message_id.clone(),
+        })
+        .into_parts();
+        raw.push(RawEvent {
+            session_id: sid,
+            seq: seq + 1,
+            ts_ms: 0,
+            kind,
+            payload,
+        });
+        assert_eq!(texts(&raw), ["[mock-big] You said: hello"]);
     }
 }

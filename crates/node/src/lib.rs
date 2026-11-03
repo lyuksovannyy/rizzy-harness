@@ -233,6 +233,15 @@ impl NodeRuntime {
                 )
                 .await
             }
+            MasterToNode::SelectVariant {
+                session_id,
+                group,
+                message_id,
+                ..
+            } => match self.session(session_id) {
+                Some(s) => s.select_variant(group, message_id).await,
+                None => Err("unknown session".into()),
+            },
             MasterToNode::Restore {
                 session_id,
                 turn_id,
@@ -254,11 +263,12 @@ impl NodeRuntime {
                 text,
                 agent,
                 attachments,
+                compare,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.prompt(text, agent, attachments).await,
+                    Some(s) => s.prompt(text, agent, attachments, compare).await,
                     None => Err("unknown session".into()),
                 }
             }

@@ -185,6 +185,7 @@ fn events() -> Vec<RawEvent> {
             variant: Some(Variant {
                 group: "g1".into(),
                 index: 0,
+                model: None,
             }),
         }),
         EventKind::AssistantMessage(AssistantMessage {
@@ -196,6 +197,7 @@ fn events() -> Vec<RawEvent> {
             variant: Some(Variant {
                 group: "g1".into(),
                 index: 0,
+                model: None,
             }),
         }),
         EventKind::AssistantMessage(AssistantMessage {
@@ -207,6 +209,7 @@ fn events() -> Vec<RawEvent> {
             variant: Some(Variant {
                 group: "g1".into(),
                 index: 1,
+                model: None,
             }),
         }),
         EventKind::ToolCallStarted(ToolCallStarted {

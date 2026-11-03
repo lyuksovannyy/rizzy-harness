@@ -36,6 +36,7 @@ export interface AgentRef {
 export interface Variant {
   group: string;
   index: number;
+  model?: string;
 }
 
 export interface ToolResult {

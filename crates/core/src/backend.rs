@@ -54,6 +54,9 @@ pub struct TurnCtx<'a> {
     pub model: String,
     /// The agent running this turn; `None` means the backend's defaults.
     pub agent: Option<crate::agent::AgentSpec>,
+    /// Parallel answers: run the turn once per model listed here (no tools)
+    /// and record each answer as a variant. Empty = a normal turn.
+    pub compare: Vec<String>,
     pub cancel: CancellationToken,
     pub host: &'a dyn TurnHost,
 }

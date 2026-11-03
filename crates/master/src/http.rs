@@ -43,6 +43,13 @@ pub fn router(master: Master) -> Router {
             )),
         )
         .route("/api/memory", get(list_memory).post(add_memory))
+        .route("/api/features", get(features))
+        .route(
+            "/api/transcribe",
+            post(transcribe).layer(axum::extract::DefaultBodyLimit::max(
+                crate::voice::MAX_AUDIO,
+            )),
+        )
         .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
         .route(
             "/api/memory/{id}",
@@ -57,6 +64,7 @@ pub fn router(master: Master) -> Router {
         .route("/api/sessions/{id}/prompt", post(prompt))
         .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/agent", post(set_agent))
+        .route("/api/sessions/{id}/variants", post(select_variant))
         .route(
             "/api/sessions/{id}/turns/{turn}/restore",
             post(restore_turn),
@@ -920,6 +928,9 @@ struct PromptBody {
     /// Upload ids from `POST /api/attachments`; consumed by this message.
     #[serde(default)]
     attachments: Vec<String>,
+    /// Parallel answers: model ids (2-4).
+    #[serde(default)]
+    compare: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1000,6 +1011,7 @@ async fn prompt(
                     .model_context(&who.username, jiff::Timestamp::now()),
             ),
             attachments,
+            compare: b.compare,
         },
     )
     .await?;
@@ -1308,4 +1320,61 @@ async fn restore_turn(
     let sid = visible_session(&m, &who, &id).await?.session_id;
     m.restore_turn(sid, turn, b.force).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct VariantBody {
+    group: String,
+    message_id: String,
+}
+
+async fn select_variant(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<VariantBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.select_variant(sid, b.group, b.message_id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// What optional services this server has, for the UI.
+async fn features(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require(&m, &headers).await?;
+    Ok(Json(
+        json!({ "voice": m.transcriber().is_some(), "memory": m.memory().is_some() }),
+    ))
+}
+
+async fn transcribe(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    require(&m, &headers).await?;
+    let t = m.transcriber().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "voice is not set up on this server".into(),
+        )
+    })?;
+    if body.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "no audio".into()));
+    }
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.starts_with("audio/"))
+        .unwrap_or("audio/webm")
+        .to_string();
+    let text = t
+        .transcribe(body.to_vec(), &mime)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "text": text })))
 }

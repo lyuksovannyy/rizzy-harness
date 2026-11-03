@@ -864,3 +864,60 @@ unversioned, pin the image.
 * No rate limit on failed node handshakes (each costs a signature check; audit logged).
 
 **Next:** Phase 9 (later items).
+
+### 2026-11-03 — Phase 9 (later items): partly done, the rest deliberately not
+
+**Done**
+* **Checkpoints + undo.** Agentic turns in a git repository get before/after snapshots:
+  commits written through a *temporary* index (untracked files included, ignored files
+  not) and kept under `refs/harness/<session>/<turn>/`. The user's index, HEAD and
+  branches are never touched (asserted byte-for-byte in a test). `checkpoint` events
+  carry the changed files; the UI shows "N files changed" under the turn. **Undo** puts
+  back only the files that turn touched and refuses if any of them changed after the
+  turn ("Undo anyway" forces it). New phase `restored`; the fold (Rust + TS) tracks
+  checkpoints per turn.
+* **Worktrees for sub-agents** (fixes the Phase 8 risk). A delegated sub-agent that can
+  write gets a detached worktree inside the git dir, seeded with the current state
+  (uncommitted edits included). When it ends, its diff is applied to the main folder,
+  serialized per node, all or nothing; a conflicting result is kept under a ref and the
+  tool result says how to apply it. Read-only sub-agents share the folder.
+* **Parallel answers.** "compare: vs <model>" in the bar sends one prompt to two models
+  at once (chat, no tools). The answers are variants of one group (now carrying their
+  model), shown side by side; "Continue with this" records `variant_selected`, and later
+  turns' history contains only the chosen answer (the first by default). Merging
+  answers is not done.
+* **Voice input.** A mic button records in the browser and sends audio to the server,
+  which forwards it to an OpenAI-compatible `/audio/transcriptions` endpoint from
+  `[voice]` (a local Whisper server, or a cloud API); audio is not stored. No browser
+  speech API (Chrome's sends audio to Google). Shown only when configured.
+
+**Not done, on purpose**
+* **MCP and skills.** Running third-party MCP servers on a node is running arbitrary
+  code with the node's privileges; it needs its own design first: a node.toml allowlist
+  of servers (command, args, env from secrets), tools namespaced `mcp__<server>__<tool>`
+  and treated as mutating (ask) by default, output scrubbed like other tools, per-server
+  enable in the UI. Shipping a half-version would widen T4/T5 for little gain.
+* **External harnesses over ACP** (Claude Code, Codex, OpenCode). The `AgentBackend`
+  trait is ready for it, but none of those tools are installed here, so it could not be
+  tested, and it is not shipped untested.
+* **Projects, Library, group chats, voice output (TTS):** product features that need a
+  design pass with the user; not started.
+
+**Evidence**
+* Rust 138: git snapshot/restore round trip (staged, untracked, ignored, deleted and
+  created files; conflict refusal; index unchanged), undo over the protocol, worktree
+  isolation with merge-back and a real conflict, compare + history selection,
+  transcription forwarding (multipart, key, auth required, off until configured).
+* `web/e2e/phase9.cjs`: dictation with Chromium's fake microphone through a fake
+  transcription server; two answers side by side, the choice survives a reload; an
+  approved `bash` turn changes two files, Undo restores them and `git status` is clean.
+  Phases 3–8 e2e still green. Initial JS 80.1 KB gzip.
+
+**Risks**
+* Checkpoints add two `git add -A` passes per agentic turn: cheap with the copied stat
+  cache, slow in huge repos with many untracked files. Very large untracked files are
+  snapshotted too (they are not ignored); refs under `refs/harness/` are never pruned yet.
+* Undo restores files, not side effects (commands that touched databases, networks,
+  or files outside the repository).
+* Applying sub-agent results is `git apply` without three-way merge: any overlap is a
+  conflict that a human or the orchestrator resolves.

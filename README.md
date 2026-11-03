@@ -5,8 +5,9 @@ for coding agents, with the agent loop running on the machine that owns the
 code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
-**Status:** Phases 1–8 done (accounts, UI, bar intelligence, onboarding, chat
-capability, memory, remote nodes and sub-agents).
+**Status:** Phases 1–8 done and most of Phase 9 (checkpoints with undo, sub-agent
+worktrees, parallel answers, voice input). See PLAN.md for what is left out
+and why.
 
 ## Quick start
 
@@ -95,6 +96,20 @@ preset = "balanced"                  # fast | balanced | best (Ollama model name
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Memory.
 
+Dictation (the mic button) needs a transcription service, for example a local
+Whisper server with an OpenAI-compatible API:
+
+```toml
+[voice]
+url = "http://localhost:8000/v1"     # serves /audio/transcriptions
+model = "Systran/faster-whisper-small"
+# key_secret = "voice"               # if the service needs a key
+```
+
+In a git repository every agentic turn is checkpointed (under
+`refs/harness/`, without touching your index or branches) and its file
+changes can be undone from the chat.
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 
@@ -176,6 +191,10 @@ node web/e2e/phase7.cjs target/debug/harness
 
 ```bash
 node web/e2e/phase8.cjs target/debug/harness
+```
+
+```bash
+node web/e2e/phase9.cjs target/debug/harness
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)
