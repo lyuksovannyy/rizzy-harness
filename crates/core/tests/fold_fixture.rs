@@ -16,6 +16,7 @@ fn events() -> Vec<RawEvent> {
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
+            parent_session: None,
             title: "fixture".into(),
             cwd: "/w".into(),
             model: "mock".into(),

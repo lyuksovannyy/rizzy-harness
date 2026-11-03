@@ -7,6 +7,7 @@
 //! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
 //! * `memory?`       -> repeats the recalled-memory block of the system prompt
+//! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel)
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * anything else   -> echoes the message back, streamed word by word
 
@@ -113,6 +114,22 @@ impl Provider for Mock {
         }
         if let Some(q) = user.strip_prefix("search:") {
             return Ok(call("web_search", json!({"query": q.trim()})));
+        }
+        if let Some(rest) = user.strip_prefix("delegate:") {
+            let calls = rest
+                .split('|')
+                .filter_map(|p| p.split_once('='))
+                .map(|(a, t)| ToolCallRef {
+                    call_id: harness_core::new_id(),
+                    tool: "delegate".into(),
+                    input: json!({"agent": a.trim(), "task": t.trim()}),
+                })
+                .collect();
+            return Ok(Completion {
+                text: String::new(),
+                tool_calls: calls,
+                usage,
+            });
         }
         if user.trim().starts_with("memory?") {
             let sys = match req.messages.first() {

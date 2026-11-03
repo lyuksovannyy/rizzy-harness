@@ -430,8 +430,9 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 * **R4** OpenAI-compatible servers differ on streamed tool-call chunking
   (index vs id); the parser keys by `index` and tolerates missing ids. Tested
   against recorded chunk shapes, not every vendor.
-* **R5** Remote access has no TLS yet (`--insecure-bind` is plain HTTP). Until
-  Phase 8, remote use must go through a VPN/tailnet or a TLS-terminating proxy.
+* **R5** The node link has TLS since Phase 8, but the **web UI still does not**
+  (`--insecure-bind` is plain HTTP). Remote browser access must go through a
+  VPN/tailnet or a TLS-terminating proxy.
 * **R6** Two-db embedded mode doubles disk usage on the master machine.
 * **R7** `genai` has a single maintainer on crates.io. Mitigated by the exact pin
   and the `Provider` seam; a swap touches one file.
@@ -805,3 +806,61 @@ unversioned, pin the image.
 * Vector search is brute force over a user's facts: fine for thousands, not millions.
 
 **Next:** Phase 8, remote nodes and orchestration.
+
+### 2026-11-03 — Phase 8 (remote nodes + orchestration): done
+
+**Done**
+* **Node link** (new crate `harness-link`), on its own port (`serve --node-listen ADDR`)
+  that speaks only the node protocol, so the UI can stay on loopback:
+  - TLS with a self-signed master certificate. Nodes **pin its SHA-256 fingerprint** at
+    join (no CA is trusted; a mis-issued certificate does not help an attacker, T8).
+  - Each node has an **Ed25519 key** (aws-lc-rs, `keys/node.key`, 0600). Every
+    connection answers a fresh challenge whose signed message includes the master's
+    certificate fingerprint (channel binding: no replay to, or relay through, another
+    endpoint).
+  - **Join** with a single-use token an admin creates in Settings → Nodes (hashed,
+    15 min). The UI prints the two commands (`node join … --token --fingerprint`,
+    `node run`). A key cannot join twice; ids `local`/`master` are never handed out.
+    Decision: the admin-issued token *is* the approval (the plan had a separate approve
+    click); the node's key fingerprint is shown in the list.
+  - The bridge accepts frames only after auth, requires the first one to be `hello`
+    for the authenticated id, and closes on a second hello. Events for sessions owned
+    by another node are still refused by the mirror (T7).
+  - **Revoke** (UI) marks the key revoked and drops the live link; the node's reconnect
+    is rejected and `node run` exits.
+  - Node side: reconnect with backoff (250 ms → 30 s); each reconnect re-sends `hello`
+    with heads, so the master resumes from its cursor.
+* **Orchestration:** agents may list `delegates` (+ `max_subagents`,
+  `max_subagent_tokens`). Such an agent gets a `delegate` tool; each call runs the
+  specialist **in its own child session on the same node** (own log, own approvals,
+  `parent_session` on `session_created`, owner inherited only from a parent on the same
+  node). All delegations of one step run **in parallel**; caps are enforced per turn
+  (default 4 sub-agents, 200k tokens) and shown in the tool description. Depth is one
+  (sub-agents get no delegates). Cancelling the parent cancels its children. The child's
+  final answer comes back as the tool result (Infinity's "report back as a tool
+  result"); the tool card links to the child session as soon as it starts. Built-in
+  **Ultracode** delegates to Coder, Scout and Writer. Sub-agent sessions are hidden from
+  Recents and link back to their parent.
+
+**Evidence**
+* Rust 133. `remote_nodes.rs`: wrong fingerprint fails at TLS; tokens single use; keys
+  cannot re-join; reserved ids; signing as another node is rejected; **a link cut
+  mid-turn through a TCP proxy converges to identical node and mirror logs**; remote
+  cancel; revoke disconnects. `orchestration.rs`: five delegations → four run and one hits
+  the cap; children overlap in time; depth one; owner inheritance; cancel cascades.
+* `web/e2e/phase8.cjs` with **two real processes**: join from the UI's command (a wrong
+  fingerprint is refused), node online, an approved `bash` call writes a file on the
+  remote node, Ultracode's two sub-agents in child sessions, revoke stops the node
+  process. Phases 3–7 e2e green.
+
+**Risks**
+* The **web UI still has no TLS** (R5); only the node link does.
+* A compromised master can still approve anything within node policy (T6/R1).
+* Approvals for a sub-agent's tools appear in the child session; the parent card links
+  there, but the user must open it. No cost cap in money, only tokens.
+* Delegation runs on the parent's node only (no cross-node fan-out yet) and sub-agents
+  share the workspace without worktrees, so parallel coders can collide on files.
+* Remote nodes need their own provider config and key (`harness.toml` on the node).
+* No rate limit on failed node handshakes (each costs a signature check; audit logged).
+
+**Next:** Phase 9 (later items).

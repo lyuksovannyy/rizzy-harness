@@ -32,6 +32,8 @@ pub(crate) struct Session {
     cwd: PathBuf,
     model: String,
     mode: ApprovalMode,
+    profile: Profile,
+    incognito: bool,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
 }
@@ -45,6 +47,7 @@ pub(crate) struct NewSession {
     pub profile: Profile,
     pub agent_id: Option<String>,
     pub incognito: bool,
+    pub parent_session: Option<SessionId>,
 }
 
 impl Session {
@@ -61,6 +64,7 @@ impl Session {
             profile,
             agent_id,
             incognito,
+            parent_session,
         } = new;
         let s = Arc::new(Self {
             node: node.clone(),
@@ -69,6 +73,8 @@ impl Session {
             cwd: cwd.clone(),
             model: model.clone(),
             mode,
+            profile,
+            incognito,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
         });
@@ -76,6 +82,7 @@ impl Session {
             profile,
             agent_id,
             incognito,
+            parent_session,
             title,
             cwd: cwd.display().to_string(),
             model,
@@ -108,6 +115,8 @@ impl Session {
             cwd: PathBuf::from(meta.cwd),
             model: meta.model,
             mode,
+            profile: meta.profile,
+            incognito: meta.incognito,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
         }))
@@ -231,7 +240,9 @@ impl Session {
             text,
             attachments,
         };
-        tokio::spawn(async move { this.run_turn(msg, agent, cancel).await });
+        tokio::spawn(async move {
+            this.run_turn(msg, agent, cancel).await;
+        });
         Ok(())
     }
 
@@ -240,7 +251,7 @@ impl Session {
         msg: UserMessage,
         agent: Option<AgentSpec>,
         cancel: CancellationToken,
-    ) {
+    ) -> (TurnEndReason, Option<Usage>) {
         let turn_id = msg.turn_id.clone();
         let user_text = msg.model_text();
         let id = self.id;
@@ -304,13 +315,79 @@ impl Session {
         self.emit(EventKind::TurnEnded(TurnEnded {
             turn_id: turn_id.clone(),
             reason,
-            usage,
+            usage: usage.clone(),
         }))
         .await;
         let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
         if t.as_ref().is_some_and(|t| t.turn_id == turn_id) {
             *t = None;
         }
+        (reason, usage)
+    }
+
+    /// Run a delegated sub-task in a new child session and wait for it.
+    async fn run_child(
+        &self,
+        agent: AgentSpec,
+        task: String,
+        cancel: CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        let child_id = SessionId::new();
+        let short: String = task.chars().take(60).collect();
+        let child = Session::create(
+            self.node.clone(),
+            child_id,
+            NewSession {
+                title: format!("@{}: {short}", agent.agent_id),
+                cwd: self.cwd.clone(),
+                model: agent.model.clone().unwrap_or_else(|| self.model.clone()),
+                mode: self.mode,
+                profile: self.profile,
+                agent_id: Some(agent.agent_id.clone()),
+                incognito: self.incognito,
+                parent_session: Some(self.id),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        self.node
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(child_id, child.clone());
+        started(child_id);
+        let turn_id = new_id();
+        *child.turn.lock().unwrap_or_else(|p| p.into_inner()) = Some(RunningTurn {
+            turn_id: turn_id.clone(),
+            cancel: cancel.clone(),
+        });
+        let msg = UserMessage {
+            turn_id,
+            text: task,
+            attachments: vec![],
+        };
+        let (reason, usage) = child.run_turn(msg, Some(agent), cancel).await;
+        let text = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(child_id, 0, usize::MAX >> 1))
+            .await
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .find_map(|e| match e.typed() {
+                Ok(EventKind::AssistantMessage(m)) if !m.text.trim().is_empty() => Some(m.text),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok(harness_core::backend::DelegateOutcome {
+            child: child_id,
+            text,
+            reason,
+            usage,
+        })
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -350,6 +427,16 @@ impl Session {
 impl TurnHost for Session {
     async fn emit(&self, kind: EventKind) {
         Session::emit(self, kind).await
+    }
+
+    async fn delegate(
+        &self,
+        agent: AgentSpec,
+        task: String,
+        cancel: CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        self.run_child(agent, task, cancel, started).await
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {

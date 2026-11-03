@@ -14,6 +14,8 @@ function summary(t: Tool): string {
     case "write":
     case "edit":
       return i.path ?? "";
+    case "delegate":
+      return `@${i.agent ?? "?"}: ${i.task ?? ""}`;
     case "grep":
       return `/${i.pattern ?? ""}/ ${i.path ?? ""}${i.glob ? ` (${i.glob})` : ""}`;
     case "glob":
@@ -73,6 +75,8 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
   };
 
   const output = item.result ? item.result.output : item.live_output;
+  // A delegated sub-task runs in its own session: link to it.
+  const child = item.tool === "delegate" ? /session: ([0-9a-f-]{36})/.exec(output)?.[1] : undefined;
 
   return (
     <div className={`tool tool-${status}`}>
@@ -85,6 +89,11 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
         )}
         <span className="chev">{expanded ? "▾" : "▸"}</span>
       </button>
+      {child && (
+        <a className="child-link small" href={`#/s/${child}`}>
+          Open @{item.input?.agent} session{status === "running" ? " (approvals for its tools appear there)" : ""}
+        </a>
+      )}
       {pending && item.approval && (
         <div className="approval">
           <div className="approval-reason">{item.approval.reason}</div>

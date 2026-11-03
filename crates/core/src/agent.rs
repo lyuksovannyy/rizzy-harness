@@ -57,6 +57,30 @@ pub struct AgentSpec {
     /// in an incognito chat). Set by the master per session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_tools: Vec<String>,
+    /// Agents this one may hand sub-tasks to (`delegate` tool). Resolved by
+    /// the master; their own `delegates` are empty, so depth is one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegates: Vec<AgentSpec>,
+    /// Limits on delegation per turn, shown to the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<DelegateCaps>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegateCaps {
+    /// Sub-agent runs per turn.
+    pub max_subagents: u32,
+    /// Tokens (input + output) all sub-agents of one turn may use together.
+    pub max_tokens: u64,
+}
+
+impl Default for DelegateCaps {
+    fn default() -> Self {
+        Self {
+            max_subagents: 4,
+            max_tokens: 200_000,
+        }
+    }
 }
 
 impl AgentSpec {

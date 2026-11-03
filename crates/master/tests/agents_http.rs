@@ -124,7 +124,7 @@ async fn chat_sessions_agents_and_mentions() {
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["general", "coder", "writer", "scout"]);
+    assert_eq!(ids, ["general", "coder", "writer", "scout", "ultracode"]);
     assert!(
         v["agents"][0].get("spec").is_none(),
         "prompts are not exposed in the list"

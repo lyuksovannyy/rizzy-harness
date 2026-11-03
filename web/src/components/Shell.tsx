@@ -213,7 +213,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       {!collapsed && (
         <Sidebar
           me={me}
-          sessions={sessions.filter((x) => !x.incognito)}
+          sessions={sessions.filter((x) => !x.incognito && !x.parent_id)}
           nodes={nodes}
           selected={selected}
           conn={live.state}
@@ -261,6 +261,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               onProviderChanged={refreshModels}
               initialTab={route.tab}
               memoryVersion={memoryVersion}
+              nodes={nodes}
             />
           ) : (
             <Home

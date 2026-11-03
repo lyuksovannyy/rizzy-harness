@@ -76,6 +76,16 @@ export default function Conversation(props: {
           🗑
         </button>
       </header>
+      {props.row?.parent_id && (
+        <div className="incognito-banner">
+          <span>
+            Sub-task run by {agentName(activeAgent)} for another session.
+          </span>
+          <a className="link" href={`#/s/${props.row.parent_id}`}>
+            Back to the main session
+          </a>
+        </div>
+      )}
       {incognito && (
         <div className="incognito-banner">
           <span>{t("conv.incognito")}</span>

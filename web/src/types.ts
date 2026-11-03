@@ -176,6 +176,17 @@ export interface SessionRow {
   agent_id: string | null;
   profile: Profile | null;
   incognito: boolean;
+  /** Set on a sub-agent's session. */
+  parent_id: string | null;
+}
+
+export interface RemoteNode {
+  node_id: string;
+  hostname: string;
+  key_fingerprint: string;
+  created_ms: number;
+  revoked: boolean;
+  connected: boolean;
 }
 
 export interface NodeInfo {

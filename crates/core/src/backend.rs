@@ -20,6 +20,29 @@ pub trait TurnHost: Send + Sync {
     /// Ask whether a tool call may run. The host applies node policy first
     /// and only asks the user if policy requires it. Emits the approval events.
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision;
+
+    /// Run `task` as `agent` in a new child session on this node and wait for
+    /// its turn to end. `started` is called with the child's id as soon as it
+    /// exists (so the UI can link to it while it works).
+    async fn delegate(
+        &self,
+        _agent: crate::agent::AgentSpec,
+        _task: String,
+        _cancel: CancellationToken,
+        _started: Box<dyn FnOnce(crate::SessionId) + Send>,
+    ) -> Result<DelegateOutcome, String> {
+        Err("delegation is not available here".into())
+    }
+}
+
+/// How a delegated sub-task ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DelegateOutcome {
+    pub child: crate::SessionId,
+    /// The sub-agent's final answer.
+    pub text: String,
+    pub reason: TurnEndReason,
+    pub usage: Option<Usage>,
 }
 
 pub struct TurnCtx<'a> {

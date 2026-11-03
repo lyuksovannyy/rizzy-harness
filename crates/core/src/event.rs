@@ -132,6 +132,9 @@ pub struct SessionCreated {
     /// Incognito sessions are excluded from search, suggestions and memory.
     #[serde(default, skip_serializing_if = "is_false")]
     pub incognito: bool,
+    /// Set on a sub-agent's session: the session whose turn delegated to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<crate::SessionId>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -448,6 +451,7 @@ mod tests {
                 profile: Profile::Chat,
                 agent_id: Some("general".into()),
                 incognito: true,
+                parent_session: None,
             }),
             EventKind::TurnStarted(TurnStarted {
                 turn_id: "t".into(),

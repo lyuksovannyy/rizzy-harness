@@ -15,6 +15,7 @@ import type {
   ProviderModel,
   ProviderState,
   RawEvent,
+  RemoteNode,
   Role,
   SearchHit,
   SessionRow,
@@ -71,6 +72,11 @@ export const api = {
     call<{ ok: boolean }>("POST", "/api/login", { username, password }),
   logout: () => call<{ ok: boolean }>("POST", "/api/logout"),
   nodes: () => call<{ nodes: NodeInfo[] }>("GET", "/api/nodes"),
+  remoteNodes: () =>
+    call<{ nodes: RemoteNode[]; listener: { port: number; fingerprint: string } | null }>("GET", "/api/admin/nodes"),
+  joinToken: () =>
+    call<{ token: string; port: number; fingerprint: string; expires_in_s: number }>("POST", "/api/admin/nodes/join"),
+  revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "/api/sessions"),
   events: (id: string, after = 0) =>
     call<{ events: RawEvent[] }>("GET", `/api/sessions/${id}/events?after=${after}`),

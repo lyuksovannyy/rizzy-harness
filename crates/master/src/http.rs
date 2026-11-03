@@ -769,6 +769,7 @@ fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
         "agent_id": r.agent_id,
         "profile": r.profile,
         "incognito": r.incognito,
+        "parent_id": r.parent_id,
     })
 }
 

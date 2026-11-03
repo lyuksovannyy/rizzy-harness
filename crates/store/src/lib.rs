@@ -68,6 +68,8 @@ pub struct SessionRow {
     pub profile: Option<String>,
     /// Temporary chat: never indexed, purged after the configured TTL.
     pub incognito: bool,
+    /// A sub-agent's session: the session that delegated to it.
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -157,7 +159,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     incognito  INTEGER NOT NULL DEFAULT 0,
     owner_id   TEXT,
     agent_id   TEXT,
-    profile    TEXT
+    profile    TEXT,
+    parent_id  TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     session_id TEXT NOT NULL,
@@ -386,9 +389,17 @@ impl Store {
                         .map(str::to_string)
                 };
                 tx.execute(
-                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7 WHERE session_id = ?1",
-                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload)],
+                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8 WHERE session_id = ?1",
+                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), opt("parent_session")],
                 )?;
+                // A sub-agent's session belongs to whoever owns its parent
+                // (same node only: a node cannot adopt another node's chats).
+                if let Some(parent) = opt("parent_session") {
+                    tx.execute(
+                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2 AND p.node_id = ?3) WHERE session_id = ?1",
+                        params![sid, parent, owner],
+                    )?;
+                }
             }
             "agent_changed" => {
                 let agent = e
@@ -822,7 +833,7 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id, agent_id, profile, incognito FROM sessions ORDER BY updated_ms DESC",
+            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id, agent_id, profile, incognito, parent_id FROM sessions ORDER BY updated_ms DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -842,6 +853,7 @@ impl Store {
                     agent_id: r.get(10)?,
                     profile: r.get(11)?,
                     incognito: r.get::<_, i64>(12)? != 0,
+                    parent_id: r.get(13)?,
                 },
             ))
         })?;

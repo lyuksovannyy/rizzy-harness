@@ -10,6 +10,9 @@
 //! model: optional-model-id
 //! effort: high                                    # low | medium | high | max
 //! budget: standard                                # lean | standard
+//! delegates: [coder, scout]                       # may hand sub-tasks to these
+//! max_subagents: 4                                # per turn (default 4)
+//! max_subagent_tokens: 200000                     # per turn, all sub-agents
 //! ---
 //! System prompt in markdown...
 //! ```
@@ -27,6 +30,7 @@ const BUILTIN: &[(&str, &str)] = &[
     ("coder", include_str!("../builtin/coder.md")),
     ("writer", include_str!("../builtin/writer.md")),
     ("scout", include_str!("../builtin/scout.md")),
+    ("ultracode", include_str!("../builtin/ultracode.md")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +62,12 @@ struct Frontmatter {
     effort: Option<String>,
     #[serde(default)]
     budget: Budget,
+    #[serde(default)]
+    delegates: Vec<String>,
+    #[serde(default)]
+    max_subagents: Option<u32>,
+    #[serde(default)]
+    max_subagent_tokens: Option<u64>,
 }
 
 /// An agent as listed in the UI.
@@ -67,6 +77,8 @@ pub struct Agent {
     pub name: String,
     pub description: String,
     pub builtin: bool,
+    /// Agent ids this one may delegate to (resolved by the master).
+    pub delegates: Vec<String>,
     #[serde(skip)]
     pub spec: AgentSpec,
 }
@@ -116,16 +128,34 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
         &serde_json_like(&fm.tools),
         fm.model.as_deref().unwrap_or(""),
         fm.effort.as_deref().unwrap_or(""),
+        &fm.delegates.join(","),
+        &format!("{:?}/{:?}", fm.max_subagents, fm.max_subagent_tokens),
     ] {
         h.update(part.as_bytes());
         h.update([0u8]);
     }
     let prompt_hash = hex::encode(h.finalize())[..16].to_string();
+    for d in &fm.delegates {
+        if !valid_id(d) || d == id {
+            return Err(AgentError::Frontmatter {
+                id: id.into(),
+                msg: format!("bad delegate {d:?}"),
+            });
+        }
+    }
+    let caps = (!fm.delegates.is_empty()).then(|| {
+        let d = harness_core::agent::DelegateCaps::default();
+        harness_core::agent::DelegateCaps {
+            max_subagents: fm.max_subagents.unwrap_or(d.max_subagents).clamp(1, 16),
+            max_tokens: fm.max_subagent_tokens.unwrap_or(d.max_tokens),
+        }
+    });
     Ok(Agent {
         id: id.into(),
         name: fm.name.clone(),
         description: fm.description,
         builtin,
+        delegates: fm.delegates,
         spec: AgentSpec {
             agent_id: id.into(),
             name: fm.name,
@@ -136,6 +166,8 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
             budget: fm.budget,
             prompt_hash,
             deny_tools: vec![],
+            delegates: vec![],
+            caps,
         },
     })
 }

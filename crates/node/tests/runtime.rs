@@ -341,6 +341,7 @@ async fn recovers_interrupted_turn_on_start() {
                 profile: harness_core::event::Profile::Agentic,
                 agent_id: None,
                 incognito: false,
+                parent_session: None,
                 title: "t".into(),
                 cwd: ws.display().to_string(),
                 model: "mock".into(),

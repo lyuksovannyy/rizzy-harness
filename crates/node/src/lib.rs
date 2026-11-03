@@ -55,7 +55,7 @@ pub struct NodeLink {
 
 pub(crate) struct Inner {
     pub(crate) cfg: NodeConfig,
-    sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
+    pub(crate) sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
     /// The current link to the master, if connected.
     link: Mutex<Option<mpsc::UnboundedSender<NodeToMaster>>>,
 }
@@ -337,6 +337,7 @@ impl NodeRuntime {
                 profile,
                 agent_id: agent.map(|a| a.agent_id),
                 incognito,
+                parent_session: None,
             },
         )
         .await

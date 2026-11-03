@@ -351,6 +351,23 @@ impl Master {
         if !effort_ok {
             spec.effort = None;
         }
+        // Sub-agents travel with the spec (nodes keep no definitions). Their
+        // own delegates stay empty: delegation is one level deep.
+        spec.delegates = agent
+            .delegates
+            .iter()
+            .filter_map(|d| set.get(d))
+            .map(|d| {
+                let mut c = d.spec.clone();
+                c.effort = None;
+                c.delegates.clear();
+                c.caps = None;
+                c
+            })
+            .collect();
+        if spec.delegates.is_empty() {
+            spec.caps = None;
+        }
         Ok(spec)
     }
 

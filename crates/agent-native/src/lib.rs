@@ -26,6 +26,9 @@ pub const FLUSH_BYTES: usize = 2048;
 
 const MAX_STEPS: usize = 50;
 
+/// The orchestration tool (handled by the loop itself, not a `Tool`).
+pub const DELEGATE: &str = "delegate";
+
 pub struct NativeConfig {
     pub system_prompt: String,
     /// Env vars removed from tool processes (they hold secrets).
@@ -134,7 +137,8 @@ impl NativeBackend {
     /// Tools offered to the model: the runtime's tools, narrowed to what the
     /// agent asks for. (Node policy still gates execution separately.)
     fn tool_specs(&self, agent: Option<&harness_core::agent::AgentSpec>) -> Vec<ToolSpec> {
-        self.tools
+        let mut specs: Vec<ToolSpec> = self
+            .tools
             .iter()
             .filter(|t| agent.is_none_or(|a| a.allows_tool(t.name())))
             .map(|t| ToolSpec {
@@ -142,7 +146,118 @@ impl NativeBackend {
                 description: t.description().to_string(),
                 schema: t.schema(),
             })
-            .collect()
+            .collect();
+        if let Some(a) = agent.filter(|a| !a.delegates.is_empty())
+            && !a.deny_tools.iter().any(|t| t == DELEGATE)
+        {
+            let caps = a.caps.unwrap_or_default();
+            let roster: Vec<String> = a
+                .delegates
+                .iter()
+                .map(|d| format!("{} ({})", d.agent_id, d.name))
+                .collect();
+            specs.push(ToolSpec {
+                name: DELEGATE.into(),
+                description: format!(
+                    "Hand a self-contained sub-task to a specialist, who works in its own session \
+                     on the same machine and returns its final answer. Available: {}. Several \
+                     calls in one step run in parallel. Limits per turn: {} sub-agents, {} tokens.",
+                    roster.join(", "),
+                    caps.max_subagents,
+                    caps.max_tokens
+                ),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "agent": {
+                            "type": "string",
+                            "enum": a.delegates.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
+                        },
+                        "task": { "type": "string", "description": "Everything the specialist needs to know" }
+                    },
+                    "required": ["agent", "task"]
+                }),
+            });
+        }
+        specs
+    }
+
+    /// Run one `delegate` call. Returns the result and the child's usage.
+    async fn run_delegate(
+        &self,
+        ctx: &TurnCtx<'_>,
+        host: &dyn harness_core::backend::TurnHost,
+        call: &ToolCallRef,
+    ) -> (ToolOutcome, Usage) {
+        let none = Usage::default();
+        let Some(agent) = ctx.agent.as_ref() else {
+            return (ToolOutcome::err("delegation needs an agent"), none);
+        };
+        let target = call
+            .input
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let task = call
+            .input
+            .get("task")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let Some(spec) = agent.delegates.iter().find(|d| d.agent_id == target) else {
+            return (
+                ToolOutcome::err(format!(
+                    "`{target}` is not an agent this one can delegate to"
+                )),
+                none,
+            );
+        };
+        if task.is_empty() {
+            return (ToolOutcome::err("`task` must describe the sub-task"), none);
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
+            let _ = tx.send(sid);
+        });
+        let run = host.delegate(spec.clone(), task, ctx.cancel.child_token(), started);
+        let call_id = call.call_id.clone();
+        // Link to the child as soon as it exists, while it still works.
+        let link = async {
+            if let Some(sid) = rx.recv().await {
+                host.emit(EventKind::ToolOutputDelta(ToolOutputDelta {
+                    call_id: call_id.clone(),
+                    stream: OutputStream::Stdout,
+                    text: format!("session: {sid}\n"),
+                }))
+                .await;
+            }
+        };
+        let (res, ()) = tokio::join!(run, link);
+        match res {
+            Err(e) => (ToolOutcome::err(e), none),
+            Ok(o) => {
+                let ok = o.reason == TurnEndReason::Completed;
+                let reason = format!("{:?}", o.reason).to_lowercase();
+                let body = if o.text.trim().is_empty() {
+                    "(no answer)".to_string()
+                } else {
+                    o.text
+                };
+                (
+                    ToolOutcome {
+                        ok,
+                        output: format!(
+                            "session: {}\n@{} ended ({reason}):\n{body}",
+                            o.child, spec.agent_id
+                        ),
+                        exit_code: None,
+                        truncated: false,
+                    },
+                    o.usage.unwrap_or_default(),
+                )
+            }
+        }
     }
 }
 
@@ -315,6 +430,7 @@ impl AgentBackend for NativeBackend {
             .and_then(parse_effort)
             .or(self.config.effort);
         let mut allowed_for_session: HashSet<String> = HashSet::new();
+        let (mut subagents, mut sub_tokens) = (0u32, 0u64);
 
         for _ in 0..MAX_STEPS {
             let message_id = new_id();
@@ -386,7 +502,88 @@ impl AgentBackend for NativeBackend {
                 };
             }
 
-            for call in completion.tool_calls {
+            // Delegations of this step run in parallel, within the caps.
+            let (delegations, calls): (Vec<_>, Vec<_>) = completion
+                .tool_calls
+                .into_iter()
+                .partition(|c| c.tool == DELEGATE && tools.iter().any(|t| t.name == DELEGATE));
+            if !delegations.is_empty() {
+                let caps = agent.and_then(|a| a.caps).unwrap_or_default();
+                let mut admitted = Vec::new();
+                for call in delegations {
+                    host.emit(EventKind::ToolCallStarted(ToolCallStarted {
+                        author: author.clone(),
+                        turn_id: ctx.turn_id.clone(),
+                        call_id: call.call_id.clone(),
+                        tool: call.tool.clone(),
+                        input: call.input.clone(),
+                    }))
+                    .await;
+                    let refusal = if subagents >= caps.max_subagents {
+                        Some(format!(
+                            "cap reached: at most {} sub-agents per turn",
+                            caps.max_subagents
+                        ))
+                    } else if sub_tokens >= caps.max_tokens {
+                        Some(format!(
+                            "cap reached: sub-agents used {sub_tokens} of {} tokens this turn",
+                            caps.max_tokens
+                        ))
+                    } else {
+                        None
+                    };
+                    match refusal {
+                        Some(r) => {
+                            host.emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                call_id: call.call_id.clone(),
+                                ok: false,
+                                output: r.clone(),
+                                exit_code: None,
+                                truncated: false,
+                            }))
+                            .await;
+                            messages.push(ChatMsg::Tool {
+                                call_id: call.call_id,
+                                content: r,
+                            });
+                        }
+                        None => {
+                            subagents += 1;
+                            admitted.push(call);
+                        }
+                    }
+                }
+                let results = futures::future::join_all(
+                    admitted.iter().map(|c| self.run_delegate(&ctx, host, c)),
+                )
+                .await;
+                for (call, (outcome, u)) in admitted.into_iter().zip(results) {
+                    sub_tokens += u.input_tokens + u.output_tokens;
+                    usage.input_tokens += u.input_tokens;
+                    usage.output_tokens += u.output_tokens;
+                    let output = self.config.secrets.scrub(&outcome.output);
+                    host.emit(EventKind::ToolCallFinished(ToolCallFinished {
+                        call_id: call.call_id.clone(),
+                        ok: outcome.ok,
+                        output: output.clone(),
+                        exit_code: None,
+                        truncated: outcome.truncated,
+                    }))
+                    .await;
+                    messages.push(ChatMsg::Tool {
+                        call_id: call.call_id,
+                        content: output,
+                    });
+                }
+                if ctx.cancel.is_cancelled() {
+                    return TurnOutcome {
+                        reason: TurnEndReason::Cancelled,
+                        usage: Some(usage),
+                        error: None,
+                    };
+                }
+            }
+            for call in calls {
                 host.emit(EventKind::ToolCallStarted(ToolCallStarted {
                     author: author.clone(),
                     turn_id: ctx.turn_id.clone(),
@@ -648,6 +845,8 @@ mod tests {
             budget: Default::default(),
             prompt_hash: "h".into(),
             deny_tools: vec![],
+            delegates: vec![],
+            caps: None,
         }
     }
 

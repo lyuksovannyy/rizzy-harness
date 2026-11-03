@@ -1059,3 +1059,19 @@ details.summary p {
   margin-top: 12px;
   text-align: center;
 }
+
+/* Phase 8: nodes, sub-agents */
+.join-cmd {
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  user-select: all;
+}
+.child-link {
+  display: block;
+  padding: 4px 12px 8px;
+}

@@ -26,6 +26,7 @@ fn created(sid: SessionId) -> RawEvent {
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
+            parent_session: None,
             title: "t".into(),
             cwd: "/w".into(),
             model: "m".into(),

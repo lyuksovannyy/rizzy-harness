@@ -5,8 +5,8 @@ for coding agents, with the agent loop running on the machine that owns the
 code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
-**Status:** Phases 1–7 done (single machine, accounts, UI, bar intelligence,
-onboarding, chat capability, memory). Remote nodes are Phase 8.
+**Status:** Phases 1–8 done (accounts, UI, bar intelligence, onboarding, chat
+capability, memory, remote nodes and sub-agents).
 
 ## Quick start
 
@@ -107,6 +107,25 @@ allow_outside_workspace = false
 
 `harness doctor` checks the setup.
 
+## Remote worker nodes
+
+Agentic sessions can run on other machines. Start the master with a node port
+(TLS with a pinned self-signed certificate; only joined nodes get in):
+
+```bash
+./target/release/harness serve --node-listen 0.0.0.0:7443
+```
+
+In Settings → Nodes choose **Create join command** and run the two printed
+commands on the other machine (same binary). That machine needs its own
+`harness.toml` (provider + key) and `node.toml` (its workspace roots and
+limits: the node, not the master, decides what may run there). Revoke a node in
+the same place.
+
+The **Ultracode** agent splits big jobs into parallel sub-tasks for Coder,
+Scout and Writer (at most 4 per turn and 200k tokens by default; set
+`delegates`, `max_subagents` and `max_subagent_tokens` in an agent file).
+
 ## Development
 
 ```bash
@@ -153,6 +172,10 @@ node web/e2e/phase6.cjs target/debug/harness
 
 ```bash
 node web/e2e/phase7.cjs target/debug/harness
+```
+
+```bash
+node web/e2e/phase8.cjs target/debug/harness
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

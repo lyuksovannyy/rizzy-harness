@@ -2,13 +2,14 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
-import type { Agent, Me, ModelInfo, Prefs } from "../types";
+import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
 import { ACCENTS, ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
+import { Nodes } from "./Nodes";
 import { Users } from "./Users";
 
-export type Tab = "profile" | "preferences" | "memory" | "provider" | "password" | "users";
+export type Tab = "profile" | "preferences" | "memory" | "provider" | "nodes" | "password" | "users";
 
 function PrefsEditor(props: {
   initial: Prefs;
@@ -57,13 +58,14 @@ export default function Settings(props: {
   onProviderChanged: () => void;
   initialTab?: Tab;
   memoryVersion: number;
+  nodes: NodeInfo[];
 }) {
   const admin = props.me.role === "admin";
   const tabs: Tab[] = [
     "profile",
     "preferences",
     "memory",
-    ...(admin ? (["provider"] as Tab[]) : []),
+    ...(admin ? (["provider", "nodes"] as Tab[]) : []),
     ...(props.me.user_id ? (["password"] as Tab[]) : []),
     ...(admin ? (["users"] as Tab[]) : []),
   ];
@@ -152,6 +154,7 @@ export default function Settings(props: {
             )}
           </>
         )}
+        {tab === "nodes" && <Nodes nodes={props.nodes} />}
         {tab === "provider" && (
           <div className="card stack">
             <ProviderForm
