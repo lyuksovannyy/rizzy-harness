@@ -3,6 +3,8 @@
 //!
 //! * `run: <cmd>`    -> one `bash` tool call, then a summary
 //! * `read: <path>`  -> one `read` tool call, then a summary
+//! * `search: <q>`  -> one `web_search` tool call, then a summary
+//! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * anything else   -> echoes the message back, streamed word by word
 
@@ -92,6 +94,12 @@ impl Provider for Mock {
         }
         if let Some(path) = user.strip_prefix("read:") {
             return Ok(call("read", json!({"path": path.trim()})));
+        }
+        if let Some(q) = user.strip_prefix("search:") {
+            return Ok(call("web_search", json!({"query": q.trim()})));
+        }
+        if let Some(u) = user.strip_prefix("fetch:") {
+            return Ok(call("web_fetch", json!({"url": u.trim()})));
         }
         if let Some(n) = user.strip_prefix("slow:") {
             let n: usize = n.trim().parse().unwrap_or(20);

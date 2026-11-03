@@ -44,6 +44,8 @@ pub enum AppendOutcome {
     Gap {
         head: u64,
     },
+    /// The session was deleted here; its events are not accepted again.
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,8 @@ pub struct SessionRow {
     pub agent_id: Option<String>,
     /// `chat` or `agentic`; `None` until `session_created` has been mirrored.
     pub profile: Option<String>,
+    /// Temporary chat: never indexed, purged after the configured TTL.
+    pub incognito: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -153,6 +157,12 @@ CREATE TABLE IF NOT EXISTS events (
     payload    TEXT NOT NULL,
     PRIMARY KEY (session_id, seq)
 ) WITHOUT ROWID;
+-- Sessions deleted here. A mirror refuses their events afterwards, so a node
+-- that was offline during the delete cannot resurrect them.
+CREATE TABLE IF NOT EXISTS deleted_sessions (
+    session_id TEXT PRIMARY KEY,
+    ts_ms      INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_ms  INTEGER NOT NULL,
@@ -241,6 +251,9 @@ impl Store {
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Deleted chats (incognito, user deletes) are overwritten, not just
+        // unlinked, so their text does not linger in free pages.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -278,6 +291,16 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        if existing.is_none() {
+            let deleted: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM deleted_sessions WHERE session_id = ?1)",
+                params![sid],
+                |r| r.get(0),
+            )?;
+            if deleted {
+                return Ok(AppendOutcome::Deleted);
+            }
+        }
         let head = match &existing {
             Some((node, head)) => {
                 if node != owner {
@@ -472,6 +495,64 @@ impl Store {
         Ok(parts.join("\n"))
     }
 
+    /// Remove a session and everything derived from it. With `tombstone`, the
+    /// id is remembered so later events for it are refused (mirrors).
+    /// Returns whether the session existed.
+    pub fn delete_session(&self, sid: SessionId, tombstone: bool) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let id = sid.to_string();
+        tx.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
+        let indexed = tx.execute("DELETE FROM chat_fts WHERE session_id = ?1", params![id])?;
+        if indexed > 0 {
+            // FTS5 deletes only add tombstones; merging drops the old terms.
+            tx.execute("INSERT INTO chat_fts(chat_fts) VALUES('optimize')", [])?;
+        }
+        let n = tx.execute("DELETE FROM sessions WHERE session_id = ?1", params![id])?;
+        if tombstone {
+            tx.execute(
+                "INSERT OR REPLACE INTO deleted_sessions (session_id, ts_ms) VALUES (?1, ?2)",
+                params![id, harness_core::now_ms()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    pub fn is_deleted(&self, sid: SessionId) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_sessions WHERE session_id = ?1)",
+            params![sid.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Idle incognito sessions last touched before `before_ms`.
+    pub fn expired_incognito(&self, before_ms: i64) -> Result<Vec<SessionId>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT session_id FROM sessions WHERE incognito = 1 AND running = 0 AND updated_ms < ?1",
+        )?;
+        let ids = stmt
+            .query_map(params![before_ms], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|s| {
+                s.parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {s}")))
+            })
+            .collect()
+    }
+
+    /// Fold the WAL back into the database file and truncate it, so deleted
+    /// rows do not survive in the log file either.
+    pub fn checkpoint(&self) -> Result<()> {
+        let conn = self.lock();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
     pub fn head_seq(&self, sid: SessionId) -> Result<u64> {
         let conn = self.lock();
         let h: Option<i64> = conn
@@ -526,7 +607,7 @@ impl Store {
     pub fn sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id, agent_id, profile FROM sessions ORDER BY updated_ms DESC",
+            "SELECT session_id, node_id, title, cwd, model, created_ms, updated_ms, head_seq, running, owner_id, agent_id, profile, incognito FROM sessions ORDER BY updated_ms DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -545,6 +626,7 @@ impl Store {
                     owner_id: r.get(9)?,
                     agent_id: r.get(10)?,
                     profile: r.get(11)?,
+                    incognito: r.get::<_, i64>(12)? != 0,
                 },
             ))
         })?;

@@ -15,6 +15,72 @@ pub struct Config {
     /// Known models and what they support. Unlisted models are assumed to
     /// support tools but not effort, so effort is never sent blindly.
     pub models: Vec<ModelConfig>,
+    pub chat: ChatConfig,
+    pub web: WebConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchKind {
+    #[default]
+    None,
+    /// Self-hosted SearXNG (JSON format enabled). Keeps queries local.
+    Searxng,
+    /// Brave Search API (key required).
+    Brave,
+}
+
+/// Web tools for chats. Changing them needs a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebConfig {
+    pub search: SearchKind,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub searxng_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brave_key_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brave_key_secret: Option<String>,
+    /// Offer `web_fetch` (reads pages the user or a search result linked).
+    pub fetch: bool,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            search: SearchKind::None,
+            searxng_url: String::new(),
+            brave_key_env: None,
+            brave_key_secret: None,
+            fetch: true,
+        }
+    }
+}
+
+/// Chat runtime behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChatConfig {
+    /// Incognito chats idle this long are deleted (master and chat runtime).
+    pub incognito_ttl_minutes: u64,
+    /// When the estimated history passes this many tokens, older turns are
+    /// replaced by a summary (0 disables summarising).
+    pub summarize_after_tokens: usize,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            incognito_ttl_minutes: 24 * 60,
+            summarize_after_tokens: 24_000,
+        }
+    }
+}
+
+impl ChatConfig {
+    pub fn incognito_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.incognito_ttl_minutes.max(1) * 60)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +156,17 @@ impl Config {
         let p = &self.provider;
         if p.api_key_env.is_some() && p.api_key_secret.is_some() {
             bail!("[provider] set api_key_env or api_key_secret, not both");
+        }
+        match self.web.search {
+            SearchKind::Searxng if self.web.searxng_url.is_empty() => {
+                bail!("[web] search = \"searxng\" needs searxng_url")
+            }
+            SearchKind::Brave
+                if self.web.brave_key_env.is_none() && self.web.brave_key_secret.is_none() =>
+            {
+                bail!("[web] search = \"brave\" needs brave_key_env or brave_key_secret")
+            }
+            _ => {}
         }
         if p.kind != ProviderKind::Mock {
             if p.model.is_empty() || p.model == "mock" {

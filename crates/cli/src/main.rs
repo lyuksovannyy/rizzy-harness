@@ -150,14 +150,23 @@ async fn serve(
         default_model: cfg.provider.model.clone(),
         secrets: secrets.clone(),
         profile: Profile::Agentic,
+        incognito_ttl: None,
     })
     .await?;
 
     // The master's own chat runtime: same session code, no workspace and no
-    // file or shell tools (web tools arrive in Phase 6).
+    // file or shell tools; only the web tools from `[web]`.
+    let (web_tools, web_key) = harness_master::providers::web_tools(&cfg, dir)?;
+    if let Some(k) = web_key {
+        secrets.add(k);
+    }
+    tracing::info!(
+        tools = ?web_tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+        "chat tools"
+    );
     let chat_backend = NativeBackend::new(
         provider,
-        Vec::new(),
+        web_tools,
         NativeConfig {
             secrets: secrets.clone(),
             ..Default::default()
@@ -172,6 +181,7 @@ async fn serve(
         default_model: cfg.provider.model.clone(),
         secrets,
         profile: Profile::Chat,
+        incognito_ttl: Some(cfg.chat.incognito_ttl()),
     })
     .await?;
 
@@ -193,6 +203,7 @@ async fn serve(
     }
     let master = Master::new(mirror, auth);
     master.set_provider_runtime(runtime);
+    master.start_incognito_purge(cfg.chat.incognito_ttl());
     let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
     for e in &agent_errors {
         tracing::warn!(error = %e, "skipping agent definition");

@@ -1,7 +1,7 @@
 ---
 name: Writer
 description: Drafts and edits prose such as docs, emails, posts and changelogs.
-tools: [read, write, edit, grep, glob]
+tools: [read, write, edit, grep, glob, web_search, web_fetch]
 budget: lean
 ---
 You are a clear, precise writer. Match the audience and the requested tone, prefer

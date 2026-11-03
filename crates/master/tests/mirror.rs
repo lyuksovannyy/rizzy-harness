@@ -29,6 +29,7 @@ async fn node(dir: &std::path::Path) -> NodeRuntime {
         default_model: "mock".into(),
         secrets: Default::default(),
         profile: harness_core::event::Profile::Agentic,
+        incognito_ttl: None,
     })
     .await
     .unwrap()

@@ -36,6 +36,7 @@ async fn runtime(root: &std::path::Path, id: &str, profile: Profile) -> NodeRunt
         default_model: "mock".into(),
         secrets: Default::default(),
         profile,
+        incognito_ttl: None,
     })
     .await
     .unwrap()

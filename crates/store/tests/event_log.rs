@@ -271,3 +271,57 @@ async fn async_call_helper() {
     let out = s.call(move |s| s.append("local", &e)).await.unwrap();
     assert_eq!(out, AppendOutcome::Applied);
 }
+
+#[test]
+fn deleted_sessions_stay_deleted() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    for e in script(sid, 5) {
+        s.append("n", &e).unwrap();
+    }
+    // Node-side delete (no tombstone): the id could be reused by replay.
+    let other = SessionId::new();
+    s.append("n", &created(other)).unwrap();
+    assert!(s.delete_session(other, false).unwrap());
+    assert_eq!(
+        s.append("n", &created(other)).unwrap(),
+        AppendOutcome::Applied
+    );
+
+    // Mirror-side delete: a late replay from an offline node is refused.
+    assert!(s.delete_session(sid, true).unwrap());
+    assert!(s.is_deleted(sid).unwrap());
+    assert!(s.events_after(sid, 0, 100).unwrap().is_empty());
+    for e in script(sid, 5) {
+        assert_eq!(s.append("n", &e).unwrap(), AppendOutcome::Deleted);
+    }
+    assert!(s.session(sid).unwrap().is_none());
+    assert!(!s.delete_session(sid, true).unwrap());
+}
+
+#[test]
+fn expired_incognito_only_selects_idle_incognito() {
+    let s = Store::open_in_memory().unwrap();
+    let inc = SessionId::new();
+    let mut e = created(inc);
+    e.payload["incognito"] = json!(true);
+    s.append("n", &e).unwrap();
+    let normal = SessionId::new();
+    s.append("n", &created(normal)).unwrap();
+    assert_eq!(s.expired_incognito(1_000).unwrap(), vec![inc]);
+    assert!(s.expired_incognito(0).unwrap().is_empty());
+    // A running turn is never purged underneath the user.
+    s.append(
+        "n",
+        &ev(
+            inc,
+            2,
+            EventKind::TurnStarted(TurnStarted {
+                agent: None,
+                turn_id: "t".into(),
+            }),
+        ),
+    )
+    .unwrap();
+    assert!(s.expired_incognito(1_000).unwrap().is_empty());
+}

@@ -25,6 +25,7 @@ harness-agent-native = { path = "crates/agent-native" }
 harness-agents = { path = "crates/agents" }
 harness-node = { path = "crates/node" }
 harness-master = { path = "crates/master" }
+harness-web = { path = "crates/web" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
@@ -40,6 +41,8 @@ getrandom = "0.4.3"
 globset = "0.4.21"
 hex = "0.4.3"
 ignore = "0.4.34"
+# Bundled tz database: containers often lack /usr/share/zoneinfo.
+jiff = { version = "0.2.39", features = ["tzdb-bundle-always"] }
 mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal", "process", "hostname"] }
 regex = "1.13.1"
@@ -64,3 +67,11 @@ uuid = { version = "1.29.0", features = ["v7", "serde"] }
 [profile.release]
 lto = "thin"
 strip = true
+
+# Full debug info for ~30 test binaries filled the disk (18 GB); line tables
+# keep backtraces useful at a fraction of the size.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

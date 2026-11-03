@@ -75,6 +75,8 @@ pub struct MasterInner {
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<harness_agents::AgentSet>,
     providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
+    /// Sessions with a re-sent `session.delete` in flight.
+    redeleting: Mutex<HashSet<SessionId>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -87,6 +89,8 @@ pub struct CreateSpec {
     pub model: Option<String>,
     pub approval_mode: Option<harness_core::policy::ApprovalMode>,
     pub agent_id: Option<String>,
+    /// Temporary chat (chat profile only).
+    pub incognito: bool,
 }
 
 /// Per-message choices on a prompt.
@@ -96,6 +100,8 @@ pub struct PromptOpts {
     pub agent_id: Option<String>,
     /// `low` | `medium` | `high` | `max`; dropped if the model lacks support.
     pub effort: Option<String>,
+    /// Appended to the agent's system prompt (user name, local time, place).
+    pub context: Option<String>,
 }
 
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
@@ -144,6 +150,7 @@ impl Master {
                 auth,
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),
+                redeleting: Mutex::new(HashSet::new()),
                 agents: Mutex::new(harness_agents::AgentSet::from_agents(
                     harness_agents::builtins(),
                     harness_agents::DEFAULT_AGENT,
@@ -320,6 +327,16 @@ impl Master {
         // Ask for everything we have not mirrored yet.
         for h in sessions {
             let sid = h.session_id;
+            let deleted = self
+                .inner
+                .mirror
+                .call(move |s| s.is_deleted(sid))
+                .await
+                .unwrap_or(false);
+            if deleted {
+                self.redelete(&node_id, sid);
+                continue;
+            }
             let mirror_head = self
                 .inner
                 .mirror
@@ -404,6 +421,13 @@ impl Master {
             NodeToMaster::Hello { .. } => {
                 tracing::warn!(node = %node_id, "unexpected second hello");
             }
+            NodeToMaster::Deleted { session_id } => {
+                // Only the owning node may delete its session.
+                let owner = self.owner(session_id).await.ok();
+                if owner.as_deref() == Some(node_id) {
+                    self.forget(session_id).await;
+                }
+            }
         }
     }
 
@@ -425,6 +449,7 @@ impl Master {
             }
             Ok(AppendOutcome::Duplicate) => {}
             Ok(AppendOutcome::Gap { head }) => self.request_resume(node_id, e.session_id, head),
+            Ok(AppendOutcome::Deleted) => self.redelete(node_id, e.session_id),
             Err(err) => {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
@@ -491,6 +516,7 @@ impl Master {
             approval_mode: spec.approval_mode,
             profile: Some(profile),
             agent: Some(agent),
+            incognito: spec.incognito,
         })
         .await?;
         Ok(sid)
@@ -504,7 +530,11 @@ impl Master {
         text: String,
         opts: PromptOpts,
     ) -> Result<(), CommandError> {
-        let PromptOpts { agent_id, effort } = opts;
+        let PromptOpts {
+            agent_id,
+            effort,
+            context,
+        } = opts;
         let row = self
             .inner
             .mirror
@@ -515,7 +545,12 @@ impl Master {
             .filter(|id| self.agents().get(id).is_some())
             .map(str::to_string);
         let chosen = agent_id.or(mention).or(row.agent_id.clone());
-        let agent = self.agent_spec_with(chosen.as_deref(), Some(&row.model), effort.as_deref())?;
+        let mut agent =
+            self.agent_spec_with(chosen.as_deref(), Some(&row.model), effort.as_deref())?;
+        if let Some(c) = context {
+            // prompt_hash still identifies the agent definition, not the context.
+            agent.system_prompt = format!("{}\n\n{c}", agent.system_prompt);
+        }
         self.send_command(&row.node_id, |req_id| MasterToNode::Prompt {
             req_id,
             session_id: sid,
@@ -549,6 +584,87 @@ impl Master {
             session_id: sid,
         })
         .await
+    }
+
+    /// Delete a session everywhere. The mirror copy goes (with a tombstone)
+    /// even if the node is offline; the node is told again when it returns.
+    pub async fn delete_session(&self, sid: SessionId) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        let res = self
+            .send_command(&node, |req_id| MasterToNode::Delete {
+                req_id,
+                session_id: sid,
+            })
+            .await;
+        match res {
+            Ok(()) | Err(CommandError::NodeOffline(_)) | Err(CommandError::Timeout) => {}
+            Err(e) => return Err(e),
+        }
+        self.forget(sid).await;
+        Ok(())
+    }
+
+    /// Drop the mirror copy of a session and refuse its events from now on.
+    async fn forget(&self, sid: SessionId) {
+        let res = self
+            .inner
+            .mirror
+            .call(move |s| {
+                s.delete_session(sid, true)?;
+                s.checkpoint()
+            })
+            .await;
+        if let Err(e) = res {
+            tracing::warn!(session = %sid, error = %e, "deleting mirror copy failed");
+        }
+        let _ = self.inner.live.send(Live::SessionsChanged);
+    }
+
+    /// A node still has a session we deleted (it was offline): tell it again.
+    fn redelete(&self, node_id: &str, sid: SessionId) {
+        let first = lock(&self.inner.redeleting).insert(sid);
+        if !first {
+            return;
+        }
+        let this = self.clone();
+        let node = node_id.to_string();
+        tokio::spawn(async move {
+            let _ = this
+                .send_command(&node, |req_id| MasterToNode::Delete {
+                    req_id,
+                    session_id: sid,
+                })
+                .await;
+            lock(&this.inner.redeleting).remove(&sid);
+        });
+    }
+
+    /// Mirror-side incognito purge, so expired chats vanish from the master
+    /// even while their node is offline.
+    pub async fn purge_incognito(&self, ttl: Duration) -> usize {
+        let before = harness_core::now_ms() - ttl.as_millis() as i64;
+        let ids = self
+            .inner
+            .mirror
+            .call(move |s| s.expired_incognito(before))
+            .await
+            .unwrap_or_default();
+        let n = ids.len();
+        for sid in ids {
+            let _ = self.delete_session(sid).await;
+        }
+        n
+    }
+
+    pub fn start_incognito_purge(&self, ttl: Duration) {
+        let this = self.clone();
+        let every = (ttl / 10).clamp(Duration::from_secs(1), Duration::from_secs(300));
+        tokio::spawn(async move {
+            loop {
+                this.purge_incognito(ttl).await;
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     pub async fn respond_approval(

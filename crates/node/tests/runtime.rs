@@ -36,6 +36,7 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
             "sk-node-secret-1".into(),
         )]),
         profile: harness_core::event::Profile::Agentic,
+        incognito_ttl: None,
     }
 }
 
@@ -91,6 +92,7 @@ impl Harness {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
             profile: None,
+            incognito: false,
             agent: None,
             req_id: "c".into(),
             session_id: sid,
@@ -270,6 +272,7 @@ async fn cwd_outside_roots_is_refused() {
     .await;
     h.send(MasterToNode::Create {
         profile: None,
+        incognito: false,
         agent: None,
         req_id: "c".into(),
         session_id: SessionId::new(),

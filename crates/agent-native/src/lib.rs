@@ -145,6 +145,19 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
     out
 }
 
+/// What the user and tools said in this conversation (not the model, not
+/// the system prompt): the provenance set for network tools.
+fn observed_text(messages: &[ChatMsg]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            ChatMsg::User(t) => Some(t.clone()),
+            ChatMsg::Tool { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 enum Step<T> {
     Done(T),
     Cancelled,
@@ -300,8 +313,9 @@ impl AgentBackend for NativeBackend {
                     input: call.input.clone(),
                 }))
                 .await;
+                let observed = observed_text(&messages);
                 let outcome = self
-                    .run_tool(&ctx, host, &call, &mut allowed_for_session)
+                    .run_tool(&ctx, host, &call, &mut allowed_for_session, &observed)
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
@@ -341,6 +355,7 @@ impl NativeBackend {
         host: &dyn harness_core::backend::TurnHost,
         call: &ToolCallRef,
         allowed_for_session: &mut HashSet<String>,
+        observed: &[String],
     ) -> ToolOutcome {
         let offered = ctx
             .agent
@@ -388,6 +403,7 @@ impl NativeBackend {
             allow_outside_workspace: self.config.allow_outside_workspace,
             timeout: self.config.tool_timeout,
             env_remove: self.config.env_remove.clone(),
+            observed: Arc::new(observed.to_vec()),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both.

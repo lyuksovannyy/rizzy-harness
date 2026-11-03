@@ -34,7 +34,10 @@ pub fn router(master: Master) -> Router {
         .route("/api/models", get(models))
         .route("/api/agents", get(agents))
         .route("/api/sessions", get(list_sessions).post(create_session))
-        .route("/api/sessions/{id}", get(get_session))
+        .route(
+            "/api/sessions/{id}",
+            get(get_session).delete(delete_session),
+        )
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/prompt", post(prompt))
         .route("/api/sessions/{id}/cancel", post(cancel))
@@ -750,6 +753,7 @@ fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
         "owner_id": r.owner_id,
         "agent_id": r.agent_id,
         "profile": r.profile,
+        "incognito": r.incognito,
     })
 }
 
@@ -775,6 +779,17 @@ async fn get_session(
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     Ok(Json(session_json(&visible_session(&m, &who, &id).await?)))
+}
+
+async fn delete_session(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let sid = visible_session(&m, &who, &id).await?.session_id;
+    m.delete_session(sid).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -819,6 +834,8 @@ struct CreateBody {
     model: Option<String>,
     #[serde(default)]
     approval_mode: Option<ApprovalMode>,
+    #[serde(default)]
+    incognito: bool,
 }
 
 async fn create_session(
@@ -827,6 +844,12 @@ async fn create_session(
     Json(b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
+    if b.incognito && b.profile != Some(harness_core::event::Profile::Chat) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "incognito is only available for chats".into(),
+        ));
+    }
     // Agentic sessions run shell commands on a worker node.
     if b.profile.unwrap_or(harness_core::event::Profile::Agentic)
         == harness_core::event::Profile::Agentic
@@ -850,6 +873,7 @@ async fn create_session(
             model: b.model,
             approval_mode: b.approval_mode,
             agent_id: b.agent_id,
+            incognito: b.incognito,
         })
         .await?;
     if let Some(uid) = who.user_id {
@@ -892,6 +916,11 @@ async fn prompt(
         crate::PromptOpts {
             agent_id: b.agent_id,
             effort: b.effort,
+            context: Some(
+                crate::prefs::Prefs::load(&m, who.user_id.as_deref())
+                    .await
+                    .model_context(&who.username, jiff::Timestamp::now()),
+            ),
         },
     )
     .await?;

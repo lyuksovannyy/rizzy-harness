@@ -24,6 +24,7 @@ struct CreateArgs {
     approval_mode: Option<harness_core::policy::ApprovalMode>,
     profile: Option<harness_core::event::Profile>,
     agent: Option<harness_core::agent::AgentSpec>,
+    incognito: bool,
 }
 
 /// Max events per `session.snapshot` batch.
@@ -41,6 +42,8 @@ pub struct NodeConfig {
     /// Which sessions this runtime hosts: `Agentic` (workspace + tools, the
     /// normal node) or `Chat` (the master's workspace-less chat runtime).
     pub profile: harness_core::event::Profile,
+    /// Incognito sessions idle this long are deleted by the node itself.
+    pub incognito_ttl: Option<std::time::Duration>,
 }
 
 /// Both ends of a link as seen from the master: commands in, messages out.
@@ -93,7 +96,22 @@ impl NodeRuntime {
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(row.session_id, s);
         }
-        Ok(Self { inner })
+        let this = Self { inner };
+        if let Some(ttl) = this.inner.cfg.incognito_ttl {
+            let rt = this.clone();
+            // Check often enough that a chat never outlives its TTL by much.
+            let every = (ttl / 10).clamp(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(300),
+            );
+            tokio::spawn(async move {
+                loop {
+                    rt.purge_incognito(ttl).await;
+                    tokio::time::sleep(every).await;
+                }
+            });
+        }
+        Ok(this)
     }
 
     pub fn node_id(&self) -> &str {
@@ -196,6 +214,7 @@ impl NodeRuntime {
                 approval_mode,
                 profile,
                 agent,
+                incognito,
                 ..
             } => {
                 self.audit("session.create", session_id).await;
@@ -208,9 +227,14 @@ impl NodeRuntime {
                         approval_mode,
                         profile,
                         agent,
+                        incognito,
                     },
                 )
                 .await
+            }
+            MasterToNode::Delete { session_id, .. } => {
+                self.audit("session.delete", session_id).await;
+                self.delete(session_id).await
             }
             MasterToNode::Prompt {
                 session_id,
@@ -274,12 +298,16 @@ impl NodeRuntime {
             approval_mode,
             profile,
             agent,
+            incognito,
         } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
         }
         let hosted = self.inner.cfg.profile;
         let profile = profile.unwrap_or(Profile::Agentic);
+        if incognito && profile != Profile::Chat {
+            return Err("incognito is only available for chat sessions".into());
+        }
         if profile != hosted {
             return Err(format!(
                 "this runtime hosts {hosted:?} sessions, not {profile:?}"
@@ -307,6 +335,7 @@ impl NodeRuntime {
                 mode,
                 profile,
                 agent_id: agent.map(|a| a.agent_id),
+                incognito,
             },
         )
         .await
@@ -317,6 +346,60 @@ impl NodeRuntime {
             .unwrap_or_else(|p| p.into_inner())
             .insert(sid, s);
         Ok(())
+    }
+
+    /// Delete a session: cancel its turn, wait for it to end, drop the log.
+    pub async fn delete(&self, sid: SessionId) -> Result<(), String> {
+        if let Some(s) = self.session(sid) {
+            s.cancel();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while s.is_running() {
+                if tokio::time::Instant::now() > deadline {
+                    return Err("the running turn did not stop".into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&sid);
+        let existed = self
+            .inner
+            .cfg
+            .store
+            .call(move |s| {
+                let existed = s.delete_session(sid, false)?;
+                s.checkpoint()?;
+                Ok::<_, harness_store::StoreError>(existed)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        if existed {
+            self.inner
+                .publish(NodeToMaster::Deleted { session_id: sid });
+        }
+        Ok(())
+    }
+
+    /// Delete incognito sessions idle for longer than `ttl`. Returns how many.
+    pub async fn purge_incognito(&self, ttl: std::time::Duration) -> usize {
+        let before = harness_core::now_ms() - ttl.as_millis() as i64;
+        let ids = self
+            .inner
+            .cfg
+            .store
+            .call(move |s| s.expired_incognito(before))
+            .await
+            .unwrap_or_default();
+        let mut n = 0;
+        for sid in ids {
+            if self.delete(sid).await.is_ok() {
+                n += 1;
+            }
+        }
+        n
     }
 
     async fn replay(&self, sid: SessionId, mut after: u64) {

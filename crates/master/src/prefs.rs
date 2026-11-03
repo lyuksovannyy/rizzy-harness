@@ -78,11 +78,7 @@ impl Prefs {
         short_text("country", &self.country)?;
         short_text("city", &self.city)?;
         if let Some(tz) = &self.timezone
-            && (tz.is_empty()
-                || tz.len() > 64
-                || !tz
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"/_+-".contains(&b)))
+            && (tz.len() > 64 || jiff::tz::TimeZone::get(tz).is_err())
         {
             return Err("timezone must be an IANA name such as Europe/Riga".into());
         }
@@ -102,6 +98,40 @@ impl Prefs {
             return Err(format!("unknown model {model:?}"));
         }
         Ok(())
+    }
+
+    /// A short context block for the model: who the user is, their local
+    /// date and time, and (if given) where they are. Empty fields are left out.
+    pub fn model_context(&self, username: &str, now: jiff::Timestamp) -> String {
+        let opt = |o: &Option<String>| o.as_deref().map(str::trim).unwrap_or("").to_string();
+        let display = opt(&self.display_name);
+        let name = if display.is_empty() {
+            username
+        } else {
+            display.as_str()
+        };
+        let tz = self
+            .timezone
+            .as_deref()
+            .and_then(|t| jiff::tz::TimeZone::get(t).ok())
+            .unwrap_or(jiff::tz::TimeZone::UTC);
+        let local = now.to_zoned(tz);
+        let mut out = format!(
+            "Context: the user's name is {name}. Their local time is {} ({}).",
+            local.strftime("%A %Y-%m-%d %H:%M"),
+            self.timezone.as_deref().unwrap_or("UTC")
+        );
+        let place: Vec<String> = [opt(&self.city), opt(&self.country)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !place.is_empty() {
+            out.push_str(&format!(
+                " They are in {}; use it for local questions (transit, shops, news, weather).",
+                place.join(", ")
+            ));
+        }
+        out
     }
 
     pub async fn load(m: &Master, user: Option<&str>) -> Prefs {
@@ -126,5 +156,35 @@ impl Prefs {
             serde_json::to_string(self).expect("prefs serialize"),
         );
         m.inner.mirror.call(move |s| s.kv_set(&k, &v)).await
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn model_context_uses_local_time_and_place() {
+        let p = Prefs {
+            display_name: Some("Alex".into()),
+            timezone: Some("Europe/Riga".into()),
+            city: Some("Riga".into()),
+            country: Some("Latvia".into()),
+            ..Default::default()
+        };
+        // 2026-01-15 22:30 UTC is 00:30 the next day in Riga (UTC+2).
+        let now: jiff::Timestamp = "2026-01-15T22:30:00Z".parse().unwrap();
+        let c = p.model_context("alex", now);
+        assert!(c.contains("Alex"), "{c}");
+        assert!(c.contains("Friday 2026-01-16 00:30 (Europe/Riga)"), "{c}");
+        assert!(c.contains("Riga, Latvia"), "{c}");
+        let bare = Prefs::default().model_context("bob", now);
+        assert!(bare.contains("bob") && bare.contains("(UTC)") && !bare.contains("They are in"));
+    }
+
+    #[test]
+    fn timezone_must_exist() {
+        assert!(jiff::tz::TimeZone::get("Europe/Riga").is_ok());
+        assert!(jiff::tz::TimeZone::get("Mars/Olympus").is_err());
     }
 }

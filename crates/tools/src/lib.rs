@@ -33,6 +33,10 @@ pub struct ToolCtx {
     pub timeout: Duration,
     /// Environment variables removed from child processes (secret holders).
     pub env_remove: Vec<String>,
+    /// Text this conversation got from the user and from tools, never text
+    /// the model wrote. Network tools only follow URLs found here, so injected
+    /// instructions cannot make the model smuggle data out in a URL it builds.
+    pub observed: Arc<Vec<String>>,
 }
 
 impl ToolCtx {
@@ -44,6 +48,7 @@ impl ToolCtx {
             allow_outside_workspace: false,
             timeout: Duration::from_secs(600),
             env_remove: Vec::new(),
+            observed: Arc::default(),
         }
     }
 

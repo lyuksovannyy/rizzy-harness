@@ -44,6 +44,7 @@ pub(crate) struct NewSession {
     pub mode: ApprovalMode,
     pub profile: Profile,
     pub agent_id: Option<String>,
+    pub incognito: bool,
 }
 
 impl Session {
@@ -59,6 +60,7 @@ impl Session {
             mode,
             profile,
             agent_id,
+            incognito,
         } = new;
         let s = Arc::new(Self {
             node: node.clone(),
@@ -73,7 +75,7 @@ impl Session {
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
             agent_id,
-            incognito: false,
+            incognito,
             title,
             cwd: cwd.display().to_string(),
             model,
@@ -306,6 +308,13 @@ impl Session {
         if t.as_ref().is_some_and(|t| t.turn_id == turn_id) {
             *t = None;
         }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
     }
 
     pub(crate) fn cancel(&self) {

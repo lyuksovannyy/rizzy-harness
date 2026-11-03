@@ -51,6 +51,48 @@ pub fn resolve_key(
     })
 }
 
+/// The web tools for the chat runtime, from `[web]`. Returns the tools and
+/// any key that must be added to the redaction set.
+pub fn web_tools(
+    cfg: &Config,
+    data_dir: &Path,
+) -> anyhow::Result<(harness_tools::ToolSet, Option<Secret<String>>)> {
+    use crate::config::SearchKind;
+    use harness_web::{SearchBackend, WebFetch, WebSearch};
+    let w = &cfg.web;
+    let mut tools: harness_tools::ToolSet = Vec::new();
+    let mut key = None;
+    match w.search {
+        SearchKind::None => {}
+        SearchKind::Searxng => tools.push(Arc::new(WebSearch::new(SearchBackend::Searxng {
+            base_url: w.searxng_url.clone(),
+        }))),
+        SearchKind::Brave => {
+            let k = match (&w.brave_key_env, &w.brave_key_secret) {
+                (Some(var), _) => Secret::new(
+                    std::env::var(var)
+                        .with_context(|| format!("environment variable {var} is not set"))?,
+                ),
+                (None, Some(name)) => {
+                    let path = data_dir.join("secrets.toml");
+                    crate::secrets::get(&path, name)?.with_context(|| {
+                        format!("secret {name:?} not found in {}", path.display())
+                    })?
+                }
+                (None, None) => anyhow::bail!("[web] brave needs a key"),
+            };
+            tools.push(Arc::new(WebSearch::new(SearchBackend::Brave {
+                api_key: k.clone(),
+            })));
+            key = Some(k);
+        }
+    }
+    if w.fetch {
+        tools.push(Arc::new(WebFetch::new()));
+    }
+    Ok((tools, key))
+}
+
 pub fn build(cfg: &Config, data_dir: &Path) -> anyhow::Result<Built> {
     match api_kind(cfg.provider.kind) {
         None => Ok(Built {

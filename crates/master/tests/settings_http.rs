@@ -36,6 +36,7 @@ async fn start() -> T {
         default_model: "mock".into(),
         secrets: Default::default(),
         profile: Profile::Chat,
+        incognito_ttl: None,
     })
     .await
     .unwrap();

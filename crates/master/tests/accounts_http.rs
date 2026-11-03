@@ -42,6 +42,7 @@ async fn start() -> Server {
         default_model: "mock".into(),
         secrets: Default::default(),
         profile: harness_core::event::Profile::Agentic,
+        incognito_ttl: None,
     })
     .await
     .unwrap();

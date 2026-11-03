@@ -39,6 +39,10 @@ pub enum NodeToMaster {
         head_seq: u64,
         events: Vec<RawEvent>,
     },
+    /// The node deleted a session (on request or because its incognito TTL
+    /// ran out); the master drops its mirror copy.
+    #[serde(rename = "session.deleted")]
+    Deleted { session_id: SessionId },
     #[serde(rename = "ack")]
     Ack {
         req_id: String,
@@ -69,6 +73,9 @@ pub enum MasterToNode {
         /// The session's initial agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentSpec>,
+        /// Temporary chat: excluded from search and memory, purged after a TTL.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        incognito: bool,
     },
     #[serde(rename = "session.prompt")]
     Prompt {
@@ -93,6 +100,12 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
     },
+    /// Delete a session and its log (cancels a running turn first).
+    #[serde(rename = "session.delete")]
+    Delete {
+        req_id: String,
+        session_id: SessionId,
+    },
     #[serde(rename = "approval.respond")]
     ApprovalRespond {
         req_id: String,
@@ -114,6 +127,7 @@ impl MasterToNode {
             | MasterToNode::Prompt { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
+            | MasterToNode::Delete { req_id, .. }
             | MasterToNode::ApprovalRespond { req_id, .. } => Some(req_id),
             MasterToNode::Welcome { .. } | MasterToNode::Resume { .. } => None,
         }
