@@ -30,6 +30,7 @@ async fn node(dir: &std::path::Path) -> NodeRuntime {
         secrets: Default::default(),
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
+        checkpoints_dir: None,
     })
     .await
     .unwrap()

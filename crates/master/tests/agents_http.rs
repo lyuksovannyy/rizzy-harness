@@ -37,6 +37,7 @@ async fn runtime(root: &std::path::Path, id: &str, profile: Profile) -> NodeRunt
         secrets: Default::default(),
         profile,
         incognito_ttl: None,
+        checkpoints_dir: None,
     })
     .await
     .unwrap()

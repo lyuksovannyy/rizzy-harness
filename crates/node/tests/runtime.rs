@@ -37,6 +37,7 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
         )]),
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
+        checkpoints_dir: None,
     }
 }
 
@@ -46,9 +47,9 @@ impl Harness {
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
-        let node = NodeRuntime::start(config(store, policy(dir.path())))
-            .await
-            .unwrap();
+        let mut cfg = config(store, policy(dir.path()));
+        cfg.checkpoints_dir = Some(dir.path().join("checkpoints"));
+        let node = NodeRuntime::start(cfg).await.unwrap();
         let mut link = node.attach().await;
         match link.from_node.recv().await.unwrap() {
             NodeToMaster::Hello { node_id, .. } => assert_eq!(node_id, "local"),
@@ -490,6 +491,7 @@ async fn git_checkpoints_and_undo() {
         session_id: sid,
         turn_id: turn,
         force: false,
+        rewind: false,
     });
     h.until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::Restored))
         .await;
@@ -498,4 +500,94 @@ async fn git_checkpoints_and_undo() {
         "v1\n"
     );
     assert!(!h.ws.join("made.txt").exists());
+}
+
+/// A folder without git gets a shadow repository outside it; only the
+/// latest N checkpoints are kept; rewind undoes a turn and all later ones.
+#[tokio::test]
+async fn shadow_checkpoints_keep_latest_and_rewind() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        checkpoints_keep: 2,
+        ..Default::default()
+    })
+    .await;
+    std::fs::write(h.ws.join("notes.txt"), "v0\n").unwrap();
+    let sid = h.create().await;
+    let mut turns = vec![];
+    for v in 1..=3 {
+        h.send(MasterToNode::Prompt {
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text: format!("run: echo v{v} > notes.txt; echo {v} > f{v}.txt"),
+        });
+        let EventKind::Checkpoint(after) = h
+            .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
+            .await
+        else {
+            unreachable!()
+        };
+        turns.push(after.turn_id);
+        h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    }
+    assert!(
+        !h.ws.join(".git").exists(),
+        "nothing is written into the folder"
+    );
+    // Keep 2: the first turn's checkpoint is gone.
+    h.send(MasterToNode::Restore {
+        req_id: "r1".into(),
+        session_id: sid,
+        turn_id: turns[0].clone(),
+        force: false,
+        rewind: false,
+    });
+    let err = loop {
+        match tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            NodeToMaster::Ack {
+                req_id,
+                ok: false,
+                error,
+            } if req_id == "r1" => break error.unwrap(),
+            NodeToMaster::Ack {
+                req_id, ok: true, ..
+            } if req_id == "r1" => panic!("should be pruned"),
+            _ => {}
+        }
+    };
+    assert!(err.contains("no longer kept"), "{err}");
+    // Rewind to before turn 2: turns 2 and 3 are undone together.
+    h.send(MasterToNode::Restore {
+        req_id: "r2".into(),
+        session_id: sid,
+        turn_id: turns[1].clone(),
+        force: false,
+        rewind: true,
+    });
+    let mut restored = vec![];
+    while restored.len() < 2 {
+        if let EventKind::Checkpoint(c) = h
+            .until(
+                |k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::Restored),
+            )
+            .await
+        {
+            restored.push(c.turn_id);
+        }
+    }
+    assert_eq!(restored, turns[1..]);
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("notes.txt")).unwrap(),
+        "v1\n"
+    );
+    assert!(h.ws.join("f1.txt").exists());
+    assert!(!h.ws.join("f2.txt").exists() && !h.ws.join("f3.txt").exists());
 }

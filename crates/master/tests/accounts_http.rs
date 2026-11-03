@@ -43,6 +43,7 @@ async fn start() -> Server {
         secrets: Default::default(),
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
+        checkpoints_dir: None,
     })
     .await
     .unwrap();

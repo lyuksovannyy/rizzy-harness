@@ -751,6 +751,7 @@ impl Master {
         sid: SessionId,
         turn_id: String,
         force: bool,
+        rewind: bool,
     ) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
         self.send_command(&node, |req_id| MasterToNode::Restore {
@@ -758,6 +759,7 @@ impl Master {
             session_id: sid,
             turn_id,
             force,
+            rewind,
         })
         .await
     }

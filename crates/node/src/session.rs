@@ -343,14 +343,23 @@ impl Session {
         (reason, usage)
     }
 
-    /// Snapshot the workspace before a turn (agentic sessions in a git repo).
-    async fn checkpoint(&self, turn_id: &str, phase: CheckpointPhase) -> Option<(PathBuf, String)> {
-        if self.profile != Profile::Agentic {
+    /// Where this session's checkpoints go, if it gets any.
+    async fn checkpoint_repo(&self) -> Option<crate::git::Repo> {
+        if self.profile != Profile::Agentic || self.node.cfg.policy.checkpoints_keep == 0 {
             return None;
         }
-        let root = crate::git::repo_root(&self.cwd).await?;
+        crate::git::repo_for(&self.cwd, self.node.cfg.checkpoints_dir.as_deref()).await
+    }
+
+    /// Snapshot the workspace before a turn (agentic sessions).
+    async fn checkpoint(
+        &self,
+        turn_id: &str,
+        phase: CheckpointPhase,
+    ) -> Option<(crate::git::Repo, String)> {
+        let repo = self.checkpoint_repo().await?;
         let r = format!("refs/harness/{}/{turn_id}/before", self.id);
-        match crate::git::snapshot(&root, &r, "harness: before turn").await {
+        match crate::git::snapshot(&repo, &r, "harness: before turn").await {
             Ok(sha) => {
                 self.emit(EventKind::Checkpoint(Checkpoint {
                     turn_id: turn_id.into(),
@@ -359,7 +368,7 @@ impl Session {
                     files: vec![],
                 }))
                 .await;
-                Some((root, sha))
+                Some((repo, sha))
             }
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
@@ -368,11 +377,11 @@ impl Session {
         }
     }
 
-    async fn checkpoint_after(&self, turn_id: &str, root: &std::path::Path, before: &str) {
+    async fn checkpoint_after(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
         let r = format!("refs/harness/{}/{turn_id}/after", self.id);
         let res = async {
-            let sha = crate::git::snapshot(root, &r, "harness: after turn").await?;
-            let files = crate::git::changed(root, before, &sha).await?;
+            let sha = crate::git::snapshot(repo, &r, "harness: after turn").await?;
+            let files = crate::git::changed(repo, before, &sha).await?;
             Ok::<_, String>((sha, files))
         }
         .await;
@@ -384,7 +393,8 @@ impl Session {
                     git_ref: sha,
                     files: files.into_iter().map(|(_, p)| p).collect(),
                 }))
-                .await
+                .await;
+                crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
             }
             Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint failed"),
         }
@@ -423,8 +433,14 @@ impl Session {
         .map_err(|e| e.to_string())
     }
 
-    /// Undo a turn's file changes (see `git::restore`).
-    pub(crate) async fn restore(&self, turn_id: &str, force: bool) -> Result<(), String> {
+    /// Undo one turn's file changes, or rewind: undo it and every later
+    /// turn (see `git::restore`). Records the new state as a snapshot.
+    pub(crate) async fn restore(
+        &self,
+        turn_id: &str,
+        force: bool,
+        rewind: bool,
+    ) -> Result<(), String> {
         if self.is_running() {
             return Err("wait for the running turn to finish".into());
         }
@@ -441,23 +457,66 @@ impl Session {
             .checkpoints
             .get(turn_id)
             .ok_or("this turn has no checkpoint")?;
-        if cp.restored {
-            return Err("already undone".into());
-        }
-        let (Some(before), Some(after)) = (&cp.before, &cp.after) else {
+        let (Some(before), Some(after)) = (cp.before.clone(), cp.after.clone()) else {
             return Err("this turn's checkpoint is incomplete".into());
         };
-        let root = crate::git::repo_root(&self.cwd)
+        // Turns from this one on, in order, and the latest recorded state.
+        let mut later: Vec<String> = Vec::new();
+        let mut latest = after.clone();
+        let mut seen = false;
+        for e in &events {
+            if let Ok(EventKind::Checkpoint(c)) = e.typed() {
+                if c.turn_id == turn_id {
+                    seen = true;
+                }
+                if seen && c.phase == CheckpointPhase::After && !later.contains(&c.turn_id) {
+                    later.push(c.turn_id.clone());
+                }
+                if c.phase != CheckpointPhase::Before {
+                    latest = c.git_ref.clone();
+                }
+            }
+        }
+        if !rewind && cp.restored {
+            return Err("already undone".into());
+        }
+        let repo = self
+            .checkpoint_repo()
             .await
-            .ok_or("the session folder is no longer a git repository")?;
-        let files = crate::git::restore(&root, before, after, force).await?;
-        self.emit(EventKind::Checkpoint(Checkpoint {
-            turn_id: turn_id.into(),
-            phase: CheckpointPhase::Restored,
-            git_ref: before.clone(),
-            files,
-        }))
-        .await;
+            .ok_or("checkpoints are not available for this folder any more")?;
+        let expected = if rewind { latest } else { after };
+        for sha in [&before, &expected] {
+            if !crate::git::exists(&repo, sha).await {
+                return Err(format!(
+                    "this checkpoint is no longer kept (only the latest {} changes are)",
+                    self.node.cfg.policy.checkpoints_keep
+                ));
+            }
+        }
+        let files = crate::git::restore(&repo, &before, &expected, force).await?;
+        let state = crate::git::snapshot(
+            &repo,
+            &format!("refs/harness/{}/{turn_id}/restored", self.id),
+            "harness: restored",
+        )
+        .await?;
+        let targets: Vec<String> = if rewind {
+            later
+                .into_iter()
+                .filter(|t| view.checkpoints.get(t).is_some_and(|c| !c.restored))
+                .collect()
+        } else {
+            vec![turn_id.to_string()]
+        };
+        for t in targets {
+            self.emit(EventKind::Checkpoint(Checkpoint {
+                turn_id: t,
+                phase: CheckpointPhase::Restored,
+                git_ref: state.clone(),
+                files: files.clone(),
+            }))
+            .await;
+        }
         Ok(())
     }
 
@@ -552,9 +611,10 @@ impl Session {
             return None;
         }
         let root = crate::git::repo_root(&self.cwd).await?;
+        let project = crate::git::Repo::project(&root);
         let res = async {
             let base = crate::git::snapshot(
-                &root,
+                &project,
                 &format!("refs/harness/{child}/base"),
                 "harness: sub-agent base",
             )
@@ -593,21 +653,24 @@ impl Session {
     /// Bring a sub-agent's changes back into the main working directory.
     async fn merge_back(&self, iso: Isolation, child: SessionId) -> String {
         let result_ref = format!("refs/harness/{child}/result");
-        let note =
-            match crate::git::snapshot(&iso.worktree, &result_ref, "harness: sub-agent result")
-                .await
-            {
-                Err(e) => format!("its changes could not be collected: {e}"),
-                Ok(result) => match crate::git::apply(&iso.root, &iso.base, &result).await {
-                    Ok(0) => "no file changes".to_string(),
-                    Ok(n) => format!("{n} changed file(s) applied to the workspace"),
-                    Err(e) => format!(
-                        "its changes conflict with the workspace and were NOT applied ({e}); \
+        let note = match crate::git::snapshot(
+            &crate::git::Repo::project(&iso.worktree),
+            &result_ref,
+            "harness: sub-agent result",
+        )
+        .await
+        {
+            Err(e) => format!("its changes could not be collected: {e}"),
+            Ok(result) => match crate::git::apply(&iso.root, &iso.base, &result).await {
+                Ok(0) => "no file changes".to_string(),
+                Ok(n) => format!("{n} changed file(s) applied to the workspace"),
+                Err(e) => format!(
+                    "its changes conflict with the workspace and were NOT applied ({e}); \
                      to apply by hand: git diff {} {} | git apply",
-                        iso.base, result
-                    ),
-                },
-            };
+                    iso.base, result
+                ),
+            },
+        };
         crate::git::worktree_remove(&iso.root, &iso.worktree).await;
         note
     }

@@ -10,14 +10,24 @@ import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ToolCard } from "./ToolCard";
 
-function Undo(props: { sessionId: string; turnId: string; files: string[]; restored: boolean; running: boolean }) {
+function Undo(props: {
+  sessionId: string;
+  turnId: string;
+  files: string[];
+  restored: boolean;
+  running: boolean;
+  /** Later turns also changed files: offer to rewind them too. */
+  laterChanges: boolean;
+}) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const run = async (force: boolean) => {
+  const [lastRewind, setLastRewind] = useState(false);
+  const run = async (force: boolean, rewind = lastRewind) => {
     setBusy(true);
     setErr(null);
+    setLastRewind(rewind);
     try {
-      await api.restoreTurn(props.sessionId, props.turnId, force);
+      await api.restoreTurn(props.sessionId, props.turnId, force, rewind);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -37,8 +47,19 @@ function Undo(props: { sessionId: string; turnId: string; files: string[]; resto
         </ul>
       </details>
       {!props.restored && (
-        <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false)}>
+        <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false, false)}>
           Undo file changes
+        </button>
+      )}
+      {props.laterChanges && (
+        <button
+          type="button"
+          className="link"
+          disabled={busy || props.running}
+          title="Undo this turn and every later turn's file changes"
+          onClick={() => void run(false, true)}
+        >
+          Rewind files to before this turn
         </button>
       )}
       {err && (
@@ -239,9 +260,22 @@ export default function Conversation(props: {
                   );
                 case "turn_end": {
                   const cp = view.checkpoints[it.turn_id];
+                  const laterChanges = view.items.slice(i + 1).some((x) => {
+                    if (x.type !== "turn_end") return false;
+                    const c = view.checkpoints[x.turn_id];
+                    return !!c && c.files.length > 0 && !c.restored;
+                  });
                   const undo =
-                    cp && cp.after && cp.files.length > 0 ? (
-                      <Undo key={`u${i}`} sessionId={sessionId} turnId={it.turn_id} files={cp.files} restored={cp.restored} running={running} />
+                    cp && cp.after && (cp.files.length > 0 || laterChanges) ? (
+                      <Undo
+                        key={`u${i}`}
+                        sessionId={sessionId}
+                        turnId={it.turn_id}
+                        files={cp.files}
+                        restored={cp.restored || cp.files.length === 0}
+                        running={running}
+                        laterChanges={laterChanges}
+                      />
                     ) : null;
                   return it.reason === "completed" ? (
                     undo

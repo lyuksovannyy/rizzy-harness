@@ -207,6 +207,7 @@ async fn serve(
         secrets: secrets.clone(),
         profile: Profile::Chat,
         incognito_ttl: Some(cfg.chat.incognito_ttl()),
+        checkpoints_dir: None,
     })
     .await?;
 
@@ -346,6 +347,7 @@ async fn agentic_node(
         secrets: secrets.clone(),
         profile: Profile::Agentic,
         incognito_ttl: None,
+        checkpoints_dir: Some(dir.join("checkpoints")),
     })
     .await?)
 }

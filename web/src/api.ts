@@ -103,8 +103,8 @@ export const api = {
   },
   selectVariant: (id: string, group: string, message_id: string) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
-  restoreTurn: (id: string, turn: string, force = false) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force }),
+  restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
   deleteSession: (id: string) => call<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
   prompt: (
     id: string,

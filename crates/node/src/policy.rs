@@ -17,6 +17,8 @@ pub struct NodePolicy {
     pub denied_tools: Vec<String>,
     /// Allow file tools to touch paths outside the session workspace.
     pub allow_outside_workspace: bool,
+    /// File checkpoints kept per working folder for undo/rewind (0 = off).
+    pub checkpoints_keep: usize,
 }
 
 impl Default for NodePolicy {
@@ -26,6 +28,7 @@ impl Default for NodePolicy {
             workspace_roots: dirs::home_dir().into_iter().collect(),
             denied_tools: Vec::new(),
             allow_outside_workspace: false,
+            checkpoints_keep: 10,
         }
     }
 }

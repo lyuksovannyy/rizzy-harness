@@ -10,6 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+hex.workspace = true
+sha2.workspace = true
 async-trait.workspace = true
 dirs.workspace = true
 harness-core.workspace = true

@@ -1308,6 +1308,8 @@ async fn revoke_node(
 struct RestoreBody {
     #[serde(default)]
     force: bool,
+    #[serde(default)]
+    rewind: bool,
 }
 
 async fn restore_turn(
@@ -1318,7 +1320,7 @@ async fn restore_turn(
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.restore_turn(sid, turn, b.force).await?;
+    m.restore_turn(sid, turn, b.force, b.rewind).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

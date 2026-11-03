@@ -45,6 +45,9 @@ pub struct NodeConfig {
     pub profile: harness_core::event::Profile,
     /// Incognito sessions idle this long are deleted by the node itself.
     pub incognito_ttl: Option<std::time::Duration>,
+    /// Shadow git repositories for checkpoints of folders without git.
+    /// `None`: only folders inside a repository get checkpoints.
+    pub checkpoints_dir: Option<std::path::PathBuf>,
 }
 
 /// Both ends of a link as seen from the master: commands in, messages out.
@@ -246,11 +249,12 @@ impl NodeRuntime {
                 session_id,
                 turn_id,
                 force,
+                rewind,
                 ..
             } => {
                 self.audit("session.restore", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.restore(&turn_id, force).await,
+                    Some(s) => s.restore(&turn_id, force, rewind).await,
                     None => Err("unknown session".into()),
                 }
             }

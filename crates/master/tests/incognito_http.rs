@@ -40,6 +40,7 @@ async fn start(node_ttl: Option<Duration>) -> T {
         secrets: Default::default(),
         profile: Profile::Chat,
         incognito_ttl: node_ttl,
+        checkpoints_dir: None,
     })
     .await
     .unwrap();

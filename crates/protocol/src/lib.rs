@@ -123,6 +123,9 @@ pub enum MasterToNode {
         /// Overwrite files edited after the turn too.
         #[serde(default)]
         force: bool,
+        /// Rewind: also undo every later turn (back to before this one).
+        #[serde(default)]
+        rewind: bool,
     },
     /// Delete a session and its log (cancels a running turn first).
     #[serde(rename = "session.delete")]
