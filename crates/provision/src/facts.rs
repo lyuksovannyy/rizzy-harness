@@ -195,7 +195,11 @@ impl Facts {
         match e {
             Engine::None => true,
             Engine::Docker => self.docker && self.runtime_in_docker_group,
-            Engine::Podman => self.podman && self.runtime_subuid && self.runtime_linger,
+            // Linger keeps the user session for a system service; without
+            // systemd (containers) there is nothing to linger.
+            Engine::Podman => {
+                self.podman && self.runtime_subuid && (self.runtime_linger || !self.systemd)
+            }
         }
     }
 
@@ -327,8 +331,13 @@ mod support_tests {
         f.podman = true;
         f.runtime_subuid = true;
         assert!(
+            f.engine_ready(Engine::Podman),
+            "no systemd: nothing to linger"
+        );
+        f.systemd = true;
+        assert!(
             !f.engine_ready(Engine::Podman),
-            "needs linger for a user service"
+            "with systemd it needs linger for a user service"
         );
         f.runtime_linger = true;
         assert!(f.engine_ready(Engine::Podman));

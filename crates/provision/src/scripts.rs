@@ -106,9 +106,14 @@ apt-get install -y -q podman uidmap
   start=$(awk -F: 'BEGIN{{m=100000}} {{e=$2+$3; if (e>m) m=e}} END{{print m}}' /etc/subuid /etc/subgid 2>/dev/null)
   usermod --add-subuids "$start-$((start+65535))" --add-subgids "$start-$((start+65535))" {RUNTIME_USER}
 fi
-loginctl enable-linger {RUNTIME_USER}
 uid=$(id -u {RUNTIME_USER})
-for _ in $(seq 1 20); do [ -d /run/user/$uid ] && break; sleep 0.5; done
+if [ -d /run/systemd/system ]; then
+  loginctl enable-linger {RUNTIME_USER}
+  for _ in $(seq 1 20); do [ -d /run/user/$uid ] && break; sleep 0.5; done
+else
+  # No systemd (containers): provide the runtime dir ourselves.
+  install -d -m 0700 -o {RUNTIME_USER} -g {RUNTIME_USER} /run/user/$uid
+fi
 runuser -u {RUNTIME_USER} -- env XDG_RUNTIME_DIR=/run/user/$uid podman info --format '{{{{.Host.Security.Rootless}}}}' | grep -qx true
 echo "podman (rootless) ready for {RUNTIME_USER}"
 "#

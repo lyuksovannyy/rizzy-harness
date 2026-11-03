@@ -891,3 +891,57 @@ pub async fn recheck(
     log.replace(all);
     Ok(f)
 }
+
+/// Runs scripts on *this* machine (no SSH): for testing setup steps on the
+/// machine harness runs on, and for setting it up as its own node.
+pub struct LocalRemote;
+
+#[async_trait::async_trait]
+impl Remote for LocalRemote {
+    async fn run(&self, script: &str, root: bool) -> Result<Output> {
+        use tokio::io::AsyncWriteExt;
+        let is_root = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+            .unwrap_or(false);
+        let mut c = if root && !is_root {
+            let mut c = tokio::process::Command::new("sudo");
+            c.args(["-n", "bash", "-s"]);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("bash");
+            c.arg("-s");
+            c
+        };
+        let mut child = c
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| Error::Step(e.to_string()))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Step("no stdin".into()))?;
+        stdin
+            .write_all(script.as_bytes())
+            .await
+            .map_err(|e| Error::Step(e.to_string()))?;
+        drop(stdin);
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|e| Error::Step(e.to_string()))?;
+        Ok(Output {
+            code: out.status.code().unwrap_or(255) as u32,
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    async fn upload(&self, path: &str, data: &[u8]) -> Result<()> {
+        std::fs::write(path, data).map_err(|e| Error::Step(e.to_string()))
+    }
+}
