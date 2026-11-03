@@ -1,16 +1,24 @@
-//! The two setup modes. **Automatic** (fresh VPS / node-only machines) runs
-//! every step; **manual** (machines with other work on them) inspects and
-//! shows the commands to run, then re-checks. Both start the same way: the
-//! user's password or key logs in once, harness installs its own key,
-//! proves it works on a new connection, and from then on only that key is
-//! used. The user's credentials are never stored.
+//! The two setup modes.
+//!
+//! **Automatic** (fresh VPS / node-only machines) needs the *root* login.
+//! With it, harness creates its own user `harness-admin`, gives it its own
+//! SSH key and (for the setup only) sudo, and from then on logs in only as
+//! that user. At the end harness removes its own sudo unless asked to keep
+//! it: a compromised master must not be root on every node.
+//!
+//! **Manual** (machines with other work on them) should get a normal user.
+//! Root is accepted with a warning; harness then offers to create its own
+//! user (without sudo) and to take its key off root.
+//!
+//! In both modes the user's password or private key is used for the first
+//! login only and never stored.
 
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use crate::facts::{Facts, INSPECT};
-use crate::scripts;
+use crate::facts::{Engine, Facts, INSPECT, Support};
+use crate::scripts::{self, ADMIN_USER, RUNTIME_USER};
 use crate::ssh::Output;
 use crate::wg::{MASTER_IP, Peer};
 use crate::{Error, Result};
@@ -23,17 +31,19 @@ pub trait Remote: Send + Sync {
     async fn upload(&self, path: &str, data: &[u8]) -> Result<()>;
 }
 
-/// Opens a *new* connection with harness's own key. Used to prove a change
-/// did not lock us out before confirming it.
+/// Opens *new* connections with harness's own key, as the current user.
+/// Used to prove a change did not lock us out before confirming it.
 #[async_trait::async_trait]
 pub trait Connector: Send + Sync {
     async fn connect(&self) -> Result<Box<dyn Remote>>;
+    /// Log in as another user from now on (e.g. `harness-admin`).
+    fn set_user(&self, user: &str);
 }
 
 /// What the master provides during setup.
 #[async_trait::async_trait]
 pub trait Master: Send + Sync {
-    /// Harness's public login key for this node.
+    /// Harness's public login key for this server.
     fn harness_pubkey(&self) -> String;
     /// The master's WireGuard public key and the tunnel address for the node.
     fn wg_plan(&self) -> Result<(String, String)>;
@@ -50,8 +60,8 @@ pub trait Master: Send + Sync {
     fn platform(&self) -> (String, String);
     /// Wait until the node `name` is connected.
     async fn wait_online(&self, name: &str) -> Result<()>;
-    /// Wait for the user to say they brought the master's tunnel up.
-    async fn wait_continue(&self);
+    /// Wait for the user to pick one of a waiting step's choices.
+    async fn wait_answer(&self, step: &str) -> String;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -60,12 +70,20 @@ pub enum Status {
     Pending,
     Running,
     Ok,
+    /// Done, with something the user should know.
+    Warning,
     Failed,
     /// Manual mode: run `script` yourself, then re-check.
     Todo,
-    /// Waiting for the user (e.g. bring the master's tunnel up).
+    /// Waiting for the user to pick one of `choices`.
     Waiting,
     Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Choice {
+    pub id: &'static str,
+    pub label: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +97,27 @@ pub struct Step {
     pub script: Option<String>,
     /// Run with root rights (`sudo bash`).
     pub root: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<Choice>,
+}
+
+impl Step {
+    fn new(
+        id: &'static str,
+        title: &'static str,
+        status: Status,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            title,
+            status,
+            detail: detail.into(),
+            script: None,
+            root: false,
+            choices: vec![],
+        }
+    }
 }
 
 /// Live step list, shared with the UI.
@@ -90,6 +129,20 @@ impl Log {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    fn upsert(&self, step: Step) {
+        let mut v = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        match v.iter_mut().find(|s| s.id == step.id) {
+            Some(s) => {
+                let script = s.script.take();
+                *s = Step {
+                    script: step.script.clone().or(script),
+                    ..step
+                };
+            }
+            None => v.push(step),
+        }
+    }
+
     fn set(
         &self,
         id: &'static str,
@@ -97,22 +150,20 @@ impl Log {
         status: Status,
         detail: impl Into<String>,
     ) {
-        let mut v = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let detail = detail.into();
-        match v.iter_mut().find(|s| s.id == id) {
-            Some(s) => {
-                s.status = status;
-                s.detail = detail;
-            }
-            None => v.push(Step {
-                id,
-                title,
-                status,
-                detail,
-                script: None,
-                root: false,
-            }),
-        }
+        self.upsert(Step::new(id, title, status, detail));
+    }
+
+    fn ask(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        detail: impl Into<String>,
+        choices: Vec<Choice>,
+    ) {
+        self.upsert(Step {
+            choices,
+            ..Step::new(id, title, Status::Waiting, detail)
+        });
     }
 
     fn set_script(&self, id: &'static str, script: String, root: bool) {
@@ -131,6 +182,14 @@ impl Log {
     /// Record a failed step (e.g. the very first login).
     pub fn push_failed(&self, id: &'static str, title: &'static str, detail: &str) {
         self.set(id, title, Status::Failed, detail);
+    }
+
+    /// The step waiting for an answer, if any, and whether `choice` is one
+    /// of its choices.
+    pub fn accepts(&self, step: &str, choice: &str) -> bool {
+        self.snapshot().iter().any(|s| {
+            s.id == step && s.status == Status::Waiting && s.choices.iter().any(|c| c.id == choice)
+        })
     }
 
     fn replace(&self, steps: Vec<Step>) {
@@ -161,47 +220,6 @@ fn last_lines(s: &str, n: usize) -> String {
     v[v.len().saturating_sub(n)..].join("\n")
 }
 
-/// Step 1 of both modes: install harness's key with the user's login, then
-/// log in again with that key alone. Returns the key-based connection.
-pub async fn bootstrap(
-    first: Box<dyn Remote>,
-    conn: &dyn Connector,
-    master: &dyn Master,
-    log: &Log,
-) -> Result<Box<dyn Remote>> {
-    let (id, title) = ("login", "Harness login key");
-    log.set(
-        id,
-        title,
-        Status::Running,
-        "installing harness's own SSH key",
-    );
-    must(
-        &*first,
-        &scripts::install_key(&master.harness_pubkey()),
-        false,
-        "installing the key",
-    )
-    .await?;
-    drop(first);
-    let r = conn.connect().await.map_err(|e| {
-        log.set(
-            id,
-            title,
-            Status::Failed,
-            format!("the key was added but logging in with it failed: {e}"),
-        );
-        e
-    })?;
-    log.set(
-        id,
-        title,
-        Status::Ok,
-        "harness logs in with its own key; your password/key was not stored",
-    );
-    Ok(r)
-}
-
 pub async fn inspect(r: &dyn Remote) -> Result<Facts> {
     let o = r.run(INSPECT, false).await?;
     Ok(Facts::parse(&o.stdout))
@@ -229,18 +247,37 @@ async fn guarded(conn: &dyn Connector, apply: &str, confirm: &str, what: &str) -
     Ok(())
 }
 
+fn engine_note(e: Engine) -> &'static str {
+    match e {
+        Engine::Podman => {
+            "rootless Podman for the `harness` user (no daemon, no root-equivalent group)"
+        }
+        Engine::Docker => {
+            "Docker; the `harness` user joins the `docker` group. Members of that group are \
+             effectively root on this server: an agent talked into `docker run -v /:/host` can \
+             take it over. Prefer Podman unless you need Docker."
+        }
+        Engine::None => "none",
+    }
+}
+
 pub struct AutoOptions {
     /// Name for the node (its WireGuard peer); the join assigns the node id.
     pub name: String,
     /// The node's public address for the tunnel endpoint.
     pub endpoint_host: String,
-    /// The user's own public key, kept so they can still log in.
+    /// The user's own public key, added to root so they keep access once
+    /// password logins are off.
     pub own_pubkey: Option<String>,
+    pub engine: Engine,
+    /// Keep passwordless sudo for `harness-admin` after setup.
+    pub keep_admin_sudo: bool,
 }
 
-/// Automatic setup after `bootstrap`. Stops at the first failure.
+/// Automatic setup. `first` is the root login with the user's credentials;
+/// it is used to create `harness-admin` and dropped right after.
 pub async fn run_auto(
-    r: Box<dyn Remote>,
+    first: Box<dyn Remote>,
     conn: &dyn Connector,
     master: &dyn Master,
     opts: &AutoOptions,
@@ -253,31 +290,89 @@ pub async fn run_auto(
 
     let (id, title) = ("inspect", "Check the server");
     log.set(id, title, Status::Running, "");
-    let f = inspect(&*r).await.map_err(|e| fail(id, title, e))?;
+    let f = inspect(&*first).await.map_err(|e| fail(id, title, e))?;
+    if !f.is_root_login {
+        return Err(fail(
+            id,
+            title,
+            Error::Step(format!(
+                "automatic setup needs the root login, not `{}`; harness then creates its own user `{ADMIN_USER}`. \
+                 Use manual setup to keep your own user.",
+                f.login_user
+            )),
+        ));
+    }
     let (arch, glibc) = master.platform();
-    let problems: Vec<String> = [
-        (!f.root).then(|| "needs root or passwordless sudo".to_string()),
-        (!f.supported_os()).then(|| format!("{} is not Debian/Ubuntu", f.os_id)),
-        (!f.systemd).then(|| "systemd is not running".to_string()),
-        (f.arch != arch).then(|| format!("CPU is {} but this harness build is {arch}", f.arch)),
-        (!f.glibc_at_least(&glibc)).then(|| format!("glibc {} is older than {glibc}", f.glibc)),
-        f.firewall_conflict()
-            .map(|c| format!("{c}: not a fresh server, use manual setup")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let support = f.support();
+    let mut problems: Vec<String> = vec![];
+    if let Support::Unsupported(why) = &support {
+        problems.push(why.clone());
+    }
+    if !f.systemd {
+        problems.push("systemd is not running".into());
+    }
+    if f.arch != arch {
+        problems.push(format!(
+            "CPU is {} but this harness build is {arch}",
+            f.arch
+        ));
+    }
+    if !f.glibc_at_least(&glibc) {
+        problems.push(format!("glibc {} is older than {glibc}", f.glibc));
+    }
+    if let Some(c) = f.firewall_conflict() {
+        problems.push(format!("{c}: not a fresh server, use manual setup"));
+    }
     if !problems.is_empty() {
         return Err(fail(id, title, Error::Step(problems.join("; "))));
     }
+    let summary = format!(
+        "{} {} {}, ssh port {}",
+        f.os_id, f.os_version, f.arch, f.ssh_port
+    );
+    match support {
+        Support::Limited(note) => log.set(id, title, Status::Warning, format!("{summary}. {note}")),
+        _ => log.set(id, title, Status::Ok, summary),
+    }
+
+    let (id, title) = ("login", "Harness's own user");
+    log.set(
+        id,
+        title,
+        Status::Running,
+        format!("creating `{ADMIN_USER}` with harness's own SSH key"),
+    );
+    let script = scripts::admin_user(&master.harness_pubkey(), true);
+    log.set_script(id, script.clone(), true);
+    must(&*first, &script, true, "creating the user")
+        .await
+        .map_err(|e| fail(id, title, e))?;
+    if let Some(k) = &opts.own_pubkey {
+        must(
+            &*first,
+            &scripts::install_key(k),
+            false,
+            "adding your key to root",
+        )
+        .await
+        .map_err(|e| fail(id, title, e))?;
+    }
+    drop(first);
+    conn.set_user(ADMIN_USER);
+    let r = conn.connect().await.map_err(|e| {
+        fail(
+            id,
+            title,
+            Error::Step(format!(
+                "`{ADMIN_USER}` was created but logging in as it failed: {e}"
+            )),
+        )
+    })?;
     log.set(
         id,
         title,
         Status::Ok,
-        format!(
-            "{} {} {}, ssh port {}",
-            f.os_id, f.os_version, f.arch, f.ssh_port
-        ),
+        format!("harness logs in as `{ADMIN_USER}` with its own key; your root password/key was not stored"),
     );
 
     let (id, title) = ("packages", "Install WireGuard and nftables");
@@ -300,16 +395,15 @@ pub async fn run_auto(
         ),
     );
     log.set_script(id, scripts::ssh_harden(), true);
-    if let Some(k) = &opts.own_pubkey {
-        let c = conn.connect().await.map_err(|e| fail(id, title, e))?;
-        must(&*c, &scripts::install_key(k), false, "adding your key")
-            .await
-            .map_err(|e| fail(id, title, e))?;
-    }
     guarded(conn, &scripts::ssh_harden(), &scripts::ssh_confirm(), "SSH")
         .await
         .map_err(|e| fail(id, title, e))?;
-    log.set(id, title, Status::Ok, "passwords off, root by key only");
+    let root_note = if opts.own_pubkey.is_some() {
+        "root by your key only"
+    } else {
+        "root over SSH is now off for passwords; use your provider's console if you need it"
+    };
+    log.set(id, title, Status::Ok, format!("passwords off; {root_note}"));
 
     let (id, title) = ("firewall", "Firewall (nftables)");
     log.set(
@@ -340,6 +434,25 @@ pub async fn run_auto(
             scripts::WG_PORT
         ),
     );
+
+    let (id, title) = ("engine", "Container engine");
+    if opts.engine == Engine::None {
+        log.set(id, title, Status::Skipped, "none selected");
+    } else {
+        log.set(id, title, Status::Running, engine_note(opts.engine));
+        let script = scripts::container_engine(opts.engine);
+        log.set_script(id, script.clone(), true);
+        let c = conn.connect().await.map_err(|e| fail(id, title, e))?;
+        must(&*c, &script, true, "setting up the container engine")
+            .await
+            .map_err(|e| fail(id, title, e))?;
+        let status = if opts.engine == Engine::Docker {
+            Status::Warning
+        } else {
+            Status::Ok
+        };
+        log.set(id, title, status, engine_note(opts.engine));
+    }
 
     let (id, title) = ("wireguard", "WireGuard tunnel");
     log.set(id, title, Status::Running, "");
@@ -375,13 +488,16 @@ pub async fn run_auto(
     log.set(id, title, Status::Ok, format!("node {node_ip}"));
 
     let (id, title) = ("tunnel", "Bring the tunnel up on this machine");
-    log.set(
+    log.ask(
         id,
         title,
-        Status::Waiting,
         format!("Run on the master (root, once per new node), then continue:\n{cmd}"),
+        vec![Choice {
+            id: "continue",
+            label: "I ran it, continue",
+        }],
     );
-    master.wait_continue().await;
+    master.wait_answer(id).await;
     log.set(id, title, Status::Ok, "");
 
     let (id, title) = ("harness", "Install and join");
@@ -394,7 +510,7 @@ pub async fn run_auto(
     let provider = master.provider_files();
     let o = must(
         &*c,
-        &scripts::node_service(&join, provider.as_ref()),
+        &scripts::node_service(&join, provider.as_ref(), opts.engine),
         true,
         "installing the node",
     )
@@ -419,75 +535,227 @@ pub async fn run_auto(
         .wait_online(&node_id)
         .await
         .map_err(|e| fail(id, title, e))?;
-    log.set(id, title, Status::Ok, format!("node `{node_id}` is online"));
+    log.set(
+        id,
+        title,
+        Status::Ok,
+        format!("node `{node_id}` is online, running as `{RUNTIME_USER}` (no sudo)"),
+    );
+
+    let (id, title) = ("lockdown", "Remove harness's root access");
+    if opts.keep_admin_sudo {
+        log.set(
+            id,
+            title,
+            Status::Warning,
+            format!("kept on request: `{ADMIN_USER}` still has passwordless sudo, so this master can act as root here"),
+        );
+    } else {
+        must(&*c, &scripts::drop_admin_sudo(), true, "removing sudo")
+            .await
+            .map_err(|e| fail(id, title, e))?;
+        log.set(
+            id,
+            title,
+            Status::Ok,
+            format!("`{ADMIN_USER}` keeps a key login for status checks, without sudo. Re-running automatic setup needs root again."),
+        );
+    }
     Ok(node_id)
 }
 
-/// Manual mode: what is in place, and the commands for what is not.
-pub fn checklist(f: &Facts, master_pub: &str, node_ip: &str, join_hint: &str) -> Vec<Step> {
-    let step = |id, title, ok: bool, detail: String, script: Option<String>, root| Step {
+pub struct ManualOptions {
+    pub engine: Engine,
+}
+
+/// Manual mode, first run: install harness's key for the login user, offer
+/// to replace a root login with harness's own user, then the checklist.
+pub async fn run_manual(
+    first: Box<dyn Remote>,
+    conn: &dyn Connector,
+    master: &dyn Master,
+    opts: &ManualOptions,
+    log: &Log,
+) -> Result<Facts> {
+    let (id, title) = ("login", "Harness login key");
+    log.set(
         id,
         title,
-        status: if ok { Status::Ok } else { Status::Todo },
-        detail,
+        Status::Running,
+        "installing harness's own SSH key",
+    );
+    let key = master.harness_pubkey();
+    must(
+        &*first,
+        &scripts::install_key(&key),
+        false,
+        "installing the key",
+    )
+    .await?;
+    drop(first);
+    let r = conn.connect().await.map_err(|e| {
+        log.set(
+            id,
+            title,
+            Status::Failed,
+            format!("the key was added but logging in with it failed: {e}"),
+        );
+        e
+    })?;
+    let f = inspect(&*r).await?;
+    log.set(
+        id,
+        title,
+        Status::Ok,
+        format!(
+            "harness logs in as `{}` with its own key; your password/key was not stored",
+            f.login_user
+        ),
+    );
+
+    if f.is_root_login {
+        let (id, title) = ("own_user", "Harness's own user");
+        log.ask(
+            id,
+            title,
+            format!(
+                "You logged in as root, and harness's key now opens root. For a server with other work on it, \
+                 harness should have its own user instead: it can create `{ADMIN_USER}` (no sudo, its own key) \
+                 and take its key off root. You run anything that needs root yourself."
+            ),
+            vec![
+                Choice { id: "create", label: "Create harness's own user" },
+                Choice { id: "keep", label: "Keep using root" },
+            ],
+        );
+        match master.wait_answer(id).await.as_str() {
+            "create" => {
+                let res = async {
+                    must(
+                        &*r,
+                        &scripts::admin_user(&key, false),
+                        true,
+                        "creating the user",
+                    )
+                    .await?;
+                    conn.set_user(ADMIN_USER);
+                    conn.connect().await?;
+                    must(
+                        &*r,
+                        &scripts::remove_key(&key),
+                        false,
+                        "removing harness's key from root",
+                    )
+                    .await?;
+                    Ok::<_, Error>(())
+                }
+                .await;
+                match res {
+                    Ok(()) => log.set(
+                        id,
+                        title,
+                        Status::Ok,
+                        format!(
+                            "harness now logs in as `{ADMIN_USER}`; its key was removed from root"
+                        ),
+                    ),
+                    Err(e) => {
+                        conn.set_user("root");
+                        log.set(id, title, Status::Failed, format!("{e}; still using root"));
+                    }
+                }
+            }
+            _ => log.set(
+                id,
+                title,
+                Status::Warning,
+                "keeping root: harness's key opens root on this server",
+            ),
+        }
+    }
+    drop(r);
+    let r = conn.connect().await?;
+    recheck(&*r, master, opts, log).await
+}
+
+/// Manual mode: what is in place, and the commands for what is not.
+pub fn checklist(
+    f: &Facts,
+    master_pub: &str,
+    node_ip: &str,
+    join_hint: &str,
+    engine: Engine,
+) -> Vec<Step> {
+    let step = |id, title, ok: bool, detail: String, script: Option<String>, root| Step {
         script: if ok { None } else { script },
         root,
+        ..Step::new(
+            id,
+            title,
+            if ok { Status::Ok } else { Status::Todo },
+            detail,
+        )
     };
-    let fw_detail;
-    let fw_script;
-    if let Some(c) = f.firewall_conflict() {
-        fw_detail = format!(
-            "{c}. Keep your firewall and allow WireGuard: UDP {} in, SSH ({}) stays open.",
-            scripts::WG_PORT,
-            f.ssh_port
-        );
-        fw_script = Some(if f.ufw_active {
-            format!(
-                "ufw allow {}/udp\nufw allow {}/tcp\n",
-                scripts::WG_PORT,
-                f.ssh_port
-            )
-        } else if f.firewalld_active {
-            format!(
-                "firewall-cmd --permanent --add-port={}/udp\nfirewall-cmd --permanent --add-port={}/tcp\nfirewall-cmd --reload\n",
-                scripts::WG_PORT,
-                f.ssh_port
-            )
-        } else {
-            format!(
-                "# Add to your existing rules: allow UDP {} and keep TCP {} open.\n# Docker users: these are INPUT rules; container ports are not affected.\n",
-                scripts::WG_PORT,
-                f.ssh_port
-            )
-        });
-    } else {
-        fw_detail = format!(
-            "No firewall found. Run this; it reverts itself in {}s. Then log in from a NEW terminal and run the confirm part.",
-            scripts::REVERT_AFTER_S
-        );
-        fw_script = Some(format!(
-            "{}\n# after checking a new SSH login works:\n{}",
-            scripts::firewall(f.ssh_port),
-            scripts::firewall_confirm()
-        ));
-    }
-    vec![
-        step(
-            "login",
-            "Harness login key",
-            true,
-            "installed and working".into(),
-            None,
-            false,
+    let os = match f.support() {
+        Support::Main => Step::new(
+            "os",
+            "Operating system",
+            Status::Ok,
+            format!("{} {}: fully supported", f.os_id, f.os_version),
         ),
+        Support::Limited(n) => Step::new("os", "Operating system", Status::Warning, n),
+        Support::Unsupported(n) => Step::new("os", "Operating system", Status::Failed, n),
+    };
+    let (fw_detail, fw_script) = if let Some(c) = f.firewall_conflict() {
+        (
+            format!(
+                "{c}. Keep your firewall and allow WireGuard: UDP {} in, SSH ({}) stays open.",
+                scripts::WG_PORT,
+                f.ssh_port
+            ),
+            Some(if f.ufw_active {
+                format!(
+                    "ufw allow {}/udp\nufw allow {}/tcp\n",
+                    scripts::WG_PORT,
+                    f.ssh_port
+                )
+            } else if f.firewalld_active {
+                format!(
+                    "firewall-cmd --permanent --add-port={}/udp\nfirewall-cmd --permanent --add-port={}/tcp\nfirewall-cmd --reload\n",
+                    scripts::WG_PORT,
+                    f.ssh_port
+                )
+            } else {
+                format!(
+                    "# Add to your existing rules: allow UDP {} and keep TCP {} open.\n# Docker users: these are INPUT rules; container ports are not affected.\n",
+                    scripts::WG_PORT,
+                    f.ssh_port
+                )
+            }),
+        )
+    } else {
+        (
+            format!(
+                "No firewall found. Run this; it reverts itself in {}s. Then log in from a NEW terminal and run the confirm part.",
+                scripts::REVERT_AFTER_S
+            ),
+            Some(format!(
+                "{}\n# after checking a new SSH login works:\n{}",
+                scripts::firewall(f.ssh_port),
+                scripts::firewall_confirm()
+            )),
+        )
+    };
+    let mut steps = vec![
+        os,
         step(
             "root",
             "Root access",
             f.root,
             if f.root {
-                "available".into()
+                "available to harness".into()
             } else {
-                "the commands below need sudo".into()
+                "harness has no sudo here: run the commands below yourself with sudo".into()
             },
             None,
             false,
@@ -539,37 +807,52 @@ pub fn checklist(f: &Facts, master_pub: &str, node_ip: &str, join_hint: &str) ->
             )),
             true,
         ),
-        step(
-            "harness",
-            "Harness node",
-            f.harness_service,
-            if f.harness_service {
-                "running".into()
+    ];
+    if engine != Engine::None {
+        let ready = f.engine_ready(engine);
+        let mut s = step(
+            "engine",
+            "Container engine",
+            ready,
+            if ready {
+                format!("ready: {}", engine_note(engine))
             } else {
                 format!(
-                    "Copy the harness binary to /tmp/harness.upload on the server, then run:\n{join_hint}"
+                    "Install it and give the `{RUNTIME_USER}` user access: {}",
+                    engine_note(engine)
                 )
             },
-            None,
+            Some(scripts::container_engine(engine)),
             true,
-        ),
-    ]
-}
-
-/// Manual mode, first run: key bootstrap then the checklist.
-pub async fn run_manual(
-    first: Box<dyn Remote>,
-    conn: &dyn Connector,
-    master: &dyn Master,
-    log: &Log,
-) -> Result<Facts> {
-    let r = bootstrap(first, conn, master, log).await?;
-    recheck(&*r, master, log).await
+        );
+        if ready && engine == Engine::Docker {
+            s.status = Status::Warning;
+        }
+        steps.push(s);
+    }
+    steps.push(step(
+        "harness",
+        "Harness node",
+        f.harness_service,
+        if f.harness_service {
+            format!("running as `{RUNTIME_USER}`")
+        } else {
+            format!("Copy the harness binary to /tmp/harness.upload on the server, then run:\n{join_hint}")
+        },
+        None,
+        true,
+    ));
+    steps
 }
 
 /// Manual mode: inspect again and rebuild the checklist. A node WireGuard
 /// key that appeared is registered with the master.
-pub async fn recheck(r: &dyn Remote, master: &dyn Master, log: &Log) -> Result<Facts> {
+pub async fn recheck(
+    r: &dyn Remote,
+    master: &dyn Master,
+    opts: &ManualOptions,
+    log: &Log,
+) -> Result<Facts> {
     let f = inspect(r).await?;
     let (master_pub, node_ip) = master.wg_plan()?;
     let mut steps = checklist(
@@ -577,6 +860,7 @@ pub async fn recheck(r: &dyn Remote, master: &dyn Master, log: &Log) -> Result<F
         &master_pub,
         &node_ip,
         "(the join command is created when this step is reached)",
+        opts.engine,
     );
     if let (Some(pk), Some(s)) = (&f.wg_pubkey, steps.iter_mut().find(|s| s.id == "wireguard")) {
         let cmd = master.wg_add_peer(Peer {
@@ -594,15 +878,16 @@ pub async fn recheck(r: &dyn Remote, master: &dyn Master, log: &Log) -> Result<F
         s.script = Some(scripts::node_service(
             &join,
             master.provider_files().as_ref(),
+            opts.engine,
         ));
     }
-    let mut all = vec![
-        log.snapshot()
-            .into_iter()
-            .find(|s| s.id == "login")
-            .unwrap_or(steps[0].clone()),
-    ];
-    all.extend(steps.into_iter().filter(|s| s.id != "login"));
+    // Keep the login / own-user outcome on top.
+    let mut all: Vec<Step> = log
+        .snapshot()
+        .into_iter()
+        .filter(|s| s.id == "login" || s.id == "own_user")
+        .collect();
+    all.extend(steps);
     log.replace(all);
     Ok(f)
 }

@@ -36,10 +36,7 @@ pub fn router(master: Master) -> Router {
         .route("/api/admin/provision/probe", post(provision_probe))
         .route("/api/admin/provision", post(provision_start))
         .route("/api/admin/provision/{id}", get(provision_state))
-        .route(
-            "/api/admin/provision/{id}/continue",
-            post(provision_continue),
-        )
+        .route("/api/admin/provision/{id}/answer", post(provision_answer))
         .route("/api/admin/provision/{id}/recheck", post(provision_recheck))
         .route("/api/admin/nodes/{id}", axum::routing::delete(revoke_node))
         .route("/api/models", get(models))
@@ -1487,6 +1484,11 @@ struct ProvisionBody {
     /// Copy this server's model provider and key to the node.
     #[serde(default)]
     copy_provider: bool,
+    #[serde(default)]
+    engine: harness_provision::facts::Engine,
+    /// Automatic mode: keep harness's passwordless sudo afterwards.
+    #[serde(default)]
+    keep_admin_sudo: bool,
 }
 
 async fn provision_start(
@@ -1506,10 +1508,19 @@ async fn provision_start(
         mode,
         own_pubkey,
         copy_provider,
+        engine,
+        keep_admin_sudo,
     } = b;
     let bad = |m: &str| Err(ApiError(StatusCode::BAD_REQUEST, m.into()));
     if !valid_host(&host) {
         return bad("invalid host");
+    }
+    // Automatic setup creates harness's own user, which takes root.
+    if mode == crate::provision::Mode::Auto && user != "root" {
+        return bad(
+            "automatic setup needs the root login (user `root`); harness then creates its own user. \
+             Use manual setup to keep your own user.",
+        );
     }
     if user.is_empty()
         || !user
@@ -1551,6 +1562,8 @@ async fn provision_start(
             mode,
             own_pubkey,
             copy_provider,
+            engine,
+            keep_admin_sudo: keep_admin_sudo && mode == crate::provision::Mode::Auto,
         })
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "id": job.id })))
@@ -1570,20 +1583,27 @@ async fn provision_state(
     Ok(Json(job_or_404(&m, &id)?.state()))
 }
 
-async fn provision_continue(
+#[derive(Deserialize)]
+struct AnswerBody {
+    step: String,
+    choice: String,
+}
+
+/// Answer a step that waits for the user (e.g. "create harness's own user").
+async fn provision_answer(
     State(m): State<Master>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Json(b): Json<AnswerBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&m, &headers).await?;
     let job = job_or_404(&m, &id)?;
-    if !job.waiting() {
+    if !job.answer(&b.step, &b.choice) {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "this setup is not waiting".into(),
+            "that step is not waiting for this answer".into(),
         ));
     }
-    job.resume();
     Ok(Json(json!({ "ok": true })))
 }
 

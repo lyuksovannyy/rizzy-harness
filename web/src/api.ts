@@ -82,7 +82,8 @@ export const api = {
     call<{ fingerprint: string }>("POST", "/api/admin/provision/probe", { host, port }),
   startSetup: (b: Record<string, unknown>) => call<{ id: string }>("POST", "/api/admin/provision", b),
   setupState: (id: string) => call<SetupState>("GET", `/api/admin/provision/${id}`),
-  setupContinue: (id: string) => call<{ ok: boolean }>("POST", `/api/admin/provision/${id}/continue`),
+  setupAnswer: (id: string, step: string, choice: string) =>
+    call<{ ok: boolean }>("POST", `/api/admin/provision/${id}/answer`, { step, choice }),
   setupRecheck: (id: string) => call<SetupState>("POST", `/api/admin/provision/${id}/recheck`),
   revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "/api/sessions"),

@@ -32,6 +32,101 @@ pub fn install_key(pubkey: &str) -> String {
     )
 }
 
+/// Harness's own login user for setup and status checks.
+pub const ADMIN_USER: &str = "harness-admin";
+/// The unprivileged user the node runs as (agents' commands run as it).
+pub const RUNTIME_USER: &str = "harness";
+
+/// Create `harness-admin` with harness's key (locked password, key login
+/// only). With `sudo`, passwordless sudo for the setup; `drop_admin_sudo`
+/// removes it again.
+pub fn admin_user(pubkey: &str, sudo: bool) -> String {
+    let sudo = if sudo {
+        format!(
+            "echo '{ADMIN_USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{ADMIN_USER}\nchmod 440 /etc/sudoers.d/{ADMIN_USER}\nvisudo -cf /etc/sudoers.d/{ADMIN_USER}\n"
+        )
+    } else {
+        format!("rm -f /etc/sudoers.d/{ADMIN_USER}\n")
+    };
+    format!(
+        r#"{HEAD}id {ADMIN_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {ADMIN_USER}
+passwd -l {ADMIN_USER} >/dev/null
+{sudo}install -d -o {ADMIN_USER} -g {ADMIN_USER} -m 0700 /home/{ADMIN_USER}/.ssh
+f=/home/{ADMIN_USER}/.ssh/authorized_keys
+touch "$f"
+grep -qxF '{k}' "$f" || echo '{k}' >> "$f"
+chown {ADMIN_USER}: "$f"
+chmod 600 "$f"
+echo "admin user ready"
+"#,
+        k = pubkey.replace('\'', "")
+    )
+}
+
+/// Remove a key from the login user's authorized_keys (e.g. harness's key
+/// from root once `harness-admin` works).
+pub fn remove_key(pubkey: &str) -> String {
+    let k = pubkey.replace('\'', "");
+    format!(
+        "set -eu\nf=~/.ssh/authorized_keys\n[ -f \"$f\" ] || exit 0\ngrep -vxF '{k}' \"$f\" > \"$f.tmp\" || true\ncat \"$f.tmp\" > \"$f\"\nrm -f \"$f.tmp\"\n"
+    )
+}
+
+/// After automatic setup: harness keeps a key login for status checks but
+/// loses root. A compromised master must not be root on every node.
+pub fn drop_admin_sudo() -> String {
+    format!("rm -f /etc/sudoers.d/{ADMIN_USER}\necho \"sudo removed\"\n")
+}
+
+/// The runtime user: a normal (not system) user so it gets subordinate
+/// uid/gid ranges for rootless containers; no password, no login shell.
+fn runtime_user() -> String {
+    format!(
+        r#"if ! id {RUNTIME_USER} >/dev/null 2>&1; then
+  useradd --create-home --home-dir /home/{RUNTIME_USER} --shell /usr/sbin/nologin {RUNTIME_USER}
+  passwd -l {RUNTIME_USER} >/dev/null
+fi
+"#
+    )
+}
+
+/// Install the container engine and give the runtime user access to it.
+/// Podman: rootless (own subuid/subgid range, lingering user session, no
+/// group). Docker: the distribution's `docker.io` and the `docker` group,
+/// which is root-equivalent.
+pub fn container_engine(engine: crate::facts::Engine) -> String {
+    use crate::facts::Engine;
+    let user = runtime_user();
+    match engine {
+        Engine::None => String::new(),
+        Engine::Podman => format!(
+            r#"{HEAD}apt-get update -q
+apt-get install -y -q podman uidmap
+{user}if ! grep -q '^{RUNTIME_USER}:' /etc/subuid; then
+  start=$(awk -F: 'BEGIN{{m=100000}} {{e=$2+$3; if (e>m) m=e}} END{{print m}}' /etc/subuid /etc/subgid 2>/dev/null)
+  usermod --add-subuids "$start-$((start+65535))" --add-subgids "$start-$((start+65535))" {RUNTIME_USER}
+fi
+loginctl enable-linger {RUNTIME_USER}
+uid=$(id -u {RUNTIME_USER})
+for _ in $(seq 1 20); do [ -d /run/user/$uid ] && break; sleep 0.5; done
+runuser -u {RUNTIME_USER} -- env XDG_RUNTIME_DIR=/run/user/$uid podman info --format '{{{{.Host.Security.Rootless}}}}' | grep -qx true
+echo "podman (rootless) ready for {RUNTIME_USER}"
+"#
+        ),
+        Engine::Docker => format!(
+            r#"{HEAD}if ! command -v docker >/dev/null; then
+  apt-get update -q
+  apt-get install -y -q docker.io
+fi
+systemctl enable --now docker
+{user}usermod -aG docker {RUNTIME_USER}
+runuser -u {RUNTIME_USER} -g docker -- docker info >/dev/null
+echo "docker ready for {RUNTIME_USER} (docker group)"
+"#
+        ),
+    }
+}
+
 pub fn packages() -> String {
     format!("{HEAD}apt-get update -q\napt-get install -y -q wireguard-tools nftables\n")
 }
@@ -152,10 +247,15 @@ echo "NODE_PUBKEY=$(wg pubkey < /etc/wireguard/harness.key)"
 
 /// Dedicated `harness` user, the binary (uploaded to `/tmp/harness.upload`),
 /// node policy, optional provider config, join, and a systemd service.
-pub fn node_service(join_cmd_args: &str, provider: Option<&ProviderFiles>) -> String {
+pub fn node_service(
+    join_cmd_args: &str,
+    provider: Option<&ProviderFiles>,
+    engine: crate::facts::Engine,
+) -> String {
+    use crate::facts::Engine;
     let file = |name: &str, body: &str| {
         format!(
-            "cat > /var/lib/harness/{name} <<'TOML'\n{body}TOML\nchown harness: /var/lib/harness/{name}\nchmod 600 /var/lib/harness/{name}\n"
+            "cat > /var/lib/harness/{name} <<'TOML'\n{body}TOML\nchown {RUNTIME_USER}: /var/lib/harness/{name}\nchmod 600 /var/lib/harness/{name}\n"
         )
     };
     let provider = match provider {
@@ -168,36 +268,50 @@ pub fn node_service(join_cmd_args: &str, provider: Option<&ProviderFiles>) -> St
         }
         None => String::new(),
     };
+    // Rootless podman runs setuid newuidmap and needs the user's runtime
+    // dir, so its unit cannot use NoNewPrivileges.
+    let (hardening, env) = match engine {
+        Engine::Podman => (
+            "ReadWritePaths=/var/lib/harness /home/harness /run/user/RUNTIME_UID",
+            "Environment=XDG_RUNTIME_DIR=/run/user/RUNTIME_UID",
+        ),
+        _ => (
+            "NoNewPrivileges=yes\nReadWritePaths=/var/lib/harness /home/harness",
+            "",
+        ),
+    };
+    let user = runtime_user();
     format!(
-        r#"{HEAD}id harness >/dev/null 2>&1 || useradd --system --create-home --home-dir /home/harness --shell /usr/sbin/nologin harness
-install -m 0755 /tmp/harness.upload /usr/local/bin/harness
+        r#"{HEAD}{user}install -m 0755 /tmp/harness.upload /usr/local/bin/harness
 rm -f /tmp/harness.upload
-install -d -o harness -g harness -m 0700 /var/lib/harness /home/harness/work
+install -d -o {RUNTIME_USER} -g {RUNTIME_USER} -m 0700 /var/lib/harness /home/{RUNTIME_USER}/work
 cat > /var/lib/harness/node.toml <<'TOML'
 # This node decides what the master may do here.
 max_approval_mode = "ask"
-workspace_roots = ["/home/harness/work"]
+workspace_roots = ["/home/{RUNTIME_USER}/work"]
 TOML
-chown harness: /var/lib/harness/node.toml
-{provider}[ -f /var/lib/harness/remote.toml ] || runuser -u harness -- /usr/local/bin/harness --data-dir /var/lib/harness node join {join_cmd_args}
-cat > /etc/systemd/system/harness-node.service <<'UNIT'
+chown {RUNTIME_USER}: /var/lib/harness/node.toml
+{provider}[ -f /var/lib/harness/remote.toml ] || runuser -u {RUNTIME_USER} -- /usr/local/bin/harness --data-dir /var/lib/harness node join {join_cmd_args}
+uid=$(id -u {RUNTIME_USER})
+cat > /etc/systemd/system/harness-node.service <<UNIT
 [Unit]
 Description=harness worker node
 After=network-online.target wg-quick@wg-harness.service
 Wants=network-online.target
 
 [Service]
-User=harness
+User={RUNTIME_USER}
 ExecStart=/usr/local/bin/harness --data-dir /var/lib/harness node run
 Restart=always
 RestartSec=5
-NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/harness /home/harness
+{hardening}
+{env}
 
 [Install]
 WantedBy=multi-user.target
 UNIT
+sed -i "s/RUNTIME_UID/$uid/g" /etc/systemd/system/harness-node.service
 systemctl daemon-reload
 systemctl enable --now harness-node
 echo installed
@@ -237,7 +351,15 @@ mod tests {
                     harness_toml: "[provider]\nkind = \"mock\"\n".into(),
                     secrets_toml: Some("[keys]\nopenai = \"k\"\n".into()),
                 }),
+                crate::facts::Engine::Podman,
             ),
+            node_service("x", None, crate::facts::Engine::Docker),
+            admin_user("ssh-ed25519 AAAA harness", true),
+            admin_user("ssh-ed25519 AAAA harness", false),
+            remove_key("ssh-ed25519 AAAA harness"),
+            drop_admin_sudo(),
+            container_engine(crate::facts::Engine::Podman),
+            container_engine(crate::facts::Engine::Docker),
         ] {
             bash_ok(&s);
         }
@@ -261,6 +383,24 @@ mod tests {
         // Single quotes cannot break out of the authorized_keys line.
         assert!(!install_key("ssh-ed25519 AAAA x'; rm -rf / #").contains("x';"));
         assert!(wireguard("a", "b", "c").contains("wg genkey"));
+        assert!(
+            admin_user("k", true).contains("visudo -cf")
+                && !admin_user("k", false).contains("NOPASSWD")
+        );
+        let p = container_engine(crate::facts::Engine::Podman);
+        assert!(
+            p.contains("enable-linger")
+                && p.contains("--add-subuids")
+                && !p.contains("usermod -aG docker")
+        );
+        assert!(
+            container_engine(crate::facts::Engine::Docker).contains("usermod -aG docker harness")
+        );
+        assert!(node_service("x", None, crate::facts::Engine::Podman).contains("XDG_RUNTIME_DIR"));
+        assert!(!node_service("x", None, crate::facts::Engine::Podman).contains("NoNewPrivileges"));
+        assert!(
+            node_service("x", None, crate::facts::Engine::Docker).contains("NoNewPrivileges=yes")
+        );
     }
 
     #[test]

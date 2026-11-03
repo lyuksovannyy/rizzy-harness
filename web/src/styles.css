@@ -1168,3 +1168,12 @@ details.summary p {
   padding: 8px 12px;
   word-break: break-all;
 }
+.hint-warn {
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.st-warning {
+  border-color: color-mix(in srgb, var(--warn) 60%, transparent);
+}

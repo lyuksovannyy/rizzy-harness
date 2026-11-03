@@ -77,6 +77,10 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
       </div>
       <div className="card stack">
         <h3>Set up a server over SSH</h3>
+        <p className="muted small">
+          Fully supported: Debian 13 and Ubuntu 26.04 LTS. Other Debian/Ubuntu releases and Debian-based systems work
+          but are not tested; anything else is refused.
+        </p>
         <ServerSetup onDone={load} />
       </div>
       <div className="card stack">

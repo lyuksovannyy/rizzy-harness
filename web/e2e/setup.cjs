@@ -55,11 +55,32 @@ let PAGE = null;
     await p.fill('input[type=password]', 'pw-harness-test');
     check(await p.isDisabled('button:has-text("Set up automatically")'), 'cannot start before confirming the fingerprint');
     await p.check('text=It matches');
+    // Automatic mode with a normal user: explained and blocked.
+    await p.waitForSelector('.hint-warn >> text=needs the root login');
+    check(await p.isDisabled('button:has-text("Set up automatically")'), 'automatic needs root');
+    // Docker shows the root-equivalence warning.
+    await p.selectOption('select:near(:text("Container engine"))', 'docker');
+    await p.waitForSelector('.hint-warn >> text=effectively root');
+    await p.selectOption('select:near(:text("Container engine"))', 'podman');
     await p.click('text=Manual');
+    // Manual mode with root: warned, not refused.
+    await p.fill('label:has-text("User") input', 'root');
+    await p.waitForSelector('.hint-warn >> text=use a normal user');
+    await p.fill('label:has-text("User") input', 'deploy');
     await p.screenshot({ path: `${S}/s-1-form.png` });
     await p.click('button:has-text("Check the server")');
     await p.waitForSelector('.setup-step.st-ok:has-text("Harness login key")');
+    // The fake server runs commands as this test's user; as root, harness asks.
+    // "Keep" avoids creating a real system user on the test machine.
+    const asked = await p.waitForSelector('.setup-step:has-text("Harness\'s own user") button:has-text("Keep using root")', { timeout: 3000 }).catch(() => null);
+    if (asked) {
+      log('asked about its own user (root login)');
+      await asked.click();
+      await p.waitForSelector('.setup-step.st-warning:has-text("Harness\'s own user")');
+    }
     await p.waitForSelector('.setup-step:has-text("Harness node") >> text=--token');
+    await p.waitForSelector('.setup-step:has-text("Container engine") >> text=rootless Podman');
+    await p.waitForSelector('.setup-step:has-text("Operating system")');
     await p.screenshot({ path: `${S}/s-2-checklist.png`, fullPage: true });
     const steps = await p.$$eval('.setup-step', (els) => els.map((e) => e.querySelector('b').textContent + ':' + e.className.split('st-')[1]));
     log('checklist:', steps.join(', '));

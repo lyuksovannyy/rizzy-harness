@@ -1027,3 +1027,47 @@ systemd timers, sshd reload, nftables, WireGuard), because this container has no
 systemd, no WireGuard kernel module and no VPS. Real interop with OpenSSH servers was
 not tested (a test that created a system user was blocked by the environment, rightly).
 Run a first automatic setup on a throwaway VPS before trusting it with a real one.
+
+### 2026-11-03 — Node setup: users, distros, container engine
+
+**Users (who is who on a node).**
+* `harness-admin`: harness's own SSH login, its own ed25519 key, locked password.
+  *Automatic* mode **requires the root login** (refused in the form, the API and again
+  after login if uid ≠ 0). With root, harness creates `harness-admin` with
+  passwordless sudo for the setup, proves the key login, adds the user's own public
+  key to root if given, and drops the root connection. Everything after that runs as
+  `harness-admin` via `sudo -n`. **At the end harness removes its own sudo** (opt-in
+  to keep it): a master holding passwordless root on every node would turn a master
+  compromise into root everywhere, which breaks T5. Re-running automatic setup then
+  needs root again.
+* *Manual* mode should get a **normal user**. Root is accepted with a warning. After the
+  login, harness asks: *Create harness's own user* (creates `harness-admin` **without**
+  sudo, switches to it, removes its key from root) or *Keep using root* (flagged).
+* `harness`: the unprivileged runtime user the node service runs as. Agents' commands
+  run as it. It never has sudo, and it is a different user from `harness-admin`. If
+  the agent's user could sudo, a prompt injection would mean root.
+
+**Distributions.** Fully supported: **Debian 13** and **Ubuntu 26.04 LTS** (constant
+`MAIN_SUPPORT`; update when a new LTS ships). Other Debian/Ubuntu releases and
+Debian-based systems (`ID_LIKE` debian/ubuntu: Mint, Raspberry Pi OS, …) run with a
+warning ("works but is not tested"). Anything else is refused before any change.
+
+**Container engine** (both modes): **Podman, rootless (default)**: `podman uidmap`,
+a subuid/subgid range for `harness` (next free range computed from
+`/etc/subuid`/`/etc/subgid`), `loginctl enable-linger`, checked with `podman info`
+(Rootless = true); the unit gets `XDG_RUNTIME_DIR` and drops `NoNewPrivileges`
+(newuidmap is setuid). **Docker**: distribution `docker.io`, `harness` joins the
+`docker` group, checked with `docker info`. **Warning shown in the form and the
+step: docker-group members are effectively root** (`docker run -v /:/host`), so an
+injected agent can take the server over. **None** is also possible. The runtime user is
+now a normal (non-system) user so it can get subordinate ids.
+
+**Evidence:** distro tier and engine-readiness tests; scripts parse (`bash -n`) and
+carry their guards; the subuid range pick and key removal ran against real files;
+scripted-server tests for: root required, order (admin user → … → engine →
+WireGuard → install → drop sudo), all post-bootstrap commands as `harness-admin`,
+Docker and kept-sudo flagged, distro tiers, manual root question (create: no sudo, key
+off root, re-check as harness-admin; keep: flagged); HTTP (automatic with non-root
+refused, only offered answers accepted); `web/e2e/setup.cjs` (warnings, root
+question, engine step). **Still not run on a real Debian 13 / Ubuntu 26.04 VPS**
+(no systemd here): the apt, podman-rootless and docker steps are untested in reality.

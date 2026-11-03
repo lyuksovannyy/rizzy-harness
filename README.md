@@ -147,11 +147,21 @@ Agentic sessions can run on other machines. Start the master with a node port
 
 The easy way: Settings → Nodes → **Set up a server over SSH**. Check the
 server's host key, log in once with a password or key (harness installs its
-own key and does not keep yours), and pick **Automatic** for a fresh VPS
-(WireGuard, nftables firewall, key-only SSH, the node service; risky steps
-revert themselves after 2 minutes unless harness can still log in) or
-**Manual** for a server with other things on it (a checklist with the
-commands to run). Test it on a throwaway VPS first.
+own key and does not keep yours), and pick:
+
+- **Automatic** for a fresh VPS, logging in as **root**: harness creates its
+  own user `harness-admin`, sets up WireGuard, an nftables firewall, key-only
+  SSH, the container engine and the node (which runs as the unprivileged
+  user `harness`), then removes its own sudo. Risky steps revert themselves
+  after 2 minutes unless harness can still log in.
+- **Manual** for a server with other things on it, logging in as a **normal
+  user**: a checklist with the commands to run. With root, harness asks
+  whether it may create its own user (without sudo) instead.
+
+Container engine: rootless **Podman** (default) or **Docker** (the `harness`
+user joins the `docker` group, which is effectively root). Fully supported:
+Debian 13 and Ubuntu 26.04 LTS; other Debian-based systems work but are not
+tested. Test it on a throwaway VPS first.
 
 By hand: in Settings → Nodes choose **Create join command** and run the two printed
 commands on the other machine (same binary). That machine needs its own

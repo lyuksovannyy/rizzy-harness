@@ -8,6 +8,9 @@ s() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
 . /etc/os-release 2>/dev/null
 echo "os_id=${ID:-unknown}"
 echo "os_version=${VERSION_ID:-}"
+echo "os_like=${ID_LIKE:-}"
+echo "os_name=${PRETTY_NAME:-}"
+echo "login_user=$(id -un)"
 echo "arch=$(uname -m)"
 echo "glibc=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
 echo "uid=$(id -u)"
@@ -30,6 +33,16 @@ systemctl is-active harness-node >/dev/null 2>&1 && echo "harness_service=active
 ipaddr=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | cut -d' ' -f2)
 [ -n "$ipaddr" ] || ipaddr=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo "public_ip=$ipaddr"
+command -v podman >/dev/null && echo "podman=yes" || echo "podman=no"
+command -v docker >/dev/null && docker --version 2>/dev/null | grep -qi podman && echo "docker_is_podman=yes"
+if id harness >/dev/null 2>&1; then
+  echo "runtime_user=yes"
+  id -nG harness | tr ' ' '\n' | grep -qx docker && echo "runtime_docker=yes" || echo "runtime_docker=no"
+  grep -q '^harness:' /etc/subuid 2>/dev/null && echo "runtime_subuid=yes" || echo "runtime_subuid=no"
+  [ -e /var/lib/systemd/linger/harness ] && echo "runtime_linger=yes" || echo "runtime_linger=no"
+else
+  echo "runtime_user=no"
+fi
 echo "wg_pubkey=$(s wg show wg-harness public-key 2>/dev/null)"
 "#;
 
@@ -37,6 +50,13 @@ echo "wg_pubkey=$(s wg show wg-harness public-key 2>/dev/null)"
 pub struct Facts {
     pub os_id: String,
     pub os_version: String,
+    /// `ID_LIKE` from os-release (forks name their parents here).
+    pub os_like: String,
+    pub os_name: String,
+    /// The user harness is logged in as.
+    pub login_user: String,
+    /// Logged in as root (uid 0).
+    pub is_root_login: bool,
     pub arch: String,
     pub glibc: String,
     pub root: bool,
@@ -57,6 +77,40 @@ pub struct Facts {
     pub public_ip: String,
     /// The node's WireGuard public key, once its tunnel exists.
     pub wg_pubkey: Option<String>,
+    pub podman: bool,
+    /// The `harness` runtime user exists.
+    pub runtime_user: bool,
+    pub runtime_in_docker_group: bool,
+    pub runtime_subuid: bool,
+    pub runtime_linger: bool,
+}
+
+/// Debian and Ubuntu releases that get full support (latest stable /
+/// LTS). Update when a new one ships.
+pub const MAIN_SUPPORT: &[(&str, &str)] = &[("debian", "13"), ("ubuntu", "26.04")];
+
+/// How well harness supports a server's OS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "level", content = "note", rename_all = "snake_case")]
+pub enum Support {
+    /// Debian 13 or Ubuntu 26.04 LTS.
+    Main,
+    /// Other Debian/Ubuntu releases and Debian-based distributions: setup
+    /// runs, but it is not tested there.
+    Limited(String),
+    Unsupported(String),
+}
+
+/// Container engine for agents on the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    /// Rootless Podman for the runtime user (no daemon, no root-equivalent group).
+    #[default]
+    Podman,
+    /// Docker; the runtime user joins the `docker` group (root-equivalent).
+    Docker,
+    None,
 }
 
 impl Facts {
@@ -71,6 +125,10 @@ impl Facts {
         Self {
             os_id: get("os_id"),
             os_version: get("os_version"),
+            os_like: get("os_like"),
+            os_name: get("os_name"),
+            login_user: get("login_user"),
+            is_root_login: get("uid") == "0",
             arch: get("arch"),
             glibc: get("glibc"),
             root: get("root") == "yes",
@@ -91,12 +149,54 @@ impl Facts {
             harness_service: get("harness_service") == "active",
             public_ip: get("public_ip"),
             wg_pubkey: Some(get("wg_pubkey")).filter(|v| !v.is_empty()),
+            podman: get("podman") == "yes",
+            runtime_user: get("runtime_user") == "yes",
+            runtime_in_docker_group: get("runtime_docker") == "yes",
+            runtime_subuid: get("runtime_subuid") == "yes",
+            runtime_linger: get("runtime_linger") == "yes",
         }
     }
 
-    /// Debian and Ubuntu are what the automatic setup knows how to drive.
-    pub fn supported_os(&self) -> bool {
-        matches!(self.os_id.as_str(), "debian" | "ubuntu")
+    pub fn support(&self) -> Support {
+        let name = if self.os_name.is_empty() {
+            format!("{} {}", self.os_id, self.os_version)
+        } else {
+            self.os_name.clone()
+        };
+        if MAIN_SUPPORT
+            .iter()
+            .any(|(id, v)| *id == self.os_id && *v == self.os_version)
+        {
+            return Support::Main;
+        }
+        let main = MAIN_SUPPORT
+            .iter()
+            .map(|(id, v)| format!("{} {v}", if *id == "debian" { "Debian" } else { "Ubuntu" }))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let debian_family = matches!(self.os_id.as_str(), "debian" | "ubuntu")
+            || self
+                .os_like
+                .split_whitespace()
+                .any(|l| l == "debian" || l == "ubuntu");
+        if debian_family {
+            Support::Limited(format!(
+                "{name} works but is not tested; fully supported: {main}"
+            ))
+        } else {
+            Support::Unsupported(format!(
+                "{name} is not Debian-based; supported: {main} (and, untested, other Debian-based systems)"
+            ))
+        }
+    }
+
+    /// The container engine is installed and usable by the runtime user.
+    pub fn engine_ready(&self, e: Engine) -> bool {
+        match e {
+            Engine::None => true,
+            Engine::Docker => self.docker && self.runtime_in_docker_group,
+            Engine::Podman => self.podman && self.runtime_subuid && self.runtime_linger,
+        }
     }
 
     /// Something else already manages the firewall: automatic setup would
@@ -140,7 +240,11 @@ mod tests {
              docker=no\nother_fw_rules=3\nssh_password=yes\nssh_root_login=without-password\n\
              ssh_port=2222\nharness=none\nharness_service=inactive\npublic_ip=203.0.113.7\n",
         );
-        assert!(f.supported_os() && f.root && f.systemd && f.nft && f.ssh_password);
+        assert!(f.root && f.systemd && f.nft && f.ssh_password && !f.is_root_login);
+        assert!(
+            matches!(f.support(), Support::Limited(_)),
+            "24.04 is not the latest LTS"
+        );
         assert_eq!((f.ssh_port, f.public_ip.as_str()), (2222, "203.0.113.7"));
         assert_eq!(f.harness, None);
         assert_eq!(
@@ -163,5 +267,70 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+}
+
+#[cfg(test)]
+mod support_tests {
+    use super::*;
+
+    fn os(id: &str, v: &str, like: &str) -> Facts {
+        Facts {
+            os_id: id.into(),
+            os_version: v.into(),
+            os_like: like.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn distro_tiers() {
+        assert_eq!(os("debian", "13", "").support(), Support::Main);
+        assert_eq!(os("ubuntu", "26.04", "debian").support(), Support::Main);
+        assert!(matches!(
+            os("ubuntu", "24.04", "debian").support(),
+            Support::Limited(_)
+        ));
+        assert!(matches!(
+            os("debian", "12", "").support(),
+            Support::Limited(_)
+        ));
+        assert!(matches!(
+            os("linuxmint", "22", "ubuntu debian").support(),
+            Support::Limited(_)
+        ));
+        assert!(matches!(
+            os("raspbian", "13", "debian").support(),
+            Support::Limited(_)
+        ));
+        assert!(matches!(
+            os("fedora", "43", "").support(),
+            Support::Unsupported(_)
+        ));
+        assert!(matches!(
+            os("rocky", "10", "rhel centos fedora").support(),
+            Support::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn engine_readiness() {
+        let mut f = Facts::default();
+        assert!(f.engine_ready(Engine::None) && !f.engine_ready(Engine::Podman));
+        f.docker = true;
+        assert!(
+            !f.engine_ready(Engine::Docker),
+            "installed but harness is not in the group"
+        );
+        f.runtime_in_docker_group = true;
+        assert!(f.engine_ready(Engine::Docker));
+        f.podman = true;
+        f.runtime_subuid = true;
+        assert!(
+            !f.engine_ready(Engine::Podman),
+            "needs linger for a user service"
+        );
+        f.runtime_linger = true;
+        assert!(f.engine_ready(Engine::Podman));
     }
 }

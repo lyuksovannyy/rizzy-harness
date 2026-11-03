@@ -1,7 +1,7 @@
 //! Setting up worker nodes over SSH from the UI (Settings → Nodes → Set up
 //! a server). Jobs live in memory. The user's password or private key is
-//! held only until harness's own key is installed and proven; harness's key
-//! and the server's pinned host key are kept so manual mode can re-check.
+//! held only for the first login; harness's own key and the server's pinned
+//! host key are kept so manual mode can re-check.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use harness_core::Secret;
+use harness_provision::facts::Engine;
 use harness_provision::scripts::ProviderFiles;
-use harness_provision::setup::{self, Connector, Log, Remote, Status};
+use harness_provision::setup::{self, Connector, Log, Remote};
 use harness_provision::ssh::{Auth, HarnessKey, Output, Ssh, Target};
 use harness_provision::wg::{IFACE, MASTER_IP, MasterWg, Peer};
 use harness_provision::{Error, Result};
@@ -22,9 +23,9 @@ use crate::{Master, lock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// Fresh VPS / node-only machine: harness changes everything itself.
+    /// Fresh VPS / node-only machine, root login: harness changes everything itself.
     Auto,
-    /// A server with other work on it: inspect and explain.
+    /// A server with other things on it, preferably a normal user: inspect and explain.
     Manual,
 }
 
@@ -54,9 +55,10 @@ impl Remote for SshRemote {
     }
 }
 
-/// New connections with harness's key and the pinned host key.
+/// New connections with harness's key and the pinned host key, as the
+/// current user (switches to `harness-admin` once it exists).
 struct KeyConnector {
-    target: Target,
+    target: Mutex<Target>,
     fingerprint: String,
     key: Secret<String>,
 }
@@ -64,13 +66,18 @@ struct KeyConnector {
 #[async_trait::async_trait]
 impl Connector for KeyConnector {
     async fn connect(&self) -> Result<Box<dyn Remote>> {
+        let target = lock(&self.target).clone();
         let s = Ssh::connect(
-            &self.target,
+            &target,
             &self.fingerprint,
             Auth::Key(self.key.clone(), None),
         )
         .await?;
         Ok(Box::new(SshRemote(s)))
+    }
+
+    fn set_user(&self, user: &str) {
+        lock(&self.target).user = user.to_string();
     }
 }
 
@@ -78,6 +85,7 @@ pub struct Job {
     pub id: String,
     pub mode: Mode,
     pub host: String,
+    pub engine: Engine,
     pub log: Log,
     done: Mutex<Option<std::result::Result<String, String>>>,
     side: Arc<Side>,
@@ -91,11 +99,43 @@ impl Job {
             "id": self.id,
             "mode": self.mode,
             "host": self.host,
+            "user": self.user(),
+            "engine": self.engine,
             "steps": self.log.snapshot(),
             "finished": done.is_some(),
             "node_id": done.as_ref().and_then(|d| d.as_ref().ok()),
             "error": done.as_ref().and_then(|d| d.as_ref().err()),
         })
+    }
+
+    /// Answer a waiting step (`false` if it is not waiting for that choice).
+    pub fn answer(&self, step: &str, choice: &str) -> bool {
+        if !self.log.accepts(step, choice) {
+            return false;
+        }
+        lock(&self.side.answers).insert(step.to_string(), choice.to_string());
+        self.side.answered.notify_waiters();
+        true
+    }
+
+    /// Manual mode: inspect again with harness's key.
+    pub async fn recheck(&self) -> Result<()> {
+        let r = self.connector.connect().await?;
+        setup::recheck(
+            &*r,
+            &*self.side,
+            &setup::ManualOptions {
+                engine: self.engine,
+            },
+            &self.log,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The user harness currently logs in as.
+    pub fn user(&self) -> String {
+        lock(&self.connector.target).user.clone()
     }
 }
 
@@ -106,7 +146,9 @@ struct Side {
     key_pub: String,
     name: String,
     copy_provider: bool,
-    cont: Arc<Notify>,
+    /// Answers to waiting steps, by step id.
+    answers: Mutex<HashMap<String, String>>,
+    answered: Notify,
 }
 
 fn local_glibc() -> String {
@@ -238,8 +280,14 @@ impl setup::Master for Side {
         )))
     }
 
-    async fn wait_continue(&self) {
-        self.cont.notified().await;
+    async fn wait_answer(&self, step: &str) -> String {
+        loop {
+            let notified = self.answered.notified();
+            if let Some(a) = lock(&self.answers).remove(step) {
+                return a;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -252,6 +300,9 @@ pub struct StartRequest {
     pub mode: Mode,
     pub own_pubkey: Option<String>,
     pub copy_provider: bool,
+    pub engine: Engine,
+    /// Automatic mode: keep harness's passwordless sudo afterwards.
+    pub keep_admin_sudo: bool,
 }
 
 impl Master {
@@ -281,30 +332,35 @@ impl Master {
             port: req.port,
             user: req.user.clone(),
         };
-        let cont = Arc::new(Notify::new());
         let side = Arc::new(Side {
             master: self.clone(),
             data_dir,
             key_pub: key.public_openssh(),
             name: req.host.clone(),
             copy_provider: req.copy_provider,
-            cont: cont.clone(),
+            answers: Mutex::new(HashMap::new()),
+            answered: Notify::new(),
         });
         let job = Arc::new(Job {
             id: harness_core::new_id(),
             mode: req.mode,
             host: req.host.clone(),
+            engine: req.engine,
             log: Log::default(),
             done: Mutex::new(None),
-            side: side.clone(),
+            side,
             connector: KeyConnector {
-                target: target.clone(),
+                target: Mutex::new(target.clone()),
                 fingerprint: req.fingerprint.clone(),
                 key: key.private_openssh(),
             },
         });
         lock(&self.inner.provision).insert(job.id.clone(), job.clone());
-        let audit = serde_json::json!({ "host": req.host, "port": req.port, "user": req.user, "mode": req.mode }).to_string();
+        let audit = serde_json::json!({
+            "host": req.host, "port": req.port, "user": req.user, "mode": req.mode,
+            "engine": req.engine, "keep_admin_sudo": req.keep_admin_sudo,
+        })
+        .to_string();
         let m = self.clone();
         tokio::spawn(async move {
             let _ = m
@@ -315,27 +371,43 @@ impl Master {
         });
 
         let j = job.clone();
-        let (auth, fp, own, mode) = (req.auth, req.fingerprint, req.own_pubkey, req.mode);
-        let continue_signal = cont;
+        let StartRequest {
+            auth,
+            fingerprint,
+            own_pubkey,
+            mode,
+            engine,
+            keep_admin_sudo,
+            ..
+        } = req;
         tokio::spawn(async move {
-            let _keep = continue_signal;
             let res: Result<String> = async {
-                let first = Ssh::connect(&target, &fp, auth).await.inspect_err(|e| {
-                    j.log_failure("login", "Harness login key", e);
-                })?;
+                let first = Ssh::connect(&target, &fingerprint, auth)
+                    .await
+                    .inspect_err(|e| {
+                        j.log.push_failed("login", "First login", &e.to_string());
+                    })?;
                 let first: Box<dyn Remote> = Box::new(SshRemote(first));
                 match mode {
                     Mode::Auto => {
-                        let r = setup::bootstrap(first, &j.connector, &*j.side, &j.log).await?;
                         let opts = setup::AutoOptions {
                             name: target.host.clone(),
                             endpoint_host: target.host.clone(),
-                            own_pubkey: own,
+                            own_pubkey,
+                            engine,
+                            keep_admin_sudo,
                         };
-                        setup::run_auto(r, &j.connector, &*j.side, &opts, &j.log).await
+                        setup::run_auto(first, &j.connector, &*j.side, &opts, &j.log).await
                     }
                     Mode::Manual => {
-                        setup::run_manual(first, &j.connector, &*j.side, &j.log).await?;
+                        setup::run_manual(
+                            first,
+                            &j.connector,
+                            &*j.side,
+                            &setup::ManualOptions { engine },
+                            &j.log,
+                        )
+                        .await?;
                         Ok(String::new())
                     }
                 }
@@ -348,32 +420,6 @@ impl Master {
 
     pub fn provision_job(&self, id: &str) -> Option<Arc<Job>> {
         lock(&self.inner.provision).get(id).cloned()
-    }
-}
-
-impl Job {
-    fn log_failure(&self, id: &'static str, title: &'static str, e: &Error) {
-        self.log.push_failed(id, title, &e.to_string());
-    }
-
-    /// The user brought the master's tunnel up.
-    pub fn resume(&self) {
-        self.side.cont.notify_one();
-    }
-
-    /// Manual mode: inspect again with harness's key.
-    pub async fn recheck(&self) -> Result<()> {
-        let r = self.connector.connect().await?;
-        setup::recheck(&*r, &*self.side, &self.log)
-            .await
-            .map(|_| ())
-    }
-
-    pub fn waiting(&self) -> bool {
-        self.log
-            .snapshot()
-            .iter()
-            .any(|s| s.status == Status::Waiting)
     }
 }
 

@@ -2,7 +2,10 @@
 // is sent once, used to install harness's own key, and not kept.
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { SetupState, SetupStep } from "../types";
+import type { Engine, SetupState, SetupStep } from "../types";
+
+const DOCKER_WARNING =
+  "The `harness` user joins the docker group. Members of that group are effectively root on the server: an agent talked into `docker run -v /:/host` can take it over. Podman runs rootless and does not have this problem.";
 
 function Step({ s, jobId, onState }: { s: SetupStep; jobId: string; onState: (v: SetupState) => void }) {
   const [copied, setCopied] = useState(false);
@@ -10,6 +13,7 @@ function Step({ s, jobId, onState }: { s: SetupStep; jobId: string; onState: (v:
     pending: "…",
     running: "running",
     ok: "done",
+    warning: "done, note",
     failed: "failed",
     todo: "to do",
     waiting: "your turn",
@@ -40,10 +44,19 @@ function Step({ s, jobId, onState }: { s: SetupStep; jobId: string; onState: (v:
           </button>
         </details>
       )}
-      {s.status === "waiting" && (
-        <button type="button" className="primary" onClick={() => void api.setupContinue(jobId).then(() => api.setupState(jobId).then(onState))}>
-          I ran it, continue
-        </button>
+      {s.status === "waiting" && s.choices && (
+        <div className="row">
+          {s.choices.map((c, i) => (
+            <button
+              key={c.id}
+              type="button"
+              className={i === 0 ? "primary" : ""}
+              onClick={() => void api.setupAnswer(jobId, s.id, c.id).then(() => api.setupState(jobId).then(onState))}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
       )}
     </li>
   );
@@ -62,6 +75,8 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<"auto" | "manual">("auto");
   const [ownKey, setOwnKey] = useState("");
   const [copyProvider, setCopyProvider] = useState(false);
+  const [engine, setEngine] = useState<Engine>("podman");
+  const [keepSudo, setKeepSudo] = useState(false);
   const [job, setJob] = useState<SetupState | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -79,7 +94,7 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
     return (
       <div className="stack">
         <div className="muted small">
-          {job.mode === "auto" ? "Automatic setup" : "Manual setup"} of {job.host}
+          {job.mode === "auto" ? "Automatic setup" : "Manual setup"} of {job.host}, harness logs in as <code>{job.user}</code>
           {job.finished && job.error && <span className="error-text"> · stopped: {job.error}</span>}
           {job.finished && job.node_id && <span> · node `{job.node_id}` is online</span>}
         </div>
@@ -134,6 +149,8 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
             ...(useKey ? { private_key: privateKey, passphrase: passphrase || undefined } : { password }),
             own_pubkey: mode === "auto" && ownKey.trim() ? ownKey.trim() : undefined,
             copy_provider: mode === "auto" && copyProvider,
+            engine,
+            keep_admin_sudo: mode === "auto" && keepSudo,
           });
           // Nothing secret stays in the page once it is sent.
           setPassword("");
@@ -161,6 +178,19 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
           <input className="mono" value={user} onChange={(e) => setUser(e.target.value)} />
         </label>
       </div>
+      {mode === "auto" && user.trim() !== "root" && (
+        <div className="hint-warn small">
+          Automatic setup needs the <b>root</b> login. Harness then creates its own user <code>harness-admin</code>{" "}
+          with its own SSH key and stops using root.
+        </div>
+      )}
+      {mode === "manual" && user.trim() === "root" && (
+        <div className="hint-warn small">
+          For a server with other things on it, use a normal user instead of root. You can continue with root: harness
+          will then ask whether it may create its own user <code>harness-admin</code> (no sudo, its own key) and take
+          its key off root.
+        </div>
+      )}
       {!fp ? (
         <div className="row">
           <button
@@ -218,15 +248,28 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
           <div className="presets">
             <label className="check">
               <input type="radio" name="mode" checked={mode === "auto"} onChange={() => setMode("auto")} />
-              <b>Automatic</b> <span className="muted small">for a fresh VPS or one used only as a node: installs WireGuard, a firewall (nftables), key-only SSH and the node</span>
+              <b>Automatic</b> <span className="muted small">for a fresh VPS or one used only as a node, root login: harness creates its own user, installs WireGuard, a firewall (nftables), key-only SSH, the container engine and the node</span>
             </label>
             <label className="check">
               <input type="radio" name="mode" checked={mode === "manual"} onChange={() => setMode("manual")} />
-              <b>Manual</b> <span className="muted small">for a server with other things on it: checks it and shows the commands to run yourself</span>
+              <b>Manual</b> <span className="muted small">for a server with other things on it, normal user: checks it and shows the commands to run yourself</span>
             </label>
           </div>
+          <label>
+            Container engine for agents
+            <select value={engine} onChange={(e) => setEngine(e.target.value as Engine)}>
+              <option value="podman">Podman, rootless (recommended)</option>
+              <option value="docker">Docker (docker group)</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+          {engine === "docker" && <div className="hint-warn small">{DOCKER_WARNING}</div>}
           {mode === "auto" && (
             <>
+              <label className="check">
+                <input type="checkbox" checked={keepSudo} onChange={(e) => setKeepSudo(e.target.checked)} />
+                Keep harness's root access after setup (lets it re-run setup; a stolen master would be root here)
+              </label>
               <label>
                 Your SSH public key (optional, so you can still log in after passwords are turned off)
                 <input className="mono" placeholder="ssh-ed25519 AAAA… you@laptop" value={ownKey} onChange={(e) => setOwnKey(e.target.value)} />
@@ -238,7 +281,12 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
             </>
           )}
           <div className="row end">
-            <button className="primary" disabled={!fpOk || busy || (!useKey && !password) || (useKey && !privateKey.trim())}>
+            <button
+              className="primary"
+              disabled={
+                !fpOk || busy || (!useKey && !password) || (useKey && !privateKey.trim()) || (mode === "auto" && user.trim() !== "root")
+              }
+            >
               {busy ? "Starting…" : mode === "auto" ? "Set up automatically" : "Check the server"}
             </button>
           </div>

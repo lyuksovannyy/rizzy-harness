@@ -48,6 +48,10 @@ async fn manual_setup_installs_harness_key_and_forgets_the_password() {
     .unwrap();
     assert_eq!(v["fingerprint"], ssh.fingerprint.as_str());
 
+    // Automatic setup needs root.
+    let r = post("/api/admin/provision", json!({"host": "127.0.0.1", "port": ssh.port, "user": "deploy", "fingerprint": ssh.fingerprint, "password": fake::PASSWORD, "mode": "auto"})).await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert!(r.text().await.unwrap().contains("needs the root login"));
     // Unconfirmed fingerprint or no credentials: refused.
     let r = post("/api/admin/provision", json!({"host": "127.0.0.1", "port": ssh.port, "user": "deploy", "fingerprint": "", "password": fake::PASSWORD, "mode": "manual"})).await.unwrap();
     assert_eq!(r.status(), 400);
@@ -64,6 +68,55 @@ async fn manual_setup_installs_harness_key_and_forgets_the_password() {
     .await
     .unwrap();
     let id = v["id"].as_str().unwrap().to_string();
+    let get_state = || async {
+        c.get(format!("{base}/api/admin/provision/{id}"))
+            .bearer_auth("tok")
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    // This test's SSH server runs commands as the test process; under root
+    // harness asks whether to create its own user. Answering "create" would
+    // add a real system user here, so the test keeps root (the "create"
+    // path is covered by harness-provision's scripted tests).
+    let mut asked = Value::Null;
+    for _ in 0..200 {
+        asked = get_state().await;
+        if asked["finished"] == true
+            || asked["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["status"] == "waiting")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let waits_for_user = asked["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["id"] == "own_user" && s["status"] == "waiting");
+    if waits_for_user {
+        let r = post(
+            &format!("/api/admin/provision/{id}/answer"),
+            json!({"step": "own_user", "choice": "delete-everything"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 409, "only offered choices are accepted");
+        let r = post(
+            &format!("/api/admin/provision/{id}/answer"),
+            json!({"step": "own_user", "choice": "keep"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 200);
+    }
     let mut state = Value::Null;
     for _ in 0..200 {
         state = c

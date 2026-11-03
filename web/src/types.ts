@@ -264,16 +264,22 @@ export interface AttentionItem {
 export interface SetupStep {
   id: string;
   title: string;
-  status: "pending" | "running" | "ok" | "failed" | "todo" | "waiting" | "skipped";
+  status: "pending" | "running" | "ok" | "warning" | "failed" | "todo" | "waiting" | "skipped";
   detail: string;
   script?: string;
   root: boolean;
+  choices?: { id: string; label: string }[];
 }
+
+export type Engine = "podman" | "docker" | "none";
 
 export interface SetupState {
   id: string;
   mode: "auto" | "manual";
   host: string;
+  /** The user harness logs in as now. */
+  user: string;
+  engine: Engine;
   steps: SetupStep[];
   finished: boolean;
   node_id: string | null;
