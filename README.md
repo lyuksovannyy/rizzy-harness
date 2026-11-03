@@ -1,5 +1,18 @@
 # harness
 
+[![ci](https://github.com/lyuksovannyy/rizzy-harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lyuksovannyy/rizzy-harness/actions/workflows/ci.yml)
+[![image](https://img.shields.io/badge/ghcr.io-rizzy--harness-blue?logo=docker)](https://github.com/lyuksovannyy/rizzy-harness/pkgs/container/rizzy-harness)
+[![release](https://img.shields.io/github/v/release/lyuksovannyy/rizzy-harness?include_prereleases&sort=semver)](https://github.com/lyuksovannyy/rizzy-harness/releases)
+
+```bash
+docker pull ghcr.io/lyuksovannyy/rizzy-harness:edge
+```
+
+The image is the **central server** (web UI, chats, node setup); worker nodes
+run on real hosts. Tags: `latest` and `X.Y.Z` for releases, `edge` for `main`
+after CI passes. Setup: [Central server in Docker](#central-server-in-docker).
+Release binaries (Linux x86_64): [Releases](https://github.com/lyuksovannyy/rizzy-harness/releases).
+
 A self-hosted coding-agent harness: one Rust binary that serves a web dashboard
 for coding agents, with the agent loop running on the machine that owns the
 code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
@@ -148,8 +161,11 @@ mkdir -p data && sudo chown 10001:10001 data
 ```
 
 ```bash
-docker compose up -d --build
+HARNESS_TAG=edge docker compose up -d
 ```
+
+(`HARNESS_TAG` defaults to `latest`, the newest release; `edge` is `main`. To
+build this checkout instead, uncomment `build: .` in `compose.yaml`.)
 
 ```bash
 docker compose exec harness harness claim-code
@@ -171,7 +187,10 @@ or the WireGuard address). Notes:
   the host's. Then add `--node-listen 10.77.0.1:7443` to the command.
 - Nodes receive the master's own binary, built on Debian 13: fine for Debian 13
   and Ubuntu 26.04 nodes, too new for older glibc (the setup checks this).
-- Docker Hub rate limits: `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
+- Building yourself and hitting Docker Hub rate limits:
+  `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
+- Published images are linux/amd64 only (the master uploads its own binary to
+  nodes, so nodes must be x86_64 too).
 
 ## Remote worker nodes
 

@@ -59,3 +59,63 @@ jobs:
           docker exec harness-ci harness claim-code > /dev/null  # exists; not printed
           # Host networking with 0.0.0.0 must be refused.
           docker run --rm --network host harness:ci 2>&1 | grep "shares the host's network"
+
+  # Publish only what passed every job above: main → :edge, tag vX.Y.Z →
+  # :X.Y.Z, :X.Y, :latest and a GitHub Release with the binary.
+  publish:
+    needs: [rust, deny, web, image]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the GitHub Release
+      packages: write   # ghcr.io
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo.toml $v"; exit 1; }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=edge,branch=main
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=harness
+            org.opencontainers.image.description=Self-hosted coding-agent harness: central server (web UI, chats, node setup). Nodes run on real hosts, not in containers.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: GitHub Release with the binary
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          img=ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}
+          docker pull "$img"
+          id=$(docker create "$img")
+          docker cp "$id:/usr/local/bin/harness" harness
+          docker rm "$id"
+          name=harness-$GITHUB_REF_NAME-x86_64-linux-gnu
+          tar czf "$name.tar.gz" harness README.md LICENSE
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          gh release create "$GITHUB_REF_NAME" "$name.tar.gz" "$name.tar.gz.sha256" \
+            --title "harness $GITHUB_REF_NAME" --generate-notes \
+            --notes "Docker: \`docker pull $img\`. The binary is built on Debian 13 (glibc 2.41)."

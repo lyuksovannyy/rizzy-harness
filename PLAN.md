@@ -1158,3 +1158,13 @@ loopback, claim code, host data path set. Found and fixed: `HARNESS_NO_LOCAL_NOD
 rejected by clap (bool flags only took true/false), and ANSI colours in `docker logs`.
 CI builds the image and repeats the curl/claim/host-network checks. **Not tested:** a
 node joining a containerised master over a real WireGuard tunnel (no WireGuard here).
+
+### 2026-11-03 — Published image and releases
+
+CI job `publish` runs only after `rust`, `deny`, `web` and `image` pass, on pushes to
+`main` and `v*` tags. `main` → `ghcr.io/lyuksovannyy/rizzy-harness:edge` (+ `sha-…`);
+tag `vX.Y.Z` → `:X.Y.Z`, `:X.Y`, `:latest`, and a GitHub Release with the Linux x86_64
+binary (taken out of the image, so it is the same build) and its sha256. A tag that
+differs from the Cargo.toml version fails the job. `GITHUB_TOKEN` only, no stored
+secrets. amd64 only: the master uploads its own binary to nodes, and an arm64 build
+under QEMU would cost ~an hour per run for no current user.
