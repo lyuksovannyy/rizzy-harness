@@ -80,6 +80,50 @@ pub async fn probe(host: &str, port: u16) -> Result<String> {
     fp.ok_or_else(|| Error::Ssh(format!("could not read the host key of {host}:{port}")))
 }
 
+/// The login methods the server offers to `user` (e.g. `["publickey"]`),
+/// asked without logging in. Used by the watchdog: `password` or
+/// `keyboard-interactive` means password logins are on again.
+pub async fn auth_methods(target: &Target, fingerprint: &str) -> Result<Vec<String>> {
+    let seen = Arc::new(Mutex::new(None));
+    let h = Pin {
+        expected: Some(fingerprint.to_string()),
+        seen: seen.clone(),
+    };
+    let mut handle = tokio::time::timeout(
+        TIMEOUT,
+        client::connect(config(), (target.host.as_str(), target.port), h),
+    )
+    .await
+    .map_err(|_| Error::Ssh(format!("{}:{} did not answer", target.host, target.port)))?
+    .map_err(|e| {
+        let got = seen.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        match got {
+            Some(g) if g != fingerprint => Error::HostKeyChanged {
+                expected: fingerprint.into(),
+                got: g,
+            },
+            _ => Error::Ssh(e.to_string()),
+        }
+    })?;
+    let res = handle
+        .authenticate_none(&target.user)
+        .await
+        .map_err(|e| Error::Ssh(e.to_string()))?;
+    let methods = match res {
+        russh::client::AuthResult::Success => vec!["none".to_string()],
+        russh::client::AuthResult::Failure {
+            remaining_methods, ..
+        } => remaining_methods
+            .iter()
+            .map(|m| <&'static str>::from(m).to_string())
+            .collect(),
+    };
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await;
+    Ok(methods)
+}
+
 pub struct Output {
     pub code: u32,
     pub stdout: String,

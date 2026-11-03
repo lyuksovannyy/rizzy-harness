@@ -77,13 +77,15 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
   const [copyProvider, setCopyProvider] = useState(false);
   const [engine, setEngine] = useState<Engine>("podman");
   const [keepSudo, setKeepSudo] = useState(false);
+  const [protectSsh, setProtectSsh] = useState(true);
+  const [protectFirewall, setProtectFirewall] = useState(true);
   const [job, setJob] = useState<SetupState | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!job || job.finished) {
-      if (job?.finished && job.node_id) onDone();
+      if (job?.finished) onDone();
       return;
     }
     const t = setTimeout(() => void api.setupState(job.id).then(setJob).catch((x) => setErr(String(x))), 1000);
@@ -151,6 +153,8 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
             copy_provider: mode === "auto" && copyProvider,
             engine,
             keep_admin_sudo: mode === "auto" && keepSudo,
+            protect_ssh: mode === "auto" && protectSsh,
+            protect_firewall: mode === "auto" && protectFirewall,
           });
           // Nothing secret stays in the page once it is sent.
           setPassword("");
@@ -266,6 +270,14 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
           {engine === "docker" && <div className="hint-warn small">{DOCKER_WARNING}</div>}
           {mode === "auto" && (
             <>
+              <label className="check">
+                <input type="checkbox" checked={protectSsh} onChange={(e) => setProtectSsh(e.target.checked)} />
+                Key-only SSH (turn password logins off; reverts itself if harness gets locked out)
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={protectFirewall} onChange={(e) => setProtectFirewall(e.target.checked)} />
+                Firewall: only SSH and WireGuard in (nftables; reverts itself if harness gets locked out)
+              </label>
               <label className="check">
                 <input type="checkbox" checked={keepSudo} onChange={(e) => setKeepSudo(e.target.checked)} />
                 Keep harness's root access after setup (lets it re-run setup; a stolen master would be root here)

@@ -30,7 +30,7 @@ pub enum Mode {
 }
 
 /// An SSH connection as a setup `Remote`.
-struct SshRemote(Ssh);
+pub(crate) struct SshRemote(pub(crate) Ssh);
 
 #[async_trait::async_trait]
 impl Remote for SshRemote {
@@ -303,6 +303,9 @@ pub struct StartRequest {
     pub engine: Engine,
     /// Automatic mode: keep harness's passwordless sudo afterwards.
     pub keep_admin_sudo: bool,
+    /// Automatic mode: key-only SSH and the firewall (opt-out).
+    pub protect_ssh: bool,
+    pub protect_firewall: bool,
 }
 
 impl Master {
@@ -378,8 +381,11 @@ impl Master {
             mode,
             engine,
             keep_admin_sudo,
+            protect_ssh,
+            protect_firewall,
             ..
         } = req;
+        let master = self.clone();
         tokio::spawn(async move {
             let res: Result<String> = async {
                 let first = Ssh::connect(&target, &fingerprint, auth)
@@ -396,6 +402,8 @@ impl Master {
                             own_pubkey,
                             engine,
                             keep_admin_sudo,
+                            protect_ssh,
+                            protect_firewall,
                         };
                         setup::run_auto(first, &j.connector, &*j.side, &opts, &j.log).await
                     }
@@ -413,6 +421,37 @@ impl Master {
                 }
             }
             .await;
+            // Saved once the server is reachable with harness's key, so it
+            // can be managed and watched later (also after a failed step).
+            let reached = j
+                .log
+                .snapshot()
+                .iter()
+                .any(|s| s.id == "login" && s.status != setup::Status::Failed);
+            if reached {
+                let auto = mode == Mode::Auto;
+                let rec = crate::node_setups::SetupRecord {
+                    id: j.id.clone(),
+                    host: target.host.clone(),
+                    port: target.port,
+                    login_user: j.user(),
+                    fingerprint: fingerprint.clone(),
+                    mode,
+                    engine,
+                    ssh_protected: auto && protect_ssh,
+                    firewall_enabled: auto && protect_firewall,
+                    watch_ssh: !auto || protect_ssh,
+                    watch_firewall: auto && protect_firewall,
+                    admin_sudo: auto && keep_admin_sudo,
+                    node_id: res.as_ref().ok().filter(|n| !n.is_empty()).cloned(),
+                    created_ms: harness_core::now_ms(),
+                    last_check_ms: None,
+                    problems: vec![],
+                };
+                if let Err(e) = master.save_setup(&rec).await {
+                    tracing::warn!(error = %e, "could not save the server setup");
+                }
+            }
             *lock(&j.done) = Some(res.map_err(|e| e.to_string()));
         });
         Ok(job)

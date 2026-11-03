@@ -34,6 +34,13 @@ pub fn router(master: Master) -> Router {
         .route("/api/admin/nodes", get(admin_nodes))
         .route("/api/admin/nodes/join", post(node_join_token))
         .route("/api/admin/provision/probe", post(provision_probe))
+        .route("/api/admin/node-setups", get(list_setups))
+        .route(
+            "/api/admin/node-setups/{id}",
+            axum::routing::patch(update_setup).delete(forget_setup),
+        )
+        .route("/api/admin/node-setups/{id}/check", post(check_setup))
+        .route("/api/admin/node-setups/{id}/firewall", post(setup_firewall))
         .route("/api/admin/provision", post(provision_start))
         .route("/api/admin/provision/{id}", get(provision_state))
         .route("/api/admin/provision/{id}/answer", post(provision_answer))
@@ -1401,7 +1408,13 @@ async fn attention(
         .mirror
         .call(move |s| s.attention(owner.as_deref(), &viewer))
         .await?;
-    Ok(Json(json!({ "items": items })))
+    // Server problems from the node watchdog, for admins.
+    let nodes = if who.is_admin() {
+        crate::node_setups::attention(&m).await
+    } else {
+        vec![]
+    };
+    Ok(Json(json!({ "items": items, "nodes": nodes })))
 }
 
 #[derive(Deserialize)]
@@ -1489,6 +1502,15 @@ struct ProvisionBody {
     /// Automatic mode: keep harness's passwordless sudo afterwards.
     #[serde(default)]
     keep_admin_sudo: bool,
+    /// Automatic mode: key-only SSH and the firewall (opt-out, default on).
+    #[serde(default = "yes")]
+    protect_ssh: bool,
+    #[serde(default = "yes")]
+    protect_firewall: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 async fn provision_start(
@@ -1510,6 +1532,8 @@ async fn provision_start(
         copy_provider,
         engine,
         keep_admin_sudo,
+        protect_ssh,
+        protect_firewall,
     } = b;
     let bad = |m: &str| Err(ApiError(StatusCode::BAD_REQUEST, m.into()));
     if !valid_host(&host) {
@@ -1564,6 +1588,8 @@ async fn provision_start(
             copy_provider,
             engine,
             keep_admin_sudo: keep_admin_sudo && mode == crate::provision::Mode::Auto,
+            protect_ssh,
+            protect_firewall,
         })
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "id": job.id })))
@@ -1618,4 +1644,135 @@ async fn provision_recheck(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(job.state()))
+}
+
+async fn setup_or_404(m: &Master, id: &str) -> ApiResult<crate::node_setups::SetupRecord> {
+    m.setup(id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such server".into()))
+}
+
+/// Servers set up over SSH, with the commands for manual changes.
+async fn list_setups(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let list: Vec<serde_json::Value> = m
+        .setups()
+        .await?
+        .iter()
+        .map(|r| json!({ "setup": r, "commands": crate::node_setups::commands(r) }))
+        .collect();
+    Ok(Json(json!({ "setups": list })))
+}
+
+#[derive(Deserialize)]
+struct SetupPatch {
+    #[serde(default)]
+    mode: Option<crate::provision::Mode>,
+    #[serde(default)]
+    watch_ssh: Option<bool>,
+    #[serde(default)]
+    watch_firewall: Option<bool>,
+}
+
+/// Change the saved mode or what the watchdog looks at. Nothing on the
+/// server changes.
+async fn update_setup(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<SetupPatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let mut r = setup_or_404(&m, &id).await?;
+    if let Some(mode) = b.mode {
+        r.mode = mode;
+    }
+    if let Some(v) = b.watch_ssh {
+        r.watch_ssh = v;
+    }
+    if let Some(v) = b.watch_firewall {
+        r.watch_firewall = v;
+    }
+    if !r.watch_ssh {
+        r.problems.retain(|p| p.kind != "ssh");
+    }
+    if !r.watch_firewall {
+        r.problems.retain(|p| p.kind != "firewall");
+    }
+    m.save_setup(&r).await?;
+    let _ = m.inner.live.send(crate::Live::SessionsChanged);
+    Ok(Json(json!(r)))
+}
+
+async fn forget_setup(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    if !m.forget_setup(&id).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such server".into()));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn check_setup(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let r = setup_or_404(&m, &id).await?;
+    let r = m
+        .check_setup(r)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!(r)))
+}
+
+#[derive(Deserialize)]
+struct FirewallBody {
+    enable: bool,
+    /// A root login for this action (unless harness kept sudo).
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    private_key: Option<String>,
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+/// Automatic mode: turn the firewall on or off on the server.
+async fn setup_firewall(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<FirewallBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let r = setup_or_404(&m, &id).await?;
+    if r.mode != crate::provision::Mode::Auto {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "manual mode: run the commands yourself, or switch this server to automatic".into(),
+        ));
+    }
+    let root = match (b.password, b.private_key) {
+        (Some(p), None) if !p.is_empty() => Some(harness_provision::ssh::Auth::Password(
+            harness_core::Secret::new(p),
+        )),
+        (None, Some(k)) if !k.trim().is_empty() => Some(harness_provision::ssh::Auth::Key(
+            harness_core::Secret::new(k),
+            b.passphrase.map(harness_core::Secret::new),
+        )),
+        _ => None,
+    };
+    let r = m
+        .set_firewall(r, b.enable, root)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!(r)))
 }

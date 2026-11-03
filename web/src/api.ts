@@ -2,6 +2,9 @@ import type {
   Agent,
   AttentionItem,
   Decision,
+  NodeAttention,
+  SetupCommands,
+  SetupRecord,
   Effort,
   FactKind,
   Me,
@@ -98,7 +101,13 @@ export const api = {
     model?: string;
     incognito?: boolean;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
-  attention: () => call<{ items: AttentionItem[] }>("GET", "/api/attention"),
+  attention: () => call<{ items: AttentionItem[]; nodes?: NodeAttention[] }>("GET", "/api/attention"),
+  setups: () => call<{ setups: { setup: SetupRecord; commands: SetupCommands }[] }>("GET", "/api/admin/node-setups"),
+  updateSetup: (id: string, b: { mode?: "auto" | "manual"; watch_ssh?: boolean; watch_firewall?: boolean }) =>
+    call<SetupRecord>("PATCH", `/api/admin/node-setups/${id}`, b),
+  forgetSetup: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/node-setups/${id}`),
+  checkSetup: (id: string) => call<SetupRecord>("POST", `/api/admin/node-setups/${id}/check`),
+  setFirewall: (id: string, b: Record<string, unknown>) => call<SetupRecord>("POST", `/api/admin/node-setups/${id}/firewall`, b),
   markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),
   features: () => call<{ voice: boolean; memory: boolean }>("GET", "/api/features"),
   transcribe: async (audio: Blob): Promise<string> => {

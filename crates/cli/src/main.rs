@@ -237,6 +237,8 @@ async fn serve(
     if let Some(b) = builtin_memory {
         master.set_builtin_memory(b);
     }
+    // Servers set up over SSH: read-only checks every 10 minutes.
+    master.start_node_watchdog(std::time::Duration::from_secs(600));
     if let Some(t) = harness_master::providers::transcriber(&cfg, dir, &secrets)? {
         master.set_transcriber(t);
     }

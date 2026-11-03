@@ -285,3 +285,41 @@ export interface SetupState {
   node_id: string | null;
   error: string | null;
 }
+
+export interface NodeProblem {
+  kind: "ssh" | "firewall" | "reach" | "host_key";
+  detail: string;
+}
+
+export interface NodeAttention {
+  setup_id: string;
+  host: string;
+  node_id: string | null;
+  problems: NodeProblem[];
+}
+
+export interface SetupRecord {
+  id: string;
+  host: string;
+  port: number;
+  login_user: string;
+  fingerprint: string;
+  mode: "auto" | "manual";
+  engine: Engine;
+  ssh_protected: boolean;
+  firewall_enabled: boolean;
+  watch_ssh: boolean;
+  watch_firewall: boolean;
+  admin_sudo: boolean;
+  node_id: string | null;
+  created_ms: number;
+  last_check_ms: number | null;
+  problems: NodeProblem[];
+}
+
+export interface SetupCommands {
+  firewall_on: string;
+  firewall_off: string;
+  ssh_on: string;
+  ssh_off: string;
+}

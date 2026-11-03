@@ -6,6 +6,7 @@ pub mod attachments;
 pub mod auth;
 pub mod config;
 mod http;
+pub mod node_setups;
 pub mod nodes;
 pub mod prefs;
 pub mod providers;

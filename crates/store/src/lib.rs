@@ -1216,6 +1216,24 @@ impl Store {
         Ok(())
     }
 
+    /// Every `(key, value)` whose key starts with `prefix`.
+    pub fn kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut st =
+            conn.prepare("SELECT k, v FROM kv WHERE substr(k, 1, length(?1)) = ?1 ORDER BY k")?;
+        let rows = st
+            .query_map(params![prefix], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn kv_delete(&self, k: &str) -> Result<bool> {
+        Ok(self
+            .lock()
+            .execute("DELETE FROM kv WHERE k = ?1", params![k])?
+            > 0)
+    }
+
     pub fn kv_set(&self, k: &str, v: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(

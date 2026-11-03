@@ -1071,3 +1071,49 @@ off root, re-check as harness-admin; keep: flagged); HTTP (automatic with non-ro
 refused, only offered answers accepted); `web/e2e/setup.cjs` (warnings, root
 question, engine step). **Still not run on a real Debian 13 / Ubuntu 26.04 VPS**
 (no systemd here): the apt, podman-rootless and docker steps are untested in reality.
+
+### 2026-11-03 — Node setups after the fact; first real run on this machine
+
+**Saved setups.** Every setup that got past the login is saved (kv `node_setup:<id>`):
+host, port, pinned fingerprint, harness's login user, **mode**, engine, what was
+applied (key-only SSH, firewall), what is watched, whether harness kept sudo, node id,
+last check and problems. Never a password or key. Settings → Nodes → *Servers set up
+over SSH* manages them.
+
+* **Automatic mode has opt-outs** (both on by default): *key-only SSH* and *firewall*.
+  Off means the step is skipped and shown as skipped, not silently missing.
+* **Mode can be switched both ways at any time.** It only changes what harness may
+  do later: *manual* = harness shows commands, never runs a change; *automatic* =
+  harness runs the change itself, using its kept sudo or a **root login given for that
+  one action** (used once, never stored; same rule as setup). Switching to automatic
+  does not give harness root, by design.
+* **Watchdog** (master, every 10 min, plus *Check now*): read-only. SSH: an SSH
+  `none` auth probe lists the methods the server offers; `password` or
+  `keyboard-interactive` = problem. Firewall: `sudo -n nft list table inet harness`
+  through a sudo rule that allows **only that command** (added for `harness-admin` in
+  both modes). It reports, it never repairs. Problems go to *Waiting for you* under the
+  bar (admins only) and to a browser notification. The toggles switch the watch only.
+* **Firewall off/on** button in automatic mode (dead-man revert when turning on).
+  In manual mode the API refuses (409) and the UI shows the commands.
+* **SSH protection is changed by hand only.** Pushback on "or via agentic chat": agents
+  run as `harness` without root, deliberately, so a chat cannot do it; giving chats that
+  power would let one injected prompt reopen password logins on every node. The UI
+  shows the commands for both directions.
+
+**First run on a real machine** (`HARNESS_LOCAL_TESTS=1 cargo test -p harness-provision
+--test local_machine`, this VPS: Ubuntu 24.04, root, no systemd, no WireGuard module):
+inspection facts; the nftables table loads, outbound still works, and it reverts cleanly;
+the SSH drop-in passes `sshd -t`/`sshd -T` (password and kbd-interactive off, root
+`prohibit-password`); `harness-admin` with sudo, then sudo dropped, locked password; the
+watch-only sudo rule allows `nft list table inet harness` and nothing else; the russh
+auth probe against the real OpenSSH matches the OpenSSH fingerprint and sees password on
+and off; rootless Podman as `harness` (container uid 0 → a subuid on the host); Docker
+group access.
+**Not testable here:** systemd timers/units (dead-man revert, node service, linger),
+WireGuard, apt on Debian 13/Ubuntu 26.04. These need a throwaway VPS.
+
+**Evidence:** provision tests (opt-outs skip their steps), master HTTP tests (record
+saved, commands listed, manual firewall 409, mode switch, per-action root required,
+watchdog problem → attention, watch toggle clears it), `web/e2e/setup.cjs` (record
+shown as manual, no firewall button, *Check now* reports password logins, problem under
+the bar, watch toggle, switch to automatic asks for a root login).

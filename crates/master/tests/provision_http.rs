@@ -165,6 +165,70 @@ async fn manual_setup_installs_harness_key_and_forgets_the_password() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+
+    // The setup is saved and can be managed afterwards.
+    let get = |p: &str| c.get(format!("{base}{p}")).bearer_auth("tok").send();
+    let v: Value = get("/api/admin/node-setups")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rec = v["setups"][0]["setup"].clone();
+    assert_eq!(rec["mode"], "manual", "{v}");
+    assert_eq!(rec["watch_ssh"], true);
+    assert!(
+        v["setups"][0]["commands"]["ssh_off"]
+            .as_str()
+            .unwrap()
+            .contains("10-harness.conf")
+    );
+    let sid = rec["id"].as_str().unwrap().to_string();
+    // Manual mode: harness does not touch the firewall itself.
+    let r = post(
+        &format!("/api/admin/node-setups/{sid}/firewall"),
+        json!({"enable": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 409);
+    // Switch to automatic; still no root access kept, so a root login is asked for.
+    let r = c
+        .patch(format!("{base}/api/admin/node-setups/{sid}"))
+        .bearer_auth("tok")
+        .json(&json!({"mode": "auto"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = post(
+        &format!("/api/admin/node-setups/{sid}/firewall"),
+        json!({"enable": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 502);
+    assert!(r.text().await.unwrap().contains("give a root login"));
+    // The watchdog: this test server offers password logins, so SSH is reported,
+    // and the problem shows up in "waiting for you".
+    let v: Value = post(&format!("/api/admin/node-setups/{sid}/check"), json!({}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["problems"][0]["kind"], "ssh", "{v}");
+    let a: Value = get("/api/attention").await.unwrap().json().await.unwrap();
+    assert_eq!(a["nodes"][0]["setup_id"], sid.as_str(), "{a}");
+    // Turning the SSH watch off clears it.
+    c.patch(format!("{base}/api/admin/node-setups/{sid}"))
+        .bearer_auth("tok")
+        .json(&json!({"watch_ssh": false}))
+        .send()
+        .await
+        .unwrap();
+    let a: Value = get("/api/attention").await.unwrap().json().await.unwrap();
+    assert!(a["nodes"].as_array().unwrap().is_empty(), "{a}");
 }
 
 fn walk(d: &std::path::Path) -> Vec<std::path::PathBuf> {

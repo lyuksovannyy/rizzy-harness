@@ -125,6 +125,100 @@ async fn setup_steps_on_this_machine() {
     assert_ne!(c, 0, "sudo removed");
     println!("harness-admin: created, sudo granted, password locked, sudo removed");
 
+    // 4b. The watchdog's read-only sudo rule, as harness-admin (no other sudo).
+    let watch = |as_admin: bool| async move {
+        let script = scripts::WATCH.replace('\'', "'\\''");
+        let cmd = if as_admin {
+            format!("su -s /bin/bash harness-admin -c '{script}'")
+        } else {
+            script
+        };
+        sh(&cmd).await.1.trim().to_string()
+    };
+    sh(&format!(
+        "nft delete table inet harness 2>/dev/null; nft -f {}",
+        rules.display()
+    ))
+    .await;
+    assert_eq!(watch(true).await, "fw=on");
+    sh("nft delete table inet harness").await;
+    assert_eq!(watch(true).await, "fw=off");
+    sh("rm -f /etc/sudoers.d/harness-admin-watch").await;
+    assert_eq!(
+        watch(true).await,
+        "fw=unknown",
+        "without the rule harness cannot look"
+    );
+    let (c, _, _) =
+        sh("su -s /bin/bash harness-admin -c 'sudo -n /usr/sbin/nft flush ruleset' 2>/dev/null")
+            .await;
+    assert_ne!(c, 0);
+    sh(&scripts::watch_rule()).await;
+    let (c, _, _) =
+        sh("su -s /bin/bash harness-admin -c 'sudo -n /usr/sbin/nft flush ruleset' 2>/dev/null")
+            .await;
+    assert_ne!(
+        c, 0,
+        "the rule allows listing harness's table only, nothing else"
+    );
+    println!("watch rule: on/off/unknown detected; no other root command allowed");
+
+    // 4c. The SSH watchdog probe against a real OpenSSH server.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let cfg = d.join("probe_sshd");
+    let hostkey = d.join("probe_key");
+    sh(&format!(
+        "ssh-keygen -q -t ed25519 -N '' -f {}",
+        hostkey.display()
+    ))
+    .await;
+    let start = |pw: &str| {
+        std::fs::write(&cfg, format!("Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}/probe.pid\nPasswordAuthentication {pw}\nKbdInteractiveAuthentication no\nUsePAM no\n", hostkey.display(), d.display())).unwrap();
+        std::process::Command::new("/usr/sbin/sshd")
+            .args(["-D", "-e", "-f"])
+            .arg(&cfg)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let target = harness_provision::ssh::Target {
+        host: "127.0.0.1".into(),
+        port,
+        user: "harness-admin".into(),
+    };
+    for (pw, expect_password) in [("yes", true), ("no", false)] {
+        let mut child = start(pw);
+        for _ in 0..50 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let fp = harness_provision::ssh::probe("127.0.0.1", port)
+            .await
+            .unwrap();
+        let fp_cli = sh(&format!(
+            "ssh-keygen -l -E sha256 -f {}.pub | cut -d' ' -f2",
+            hostkey.display()
+        ))
+        .await
+        .1
+        .trim()
+        .to_string();
+        assert_eq!(fp, fp_cli, "host key fingerprint matches OpenSSH's");
+        let methods = harness_provision::ssh::auth_methods(&target, &fp)
+            .await
+            .unwrap();
+        println!("real OpenSSH, PasswordAuthentication {pw}: offers {methods:?}");
+        assert_eq!(methods.iter().any(|m| m == "password"), expect_password);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     // 5. Rootless Podman for the runtime user.
     let (c, out, e) = sh(&scripts::container_engine(Engine::Podman)).await;
     println!(

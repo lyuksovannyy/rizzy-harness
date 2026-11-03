@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { NodeInfo, RemoteNode } from "../types";
+import { ManagedServers } from "./ManagedServers";
 import { ServerSetup } from "./ServerSetup";
 
 export function Nodes(props: { nodes: NodeInfo[] }) {
@@ -9,7 +10,9 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
   const [listener, setListener] = useState<{ port: number; fingerprint: string } | null>(null);
   const [join, setJoin] = useState<{ token: string; port: number; fingerprint: string; expires_in_s: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [setups, setSetups] = useState(0);
   const load = useCallback(() => {
+    setSetups((v) => v + 1);
     api
       .remoteNodes()
       .then((r) => {
@@ -75,6 +78,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
           </tbody>
         </table>
       </div>
+      <ManagedServers version={setups} />
       <div className="card stack">
         <h3>Set up a server over SSH</h3>
         <p className="muted small">

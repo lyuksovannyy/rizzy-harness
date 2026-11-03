@@ -272,6 +272,10 @@ pub struct AutoOptions {
     pub engine: Engine,
     /// Keep passwordless sudo for `harness-admin` after setup.
     pub keep_admin_sudo: bool,
+    /// Key-only SSH (opt-out).
+    pub protect_ssh: bool,
+    /// The nftables firewall (opt-out).
+    pub protect_firewall: bool,
 }
 
 /// Automatic setup. `first` is the root login with the user's credentials;
@@ -385,55 +389,73 @@ pub async fn run_auto(
     drop(r);
 
     let (id, title) = ("ssh", "Key-only SSH");
-    log.set(
-        id,
-        title,
-        Status::Running,
-        format!(
-            "reverts itself in {}s unless confirmed",
-            scripts::REVERT_AFTER_S
-        ),
-    );
-    log.set_script(id, scripts::ssh_harden(), true);
-    guarded(conn, &scripts::ssh_harden(), &scripts::ssh_confirm(), "SSH")
-        .await
-        .map_err(|e| fail(id, title, e))?;
-    let root_note = if opts.own_pubkey.is_some() {
-        "root by your key only"
+    if !opts.protect_ssh {
+        log.set(
+            id,
+            title,
+            Status::Skipped,
+            "you opted out; password logins stay as they are",
+        );
     } else {
-        "root over SSH is now off for passwords; use your provider's console if you need it"
-    };
-    log.set(id, title, Status::Ok, format!("passwords off; {root_note}"));
+        log.set(
+            id,
+            title,
+            Status::Running,
+            format!(
+                "reverts itself in {}s unless confirmed",
+                scripts::REVERT_AFTER_S
+            ),
+        );
+        log.set_script(id, scripts::ssh_harden(), true);
+        guarded(conn, &scripts::ssh_harden(), &scripts::ssh_confirm(), "SSH")
+            .await
+            .map_err(|e| fail(id, title, e))?;
+        let root_note = if opts.own_pubkey.is_some() {
+            "root by your key only"
+        } else {
+            "root over SSH is now off for passwords; use your provider's console if you need it"
+        };
+        log.set(id, title, Status::Ok, format!("passwords off; {root_note}"));
+    }
 
     let (id, title) = ("firewall", "Firewall (nftables)");
-    log.set(
-        id,
-        title,
-        Status::Running,
-        format!(
-            "reverts itself in {}s unless confirmed",
-            scripts::REVERT_AFTER_S
-        ),
-    );
-    log.set_script(id, scripts::firewall(f.ssh_port), true);
-    guarded(
-        conn,
-        &scripts::firewall(f.ssh_port),
-        &scripts::firewall_confirm(),
-        "firewall",
-    )
-    .await
-    .map_err(|e| fail(id, title, e))?;
-    log.set(
-        id,
-        title,
-        Status::Ok,
-        format!(
-            "inbound: SSH {} and WireGuard {}/udp only",
-            f.ssh_port,
-            scripts::WG_PORT
-        ),
-    );
+    if !opts.protect_firewall {
+        log.set(
+            id,
+            title,
+            Status::Skipped,
+            "you opted out; no firewall rules were added",
+        );
+    } else {
+        log.set(
+            id,
+            title,
+            Status::Running,
+            format!(
+                "reverts itself in {}s unless confirmed",
+                scripts::REVERT_AFTER_S
+            ),
+        );
+        log.set_script(id, scripts::firewall(f.ssh_port), true);
+        guarded(
+            conn,
+            &scripts::firewall(f.ssh_port),
+            &scripts::firewall_confirm(),
+            "firewall",
+        )
+        .await
+        .map_err(|e| fail(id, title, e))?;
+        log.set(
+            id,
+            title,
+            Status::Ok,
+            format!(
+                "inbound: SSH {} and WireGuard {}/udp only",
+                f.ssh_port,
+                scripts::WG_PORT
+            ),
+        );
+    }
 
     let (id, title) = ("engine", "Container engine");
     if opts.engine == Engine::None {

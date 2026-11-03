@@ -7,7 +7,7 @@ import { agenticBlockReason, type Mode } from "../lib/modes";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
-import type { Agent, AttentionItem, Me, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
+import type { Agent, AttentionItem, Me, ModelInfo, NodeAttention, NodeInfo, Prefs, SessionRow } from "../types";
 import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import { Sidebar } from "./Sidebar";
@@ -23,7 +23,7 @@ const COLLAPSED_KEY = "harness.sidebarCollapsed";
 type Route =
   | { kind: "home" }
   | { kind: "session"; id: string }
-  | { kind: "settings"; tab?: "memory" };
+  | { kind: "settings"; tab?: "memory" | "nodes" };
 
 function parseRoute(): Route {
   const h = location.hash;
@@ -31,6 +31,7 @@ function parseRoute(): Route {
   if (m) return { kind: "session", id: m[1]! };
   if (h === "#/settings") return { kind: "settings" };
   if (h === "#/settings/memory") return { kind: "settings", tab: "memory" };
+  if (h === "#/settings/nodes") return { kind: "settings", tab: "nodes" };
   return { kind: "home" };
 }
 
@@ -60,6 +61,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [toReview, setToReview] = useState(0);
   const [voice, setVoice] = useState(false);
   const [attention, setAttention] = useState<AttentionItem[]>([]);
+  const [nodeAttention, setNodeAttention] = useState<NodeAttention[]>([]);
   const waiting = useRef<string[] | null>(null);
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -83,10 +85,21 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     api
       .attention()
       .then((r) => {
-        const ids = r.items.map((a) => a.session_id);
+        const nodes = r.nodes ?? [];
+        const ids = [...r.items.map((a) => a.session_id), ...nodes.map((n) => `node:${n.setup_id}`)];
         // Notify about chats that just started waiting (not on first load).
         if (waiting.current && notifyEnabled()) {
           for (const id of newlyWaiting(waiting.current, ids)) {
+            if (id.startsWith("node:")) {
+              const n = nodes.find((x) => `node:${x.setup_id}` === id)!;
+              const note = new Notification(`Server ${n.host}`, { body: n.problems.map((p) => p.detail).join("; "), tag: id });
+              note.onclick = () => {
+                window.focus();
+                location.hash = "#/settings/nodes";
+                note.close();
+              };
+              continue;
+            }
             const a = r.items.find((x) => x.session_id === id)!;
             const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
             if (viewing) continue;
@@ -103,6 +116,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
         }
         waiting.current = ids;
         setAttention(r.items);
+        setNodeAttention(nodes);
       })
       .catch(() => {});
   }, []);
@@ -154,8 +168,9 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
 
   // Tab title shows how many chats wait for the user.
   useEffect(() => {
-    document.title = attention.length ? `(${attention.length}) harness` : "harness";
-  }, [attention.length]);
+    const n = attention.length + nodeAttention.length;
+    document.title = n ? `(${n}) harness` : "harness";
+  }, [attention.length, nodeAttention.length]);
 
   // Looking at a chat that asked a question counts as seeing it.
   const viewing = route.kind === "session" ? route.id : null;
@@ -336,6 +351,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               toReview={toReview}
               voice={voice}
               attention={attention}
+              nodeAttention={nodeAttention}
             />
           )}
         </Suspense>

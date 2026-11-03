@@ -153,6 +153,8 @@ async fn auto_with(
         own_pubkey: Some("ssh-ed25519 AAAAuser me".into()),
         engine,
         keep_admin_sudo: keep,
+        protect_ssh: true,
+        protect_firewall: true,
     };
     run_auto(first, &conn, &m, &opts, log).await
 }
@@ -439,7 +441,7 @@ async fn manual_root_login_offers_harness_own_user() {
         })
         .unwrap();
     assert!(
-        admin.1.contains("rm -f /etc/sudoers.d/harness-admin") && !admin.1.contains("NOPASSWD"),
+        admin.1.contains("rm -f /etc/sudoers.d/harness-admin") && !admin.1.contains("NOPASSWD:ALL"),
         "no sudo in manual mode"
     );
     assert!(
@@ -482,5 +484,40 @@ async fn manual_root_login_offers_harness_own_user() {
     assert!(
         log.snapshot().iter().all(|s| s.id != "engine"),
         "no engine step when none chosen"
+    );
+}
+
+#[tokio::test]
+async fn protections_can_be_opted_out() {
+    let w = world(FRESH);
+    let log = Log::default();
+    let first = Box::new(Srv {
+        w: w.clone(),
+        kind: "password",
+    });
+    let (conn, m) = (Conn(w.clone()), M(w.clone()));
+    let opts = AutoOptions {
+        name: "vps".into(),
+        endpoint_host: "203.0.113.7".into(),
+        own_pubkey: None,
+        engine: harness_provision::facts::Engine::None,
+        keep_admin_sudo: false,
+        protect_ssh: false,
+        protect_firewall: false,
+    };
+    run_auto(first, &conn, &m, &opts, &log).await.unwrap();
+    let steps = log.snapshot();
+    for id in ["ssh", "firewall", "engine"] {
+        assert_eq!(
+            steps.iter().find(|s| s.id == id).unwrap().status,
+            Status::Skipped,
+            "{id}"
+        );
+    }
+    let w = w.lock().unwrap();
+    assert!(
+        !w.ran
+            .iter()
+            .any(|r| r.1.contains("10-harness.conf") || r.1.contains("firewall.nft"))
     );
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
-import type { Agent, ModelInfo, NodeInfo, Prefs, AttentionItem } from "../types";
+import type { Agent, ModelInfo, NodeInfo, Prefs, AttentionItem, NodeAttention } from "../types";
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
@@ -24,6 +24,7 @@ export function Home(props: {
   toReview?: number;
   voice?: boolean;
   attention?: AttentionItem[];
+  nodeAttention?: NodeAttention[];
 }) {
   const [similarCount, setSimilarCount] = useState(0);
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
@@ -60,7 +61,7 @@ export function Home(props: {
           voice={props.voice}
         />
         <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} onCount={setSimilarCount} />
-        {similarCount === 0 && <Attention items={props.attention ?? []} onOpen={props.onOpen} />}
+        {similarCount === 0 && <Attention items={props.attention ?? []} nodes={props.nodeAttention} onOpen={props.onOpen} />}
         {!!props.toReview && (
           <a className="review-link small" href="#/settings/memory">
             {props.toReview === 1 ? t("home.toReviewOne") : t("home.toReview", { n: String(props.toReview) })}

@@ -82,7 +82,7 @@ let PAGE = null;
     await p.waitForSelector('.setup-step:has-text("Container engine") >> text=rootless Podman');
     await p.waitForSelector('.setup-step:has-text("Operating system")');
     await p.screenshot({ path: `${S}/s-2-checklist.png`, fullPage: true });
-    const steps = await p.$$eval('.setup-step', (els) => els.map((e) => e.querySelector('b').textContent + ':' + e.className.split('st-')[1]));
+    const steps = await p.$$eval('.setup-steps:not(.managed) .setup-step', (els) => els.map((e) => e.querySelector('b').textContent + ':' + e.className.split('st-')[1]));
     log('checklist:', steps.join(', '));
     const ak = fs.readFileSync(`${home}/.ssh/authorized_keys`, 'utf8');
     check(ak.includes('harness'), 'harness key installed');
@@ -91,6 +91,33 @@ let PAGE = null;
     await sleep(800);
     check(!(await p.$('.error-text')), 'recheck with harness key works');
     log('re-check ok with harness key');
+
+    // Saved setup: managed after the fact.
+    const srvCard = '.setup-step:has(b:text-is("127.0.0.1"))';
+    await p.waitForSelector(`${srvCard} select`);
+    check((await p.$eval(`${srvCard} select`, (e) => e.value)) === 'manual', 'mode saved as manual');
+    await p.waitForSelector(`${srvCard} summary:has-text("Commands: firewall on")`);
+    check(!(await p.$(`${srvCard} button:has-text("Turn the firewall")`)), 'no firewall button in manual mode');
+    // The fake server still allows passwords: the watchdog reports it.
+    await p.click(`${srvCard} button:has-text("Check now")`);
+    await p.waitForSelector(`${srvCard} .error-text:has-text("assword")`);
+    log('watchdog: password logins reported');
+    await p.goto(URL_);
+    await p.waitForSelector('.attention >> text=127.0.0.1');
+    log('node problem shown under the bar');
+    await p.goto(`${URL_}#/settings/nodes`);
+    await p.waitForSelector(`${srvCard} select`);
+    // Turning the SSH watch off clears the problem.
+    await p.click(`${srvCard} label:has-text("Watch SSH") input`);  // controlled: flips after the save
+    await p.waitForSelector(`${srvCard} label:has-text("Watch SSH") input:not(:checked)`);
+    await p.waitForSelector(`${srvCard} .error-text`, { state: 'detached' });
+    // Switch to automatic: the firewall button appears; turning it on asks for a root login.
+    await p.selectOption(`${srvCard} select`, 'auto');
+    await p.click(`${srvCard} button:has-text("Turn the firewall on")`);
+    await p.waitForSelector(`${srvCard} textarea[placeholder*="root's private key"]`);
+    await p.click(`${srvCard} button:has-text("Cancel")`);
+    await p.screenshot({ path: `${S}/s-3-managed.png`, fullPage: true });
+    log('mode switch, watch toggle, root-login prompt ok');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

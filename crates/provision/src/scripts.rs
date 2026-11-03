@@ -51,7 +51,7 @@ pub fn admin_user(pubkey: &str, sudo: bool) -> String {
     format!(
         r#"{HEAD}id {ADMIN_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {ADMIN_USER}
 passwd -l {ADMIN_USER} >/dev/null
-{sudo}install -d -o {ADMIN_USER} -g {ADMIN_USER} -m 0700 /home/{ADMIN_USER}/.ssh
+{sudo}{watch}install -d -o {ADMIN_USER} -g {ADMIN_USER} -m 0700 /home/{ADMIN_USER}/.ssh
 f=/home/{ADMIN_USER}/.ssh/authorized_keys
 touch "$f"
 grep -qxF '{k}' "$f" || echo '{k}' >> "$f"
@@ -59,7 +59,39 @@ chown {ADMIN_USER}: "$f"
 chmod 600 "$f"
 echo "admin user ready"
 "#,
-        k = pubkey.replace('\'', "")
+        k = pubkey.replace('\'', ""),
+        watch = watch_rule()
+    )
+}
+
+/// The only root command harness keeps for good: listing its own firewall
+/// table, so the watchdog can check it. Read-only.
+pub fn watch_rule() -> String {
+    format!(
+        "echo '{ADMIN_USER} ALL=(root) NOPASSWD: /usr/sbin/nft list table inet harness' > /etc/sudoers.d/{ADMIN_USER}-watch\nchmod 440 /etc/sudoers.d/{ADMIN_USER}-watch\nvisudo -cf /etc/sudoers.d/{ADMIN_USER}-watch\n"
+    )
+}
+
+/// Read-only state for the watchdog, as the login user: `fw=on|off|unknown`.
+pub const WATCH: &str = r#"if [ "$(id -u)" = 0 ]; then n="nft"
+elif sudo -n -l /usr/sbin/nft list table inet harness >/dev/null 2>&1; then n="sudo -n /usr/sbin/nft"
+else n=""; fi
+if [ -z "$n" ]; then echo fw=unknown
+elif $n list table inet harness >/dev/null 2>&1; then echo fw=on
+else echo fw=off; fi
+"#;
+
+/// Turn the firewall off and keep it off after reboots.
+pub fn firewall_disable() -> String {
+    format!(
+        "{HEAD}systemctl stop harness-revert-fw.timer 2>/dev/null || true\nnft delete table inet harness 2>/dev/null || true\nsystemctl disable harness-firewall.service 2>/dev/null || true\necho disabled\n"
+    )
+}
+
+/// Undo key-only SSH (passwords allowed again). Shown, never run by harness.
+pub fn ssh_unharden() -> String {
+    format!(
+        "{HEAD}rm -f /etc/ssh/sshd_config.d/10-harness.conf\nsshd -t\nsystemctl reload ssh 2>/dev/null || systemctl reload sshd\necho \"password logins allowed again\"\n"
     )
 }
 
@@ -363,6 +395,10 @@ mod tests {
             admin_user("ssh-ed25519 AAAA harness", false),
             remove_key("ssh-ed25519 AAAA harness"),
             drop_admin_sudo(),
+            watch_rule(),
+            WATCH.to_string(),
+            firewall_disable(),
+            ssh_unharden(),
             container_engine(crate::facts::Engine::Podman),
             container_engine(crate::facts::Engine::Docker),
         ] {
@@ -390,7 +426,7 @@ mod tests {
         assert!(wireguard("a", "b", "c").contains("wg genkey"));
         assert!(
             admin_user("k", true).contains("visudo -cf")
-                && !admin_user("k", false).contains("NOPASSWD")
+                && !admin_user("k", false).contains("NOPASSWD:ALL")
         );
         let p = container_engine(crate::facts::Engine::Podman);
         assert!(

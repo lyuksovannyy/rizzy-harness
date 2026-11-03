@@ -158,6 +158,14 @@ own key and does not keep yours), and pick:
   user**: a checklist with the commands to run. With root, harness asks
   whether it may create its own user (without sudo) instead.
 
+In automatic mode, *key-only SSH* and *firewall* can be unticked. After the
+setup the server stays listed under **Servers set up over SSH**: switch the
+mode either way, turn the firewall off/on (automatic mode; harness asks for a
+root login for that one action unless it kept sudo), and choose what the
+watchdog checks every 10 minutes (password logins back on, firewall rules gone).
+It only reports, under the bar and as a notification. SSH hardening is changed
+by hand; the commands are shown there.
+
 Container engine: rootless **Podman** (default) or **Docker** (the `harness`
 user joins the `docker` group, which is effectively root). Fully supported:
 Debian 13 and Ubuntu 26.04 LTS; other Debian-based systems work but are not
