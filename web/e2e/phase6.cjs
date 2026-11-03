@@ -26,6 +26,7 @@ const searx = http.createServer((req, res) => {
 async function skipOnboarding(page) {
   await page.waitForSelector('text=Connect an AI provider');
   await page.click('text=Skip: use the built-in demo');
+  await page.click('text=Skip: keywords only');
   await page.waitForSelector('text=About you');
   await page.click('button:has-text("Continue")');
   await page.waitForSelector('h2:has-text("Search engine")');

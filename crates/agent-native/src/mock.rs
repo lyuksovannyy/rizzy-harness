@@ -6,6 +6,7 @@
 //! * `search: <q>`  -> one `web_search` tool call, then a summary
 //! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
+//! * `memory?`       -> repeats the recalled-memory block of the system prompt
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * anything else   -> echoes the message back, streamed word by word
 
@@ -112,6 +113,23 @@ impl Provider for Mock {
         }
         if let Some(q) = user.strip_prefix("search:") {
             return Ok(call("web_search", json!({"query": q.trim()})));
+        }
+        if user.trim().starts_with("memory?") {
+            let sys = match req.messages.first() {
+                Some(ChatMsg::System(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let block = sys
+                .split("What you remember about the user")
+                .nth(1)
+                .map(|b| format!("Memory:{b}"))
+                .unwrap_or_else(|| "Memory: nothing recalled.".into());
+            let text = self.stream_words(vec![block], &deltas).await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+            });
         }
         if let Some(t) = user.strip_prefix("remember:") {
             return Ok(call("remember", json!({"text": t.trim(), "kind": "fact"})));

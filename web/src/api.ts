@@ -2,7 +2,11 @@ import type {
   Agent,
   Decision,
   Effort,
+  FactKind,
   Me,
+  MemoryCfg,
+  MemoryFact,
+  Preset,
   ModelInfo,
   NodeInfo,
   Prefs,
@@ -120,6 +124,15 @@ export const api = {
   }) => call<ProviderState>("PUT", "/api/admin/provider", b),
   settings: () => call<Prefs>("GET", "/api/me/settings"),
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
+  memories: () => call<{ memories: MemoryFact[]; backend: string }>("GET", "/api/memory"),
+  addMemory: (text: string, kind: FactKind = "fact") =>
+    call<MemoryFact>("POST", "/api/memory", { text, kind }),
+  updateMemory: (id: string, b: { text?: string; status?: "active" }) =>
+    call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),
+  memoryCfg: () => call<MemoryCfg>("GET", "/api/admin/memory"),
+  saveMemoryCfg: (b: { embeddings_url: string; embeddings_model: string; preset: Preset }) =>
+    call<MemoryCfg>("PUT", "/api/admin/memory", b),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
   approve: (id: string, approvalId: string, decision: Decision) =>
     call("POST", `/api/sessions/${id}/approvals/${approvalId}`, { decision }),

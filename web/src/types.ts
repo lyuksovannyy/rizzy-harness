@@ -206,3 +206,28 @@ export interface User {
   must_change_password: boolean;
   created_ms: number;
 }
+
+export type FactKind = "fact" | "preference" | "location";
+
+export interface MemoryFact {
+  id: string;
+  owner_id: string | null;
+  text: string;
+  kind: FactKind;
+  status: "proposed" | "active";
+  source_session: string | null;
+  created_ms: number;
+  updated_ms: number;
+}
+
+export type Preset = "fast" | "balanced" | "best";
+
+export interface MemoryCfg {
+  backend: "builtin" | "mem0" | "off";
+  embeddings_url: string;
+  embeddings_model: string;
+  preset: Preset;
+  model: string;
+  active_model: string | null;
+  presets: { id: Preset; model: string; size: string }[];
+}

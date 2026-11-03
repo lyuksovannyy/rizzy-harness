@@ -54,6 +54,9 @@ const en = {
   "settings.provider": "AI provider",
   "settings.password": "Password",
   "settings.users": "Users",
+  "settings.memory": "Memory",
+  "home.toReview": "{n} new memories to review",
+  "home.toReviewOne": "1 new memory to review",
 } as const;
 
 type Catalog = typeof en;

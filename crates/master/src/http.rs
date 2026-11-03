@@ -1220,10 +1220,14 @@ async fn put_memory_cfg(
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
     if let Some(e) = &emb {
         e.embed(&["test".to_string()]).await.map_err(|err| {
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                format!("{err} (is the model `{}` pulled?)", e.model),
-            )
+            let msg = err.to_string();
+            // Only a server that answered can be missing the model.
+            let hint = if msg.contains("answered") {
+                format!(" (is the model `{}` available there?)", e.model)
+            } else {
+                String::new()
+            };
+            ApiError(StatusCode::BAD_GATEWAY, format!("{msg}{hint}"))
         })?;
     }
     rt.save(cfg.clone())

@@ -5,8 +5,8 @@ for coding agents, with the agent loop running on the machine that owns the
 code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
-**Status:** Phases 1–6 done (single machine, accounts, UI, bar intelligence,
-onboarding, chat capability). Remote nodes are Phase 8.
+**Status:** Phases 1–7 done (single machine, accounts, UI, bar intelligence,
+onboarding, chat capability, memory). Remote nodes are Phase 8.
 
 ## Quick start
 
@@ -84,7 +84,16 @@ search = "searxng"                   # none | searxng | brave
 searxng_url = "http://localhost:8888" # JSON format must be enabled in SearXNG
 # brave_key_secret = "brave"         # for search = "brave" ([keys] brave = "..." in secrets.toml)
 fetch = true                         # web_fetch: public addresses only, URLs from you or a search
+
+[memory]
+backend = "builtin"                  # builtin | mem0 | off (restart to switch)
+embeddings_url = "http://localhost:11434/v1"  # optional: recall by meaning (settable in the UI)
+preset = "balanced"                  # fast | balanced | best (Ollama model names)
+# mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
+
+Memories are proposed by the assistant during chats and used only after you
+confirm them under Settings → Memory.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
@@ -140,6 +149,10 @@ node web/e2e/phase5.cjs target/debug/harness
 
 ```bash
 node web/e2e/phase6.cjs target/debug/harness
+```
+
+```bash
+node web/e2e/phase7.cjs target/debug/harness
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

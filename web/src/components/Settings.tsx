@@ -5,9 +5,10 @@ import { t } from "../lib/i18n";
 import type { Agent, Me, ModelInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
 import { ACCENTS, ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
+import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Users } from "./Users";
 
-type Tab = "profile" | "preferences" | "provider" | "password" | "users";
+export type Tab = "profile" | "preferences" | "memory" | "provider" | "password" | "users";
 
 function PrefsEditor(props: {
   initial: Prefs;
@@ -54,16 +55,22 @@ export default function Settings(props: {
   prefs: Prefs | null;
   onPrefs: (p: Prefs) => void;
   onProviderChanged: () => void;
+  initialTab?: Tab;
+  memoryVersion: number;
 }) {
   const admin = props.me.role === "admin";
   const tabs: Tab[] = [
     "profile",
     "preferences",
+    "memory",
     ...(admin ? (["provider"] as Tab[]) : []),
     ...(props.me.user_id ? (["password"] as Tab[]) : []),
     ...(admin ? (["users"] as Tab[]) : []),
   ];
-  const [tab, setTab] = useState<Tab>("profile");
+  const [tab, setTab] = useState<Tab>(props.initialTab ?? "profile");
+  useEffect(() => {
+    if (props.initialTab) setTab(props.initialTab);
+  }, [props.initialTab]);
   const [providerMsg, setProviderMsg] = useState<string | null>(null);
   const prefs = props.prefs;
 
@@ -133,6 +140,17 @@ export default function Settings(props: {
               </>
             )}
           </PrefsEditor>
+        )}
+        {tab === "memory" && (
+          <>
+            <MemoryPage version={props.memoryVersion} />
+            {admin && (
+              <div className="card stack">
+                <h3>Recall (server-wide)</h3>
+                <MemoryCfgForm />
+              </div>
+            )}
+          </>
         )}
         {tab === "provider" && (
           <div className="card stack">

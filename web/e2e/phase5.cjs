@@ -79,8 +79,9 @@ function fakeProvider() {
     await p.click('button[aria-label="make fake-large the default"]');
     await p.screenshot({ path: `${S}/p5-1-provider.png` });
     await p.click('text=Save and continue');
+    await p.click('text=Skip: keywords only');
 
-    // Step 2: profile (time zone pre-filled from the browser).
+    // Step 3: profile (time zone pre-filled from the browser).
     await p.waitForSelector('text=About you');
     const tz = await p.inputValue('input[list="tz-list"]');
     log('prefilled tz:', tz);

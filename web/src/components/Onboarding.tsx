@@ -5,8 +5,9 @@ import { api } from "../api";
 import { browserTimeZone } from "../lib/greeting";
 import type { Me, Prefs } from "../types";
 import { chooseDemoProvider, ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
+import { MemoryCfgForm } from "./Memory";
 
-type Step = "provider" | "profile" | "search";
+type Step = "provider" | "memory" | "profile" | "search";
 
 export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Prefs) => void }) {
   const [steps, setSteps] = useState<Step[] | null>(null);
@@ -26,7 +27,9 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
     }
     api
       .provider()
-      .then((p) => setSteps(p.configured ? ["profile", "search"] : ["provider", "profile", "search"]))
+      .then((p) =>
+        setSteps(p.configured ? ["profile", "search"] : ["provider", "memory", "profile", "search"]),
+      )
       .catch(() => setSteps(["profile", "search"]));
   }, [props.me.role]);
 
@@ -69,6 +72,20 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
               }}
             >
               Skip: use the built-in demo (no real AI) for now
+            </button>
+          </>
+        )}
+        {step === "memory" && (
+          <>
+            <h2>Memory</h2>
+            <p className="muted">
+              The assistant can remember facts you confirm. Recall works by keywords out of the box; an
+              embeddings model (for example in Ollama, on this machine or your network) lets it match by
+              meaning. You can change this later in Settings → Memory.
+            </p>
+            <MemoryCfgForm onSaved={next} saveLabel="Save and continue" />
+            <button type="button" className="link" onClick={next}>
+              Skip: keywords only
             </button>
           </>
         )}

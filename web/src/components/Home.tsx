@@ -19,6 +19,8 @@ export function Home(props: {
   predict: (text: string) => Mode | null;
   onLearn: (text: string, mode: Mode) => void;
   onOpen: (sessionId: string) => void;
+  /** Memory proposals waiting for the user. */
+  toReview?: number;
 }) {
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
   const onTextChange = useCallback((text: string, mode: Mode) => setTyped({ text, mode }), []);
@@ -53,6 +55,11 @@ export function Home(props: {
           onArrowDown={() => similar.current?.focusFirst() ?? false}
         />
         <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} />
+        {!!props.toReview && (
+          <a className="review-link small" href="#/settings/memory">
+            {props.toReview === 1 ? t("home.toReviewOne") : t("home.toReview", { n: String(props.toReview) })}
+          </a>
+        )}
       </div>
     </section>
   );

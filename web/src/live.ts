@@ -21,6 +21,7 @@ export class Live {
   version = 0;
   onSessionsChanged: () => void = () => {};
   onNodesChanged: () => void = () => {};
+  onMemoryChanged: () => void = () => {};
 
   constructor() {
     this.connect();
@@ -128,6 +129,9 @@ export class Live {
         break;
       case "nodes_changed":
         this.onNodesChanged();
+        break;
+      case "memory_changed":
+        this.onMemoryChanged();
         break;
       case "replayed":
         this.notify();

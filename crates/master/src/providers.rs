@@ -272,11 +272,7 @@ pub type MemorySetup = (
 
 /// The memory store for `[memory]`. The built-in store is also returned on
 /// its own so its embedder can be switched live.
-pub fn memory(
-    cfg: &Config,
-    data_dir: &Path,
-    secrets: &SecretSet,
-) -> anyhow::Result<MemorySetup> {
+pub fn memory(cfg: &Config, data_dir: &Path, secrets: &SecretSet) -> anyhow::Result<MemorySetup> {
     use crate::config::MemoryBackend;
     Ok(match cfg.memory.backend {
         MemoryBackend::Off => (None, None),

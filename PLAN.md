@@ -744,3 +744,64 @@ summary, incognito TTL).
   subprocess sandbox would be stronger.
 
 **Next:** Phase 7, memory.
+
+### 2026-11-03 — Phase 7 (memory): done
+
+**Evaluation (research agent, sources in its report; PyPI release data, repo files):**
+
+| | OpenViking | mem0 server | Graphiti |
+|---|---|---|---|
+| Licence | AGPL-3.0 + README "no rewrite/port" clause | Apache-2.0 | Apache-2.0 |
+| Latest | 0.5.3, 2026-11-02 (pre-1.0, churning) | 2.2.1, 2026-09-25 | 0.31.2, 2026-10-20 |
+| Infra | 1 container, embedded storage | API + Postgres/pgvector | API + Neo4j/FalkorDB |
+| Fits CRUD trait | poorly (context filesystem) | directly | partly (no list/update) |
+| Own LLM needed | yes (VLM + embeddings) per write | no with `infer:false` (embeddings still) | yes |
+
+**Decision:** the built-in store is the default; **mem0** is the optional external backend
+(Apache-2.0, maps 1:1 onto our trait, `infer:false` means no second LLM bill or data
+path). OpenViking was the first candidate and is rejected: a VLM call on every memory
+write, a filesystem model we would have to emulate CRUD on, and a licence clause against
+porting. mem0 notes: telemetry is on by default (`MEM0_TELEMETRY=false`), routes are
+unversioned, pin the image.
+
+**Done**
+* Crate `harness-memory`: `MemoryStore` trait; built-in SQLite store in its own
+  `memory.db` (FTS5; vectors from any OpenAI-compatible `/embeddings` endpoint, fused
+  with keyword hits by reciprocal rank; vectors backfilled lazily per model; a failing
+  endpoint degrades to keywords); `Mem0Memory` adapter (our status/kind/source/dedupe in
+  `metadata`).
+* Memories are **proposed, then confirmed**: chats get a `remember` tool whose call does
+  nothing on the node; the master sees the mirrored call and files a proposal for the
+  chat's owner (deduped by call id, so replays cannot duplicate). Only confirmed facts
+  are recalled (top 6, into the system prompt with "may be outdated").
+* Incognito chats get neither recall nor the tool (`AgentSpec.deny_tools`).
+* Memory page (Settings → Memory): review proposals (Remember / Discard), add, edit,
+  forget, link to the source chat; Home shows "N new memories to review".
+* Admin recall settings, live: keywords only, or an embeddings endpoint with presets
+  Fast / Balanced / Best (`all-minilm`, `nomic-embed-text`, `mxbai-embed-large`; sizes
+  are download sizes). Saving makes one test embedding call first. Also an onboarding
+  step for admins.
+
+**Evidence**
+* Rust 128: store CRUD, owner scoping, proposals not recalled, edit re-indexes, FTS
+  syntax inert, dedupe, embeddings find "puppy"→"dog" where keywords cannot, dead
+  endpoint falls back; mem0 adapter against a fake server (asserts `infer:false`, bad
+  key fails); HTTP: propose → confirm → recalled into the next prompt, incognito
+  neither reads nor writes, another user gets 404 on edit/delete.
+* `web/e2e/phase7.cjs`: onboarding refuses a dead embeddings endpoint and saves a working
+  one; model proposes; Home review link; unconfirmed not recalled; confirmed recalled by
+  meaning; forget. Phases 3–6 e2e green. Initial JS 79.4 KB gzip.
+
+**Not done / risks**
+* The presets are **not benchmarked** here (no models in this environment): sizes are
+  published model sizes, not measured RAM/latency. No reranker yet (the plan had one for
+  Balanced/Best).
+* The mem0 adapter was only tested against a fake built from mem0's source; check a real
+  instance's `/docs` before relying on it. Switching backends needs a restart and does
+  not migrate facts.
+* Recall quality depends on the model writing good `remember` sentences; a model can
+  still propose junk (the user filters it). Location facts are not copied into the
+  profile's city/country automatically.
+* Vector search is brute force over a user's facts: fine for thousands, not millions.
+
+**Next:** Phase 8, remote nodes and orchestration.

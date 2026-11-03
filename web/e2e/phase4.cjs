@@ -17,6 +17,7 @@ async function skipOnboarding(page, admin) {
   if (admin) {
     await page.waitForSelector('text=Connect an AI provider');
     await page.click('text=Skip: use the built-in demo');
+    await page.click('text=Skip: keywords only');
   }
   await page.waitForSelector('text=About you');
   await page.click('button:has-text("Continue")');

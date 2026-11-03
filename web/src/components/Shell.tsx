@@ -19,13 +19,17 @@ const Onboarding = lazy(() => import("./Onboarding"));
 const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
 const COLLAPSED_KEY = "harness.sidebarCollapsed";
 
-type Route = { kind: "home" } | { kind: "session"; id: string } | { kind: "settings" };
+type Route =
+  | { kind: "home" }
+  | { kind: "session"; id: string }
+  | { kind: "settings"; tab?: "memory" };
 
 function parseRoute(): Route {
   const h = location.hash;
   const m = h.match(/^#\/s\/([0-9a-f-]{36})$/);
   if (m) return { kind: "session", id: m[1]! };
   if (h === "#/settings") return { kind: "settings" };
+  if (h === "#/settings/memory") return { kind: "settings", tab: "memory" };
   return { kind: "home" };
 }
 
@@ -51,6 +55,8 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [serverDefaultAgent, setServerDefaultAgent] = useState("general");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [prefs, setPrefs] = useState<Prefs | null>(null);
+  const [memoryVersion, setMemoryVersion] = useState(0);
+  const [toReview, setToReview] = useState(0);
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === "1";
@@ -82,6 +88,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   useEffect(() => {
     live.onSessionsChanged = refreshSessions;
     live.onNodesChanged = refreshNodes;
+    live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     refreshSessions();
     refreshNodes();
     api
@@ -101,6 +108,13 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       .catch(() => {});
     return () => live.close();
   }, [live, refreshSessions, refreshNodes, refreshModels, unauthorized]);
+
+  useEffect(() => {
+    api
+      .memories()
+      .then((r) => setToReview(r.memories.filter((f) => f.status === "proposed").length))
+      .catch(() => setToReview(0));
+  }, [memoryVersion]);
 
   // Accent colour from preferences.
   useEffect(() => {
@@ -245,6 +259,8 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               prefs={prefs}
               onPrefs={setPrefs}
               onProviderChanged={refreshModels}
+              initialTab={route.tab}
+              memoryVersion={memoryVersion}
             />
           ) : (
             <Home
@@ -260,6 +276,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               predict={predict}
               onLearn={learn}
               onOpen={(id) => navigate({ kind: "session", id })}
+              toReview={toReview}
             />
           )}
         </Suspense>
