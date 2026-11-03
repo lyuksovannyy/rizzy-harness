@@ -4,7 +4,11 @@
 //! shows them to be run by hand. Passwords and user keys are used once to
 //! install harness's own key and are never stored.
 
+pub mod facts;
+pub mod scripts;
+pub mod setup;
 pub mod ssh;
+pub mod wg;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

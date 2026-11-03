@@ -10,11 +10,14 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 harness-core.workspace = true
 # No `rsa`: the rsa crate has RUSTSEC-2023-0071 (timing side channel, unfixed).
 russh = { version = "0.65.0", default-features = false, features = ["aws-lc-rs", "flate2"] }
 getrandom.workspace = true
-serde.workspace = true
+aws-lc-rs = "1.19.0"
+base64 = "0.22.1"
+serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
