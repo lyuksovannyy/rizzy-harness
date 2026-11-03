@@ -1,6 +1,6 @@
 //! The SSH client against an in-process server.
 
-mod fake_sshd;
+use harness_provision::testing as fake_sshd;
 
 use harness_core::Secret;
 use harness_provision::Error;

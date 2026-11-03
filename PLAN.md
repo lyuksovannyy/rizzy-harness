@@ -963,3 +963,67 @@ server) and only on localhost or `--tls`. "Asked a question" is a heuristic (tra
 questions/approvals, seen, re-trigger). `web/e2e/attention.cjs` (yellow list,
 notification recorded, replaced by search results while typing, cleared on open);
 phases 3–9 e2e green.
+
+### 2026-11-03 — Node setup over SSH (automatic and manual)
+
+Settings → Nodes → *Set up a server over SSH*. New crate `harness-provision` (russh).
+
+**Both modes start the same way.**
+1. *Check the server's identity*: harness reads the SSH host key fingerprint without
+   logging in; the user compares it with the provider's console and ticks "It
+   matches". Every later connection refuses any other key (no silent TOFU: a
+   password must not go to a machine in the middle).
+2. The user's password or private key logs in **once**, installs harness's own
+   ed25519 key (`keys/ssh/<host>_<port>`, 0600), and harness proves it on a **new**
+   connection. From then on only harness's key is used; the password/key is dropped
+   and never written (a test scans the whole data dir for it).
+
+**Automatic** (fresh VPS / node-only): refuses servers that are not Debian/Ubuntu
+with systemd, lack root/passwordless sudo, have a different CPU or older glibc than
+this build, or already run ufw, firewalld, Docker or other firewall rules ("not a
+fresh server, use manual setup"). Then: packages (`wireguard-tools`, `nftables`);
+key-only SSH (a `10-harness.conf` drop-in, which wins over cloud-init's `50-…`,
+checked with `sshd -t`; the user's own public key is added first so they keep
+access); firewall (own `inet harness` nftables table: inbound only SSH and UDP
+51820; outbound open for agents); WireGuard (node key generated on the node; master
+peer only); then the user brings the master's side up once with root (shown
+command, then *continue*); then harness installs itself as an unprivileged
+`harness` user with a hardened systemd unit, joins over the tunnel and waits for the
+node to come online. **SSH and firewall changes arm a systemd timer that reverts them
+after 120 s; they are confirmed only after a new key login works**, so a bad rule
+cannot lock the user out (tested: on a lost connection the confirm never runs).
+
+**Manual** (servers with other things on them): inspection is read-only; the only
+change is adding harness's key. A checklist shows what is in place and, for the rest,
+the exact commands (with the same revert timers and "log in from a new terminal,
+then confirm" instructions). With an existing ufw/firewalld it gives rules for *their*
+firewall instead of ours. *Check again* re-inspects with harness's key; a node
+WireGuard key that appeared is registered with the master automatically.
+
+**Decisions and pushback**
+* nftables directly, not ufw or iptables: on current Debian/Ubuntu `iptables` is a
+  shim over nftables and ufw sits on top; one own table does not fight other rules.
+* Topology: each node listens on UDP 51820 and the master dials out
+  (`PersistentKeepalive`), so a master at home behind NAT works. Creating the
+  master's interface needs root once; harness does not run as root, so it prints
+  `sudo wg-quick up …` (or `wg syncconf` for later nodes) instead.
+* Copying the model provider's API key to a node is opt-in: nodes run model calls
+  themselves. It lands in the node's `secrets.toml` (0600), not `harness.toml`.
+* russh without its `rsa` feature (RUSTSEC-2023-0071, unfixed); RSA-only private keys
+  are not accepted; use the password once or an ed25519/ECDSA key.
+
+**Evidence:** SSH client against an in-process russh server (probe, wrong pin, wrong
+password, exec, key bootstrap); inspection script run on a real Ubuntu 24.04;
+firewall rules validated with `nft -c`; master WireGuard keys equal `wg pubkey`;
+runner tests (order, lockout → never confirmed, refusal of non-fresh servers, manual
+checklist); HTTP test (no credential on disk, re-check with harness's key after
+password login is turned off); `web/e2e/setup.cjs` in the browser.
+Found and fixed on the way: checkpoint snapshots copied the git index with a fresh
+mtime, defeating git's racy-clean check, so a same-size edit in the same second
+could be missed by undo (reproduced 3/25, now 0/40).
+
+**Not tested here, stated plainly:** the automatic steps on a real VPS (apt,
+systemd timers, sshd reload, nftables, WireGuard), because this container has no
+systemd, no WireGuard kernel module and no VPS. Real interop with OpenSSH servers was
+not tested (a test that created a system user was blocked by the environment, rightly).
+Run a first automatic setup on a throwaway VPS before trusting it with a real one.

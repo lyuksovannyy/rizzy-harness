@@ -9,6 +9,7 @@ mod http;
 pub mod nodes;
 pub mod prefs;
 pub mod providers;
+pub mod provision;
 pub mod search;
 pub mod secrets;
 pub mod voice;
@@ -89,6 +90,7 @@ pub struct MasterInner {
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
+    provision: provision::Jobs,
 }
 
 /// What the UI asks for when starting a session.
@@ -172,6 +174,7 @@ impl Master {
                 remote_stops: Mutex::new(HashMap::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
+                provision: Mutex::new(HashMap::new()),
                 agents: Mutex::new(harness_agents::AgentSet::from_agents(
                     harness_agents::builtins(),
                     harness_agents::DEFAULT_AGENT,

@@ -142,6 +142,23 @@ async fn temp_index(repo: &Repo) -> Result<PathBuf, String> {
         tokio::fs::copy(&real, &tmp)
             .await
             .map_err(|e| e.to_string())?;
+        // Keep the original mtime: git's "racy clean" check compares file
+        // times with the index file's own mtime. A fresh mtime lets a
+        // same-size edit made in the same second look unchanged.
+        let modified = tokio::fs::metadata(&real)
+            .await
+            .and_then(|m| m.modified())
+            .map_err(|e| e.to_string())?;
+        let t = tmp.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&t)
+                .and_then(|f| f.set_modified(modified))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     }
     Ok(tmp)
 }

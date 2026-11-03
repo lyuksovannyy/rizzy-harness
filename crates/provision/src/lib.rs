@@ -8,6 +8,9 @@ pub mod facts;
 pub mod scripts;
 pub mod setup;
 pub mod ssh;
+/// An in-process SSH server for tests (feature `test-util`).
+#[cfg(feature = "test-util")]
+pub mod testing;
 pub mod wg;
 
 #[derive(Debug, thiserror::Error)]

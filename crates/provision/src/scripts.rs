@@ -6,6 +6,15 @@
 //! `REVERT_AFTER_S` unless the master logs in again over a *new* connection
 //! and cancels the timer.
 
+/// The provider config copied to a node (only if the user allowed it): the
+/// node runs model calls itself, so it needs the key.
+#[derive(Debug, Clone)]
+pub struct ProviderFiles {
+    pub harness_toml: String,
+    /// `[keys]` with the API key, mode 0600 on the node.
+    pub secrets_toml: Option<String>,
+}
+
 /// Seconds before an unconfirmed risky change reverts itself.
 pub const REVERT_AFTER_S: u32 = 120;
 
@@ -143,11 +152,20 @@ echo "NODE_PUBKEY=$(wg pubkey < /etc/wireguard/harness.key)"
 
 /// Dedicated `harness` user, the binary (uploaded to `/tmp/harness.upload`),
 /// node policy, optional provider config, join, and a systemd service.
-pub fn node_service(join_cmd_args: &str, provider_toml: Option<&str>) -> String {
-    let provider = match provider_toml {
-        Some(t) => format!(
-            "cat > /var/lib/harness/harness.toml <<'TOML'\n{t}TOML\nchown harness: /var/lib/harness/harness.toml\nchmod 600 /var/lib/harness/harness.toml\n"
-        ),
+pub fn node_service(join_cmd_args: &str, provider: Option<&ProviderFiles>) -> String {
+    let file = |name: &str, body: &str| {
+        format!(
+            "cat > /var/lib/harness/{name} <<'TOML'\n{body}TOML\nchown harness: /var/lib/harness/{name}\nchmod 600 /var/lib/harness/{name}\n"
+        )
+    };
+    let provider = match provider {
+        Some(p) => {
+            let mut s = file("harness.toml", &p.harness_toml);
+            if let Some(sec) = &p.secrets_toml {
+                s.push_str(&file("secrets.toml", sec));
+            }
+            s
+        }
         None => String::new(),
     };
     format!(
@@ -215,7 +233,10 @@ mod tests {
             wireguard("10.77.0.2", "10.77.0.1", "pubkey="),
             node_service(
                 "wss://10.77.0.1:7443 --token t --fingerprint f",
-                Some("[provider]\nkind = \"mock\"\n"),
+                Some(&ProviderFiles {
+                    harness_toml: "[provider]\nkind = \"mock\"\n".into(),
+                    secrets_toml: Some("[keys]\nopenai = \"k\"\n".into()),
+                }),
             ),
         ] {
             bash_ok(&s);

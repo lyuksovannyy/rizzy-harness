@@ -25,6 +25,8 @@ harness-tools.workspace = true
 harness-web.workspace = true
 harness-memory.workspace = true
 harness-link.workspace = true
+harness-provision.workspace = true
+async-trait.workspace = true
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-util.workspace = true
 hex.workspace = true
@@ -44,6 +46,7 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+harness-provision = { workspace = true, features = ["test-util"] }
 axum = { workspace = true, features = ["multipart"] }
 harness-link.workspace = true
 async-trait.workspace = true

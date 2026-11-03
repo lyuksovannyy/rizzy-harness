@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { NodeInfo, RemoteNode } from "../types";
+import { ServerSetup } from "./ServerSetup";
 
 export function Nodes(props: { nodes: NodeInfo[] }) {
   const [remote, setRemote] = useState<RemoteNode[]>([]);
@@ -75,7 +76,11 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
         </table>
       </div>
       <div className="card stack">
-        <h3>Add a node</h3>
+        <h3>Set up a server over SSH</h3>
+        <ServerSetup onDone={load} />
+      </div>
+      <div className="card stack">
+        <h3>Add a node by hand</h3>
         {!listener ? (
           <p className="muted">
             Remote nodes are off. Restart the server with <code>--node-listen 0.0.0.0:7443</code> (TLS with a pinned

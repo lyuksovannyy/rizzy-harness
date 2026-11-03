@@ -3,8 +3,6 @@
 //! current user with HOME pointing at a temporary directory. Nothing outside
 //! that directory is touched.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -22,6 +22,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tempfile = { workspace = true, optional = true }
+
+[features]
+test-util = ["dep:tempfile"]
 
 [dev-dependencies]
+harness-provision = { path = ".", features = ["test-util"] }
 tempfile.workspace = true
+
+[[example]]
+name = "fake_sshd"
+required-features = ["test-util"]

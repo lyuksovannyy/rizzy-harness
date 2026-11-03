@@ -18,6 +18,7 @@ import type {
   RawEvent,
   RemoteNode,
   Role,
+  SetupState,
   SearchHit,
   SessionRow,
   UploadedAttachment,
@@ -77,6 +78,12 @@ export const api = {
     call<{ nodes: RemoteNode[]; listener: { port: number; fingerprint: string } | null }>("GET", "/api/admin/nodes"),
   joinToken: () =>
     call<{ token: string; port: number; fingerprint: string; expires_in_s: number }>("POST", "/api/admin/nodes/join"),
+  probeHost: (host: string, port: number) =>
+    call<{ fingerprint: string }>("POST", "/api/admin/provision/probe", { host, port }),
+  startSetup: (b: Record<string, unknown>) => call<{ id: string }>("POST", "/api/admin/provision", b),
+  setupState: (id: string) => call<SetupState>("GET", `/api/admin/provision/${id}`),
+  setupContinue: (id: string) => call<{ ok: boolean }>("POST", `/api/admin/provision/${id}/continue`),
+  setupRecheck: (id: string) => call<SetupState>("POST", `/api/admin/provision/${id}/recheck`),
   revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
   sessions: () => call<{ sessions: SessionRow[] }>("GET", "/api/sessions"),
   events: (id: string, after = 0) =>

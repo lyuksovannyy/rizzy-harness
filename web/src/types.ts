@@ -260,3 +260,22 @@ export interface AttentionItem {
   parent_id: string | null;
   updated_ms: number;
 }
+
+export interface SetupStep {
+  id: string;
+  title: string;
+  status: "pending" | "running" | "ok" | "failed" | "todo" | "waiting" | "skipped";
+  detail: string;
+  script?: string;
+  root: boolean;
+}
+
+export interface SetupState {
+  id: string;
+  mode: "auto" | "manual";
+  host: string;
+  steps: SetupStep[];
+  finished: boolean;
+  node_id: string | null;
+  error: string | null;
+}

@@ -145,7 +145,15 @@ Agentic sessions can run on other machines. Start the master with a node port
 ./target/release/harness serve --node-listen 0.0.0.0:7443
 ```
 
-In Settings → Nodes choose **Create join command** and run the two printed
+The easy way: Settings → Nodes → **Set up a server over SSH**. Check the
+server's host key, log in once with a password or key (harness installs its
+own key and does not keep yours), and pick **Automatic** for a fresh VPS
+(WireGuard, nftables firewall, key-only SSH, the node service; risky steps
+revert themselves after 2 minutes unless harness can still log in) or
+**Manual** for a server with other things on it (a checklist with the
+commands to run). Test it on a throwaway VPS first.
+
+By hand: in Settings → Nodes choose **Create join command** and run the two printed
 commands on the other machine (same binary). That machine needs its own
 `harness.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in
@@ -213,6 +221,14 @@ node web/e2e/phase9.cjs target/debug/harness
 
 ```bash
 node web/e2e/attention.cjs target/debug/harness
+```
+
+```bash
+cargo build -p harness-provision --features test-util --example fake_sshd
+```
+
+```bash
+node web/e2e/setup.cjs target/debug/harness target/debug/examples/fake_sshd
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

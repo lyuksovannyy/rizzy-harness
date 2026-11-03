@@ -43,7 +43,7 @@ pub trait Master: Send + Sync {
     /// `wss://... --token ... --fingerprint ...` for `node join`.
     async fn join_args(&self) -> Result<String>;
     /// Provider config to copy, if the user allowed it.
-    fn provider_toml(&self) -> Option<String>;
+    fn provider_files(&self) -> Option<scripts::ProviderFiles>;
     /// The harness binary for the node's architecture.
     fn binary(&self, arch: &str) -> Result<Vec<u8>>;
     /// The master's own `(arch, glibc)`.
@@ -126,6 +126,11 @@ impl Log {
             s.script = Some(script);
             s.root = root;
         }
+    }
+
+    /// Record a failed step (e.g. the very first login).
+    pub fn push_failed(&self, id: &'static str, title: &'static str, detail: &str) {
+        self.set(id, title, Status::Failed, detail);
     }
 
     fn replace(&self, steps: Vec<Step>) {
@@ -386,10 +391,10 @@ pub async fn run_auto(
         .await
         .map_err(|e| fail(id, title, e))?;
     let join = master.join_args().await.map_err(|e| fail(id, title, e))?;
-    let provider = master.provider_toml();
+    let provider = master.provider_files();
     let o = must(
         &*c,
-        &scripts::node_service(&join, provider.as_deref()),
+        &scripts::node_service(&join, provider.as_ref()),
         true,
         "installing the node",
     )
@@ -588,7 +593,7 @@ pub async fn recheck(r: &dyn Remote, master: &dyn Master, log: &Log) -> Result<F
         let join = master.join_args().await?;
         s.script = Some(scripts::node_service(
             &join,
-            master.provider_toml().as_deref(),
+            master.provider_files().as_ref(),
         ));
     }
     let mut all = vec![

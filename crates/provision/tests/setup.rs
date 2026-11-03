@@ -96,7 +96,7 @@ impl Master for M {
     async fn join_args(&self) -> Result<String> {
         Ok("wss://10.77.0.1:7443 --token T --fingerprint F".into())
     }
-    fn provider_toml(&self) -> Option<String> {
+    fn provider_files(&self) -> Option<harness_provision::scripts::ProviderFiles> {
         None
     }
     fn binary(&self, _arch: &str) -> Result<Vec<u8>> {

@@ -1,0 +1,128 @@
+//! Node setup over HTTP against an in-process SSH server: probe, manual
+//! mode, harness's own key, and no stored credentials.
+
+use std::time::Duration;
+
+use harness_core::Secret;
+use harness_master::auth::Auth;
+use harness_master::config::Config;
+use harness_master::providers::ProviderRuntime;
+use harness_master::{Master, router};
+use harness_provision::testing as fake;
+use harness_store::Store;
+use serde_json::{Value, json};
+
+#[tokio::test]
+async fn manual_setup_installs_harness_key_and_forgets_the_password() {
+    let ssh = fake::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let master = Master::new(
+        Store::open_in_memory().unwrap(),
+        Auth::new(Secret::new("tok".into()), vec![addr.to_string()], false),
+    );
+    let (rt, _) =
+        ProviderRuntime::start(Config::default(), dir.path(), Default::default()).unwrap();
+    master.set_provider_runtime(std::sync::Arc::new(rt));
+    master.set_node_listener(7443, "sha256:abc".into());
+    let m2 = master.clone();
+    tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
+    let c = reqwest::Client::new();
+    let base = format!("http://{addr}");
+    let post = |p: &str, b: Value| {
+        c.post(format!("{base}{p}"))
+            .bearer_auth("tok")
+            .json(&b)
+            .send()
+    };
+
+    let v: Value = post(
+        "/api/admin/provision/probe",
+        json!({"host": "127.0.0.1", "port": ssh.port}),
+    )
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(v["fingerprint"], ssh.fingerprint.as_str());
+
+    // Unconfirmed fingerprint or no credentials: refused.
+    let r = post("/api/admin/provision", json!({"host": "127.0.0.1", "port": ssh.port, "user": "deploy", "fingerprint": "", "password": fake::PASSWORD, "mode": "manual"})).await.unwrap();
+    assert_eq!(r.status(), 400);
+    let r = post("/api/admin/provision", json!({"host": "127.0.0.1; rm", "port": ssh.port, "user": "deploy", "fingerprint": ssh.fingerprint, "password": "x", "mode": "manual"})).await.unwrap();
+    assert_eq!(r.status(), 400);
+
+    let v: Value = post(
+        "/api/admin/provision",
+        json!({"host": "127.0.0.1", "port": ssh.port, "user": "deploy", "fingerprint": ssh.fingerprint, "password": fake::PASSWORD, "mode": "manual"}),
+    )
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+    let mut state = Value::Null;
+    for _ in 0..200 {
+        state = c
+            .get(format!("{base}/api/admin/provision/{id}"))
+            .bearer_auth("tok")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if state["finished"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(state["finished"], true, "{state}");
+    assert!(state["error"].is_null(), "{state}");
+    let steps = state["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["id"], "login");
+    assert_eq!(steps[0]["status"], "ok");
+    let harness = steps.iter().find(|s| s["id"] == "harness").unwrap();
+    assert!(
+        harness["script"].as_str().unwrap().contains("--token "),
+        "{harness}"
+    );
+
+    // Harness's key is on the server; the password is nowhere on disk.
+    let ak = std::fs::read_to_string(ssh.home.path().join(".ssh/authorized_keys")).unwrap();
+    assert!(ak.contains("ssh-ed25519 ") && ak.contains("harness"));
+    let mut found = false;
+    for e in walk(dir.path()) {
+        if std::fs::read(&e)
+            .unwrap()
+            .windows(fake::PASSWORD.len())
+            .any(|w| w == fake::PASSWORD.as_bytes())
+        {
+            found = true;
+        }
+    }
+    assert!(!found, "the password was written to disk");
+
+    // Re-check works with harness's key alone (passwords now refused).
+    ssh.set_password_login(false);
+    let r = post(&format!("/api/admin/provision/{id}/recheck"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+}
+
+fn walk(d: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut v = vec![];
+    for e in std::fs::read_dir(d).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            v.extend(walk(&p));
+        } else {
+            v.push(p);
+        }
+    }
+    v
+}
