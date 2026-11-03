@@ -31,6 +31,9 @@ pub fn router(master: Master) -> Router {
             axum::routing::patch(update_user).delete(delete_user),
         )
         .route("/api/nodes", get(nodes))
+        .route("/api/admin/nodes", get(admin_nodes))
+        .route("/api/admin/nodes/join", post(node_join_token))
+        .route("/api/admin/nodes/{id}", axum::routing::delete(revoke_node))
         .route("/api/models", get(models))
         .route("/api/agents", get(agents))
         .route(
@@ -1236,4 +1239,50 @@ async fn put_memory_cfg(
         bm.set_embedder(emb);
     }
     Ok(Json(memory_cfg_json(&m, &cfg)))
+}
+
+async fn admin_nodes(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let listener = m.node_listener();
+    Ok(Json(json!({
+        "nodes": m.registered_nodes().await?,
+        "listener": listener.map(|(port, fp)| json!({ "port": port, "fingerprint": fp })),
+    })))
+}
+
+/// A join token plus everything the node needs, except the host name the
+/// node should dial (the browser knows that better than the server).
+async fn node_join_token(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require_admin(&m, &headers).await?;
+    let Some((port, fingerprint)) = m.node_listener() else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "remote nodes are off: start the server with --node-listen 0.0.0.0:7443".into(),
+        ));
+    };
+    let token = m.create_join_token(who.user_id.clone()).await?;
+    Ok(Json(json!({
+        "token": token,
+        "port": port,
+        "fingerprint": fingerprint,
+        "expires_in_s": crate::nodes::JOIN_TOKEN_TTL.as_secs(),
+    })))
+}
+
+async fn revoke_node(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    if !m.revoke_node(&id).await? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such node".into()));
+    }
+    Ok(Json(json!({ "ok": true })))
 }

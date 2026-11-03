@@ -1,0 +1,212 @@
+//! Remote nodes: the TLS listener, the join/auth handshake, revocation.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use harness_link::wire::{Hello, ServerMsg, accept, new_nonce, recv_json, send_json};
+use harness_link::{MasterCert, identity};
+use harness_node::NodeLink;
+use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+use crate::{Master, lock};
+
+/// How long a join token stays valid.
+pub const JOIN_TOKEN_TTL: Duration = Duration::from_secs(15 * 60);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn token_hash(t: &str) -> String {
+    hex::encode(Sha256::digest(t.trim().as_bytes()))
+}
+
+impl Master {
+    /// A single-use join token (only its hash is stored).
+    pub async fn create_join_token(
+        &self,
+        by: Option<String>,
+    ) -> Result<String, harness_store::StoreError> {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).expect("OS randomness");
+        let token = hex::encode(b);
+        let (h, exp) = (
+            token_hash(&token),
+            harness_core::now_ms() + JOIN_TOKEN_TTL.as_millis() as i64,
+        );
+        self.inner
+            .mirror
+            .call(move |s| s.join_token_create(&h, exp, by.as_deref()))
+            .await?;
+        Ok(token)
+    }
+
+    /// Revoke a node: its key stops working and a live link is dropped.
+    pub async fn revoke_node(&self, node_id: &str) -> Result<bool, harness_store::StoreError> {
+        let id = node_id.to_string();
+        let done = self
+            .inner
+            .mirror
+            .call(move |s| s.node_revoke(&id, harness_core::now_ms()))
+            .await?;
+        if let Some(stop) = lock(&self.inner.remote_stops).remove(node_id) {
+            stop.cancel();
+        }
+        let id = node_id.to_string();
+        let _ = self
+            .inner
+            .mirror
+            .call(move |s| {
+                s.audit(
+                    "node.revoke",
+                    &serde_json::json!({ "node_id": id }).to_string(),
+                )
+            })
+            .await;
+        Ok(done)
+    }
+
+    /// Accept remote nodes on `listener` (TLS with `cert`) until the process ends.
+    pub fn serve_nodes(&self, listener: TcpListener, cert: Arc<MasterCert>) -> anyhow::Result<()> {
+        let tls = cert.server_config()?;
+        let this = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let (tcp, peer) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "node listener accept failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let (this, tls, cert) = (this.clone(), tls.clone(), cert.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = this.node_connection(tcp, tls, &cert).await {
+                        tracing::info!(%peer, error = %e, "node connection ended");
+                    }
+                });
+            }
+        });
+        Ok(())
+    }
+
+    async fn node_connection(
+        &self,
+        tcp: tokio::net::TcpStream,
+        tls: Arc<rustls::ServerConfig>,
+        cert: &MasterCert,
+    ) -> anyhow::Result<()> {
+        let mut ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, accept(tcp, tls)).await??;
+        let nonce = new_nonce();
+        send_json(
+            &mut ws,
+            &ServerMsg::Challenge {
+                nonce: nonce.clone(),
+            },
+        )
+        .await?;
+        let hello: Option<Hello> =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, recv_json(&mut ws)).await??;
+        let signed = identity::auth_message(&nonce, &cert.fingerprint());
+        let reject = |reason: &str| ServerMsg::Rejected {
+            reason: reason.into(),
+        };
+        match hello {
+            Some(Hello::Join {
+                token,
+                public_key,
+                hostname,
+                signature,
+            }) => {
+                // Possession of the key first, then the token is spent.
+                if !identity::verify(&public_key, &signed, &signature) {
+                    send_json(&mut ws, &reject("bad signature")).await?;
+                    return Ok(());
+                }
+                let hostname: String = hostname
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(64)
+                    .collect();
+                let (h, pk, hn) = (token_hash(&token), public_key.clone(), hostname.clone());
+                let id = self
+                    .inner
+                    .mirror
+                    .call(move |s| s.node_join(&h, harness_core::now_ms(), &pk, &hn))
+                    .await?;
+                match id {
+                    Some(id) => {
+                        let detail =
+                            serde_json::json!({ "node_id": id, "hostname": hostname }).to_string();
+                        let _ = self
+                            .inner
+                            .mirror
+                            .call(move |s| s.audit("node.join", &detail))
+                            .await;
+                        send_json(&mut ws, &ServerMsg::Accepted { node_id: id }).await?;
+                        let _ = self.inner.live.send(crate::Live::NodesChanged);
+                    }
+                    None => send_json(&mut ws, &reject("invalid or expired join token")).await?,
+                }
+                Ok(())
+            }
+            Some(Hello::Auth { node_id, signature }) => {
+                let id = node_id.clone();
+                let key = self.inner.mirror.call(move |s| s.node_key(&id)).await?;
+                let ok = key.is_some_and(|k| identity::verify(&k, &signed, &signature));
+                if !ok {
+                    let detail = serde_json::json!({ "node_id": node_id }).to_string();
+                    let _ = self
+                        .inner
+                        .mirror
+                        .call(move |s| s.audit("node.auth_failed", &detail))
+                        .await;
+                    send_json(&mut ws, &reject("unknown or revoked node")).await?;
+                    return Ok(());
+                }
+                send_json(
+                    &mut ws,
+                    &ServerMsg::Accepted {
+                        node_id: node_id.clone(),
+                    },
+                )
+                .await?;
+                let stop = CancellationToken::new();
+                if let Some(old) =
+                    lock(&self.inner.remote_stops).insert(node_id.clone(), stop.clone())
+                {
+                    old.cancel();
+                }
+                let (to_node, from_node) = harness_link::server::bridge(ws, node_id.clone(), stop);
+                self.add_link(NodeLink { to_node, from_node }, false)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Registered remote nodes with their connection state.
+    pub async fn registered_nodes(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, harness_store::StoreError> {
+        let rows = self.inner.mirror.call(|s| s.registered_nodes()).await?;
+        let live = self.nodes();
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let connected = live.iter().any(|n| n.node_id == r.node_id && n.connected);
+                let pk = &r.public_key;
+                serde_json::json!({
+                    "node_id": r.node_id,
+                    "hostname": r.hostname,
+                    "key_fingerprint": format!("ed25519:{}", &pk[..pk.len().min(16)]),
+                    "created_ms": r.created_ms,
+                    "revoked": r.revoked_ms.is_some(),
+                    "connected": connected && r.revoked_ms.is_none(),
+                })
+            })
+            .collect())
+    }
+}

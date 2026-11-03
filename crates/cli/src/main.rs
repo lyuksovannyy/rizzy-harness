@@ -39,6 +39,10 @@ enum Cmd {
         /// Extra `host:port` values accepted in Host/Origin headers.
         #[arg(long = "allowed-host")]
         allowed_hosts: Vec<String>,
+        /// Accept remote worker nodes here (TLS with a pinned self-signed
+        /// certificate, Ed25519 node keys). Off unless given.
+        #[arg(long)]
+        node_listen: Option<SocketAddr>,
     },
     /// Print the API token (for scripts; the UI uses username + password).
     Token,
@@ -51,14 +55,31 @@ enum Cmd {
         #[command(subcommand)]
         cmd: NodeCmd,
     },
-    /// Approve or revoke node fingerprints (Phase 2).
-    Pair,
 }
 
 #[derive(Subcommand)]
 enum NodeCmd {
-    /// Join a master as a remote node (Phase 2).
-    Join { master_url: String },
+    /// Register this machine with a master (once). Get the command from the
+    /// master's Settings → Nodes → Add node.
+    Join {
+        /// `wss://host:port` of the master's node listener.
+        master_url: String,
+        #[arg(long)]
+        token: String,
+        /// The master certificate fingerprint shown with the token.
+        #[arg(long)]
+        fingerprint: String,
+    },
+    /// Run as a worker node for the master joined before.
+    Run,
+}
+
+/// `<data>/remote.toml`: where this node's master is.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RemoteToml {
+    url: String,
+    fingerprint: String,
+    node_id: String,
 }
 
 fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
@@ -103,6 +124,7 @@ async fn serve(
     bind: SocketAddr,
     insecure_bind: bool,
     extra_hosts: Vec<String>,
+    node_listen: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
     if !bind.ip().is_loopback() {
         if !insecure_bind {
@@ -125,34 +147,16 @@ async fn serve(
     let provider: Arc<dyn Provider> = runtime.provider.clone();
     tracing::info!(provider = provider.name(), model = %cfg.provider.model, "provider");
 
-    let node_store = Store::open(&dir.join("node.db"), Durability::Full)?;
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
-    let backend = NativeBackend::new(
-        provider.clone(),
-        harness_tools::builtin(),
-        NativeConfig {
-            env_remove,
-            secrets: secrets.clone(),
-            allow_outside_workspace: policy.allow_outside_workspace,
-            effort: cfg
-                .provider
-                .effort
-                .filter(|_| cfg.supports_effort(&cfg.provider.model)),
-            summarize_after_tokens: cfg.chat.summarize_after_tokens,
-            ..Default::default()
-        },
-    );
-    let node = NodeRuntime::start(NodeConfig {
-        node_id: "local".into(),
-        hostname: hostname(),
+    let node = agentic_node(
+        dir,
+        &cfg,
         policy,
-        store: node_store,
-        backend: Arc::new(backend),
-        default_model: cfg.provider.model.clone(),
-        secrets: secrets.clone(),
-        profile: Profile::Agentic,
-        incognito_ttl: None,
-    })
+        provider.clone(),
+        env_remove,
+        &secrets,
+        "local",
+    )
     .await?;
 
     // The master's own chat runtime: same session code, no workspace and no
@@ -231,6 +235,19 @@ async fn serve(
         .await
         .map_err(anyhow::Error::msg)?;
 
+    if let Some(addr) = node_listen {
+        let cert = Arc::new(harness_link::MasterCert::load_or_create(dir)?);
+        let l = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("binding node listener {addr}"))?;
+        let port = l.local_addr()?.port();
+        master.set_node_listener(port, cert.fingerprint());
+        master.serve_nodes(l, cert.clone())?;
+        println!(
+            "nodes connect to wss://<this host>:{port} (certificate {})",
+            cert.fingerprint()
+        );
+    }
     // Printed (not logged) so tests and users can find the port; never a secret.
     println!("{APP_NAME} listening on http://{addr}");
     if unclaimed {
@@ -244,6 +261,110 @@ async fn serve(
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    Ok(())
+}
+
+/// The worker runtime (embedded `local` node, or a remote node).
+async fn agentic_node(
+    dir: &Path,
+    cfg: &Config,
+    policy: NodePolicy,
+    provider: Arc<dyn Provider>,
+    env_remove: Vec<String>,
+    secrets: &harness_core::SecretSet,
+    node_id: &str,
+) -> anyhow::Result<NodeRuntime> {
+    let backend = NativeBackend::new(
+        provider,
+        harness_tools::builtin(),
+        NativeConfig {
+            env_remove,
+            secrets: secrets.clone(),
+            allow_outside_workspace: policy.allow_outside_workspace,
+            effort: cfg
+                .provider
+                .effort
+                .filter(|_| cfg.supports_effort(&cfg.provider.model)),
+            summarize_after_tokens: cfg.chat.summarize_after_tokens,
+            ..Default::default()
+        },
+    );
+    Ok(NodeRuntime::start(NodeConfig {
+        node_id: node_id.into(),
+        hostname: hostname(),
+        policy,
+        store: Store::open(&dir.join("node.db"), Durability::Full)?,
+        backend: Arc::new(backend),
+        default_model: cfg.provider.model.clone(),
+        secrets: secrets.clone(),
+        profile: Profile::Agentic,
+        incognito_ttl: None,
+    })
+    .await?)
+}
+
+async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> anyhow::Result<()> {
+    let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
+    let node_id = harness_link::client::join(url, fingerprint, token, &hostname(), &key).await?;
+    let remote = RemoteToml {
+        url: url.into(),
+        fingerprint: fingerprint.into(),
+        node_id: node_id.clone(),
+    };
+    std::fs::write(dir.join("remote.toml"), toml::to_string(&remote)?)?;
+    println!("joined as node `{node_id}`. Start it with: {APP_NAME} node run");
+    println!(
+        "this node's own policy is {} (it decides what the master may do here)",
+        dir.join("node.toml").display()
+    );
+    Ok(())
+}
+
+async fn node_run(dir: &Path) -> anyhow::Result<()> {
+    let remote: RemoteToml = toml::from_str(
+        &std::fs::read_to_string(dir.join("remote.toml"))
+            .context("not joined yet: run `node join` first")?,
+    )?;
+    let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
+    let cfg = Config::load(&dir.join("harness.toml"))?;
+    let policy = NodePolicy::load(&dir.join("node.toml"))?;
+    let secrets = harness_core::SecretSet::default();
+    let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
+    let provider: Arc<dyn Provider> = runtime.provider.clone();
+    let node = agentic_node(
+        dir,
+        &cfg,
+        policy,
+        provider,
+        env_remove,
+        &secrets,
+        &remote.node_id,
+    )
+    .await?;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let s2 = stop.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        s2.cancel();
+    });
+    println!("node `{}` connecting to {}", remote.node_id, remote.url);
+    harness_link::client::run(
+        harness_link::client::Remote {
+            url: remote.url,
+            fingerprint: remote.fingerprint,
+            node_id: remote.node_id,
+        },
+        key,
+        stop,
+        || {
+            let node = node.clone();
+            async move {
+                let l = node.attach().await;
+                (l.to_node, l.from_node)
+            }
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -332,7 +453,8 @@ async fn main() -> anyhow::Result<()> {
             bind,
             insecure_bind,
             allowed_hosts,
-        } => serve(&dir, bind, insecure_bind, allowed_hosts).await,
+            node_listen,
+        } => serve(&dir, bind, insecure_bind, allowed_hosts, node_listen).await,
         Cmd::Token => {
             let t = auth::load_or_create_token(&api_token_path(&dir))?;
             println!("{}", t.expose());
@@ -349,8 +471,13 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Doctor => doctor(&dir),
         Cmd::Node {
-            cmd: NodeCmd::Join { .. },
-        }
-        | Cmd::Pair => bail!("remote nodes arrive in Phase 2 (see PLAN.md)"),
+            cmd:
+                NodeCmd::Join {
+                    master_url,
+                    token,
+                    fingerprint,
+                },
+        } => node_join(&dir, &master_url, &token, &fingerprint).await,
+        Cmd::Node { cmd: NodeCmd::Run } => node_run(&dir).await,
     }
 }

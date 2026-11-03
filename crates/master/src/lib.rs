@@ -6,6 +6,7 @@ pub mod attachments;
 pub mod auth;
 pub mod config;
 mod http;
+pub mod nodes;
 pub mod prefs;
 pub mod providers;
 pub mod search;
@@ -82,6 +83,10 @@ pub struct MasterInner {
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
     /// The built-in store, when that is the backend (embedder switched live).
     builtin_memory: Mutex<Option<Arc<harness_memory::SqliteMemory>>>,
+    /// Stop handles of live remote links, by node id (revoke drops them).
+    remote_stops: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// Fingerprint of the node listener's certificate, if it runs.
+    node_listener: Mutex<Option<(u16, String)>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -141,7 +146,7 @@ pub enum CommandError {
     UnknownAgent(String),
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -160,6 +165,8 @@ impl Master {
                 redeleting: Mutex::new(HashSet::new()),
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
+                remote_stops: Mutex::new(HashMap::new()),
+                node_listener: Mutex::new(None),
                 agents: Mutex::new(harness_agents::AgentSet::from_agents(
                     harness_agents::builtins(),
                     harness_agents::DEFAULT_AGENT,
@@ -180,6 +187,20 @@ impl Master {
 
     pub fn set_memory(&self, m: Arc<dyn harness_memory::MemoryStore>) {
         *lock(&self.inner.memory) = Some(m);
+    }
+
+    /// The mirror store (tests and tools).
+    pub fn inner_mirror(&self) -> Store {
+        self.inner.mirror.clone()
+    }
+
+    /// Record where remote nodes connect (for the "add node" command).
+    pub fn set_node_listener(&self, port: u16, fingerprint: String) {
+        *lock(&self.inner.node_listener) = Some((port, fingerprint));
+    }
+
+    pub fn node_listener(&self) -> Option<(u16, String)> {
+        lock(&self.inner.node_listener).clone()
     }
 
     pub fn set_builtin_memory(&self, m: Arc<harness_memory::SqliteMemory>) {

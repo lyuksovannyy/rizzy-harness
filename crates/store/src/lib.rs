@@ -128,6 +128,16 @@ pub struct UserPatch {
     pub can_agentic: Option<bool>,
 }
 
+/// A remote node the master trusts (pinned key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRow {
+    pub node_id: String,
+    pub hostname: String,
+    pub public_key: String,
+    pub created_ms: i64,
+    pub revoked_ms: Option<i64>,
+}
+
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -174,6 +184,20 @@ CREATE TABLE IF NOT EXISTS attachments (
     text          TEXT NOT NULL,
     truncated     INTEGER NOT NULL,
     created_ms    INTEGER NOT NULL
+);
+-- Remote nodes the master trusts: pinned Ed25519 public keys.
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id    TEXT PRIMARY KEY,
+    public_key TEXT NOT NULL UNIQUE,
+    hostname   TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    revoked_ms INTEGER
+);
+-- Single-use join tokens (SHA-256 only).
+CREATE TABLE IF NOT EXISTS join_tokens (
+    token_hash TEXT PRIMARY KEY,
+    expires_ms INTEGER NOT NULL,
+    created_by TEXT
 );
 CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -555,6 +579,123 @@ impl Store {
                     .map_err(|_| StoreError::Corrupt(format!("session id {s}")))
             })
             .collect()
+    }
+
+    pub fn join_token_create(
+        &self,
+        token_hash: &str,
+        expires_ms: i64,
+        by: Option<&str>,
+    ) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO join_tokens (token_hash, expires_ms, created_by) VALUES (?1, ?2, ?3)",
+            params![token_hash, expires_ms, by],
+        )?;
+        Ok(())
+    }
+
+    /// Consume a join token and register the node, atomically. Returns the
+    /// assigned node id, or `None` if the token is unknown, used or expired,
+    /// or the key is already registered.
+    pub fn node_join(
+        &self,
+        token_hash: &str,
+        now_ms: i64,
+        public_key: &str,
+        hostname: &str,
+    ) -> Result<Option<String>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let ok = tx.execute(
+            "DELETE FROM join_tokens WHERE token_hash = ?1 AND expires_ms > ?2",
+            params![token_hash, now_ms],
+        )? == 1;
+        tx.execute(
+            "DELETE FROM join_tokens WHERE expires_ms <= ?1",
+            params![now_ms],
+        )?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE public_key = ?1)",
+            params![public_key],
+            |r| r.get(0),
+        )?;
+        if !ok || known {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let base: String = hostname
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .take(40)
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+        let base = if base.is_empty() || base == "local" || base == "master" {
+            format!("node-{base}")
+        } else {
+            base
+        };
+        let mut id = base.clone();
+        let mut n = 2;
+        while tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1)",
+            params![id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            id = format!("{base}-{n}");
+            n += 1;
+        }
+        tx.execute(
+            "INSERT INTO nodes (node_id, public_key, hostname, created_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![id, public_key, hostname, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// The pinned key of a node that is not revoked.
+    pub fn node_key(&self, node_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT public_key FROM nodes WHERE node_id = ?1 AND revoked_ms IS NULL",
+                params![node_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every registered remote node.
+    pub fn registered_nodes(&self) -> Result<Vec<NodeRow>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(
+            "SELECT node_id, hostname, public_key, created_ms, revoked_ms FROM nodes ORDER BY created_ms",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(NodeRow {
+                    node_id: r.get(0)?,
+                    hostname: r.get(1)?,
+                    public_key: r.get(2)?,
+                    created_ms: r.get(3)?,
+                    revoked_ms: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn node_revoke(&self, node_id: &str, now_ms: i64) -> Result<bool> {
+        Ok(self.lock().execute(
+            "UPDATE nodes SET revoked_ms = ?2 WHERE node_id = ?1 AND revoked_ms IS NULL",
+            params![node_id, now_ms],
+        )? > 0)
     }
 
     pub fn attachment_put(

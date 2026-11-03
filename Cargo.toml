@@ -27,6 +27,7 @@ harness-node = { path = "crates/node" }
 harness-master = { path = "crates/master" }
 harness-web = { path = "crates/web" }
 harness-memory = { path = "crates/memory" }
+harness-link = { path = "crates/link" }
 
 anyhow = "1.0.104"
 argon2 = "0.6.0"
