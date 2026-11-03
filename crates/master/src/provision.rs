@@ -4,7 +4,7 @@
 //! host key are kept so manual mode can re-check.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -166,6 +166,24 @@ fn local_glibc() -> String {
         .unwrap_or_else(|| "2.0".into())
 }
 
+/// A data-dir path as the user sees it on the host. In a container the data
+/// dir is a mounted volume; `HARNESS_HOST_DATA_DIR` names it on the host so
+/// printed commands (`sudo wg-quick up …`) work there.
+fn shown_path(data_dir: &Path, p: &Path) -> PathBuf {
+    map_to_host(
+        data_dir,
+        p,
+        std::env::var_os("HARNESS_HOST_DATA_DIR").map(PathBuf::from),
+    )
+}
+
+fn map_to_host(data_dir: &Path, p: &Path, host: Option<PathBuf>) -> PathBuf {
+    match (host, p.strip_prefix(data_dir)) {
+        (Some(h), Ok(rest)) => h.join(rest),
+        _ => p.to_path_buf(),
+    }
+}
+
 impl Side {
     fn wg(&self) -> Result<MasterWg> {
         MasterWg::load_or_create(&self.data_dir.join("keys"))
@@ -188,17 +206,15 @@ impl setup::Master for Side {
         let mut wg = self.wg()?;
         wg.upsert(peer);
         wg.save(&dir)?;
-        let conf = dir.join(format!("{IFACE}.conf"));
-        Ok(
-            if std::path::Path::new(&format!("/sys/class/net/{IFACE}")).exists() {
-                format!(
-                    "sudo bash -c 'wg syncconf {IFACE} <(wg-quick strip {})'",
-                    conf.display()
-                )
-            } else {
-                format!("sudo wg-quick up {}", conf.display())
-            },
-        )
+        let conf = shown_path(&self.data_dir, &dir.join(format!("{IFACE}.conf")));
+        Ok(if Path::new(&format!("/sys/class/net/{IFACE}")).exists() {
+            format!(
+                "sudo bash -c 'wg syncconf {IFACE} <(wg-quick strip {})'",
+                conf.display()
+            )
+        } else {
+            format!("sudo wg-quick up {}", conf.display())
+        })
     }
 
     async fn join_args(&self) -> Result<String> {
@@ -464,3 +480,24 @@ impl Master {
 
 /// Jobs by id.
 pub type Jobs = Mutex<HashMap<String, Arc<Job>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_paths_for_printed_commands() {
+        let d = Path::new("/data");
+        let p = Path::new("/data/keys/wg-harness.conf");
+        assert_eq!(map_to_host(d, p, None), p);
+        assert_eq!(
+            map_to_host(d, p, Some("/srv/harness".into())),
+            Path::new("/srv/harness/keys/wg-harness.conf")
+        );
+        // Outside the data dir: unchanged.
+        assert_eq!(
+            map_to_host(d, Path::new("/etc/x"), Some("/srv".into())),
+            Path::new("/etc/x")
+        );
+    }
+}

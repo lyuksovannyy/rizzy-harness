@@ -45,12 +45,24 @@ enum Cmd {
         #[arg(long)]
         tls: bool,
         /// Extra `host:port` values accepted in Host/Origin headers.
-        #[arg(long = "allowed-host")]
+        #[arg(
+            long = "allowed-host",
+            env = "HARNESS_ALLOWED_HOSTS",
+            value_delimiter = ','
+        )]
         allowed_hosts: Vec<String>,
         /// Accept remote worker nodes here (TLS with a pinned self-signed
         /// certificate, Ed25519 node keys). Off unless given.
         #[arg(long)]
         node_listen: Option<SocketAddr>,
+        /// Run no agentic node here: chats only, agentic sessions go to
+        /// remote nodes. Used by the container image (nodes need a real host).
+        #[arg(
+            long,
+            env = "HARNESS_NO_LOCAL_NODE",
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        no_local_node: bool,
     },
     /// Print the API token (for scripts; the UI uses username + password).
     Token,
@@ -134,8 +146,9 @@ async fn serve(
     tls: bool,
     extra_hosts: Vec<String>,
     node_listen: Option<SocketAddr>,
+    no_local_node: bool,
 ) -> anyhow::Result<()> {
-    match net::exposure(bind, insecure_bind)? {
+    match net::exposure(bind, insecure_bind, net::in_container())? {
         net::Exposure::Loopback => {}
         net::Exposure::WireGuard(iface) => {
             tracing::info!(%bind, %iface, "serving on a WireGuard interface (peers only)");
@@ -146,6 +159,11 @@ async fn serve(
                 );
             }
         }
+        net::Exposure::Container => tracing::info!(
+            %bind,
+            "in a container: reachable only where the port is published (publish it on \
+             127.0.0.1 or the WireGuard address, never 0.0.0.0)"
+        ),
         net::Exposure::Insecure => tracing::warn!(
             %bind,
             "listening on an address that is not WireGuard (--insecure-bind){}. Use only on a \
@@ -163,16 +181,23 @@ async fn serve(
     tracing::info!(provider = provider.name(), model = %cfg.provider.model, "provider");
 
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
-    let node = agentic_node(
-        dir,
-        &cfg,
-        policy,
-        provider.clone(),
-        env_remove,
-        &secrets,
-        "local",
-    )
-    .await?;
+    let node = if no_local_node {
+        tracing::info!("no local node: agentic sessions run on remote nodes");
+        None
+    } else {
+        Some(
+            agentic_node(
+                dir,
+                &cfg,
+                policy,
+                provider.clone(),
+                env_remove,
+                &secrets,
+                "local",
+            )
+            .await?,
+        )
+    };
 
     // The master's own chat runtime: same session code, no workspace and no
     // file or shell tools; only the web tools from `[web]`.
@@ -247,10 +272,12 @@ async fn serve(
         tracing::warn!(error = %e, "skipping agent definition");
     }
     master.set_agents(agents);
-    master
-        .add_link(node.attach().await, true)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    if let Some(node) = &node {
+        master
+            .add_link(node.attach().await, true)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
     master
         .add_link(chat.attach().await, true)
         .await
@@ -496,6 +523,8 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
+        // No colour codes in `docker logs`, journald or files.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     let cli = Cli::parse();
     let dir = data_dir(&cli.data_dir)?;
@@ -506,7 +535,19 @@ async fn main() -> anyhow::Result<()> {
             tls,
             allowed_hosts,
             node_listen,
-        } => serve(&dir, bind, insecure_bind, tls, allowed_hosts, node_listen).await,
+            no_local_node,
+        } => {
+            serve(
+                &dir,
+                bind,
+                insecure_bind,
+                tls,
+                allowed_hosts,
+                node_listen,
+                no_local_node,
+            )
+            .await
+        }
         Cmd::Token => {
             let t = auth::load_or_create_token(&api_token_path(&dir))?;
             println!("{}", t.expose());

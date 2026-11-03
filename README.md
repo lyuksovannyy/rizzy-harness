@@ -136,6 +136,43 @@ data directory once on each device:
 ./target/release/harness serve --bind 10.8.0.1:7777 --tls
 ```
 
+## Central server in Docker
+
+The master (web UI, chats, node management) can run in a container. **Nodes
+cannot, by design**: a node needs the real host (WireGuard, the firewall, the
+user's files and tools), so the image runs no agentic node; agentic sessions go
+to remote nodes you set up from the UI.
+
+```bash
+mkdir -p data && sudo chown 10001:10001 data
+```
+
+```bash
+docker compose up -d --build
+```
+
+```bash
+docker compose exec harness harness claim-code
+```
+
+Then open `http://127.0.0.1:7777` (from elsewhere: `ssh -L 7777:127.0.0.1:7777`
+or the WireGuard address). Notes:
+
+- `compose.yaml` uses **host networking** so the master can reach nodes over
+  the host's WireGuard interface and bind loopback / the tunnel address exactly
+  as on bare metal. With host networking `0.0.0.0` is refused.
+- Without host networking (UI and chats only), publish on loopback:
+  `-p 127.0.0.1:7777:7777`. Inside its own network the container may bind
+  `0.0.0.0` (`HARNESS_CONTAINER=1`); **never publish on `0.0.0.0`**: Docker's
+  published ports bypass ufw/iptables rules on the host. A different host
+  port needs `HARNESS_ALLOWED_HOSTS=127.0.0.1:8080` (the Host header check).
+- Setting up a node prints `sudo wg-quick up <data>/keys/wg-harness.conf`: run it
+  **on the host**. `HARNESS_HOST_DATA_DIR` (set in compose) makes the printed path
+  the host's. Then add `--node-listen 10.77.0.1:7443` to the command.
+- Nodes receive the master's own binary, built on Debian 13: fine for Debian 13
+  and Ubuntu 26.04 nodes, too new for older glibc (the setup checks this).
+- Docker Hub rate limits: `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
+
 ## Remote worker nodes
 
 Agentic sessions can run on other machines. Start the master with a node port
@@ -247,6 +284,13 @@ cargo build -p harness-provision --features test-util --example fake_sshd
 
 ```bash
 node web/e2e/setup.cjs target/debug/harness target/debug/examples/fake_sshd
+```
+
+The container (a running image published on `127.0.0.1:7781`, with a
+`[provider] kind = "mock"` harness.toml in its data volume):
+
+```bash
+node web/e2e/container.cjs http://127.0.0.1:7781/ "$(docker exec <container> harness claim-code)"
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

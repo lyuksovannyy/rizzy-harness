@@ -1117,3 +1117,44 @@ saved, commands listed, manual firewall 409, mode switch, per-action root requir
 watchdog problem → attention, watch toggle clears it), `web/e2e/setup.cjs` (record
 shown as manual, no firewall button, *Check now* reports password logins, problem under
 the bar, watch toggle, switch to automatic asks for a root login).
+
+### 2026-11-03 — Central server in Docker
+
+**What runs in the container:** the master (web UI, chats, node setup, watchdog) and
+nothing else. `HARNESS_NO_LOCAL_NODE=1` (`serve --no-local-node`) skips the embedded
+agentic node; agentic sessions go to remote nodes, and without one the UI already says
+"set one up". **Nodes are not containerised, by design**: a node is the host's
+WireGuard peer, its firewall, its user's files and tools; in a container it would
+either see nothing useful or need so many privileges that the container is a fiction.
+
+**Image** (`Dockerfile`): web build (node 22) → `cargo build --release --locked`
+(rust 1.99) → `debian:trixie-slim`, no apt (only the CA bundle is copied in), runs as
+uid 10001, data in `/data` (0700), `STOPSIGNAL SIGINT` (serve shuts down on SIGINT;
+PID 1 ignores SIGTERM without a handler). Debian 13 on purpose: the master uploads
+**its own binary** to nodes, so its glibc must not be newer than theirs (checked by
+the setup already). `REGISTRY` build arg for Docker Hub mirrors.
+
+**Networking, two ways:**
+* `compose.yaml` default, **host networking**: the master reaches nodes through the
+  host's `wg-harness` and binds loopback / `10.77.0.1` exactly as on bare metal. The
+  `sudo wg-quick up …` command printed during node setup is run on the host;
+  `HARNESS_HOST_DATA_DIR` maps the printed path to the host's (`./data`).
+* Own network (UI and chats only): inside the container `0.0.0.0` is allowed
+  (`HARNESS_CONTAINER=1`, set by the image, never guessed), and exposure is decided by
+  publishing; the docs say `-p 127.0.0.1:7777:7777`, never `0.0.0.0` (Docker's
+  published ports bypass the host's ufw/iptables rules). **Guard:** if a host-only
+  interface (`docker0`, `podman0`, `cni-podman0`) is visible, the container is on the
+  host's network and `0.0.0.0` is refused; best effort, documented as such.
+* `HARNESS_ALLOWED_HOSTS` (comma-separated) for a different published port.
+
+**Evidence (run here, real Docker 29):** image built from this Dockerfile (163 MB; only
+a CA-proxy shim added for this sandbox's egress, in a scratch copy); in bridge mode:
+UI served, wrong Host → 403, runs as uid 10001, claim code via `docker exec`,
+`web/e2e/container.cjs` (claim, onboarding, chat answered by the master, Agentic
+disabled with "No worker node is online", only the `master` node listed), `docker stop`
+exits 0 in 0.2 s, data kept across restarts; host networking: `0.0.0.0` refused
+("docker0 is visible"), `127.0.0.1` served; `compose.yaml` as shipped: up, listening on
+loopback, claim code, host data path set. Found and fixed: `HARNESS_NO_LOCAL_NODE=1` was
+rejected by clap (bool flags only took true/false), and ANSI colours in `docker logs`.
+CI builds the image and repeats the curl/claim/host-network checks. **Not tested:** a
+node joining a containerised master over a real WireGuard tunnel (no WireGuard here).

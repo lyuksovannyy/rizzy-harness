@@ -1,0 +1,29 @@
+# Central server in Docker. Read README → "Central server in Docker" first.
+#   mkdir -p data && sudo chown 10001:10001 data   # the image runs as uid 10001
+#   docker compose up -d --build
+#   docker compose exec harness harness claim-code
+# then open http://127.0.0.1:7777 (or tunnel to it: ssh -L 7777:127.0.0.1:7777).
+services:
+  harness:
+    build: .
+    image: harness:latest
+    restart: unless-stopped
+    # Host networking: the master reaches nodes through the host's WireGuard
+    # interface and binds to loopback / the tunnel address like on bare metal.
+    # (0.0.0.0 is refused with host networking.)
+    network_mode: host
+    command: ["serve", "--bind", "127.0.0.1:7777"]
+    # After `sudo wg-quick up` of the printed config, accept nodes over the tunnel:
+    # command: ["serve", "--bind", "127.0.0.1:7777", "--node-listen", "10.77.0.1:7443"]
+    volumes:
+      - ./data:/data
+    environment:
+      # Where ./data is on the host, so printed commands (wg-quick) work there.
+      HARNESS_HOST_DATA_DIR: ${PWD}/data
+
+  # UI only, no remote nodes, isolated network: publish on loopback only.
+  # harness:
+  #   build: .
+  #   restart: unless-stopped
+  #   ports: ["127.0.0.1:7777:7777"]
+  #   volumes: ["./data:/data"]
