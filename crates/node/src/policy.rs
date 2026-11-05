@@ -19,6 +19,9 @@ pub struct NodePolicy {
     pub allow_outside_workspace: bool,
     /// File checkpoints kept per working folder for undo/rewind (0 = off).
     pub checkpoints_keep: usize,
+    /// Let agents query a graphify knowledge graph (runs the third-party
+    /// `graphify` program here; install it with `harness graphify install`).
+    pub graphify: bool,
 }
 
 impl Default for NodePolicy {
@@ -29,6 +32,7 @@ impl Default for NodePolicy {
             denied_tools: Vec::new(),
             allow_outside_workspace: false,
             checkpoints_keep: 10,
+            graphify: false,
         }
     }
 }

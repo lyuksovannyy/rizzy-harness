@@ -8,6 +8,9 @@ use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
 const MAX_GREP_RESULTS: usize = 200;
 const MAX_GLOB_RESULTS: usize = 500;
+/// With bounded reads.
+const BOUNDED_GREP_RESULTS: usize = 60;
+const BOUNDED_GLOB_RESULTS: usize = 150;
 
 pub struct Grep;
 pub struct Glob;
@@ -80,6 +83,12 @@ impl Tool for Grep {
         };
         let ws = ctx.workspace.clone();
         let cancel = ctx.cancel.clone();
+        let bounded = ctx.savings.bounded_reads;
+        let max_results = if bounded {
+            BOUNDED_GREP_RESULTS
+        } else {
+            MAX_GREP_RESULTS
+        };
         let res = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
             'files: for entry in walker(&root).flatten() {
@@ -106,10 +115,13 @@ impl Tool for Grep {
                 let text = String::from_utf8_lossy(&bytes);
                 for (i, line) in text.lines().enumerate() {
                     if re.is_match(line) {
-                        let line: String = line.chars().take(300).collect();
+                        let line: String =
+                            line.chars().take(if bounded { 200 } else { 300 }).collect();
                         out.push(format!("{}:{}:{}", rel.display(), i + 1, line));
-                        if out.len() >= MAX_GREP_RESULTS {
-                            out.push(format!("[stopped at {MAX_GREP_RESULTS} matches]"));
+                        if out.len() >= max_results {
+                            out.push(format!(
+                                "[stopped at {max_results} matches; narrow the pattern or the path]"
+                            ));
                             break 'files;
                         }
                     }
@@ -120,6 +132,7 @@ impl Tool for Grep {
         .await;
         match res {
             Ok(lines) if lines.is_empty() => ToolOutcome::ok("No matches."),
+            Ok(lines) if bounded => ToolOutcome::ok(group_by_file(&lines)),
             Ok(lines) => ToolOutcome::ok(lines.join("\n")),
             Err(e) => ToolOutcome::err(format!("grep failed: {e}")),
         }
@@ -164,6 +177,11 @@ impl Tool for Glob {
             Err(e) => return ToolOutcome::err(format!("bad glob: {e}")),
         };
         let ws = ctx.workspace.clone();
+        let max_files = if ctx.savings.bounded_reads {
+            BOUNDED_GLOB_RESULTS
+        } else {
+            MAX_GLOB_RESULTS
+        };
         let res = tokio::task::spawn_blocking(move || {
             let mut found: Vec<(SystemTime, String)> = Vec::new();
             for entry in walker(&root).flatten() {
@@ -190,19 +208,40 @@ impl Tool for Glob {
             Ok(f) if f.is_empty() => ToolOutcome::ok("No files found."),
             Ok(f) => {
                 let n = f.len();
-                let mut lines: Vec<String> = f
-                    .into_iter()
-                    .take(MAX_GLOB_RESULTS)
-                    .map(|(_, p)| p)
-                    .collect();
-                if n > MAX_GLOB_RESULTS {
-                    lines.push(format!("[{n} files, showing {MAX_GLOB_RESULTS}]"));
+                let mut lines: Vec<String> =
+                    f.into_iter().take(max_files).map(|(_, p)| p).collect();
+                if n > max_files {
+                    lines.push(format!("[{n} files, showing {max_files}]"));
                 }
                 ToolOutcome::ok(lines.join("\n"))
             }
             Err(e) => ToolOutcome::err(format!("glob failed: {e}")),
         }
     }
+}
+
+/// `path:line:text` lines regrouped so each path is written once.
+fn group_by_file(lines: &[String]) -> String {
+    let mut out = String::new();
+    let mut current: Option<&str> = None;
+    for l in lines {
+        let mut parts = l.splitn(3, ':');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(p), Some(n), Some(t)) if n.chars().all(|c| c.is_ascii_digit()) => {
+                if current != Some(p) {
+                    out.push_str(p);
+                    out.push_str(":\n");
+                    current = Some(p);
+                }
+                out.push_str(&format!("  {n}: {t}\n"));
+            }
+            _ => {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+    }
+    out.trim_end().to_string()
 }
 
 #[cfg(test)]

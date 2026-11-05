@@ -46,6 +46,7 @@ fn request() -> ChatRequest {
             schema: json!({"type": "object", "properties": {"command": {"type": "string"}}}),
         }],
         effort: None,
+        cache: false,
     }
 }
 
@@ -219,4 +220,65 @@ async fn swappable_provider_switches_between_turns() {
         LlmProvider::new(ApiKind::Openai, "http://127.0.0.1:9/v1", None).unwrap(),
     ));
     assert_eq!(sw.name(), "openai-compatible");
+}
+
+#[tokio::test]
+async fn anthropic_prompt_cache_markers_and_usage() {
+    let ev = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let sse = [
+        ev("message_start", json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":20,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500,"output_tokens":1}}})),
+        ev("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})),
+        ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}})),
+        ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
+        ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}})),
+        ev("message_stop", json!({"type":"message_stop"})),
+    ]
+    .concat();
+    let (base, seen) = serve("/v1/messages", sse).await;
+    let p = LlmProvider::new(
+        ApiKind::Anthropic,
+        &format!("{base}/v1"),
+        Some(Secret::new("k".into())),
+    )
+    .unwrap();
+    let mut req = request();
+    req.cache = true;
+    req.messages.push(ChatMsg::Assistant {
+        text: "pong".into(),
+        tool_calls: vec![],
+    });
+    req.messages.push(ChatMsg::User("again".into()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let c = p.complete(&req, tx).await.unwrap();
+    let u = c.usage.unwrap();
+    assert_eq!(u.cache_read_tokens, 3000, "{u:?}");
+    assert_eq!(u.cache_write_tokens, 500, "{u:?}");
+    let (_, body) = seen.lock().unwrap().clone().unwrap();
+    // Breakpoint on the system prompt (covers tools + system)...
+    assert_eq!(
+        body["system"][0]["cache_control"]["type"], "ephemeral",
+        "{body}"
+    );
+    // ...and on the newest message only.
+    let msgs = body["messages"].as_array().unwrap();
+    let marked: Vec<usize> = msgs
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.to_string().contains("cache_control"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(marked, vec![msgs.len() - 1], "{body}");
+
+    // Without the flag: no markers at all.
+    let (base, seen) = serve("/v1/messages", String::new()).await;
+    let p = LlmProvider::new(
+        ApiKind::Anthropic,
+        &format!("{base}/v1"),
+        Some(Secret::new("k".into())),
+    )
+    .unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = p.complete(&request(), tx).await;
+    let (_, body) = seen.lock().unwrap().clone().unwrap();
+    assert!(!body.to_string().contains("cache_control"), "{body}");
 }

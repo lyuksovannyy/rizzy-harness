@@ -8,9 +8,10 @@ import { ACCENTS, ProfileFields, ProviderForm, SearchEngineFields } from "./form
 import { enableNotify, notifyEnabled, notifySupported } from "../lib/notify";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Nodes } from "./Nodes";
+import { SavingsSettings } from "./Savings";
 import { Users } from "./Users";
 
-export type Tab = "profile" | "preferences" | "memory" | "provider" | "nodes" | "password" | "users";
+export type Tab = "profile" | "preferences" | "memory" | "provider" | "savings" | "nodes" | "password" | "users";
 
 function NotifyToggle() {
   const [on, setOn] = useState(notifyEnabled());
@@ -83,7 +84,7 @@ export default function Settings(props: {
     "profile",
     "preferences",
     "memory",
-    ...(admin ? (["provider", "nodes"] as Tab[]) : []),
+    ...(admin ? (["provider", "savings", "nodes"] as Tab[]) : []),
     ...(props.me.user_id ? (["password"] as Tab[]) : []),
     ...(admin ? (["users"] as Tab[]) : []),
   ];
@@ -174,6 +175,7 @@ export default function Settings(props: {
             )}
           </>
         )}
+        {tab === "savings" && <SavingsSettings />}
         {tab === "nodes" && <Nodes nodes={props.nodes} />}
         {tab === "provider" && (
           <div className="card stack">

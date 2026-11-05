@@ -57,8 +57,20 @@ pub struct TurnCtx<'a> {
     /// Parallel answers: run the turn once per model listed here (no tools)
     /// and record each answer as a variant. Empty = a normal turn.
     pub compare: Vec<String>,
+    pub extra: TurnExtra,
     pub cancel: CancellationToken,
     pub host: &'a dyn TurnHost,
+}
+
+/// Per-turn inputs that are not part of the agent definition.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnExtra {
+    /// Token-saving methods in effect for this turn.
+    pub savings: crate::savings::Savings,
+    /// Context that changes every turn (memory recall, page context). It is
+    /// sent after the history, not in the system prompt, so the cached
+    /// prefix stays the same from turn to turn. Never stored.
+    pub context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

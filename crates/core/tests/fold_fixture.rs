@@ -144,6 +144,7 @@ fn events() -> Vec<RawEvent> {
                 input_tokens: 1,
                 output_tokens: 2,
                 context_tokens: 1,
+                ..Default::default()
             }),
         }),
         // v2: agents, authors, variants.

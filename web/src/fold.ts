@@ -189,6 +189,8 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (p.usage) {
         v.usage.input_tokens += p.usage.input_tokens;
         v.usage.output_tokens += p.usage.output_tokens;
+        if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
+        if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
         v.context_tokens = p.usage.context_tokens ?? 0;
       }
       v.running_turn = null;

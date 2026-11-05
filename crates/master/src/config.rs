@@ -19,6 +19,8 @@ pub struct Config {
     pub web: WebConfig,
     pub memory: MemoryConfig,
     pub voice: VoiceConfig,
+    /// Token-saving methods, each one switchable.
+    pub savings: harness_core::savings::TokenSavings,
 }
 
 /// Dictation: audio goes to an OpenAI-compatible `/audio/transcriptions`

@@ -131,7 +131,11 @@ export default function Conversation(props: {
             {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
               <span
                 className="muted meter"
-                title={`${view.usage.input_tokens.toLocaleString()} in · ${view.usage.output_tokens.toLocaleString()} out`}
+                title={`${view.usage.input_tokens.toLocaleString()} in · ${view.usage.output_tokens.toLocaleString()} out${
+                  view.usage.cache_read_tokens
+                    ? ` · ${view.usage.cache_read_tokens.toLocaleString()} of the input read from the provider's cache`
+                    : ""
+                }`}
               >
                 {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
                 {compact(view.context_tokens)} {t("conv.context")}

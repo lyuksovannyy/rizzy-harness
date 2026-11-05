@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use harness_core::agent::AgentSpec;
-use harness_core::backend::{TurnCtx, TurnHost};
+use harness_core::backend::{TurnCtx, TurnExtra, TurnHost};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ToolRisk};
 use harness_core::view::SessionView;
@@ -22,6 +22,8 @@ use crate::Inner;
 struct RunningTurn {
     turn_id: String,
     cancel: CancellationToken,
+    /// Sub-agents started by this turn use the same token-saving methods.
+    savings: harness_core::savings::Savings,
 }
 
 pub(crate) struct Session {
@@ -230,6 +232,7 @@ impl Session {
         agent: Option<AgentSpec>,
         attachments: Vec<Attachment>,
         compare: Vec<String>,
+        extra: TurnExtra,
     ) -> Result<(), String> {
         if !compare.is_empty() && (self.profile != Profile::Chat || compare.len() > 4) {
             return Err("parallel answers need a chat and at most 4 models".into());
@@ -244,6 +247,7 @@ impl Session {
             *t = Some(RunningTurn {
                 turn_id: turn_id.clone(),
                 cancel: cancel.clone(),
+                savings: extra.savings.clone(),
             });
         }
         let this = self.clone();
@@ -253,7 +257,7 @@ impl Session {
             attachments,
         };
         tokio::spawn(async move {
-            this.run_turn(msg, agent, compare, cancel).await;
+            this.run_turn(msg, agent, compare, extra, cancel).await;
         });
         Ok(())
     }
@@ -263,6 +267,7 @@ impl Session {
         msg: UserMessage,
         agent: Option<AgentSpec>,
         compare: Vec<String>,
+        extra: TurnExtra,
         cancel: CancellationToken,
     ) -> (TurnEndReason, Option<Usage>) {
         let turn_id = msg.turn_id.clone();
@@ -301,6 +306,7 @@ impl Session {
                         .unwrap_or_else(|| this.model.clone()),
                     agent,
                     compare,
+                    extra,
                     cancel: c,
                     host: &*this,
                 })
@@ -560,16 +566,30 @@ impl Session {
             .insert(child_id, child.clone());
         started(child_id);
         let turn_id = new_id();
+        let savings = self
+            .turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|t| t.savings.clone())
+            .unwrap_or_default();
         *child.turn.lock().unwrap_or_else(|p| p.into_inner()) = Some(RunningTurn {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
+            savings: savings.clone(),
         });
         let msg = UserMessage {
             turn_id,
             text: task,
             attachments: vec![],
         };
-        let (reason, usage) = child.run_turn(msg, Some(agent), vec![], cancel).await;
+        let extra = TurnExtra {
+            savings,
+            context: None,
+        };
+        let (reason, usage) = child
+            .run_turn(msg, Some(agent), vec![], extra, cancel)
+            .await;
         let merge_note = match iso {
             Some(i) => Some(self.merge_back(i, child_id).await),
             None => None,

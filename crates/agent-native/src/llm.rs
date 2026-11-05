@@ -6,8 +6,8 @@
 use futures::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest as GChatRequest, ChatStreamEvent, ContentPart,
-    MessageContent, ReasoningEffort, Tool, ToolCall, ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest as GChatRequest, ChatStreamEvent,
+    ContentPart, MessageContent, ReasoningEffort, Tool, ToolCall, ToolResponse,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
@@ -73,9 +73,19 @@ impl LlmProvider {
 
 pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
     let mut msgs = Vec::new();
+    let mut system_seen = false;
     for m in &req.messages {
         match m {
-            ChatMsg::System(t) => msgs.push(ChatMessage::system(t.clone())),
+            ChatMsg::System(t) => {
+                let mut m = ChatMessage::system(t.clone());
+                // Breakpoint 1: tools + system prompt (Anthropic caches the
+                // prefix up to and including the marked block).
+                if req.cache && !system_seen {
+                    m = m.with_options(CacheControl::Ephemeral);
+                }
+                system_seen = true;
+                msgs.push(m)
+            }
             ChatMsg::User(t) => msgs.push(ChatMessage::user(t.clone())),
             ChatMsg::Assistant { text, tool_calls } => {
                 let mut parts = Vec::new();
@@ -99,6 +109,14 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                 content.clone(),
             ))),
         }
+    }
+    // Breakpoint 2: the newest message, so the next call (same history plus
+    // one more step) reads everything up to here from the cache.
+    if req.cache
+        && msgs.len() > 1
+        && let Some(last) = msgs.last_mut()
+    {
+        *last = last.clone().with_options(CacheControl::Ephemeral);
     }
     let mut r = GChatRequest::new(msgs);
     if !req.tools.is_empty() {
@@ -164,10 +182,14 @@ impl Provider for LlmProvider {
                 }
                 ChatStreamEvent::End(end) => {
                     if let Some(u) = end.captured_usage {
+                        let d = u.prompt_tokens_details.as_ref();
+                        let n = |v: Option<i32>| v.unwrap_or(0).max(0) as u64;
                         out.usage = Some(Usage {
-                            input_tokens: u.prompt_tokens.unwrap_or(0).max(0) as u64,
-                            output_tokens: u.completion_tokens.unwrap_or(0).max(0) as u64,
+                            input_tokens: n(u.prompt_tokens),
+                            output_tokens: n(u.completion_tokens),
                             context_tokens: 0,
+                            cache_read_tokens: n(d.and_then(|d| d.cached_tokens)),
+                            cache_write_tokens: n(d.and_then(|d| d.cache_creation_tokens)),
                         });
                     }
                     if let Some(content) = end.captured_content {
@@ -322,6 +344,7 @@ mod tests {
                 schema: json!({"type": "object"}),
             }],
             effort: None,
+            cache: false,
         });
         assert_eq!(r.messages.len(), 4);
         assert_eq!(r.tools.as_ref().map(|t| t.len()), Some(1));

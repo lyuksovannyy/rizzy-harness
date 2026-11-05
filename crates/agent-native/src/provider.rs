@@ -42,6 +42,9 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMsg>,
     pub tools: Vec<ToolSpec>,
     pub effort: Option<Effort>,
+    /// Mark the stable prefix (system prompt + tools) and the newest message
+    /// as cache breakpoints, where the provider needs explicit markers.
+    pub cache: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

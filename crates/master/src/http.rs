@@ -63,6 +63,9 @@ pub fn router(master: Master) -> Router {
             )),
         )
         .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
+        .route("/api/admin/savings", get(get_savings).put(put_savings))
+        .route("/api/admin/graphify", get(get_graphify).put(put_graphify))
+        .route("/api/admin/graphify/install", post(install_graphify))
         .route(
             "/api/memory/{id}",
             axum::routing::patch(update_memory).delete(delete_memory),
@@ -1775,4 +1778,169 @@ async fn setup_firewall(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(json!(r)))
+}
+
+// ---- token savings -------------------------------------------------------
+
+async fn get_savings(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
+    require_admin(&m, &headers).await?;
+    Ok(Json(runtime(&m)?.config().savings))
+}
+
+/// Replace the token-saving settings; the next turn uses them.
+async fn put_savings(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<harness_core::savings::TokenSavings>,
+) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let mut cfg = rt.config();
+    cfg.savings = b;
+    rt.save(cfg.clone())
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(cfg.savings))
+}
+
+async fn graphify_json(m: &Master) -> serde_json::Value {
+    let local = m.graphify();
+    serde_json::json!({
+        "local_node": local.is_some(),
+        "allowed": local.as_ref().is_some_and(|(s, _)| s.allowed()),
+        "installed": harness_tools::graphify::installed_version().await,
+        "pinned_version": harness_tools::graphify::VERSION,
+        "remote_setup": [
+            "harness graphify install",
+            "echo 'graphify = true' >> <data dir>/node.toml   # then restart the node",
+        ],
+    })
+}
+
+async fn get_graphify(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    Ok(Json(graphify_json(&m).await))
+}
+
+#[derive(Deserialize)]
+struct GraphifyBody {
+    allowed: bool,
+}
+
+/// Allow or forbid graphify on the built-in node (writes its node.toml).
+/// Remote nodes decide in their own node.toml.
+async fn put_graphify(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<GraphifyBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let Some((state, path)) = m.graphify() else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this server runs no built-in node; allow graphify in each node's node.toml".into(),
+        ));
+    };
+    set_toml_bool(&path, "graphify", b.allowed)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.set_allowed(b.allowed);
+    Ok(Json(graphify_json(&m).await))
+}
+
+/// Install the pinned graphify for the user running harness (built-in node).
+async fn install_graphify(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    if m.graphify().is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this server runs no built-in node; run `harness graphify install` on each node".into(),
+        ));
+    }
+    let (ok, log) = match harness_tools::graphify::install().await {
+        Ok(l) => (true, l),
+        Err(l) => (false, l),
+    };
+    let mut v = graphify_json(&m).await;
+    v["install_ok"] = ok.into();
+    v["install_log"] = log
+        .chars()
+        .rev()
+        .take(4000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .into();
+    Ok(Json(v))
+}
+
+/// Set a top-level `key = true|false` in a TOML file, keeping the rest of
+/// the file (and its comments) as it is.
+fn set_toml_bool(path: &std::path::Path, key: &str, v: bool) -> Result<(), String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let line = format!("{key} = {v}");
+    let mut found = false;
+    let mut in_table = false;
+    let mut out: Vec<String> = Vec::new();
+    for l in text.lines() {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            in_table = true;
+        }
+        let is_key = !in_table
+            && t.strip_prefix(key)
+                .is_some_and(|r| r.trim_start().starts_with('='));
+        if is_key && !found {
+            out.push(line.clone());
+            found = true;
+        } else if !is_key {
+            out.push(l.to_string());
+        }
+    }
+    if !found {
+        // Top-level keys must come before any [table].
+        let at = out
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .unwrap_or(out.len());
+        out.insert(at, line);
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    // Must still parse as a node policy before it replaces the file.
+    toml::from_str::<toml::Value>(&s).map_err(|e| e.to_string())?;
+    std::fs::write(path, s).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod savings_tests {
+    #[test]
+    fn toml_bool_is_set_in_place() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("node.toml");
+        super::set_toml_bool(&p, "graphify", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "graphify = true\n");
+        std::fs::write(
+            &p,
+            "# my roots\nworkspace_roots = [\"/w\"]\ngraphify = true\n",
+        )
+        .unwrap();
+        super::set_toml_bool(&p, "graphify", false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "# my roots\nworkspace_roots = [\"/w\"]\ngraphify = false\n"
+        );
+    }
 }

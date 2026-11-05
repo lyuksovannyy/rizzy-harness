@@ -31,6 +31,24 @@ confidence-threshold = 0.9
 crate = "option-ext"
 allow = ["MPL-2.0"]
 
+# Servo's CSS parser, used unmodified through dom_smoothie (web_fetch
+# readability). Same reasoning as above.
+[[licenses.exceptions]]
+crate = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "cssparser-macros"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "dtoa-short"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "selectors"
+allow = ["MPL-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

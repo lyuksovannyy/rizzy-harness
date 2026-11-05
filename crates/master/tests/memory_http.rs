@@ -83,6 +83,14 @@ async fn start() -> T {
         }),
     );
     master.set_memory(Arc::new(SqliteMemory::open_in_memory().unwrap()));
+    // Supplies the admin settings (token savings) from a default config.
+    let (rt, _) = harness_master::providers::ProviderRuntime::start(
+        harness_master::config::Config::default(),
+        dir.path(),
+        Default::default(),
+    )
+    .unwrap();
+    master.set_provider_runtime(Arc::new(rt));
     master.add_link(chat.attach().await, true).await.unwrap();
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
@@ -158,17 +166,46 @@ async fn turn(t: &T, c: &str, text: &str, incognito: bool) -> String {
     sid
 }
 
+/// What the model saw besides the history: the system prompt and the
+/// per-turn context in front of the newest user message.
 fn last_system(t: &T) -> String {
     let reqs = t.rec.reqs.lock().unwrap();
-    match &reqs.last().unwrap().messages[0] {
-        ChatMsg::System(s) => s.clone(),
-        _ => panic!(),
-    }
+    let r = reqs.last().unwrap();
+    let ChatMsg::System(sys) = &r.messages[0] else {
+        panic!()
+    };
+    // Recall and the time-stamped context line change every turn: they must
+    // stay out of the system prompt, or the prompt cache never hits.
+    assert!(!sys.contains("What you remember"), "{sys}");
+    assert!(!sys.contains("Context: the user's name"), "{sys}");
+    let user = r
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ChatMsg::User(u) => Some(u.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    format!("{sys}\n{user}")
 }
 
 async fn memories(t: &T, c: &str) -> Vec<Value> {
     let (_, v) = req(t, Method::GET, "/api/memory", None, c).await;
     v["memories"].as_array().unwrap().clone()
+}
+
+/// With caching off and the chat style set to `ultra` (clamped to `lite`).
+async fn off_turn_checks(t: &T, c: &str) {
+    turn(t, c, "hello again", false).await;
+    let reqs = t.rec.reqs.lock().unwrap();
+    let r = reqs.last().unwrap();
+    assert!(!r.cache);
+    let ChatMsg::System(sys) = &r.messages[0] else {
+        panic!()
+    };
+    assert!(sys.contains("Answer style: lead with the answer"), "{sys}");
+    assert!(!sys.contains("Articles optional"), "{sys}");
 }
 
 #[tokio::test]
@@ -216,6 +253,53 @@ async fn propose_confirm_recall() {
     );
     // The context line is there too.
     assert!(sys.contains("Context: the user's name is alex"), "{sys}");
+
+    // Token savings defaults reach the model: cache markers and, in a chat,
+    // the lite style only.
+    {
+        let reqs = t.rec.reqs.lock().unwrap();
+        let r = reqs.last().unwrap();
+        assert!(r.cache);
+        let ChatMsg::System(sys) = &r.messages[0] else {
+            panic!()
+        };
+        assert!(sys.contains("Answer style: lead with the answer"), "{sys}");
+        assert!(
+            !sys.contains("Articles optional"),
+            "chat never gets the terse style"
+        );
+    }
+    // Every method can be switched off; the next turn follows.
+    let (st, v) = req(&t, Method::GET, "/api/admin/savings", None, &c).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut off = v.clone();
+    for k in [
+        "prompt_cache",
+        "mask_old_outputs",
+        "filter_shell_output",
+        "bounded_reads",
+        "web_readability",
+        "repo_map",
+        "outline_tool",
+        "graphify",
+    ] {
+        off[k] = json!(false);
+    }
+    off["chat_style"] = json!("ultra");
+    off["agentic_style"] = json!("off");
+    let (st, v) = req(&t, Method::PUT, "/api/admin/savings", Some(off), &c).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    off_turn_checks(&t, &c).await;
+    // No built-in node here: graphify is decided by each node's node.toml.
+    let (st, _) = req(
+        &t,
+        Method::PUT,
+        "/api/admin/graphify",
+        Some(json!({"allowed": true})),
+        &c,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
 
     // Incognito: no recall and no remember tool.
     turn(&t, &c, "which tram do I take?", true).await;

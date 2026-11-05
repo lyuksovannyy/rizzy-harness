@@ -93,6 +93,13 @@ pub enum MasterToNode {
         /// Parallel answers from these models (chat turns, no tools).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         compare: Vec<String>,
+        /// Token-saving methods for this turn (absent = all off).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        savings: Option<harness_core::savings::Savings>,
+        /// Per-turn context (memory recall...), placed after the history so
+        /// the cached prefix does not change. Not stored in the log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]

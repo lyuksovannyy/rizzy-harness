@@ -13,6 +13,7 @@ workspace = true
 async-trait.workspace = true
 globset.workspace = true
 harness-core.workspace = true
+harness-codemap.workspace = true
 ignore.workspace = true
 nix.workspace = true
 regex.workspace = true

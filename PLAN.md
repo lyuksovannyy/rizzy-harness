@@ -1168,3 +1168,58 @@ binary (taken out of the image, so it is the same build) and its sha256. A tag t
 differs from the Cargo.toml version fails the job. `GITHUB_TOKEN` only, no stored
 secrets. amd64 only: the master uploads its own binary to nodes, and an arm64 build
 under QEMU would cost ~an hour per run for no current user.
+
+### 2026-11-05 — Token savings (every method switchable)
+
+Research first (four named tools read from source, plus a search; details in the
+session): **none of graphify, rtk, headroom or caveman is a dependency.** rtk has no
+library API and part of its default build is BUSL-1.1; headroom's proxy has telemetry on
+by default and would hold our API key; graphify is retrieval, not compression; caveman
+measures 3% fewer output tokens than a plain "be concise" (35% for its terse level). The
+biggest saving was missing entirely: **no prompt caching**, and memory recall was pasted
+into the system prompt on every turn, which would have defeated any cache.
+
+**Settings.** `TokenSavings` (`[savings]`, Settings → Token savings) is resolved per turn
+into `Savings` (`for_turn(chat)`) and sent with `session.prompt` (additive protocol
+field; absent = everything off, so old masters and tests behave as before). Chat turns
+never get agentic methods and are capped at the `lite` style. Sub-agents inherit the
+parent turn's settings. Per-turn context (memory recall, page context) is a separate
+`context` field placed after the history, never in the system prompt.
+
+**Methods.** (1) Prompt caching: genai `CacheControl::Ephemeral` on the system prompt
+(covers tools + system) and on the newest message; cache reads/writes are counted in
+`Usage` and shown in the token meter's tooltip. (2) Observation masking (`mask.rs`):
+large tool outputs beyond the newest `keep` are replaced by a note naming the call; the
+hidden set only changes every `keep` outputs and is a pure function of the history, so
+the cache breaks rarely and later turns mask identically. (3) Shell filter (`filter.rs`):
+ANSI/OSC stripping, `\r` progress bars, build/download noise, passing test lines
+(cargo, unittest, pytest, go, jest/vitest) → a count, repeat folding; failures, panics
+and summaries kept; full output in a bounded in-memory store behind `tool_output`.
+(4) Bounded reads/grep. (5) `web_fetch` readability (dom_smoothie, MIT) + Markdown
+(htmd, Apache-2.0), raw text fallback when extraction finds < 200 chars. (6) Answer
+styles (`style.rs`): `lite` is our text; `full`/`ultra` adapted from caveman with
+attribution (THIRD_PARTY_NOTICES.md); the "write plain sentences for warnings,
+irreversible actions, questions" rules are kept in every level. (7) `harness-codemap`:
+tree-sitter tags for Rust/Python/JS/TS/Go → `outline` tool and a PageRank-ranked repo
+map (built once per folder per hour, so it does not churn the cached prefix).
+(8) graphify: `graph_query` shells out to the pinned `graphifyy==0.9.102` (installed by
+`harness graphify install` via uv or pipx, or the settings button for the built-in
+node). It needs the node's own `graphify = true` (node-local policy stays
+authoritative; the master toggle can only turn it off), writes its graph under the
+node's data dir via `GRAPHIFY_OUT`, and gets the tool env with secrets removed.
+
+**Real-model measurement** (`crates/agent-native/examples/savings_bench.rs`,
+gemini-flash-latest via an OpenAI-compatible router, 2026-11-05): one bug-fix task (a
+Python library with a wrong percentage, 40 unittest tests, padding code), 3 runs per
+setting, solved = the test suite passes afterwards.
+
+| setting | mean input tokens | mean output | solved |
+|---|---|---|---|
+| everything off | 89,729 | 838 | 3/3 |
+| defaults | 38,910 (−57%) | 695 | 3/3 |
+| defaults + repo map + `full` style | 24,978 (−72%) | 451 | 3/3 |
+
+Honest limits: one task, one model, n=3, and high run-to-run variance (the "off" runs
+ranged 40k–126k). The router reported no cached tokens, so prompt caching is not part of
+these numbers (it is covered by the Anthropic wire test, not measured live). Treat the
+direction as solid and the percentages as indicative.

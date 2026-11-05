@@ -168,8 +168,28 @@ pub fn provenance_ok(u: &url::Url, observed: &[String]) -> bool {
     })
 }
 
-/// Read at most `MAX_BODY` bytes and turn the page into plain text.
-async fn read_page(resp: reqwest::Response) -> Result<(String, bool), String> {
+/// The page's main content as Markdown (readability extraction), or `None`
+/// when extraction finds too little (then the caller falls back to all text).
+pub fn readable_markdown(html: &str, url: &str) -> Option<String> {
+    let mut r = dom_smoothie::Readability::new(html, Some(url), None).ok()?;
+    let article = r.parse().ok()?;
+    let md = htmd::convert(&article.content).ok()?;
+    let md = md.trim();
+    if md.chars().count() < 200 {
+        return None;
+    }
+    let title = article.title.trim();
+    Some(if title.is_empty() {
+        md.to_string()
+    } else {
+        format!("# {title}\n\n{md}")
+    })
+}
+
+/// Read at most `MAX_BODY` bytes and turn the page into text: the main
+/// article as Markdown when `readable`, else all of the page's text.
+async fn read_page(resp: reqwest::Response, readable: bool) -> Result<(String, bool), String> {
+    let page_url = resp.url().to_string();
     let ctype = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -196,7 +216,22 @@ async fn read_page(resp: reqwest::Response) -> Result<(String, bool), String> {
         body.extend_from_slice(&chunk);
     }
     let text = if html {
-        html2text::from_read(&body[..], 100).map_err(|e| e.to_string())?
+        let extracted = if readable {
+            let (b, u) = (
+                String::from_utf8_lossy(&body).into_owned(),
+                page_url.clone(),
+            );
+            tokio::task::spawn_blocking(move || readable_markdown(&b, &u))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        match extracted {
+            Some(md) => md,
+            None => html2text::from_read(&body[..], 100).map_err(|e| e.to_string())?,
+        }
     } else {
         String::from_utf8_lossy(&body).into_owned()
     };
@@ -296,7 +331,7 @@ impl Tool for WebFetch {
         if !status.is_success() {
             return ToolOutcome::err(format!("{final_url} answered {status}"));
         }
-        match read_page(resp).await {
+        match read_page(resp, ctx.savings.web_readability).await {
             Ok((text, truncated)) => ToolOutcome {
                 ok: true,
                 output: format!("URL: {final_url}\n\n{text}"),

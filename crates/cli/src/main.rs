@@ -75,6 +75,20 @@ enum Cmd {
         #[command(subcommand)]
         cmd: NodeCmd,
     },
+    /// Optional graphify knowledge graph for agents (third-party program).
+    Graphify {
+        #[command(subcommand)]
+        cmd: GraphifyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphifyCmd {
+    /// Install the pinned graphify version for this user (uv or pipx).
+    /// Then allow it with `graphify = true` in node.toml and restart.
+    Install,
+    /// Show whether graphify is installed and allowed here.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -272,11 +286,14 @@ async fn serve(
         tracing::warn!(error = %e, "skipping agent definition");
     }
     master.set_agents(agents);
-    if let Some(node) = &node {
+    if let Some((node, graphify)) = &node {
         master
             .add_link(node.attach().await, true)
             .await
             .map_err(anyhow::Error::msg)?;
+        // The built-in node shares this machine and its node.toml with the
+        // master, so the settings page may switch graphify for it.
+        master.set_graphify(graphify.clone(), dir.join("node.toml"));
     }
     master
         .add_link(chat.attach().await, true)
@@ -350,10 +367,17 @@ async fn agentic_node(
     env_remove: Vec<String>,
     secrets: &harness_core::SecretSet,
     node_id: &str,
-) -> anyhow::Result<NodeRuntime> {
+) -> anyhow::Result<(NodeRuntime, Arc<harness_tools::graphify::GraphifyState>)> {
+    // graphify: only if this node's own policy allows it (node.toml).
+    let graphify =
+        harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
+    let mut tools = harness_tools::builtin();
+    tools.push(Arc::new(harness_tools::graphify::GraphQuery::new(
+        graphify.clone(),
+    )));
     let backend = NativeBackend::new(
         provider,
-        harness_tools::builtin(),
+        tools,
         NativeConfig {
             env_remove,
             secrets: secrets.clone(),
@@ -366,7 +390,7 @@ async fn agentic_node(
             ..Default::default()
         },
     );
-    Ok(NodeRuntime::start(NodeConfig {
+    let rt = NodeRuntime::start(NodeConfig {
         node_id: node_id.into(),
         hostname: hostname(),
         policy,
@@ -378,7 +402,8 @@ async fn agentic_node(
         incognito_ttl: None,
         checkpoints_dir: Some(dir.join("checkpoints")),
     })
-    .await?)
+    .await?;
+    Ok((rt, graphify))
 }
 
 async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> anyhow::Result<()> {
@@ -409,7 +434,7 @@ async fn node_run(dir: &Path) -> anyhow::Result<()> {
     let secrets = harness_core::SecretSet::default();
     let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
     let provider: Arc<dyn Provider> = runtime.provider.clone();
-    let node = agentic_node(
+    let (node, _graphify) = agentic_node(
         dir,
         &cfg,
         policy,
@@ -547,6 +572,29 @@ async fn main() -> anyhow::Result<()> {
                 no_local_node,
             )
             .await
+        }
+        Cmd::Graphify { cmd } => {
+            let policy = NodePolicy::load(&dir.join("node.toml"))?;
+            if matches!(cmd, GraphifyCmd::Install) {
+                match harness_tools::graphify::install().await {
+                    Ok(log) => println!("{log}"),
+                    Err(log) => bail!("install failed:\n{log}"),
+                }
+            }
+            println!(
+                "graphify: {} (pinned {}); allowed by {}: {}",
+                harness_tools::graphify::installed_version()
+                    .await
+                    .unwrap_or_else(|| "not installed".into()),
+                harness_tools::graphify::VERSION,
+                dir.join("node.toml").display(),
+                if policy.graphify {
+                    "yes"
+                } else {
+                    "no (add `graphify = true` and restart)"
+                }
+            );
+            Ok(())
         }
         Cmd::Token => {
             let t = auth::load_or_create_token(&api_token_path(&dir))?;

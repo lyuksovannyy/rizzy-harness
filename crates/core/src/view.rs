@@ -275,8 +275,7 @@ impl SessionView {
             }
             EventKind::TurnEnded(t) => {
                 if let Some(u) = &t.usage {
-                    self.usage.input_tokens += u.input_tokens;
-                    self.usage.output_tokens += u.output_tokens;
+                    self.usage.add(u);
                     self.context_tokens = u.context_tokens;
                 }
                 self.running_turn = None;

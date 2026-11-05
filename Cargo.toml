@@ -21,6 +21,7 @@ harness-core = { path = "crates/core" }
 harness-store = { path = "crates/store" }
 harness-protocol = { path = "crates/protocol" }
 harness-tools = { path = "crates/tools" }
+harness-codemap = { path = "crates/codemap" }
 harness-agent-native = { path = "crates/agent-native" }
 harness-agents = { path = "crates/agents" }
 harness-node = { path = "crates/node" }

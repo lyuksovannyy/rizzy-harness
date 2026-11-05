@@ -134,7 +134,45 @@ max_approval_mode = "ask"            # ask_all | ask | auto
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]
 allow_outside_workspace = false
+graphify = false                     # let agents query a graphify knowledge graph (see below)
 ```
+
+### Token savings
+
+Settings → Token savings (admin) switches each method on or off; it is
+stored as `[savings]` in `harness.toml` and applies from the next message.
+
+| Method | Default | Applies to | What it does |
+|---|---|---|---|
+| `prompt_cache` | on | chat + agentic | Marks the stable start of each request (instructions, tools, history) cacheable; Anthropic bills re-reads at 10% or less. Per-turn context (memory recall) is sent after the history so it does not invalidate the cache. |
+| `mask_old_outputs` | on, keep 8 | agentic | Tool outputs older than the newest 8–15 become a one-line note; hidden in batches so the cache stays valid. |
+| `filter_shell_output` | on | agentic | Colours, progress bars, build noise and passing-test lines removed, repeats folded; the full output stays on the node (`tool_output`). |
+| `bounded_reads` | on | agentic | 400-line read windows, 60 grep matches grouped by file. |
+| `outline_tool` | on | agentic | `outline`: a file's definitions with line numbers (Rust, Python, JS, TS, Go). |
+| `repo_map` | off | agentic | A ranked map of the repository's definitions (tree-sitter + PageRank) in the instructions. |
+| `web_readability` | on | chat + agentic | `web_fetch` returns the main article as Markdown. |
+| `chat_style` / `agentic_style` | lite / lite | | Answer style: `off`, `lite`, `full`, `ultra`. Chats are capped at `lite`. |
+| `graphify` | off | agentic | `graph_query` tool, only on nodes that allow and installed it. |
+
+```toml
+[savings]
+agentic_style = "full"
+repo_map = true
+repo_map_tokens = 1024
+```
+
+**graphify (optional).** A third-party Python program (Graphify-Labs/graphify,
+Apache-2.0) that builds a knowledge graph of the repository. On the built-in
+node: Settings → Token savings → *Install graphify*, then *Allow*. On another
+node (each node decides for itself):
+
+```bash
+harness graphify install
+```
+
+then add `graphify = true` to that node's `node.toml` and restart it. The
+graph is stored in the node's data folder, never in your repository, and
+graphify gets no API keys.
 
 `harness doctor` checks the setup.
 
@@ -303,6 +341,18 @@ cargo build -p harness-provision --features test-util --example fake_sshd
 
 ```bash
 node web/e2e/setup.cjs target/debug/harness target/debug/examples/fake_sshd
+```
+
+Token savings page (graphify part runs only when it is installed):
+
+```bash
+node web/e2e/savings.cjs target/debug/harness
+```
+
+Token savings against a real model (key from the environment, never printed):
+
+```bash
+BENCH_BASE_URL=https://api.example/v1 BENCH_KEY=... BENCH_MODEL=some-model cargo run -p harness-agent-native --example savings_bench -- 3
 ```
 
 The container (a running image published on `127.0.0.1:7781`, with a

@@ -127,6 +127,8 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
     assert_eq!(c.approval_mode, harness_core::policy::ApprovalMode::Ask);
 
     h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -165,6 +167,8 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -193,6 +197,8 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     // Now approve a long-running command and cancel it while it runs.
     let pidfile = h.ws.join("pid");
     h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -254,6 +260,8 @@ async fn policy_denied_tool_never_runs() {
     .await;
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -304,6 +312,8 @@ async fn resume_replays_in_batches() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -415,6 +425,8 @@ async fn recovers_interrupted_turn_on_start() {
     let mut link = node.attach().await;
     link.to_node
         .send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
             agent: None,
             attachments: vec![],
             compare: vec![],
@@ -463,6 +475,8 @@ async fn git_checkpoints_and_undo() {
     git(&["commit", "-qm", "init"]);
     let sid = h.create().await;
     h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -518,6 +532,8 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
     let mut turns = vec![];
     for v in 1..=3 {
         h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
             agent: None,
             attachments: vec![],
             compare: vec![],

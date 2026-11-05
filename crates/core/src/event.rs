@@ -358,6 +358,26 @@ pub struct Usage {
     /// Input tokens of the turn's last model call: the context size.
     #[serde(default)]
     pub context_tokens: u64,
+    /// Of `input_tokens`, how many were read from the provider's prompt
+    /// cache (billed at a fraction) and how many were written to it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_tokens: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl Usage {
+    /// Add another call's usage (context size is the latest call's).
+    pub fn add(&mut self, u: &Usage) {
+        self.input_tokens += u.input_tokens;
+        self.output_tokens += u.output_tokens;
+        self.cache_read_tokens += u.cache_read_tokens;
+        self.cache_write_tokens += u.cache_write_tokens;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

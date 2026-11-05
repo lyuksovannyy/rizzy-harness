@@ -6,7 +6,7 @@
 //! * `search: <q>`  -> one `web_search` tool call, then a summary
 //! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
-//! * `memory?`       -> repeats the recalled-memory block of the system prompt
+//! * `memory?`       -> repeats the recalled-memory block (per-turn context)
 //! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel)
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * anything else   -> echoes the message back, streamed word by word
@@ -59,6 +59,8 @@ impl Provider for Mock {
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
         let usage = Some(Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: estimate_tokens(&req.messages),
             output_tokens: 1,
             context_tokens: 0,
@@ -88,7 +90,7 @@ impl Provider for Mock {
                 usage,
             });
         }
-        let user = req
+        let raw_user = req
             .messages
             .iter()
             .rev()
@@ -97,6 +99,14 @@ impl Provider for Mock {
                 _ => None,
             })
             .unwrap_or_default();
+        // Per-turn context comes first in the user message; commands follow it.
+        let (context, user) = match raw_user
+            .strip_prefix("<context>\n")
+            .and_then(|r| r.split_once("\n</context>\n\n"))
+        {
+            Some((c, u)) => (c.to_string(), u.to_string()),
+            None => (String::new(), raw_user),
+        };
         let call = |tool: &str, input| Completion {
             text: String::new(),
             tool_calls: vec![ToolCallRef {
@@ -136,7 +146,7 @@ impl Provider for Mock {
                 Some(ChatMsg::System(s)) => s.clone(),
                 _ => String::new(),
             };
-            let block = sys
+            let block = format!("{context}\n{sys}")
                 .split("What you remember about the user")
                 .nth(1)
                 .map(|b| format!("Memory:{b}"))

@@ -38,6 +38,23 @@ async fn server() -> String {
                 Html("<html><head><title>T</title><script>var secret=1</script></head><body><h1>Hello page</h1><p>Body text here.</p></body></html>")
             }),
         )
+        .route(
+            "/article",
+            get(|| async {
+                let para = "Tokio is an asynchronous runtime for the Rust programming language. \
+                    It provides the building blocks needed for writing network applications. ";
+                Html(format!(
+                    "<html><head><title>Tokio guide</title></head><body>\
+                     <nav><a href='/a'>Home</a> <a href='/b'>Blog</a> <a href='/c'>Shop</a> NAVJUNK</nav>\
+                     <aside>Subscribe to our newsletter! ASIDEJUNK</aside>\
+                     <article><h1>Tokio guide</h1><p>{p}</p><p>{p}</p><h2>Spawning</h2>\
+                     <p>Use <code>tokio::spawn</code> to run tasks. {p}</p>\
+                     <ul><li>first item</li><li>second item</li></ul></article>\
+                     <footer>Copyright FOOTERJUNK</footer></body></html>",
+                    p = para
+                ))
+            }),
+        )
         .route("/bin", get(|| async { ([("content-type", "application/octet-stream")], vec![0u8; 10]) }))
         .route("/hop", get(|| async { Redirect::temporary("http://169.254.169.254/latest") }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -134,4 +151,26 @@ async fn fetch_refuses_private_targets() {
         "{}",
         out.output
     );
+}
+
+#[tokio::test]
+async fn fetch_readable_markdown_vs_all_text() {
+    let base = server().await;
+    let url = format!("{base}/article");
+    let f = WebFetch::allowing_private();
+    let mut c = ctx(&[&url]);
+    let all = f.run(&c, json!({"url": url})).await;
+    assert!(all.ok, "{}", all.output);
+    assert!(all.output.contains("NAVJUNK") && all.output.contains("FOOTERJUNK"));
+
+    c.savings.web_readability = true;
+    let md = f.run(&c, json!({"url": url})).await;
+    assert!(md.ok, "{}", md.output);
+    for gone in ["NAVJUNK", "ASIDEJUNK", "FOOTERJUNK"] {
+        assert!(!md.output.contains(gone), "{gone} kept:\n{}", md.output);
+    }
+    assert!(md.output.contains("`tokio::spawn`"), "{}", md.output);
+    assert!(md.output.contains("Spawning"), "{}", md.output);
+    assert!(md.output.contains("first item"), "{}", md.output);
+    assert!(md.output.len() < all.output.len());
 }

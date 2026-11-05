@@ -81,6 +81,13 @@ pub struct MasterInner {
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<harness_agents::AgentSet>,
     providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
+    /// The built-in node's graphify switch and its node.toml.
+    graphify: Mutex<
+        Option<(
+            Arc<harness_tools::graphify::GraphifyState>,
+            std::path::PathBuf,
+        )>,
+    >,
     /// Sessions with a re-sent `session.delete` in flight.
     redeleting: Mutex<HashSet<SessionId>>,
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
@@ -169,6 +176,7 @@ impl Master {
                 auth,
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),
+                graphify: Mutex::new(None),
                 redeleting: Mutex::new(HashSet::new()),
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
@@ -192,6 +200,28 @@ impl Master {
 
     pub fn provider_runtime(&self) -> Option<Arc<providers::ProviderRuntime>> {
         lock(&self.inner.providers).clone()
+    }
+
+    pub fn set_graphify(
+        &self,
+        state: Arc<harness_tools::graphify::GraphifyState>,
+        node_toml: std::path::PathBuf,
+    ) {
+        *lock(&self.inner.graphify) = Some((state, node_toml));
+    }
+
+    pub fn graphify(
+        &self,
+    ) -> Option<(
+        Arc<harness_tools::graphify::GraphifyState>,
+        std::path::PathBuf,
+    )> {
+        lock(&self.inner.graphify).clone()
+    }
+
+    /// The admin's token-saving choice (`None` without a config: tests).
+    pub fn token_savings(&self) -> Option<harness_core::savings::TokenSavings> {
+        self.provider_runtime().map(|r| r.config().savings)
     }
 
     pub fn set_memory(&self, m: Arc<dyn harness_memory::MemoryStore>) {
@@ -683,23 +713,21 @@ impl Master {
         let chosen = agent_id.or(mention).or(row.agent_id.clone());
         let mut agent =
             self.agent_spec_with(chosen.as_deref(), Some(&row.model), effort.as_deref())?;
-        if let Some(c) = context {
-            // prompt_hash still identifies the agent definition, not the context.
-            agent.system_prompt = format!("{}\n\n{c}", agent.system_prompt);
-        }
+        // Per-turn context goes after the history, not into the system
+        // prompt: a system prompt that changes every turn would make the
+        // provider re-read (and bill) the whole conversation each time.
+        let mut turn_context: Vec<String> = context.into_iter().collect();
         if row.incognito {
             // Incognito chats neither write nor read memory.
             agent.deny_tools.push("remember".into());
         } else if let Some(mem) = self.memory() {
             match mem.recall(row.owner_id.as_deref(), &text, 6).await {
-                Ok(facts) => {
-                    if let Some(block) = harness_memory::context_block(&facts) {
-                        agent.system_prompt = format!("{}\n\n{block}", agent.system_prompt);
-                    }
-                }
+                Ok(facts) => turn_context.extend(harness_memory::context_block(&facts)),
                 Err(err) => tracing::warn!(error = %err, "memory recall failed"),
             }
         }
+        let chat = row.profile.as_deref() == Some("chat");
+        let savings = self.token_savings().map(|t| t.for_turn(chat));
         self.send_command(&row.node_id, |req_id| MasterToNode::Prompt {
             req_id,
             session_id: sid,
@@ -707,6 +735,8 @@ impl Master {
             agent: Some(agent),
             attachments,
             compare,
+            savings,
+            context: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
         })
         .await
     }

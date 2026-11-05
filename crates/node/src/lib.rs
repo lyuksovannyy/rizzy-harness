@@ -268,11 +268,17 @@ impl NodeRuntime {
                 agent,
                 attachments,
                 compare,
+                savings,
+                context,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
+                let extra = harness_core::backend::TurnExtra {
+                    savings: savings.unwrap_or_default(),
+                    context,
+                };
                 match self.session(session_id) {
-                    Some(s) => s.prompt(text, agent, attachments, compare).await,
+                    Some(s) => s.prompt(text, agent, attachments, compare, extra).await,
                     None => Err("unknown session".into()),
                 }
             }

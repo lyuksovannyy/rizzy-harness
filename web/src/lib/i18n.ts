@@ -56,6 +56,7 @@ const en = {
   "settings.users": "Users",
   "settings.memory": "Memory",
   "settings.nodes": "Nodes",
+  "settings.savings": "Token savings",
   "home.toReview": "{n} new memories to review",
   "home.toReviewOne": "1 new memory to review",
 } as const;

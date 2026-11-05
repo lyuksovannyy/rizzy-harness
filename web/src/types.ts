@@ -105,6 +105,9 @@ export interface Usage {
   input_tokens: number;
   output_tokens: number;
   context_tokens: number;
+  /** Of input_tokens, read from / written to the provider's prompt cache. */
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
 }
 
 export interface UploadedAttachment {
@@ -322,4 +325,31 @@ export interface SetupCommands {
   firewall_off: string;
   ssh_on: string;
   ssh_off: string;
+}
+
+export type Style = "off" | "lite" | "full" | "ultra";
+
+export interface TokenSavings {
+  prompt_cache: boolean;
+  mask_old_outputs: boolean;
+  keep_tool_outputs: number;
+  filter_shell_output: boolean;
+  bounded_reads: boolean;
+  web_readability: boolean;
+  chat_style: Style;
+  agentic_style: Style;
+  repo_map: boolean;
+  repo_map_tokens: number;
+  outline_tool: boolean;
+  graphify: boolean;
+}
+
+export interface GraphifyStatus {
+  local_node: boolean;
+  allowed: boolean;
+  installed: string | null;
+  pinned_version: string;
+  remote_setup: string[];
+  install_ok?: boolean;
+  install_log?: string;
 }

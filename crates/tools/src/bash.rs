@@ -143,8 +143,15 @@ impl Tool for Bash {
         ));
 
         let mut combined = String::new();
+        // With filtering on, keep (much) more: the full text is stored for
+        // `tool_output`, the model only sees the filtered version.
+        let keep_chars = if ctx.savings.filter_shell_output && ctx.outputs.is_some() {
+            crate::outputs::MAX_STORED
+        } else {
+            4 * crate::MAX_OUTPUT_CHARS
+        };
         let forward = |stream: OutputStream, s: String, combined: &mut String| {
-            if combined.len() < 4 * crate::MAX_OUTPUT_CHARS {
+            if combined.len() < keep_chars {
                 combined.push_str(&s);
             }
             if let Some(ui) = &ctx.output {
@@ -195,7 +202,27 @@ impl Tool for Bash {
             forward(stream, s, &mut combined);
         }
 
-        let (mut output, truncated) = cap(combined);
+        let (mut output, truncated) = match &ctx.outputs {
+            Some(store) if ctx.savings.filter_shell_output => {
+                let f = crate::filter::filter(&combined);
+                let (text, cut) = cap(f.text);
+                if f.removed_lines > 0 || cut {
+                    let total = combined.lines().count();
+                    let id = store.put(combined);
+                    (
+                        format!(
+                            "{text}\n[filtered: {} of {total} lines not shown; full output: \
+                             tool_output id={id}]",
+                            f.removed_lines
+                        ),
+                        cut,
+                    )
+                } else {
+                    (text, false)
+                }
+            }
+            _ => cap(combined),
+        };
         match end {
             End::Exited(code) => {
                 if output.is_empty() {

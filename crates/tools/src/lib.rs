@@ -4,7 +4,11 @@
 //! confined to the workspace unless the node policy says otherwise.
 
 mod bash;
+pub mod filter;
 mod fs;
+pub mod graphify;
+mod outline;
+pub mod outputs;
 mod search;
 
 use std::path::{Component, Path, PathBuf};
@@ -19,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 pub use bash::Bash;
 pub use fs::{Edit, Read, Write};
+pub use outline::Outline;
+pub use outputs::{OutputStore, ToolOutput};
 pub use search::{Glob, Grep};
 
 /// Cap on what the model sees from one tool call.
@@ -37,6 +43,10 @@ pub struct ToolCtx {
     /// the model wrote. Network tools only follow URLs found here, so injected
     /// instructions cannot make the model smuggle data out in a URL it builds.
     pub observed: Arc<Vec<String>>,
+    /// Token-saving methods in effect for this call.
+    pub savings: harness_core::savings::Savings,
+    /// Where full outputs of filtered commands are kept (`tool_output`).
+    pub outputs: Option<Arc<OutputStore>>,
 }
 
 impl ToolCtx {
@@ -49,6 +59,8 @@ impl ToolCtx {
             timeout: Duration::from_secs(600),
             env_remove: Vec::new(),
             observed: Arc::default(),
+            savings: Default::default(),
+            outputs: None,
         }
     }
 
@@ -167,6 +179,11 @@ pub trait Tool: Send + Sync {
     /// JSON Schema of the input object.
     fn schema(&self) -> Value;
     fn risk(&self) -> ToolRisk;
+    /// Offered to the model only when this returns true (tools that exist
+    /// for a token-saving method are off with it).
+    fn enabled(&self, _savings: &harness_core::savings::Savings) -> bool {
+        true
+    }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome;
 }
 
@@ -180,6 +197,8 @@ pub fn builtin() -> ToolSet {
         Arc::new(Edit),
         Arc::new(Grep),
         Arc::new(Glob),
+        Arc::new(ToolOutput),
+        Arc::new(Outline),
     ]
 }
 

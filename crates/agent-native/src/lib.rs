@@ -2,8 +2,10 @@
 //! host's approval gate), feed results back, repeat until the model stops.
 
 pub mod llm;
+pub mod mask;
 pub mod mock;
 pub mod provider;
+pub mod style;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -123,7 +125,15 @@ pub struct NativeBackend {
     provider: Arc<dyn Provider>,
     tools: ToolSet,
     config: NativeConfig,
+    /// Full outputs of filtered commands (`tool_output`).
+    outputs: Arc<harness_tools::OutputStore>,
+    repo_maps: std::sync::Mutex<RepoMaps>,
 }
+
+type RepoMaps =
+    std::collections::HashMap<(std::path::PathBuf, usize), (std::time::Instant, Option<String>)>;
+
+const REPO_MAP_TTL: Duration = Duration::from_secs(3600);
 
 impl NativeBackend {
     pub fn new(provider: Arc<dyn Provider>, tools: ToolSet, config: NativeConfig) -> Self {
@@ -131,15 +141,22 @@ impl NativeBackend {
             provider,
             tools,
             config,
+            outputs: Arc::default(),
+            repo_maps: Default::default(),
         }
     }
 
     /// Tools offered to the model: the runtime's tools, narrowed to what the
     /// agent asks for. (Node policy still gates execution separately.)
-    fn tool_specs(&self, agent: Option<&harness_core::agent::AgentSpec>) -> Vec<ToolSpec> {
+    fn tool_specs(
+        &self,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        savings: &harness_core::savings::Savings,
+    ) -> Vec<ToolSpec> {
         let mut specs: Vec<ToolSpec> = self
             .tools
             .iter()
+            .filter(|t| t.enabled(savings))
             .filter(|t| agent.is_none_or(|a| a.allows_tool(t.name())))
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
@@ -406,21 +423,36 @@ impl AgentBackend for NativeBackend {
         let base_prompt = agent
             .map(|a| a.system_prompt.as_str())
             .unwrap_or(&self.config.system_prompt);
-        let system = if ctx.cwd.as_os_str().is_empty() {
+        let sv = &ctx.extra.savings;
+        let keep = sv.keep_tool_outputs.map(|k| k as usize);
+        let mut system = if ctx.cwd.as_os_str().is_empty() {
             base_prompt.to_string()
         } else {
             format!("{base_prompt}\n\nWorking directory: {}", ctx.cwd.display())
         };
+        let style = style::fragment(sv.style);
+        if !style.is_empty() {
+            system = format!("{system}\n\n{style}");
+        }
+        if let Some(map) = self.repo_map(&ctx).await {
+            system = format!("{system}\n\n{map}");
+        }
         let mut usage = Usage::default();
         let (mut summary, mut recent) = split_summary(&ctx.history);
         let limit = self.config.summarize_after_tokens;
+        let history_tokens = |events: &[RawEvent]| {
+            let mut m = history_to_messages(events);
+            if let Some(k) = keep {
+                mask::mask_old_outputs(&mut m, k);
+            }
+            provider::estimate_tokens(&m) as usize
+        };
         if limit > 0
-            && provider::estimate_tokens(&history_to_messages(recent)) as usize > limit
+            && history_tokens(recent) > limit
             && let Some((text, through_seq, u)) =
                 self.summarize(&ctx, summary.as_deref(), recent).await
         {
-            usage.input_tokens += u.input_tokens;
-            usage.output_tokens += u.output_tokens;
+            usage.add(&u);
             host.emit(EventKind::HistorySummarized(HistorySummarized {
                 turn_id: ctx.turn_id.clone(),
                 through_seq,
@@ -437,11 +469,16 @@ impl AgentBackend for NativeBackend {
         };
         let mut messages = vec![ChatMsg::System(system)];
         messages.extend(history_to_messages(recent));
-        messages.push(ChatMsg::User(ctx.user_text.clone()));
+        // Per-turn context sits after the history: the system prompt and the
+        // history stay byte-identical from turn to turn (prompt cache).
+        messages.push(ChatMsg::User(match &ctx.extra.context {
+            Some(c) => format!("<context>\n{c}\n</context>\n\n{}", ctx.user_text),
+            None => ctx.user_text.clone(),
+        }));
         if !ctx.compare.is_empty() {
             return self.compare(&ctx, messages, usage, author).await;
         }
-        let tools = self.tool_specs(agent);
+        let tools = self.tool_specs(agent, sv);
         // The master only puts an effort on the spec when the model supports it.
         let effort = agent
             .and_then(|a| a.effort.as_deref())
@@ -452,11 +489,16 @@ impl AgentBackend for NativeBackend {
 
         for _ in 0..MAX_STEPS {
             let message_id = new_id();
+            let mut sent = messages.clone();
+            if let Some(k) = keep {
+                mask::mask_old_outputs(&mut sent, k);
+            }
             let req = ChatRequest {
                 model: ctx.model.clone(),
-                messages: messages.clone(),
+                messages: sent,
                 tools: tools.clone(),
                 effort,
+                cache: sv.prompt_cache,
             };
             let (tx, rx) = mpsc::unbounded_channel();
             let turn_id = ctx.turn_id.clone();
@@ -495,8 +537,7 @@ impl AgentBackend for NativeBackend {
                 Step::Done(Ok(c)) => c,
             };
             if let Some(u) = &completion.usage {
-                usage.input_tokens += u.input_tokens;
-                usage.output_tokens += u.output_tokens;
+                usage.add(u);
                 usage.context_tokens = u.input_tokens;
             }
             host.emit(EventKind::AssistantMessage(AssistantMessage {
@@ -577,8 +618,7 @@ impl AgentBackend for NativeBackend {
                 .await;
                 for (call, (outcome, u)) in admitted.into_iter().zip(results) {
                     sub_tokens += u.input_tokens + u.output_tokens;
-                    usage.input_tokens += u.input_tokens;
-                    usage.output_tokens += u.output_tokens;
+                    usage.add(&u);
                     let output = self.config.secrets.scrub(&outcome.output);
                     host.emit(EventKind::ToolCallFinished(ToolCallFinished {
                         call_id: call.call_id.clone(),
@@ -646,6 +686,36 @@ impl AgentBackend for NativeBackend {
 }
 
 impl NativeBackend {
+    /// The repository map for this turn's working folder, if enabled. Built
+    /// once per folder and kept for an hour: it sits in the system prompt,
+    /// so rebuilding it every turn would defeat the prompt cache.
+    async fn repo_map(&self, ctx: &TurnCtx<'_>) -> Option<String> {
+        let budget = ctx.extra.savings.repo_map_tokens? as usize;
+        if ctx.cwd.as_os_str().is_empty() {
+            return None;
+        }
+        let key = (ctx.cwd.clone(), budget);
+        if let Some((at, map)) = self
+            .repo_maps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            && at.elapsed() < REPO_MAP_TTL
+        {
+            return map.clone();
+        }
+        let cwd = ctx.cwd.clone();
+        let map = tokio::task::spawn_blocking(move || harness_codemap::repo_map(&cwd, budget))
+            .await
+            .ok()
+            .flatten();
+        self.repo_maps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, (std::time::Instant::now(), map.clone()));
+        map
+    }
+
     /// Parallel answers: one completion per model, no tools, each recorded
     /// as a variant of the same group (the turn id).
     async fn compare(
@@ -671,6 +741,7 @@ impl NativeBackend {
                     messages,
                     tools: vec![],
                     effort: None,
+                    cache: ctx.extra.savings.prompt_cache,
                 };
                 let (tx, rx) = mpsc::unbounded_channel();
                 let (turn_id, mid, v2, a2) = (
@@ -778,6 +849,7 @@ impl NativeBackend {
             ],
             tools: vec![],
             effort: None,
+            cache: false,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let c = tokio::select! {
@@ -804,7 +876,7 @@ impl NativeBackend {
             .tools
             .iter()
             .find(|t| t.name() == call.tool)
-            .filter(|_| offered)
+            .filter(|t| offered && t.enabled(&ctx.extra.savings))
         else {
             return ToolOutcome::err(format!("unknown tool `{}`", call.tool));
         };
@@ -843,6 +915,8 @@ impl NativeBackend {
             timeout: self.config.tool_timeout,
             env_remove: self.config.env_remove.clone(),
             observed: Arc::new(observed.to_vec()),
+            savings: ctx.extra.savings.clone(),
+            outputs: Some(self.outputs.clone()),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both.
@@ -946,6 +1020,7 @@ mod tests {
             model: "mock".into(),
             agent: None,
             compare: vec![],
+            extra: Default::default(),
             cancel: Default::default(),
             host,
         }
@@ -976,7 +1051,7 @@ mod tests {
         let mut c = ctx(&host, "run: touch hacked", dir.path());
         c.agent = Some(scout());
         let b = backend();
-        assert_eq!(b.tool_specs(c.agent.as_ref()).len(), 1);
+        assert_eq!(b.tool_specs(c.agent.as_ref(), &Default::default()).len(), 1);
         b.run_turn(c).await;
         assert!(!dir.path().join("hacked").exists());
         assert!(host.asked.lock().unwrap().is_empty(), "never even asked");

@@ -5,6 +5,9 @@ use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
 const DEFAULT_READ_LINES: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
+/// With bounded reads: the default window, and the per-line cap.
+const BOUNDED_READ_LINES: usize = 400;
+const BOUNDED_LINE_CHARS: usize = 500;
 
 pub struct Read;
 pub struct Write;
@@ -46,7 +49,16 @@ impl Tool for Read {
             .get("limit")
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
-            .unwrap_or(DEFAULT_READ_LINES);
+            .unwrap_or(if ctx.savings.bounded_reads {
+                BOUNDED_READ_LINES
+            } else {
+                DEFAULT_READ_LINES
+            });
+        let (max_chars, compact) = if ctx.savings.bounded_reads {
+            (BOUNDED_LINE_CHARS, true)
+        } else {
+            (MAX_LINE_CHARS, false)
+        };
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
             Err(e) => return ToolOutcome::err(format!("{}: {e}", path.display())),
@@ -58,20 +70,30 @@ impl Tool for Read {
         let total = text.lines().count();
         let mut out = String::new();
         for (i, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
-            let line: String = if line.chars().count() > MAX_LINE_CHARS {
-                line.chars().take(MAX_LINE_CHARS).collect::<String>() + "…"
+            let line: String = if line.chars().count() > max_chars {
+                line.chars().take(max_chars).collect::<String>() + "…"
             } else {
                 line.to_string()
             };
-            out.push_str(&format!("{:>6}\t{}\n", i + 1, line));
+            if compact {
+                // No padding: a few tokens per line add up over long files.
+                out.push_str(&format!("{}\t{}\n", i + 1, line));
+            } else {
+                out.push_str(&format!("{:>6}\t{}\n", i + 1, line));
+            }
         }
         if total == 0 {
             out.push_str("(empty file)\n");
         } else if offset - 1 + limit < total {
             out.push_str(&format!(
-                "[showing lines {}-{} of {total}; use offset to read more]\n",
+                "[showing lines {}-{} of {total}; use offset to read more{}]\n",
                 offset,
-                offset - 1 + limit
+                offset - 1 + limit,
+                if ctx.savings.outline_tool {
+                    ", or `outline` for the file's structure"
+                } else {
+                    ""
+                }
             ));
         }
         ToolOutcome::ok(out)
