@@ -1,3 +1,4 @@
+import { ArrowUp, CornerDownRight, FileText, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
@@ -333,7 +334,7 @@ export function Composer(props: {
           <ul className="chips" aria-label={t("composer.attachments")}>
             {files.map((f) => (
               <li key={f.attachment_id} className="chip" title={`${f.chars.toLocaleString()} ${t("composer.chars")}`}>
-                📄 {f.name}
+                <FileText size={14} /> {f.name}
                 {f.truncated && <span className="muted"> ({t("composer.truncated")})</span>}
                 <button
                   type="button"
@@ -341,7 +342,7 @@ export function Composer(props: {
                   aria-label={`${t("composer.remove")} ${f.name}`}
                   onClick={() => setFiles((prev) => prev.filter((x) => x !== f))}
                 >
-                  ×
+                  <X size={14} />
                 </button>
               </li>
             ))}
@@ -358,7 +359,7 @@ export function Composer(props: {
                 disabled={files.length >= MAX_ATTACHMENTS || uploading > 0}
                 onClick={() => fileInput.current?.click()}
               >
-                {uploading > 0 ? "…" : "+"}
+                {uploading > 0 ? <Loader2 size={18} className="spin" /> : <Paperclip size={18} />}
               </button>
               <input
                 ref={fileInput}
@@ -379,7 +380,7 @@ export function Composer(props: {
               aria-label="agent"
               value={props.agentId}
               onChange={(e) => props.onAgentChange(e.target.value)}
-              title={override ? `→ @${override} ${t("composer.forMessage")}` : undefined}
+              title={override ? `@${override} ${t("composer.forMessage")}` : undefined}
             >
               {props.agents.map((a) => (
                 <option key={a.id} value={a.id}>
@@ -390,7 +391,7 @@ export function Composer(props: {
           )}
           {override && override !== props.agentId && (
             <span className="pill override">
-              → @{override} {t("composer.forMessage")}
+              <CornerDownRight size={14} /> @{override} {t("composer.forMessage")}
             </span>
           )}
           {home && mode !== "search" && props.models.length > 1 && (
@@ -445,7 +446,13 @@ export function Composer(props: {
               disabled={rec === "transcribing"}
               onClick={() => void toggleMic()}
             >
-              {rec === "recording" ? "■" : rec === "transcribing" ? "…" : "🎙"}
+              {rec === "recording" ? (
+                <Square size={16} />
+              ) : rec === "transcribing" ? (
+                <Loader2 size={18} className="spin" />
+              ) : (
+                <Mic size={18} />
+              )}
             </button>
           )}
           {home && mode === "ask" && (
@@ -491,7 +498,7 @@ export function Composer(props: {
           )}
           {props.running && props.onStop ? (
             <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
-              ■
+              <Square size={16} fill="currentColor" />
             </button>
           ) : (
             <button
@@ -501,7 +508,7 @@ export function Composer(props: {
               disabled={busy || uploading > 0 || !text.trim()}
               aria-label={t("composer.send")}
             >
-              ↑
+              <ArrowUp size={18} />
             </button>
           )}
         </div>

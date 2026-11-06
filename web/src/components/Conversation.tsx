@@ -1,5 +1,6 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
+import { FileText, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
@@ -144,7 +145,7 @@ export default function Conversation(props: {
           </div>
         </div>
         <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={() => void remove()}>
-          🗑
+          <Trash2 size={18} />
         </button>
       </header>
       {props.row?.parent_id && (
@@ -224,7 +225,7 @@ export default function Conversation(props: {
                         <ul className="chips">
                           {it.attachments.map((n, j) => (
                             <li key={j} className="chip">
-                              📄 {n}
+                              <FileText size={14} /> {n}
                             </li>
                           ))}
                         </ul>

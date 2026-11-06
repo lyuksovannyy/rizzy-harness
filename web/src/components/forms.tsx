@@ -1,7 +1,10 @@
 // Forms shared by onboarding and Settings.
+import { Star } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { browserTimeZone } from "../lib/greeting";
+import { countryCode, isTimeZone, loadCities, suggestCities, suggestCountries, suggestTimeZones } from "../lib/geo";
+import { Combobox } from "./Combobox";
 import type { Prefs, ProviderKind, ProviderModel, ProviderState } from "../types";
 
 const PRESETS: { label: string; kind: ProviderKind; base: string; needsKey: boolean }[] = [
@@ -169,7 +172,7 @@ export function ProviderForm(props: { onSaved: (p: ProviderState) => void; saveL
                     toggle(m, true);
                   }}
                 >
-                  {def === m ? "★" : "☆"}
+                  <Star size={16} fill={def === m ? "currentColor" : "none"} />
                 </button>
                 {chosen[m] && (
                   <label className="check small">
@@ -203,14 +206,12 @@ export async function chooseDemoProvider(): Promise<ProviderState> {
 
 export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => void; username: string }) {
   const { prefs, onChange } = props;
-  const zones = (() => {
-    try {
-      return (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.("timeZone") ?? [];
-    } catch {
-      return [];
-    }
-  })();
+  const [cities, setCities] = useState<[string, string][] | null>(null);
   const set = (k: keyof Prefs, v: string) => onChange({ ...prefs, [k]: v.trim() ? v : null });
+  const tz = prefs.timezone ?? "";
+  const tzBad = tz.trim() !== "" && !isTimeZone(tz.trim());
+  const device = browserTimeZone();
+  const cc = countryCode(prefs.country);
   return (
     <div className="form stack">
       <label>
@@ -221,34 +222,57 @@ export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => voi
           onChange={(e) => set("display_name", e.target.value)}
         />
       </label>
-      <label>
-        Time zone
-        <input
-          list="tz-list"
-          value={prefs.timezone ?? browserTimeZone()}
-          onChange={(e) => set("timezone", e.target.value)}
+      <div className="field">
+        <span>
+          Time zone <span className="muted">(optional)</span>
+        </span>
+        <Combobox
+          label="Time zone"
+          value={tz}
+          onChange={(v) => set("timezone", v)}
+          suggest={suggestTimeZones}
+          placeholder="e.g. Europe/Riga"
+          invalid={tzBad}
         />
-        <datalist id="tz-list">
-          {zones.map((z) => (
-            <option key={z} value={z} />
-          ))}
-        </datalist>
-      </label>
+        {tzBad && <span className="error-text small">Pick a time zone from the list.</span>}
+        {!tz && (
+          <span className="muted small">
+            Empty: the AI is not told your local time.{" "}
+            <button type="button" className="link" onClick={() => set("timezone", device)}>
+              Use this device's ({device})
+            </button>
+          </span>
+        )}
+      </div>
       <div className="row">
-        <label className="grow">
+        <div className="field grow">
           <span>
             Country <span className="muted">(optional)</span>
           </span>
-          <input value={prefs.country ?? ""} onChange={(e) => set("country", e.target.value)} />
-        </label>
-        <label className="grow">
+          <Combobox
+            label="Country"
+            value={prefs.country ?? ""}
+            onChange={(v) => set("country", v)}
+            suggest={suggestCountries}
+          />
+        </div>
+        <div className="field grow">
           <span>
             City <span className="muted">(optional)</span>
           </span>
-          <input value={prefs.city ?? ""} onChange={(e) => set("city", e.target.value)} />
-        </label>
+          <Combobox
+            label="City"
+            value={prefs.city ?? ""}
+            onChange={(v) => set("city", v)}
+            onFirstFocus={() => void loadCities().then(setCities)}
+            suggest={(q) => (cities ? suggestCities(cities, q, cc) : [])}
+          />
+        </div>
       </div>
-      <p className="muted small">Country and city only tell the AI where to look for local things (transit, shops, news).</p>
+      <p className="muted small">
+        Country and city only tell the AI where to look for local things (transit, shops, news). City names: GeoNames
+        (CC BY 4.0).
+      </p>
     </div>
   );
 }

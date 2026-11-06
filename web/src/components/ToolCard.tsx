@@ -1,3 +1,4 @@
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import type { Decision, Item } from "../types";
@@ -87,7 +88,7 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
         {item.result?.exit_code !== null && item.result?.exit_code !== undefined && (
           <span className="muted mono">exit {item.result.exit_code}</span>
         )}
-        <span className="chev">{expanded ? "▾" : "▸"}</span>
+        <span className="chev">{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
       </button>
       {child && (
         <a className="child-link small" href={`#/s/${child}`}>

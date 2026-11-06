@@ -205,20 +205,14 @@ select {
 .brand {
   font-weight: 600;
 }
-.conn {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--fg-2);
-}
-.conn-live {
-  background: var(--ok);
+.conn-icon {
+  display: inline-flex;
 }
 .conn-connecting {
-  background: var(--warn);
+  color: var(--warn);
 }
 .conn-offline {
-  background: var(--bad);
+  color: var(--bad);
 }
 .nav-item {
   display: flex;
@@ -727,7 +721,8 @@ pre.diff .del {
   color: var(--fg);
   border-bottom-color: var(--fg);
 }
-.form label {
+.form label,
+.form .field {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1181,3 +1176,21 @@ details.summary p {
 ul.savings { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
 ul.savings li { display: grid; gap: 2px; }
 ul.savings input[type=number] { width: 5.5em; }
+
+.combo { position: relative; }
+.combo input { width: 100%; padding-right: 30px; }
+.combo-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+.combo-list {
+  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  margin: 0; padding: 4px; list-style: none; max-height: 280px; overflow-y: auto;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.combo-list li { color: var(--fg); font-size: 14px; display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.combo-list li.on { background: var(--bg-hover); }
+
+/* Lucide icons sit on the text baseline like the glyphs they replaced. */
+svg.lucide { vertical-align: -0.15em; flex-shrink: 0; }
+button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

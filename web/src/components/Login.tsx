@@ -1,3 +1,4 @@
+import { APP_TITLE } from "../lib/brand";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 
@@ -37,7 +38,7 @@ export function Login({ onDone }: { onDone: () => void }) {
   return (
     <div className="login">
       <form onSubmit={submit} className="card">
-        <h1>harness</h1>
+        <h1>{APP_TITLE}</h1>
         {claimed ? (
           <p className="muted">Log in to continue.</p>
         ) : (

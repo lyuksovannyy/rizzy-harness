@@ -148,10 +148,16 @@ const log = (...a) => console.log('•', ...a);
   await p.waitForSelector('.msg.assistant.streaming');
   await sleep(800);
   process.kill(-srv.pid, 'SIGKILL');
-  await sleep(700);
+  // The sidebar shows a connection icon only while something is wrong.
+  await p.waitForSelector('.conn-icon', { timeout: 10000 });
+  log('connection icon while the server is down:', await p.getAttribute('.conn-icon', 'class'));
+  await sleep(300);
   srv = start();
   await p.waitForSelector('text=turn interrupted', { timeout: 20000 });
-  log('recovered after kill -9; conn:', await p.getAttribute('.conn', 'class'));
+  await p.waitForSelector('.conn-icon', { state: 'detached', timeout: 20000 });
+  log('recovered after kill -9; connection icon gone');
+  const brand = await p.innerText('.brand');
+  if (brand !== 'rizzy harness') throw new Error('brand: ' + brand);
 
   // Mobile
   await p.setViewportSize({ width: 390, height: 800 });

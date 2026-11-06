@@ -113,14 +113,21 @@ impl Prefs {
         let tz = self
             .timezone
             .as_deref()
-            .and_then(|t| jiff::tz::TimeZone::get(t).ok())
-            .unwrap_or(jiff::tz::TimeZone::UTC);
-        let local = now.to_zoned(tz);
-        let mut out = format!(
-            "Context: the user's name is {name}. Their local time is {} ({}).",
-            local.strftime("%A %Y-%m-%d %H:%M"),
-            self.timezone.as_deref().unwrap_or("UTC")
-        );
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .and_then(|t| jiff::tz::TimeZone::get(t).ok().map(|z| (t, z)));
+        let mut out = match tz {
+            Some((zone_name, zone)) => format!(
+                "Context: the user's name is {name}. Their local time is {} ({zone_name}).",
+                now.to_zoned(zone).strftime("%A %Y-%m-%d %H:%M"),
+            ),
+            // No time zone given: say so instead of passing UTC off as theirs.
+            None => format!(
+                "Context: the user's name is {name}. Their time zone is not known; it is {} UTC.",
+                now.to_zoned(jiff::tz::TimeZone::UTC)
+                    .strftime("%A %Y-%m-%d %H:%M")
+            ),
+        };
         let place: Vec<String> = [opt(&self.city), opt(&self.country)]
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -179,7 +186,16 @@ mod context_tests {
         assert!(c.contains("Friday 2026-01-16 00:30 (Europe/Riga)"), "{c}");
         assert!(c.contains("Riga, Latvia"), "{c}");
         let bare = Prefs::default().model_context("bob", now);
-        assert!(bare.contains("bob") && bare.contains("(UTC)") && !bare.contains("They are in"));
+        assert!(
+            bare.contains("bob") && !bare.contains("They are in"),
+            "{bare}"
+        );
+        // No time zone: UTC is not passed off as the user's local time.
+        assert!(
+            bare.contains("time zone is not known; it is Thursday 2026-01-15 22:30 UTC"),
+            "{bare}"
+        );
+        assert!(!bare.contains("local time"), "{bare}");
     }
 
     #[test]

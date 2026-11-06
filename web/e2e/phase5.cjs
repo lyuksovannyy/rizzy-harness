@@ -83,13 +83,37 @@ function fakeProvider() {
 
     // Step 3: profile (time zone pre-filled from the browser).
     await p.waitForSelector('text=About you');
-    const tz = await p.inputValue('input[list="tz-list"]');
+    const tzBox = 'input[role=combobox][aria-label="Time zone"]';
+    const tz = await p.inputValue(tzBox);
     log('prefilled tz:', tz);
     check(tz === 'Europe/Riga', 'timezone should be prefilled from the browser');
+    // Time zone: can be emptied, then picked again from suggestions.
+    await p.click('button[aria-label="Clear time zone"]');
+    check((await p.inputValue(tzBox)) === '', 'time zone can be empty');
+    await p.waitForSelector('text=Empty: the AI is not told your local time.');
+    await p.fill(tzBox, 'new york');
+    await p.waitForSelector('[role=listbox] [role=option]:has-text("America/New York")');
+    await p.keyboard.press('Escape');
+    await p.fill(tzBox, 'riga');
+    await p.keyboard.press('Enter');
+    check((await p.inputValue(tzBox)) === 'Europe/Riga', 'Enter picks the first suggestion');
     await p.fill('input[placeholder="alex"]', 'Alex');
-    await p.locator('label:has-text("Country") input').fill('Latvia');
-    await p.locator('label:has-text("City") input').fill('Riga');
+    // Country: suggestions from the browser's country names.
+    const country = 'input[role=combobox][aria-label="Country"]';
+    await p.fill(country, 'latv');
+    await p.click('[role=option]:has-text("Latvia")');
+    check((await p.inputValue(country)) === 'Latvia', 'country picked');
+    // City: suggestions limited to the chosen country (data loaded on focus).
+    const city = 'input[role=combobox][aria-label="City"]';
+    await p.click(city);
+    await p.fill(city, 'ri');
+    await p.waitForSelector('[role=option]:has-text("Riga")');
+    const opts = await p.$$eval('[role=option]', (o) => o.map((x) => x.textContent));
+    log('city suggestions for "ri" in Latvia:', opts.join(', '));
+    check(!opts.some((o) => /Rio de Janeiro/.test(o)), 'cities outside Latvia are not offered');
     await p.screenshot({ path: `${S}/p5-2-profile.png` });
+    await p.click('[role=option]:has-text("Riga")');
+    check((await p.inputValue(city)) === 'Riga', 'city picked');
     await p.click('button:has-text("Continue")');
 
     // Step 3: search engine.

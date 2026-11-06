@@ -1,3 +1,5 @@
+import { Menu, SquarePen } from "lucide-react";
+import { APP_TITLE } from "../lib/brand";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
@@ -103,7 +105,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
             const a = r.items.find((x) => x.session_id === id)!;
             const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
             if (viewing) continue;
-            const n = new Notification(a.title || "harness", {
+            const n = new Notification(a.title || APP_TITLE, {
               body: a.reason === "approval" ? "Needs your approval" : "Asked you a question",
               tag: id,
             });
@@ -169,7 +171,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   // Tab title shows how many chats wait for the user.
   useEffect(() => {
     const n = attention.length + nodeAttention.length;
-    document.title = n ? `(${n}) harness` : "harness";
+    document.title = n ? `(${n}) ${APP_TITLE}` : APP_TITLE;
   }, [attention.length, nodeAttention.length]);
 
   // Looking at a chat that asked a question counts as seeing it.
@@ -302,11 +304,11 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
             aria-label={t("nav.expand")}
             onClick={() => (collapsed ? toggleCollapsed() : setDrawer(true))}
           >
-            ☰
+            <Menu size={18} />
           </button>
           {collapsed && (
             <button className="icon" aria-label={t("nav.newChat")} onClick={() => navigate({ kind: "home" })}>
-              ✎
+              <SquarePen size={18} />
             </button>
           )}
         </div>

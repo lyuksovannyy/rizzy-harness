@@ -1,3 +1,5 @@
+import { Loader2, PanelLeftClose, Search, Settings, SquarePen, WifiOff } from "lucide-react";
+import { APP_TITLE } from "../lib/brand";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { ConnState } from "../live";
@@ -45,8 +47,13 @@ export function Sidebar(props: {
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
-        <span className="brand">harness</span>
-        <span className={`conn conn-${props.conn}`} title={`connection: ${props.conn}`} />
+        <span className="brand">{APP_TITLE}</span>
+        {/* Nothing while connected; an icon only when something is wrong. */}
+        {props.conn !== "live" && (
+          <span className={`conn-icon conn-${props.conn}`} title={`connection: ${props.conn}`} role="status">
+            {props.conn === "offline" ? <WifiOff size={14} /> : <Loader2 size={14} className="spin" />}
+          </span>
+        )}
         <span className="spacer" />
         <button
           className="icon"
@@ -54,14 +61,14 @@ export function Sidebar(props: {
           title={t("nav.search")}
           onClick={() => setSearching((v) => !v)}
         >
-          ⌕
+          <Search size={18} />
         </button>
         <button className="icon" aria-label={t("nav.collapse")} title={t("nav.collapse")} onClick={props.onCollapse}>
-          ⟨
+          <PanelLeftClose size={18} />
         </button>
       </div>
       <button className="nav-item new-chat" onClick={props.onNew}>
-        ✎ {t("nav.newChat")}
+        <SquarePen size={16} /> {t("nav.newChat")}
       </button>
       {searching && (
         <input
@@ -110,7 +117,7 @@ export function Sidebar(props: {
             {props.me.username}
             {props.me.role === "admin" && <span className="muted"> · admin</span>}
           </span>
-          <span className="muted">⚙</span>
+          <Settings size={16} className="muted" />
         </button>
         <button className="link" onClick={props.onLogout}>
           {t("nav.logout")}
