@@ -1194,3 +1194,32 @@ svg.lucide { vertical-align: -0.15em; flex-shrink: 0; }
 button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Secondary text in options (search engine abilities and the like). */
+.option-hint { color: var(--fg-2); font-size: 12px; white-space: nowrap; }
+.select { position: relative; display: inline-block; min-width: 0; }
+.select-button {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 14px; cursor: pointer;
+}
+.select.compact .select-button { padding: 4px 8px; border-radius: 999px; font-size: 13px; }
+.select-list {
+  position: absolute; z-index: 30; left: 0; top: calc(100% + 4px); min-width: 240px;
+  margin: 0; padding: 4px; list-style: none; max-height: 320px; overflow-y: auto;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.composer .select-list { top: auto; bottom: calc(100% + 6px); }
+.select-list li {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+  padding: 7px 10px; border-radius: 6px; cursor: pointer; color: var(--fg); font-size: 14px;
+}
+.select-list li.on { background: var(--bg-hover); }
+.select-list li.chosen > span:first-child { font-weight: 600; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; }
+.seg button { border: 0; background: none; color: var(--fg-2); padding: 3px 10px; border-radius: 999px; font: inherit; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+.seg button.on { background: var(--bg-3); color: var(--fg); }
+.row.wrap { flex-wrap: wrap; }
+.custom-engine { padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.custom-engine .row input:not([type]) { flex: 1; }

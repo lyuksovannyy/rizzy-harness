@@ -1,9 +1,11 @@
-import { ArrowUp, CornerDownRight, FileText, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { api } from "../api";
+import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, type SearchKind, supports } from "../lib/engines";
+import { Select } from "./Select";
 import type { Agent, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 
 const FOLDERS_KEY = "harness.folders";
@@ -39,6 +41,8 @@ export interface Submission {
   attachments: string[];
   /** Home, Ask: also answer with this model, side by side. */
   compareWith: string | null;
+  /** Search mode: the engine URL template and the query (an @engine removed). */
+  search?: { url: string; query: string };
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -70,6 +74,8 @@ export function Composer(props: {
   onArrowDown?: () => boolean;
   /** The server can transcribe dictation. */
   voice?: boolean;
+  /** Search mode: the user's default engines and their own engines. */
+  search?: { text: string; image: string; custom?: CustomEngine[] };
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() =>
@@ -90,6 +96,8 @@ export function Composer(props: {
   const [busy, setBusy] = useState(false);
   const [incognito, setIncognito] = useState(false);
   const [compareWith, setCompareWith] = useState<string | null>(null);
+  const [searchKind, setSearchKind] = useState<SearchKind>("text");
+  const [enginePick, setEnginePick] = useState<Partial<Record<SearchKind, string>>>({});
   const [files, setFiles] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -176,8 +184,29 @@ export function Composer(props: {
   }, []);
 
   const enabled = useMemo(() => enabledModes(props.agenticBlocked), [props.agenticBlocked]);
-  const mention = mode === "search" || popupClosed ? null : activeMention(text, caret);
-  const suggestions = mention ? filterAgents(props.agents, mention.query) : [];
+  // Search mode: which engine runs. A leading @engine wins (and switches to
+  // the kind it can do), then the selector, then the user's default.
+  const engines = useMemo(() => allEngines(props.search?.custom), [props.search?.custom]);
+  const searching = home && mode === "search";
+  const typedEngine = searching ? engineMention(text, engines) : null;
+  let kind: SearchKind = searchKind;
+  if (typedEngine && !supports(typedEngine.engine, kind)) kind = kind === "text" ? "image" : "text";
+  const defaultUrl = (kind === "text" ? props.search?.text : props.search?.image) ?? "";
+  const engine =
+    typedEngine?.engine ??
+    engines.find((e) => e.id === enginePick[kind] && supports(e, kind)) ??
+    engineByUrl(engines, defaultUrl, kind);
+  const engineUrl = (engine ? (kind === "text" ? engine.text : engine.image) : undefined) ?? defaultUrl;
+
+  const mention = popupClosed ? null : activeMention(text, caret);
+  const suggestions: { id: string; title: string; hint: string }[] = !mention
+    ? []
+    : searching
+      ? engines
+          .filter((e) => e.id.startsWith(mention.query.toLowerCase()) || e.name.toLowerCase().startsWith(mention.query.toLowerCase()))
+          .slice(0, 8)
+          .map((e) => ({ id: e.id, title: e.name, hint: abilities(e) }))
+      : filterAgents(props.agents, mention.query).map((a) => ({ id: a.id, title: a.id, hint: a.description || a.name }));
   const popupOpen = suggestions.length > 0;
   const override = leadingMention(
     text,
@@ -216,6 +245,7 @@ export function Composer(props: {
         incognito: home && mode === "ask" && incognito,
         attachments: files.map((f) => f.attachment_id),
         compareWith: home && mode === "ask" && compareWith && compareWith !== model ? compareWith : null,
+        search: searching ? { url: engineUrl, query: typedEngine ? typedEngine.query.trim() || body : body } : undefined,
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
@@ -297,7 +327,7 @@ export function Composer(props: {
   return (
     <div className="composer-wrap">
       {popupOpen && (
-        <ul className="mention-popup" role="listbox" aria-label="agents">
+        <ul className="mention-popup" role="listbox" aria-label={searching ? "search engines" : "agents"}>
           {suggestions.map((a, i) => (
             <li
               key={a.id}
@@ -309,7 +339,7 @@ export function Composer(props: {
                 choose(a.id);
               }}
             >
-              <b>@{a.id}</b> <span className="muted">{a.description || a.name}</span>
+              <b>@{a.id}</b> {searching && <span>{a.title}</span>} <span className="option-hint">{a.hint}</span>
             </li>
           ))}
         </ul>
@@ -454,6 +484,42 @@ export function Composer(props: {
                 <Mic size={18} />
               )}
             </button>
+          )}
+          {searching && (
+            <>
+              <div className="seg" role="radiogroup" aria-label="search kind">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={kind === "text"}
+                  className={kind === "text" ? "on" : ""}
+                  onClick={() => setSearchKind("text")}
+                >
+                  <Globe size={14} /> Web
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={kind === "image"}
+                  className={kind === "image" ? "on" : ""}
+                  onClick={() => setSearchKind("image")}
+                >
+                  <Image size={14} /> Images
+                </button>
+              </div>
+              <Select
+                compact
+                label="Search engine"
+                value={engine?.id ?? ""}
+                options={engines
+                  .filter((e) => supports(e, kind))
+                  .map((e) => ({ value: e.id, label: e.name, hint: abilities(e) }))}
+                onChange={(id) => {
+                  setEnginePick((p) => ({ ...p, [kind]: id }));
+                  ta.current?.focus();
+                }}
+              />
+            </>
           )}
           {home && mode === "ask" && (
             <button

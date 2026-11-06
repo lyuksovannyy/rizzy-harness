@@ -137,6 +137,8 @@ export interface ModelInfo {
 
 export interface Prefs {
   search_url: string;
+  image_search_url?: string;
+  custom_engines?: { name: string; text_url?: string | null; image_url?: string | null }[];
   default_agent: string | null;
   default_model: string | null;
   display_name?: string | null;

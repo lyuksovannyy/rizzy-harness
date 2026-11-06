@@ -1,10 +1,12 @@
 // Forms shared by onboarding and Settings.
-import { Star } from "lucide-react";
+import { Plus, Star, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { browserTimeZone } from "../lib/greeting";
 import { countryCode, isTimeZone, loadCities, suggestCities, suggestCountries, suggestTimeZones } from "../lib/geo";
 import { Combobox } from "./Combobox";
+import { abilities, allEngines, type CustomEngine, DEFAULT_IMAGE_SEARCH, type Engine, type SearchKind, supports } from "../lib/engines";
+import { Select, type SelectOption } from "./Select";
 import type { Prefs, ProviderKind, ProviderModel, ProviderState } from "../types";
 
 const PRESETS: { label: string; kind: ProviderKind; base: string; needsKey: boolean }[] = [
@@ -277,45 +279,118 @@ export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => voi
   );
 }
 
-const ENGINES: { label: string; url: string }[] = [
-  { label: "DuckDuckGo", url: "https://duckduckgo.com/?q={q}" },
-  { label: "Google", url: "https://www.google.com/search?q={q}" },
-  { label: "Brave Search", url: "https://search.brave.com/search?q={q}" },
-  { label: "Kagi", url: "https://kagi.com/search?q={q}" },
-  { label: "Startpage", url: "https://www.startpage.com/do/search?q={q}" },
-  { label: "Bing", url: "https://www.bing.com/search?q={q}" },
-];
+/** Options for an engine selector: every engine able to do `kind`. */
+function engineOptions(engines: Engine[], kind: SearchKind): SelectOption[] {
+  return engines
+    .filter((e) => supports(e, kind))
+    .map((e) => ({ value: (kind === "text" ? e.text : e.image)!, label: e.name, hint: abilities(e) }));
+}
+
+function CustomEngines(props: { prefs: Prefs; onChange: (p: Prefs) => void }) {
+  const list = props.prefs.custom_engines ?? [];
+  const put = (i: number, c: CustomEngine | null) => {
+    const next = list.slice();
+    if (c) next[i] = c;
+    else next.splice(i, 1);
+    props.onChange({ ...props.prefs, custom_engines: next });
+  };
+  return (
+    <div className="stack">
+      <span>
+        Your own engines <span className="muted">(use {"{q}"} where the query goes)</span>
+      </span>
+      {list.map((c, i) => (
+        <div key={i} className="custom-engine stack" aria-label={`custom engine ${i + 1}`}>
+          <div className="row">
+            <input
+              aria-label="Engine name"
+              placeholder="Name"
+              value={c.name}
+              onChange={(e) => put(i, { ...c, name: e.target.value })}
+            />
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={c.text_url != null}
+                onChange={(e) => put(i, { ...c, text_url: e.target.checked ? "https://" : null })}
+              />
+              Text
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={c.image_url != null}
+                onChange={(e) => put(i, { ...c, image_url: e.target.checked ? "https://" : null })}
+              />
+              Image
+            </label>
+            <button type="button" className="icon" aria-label={`Remove ${c.name || "engine"}`} onClick={() => put(i, null)}>
+              <Trash2 size={16} />
+            </button>
+          </div>
+          {c.text_url != null && (
+            <input
+              className="mono"
+              aria-label="Text search URL"
+              placeholder="https://example.com/search?q={q}"
+              value={c.text_url}
+              onChange={(e) => put(i, { ...c, text_url: e.target.value })}
+            />
+          )}
+          {c.image_url != null && (
+            <input
+              className="mono"
+              aria-label="Image search URL"
+              placeholder="https://example.com/images?q={q}"
+              value={c.image_url}
+              onChange={(e) => put(i, { ...c, image_url: e.target.value })}
+            />
+          )}
+        </div>
+      ))}
+      <div>
+        <button
+          type="button"
+          onClick={() => props.onChange({ ...props.prefs, custom_engines: [...list, { name: "", text_url: "https://" }] })}
+        >
+          <Plus size={14} /> Add a search engine
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function SearchEngineFields(props: { prefs: Prefs; onChange: (p: Prefs) => void }) {
   const { prefs, onChange } = props;
-  const known = ENGINES.find((e) => e.url === prefs.search_url);
+  const engines = allEngines(prefs.custom_engines);
+  const imageUrl = prefs.image_search_url ?? DEFAULT_IMAGE_SEARCH;
   return (
     <div className="form stack">
-      <div className="engines" role="radiogroup" aria-label="search engine">
-        {ENGINES.map((e) => (
-          <label key={e.url} className="check">
-            <input
-              type="radio"
-              name="engine"
-              checked={prefs.search_url === e.url}
-              onChange={() => onChange({ ...prefs, search_url: e.url })}
-            />
-            {e.label}
-          </label>
-        ))}
-        <label className="check">
-          <input type="radio" name="engine" checked={!known} onChange={() => onChange({ ...prefs, search_url: "https://" })} />
-          Custom
-        </label>
+      <div className="row wrap">
+        <div className="field">
+          <span>Web search</span>
+          <Select
+            label="Web search engine"
+            value={prefs.search_url}
+            options={engineOptions(engines, "text")}
+            onChange={(v) => onChange({ ...prefs, search_url: v })}
+          />
+        </div>
+        <div className="field">
+          <span>Image search</span>
+          <Select
+            label="Image search engine"
+            value={imageUrl}
+            options={engineOptions(engines, "image")}
+            onChange={(v) => onChange({ ...prefs, image_search_url: v })}
+          />
+        </div>
       </div>
-      {!known && (
-        <label>
-          <span>
-            Search URL <span className="muted">(use {"{q}"} for the query)</span>
-          </span>
-          <input className="mono" value={prefs.search_url} onChange={(e) => onChange({ ...prefs, search_url: e.target.value })} />
-        </label>
-      )}
+      <p className="muted small">
+        In Search mode you can switch between web and image search, pick another engine, or start the query with its
+        name, like <code>@yandex red panda</code>.
+      </p>
+      <CustomEngines prefs={prefs} onChange={onChange} />
     </div>
   );
 }

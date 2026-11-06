@@ -166,11 +166,42 @@ async fn settings_defaults_validation_and_isolation() {
     let (_, _, v) = req(&t, Method::GET, "/api/me/settings", None, Some(&admin)).await;
     assert_eq!(v["timezone"], "Europe/Riga");
     assert_eq!(v["onboarded"], true);
+    // Defaults for older saved settings: DuckDuckGo images, no custom engines.
+    assert_eq!(
+        v["image_search_url"],
+        "https://duckduckgo.com/?q={q}&iax=images&ia=images"
+    );
+    assert_eq!(v["custom_engines"], json!([]));
+    let engines = json!({
+        "search_url": "https://e.com/?q={q}",
+        "image_search_url": "https://pics.example/s?q={q}",
+        "custom_engines": [
+            {"name": "Pics", "image_url": "https://pics.example/s?q={q}"},
+            {"name": "Docs", "text_url": "https://docs.example/?q={q}"}
+        ]
+    });
+    let (st, _, v) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(engines.clone()),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, _, v) = req(&t, Method::GET, "/api/me/settings", None, Some(&admin)).await;
+    assert_eq!(v["custom_engines"], engines["custom_engines"]);
+    assert_eq!(v["image_search_url"], "https://pics.example/s?q={q}");
     for bad in [
         json!({"search_url": "https://e.com/?q={q}", "timezone": "Europe/Riga; DROP"}),
         json!({"search_url": "https://e.com/?q={q}", "accent": "neon"}),
         json!({"search_url": "https://e.com/?q={q}", "display_name": "x".repeat(65)}),
         json!({"search_url": "https://e.com/?q={q}", "city": "  "}),
+        // Image engine and custom engines are checked like the text one.
+        json!({"search_url": "https://e.com/?q={q}", "image_search_url": "http://img.example/?q={q}"}),
+        json!({"search_url": "https://e.com/?q={q}", "custom_engines": [{"name": "Nothing"}]}),
+        json!({"search_url": "https://e.com/?q={q}", "custom_engines": [{"name": "Bad", "image_url": "https://x.example/"}]}),
+        json!({"search_url": "https://e.com/?q={q}", "custom_engines": [{"name": "", "text_url": "https://x.example/?q={q}"}]}),
     ] {
         let (st, _, v) = req(
             &t,

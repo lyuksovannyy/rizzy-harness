@@ -1,3 +1,4 @@
+import { DEFAULT_IMAGE_SEARCH } from "../lib/engines";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
@@ -59,6 +60,15 @@ export function Home(props: {
           onTextChange={onTextChange}
           onArrowDown={() => similar.current?.focusFirst() ?? false}
           voice={props.voice}
+          search={
+            props.prefs
+              ? {
+                  text: props.prefs.search_url,
+                  image: props.prefs.image_search_url ?? DEFAULT_IMAGE_SEARCH,
+                  custom: props.prefs.custom_engines,
+                }
+              : undefined
+          }
         />
         <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} onCount={setSimilarCount} />
         {similarCount === 0 && <Attention items={props.attention ?? []} nodes={props.nodeAttention} onOpen={props.onOpen} />}

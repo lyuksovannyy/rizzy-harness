@@ -221,7 +221,8 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
 
   const submit = async (s: Submission) => {
     if (s.mode === "search") {
-      location.href = buildSearchUrl(prefs?.search_url ?? DEFAULT_SEARCH, s.text);
+      const q = s.search ?? { url: prefs?.search_url ?? DEFAULT_SEARCH, query: s.text };
+      location.href = buildSearchUrl(q.url, q.query);
       return;
     }
     const agentic = s.mode === "agentic";

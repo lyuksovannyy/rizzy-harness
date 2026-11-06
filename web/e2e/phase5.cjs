@@ -118,7 +118,24 @@ function fakeProvider() {
 
     // Step 3: search engine.
     await p.waitForSelector('h2:has-text("Search engine")');
-    await p.check('label:has-text("Google") input');
+    const pickEngine = async (label, name) => {
+      await p.click(`button[aria-label^="${label}:"]`);
+      await p.click(`[role=listbox][aria-label="${label}"] [role=option]:has-text("${name}")`);
+    };
+    // The selector lists every engine able to do the kind, with its abilities.
+    await p.click('button[aria-label^="Web search engine:"]');
+    const webOpts = await p.$$eval('[role=listbox][aria-label="Web search engine"] [role=option]', (o) => o.map((x) => x.textContent));
+    log('web engines:', webOpts.join(' | '));
+    check(webOpts.some((o) => o === 'Googletext & image') && webOpts.some((o) => o === 'Wikipediatext'), 'abilities shown');
+    check(!webOpts.some((o) => o.startsWith('Unsplash')), 'image-only engines are not web engines');
+    await p.keyboard.press('Escape');
+    await pickEngine('Web search engine', 'Google');
+    await pickEngine('Image search engine', 'Yandex');
+    // A custom engine with text search only.
+    await p.click('button:has-text("Add a search engine")');
+    await p.fill('input[aria-label="Engine name"]', 'Docs');
+    await p.fill('input[aria-label="Text search URL"]', 'https://docs.example/?q={q}');
+    await p.screenshot({ path: `${S}/p5-3-engines.png` });
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
     const g = await p.innerText('h1.greeting');
@@ -138,15 +155,33 @@ function fakeProvider() {
     check((fs.statSync(`${S}/data/secrets.toml`).mode & 0o777) === 0o600, 'secrets.toml is 0600');
     log('files ok: key only in secrets.toml (0600)');
 
-    // Search mode uses the engine picked in onboarding.
-    await p.route('https://www.google.com/**', (r) => r.fulfill({ body: 'ok', contentType: 'text/plain' }));
-    await p.click('.new-chat');
-    await p.waitForSelector('h1.greeting');
-    await p.fill('.composer textarea', 'youtube');
-    await sleep(100);
-    await p.keyboard.press('Enter');
-    await p.waitForURL(/google\.com/);
-    log('search ->', p.url());
+    // Search mode uses the engines picked in onboarding; Images, @mention and
+    // the selector override them.
+    for (const host of ['www.google.com', 'yandex.com', 'duckduckgo.com', 'www.bing.com', 'docs.example']) {
+      await p.route(`https://${host}/**`, (r) => r.fulfill({ body: 'ok', contentType: 'text/plain' }));
+    }
+    const search = async (setup, text, expect) => {
+      await p.goto(URL_);
+      await p.waitForSelector('h1.greeting');
+      await p.click('.mode-switch button:has-text("Search")');
+      if (setup) await setup();
+      await p.fill('.composer textarea', text);
+      await sleep(100);
+      await p.click('.mode-switch button:has-text("Search")');
+      await p.focus('.composer textarea');
+      await p.keyboard.press('End');
+      await p.keyboard.press('Enter');
+      await p.waitForURL(expect);
+      log('search ->', p.url());
+    };
+    await search(null, 'youtube', /google\.com\/search\?q=youtube/);
+    await search(async () => p.click('[aria-label="search kind"] button:has-text("Images")'), 'red panda', /yandex\.com\/images\/search\?text=red%20panda/);
+    await search(null, '@duckduckgo cats', /duckduckgo\.com\/\?q=cats$/);
+    await search(async () => {
+      await p.click('button[aria-label^="Search engine:"]');
+      await p.click('[role=listbox][aria-label="Search engine"] [role=option]:has-text("Bing")');
+    }, 'rust', /bing\.com\/search\?q=rust/);
+    await search(null, '@docs tokio', /docs\.example\/\?q=tokio/);
     await p.goto(URL_);
     await p.waitForSelector('h1.greeting');
 

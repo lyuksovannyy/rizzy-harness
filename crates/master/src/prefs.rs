@@ -6,12 +6,40 @@ use serde::{Deserialize, Serialize};
 use crate::Master;
 
 pub const DEFAULT_SEARCH_URL: &str = "https://duckduckgo.com/?q={q}";
+pub const DEFAULT_IMAGE_SEARCH_URL: &str = "https://duckduckgo.com/?q={q}&iax=images&ia=images";
+/// Custom search engines a user may define.
+pub const MAX_CUSTOM_ENGINES: usize = 20;
+
+/// A user-defined search engine. Its abilities are the URLs it has: a text
+/// URL makes it a web search, an image URL an image search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEngine {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+}
+
+fn check_search_url(what: &str, u: &str) -> Result<(), String> {
+    let u = u.trim();
+    if !u.starts_with("https://") || !u.contains("{q}") || u.len() > 2048 {
+        return Err(format!("{what} must be an https:// URL containing {{q}}"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prefs {
     /// Where Search mode sends the query; `{q}` is replaced (URL-encoded).
     pub search_url: String,
+    /// The same for image searches.
+    #[serde(default = "default_image_search")]
+    pub image_search_url: String,
+    #[serde(default)]
+    pub custom_engines: Vec<CustomEngine>,
     #[serde(default)]
     pub default_agent: Option<String>,
     #[serde(default)]
@@ -35,12 +63,18 @@ pub struct Prefs {
     pub onboarded: bool,
 }
 
+fn default_image_search() -> String {
+    DEFAULT_IMAGE_SEARCH_URL.into()
+}
+
 pub const ACCENTS: &[&str] = &["blue", "violet", "green", "orange", "pink", "gray"];
 
 impl Default for Prefs {
     fn default() -> Self {
         Self {
             search_url: DEFAULT_SEARCH_URL.into(),
+            image_search_url: DEFAULT_IMAGE_SEARCH_URL.into(),
+            custom_engines: Vec::new(),
             default_agent: None,
             default_model: None,
             display_name: None,
@@ -70,9 +104,27 @@ fn key(user: Option<&str>) -> String {
 
 impl Prefs {
     pub fn validate(&self, m: &Master) -> Result<(), String> {
-        let u = self.search_url.trim();
-        if !u.starts_with("https://") || !u.contains("{q}") || u.len() > 2048 {
-            return Err("search_url must be an https:// URL containing {q}".into());
+        check_search_url("search_url", &self.search_url)?;
+        check_search_url("image_search_url", &self.image_search_url)?;
+        if self.custom_engines.len() > MAX_CUSTOM_ENGINES {
+            return Err(format!(
+                "at most {MAX_CUSTOM_ENGINES} custom search engines"
+            ));
+        }
+        for e in &self.custom_engines {
+            short_text("engine name", &Some(e.name.clone()))?;
+            if e.text_url.is_none() && e.image_url.is_none() {
+                return Err(format!(
+                    "search engine {:?} needs a text or an image URL",
+                    e.name
+                ));
+            }
+            if let Some(u) = &e.text_url {
+                check_search_url(&format!("{} text URL", e.name), u)?;
+            }
+            if let Some(u) = &e.image_url {
+                check_search_url(&format!("{} image URL", e.name), u)?;
+            }
         }
         short_text("display_name", &self.display_name)?;
         short_text("country", &self.country)?;
