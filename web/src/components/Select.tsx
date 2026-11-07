@@ -1,12 +1,14 @@
 // A dropdown whose options have a secondary line (e.g. an engine's
 // abilities). Keyboard: Enter/Space/↓ open, ↑/↓ move, Enter picks, Esc closes.
-import { useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 export interface SelectOption {
   value: string;
   label: string;
   hint?: string;
+  /** Before the label, in the list and on the button (an engine's favicon). */
+  icon?: ReactNode;
 }
 
 export function Select(props: {
@@ -63,6 +65,7 @@ export function Select(props: {
           }
         }}
       >
+        {current?.icon}
         <span className="ellipsis">{current?.label ?? "Choose…"}</span>
         {current?.hint && !props.compact && <span className="option-hint">{current.hint}</span>}
         <ChevronDown size={14} />
@@ -79,7 +82,10 @@ export function Select(props: {
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(o)}
             >
-              <span>{o.label}</span>
+              <span className="option-label">
+                {o.icon}
+                {o.label}
+              </span>
               {o.hint && <span className="option-hint">{o.hint}</span>}
             </li>
           ))}

@@ -38,13 +38,11 @@ pub fn answer_reply(block: &UiBlock, reply: &FormReply) -> Result<String, String
 /// The canonical text for `reply` (see `answer_reply`), or why the session
 /// does not take it now.
 pub fn check_reply(history: &[RawEvent], reply: &FormReply) -> Result<String, String> {
-    let mut parent = false;
     let mut asked: Option<AssistantMessage> = None;
     let mut answered = false;
     let mut chosen: HashMap<String, String> = HashMap::new();
     for e in history {
         match e.typed() {
-            Ok(EventKind::SessionCreated(c)) => parent = c.parent_session.is_some(),
             Ok(EventKind::AssistantMessage(m)) if m.message_id == reply.message_id => {
                 asked = Some(m);
                 answered = false;
@@ -73,11 +71,6 @@ pub fn check_reply(history: &[RawEvent], reply: &FormReply) -> Result<String, St
             return Err("continue with this answer first".into());
         }
     }
-    // Sub-task sessions run at most at the display level; this is the
-    // second lock, for a log written before that cap.
-    if parent {
-        return Err("a sub-task takes no answers".into());
-    }
     let Some(block) = m.blocks.iter().find(|b| b.id == reply.block_id) else {
         return Err("no such question or form in that message".into());
     };
@@ -103,7 +96,7 @@ mod tests {
 
     const ASK: &str = "Pick:\n\n```ui:choices\n{\"id\": \"db\", \"question\": \"Which?\", \"options\": [\"a\", \"b\"]}\n```\n\n```ui:progress\n{\"id\": \"p\", \"title\": \"T\", \"steps\": [{\"label\": \"x\", \"status\": \"done\"}]}\n```\n\n```ui:form\n{\"id\": \"f\"}\n```\n";
 
-    fn created(parent: bool) -> EventKind {
+    fn created() -> EventKind {
         EventKind::SessionCreated(SessionCreated {
             title: "t".into(),
             cwd: "/w".into(),
@@ -114,7 +107,7 @@ mod tests {
             profile: Profile::Chat,
             agent_id: None,
             incognito: false,
-            parent_session: parent.then(SessionId::new),
+            parent_session: None,
         })
     }
 
@@ -175,7 +168,7 @@ mod tests {
 
     #[test]
     fn an_open_question_takes_its_answer() {
-        let h = log(vec![created(false), user(), asked("m1", None)]);
+        let h = log(vec![created(), user(), asked("m1", None)]);
         assert_eq!(
             check_reply(&h, &pick()),
             Ok("Choice answer · db: o2".into())
@@ -188,13 +181,13 @@ mod tests {
 
     #[test]
     fn a_later_user_message_closes_it() {
-        let h = log(vec![created(false), asked("m1", None), user()]);
+        let h = log(vec![created(), asked("m1", None), user()]);
         assert_eq!(check_reply(&h, &pick()), Err(NOT_OPEN.into()));
     }
 
     #[test]
     fn unknown_messages_and_blocks() {
-        let h = log(vec![created(false), asked("m1", None)]);
+        let h = log(vec![created(), asked("m1", None)]);
         assert_eq!(
             check_reply(&h, &reply("m9", "db", json!({}))),
             Err("no such message".into())
@@ -217,7 +210,7 @@ mod tests {
     fn only_the_chosen_parallel_answer_is_open() {
         let both = || {
             vec![
-                created(false),
+                created(),
                 asked("m1", Some(("g", 0))),
                 asked("m2", Some(("g", 1))),
             ]
@@ -243,13 +236,8 @@ mod tests {
     }
 
     #[test]
-    fn sub_tasks_and_oversized_replies_are_refused() {
-        let h = log(vec![created(true), asked("m1", None)]);
-        assert_eq!(
-            check_reply(&h, &pick()),
-            Err("a sub-task takes no answers".into())
-        );
-        let h = log(vec![created(false), asked("m1", None)]);
+    fn oversized_replies_are_refused() {
+        let h = log(vec![created(), asked("m1", None)]);
         let big = reply(
             "m1",
             "db",

@@ -6,12 +6,13 @@ const fs = require('fs');
 // Needs Playwright with Chromium. Exits non-zero on the first failure.
 const path = require('path');
 const os = require('os');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-'));
 fs.mkdirSync(`${S}/p3/data`, { recursive: true });
 fs.mkdirSync(`${S}/p3/proj`, { recursive: true });
 fs.writeFileSync(`${S}/p3/proj/main.rs`, 'fn main() {}\n');
-fs.writeFileSync(`${S}/p3/data/harness.toml`, '[provider]\nkind = "mock"\nmock_delay_ms = 25\n');
+fs.writeFileSync(`${S}/p3/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 25\nmodels = [{ id = "mock" }]\n');
 fs.writeFileSync(`${S}/p3/data/node.toml`, `workspace_roots = ["${S}/p3"]\n`);
 const URL = 'http://127.0.0.1:7798/';
 
@@ -20,7 +21,7 @@ async function skipOnboarding(page, admin) {
   if (admin) {
     await page.waitForSelector('text=Connect an AI provider');
     await page.click('text=Skip: use the built-in demo');
-    await page.click('text=Skip: keywords only');
+    await keywordsOnly(page);
   }
   await page.waitForSelector('text=About you');
   await page.click('button:has-text("Continue")');
@@ -40,10 +41,7 @@ const log = (...a) => console.log('•', ...a);
   const errors = [];
   p.on('pageerror', e => errors.push(e.message));
   await p.goto(URL);
-  await p.fill('input[placeholder="claim code"]', code);
-  await p.fill('input[placeholder="username"]', 'alex');
-  await p.fill('input[type=password]', 'admin password');
-  await p.click('text=Create account');
+  await createOwner(p, code);
   await skipOnboarding(p, true);
   await p.waitForSelector('h1.greeting');
   log('greeting:', await p.innerText('h1.greeting'));

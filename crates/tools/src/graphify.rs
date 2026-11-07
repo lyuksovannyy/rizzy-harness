@@ -4,7 +4,7 @@
 //!
 //! Off unless three things hold: the node allows it (`graphify = true` in
 //! node.toml: it runs a third-party program on this machine), the program
-//! is installed (`harness graphify install`), and the admin's token-saving
+//! is installed (`rizzy-harness graphify install`), and the admin's token-saving
 //! settings turn it on. The graph is written under harness's data dir
 //! (`GRAPHIFY_OUT`), never into the user's repository, and harness gives it no
 //! API keys, so it only does its AST (no-LLM) extraction.
@@ -20,7 +20,7 @@ use tokio::process::Command;
 
 use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
-/// The version installed by `harness graphify install` (pinned: a newer
+/// The version installed by `rizzy-harness graphify install` (pinned: a newer
 /// release is a new third-party program and should be a deliberate update).
 pub const VERSION: &str = "0.9.102";
 const PACKAGE: &str = "graphifyy";
@@ -267,7 +267,7 @@ mod tests {
     }
 }
 
-/// Runs the real program when installed (`harness graphify install`); a
+/// Runs the real program when installed (`rizzy-harness graphify install`); a
 /// no-op otherwise. HARNESS_GRAPHIFY_TEST=1 makes it mandatory.
 #[cfg(test)]
 mod real {

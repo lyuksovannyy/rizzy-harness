@@ -63,7 +63,7 @@ export type Deck = {
   put(text: string): void;
 };
 
-export type Placed = Rect & { text: string; tier: number; pill: boolean; delay: number };
+export type Placed = Rect & { text: string; tier: number; delay: number };
 
 type Ctx = {
   rng: () => number;
@@ -83,12 +83,10 @@ export function placeLine(c: Ctx, ti: number, deck: Deck, taken: readonly Rect[]
   for (let attempt = 0; attempt < 4 && maxLen >= 10; attempt++) {
     const text = deck.take(maxLen);
     if (!text) return null;
-    // About a quarter of the near lines sit in a faint search-field outline.
-    const pill = ti >= 3 && c.rng() < 0.25;
-    const w = Math.ceil(c.measure(text, t.px) + (pill ? 1.6 * t.px + 2 : 0));
-    const h = Math.ceil(1.3 * t.px + (pill ? 0.5 * t.px + 2 : 0));
+    const w = Math.ceil(c.measure(text, t.px));
+    const h = Math.ceil(1.3 * t.px);
     const spot = bestSpot(c, w, h, t, taken);
-    if (spot) return { ...spot, w, h, text, tier: ti, pill, delay: 0 };
+    if (spot) return { ...spot, w, h, text, tier: ti, delay: 0 };
     deck.put(text);
     maxLen = Math.floor(text.length * 0.75);
   }

@@ -1,7 +1,7 @@
 //! The two setup modes.
 //!
 //! **Automatic** (fresh VPS / node-only machines) needs the *root* login.
-//! With it, harness creates its own user `harness-admin`, gives it its own
+//! With it, harness creates its own user `rizzy-harness-admin`, gives it its own
 //! SSH key and (for the setup only) sudo, and from then on logs in only as
 //! that user. At the end harness removes its own sudo unless asked to keep
 //! it: a compromised master must not be root on every node.
@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use crate::facts::{Engine, Facts, INSPECT, Support};
+use crate::facts::{Engine, Facts, Support, inspect_script};
 use crate::scripts::{self, ADMIN_USER, RUNTIME_USER};
 use crate::ssh::Output;
 use crate::wg::{MASTER_IP, Peer};
@@ -36,7 +36,7 @@ pub trait Remote: Send + Sync {
 #[async_trait::async_trait]
 pub trait Connector: Send + Sync {
     async fn connect(&self) -> Result<Box<dyn Remote>>;
-    /// Log in as another user from now on (e.g. `harness-admin`).
+    /// Log in as another user from now on (e.g. `rizzy-harness-admin`).
     fn set_user(&self, user: &str);
 }
 
@@ -221,7 +221,7 @@ fn last_lines(s: &str, n: usize) -> String {
 }
 
 pub async fn inspect(r: &dyn Remote) -> Result<Facts> {
-    let o = r.run(INSPECT, false).await?;
+    let o = r.run(&inspect_script(), false).await?;
     Ok(Facts::parse(&o.stdout))
 }
 
@@ -250,10 +250,10 @@ async fn guarded(conn: &dyn Connector, apply: &str, confirm: &str, what: &str) -
 fn engine_note(e: Engine) -> &'static str {
     match e {
         Engine::Podman => {
-            "rootless Podman for the `harness` user (no daemon, no root-equivalent group)"
+            "rootless Podman for the `rizzy-harness` user (no daemon, no root-equivalent group)"
         }
         Engine::Docker => {
-            "Docker; the `harness` user joins the `docker` group. Members of that group are \
+            "Docker; the `rizzy-harness` user joins the `docker` group. Members of that group are \
              effectively root on this server: an agent talked into `docker run -v /:/host` can \
              take it over. Prefer Podman unless you need Docker."
         }
@@ -270,7 +270,7 @@ pub struct AutoOptions {
     /// password logins are off.
     pub own_pubkey: Option<String>,
     pub engine: Engine,
-    /// Keep passwordless sudo for `harness-admin` after setup.
+    /// Keep passwordless sudo for `rizzy-harness-admin` after setup.
     pub keep_admin_sudo: bool,
     /// Key-only SSH (opt-out).
     pub protect_ssh: bool,
@@ -279,7 +279,7 @@ pub struct AutoOptions {
 }
 
 /// Automatic setup. `first` is the root login with the user's credentials;
-/// it is used to create `harness-admin` and dropped right after.
+/// it is used to create `rizzy-harness-admin` and dropped right after.
 pub async fn run_auto(
     first: Box<dyn Remote>,
     conn: &dyn Connector,
@@ -525,7 +525,7 @@ pub async fn run_auto(
     let (id, title) = ("harness", "Install and join");
     log.set(id, title, Status::Running, "uploading harness");
     let bin = master.binary(&f.arch).map_err(|e| fail(id, title, e))?;
-    c.upload("/tmp/harness.upload", &bin)
+    c.upload("/tmp/rizzy-harness.upload", &bin)
         .await
         .map_err(|e| fail(id, title, e))?;
     let join = master.join_args().await.map_err(|e| fail(id, title, e))?;
@@ -787,7 +787,7 @@ pub fn checklist(
             "WireGuard tunnel",
             f.wg_up,
             if f.wg_up {
-                "wg-harness is up".into()
+                "rizzy-harness is up".into()
             } else {
                 "Install WireGuard and create the tunnel:".into()
             },
@@ -859,7 +859,7 @@ pub fn checklist(
         if f.harness_service {
             format!("running as `{RUNTIME_USER}`")
         } else {
-            format!("Copy the harness binary to /tmp/harness.upload on the server, then run:\n{join_hint}")
+            format!("Copy the harness binary to /tmp/rizzy-harness.upload on the server, then run:\n{join_hint}")
         },
         None,
         true,

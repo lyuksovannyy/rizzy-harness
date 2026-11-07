@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { abilities, allEngines, BUILTIN_ENGINES, engineByUrl, engineMention, searchUrl, supports } from "./engines";
+import { abilities, allEngines, BUILTIN_ENGINES, engineByUrl, engineMention, engineOrigin, searchUrl, supports, urlOrigin } from "./engines";
 
 describe("search engines", () => {
   it("built-ins carry real templates and their abilities", () => {
@@ -33,5 +33,21 @@ describe("search engines", () => {
     expect(searchUrl("https://yandex.com/images/search?text={q}", "red panda & co")).toBe(
       "https://yandex.com/images/search?text=red%20panda%20%26%20co",
     );
+  });
+
+  it("an engine's favicon comes from the origin of its text URL, else its image URL", () => {
+    const all = allEngines([
+      { name: "Pics", image_url: "https://img.example:8443/s?q={q}" },
+      { name: "Half typed", text_url: "https://" },
+      { name: "Plain", text_url: "http://search.example/?q={q}" },
+    ]);
+    const by = (id: string) => all.find((e) => e.id === id)!;
+    expect(engineOrigin(by("google"))).toBe("https://www.google.com");
+    expect(engineOrigin(by("unsplash"))).toBe("https://unsplash.com");
+    expect(engineOrigin(by("pics"))).toBe("https://img.example:8443");
+    expect(engineOrigin(by("halftyped"))).toBeNull();
+    expect(engineOrigin(by("plain"))).toBeNull();
+    expect(urlOrigin("not a url")).toBeNull();
+    expect(urlOrigin(null)).toBeNull();
   });
 });

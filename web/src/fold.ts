@@ -38,6 +38,7 @@ const KNOWN = new Set([
   "agent_changed",
   "variant_selected",
   "history_summarized",
+  "model_fallback",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -83,7 +84,7 @@ export function apply(v: SessionView, e: RawEvent): void {
         model: p.model,
         backend: p.backend,
         node_id: p.node_id,
-        approval_mode: p.approval_mode ?? "ask",
+        approval_mode: p.approval_mode,
         profile: p.profile,
       };
       if (p.agent_id != null) meta!.agent_id = p.agent_id;
@@ -200,7 +201,7 @@ export function apply(v: SessionView, e: RawEvent): void {
         v.usage.output_tokens += p.usage.output_tokens;
         if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
         if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
-        v.context_tokens = p.usage.context_tokens ?? 0;
+        v.context_tokens = p.usage.context_tokens;
       }
       v.running_turn = null;
       v.running_agent = null;
@@ -218,6 +219,9 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "history_summarized":
       v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
+      break;
+    case "model_fallback":
+      v.items.push({ type: "fallback", turn_id: p.turn_id, model: p.model, from: p.from, reason: p.reason ?? null });
       break;
   }
 }

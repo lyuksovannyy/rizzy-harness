@@ -1,6 +1,6 @@
 // A user message that answers a question or form (rich_plan §6.5): the
 // answer as the user picked it (labels from the block, values as typed),
-// then their note. Without the block (an old log, a block that changed) it
+// then their note. Without the block (one that changed) it
 // is the message text, which is the canonical answer and the note.
 import { rt } from "../md/strings";
 import type { FormReply, Item, UiBlock } from "../types";

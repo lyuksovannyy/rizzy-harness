@@ -37,6 +37,8 @@ pub struct NodeConfig {
     pub policy: NodePolicy,
     pub store: Store,
     pub backend: Arc<dyn AgentBackend>,
+    /// Only when a create names no model: the master resolves the current
+    /// default for every session it creates, so this is a last resort.
     pub default_model: String,
     /// Values scrubbed from every event payload before it is stored.
     pub secrets: harness_core::SecretSet,

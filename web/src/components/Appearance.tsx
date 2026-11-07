@@ -10,6 +10,7 @@ import { t } from "../lib/i18n";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Prefs } from "../types";
 import { ACCENTS, BACKDROPS, THEMES } from "./forms";
+import { Seg } from "./Seg";
 
 const ICONS = { system: Monitor, light: Sun, dark: Moon } as const;
 
@@ -44,24 +45,15 @@ export function AppearanceFields(props: { prefs: Prefs; saved: Prefs; onChange: 
       <div className="form stack">
         <div className="field">
           {t("settings.theme")}
-          <div className="seg" role="radiogroup" aria-label="theme" onKeyDown={radioKeys}>
-            {THEMES.map((x) => {
+          <Seg
+            label="theme"
+            value={theme}
+            options={THEMES.map((x) => {
               const Icon = ICONS[x];
-              return (
-                <button
-                  key={x}
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === x}
-                  tabIndex={radioTab(theme === x)}
-                  className={theme === x ? "on" : ""}
-                  onClick={() => preview({ ...p, theme: x === "system" ? null : x })}
-                >
-                  <Icon size={14} /> {t(`theme.${x}`)}
-                </button>
-              );
+              return { value: x, label: <><Icon size={14} /> {t(`theme.${x}`)}</> };
             })}
-          </div>
+            onChange={(x) => preview({ ...p, theme: x === "system" ? null : x })}
+          />
         </div>
         <div className="field">
           {t("settings.accent")}
@@ -82,21 +74,12 @@ export function AppearanceFields(props: { prefs: Prefs; saved: Prefs; onChange: 
         </div>
         <div className="field">
           {t("settings.backdrop")}
-          <div className="seg" role="radiogroup" aria-label="backgrounds" onKeyDown={radioKeys}>
-            {BACKDROPS.map((x) => (
-              <button
-                key={x}
-                type="button"
-                role="radio"
-                aria-checked={backdrop === x}
-                tabIndex={radioTab(backdrop === x)}
-                className={backdrop === x ? "on" : ""}
-                onClick={() => props.onChange({ ...p, backdrop: x === "animated" ? null : x })}
-              >
-                {t(`backdrop.${x}`)}
-              </button>
-            ))}
-          </div>
+          <Seg
+            label="backgrounds"
+            value={backdrop}
+            options={BACKDROPS.map((x) => ({ value: x, label: t(`backdrop.${x}`) }))}
+            onChange={(x) => props.onChange({ ...p, backdrop: x === "animated" ? null : x })}
+          />
           <span className="field-hint">{t("settings.backdropHint")}</span>
         </div>
         <div className="field">

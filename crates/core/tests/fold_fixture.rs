@@ -199,6 +199,19 @@ fn events() -> Vec<RawEvent> {
                 prompt_hash: "h2".into(),
             }),
         }),
+        // The turn's model failed before any output; a fallback answers.
+        EventKind::ModelFallback(ModelFallback {
+            turn_id: "t2".into(),
+            model: "loc::small".into(),
+            from: "loc::big".into(),
+            reason: Some("unavailable".into()),
+        }),
+        EventKind::ModelFallback(ModelFallback {
+            turn_id: "t2".into(),
+            model: "loc::other".into(),
+            from: "loc::big".into(),
+            reason: None,
+        }),
         EventKind::UserMessage(UserMessage {
             turn_id: "t2".into(),
             text: "@writer draft the changelog".into(),

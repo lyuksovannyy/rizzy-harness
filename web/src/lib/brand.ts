@@ -1,2 +1,2 @@
-/** The product name shown in the UI. The binary, data folder and env vars stay `harness`. */
+/** The product name shown in the UI. Commands, files and folders are `rizzy-harness`; env vars keep the `HARNESS_` prefix. */
 export const APP_TITLE = "rizzy harness";

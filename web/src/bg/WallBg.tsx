@@ -244,7 +244,7 @@ export default function WallBg(p: BgProps & { history: History }) {
                   if (el) els.current.set(l.id, el);
                   else els.current.delete(l.id);
                 }}
-                className={`wall-line${l.pill ? " pill" : ""}${l.phase === "in" ? "" : ` ${l.phase}`}`}
+                className={`wall-line${l.phase === "in" ? "" : ` ${l.phase}`}`}
                 data-tier={ti}
                 data-text={l.phase === "typing" || l.phase === "typed" ? undefined : l.text}
                 style={

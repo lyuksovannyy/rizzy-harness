@@ -33,11 +33,11 @@ pub fn install_key(pubkey: &str) -> String {
 }
 
 /// Harness's own login user for setup and status checks.
-pub const ADMIN_USER: &str = "harness-admin";
+pub const ADMIN_USER: &str = "rizzy-harness-admin";
 /// The unprivileged user the node runs as (agents' commands run as it).
-pub const RUNTIME_USER: &str = "harness";
+pub const RUNTIME_USER: &str = "rizzy-harness";
 
-/// Create `harness-admin` with harness's key (locked password, key login
+/// Create `rizzy-harness-admin` with harness's key (locked password, key login
 /// only). With `sudo`, passwordless sudo for the setup; `drop_admin_sudo`
 /// removes it again.
 pub fn admin_user(pubkey: &str, sudo: bool) -> String {
@@ -68,35 +68,35 @@ echo "admin user ready"
 /// table, so the watchdog can check it. Read-only.
 pub fn watch_rule() -> String {
     format!(
-        "echo '{ADMIN_USER} ALL=(root) NOPASSWD: /usr/sbin/nft list table inet harness' > /etc/sudoers.d/{ADMIN_USER}-watch\nchmod 440 /etc/sudoers.d/{ADMIN_USER}-watch\nvisudo -cf /etc/sudoers.d/{ADMIN_USER}-watch\n"
+        "echo '{ADMIN_USER} ALL=(root) NOPASSWD: /usr/sbin/nft list table inet rizzy_harness' > /etc/sudoers.d/{ADMIN_USER}-watch\nchmod 440 /etc/sudoers.d/{ADMIN_USER}-watch\nvisudo -cf /etc/sudoers.d/{ADMIN_USER}-watch\n"
     )
 }
 
 /// Read-only state for the watchdog, as the login user: `fw=on|off|unknown`.
 pub const WATCH: &str = r#"if [ "$(id -u)" = 0 ]; then n="nft"
-elif sudo -n -l /usr/sbin/nft list table inet harness >/dev/null 2>&1; then n="sudo -n /usr/sbin/nft"
+elif sudo -n -l /usr/sbin/nft list table inet rizzy_harness >/dev/null 2>&1; then n="sudo -n /usr/sbin/nft"
 else n=""; fi
 if [ -z "$n" ]; then echo fw=unknown
-elif $n list table inet harness >/dev/null 2>&1; then echo fw=on
+elif $n list table inet rizzy_harness >/dev/null 2>&1; then echo fw=on
 else echo fw=off; fi
 "#;
 
 /// Turn the firewall off and keep it off after reboots.
 pub fn firewall_disable() -> String {
     format!(
-        "{HEAD}systemctl stop harness-revert-fw.timer 2>/dev/null || true\nnft delete table inet harness 2>/dev/null || true\nsystemctl disable harness-firewall.service 2>/dev/null || true\necho disabled\n"
+        "{HEAD}systemctl stop rizzy-harness-revert-fw.timer 2>/dev/null || true\nnft delete table inet rizzy_harness 2>/dev/null || true\nsystemctl disable rizzy-harness-firewall.service 2>/dev/null || true\necho disabled\n"
     )
 }
 
 /// Undo key-only SSH (passwords allowed again). Shown, never run by harness.
 pub fn ssh_unharden() -> String {
     format!(
-        "{HEAD}rm -f /etc/ssh/sshd_config.d/10-harness.conf\nsshd -t\nsystemctl reload ssh 2>/dev/null || systemctl reload sshd\necho \"password logins allowed again\"\n"
+        "{HEAD}rm -f /etc/ssh/sshd_config.d/10-rizzy-harness.conf\nsshd -t\nsystemctl reload ssh 2>/dev/null || systemctl reload sshd\necho \"password logins allowed again\"\n"
     )
 }
 
 /// Remove a key from the login user's authorized_keys (e.g. harness's key
-/// from root once `harness-admin` works).
+/// from root once `rizzy-harness-admin` works).
 pub fn remove_key(pubkey: &str) -> String {
     let k = pubkey.replace('\'', "");
     format!(
@@ -173,7 +173,7 @@ pub fn packages() -> String {
 /// before reload; reverts itself unless confirmed.
 pub fn ssh_harden() -> String {
     format!(
-        r#"{HEAD}conf=/etc/ssh/sshd_config.d/10-harness.conf
+        r#"{HEAD}conf=/etc/ssh/sshd_config.d/10-rizzy-harness.conf
 grep -qE '^\s*Include\s+/etc/ssh/sshd_config.d/\*\.conf' /etc/ssh/sshd_config || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 mkdir -p /etc/ssh/sshd_config.d
 cat > "$conf" <<'CONF'
@@ -184,8 +184,8 @@ PermitRootLogin prohibit-password
 CONF
 if ! sshd -t; then rm -f "$conf"; echo "sshd rejected the new config; nothing changed" >&2; exit 1; fi
 reload() {{ systemctl reload ssh 2>/dev/null || systemctl reload sshd; }}
-systemctl stop harness-revert-ssh.timer 2>/dev/null || true
-systemd-run --quiet --unit=harness-revert-ssh --on-active={REVERT_AFTER_S} /bin/sh -c "rm -f $conf; systemctl reload ssh 2>/dev/null || systemctl reload sshd"
+systemctl stop rizzy-harness-revert-ssh.timer 2>/dev/null || true
+systemd-run --quiet --unit=rizzy-harness-revert-ssh --on-active={REVERT_AFTER_S} /bin/sh -c "rm -f $conf; systemctl reload ssh 2>/dev/null || systemctl reload sshd"
 reload
 echo "applied; reverts in {REVERT_AFTER_S}s unless confirmed"
 "#
@@ -193,14 +193,14 @@ echo "applied; reverts in {REVERT_AFTER_S}s unless confirmed"
 }
 
 pub fn ssh_confirm() -> String {
-    "systemctl stop harness-revert-ssh.timer 2>/dev/null || true\necho confirmed\n".into()
+    "systemctl stop rizzy-harness-revert-ssh.timer 2>/dev/null || true\necho confirmed\n".into()
 }
 
 /// The node's firewall: our own nftables table, inbound limited to SSH and
 /// WireGuard (outbound open: agents need the internet).
 pub fn firewall_rules(ssh_port: u16) -> String {
     format!(
-        r#"table inet harness {{
+        r#"table inet rizzy_harness {{
   chain input {{
     type filter hook input priority 0; policy drop;
     iif "lo" accept
@@ -218,14 +218,14 @@ pub fn firewall_rules(ssh_port: u16) -> String {
 
 pub fn firewall(ssh_port: u16) -> String {
     format!(
-        r#"{HEAD}mkdir -p /etc/harness
-cat > /etc/harness/firewall.nft <<'NFT'
+        r#"{HEAD}mkdir -p /etc/rizzy-harness
+cat > /etc/rizzy-harness/firewall.nft <<'NFT'
 {rules}NFT
-nft -c -f /etc/harness/firewall.nft
-nft delete table inet harness 2>/dev/null || true
-systemctl stop harness-revert-fw.timer 2>/dev/null || true
-systemd-run --quiet --unit=harness-revert-fw --on-active={REVERT_AFTER_S} /usr/sbin/nft delete table inet harness
-nft -f /etc/harness/firewall.nft
+nft -c -f /etc/rizzy-harness/firewall.nft
+nft delete table inet rizzy_harness 2>/dev/null || true
+systemctl stop rizzy-harness-revert-fw.timer 2>/dev/null || true
+systemd-run --quiet --unit=rizzy-harness-revert-fw --on-active={REVERT_AFTER_S} /usr/sbin/nft delete table inet rizzy_harness
+nft -f /etc/rizzy-harness/firewall.nft
 echo "applied; reverts in {REVERT_AFTER_S}s unless confirmed"
 "#,
         rules = firewall_rules(ssh_port)
@@ -235,23 +235,23 @@ echo "applied; reverts in {REVERT_AFTER_S}s unless confirmed"
 /// Cancel the revert and load the rules at every boot.
 pub fn firewall_confirm() -> String {
     format!(
-        r#"{HEAD}systemctl stop harness-revert-fw.timer 2>/dev/null || true
-cat > /etc/systemd/system/harness-firewall.service <<'UNIT'
+        r#"{HEAD}systemctl stop rizzy-harness-revert-fw.timer 2>/dev/null || true
+cat > /etc/systemd/system/rizzy-harness-firewall.service <<'UNIT'
 [Unit]
-Description=harness node firewall
+Description=rizzy-harness node firewall
 Before=network-pre.target
 Wants=network-pre.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft -f /etc/harness/firewall.nft
+ExecStart=/usr/sbin/nft -f /etc/rizzy-harness/firewall.nft
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable harness-firewall.service
+systemctl enable rizzy-harness-firewall.service
 echo confirmed
 "#
     )
@@ -263,26 +263,26 @@ pub fn wireguard(node_ip: &str, master_ip: &str, master_pubkey: &str) -> String 
     format!(
         r#"{HEAD}umask 077
 mkdir -p /etc/wireguard
-[ -s /etc/wireguard/harness.key ] || wg genkey > /etc/wireguard/harness.key
-cat > /etc/wireguard/wg-harness.conf <<CONF
+[ -s /etc/wireguard/rizzy-harness.key ] || wg genkey > /etc/wireguard/rizzy-harness.key
+cat > /etc/wireguard/rizzy-harness.conf <<CONF
 [Interface]
 Address = {node_ip}/24
 ListenPort = {WG_PORT}
-PostUp = wg set %i private-key /etc/wireguard/harness.key
+PostUp = wg set %i private-key /etc/wireguard/rizzy-harness.key
 
 [Peer]
 # the harness master
 PublicKey = {master_pubkey}
 AllowedIPs = {master_ip}/32
 CONF
-systemctl enable wg-quick@wg-harness >/dev/null 2>&1
-systemctl restart wg-quick@wg-harness
-echo "NODE_PUBKEY=$(wg pubkey < /etc/wireguard/harness.key)"
+systemctl enable wg-quick@rizzy-harness >/dev/null 2>&1
+systemctl restart wg-quick@rizzy-harness
+echo "NODE_PUBKEY=$(wg pubkey < /etc/wireguard/rizzy-harness.key)"
 "#
     )
 }
 
-/// Dedicated `harness` user, the binary (uploaded to `/tmp/harness.upload`),
+/// Dedicated `rizzy-harness` user, the binary (uploaded to `/tmp/rizzy-harness.upload`),
 /// node policy, optional provider config, join, and a systemd service.
 pub fn node_service(
     join_cmd_args: &str,
@@ -292,12 +292,12 @@ pub fn node_service(
     use crate::facts::Engine;
     let file = |name: &str, body: &str| {
         format!(
-            "cat > /var/lib/harness/{name} <<'TOML'\n{body}TOML\nchown {RUNTIME_USER}: /var/lib/harness/{name}\nchmod 600 /var/lib/harness/{name}\n"
+            "cat > /var/lib/rizzy-harness/{name} <<'TOML'\n{body}TOML\nchown {RUNTIME_USER}: /var/lib/rizzy-harness/{name}\nchmod 600 /var/lib/rizzy-harness/{name}\n"
         )
     };
     let provider = match provider {
         Some(p) => {
-            let mut s = file("harness.toml", &p.harness_toml);
+            let mut s = file(harness_core::CONFIG_FILE, &p.harness_toml);
             if let Some(sec) = &p.secrets_toml {
                 s.push_str(&file("secrets.toml", sec));
             }
@@ -309,36 +309,36 @@ pub fn node_service(
     // dir, so its unit cannot use NoNewPrivileges.
     let (hardening, env) = match engine {
         Engine::Podman => (
-            "ReadWritePaths=/var/lib/harness /home/harness /run/user/RUNTIME_UID",
+            "ReadWritePaths=/var/lib/rizzy-harness /home/rizzy-harness /run/user/RUNTIME_UID",
             "Environment=XDG_RUNTIME_DIR=/run/user/RUNTIME_UID",
         ),
         _ => (
-            "NoNewPrivileges=yes\nReadWritePaths=/var/lib/harness /home/harness",
+            "NoNewPrivileges=yes\nReadWritePaths=/var/lib/rizzy-harness /home/rizzy-harness",
             "",
         ),
     };
     let user = runtime_user();
     format!(
-        r#"{HEAD}{user}install -m 0755 /tmp/harness.upload /usr/local/bin/harness
-rm -f /tmp/harness.upload
-install -d -o {RUNTIME_USER} -g {RUNTIME_USER} -m 0700 /var/lib/harness /home/{RUNTIME_USER}/work
-cat > /var/lib/harness/node.toml <<'TOML'
+        r#"{HEAD}{user}install -m 0755 /tmp/rizzy-harness.upload /usr/local/bin/rizzy-harness
+rm -f /tmp/rizzy-harness.upload
+install -d -o {RUNTIME_USER} -g {RUNTIME_USER} -m 0700 /var/lib/rizzy-harness /home/{RUNTIME_USER}/work
+cat > /var/lib/rizzy-harness/node.toml <<'TOML'
 # This node decides what the master may do here.
 max_approval_mode = "ask"
 workspace_roots = ["/home/{RUNTIME_USER}/work"]
 TOML
-chown {RUNTIME_USER}: /var/lib/harness/node.toml
-{provider}[ -f /var/lib/harness/remote.toml ] || runuser -u {RUNTIME_USER} -- /usr/local/bin/harness --data-dir /var/lib/harness node join {join_cmd_args}
+chown {RUNTIME_USER}: /var/lib/rizzy-harness/node.toml
+{provider}[ -f /var/lib/rizzy-harness/remote.toml ] || runuser -u {RUNTIME_USER} -- /usr/local/bin/rizzy-harness --data-dir /var/lib/rizzy-harness node join {join_cmd_args}
 uid=$(id -u {RUNTIME_USER})
-cat > /etc/systemd/system/harness-node.service <<UNIT
+cat > /etc/systemd/system/rizzy-harness-node.service <<UNIT
 [Unit]
 Description=harness worker node
-After=network-online.target wg-quick@wg-harness.service
+After=network-online.target wg-quick@rizzy-harness.service
 Wants=network-online.target
 
 [Service]
 User={RUNTIME_USER}
-ExecStart=/usr/local/bin/harness --data-dir /var/lib/harness node run
+ExecStart=/usr/local/bin/rizzy-harness --data-dir /var/lib/rizzy-harness node run
 Restart=always
 RestartSec=5
 ProtectSystem=strict
@@ -348,9 +348,9 @@ ProtectSystem=strict
 [Install]
 WantedBy=multi-user.target
 UNIT
-sed -i "s/RUNTIME_UID/$uid/g" /etc/systemd/system/harness-node.service
+sed -i "s/RUNTIME_UID/$uid/g" /etc/systemd/system/rizzy-harness-node.service
 systemctl daemon-reload
-systemctl enable --now harness-node
+systemctl enable --now rizzy-harness-node
 echo installed
 "#
     )
@@ -385,8 +385,8 @@ mod tests {
             node_service(
                 "wss://10.77.0.1:7443 --token t --fingerprint f",
                 Some(&ProviderFiles {
-                    harness_toml: "[provider]\nkind = \"mock\"\n".into(),
-                    secrets_toml: Some("[keys]\nopenai = \"k\"\n".into()),
+                    harness_toml: "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\n\n[[providers.models]]\nid = \"mock\"\n".into(),
+                    secrets_toml: Some("[keys]\nprovider-demo = \"k\"\n".into()),
                 }),
                 crate::facts::Engine::Podman,
             ),
@@ -418,7 +418,8 @@ mod tests {
         );
         assert!(
             f.find("systemd-run").unwrap()
-                < f.find("nft -f /etc/harness/firewall.nft\necho").unwrap(),
+                < f.find("nft -f /etc/rizzy-harness/firewall.nft\necho")
+                    .unwrap(),
             "revert armed before applying"
         );
         // Single quotes cannot break out of the authorized_keys line.
@@ -435,7 +436,8 @@ mod tests {
                 && !p.contains("usermod -aG docker")
         );
         assert!(
-            container_engine(crate::facts::Engine::Docker).contains("usermod -aG docker harness")
+            container_engine(crate::facts::Engine::Docker)
+                .contains("usermod -aG docker rizzy-harness")
         );
         assert!(node_service("x", None, crate::facts::Engine::Podman).contains("XDG_RUNTIME_DIR"));
         assert!(!node_service("x", None, crate::facts::Engine::Podman).contains("NoNewPrivileges"));

@@ -68,3 +68,118 @@ describe("mode changes", () => {
     c.unmount();
   });
 });
+
+describe("model for a mention", () => {
+  const info = (id: string) => ({
+    id,
+    raw: id.split("::")[1]!,
+    provider: id.split("::")[0]!,
+    provider_id: id.split("::")[0]!,
+    name: null,
+    context: null,
+    max_output: null,
+    effort: false,
+    vision: false,
+    tools: false,
+    default: id === "openai::gpt-4o",
+    unavailable: false,
+  });
+  test("a leading @agent sends with that agent's default", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer
+          where="home"
+          agents={[
+            { id: "general", name: "General", description: "", builtin: true, default_model: null, main_model: "openai::gpt-4o", fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } },
+            { id: "coder", name: "Coder", description: "", builtin: true, default_model: "anthropic::claude-x", main_model: "anthropic::claude-x", fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } },
+          ]}
+          models={[info("openai::gpt-4o"), info("anthropic::claude-x")]}
+          workers={[]}
+          agentId="general"
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          onSubmit={async () => {}}
+          predict={() => "ask"}
+        />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const select = () => host.querySelector<HTMLSelectElement>('select[aria-label="model"]')!;
+    expect(select().value).toBe("openai::gpt-4o");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "@coder fix this");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(select().value).toBe("anthropic::claude-x");
+    act(() => root.unmount());
+    host.remove();
+  });
+});
+
+describe("models the provider dropped", () => {
+  const info = (id: string, more: { default?: boolean; unavailable?: boolean } = {}) => ({
+    id,
+    raw: id.split("::")[1]!,
+    provider: "OpenAI",
+    provider_id: "openai",
+    name: null,
+    context: null,
+    max_output: null,
+    effort: false,
+    vision: false,
+    tools: false,
+    default: false,
+    unavailable: false,
+    ...more,
+  });
+  const mount = (models: ReturnType<typeof info>[], defaultModel?: string) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer
+          where="home"
+          agents={[]}
+          models={models}
+          defaultModel={defaultModel}
+          workers={[]}
+          agentId=""
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          onSubmit={async () => {}}
+          predict={() => "ask"}
+        />,
+      ),
+    );
+    const options = (label: string) =>
+      [...host.querySelectorAll<HTMLOptionElement>(`select[aria-label="${label}"] option`)].map((o) => [o.value, o.disabled, o.textContent]);
+    const value = () => host.querySelector<HTMLSelectElement>('select[aria-label="model"]')!.value;
+    return { options, value, done: () => (act(() => root.unmount()), host.remove()) };
+  };
+
+  test("are not offered, and never picked by default", () => {
+    const c = mount([info("openai::gpt-4", { default: true, unavailable: true }), info("openai::gpt-4o"), info("openai::gpt-4o-mini")]);
+    expect(c.value()).toBe("openai::gpt-4o");
+    expect(c.options("model")).toEqual([
+      ["openai::gpt-4o", false, "gpt-4o"],
+      ["openai::gpt-4o-mini", false, "gpt-4o-mini"],
+    ]);
+    expect(c.options("compare with").map((o) => o[0])).toEqual(["", "openai::gpt-4o-mini"]);
+    c.done();
+  });
+
+  test("a default naming one still shows it, marked and not to be picked again", () => {
+    const c = mount([info("openai::gpt-4", { unavailable: true }), info("openai::gpt-4o")], "openai::gpt-4");
+    expect(c.value()).toBe("openai::gpt-4");
+    expect(c.options("model")).toEqual([
+      ["openai::gpt-4", true, "gpt-4 (unavailable)"],
+      ["openai::gpt-4o", false, "gpt-4o"],
+    ]);
+    expect(c.options("compare with").map((o) => o[0])).toEqual(["", "openai::gpt-4o"]);
+    c.done();
+  });
+});

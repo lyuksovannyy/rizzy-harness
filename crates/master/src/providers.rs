@@ -1,5 +1,6 @@
-//! The model provider the whole server uses, swappable at runtime so that
-//! onboarding and settings can change it without a restart.
+//! The model providers the whole server uses, behind one router that is
+//! swappable at runtime so that onboarding and settings can change them
+//! without a restart.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -7,17 +8,17 @@ use std::time::Duration;
 
 use anyhow::Context;
 use harness_agent_native::Provider;
-use harness_agent_native::llm::{ApiKind, LlmProvider, SwappableProvider};
+use harness_agent_native::llm::{ApiKind, LlmProvider, ModelRouter, Route, SwappableProvider};
 use harness_agent_native::mock::Mock;
 use harness_core::{Secret, SecretSet};
 
 use crate::ModelInfo;
-use crate::config::{Config, ModelConfig, ProviderKind};
+use crate::config::{Config, ModelConfig, ProviderConfig, ProviderKind};
 
-/// A built provider plus the key it uses and env vars to hide from tools.
+/// The built router plus the keys it uses and env vars to hide from tools.
 pub struct Built {
     pub provider: Arc<dyn Provider>,
-    pub key: Option<Secret<String>>,
+    pub keys: Vec<Secret<String>>,
     pub env_remove: Vec<String>,
 }
 
@@ -29,12 +30,16 @@ pub fn api_kind(kind: ProviderKind) -> Option<ApiKind> {
     }
 }
 
-/// Resolve the configured key (env var or `secrets.toml`).
+/// The `secrets.toml` name of a provider's stored key.
+pub fn secret_name(provider_id: &str) -> String {
+    format!("provider-{provider_id}")
+}
+
+/// Resolve a provider's key (env var or `secrets.toml`).
 pub fn resolve_key(
-    cfg: &Config,
+    p: &ProviderConfig,
     data_dir: &Path,
 ) -> anyhow::Result<(Option<Secret<String>>, Vec<String>)> {
-    let p = &cfg.provider;
     Ok(match (&p.api_key_env, &p.api_key_secret) {
         (Some(var), _) => {
             let v = std::env::var(var)
@@ -94,51 +99,58 @@ pub fn web_tools(
 }
 
 pub fn build(cfg: &Config, data_dir: &Path) -> anyhow::Result<Built> {
-    match api_kind(cfg.provider.kind) {
-        None => Ok(Built {
-            provider: Arc::new(Mock {
-                delay: Duration::from_millis(cfg.provider.mock_delay_ms),
+    let (mut keys, mut env_remove, mut routes) = (Vec::new(), Vec::new(), Vec::new());
+    for p in &cfg.providers {
+        let provider: Arc<dyn Provider> = match api_kind(p.kind) {
+            None => Arc::new(Mock {
+                delay: Duration::from_millis(p.mock_delay_ms.unwrap_or(40)),
             }),
-            key: None,
-            env_remove: vec![],
-        }),
-        Some(kind) => {
-            let (key, env_remove) = resolve_key(cfg, data_dir)?;
-            Ok(Built {
-                provider: Arc::new(LlmProvider::new(kind, cfg.base_url(), key.clone())?),
-                key,
-                env_remove,
-            })
-        }
+            Some(kind) => {
+                let (key, env) =
+                    resolve_key(p, data_dir).with_context(|| format!("provider {:?}", p.id))?;
+                keys.extend(key.clone());
+                env_remove.extend(env);
+                Arc::new(LlmProvider::new(kind, &p.base_url, key)?)
+            }
+        };
+        routes.push(Route {
+            prefix: p.id.clone(),
+            provider,
+        });
     }
+    Ok(Built {
+        provider: Arc::new(ModelRouter::new(routes)),
+        keys,
+        env_remove,
+    })
 }
 
-/// The default model plus every model listed in `[[models]]`.
-pub fn model_list(cfg: &Config, provider: &str) -> Vec<ModelInfo> {
-    let mut out: Vec<ModelInfo> = cfg
-        .models
+/// Every listed model of every provider, prefixed, in config order.
+pub fn model_list(cfg: &Config) -> Vec<ModelInfo> {
+    let default = cfg.effective_default();
+    cfg.providers
         .iter()
-        .map(|m| ModelInfo {
-            id: m.id.clone(),
-            provider: provider.to_string(),
-            effort: m.effort,
-            vision: m.vision,
-            default: m.id == cfg.provider.model,
+        .flat_map(|p| {
+            let default = default.clone();
+            p.models.iter().map(move |m| {
+                let id = format!("{}::{}", p.id, m.id);
+                ModelInfo {
+                    default: default.as_deref() == Some(id.as_str()),
+                    id,
+                    raw: m.id.clone(),
+                    provider: p.name.clone(),
+                    provider_id: p.id.clone(),
+                    name: m.name.clone(),
+                    context: m.context,
+                    max_output: m.max_output,
+                    effort: crate::config::effort_allowed(p, m),
+                    vision: m.vision == Some(true),
+                    tools: m.tools == Some(true),
+                    unavailable: m.unavailable,
+                }
+            })
         })
-        .collect();
-    if !out.iter().any(|m| m.default) {
-        out.insert(
-            0,
-            ModelInfo {
-                id: cfg.provider.model.clone(),
-                provider: provider.to_string(),
-                effort: false,
-                vision: false,
-                default: true,
-            },
-        );
-    }
-    out
+        .collect()
 }
 
 /// Owns the live provider, its config file and the shared secret set.
@@ -147,6 +159,9 @@ pub struct ProviderRuntime {
     pub secrets: SecretSet,
     data_dir: PathBuf,
     config: Mutex<Config>,
+    /// Held by every config change from its `config()` read through its
+    /// `save` / `apply`, so no change writes back a stale snapshot.
+    edits: tokio::sync::Mutex<()>,
 }
 
 impl ProviderRuntime {
@@ -157,7 +172,7 @@ impl ProviderRuntime {
         secrets: SecretSet,
     ) -> anyhow::Result<(Self, Vec<String>)> {
         let built = build(&cfg, data_dir)?;
-        if let Some(k) = built.key {
+        for k in built.keys {
             secrets.add(k);
         }
         Ok((
@@ -166,6 +181,7 @@ impl ProviderRuntime {
                 secrets,
                 data_dir: data_dir.to_path_buf(),
                 config: Mutex::new(cfg),
+                edits: tokio::sync::Mutex::new(()),
             },
             built.env_remove,
         ))
@@ -178,29 +194,36 @@ impl ProviderRuntime {
             .clone()
     }
 
+    /// Serialise config changes: take this before reading the config you
+    /// are about to change, and keep it until it is saved or applied. Never
+    /// hold it across a network call.
+    pub async fn lock_edits(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.edits.lock().await
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
 
     pub fn models(&self) -> Vec<ModelInfo> {
-        model_list(&self.config(), self.provider.name())
+        model_list(&self.config())
     }
 
     /// Validate and persist a config change that does not touch the provider.
     pub fn save(&self, cfg: Config) -> anyhow::Result<()> {
         cfg.validate()?;
-        cfg.save(&self.data_dir.join("harness.toml"))?;
+        cfg.save(&self.data_dir.join(harness_core::CONFIG_FILE))?;
         *self.config.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
         Ok(())
     }
 
-    /// Validate, build, persist to `harness.toml`, then switch. Running turns
+    /// Validate, build, persist to `config.toml`, then switch. Running turns
     /// finish on the old provider; the next turn uses the new one.
     pub fn apply(&self, cfg: Config) -> anyhow::Result<()> {
         cfg.validate()?;
         let built = build(&cfg, &self.data_dir)?;
-        cfg.save(&self.data_dir.join("harness.toml"))?;
-        if let Some(k) = built.key {
+        cfg.save(&self.data_dir.join(harness_core::CONFIG_FILE))?;
+        for k in built.keys {
             self.secrets.add(k);
         }
         self.provider.set(built.provider);
@@ -209,25 +232,23 @@ impl ProviderRuntime {
     }
 }
 
-/// Models listed by a provider's `/models`, for the onboarding picker.
+/// Models a provider lists, with what it reports about each, for the
+/// onboarding picker. Doubles as a key check.
 pub async fn list_models(
     kind: ProviderKind,
     base_url: &str,
     key: Option<&Secret<String>>,
-) -> Result<Vec<String>, String> {
+    ollama: bool,
+) -> Result<Vec<ModelConfig>, String> {
     match api_kind(kind) {
-        None => Ok(vec!["mock".into()]),
-        Some(k) => harness_agent_native::llm::list_models(k, base_url, key)
+        None => Ok(vec![ModelConfig {
+            id: "mock".into(),
+            ..Default::default()
+        }]),
+        Some(k) => harness_agent_native::models::list_models(k, base_url, key, ollama)
             .await
+            .map(|v| v.into_iter().map(ModelConfig::from).collect())
             .map_err(|e| e.to_string()),
-    }
-}
-
-pub fn model_config(id: &str, effort: bool, vision: bool) -> ModelConfig {
-    ModelConfig {
-        id: id.to_string(),
-        effort,
-        vision,
     }
 }
 
@@ -243,25 +264,45 @@ fn secret(data_dir: &Path, name: &Option<String>) -> anyhow::Result<Option<Secre
     }
 }
 
-/// The embedder for `[memory]`, if one is configured.
+/// The embedder for `[memory]`, when meaning recall is on. A provider
+/// source uses that provider's URL and its key as resolved now.
 pub fn embedder(
     cfg: &Config,
     data_dir: &Path,
     secrets: &SecretSet,
 ) -> anyhow::Result<Option<harness_memory::Embedder>> {
+    use crate::config::{EmbedSource, Recall};
+    use harness_memory::ApiStyle;
     let m = &cfg.memory;
-    if m.embeddings_url.is_empty() {
+    if m.recall == Recall::Keywords {
         return Ok(None);
     }
-    let key = secret(data_dir, &m.embeddings_key_secret)?;
+    let (url, key, style) = match m.source {
+        EmbedSource::Provider => {
+            let p = cfg
+                .embed_provider()
+                .context("[memory] provider_id is not a configured provider")?;
+            let (key, _) =
+                resolve_key(p, data_dir).with_context(|| format!("provider {:?}", p.id))?;
+            let style = match p.kind {
+                ProviderKind::Anthropic => ApiStyle::Anthropic,
+                _ => ApiStyle::Openai,
+            };
+            (p.base_url.clone(), key, style)
+        }
+        EmbedSource::Ollama => (m.ollama_url().to_string(), None, ApiStyle::Openai),
+    };
+    if key.is_some() && !crate::config::url_allowed(&url) {
+        anyhow::bail!(
+            "an embeddings URL that gets a key must be https:// (plain http only for localhost)"
+        );
+    }
     if let Some(k) = &key {
         secrets.add(k.clone());
     }
-    Ok(Some(harness_memory::Embedder::new(
-        &m.embeddings_url,
-        &m.model(),
-        key,
-    )))
+    Ok(Some(
+        harness_memory::Embedder::new(&url, &m.model(), key).with_style(style),
+    ))
 }
 
 /// The configured store, and the built-in one again when that is it.

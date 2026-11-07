@@ -27,7 +27,7 @@ pub struct SetupRecord {
     pub id: String,
     pub host: String,
     pub port: u16,
-    /// The user harness logs in as (`harness-admin`, root, or the user's own).
+    /// The user harness logs in as (`rizzy-harness-admin`, root, or the user's own).
     pub login_user: String,
     /// The pinned SSH host key.
     pub fingerprint: String,
@@ -39,7 +39,7 @@ pub struct SetupRecord {
     /// What the watchdog looks at.
     pub watch_ssh: bool,
     pub watch_firewall: bool,
-    /// `harness-admin` kept passwordless sudo.
+    /// `rizzy-harness-admin` kept passwordless sudo.
     pub admin_sudo: bool,
     pub node_id: Option<String>,
     pub created_ms: i64,

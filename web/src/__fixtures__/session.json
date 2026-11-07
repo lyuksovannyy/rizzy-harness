@@ -346,6 +346,29 @@
       "ts_ms": 1700000000022
     },
     {
+      "kind": "model_fallback",
+      "payload": {
+        "from": "loc::big",
+        "model": "loc::small",
+        "reason": "unavailable",
+        "turn_id": "t2"
+      },
+      "seq": 24,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000023
+    },
+    {
+      "kind": "model_fallback",
+      "payload": {
+        "from": "loc::big",
+        "model": "loc::other",
+        "turn_id": "t2"
+      },
+      "seq": 25,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000024
+    },
+    {
       "kind": "user_message",
       "payload": {
         "attachments": [
@@ -359,9 +382,9 @@
         "text": "@writer draft the changelog",
         "turn_id": "t2"
       },
-      "seq": 24,
+      "seq": 26,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000023
+      "ts_ms": 1700000000025
     },
     {
       "kind": "history_summarized",
@@ -370,9 +393,9 @@
         "through_seq": 3,
         "turn_id": "t2"
       },
-      "seq": 25,
+      "seq": 27,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000024
+      "ts_ms": 1700000000026
     },
     {
       "kind": "assistant_delta",
@@ -386,9 +409,9 @@
           "index": 0
         }
       },
-      "seq": 26,
+      "seq": 28,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000025
+      "ts_ms": 1700000000027
     },
     {
       "kind": "assistant_message",
@@ -403,9 +426,9 @@
           "index": 0
         }
       },
-      "seq": 27,
+      "seq": 29,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000026
+      "ts_ms": 1700000000028
     },
     {
       "kind": "assistant_message",
@@ -420,9 +443,9 @@
           "index": 1
         }
       },
-      "seq": 28,
+      "seq": 30,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000027
+      "ts_ms": 1700000000029
     },
     {
       "kind": "tool_call_started",
@@ -435,9 +458,9 @@
         "tool": "read",
         "turn_id": "t2"
       },
-      "seq": 29,
+      "seq": 31,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000028
+      "ts_ms": 1700000000030
     },
     {
       "kind": "variant_selected",
@@ -445,9 +468,9 @@
         "group": "g1",
         "message_id": "m4"
       },
-      "seq": 30,
+      "seq": 32,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000029
+      "ts_ms": 1700000000031
     },
     {
       "kind": "user_message",
@@ -464,16 +487,16 @@
         "text": "Choice answer · next: o1",
         "turn_id": "t3"
       },
-      "seq": 31,
+      "seq": 33,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000030
+      "ts_ms": 1700000000032
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 32,
+      "seq": 34,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -489,7 +512,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 32,
+    "head_seq": 34,
     "items": [
       {
         "text": "fix the bug",
@@ -648,6 +671,20 @@
           "prompt_hash": "h1"
         },
         "type": "agent_changed"
+      },
+      {
+        "from": "loc::big",
+        "model": "loc::small",
+        "reason": "unavailable",
+        "turn_id": "t2",
+        "type": "fallback"
+      },
+      {
+        "from": "loc::big",
+        "model": "loc::other",
+        "reason": null,
+        "turn_id": "t2",
+        "type": "fallback"
       },
       {
         "attachments": [

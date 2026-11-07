@@ -18,6 +18,13 @@ pub use secret::{Secret, SecretSet};
 /// The product's working name. Change it here (and in Cargo package names).
 pub const APP_NAME: &str = "harness";
 
+/// The name outside the code: the command, the default data folder and
+/// what gets installed on nodes. Code keeps the short [`APP_NAME`].
+pub const BRAND: &str = "rizzy-harness";
+
+/// The config file in the data directory.
+pub const CONFIG_FILE: &str = "config.toml";
+
 /// Environment variable prefix derived from [`APP_NAME`], e.g. `HARNESS_`.
 pub fn env_prefix() -> String {
     format!("{}_", APP_NAME.to_ascii_uppercase())

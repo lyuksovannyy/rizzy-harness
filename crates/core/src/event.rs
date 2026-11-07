@@ -1,4 +1,4 @@
-//! Event schema. See PLAN.md §2. Changes here must be additive.
+//! Event schema. See PLAN.md §2.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,6 +73,7 @@ pub enum EventKind {
     AgentChanged(AgentChanged),
     VariantSelected(VariantSelected),
     HistorySummarized(HistorySummarized),
+    ModelFallback(ModelFallback),
 }
 
 impl EventKind {
@@ -112,6 +113,7 @@ impl EventKind {
             EventKind::AgentChanged(_) => "agent_changed",
             EventKind::VariantSelected(_) => "variant_selected",
             EventKind::HistorySummarized(_) => "history_summarized",
+            EventKind::ModelFallback(_) => "model_fallback",
         }
     }
 }
@@ -123,7 +125,6 @@ pub struct SessionCreated {
     pub model: String,
     pub backend: String,
     pub node_id: String,
-    #[serde(default)]
     pub approval_mode: crate::policy::ApprovalMode,
     pub profile: Profile,
     /// The agent active when the session started.
@@ -246,6 +247,20 @@ pub struct HistorySummarized {
     pub text: String,
 }
 
+/// The turn's model was unavailable or failed before any output, and one
+/// of the agent's fallbacks answers instead. Emitted before its answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelFallback {
+    pub turn_id: String,
+    /// The model that answers (prefixed).
+    pub model: String,
+    /// The turn's own model.
+    pub from: String,
+    /// Why `from` was not used: "unavailable", or the provider's error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantDelta {
     pub turn_id: String,
@@ -288,9 +303,8 @@ pub struct AssistantMessage {
 /// do not all match renders as plain code. Exactly one of `spec` and `error`
 /// is set.
 ///
-/// Unknown keys are tolerated here like everywhere in the event schema (a
-/// newer node may add some); the model's own JSON is what `ui` rejects
-/// unknown keys in.
+/// Unknown keys are tolerated here like everywhere in the event schema; the
+/// model's own JSON is what `ui` rejects unknown keys in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiBlock {
     pub ordinal: u32,
@@ -464,7 +478,6 @@ pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Input tokens of the turn's last model call: the context size.
-    #[serde(default)]
     pub context_tokens: u64,
     /// Of `input_tokens`, how many were read from the provider's prompt
     /// cache (billed at a fraction) and how many were written to it.
@@ -616,6 +629,12 @@ mod tests {
                 group: "g".into(),
                 message_id: "m".into(),
             }),
+            EventKind::ModelFallback(ModelFallback {
+                turn_id: "t".into(),
+                model: "b::m2".into(),
+                from: "a::m1".into(),
+                reason: Some("unavailable".into()),
+            }),
         ];
         for k in kinds {
             let (kind, payload) = k.clone().into_parts();
@@ -743,7 +762,7 @@ mod tests {
 
     #[test]
     fn additive_fields_tolerated() {
-        // Extra unknown fields from a newer node must not break an older reader.
+        // Unknown fields are ignored, not rejected.
         let k = EventKind::from_parts(
             "turn_started",
             json!({"turn_id": "t1", "added_later": true}),

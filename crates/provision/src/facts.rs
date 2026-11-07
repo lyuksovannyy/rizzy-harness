@@ -2,8 +2,16 @@
 
 use serde::Serialize;
 
-/// Runs as the login user; uses `sudo -n` only for read-only queries.
-pub const INSPECT: &str = r#"
+use crate::scripts::RUNTIME_USER;
+
+/// The inspection script. Runs as the login user; uses `sudo -n` only for
+/// read-only queries.
+pub fn inspect_script() -> String {
+    format!("ru={RUNTIME_USER}\n{INSPECT}")
+}
+
+/// `$ru` is the runtime user, set by [`inspect_script`].
+const INSPECT: &str = r#"
 s() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
 . /etc/os-release 2>/dev/null
 echo "os_id=${ID:-unknown}"
@@ -17,33 +25,33 @@ echo "uid=$(id -u)"
 if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then echo "root=yes"; else echo "root=no"; fi
 command -v systemctl >/dev/null && [ -d /run/systemd/system ] && echo "systemd=yes" || echo "systemd=no"
 command -v wg >/dev/null && echo "wg_tools=yes" || echo "wg_tools=no"
-s ip -o link show type wireguard 2>/dev/null | grep -q wg-harness && echo "wg_harness=up" || echo "wg_harness=down"
+s ip -o link show type wireguard 2>/dev/null | grep -q rizzy-harness && echo "wg_harness=up" || echo "wg_harness=down"
 command -v nft >/dev/null && echo "nft=yes" || echo "nft=no"
-s nft list table inet harness >/dev/null 2>&1 && echo "harness_fw=yes" || echo "harness_fw=no"
+s nft list table inet rizzy_harness >/dev/null 2>&1 && echo "harness_fw=yes" || echo "harness_fw=no"
 command -v ufw >/dev/null && s ufw status 2>/dev/null | grep -q 'Status: active' && echo "ufw=active" || echo "ufw=inactive"
 systemctl is-active firewalld >/dev/null 2>&1 && echo "firewalld=active" || echo "firewalld=inactive"
 command -v docker >/dev/null && echo "docker=yes" || echo "docker=no"
-echo "other_fw_rules=$(s nft list ruleset 2>/dev/null | grep -v 'table inet harness' | grep -c 'chain ')"
+echo "other_fw_rules=$(s nft list ruleset 2>/dev/null | grep -v 'table inet rizzy_harness' | grep -c 'chain ')"
 cfg=$(s sshd -T 2>/dev/null)
 echo "ssh_password=$(echo "$cfg" | awk '$1=="passwordauthentication"{print $2}')"
 echo "ssh_root_login=$(echo "$cfg" | awk '$1=="permitrootlogin"{print $2}')"
 echo "ssh_port=$(echo "$cfg" | awk '$1=="port"{print $2; exit}')"
-command -v harness >/dev/null && echo "harness=$(harness --version 2>/dev/null | awk '{print $2}')" || echo "harness=none"
-systemctl is-active harness-node >/dev/null 2>&1 && echo "harness_service=active" || echo "harness_service=inactive"
+command -v rizzy-harness >/dev/null && echo "harness=$(rizzy-harness --version 2>/dev/null | awk '{print $2}')" || echo "harness=none"
+systemctl is-active rizzy-harness-node >/dev/null 2>&1 && echo "harness_service=active" || echo "harness_service=inactive"
 ipaddr=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | cut -d' ' -f2)
 [ -n "$ipaddr" ] || ipaddr=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo "public_ip=$ipaddr"
 command -v podman >/dev/null && echo "podman=yes" || echo "podman=no"
 command -v docker >/dev/null && docker --version 2>/dev/null | grep -qi podman && echo "docker_is_podman=yes"
-if id harness >/dev/null 2>&1; then
+if id "$ru" >/dev/null 2>&1; then
   echo "runtime_user=yes"
-  id -nG harness | tr ' ' '\n' | grep -qx docker && echo "runtime_docker=yes" || echo "runtime_docker=no"
-  grep -q '^harness:' /etc/subuid 2>/dev/null && echo "runtime_subuid=yes" || echo "runtime_subuid=no"
-  [ -e /var/lib/systemd/linger/harness ] && echo "runtime_linger=yes" || echo "runtime_linger=no"
+  id -nG "$ru" | tr ' ' '\n' | grep -qx docker && echo "runtime_docker=yes" || echo "runtime_docker=no"
+  grep -q "^$ru:" /etc/subuid 2>/dev/null && echo "runtime_subuid=yes" || echo "runtime_subuid=no"
+  [ -e "/var/lib/systemd/linger/$ru" ] && echo "runtime_linger=yes" || echo "runtime_linger=no"
 else
   echo "runtime_user=no"
 fi
-echo "wg_pubkey=$(s wg show wg-harness public-key 2>/dev/null)"
+echo "wg_pubkey=$(s wg show rizzy-harness public-key 2>/dev/null)"
 "#;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -78,7 +86,7 @@ pub struct Facts {
     /// The node's WireGuard public key, once its tunnel exists.
     pub wg_pubkey: Option<String>,
     pub podman: bool,
-    /// The `harness` runtime user exists.
+    /// The runtime user ([`crate::scripts::RUNTIME_USER`]) exists.
     pub runtime_user: bool,
     pub runtime_in_docker_group: bool,
     pub runtime_subuid: bool,
@@ -263,7 +271,7 @@ mod tests {
     #[test]
     fn inspection_script_is_valid_bash() {
         let out = std::process::Command::new("bash")
-            .args(["-n", "-c", INSPECT])
+            .args(["-n", "-c", &inspect_script()])
             .output()
             .unwrap();
         assert!(
@@ -271,6 +279,36 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn runtime_probes_use_the_runtime_user() {
+        let s = inspect_script();
+        assert!(s.starts_with(&format!("ru={RUNTIME_USER}\n")), "{s}");
+        for probe in [
+            r#"id "$ru" >"#,
+            r#"id -nG "$ru""#,
+            r#""^$ru:" /etc/subuid"#,
+            r#""/var/lib/systemd/linger/$ru""#,
+        ] {
+            assert!(s.contains(probe), "missing {probe}");
+        }
+        // Run the probes against a stub `id` that only knows the runtime user.
+        let probes = s
+            .lines()
+            .skip_while(|l| !l.starts_with("if id"))
+            .take_while(|l| *l != "fi")
+            .collect::<Vec<_>>()
+            .join("\n");
+        let stub = format!(
+            "ru={RUNTIME_USER}\nid() {{ [ \"$1\" = {RUNTIME_USER} ] || [ \"$2\" = {RUNTIME_USER} ]; }}\n{probes}\nfi\n"
+        );
+        let out = std::process::Command::new("bash")
+            .args(["-c", &stub])
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout);
+        assert!(out.contains("runtime_user=yes"), "{out}");
     }
 }
 
@@ -324,7 +362,7 @@ mod support_tests {
         f.docker = true;
         assert!(
             !f.engine_ready(Engine::Docker),
-            "installed but harness is not in the group"
+            "installed but rizzy-harness is not in the group"
         );
         f.runtime_in_docker_group = true;
         assert!(f.engine_ready(Engine::Docker));

@@ -8,7 +8,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e9-'));
 const D = `${S}/data`, R = `${S}/repo`;
 fs.mkdirSync(D, { recursive: true });
@@ -33,9 +34,10 @@ const whisper = http.createServer((req, res) => {
 
 (async () => {
   await new Promise((r) => whisper.listen(0, '127.0.0.1', r));
-  fs.writeFileSync(`${D}/harness.toml`, [
-    '[provider]', 'kind = "mock"', 'mock_delay_ms = 5', '',
-    '[[models]]', 'id = "mock"', '', '[[models]]', 'id = "mock-big"', '',
+  fs.writeFileSync(`${D}/config.toml`, [
+    // Two demo models to compare (demo::mock and demo::mock-big).
+    '[[providers]]', 'id = "demo"', 'name = "Demo"', 'preset = "demo"', 'kind = "mock"', 'mock_delay_ms = 5',
+    'models = [{ id = "mock" }, { id = "mock-big" }]', '',
     '[voice]', `url = "http://127.0.0.1:${whisper.address().port}/v1"`, 'model = "tiny"', '',
   ].join('\n'));
   fs.writeFileSync(`${D}/node.toml`, `workspace_roots = ["${R}"]\n`);
@@ -56,26 +58,16 @@ const whisper = http.createServer((req, res) => {
     const errors = [];
     p.on('pageerror', (e) => errors.push(e.message));
     await p.goto(URL_);
-    await p.fill('input[placeholder="claim code"]', code);
-    await p.fill('input[placeholder="username"]', 'alex');
-    await p.fill('input[type=password]', 'admin password');
-    await p.click('text=Create account');
+    await createOwner(p, code);
     await p.click('text=Skip: use the built-in demo');
-    await p.click('text=Skip: keywords only');
+    await keywordsOnly(p);
     await p.click('button:has-text("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
-    // Two demo models to compare.
-    const saved = await p.evaluate(() =>
-      fetch('/api/admin/provider', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ kind: 'mock', models: [{ id: 'mock', effort: false, vision: false }, { id: 'mock-big', effort: false, vision: false }] }),
-      }).then((r) => r.status),
-    );
-    check(saved === 200, 'models saved: ' + saved);
-    await p.reload();
-    await p.waitForSelector('h1.greeting');
+    // The demo skip keeps the configured demo provider and its two models.
+    const models = await p.evaluate(() => fetch('/api/models').then((r) => r.json()));
+    const ids = models.models.map((m) => m.id);
+    check(ids.includes('demo::mock') && ids.includes('demo::mock-big'), 'two demo models: ' + ids.join(', '));
 
     // 1. Dictation fills the bar.
     await p.click('button[aria-label="dictate"]');
@@ -88,7 +80,7 @@ const whisper = http.createServer((req, res) => {
     // 2. Parallel answers.
     await p.fill('.composer textarea', 'compare these answers');
     await p.click('.mode-switch button:has-text("Ask")');
-    await p.selectOption('select[aria-label="compare with"]', 'mock-big');
+    await p.selectOption('select[aria-label="compare with"]', 'demo::mock-big');
     await p.click('.composer .send');
     await p.waitForSelector('.variants .msg.variant >> nth=1');
     await p.waitForSelector('text=[mock-big] You said: compare these answers');

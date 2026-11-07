@@ -69,6 +69,12 @@
   --mag-side: color-mix(in srgb, var(--fg) 9%, var(--bg));
   --mag-glint: rgb(255 255 255 / 0.22);
   --mag-shadow: rgb(0 0 0 / 0.45);
+  /* Agent avatars (AgentAvatar.tsx): light on the face, its shading, the
+     side under it (mixed into the accent) and the shadow on the ground. */
+  --av-shine: rgb(255 255 255 / 0.55);
+  --av-shade: rgb(0 0 0 / 0.3);
+  --av-depth: rgb(0 0 0);
+  --av-ground: rgb(0 0 0 / 0.5);
   /* Elevation: the composer, then popovers; the thumb of a switch. */
   --shadow-1: inset 0 1px 0 rgb(255 255 255 / 0.03), 0 6px 20px -8px rgb(0 0 0 / 0.55);
   --shadow-2: 0 16px 40px -12px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.3);
@@ -132,6 +138,10 @@
     --art-peak: 0.24;
     --mag-glint: rgb(255 255 255 / 0.75);
     --mag-shadow: rgb(17 17 19 / 0.12);
+    --av-shine: rgb(255 255 255 / 0.4);
+    --av-shade: rgb(17 17 19 / 0.22);
+    --av-depth: rgb(70 70 78);
+    --av-ground: rgb(17 17 19 / 0.16);
     --shadow-1: 0 1px 2px rgb(17 17 19 / 0.04), 0 6px 20px -8px rgb(17 17 19 / 0.1);
     --shadow-2: 0 16px 40px -12px rgb(17 17 19 / 0.18), 0 2px 6px rgb(17 17 19 / 0.04);
     --shadow-thumb: 0 1px 2px rgb(17 17 19 / 0.1), 0 0 0 1px rgb(17 17 19 / 0.04);
@@ -188,6 +198,10 @@
   --art-peak: 0.24;
   --mag-glint: rgb(255 255 255 / 0.75);
   --mag-shadow: rgb(17 17 19 / 0.12);
+  --av-shine: rgb(255 255 255 / 0.4);
+  --av-shade: rgb(17 17 19 / 0.22);
+  --av-depth: rgb(70 70 78);
+  --av-ground: rgb(17 17 19 / 0.16);
   --shadow-1: 0 1px 2px rgb(17 17 19 / 0.04), 0 6px 20px -8px rgb(17 17 19 / 0.1);
   --shadow-2: 0 16px 40px -12px rgb(17 17 19 / 0.18), 0 2px 6px rgb(17 17 19 / 0.04);
   --shadow-thumb: 0 1px 2px rgb(17 17 19 / 0.1), 0 0 0 1px rgb(17 17 19 / 0.04);
@@ -335,7 +349,8 @@ button:where(:hover:not(:disabled)) {
 button:where(:active:not(:disabled)) {
   transform: scale(0.98);
 }
-button:disabled {
+button:disabled,
+button[aria-disabled="true"] {
   opacity: 0.45;
   cursor: default;
 }
@@ -496,6 +511,135 @@ select {
 .login .card {
   width: min(400px, 100%);
   padding: var(--space-8);
+}
+/* First-run claim: a titled header, then numbered steps; the account step
+   appears once the claim code is whole. */
+.setup-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.setup-head .eyebrow {
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+  font-weight: var(--w-medium);
+}
+.setup-head p {
+  margin: var(--space-1) 0 0;
+}
+.setup-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  counter-reset: step;
+}
+.setup-steps > li {
+  counter-increment: step;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.setup-steps > li > span:first-child {
+  font-size: var(--text-sm);
+  font-weight: var(--w-medium);
+}
+.setup-steps > li > span:first-child::before {
+  content: counter(step) ". ";
+  color: var(--fg-2);
+}
+.setup-cmd {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 6px 6px 6px 12px;
+}
+.setup-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.setup-cmd .copy {
+  min-height: 0;
+  font-size: var(--text-xs);
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+}
+.setup-alt {
+  color: var(--fg-2);
+  font-size: var(--text-xs);
+}
+/* The file name reads as a chip, like inline code in messages. */
+.setup-alt code {
+  color: var(--fg);
+  background: var(--bg-3);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  font-size: 0.95em;
+}
+/* New password: a show/hide toggle inside the field, then a four-bar
+   strength meter whose colour follows the score. */
+.pw-field {
+  position: relative;
+}
+.pw-field input {
+  padding-right: 40px;
+}
+.pw-field button.icon {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  width: 30px;
+  height: 30px;
+  transform: translateY(-50%);
+}
+.pw-field button.icon:active {
+  transform: translateY(-50%);
+}
+.pw-strength {
+  --pw-color: var(--bad);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: calc(-1 * var(--space-1));
+  font-size: var(--text-xs);
+}
+.pw-strength[data-score="2"] {
+  --pw-color: var(--warn);
+}
+.pw-strength[data-score="3"],
+.pw-strength[data-score="4"] {
+  --pw-color: var(--ok);
+}
+.pw-bars {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-1);
+}
+.pw-bars span {
+  height: 4px;
+  border-radius: var(--r-full);
+  background: var(--line-strong);
+  transition: background-color var(--dur-2) var(--ease-standard);
+}
+.pw-bars span.on {
+  background: var(--pw-color);
+}
+.pw-label {
+  min-width: 5.5em;
+  text-align: right;
+  color: var(--pw-color);
+}
+.setup-account {
+  animation: fade-in var(--dur-2) var(--ease-standard);
 }
 .card h1,
 .card h2,
@@ -974,7 +1118,8 @@ select.pill {
 .select-list,
 .combo-list,
 .cite-card,
-.link-confirm {
+.link-confirm,
+.agent-menu {
   background: var(--surface-pop);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
@@ -990,7 +1135,8 @@ select.pill {
   .select-list,
   .combo-list,
   .cite-card,
-  .link-confirm {
+  .link-confirm,
+  .agent-menu {
     opacity: 0;
     transform: translateY(4px) scale(0.98);
   }
@@ -2451,33 +2597,327 @@ mark {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.model-pick ul {
+/* ModelPicker: a scrolling list of rows; a row is the model, the tags of
+   what the provider reported, and (when chosen) its agents. */
+.model-pick {
+  gap: var(--space-2);
+}
+.model-pick > ul {
   list-style: none;
-  margin: 6px 0 0;
+  margin: 0;
   padding: 0;
-  max-height: 240px;
+  max-height: 320px;
   overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
 }
-.model-pick li {
+.model-pick > ul > li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
-  padding: 4px 10px;
+  gap: var(--space-1-5) var(--space-3);
+  padding: 6px 10px;
   border-bottom: 1px solid var(--line);
 }
-.model-pick li:last-child {
+.model-pick > ul > li.on {
+  background: var(--accent-soft);
+}
+.model-pick > ul > li:last-child {
   border-bottom: none;
 }
-.model-pick li > label:first-child {
+.model-pick > ul > li > label:first-child {
   flex: 1;
+  min-width: 12rem;
 }
-.star {
-  font-size: 16px;
+.model-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.star.on {
-  color: var(--warn);
+/* Each tag kind has its own icon and accent: the text is the accent on an
+   opaque 12% tint of it (theme.test.ts checks up to 16%), so it reads the
+   same on a chosen row. Unavailable is --bad on the callout's 9% tint. */
+.model-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+.model-tag {
+  --tag: var(--fg-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px 1px 5px;
+  border-radius: var(--r-full);
+  font-size: var(--text-2xs);
+  font-weight: var(--w-medium);
+  color: var(--tag);
+  background: color-mix(in srgb, var(--tag) 12%, var(--bg));
+  white-space: nowrap;
+}
+.model-tag.tag-ctx { --tag: var(--accent-blue); }
+.model-tag.tag-out { --tag: var(--accent-orange); }
+.model-tag.tag-effort { --tag: var(--accent-violet); }
+.model-tag.tag-vision { --tag: var(--accent-green); }
+.model-tag.tag-tools { --tag: var(--accent-pink); }
+.model-tag.tag-custom {
+  --tag: var(--accent);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.model-tag.tag-unavailable {
+  --tag: var(--bad);
+  background: color-mix(in srgb, var(--bad) 9%, var(--bg));
+}
+.model-actions {
+  display: inline-flex;
+  gap: var(--space-0-5);
+}
+.model-actions button.icon {
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+}
+button.small-button {
+  min-height: 0;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
+}
+.model-pick .pager {
+  gap: var(--space-1);
+}
+.model-pick .pager button.icon {
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+}
+button.agent-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 16rem;
+  min-height: 0;
+  padding: 2px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--text-xs);
+  font-weight: var(--w-regular);
+}
+button.agent-pick:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+button.agent-pick:active:not(:disabled) {
+  transform: none;
+}
+/* A chosen model no agent uses yet: saving waits for it. */
+button.agent-pick.loose {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  color: var(--fg-2);
+}
+/* A menu in the top layer; md/anchored.ts places it under its button. */
+.agent-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.agent-menu button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: none;
+  font-weight: var(--w-regular);
+  text-align: left;
+}
+.agent-menu button:hover:not(:disabled),
+.agent-menu button:focus-visible {
+  background: var(--bg-hover);
+}
+.agent-menu button[aria-checked="true"] {
+  font-weight: var(--w-semibold);
+}
+.agent-menu button svg {
+  color: var(--accent);
+}
+/* One agent per row: its name, then Main and Fallback. */
+.agent-menu-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px 3px 3px 10px;
+}
+.agent-menu-name {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-right: var(--space-3);
+}
+.agent-menu .agent-menu-row button {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  font-size: var(--text-xs);
+}
+.agent-menu .agent-menu-row button[aria-checked="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  font-weight: var(--w-medium);
+}
+/* Under the picker: each agent's main model, then its fallbacks in order. */
+.agent-plan {
+  gap: var(--space-2);
+}
+.agent-chains,
+.chain-fallbacks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.agent-chains {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+}
+.agent-chains > li,
+.chain-fallbacks,
+.chain-fallbacks > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-1-5);
+  font-size: var(--text-sm);
+}
+.agent-chain-name {
+  min-width: 5rem;
+  color: var(--fg);
+  font-weight: var(--w-medium);
+}
+.chain-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
+  max-width: 100%;
+  padding: 0 0 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+}
+.chain-item button.icon {
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  border-radius: var(--r-full);
+}
+.chain-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.chain-model.gone {
+  color: var(--bad);
+}
+/* A model added by hand: its fields and a test, in a box under the list. */
+.custom-model {
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+}
+.tested-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ok);
+}
+.providers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.providers li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.providers li:last-child {
+  border-bottom: none;
+}
+.providers li > .grow {
+  min-width: 0;
+}
+.provider-names {
+  align-items: flex-start;
+}
+.form input[readonly] {
+  background: var(--bg-2);
+  color: var(--fg-2);
+}
+/* A URL the preset fixes: disabled, so it never takes focus or a caret,
+   yet readable like a read-only field. */
+.form input.fixed:disabled {
+  background: var(--bg-2);
+  color: var(--fg-2);
+  -webkit-text-fill-color: var(--fg-2);
+  opacity: 1;
+  cursor: default;
+}
+/* A field with its button on the same line (Test connection). */
+.field-action {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+.field-action > label {
+  min-width: 0;
+}
+.field-action > button.icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  color: var(--fg);
+}
+.test-status {
+  margin-top: calc(-1 * var(--space-2));
+}
+.provider-gone {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--bad);
+}
+/* An onboarding step; a step left stays mounted but hidden. */
+.onboard-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.onboard-step[hidden] {
+  display: none;
+}
+.provider-names > label {
+  min-width: 12rem;
 }
 .engines {
   display: grid;
@@ -2738,15 +3178,32 @@ ul.savings { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--
 ul.savings li { display: grid; gap: var(--space-0-5); }
 ul.savings input[type=number] { width: 5.5em; }
 
-.combo { position: relative; }
-.combo input { width: 100%; padding-right: 30px; }
-.combo-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+/* The combo lays out its own input, so in a .row (where inputs are
+   width: auto) it still fills the field and the buttons sit on its edge.
+   Its padding leaves room for each visible button (--combo-actions), and
+   the 28px buttons stay inside its border, 2px apart. */
+.combo { position: relative; display: flex; --combo-actions: 0; }
+.combo input { flex: 1; width: 100%; min-width: 0; padding-right: calc(12px + var(--combo-actions) * 30px); }
+.combo.has-icon input { padding-left: 40px; }
+.combo-lead { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); display: flex; pointer-events: none; }
+.combo-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; gap: var(--space-0-5); }
+.combo-actions button.icon { width: 28px; height: 28px; min-height: 0; }
+.combo-actions button.icon:active { transform: none; }
+.combo-icon { display: block; flex: none; width: 20px; height: 15px; border-radius: 2px; object-fit: cover; box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 12%, transparent); }
+.combo-icon-text { flex: none; width: 20px; font-family: var(--mono); font-size: var(--text-2xs); color: var(--fg-2); text-align: center; }
 .combo-list {
   position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
-  margin: 0; list-style: none; max-height: 280px; overflow-y: auto;
+  display: flex; flex-direction: column; max-height: 280px; font-weight: var(--w-regular);
 }
-.combo-list li { color: var(--fg); font-size: var(--text-md); display: flex; justify-content: space-between; gap: var(--space-3); padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; }
+.combo-list ul { margin: 0; padding: 0; list-style: none; overflow-y: auto; min-height: 0; }
+.combo-list li { color: var(--fg); font-size: var(--text-md); display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; }
 .combo-list li.on { background: var(--bg-hover); }
+.combo-foot { flex: none; margin-top: 4px; padding: 6px 10px 2px; border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--fg-2); }
+.combo-foot a { color: inherit; }
+/* An option's icon (a flag, a favicon) and its label. */
+.option-label { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.engine-icon { display: inline-block; flex: none; width: 16px; height: 16px; border-radius: 3px; object-fit: contain; }
+.mention-popup .engine-icon { vertical-align: -3px; margin-right: var(--space-1-5); }
 
 /* Lucide icons sit on the text baseline like the glyphs they replaced. */
 svg.lucide { vertical-align: -0.15em; flex-shrink: 0; }
@@ -2781,13 +3238,16 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 }
 .composer .select-list { top: auto; bottom: calc(100% + 6px); }
 .select-list li {
-  display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-4);
+  display: flex; justify-content: space-between; align-items: center; gap: var(--space-4);
   padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; color: var(--fg); font-size: var(--text-md);
 }
 .select-list li.on { background: var(--bg-hover); }
 .select-list li.chosen > span:first-child { font-weight: var(--w-semibold); }
+.select-list { font-weight: var(--w-regular); }
 /* A segmented control looks like the mode switch: a track, a raised thumb. */
 .seg { display: inline-flex; background: var(--bg-3); border-radius: var(--r-full); padding: 2px; }
+/* Many options wrap onto more lines; a pill would not hold them. */
+.seg.wrap { flex-wrap: wrap; max-width: 100%; border-radius: var(--r-lg); }
 .seg button {
   border: 0; background: none; color: var(--fg-2); min-height: 0; padding: 3px 12px; border-radius: var(--r-full);
   font: inherit; font-size: var(--text-sm); font-weight: var(--w-regular); cursor: pointer;
@@ -2796,10 +3256,147 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .field > .seg,
 .field > .swatches,
 .field > .check { align-self: flex-start; }
-.field-hint { font-size: var(--text-xs); font-weight: var(--w-regular); color: var(--fg-2); }
+.field-hint { margin: 0; font-size: var(--text-xs); font-weight: var(--w-regular); color: var(--fg-2); }
+.field-hint.error-text { color: var(--bad); }
+/* A caption <label> above its control: one line, unlike a wrapping label. */
+.form .field-label { display: block; }
+.optional { font-weight: var(--w-regular); }
 .check:has(input:disabled) { opacity: 0.45; }
 .seg button:hover:not(:disabled) { background: none; color: var(--fg); }
 .seg button.on { background: var(--thumb); box-shadow: var(--shadow-thumb); color: var(--fg); font-weight: var(--w-medium); }
 .row.wrap { flex-wrap: wrap; }
 .custom-engine { padding: 12px; border: 1px solid var(--line); border-radius: var(--r-lg); }
 .custom-engine .row input:not([type]) { flex: 1; }
+
+/* Agent avatars (AgentAvatar.tsx): the face is the agent's accent, lit and
+   shaded by the --av-* tokens with its side showing below, so it reads as
+   a small solid in either theme. data-state sets the expression; the loops
+   run only under data-motion="live", and reduced motion keeps the faces
+   still. SVG transforms turn about each part's own origin (an eye's centre). */
+.agent-avatar { flex: none; display: inline-block; vertical-align: middle; overflow: visible; }
+.agent-avatar .av-face,
+.agent-avatar .av-side,
+.agent-avatar .av-layer { stroke-width: 2.5; stroke-linejoin: round; }
+.agent-avatar .av-face { fill: var(--av-c); stroke: var(--av-c); }
+.agent-avatar .av-side {
+  fill: color-mix(in srgb, var(--av-c) 62%, var(--av-depth));
+  stroke: color-mix(in srgb, var(--av-c) 62%, var(--av-depth));
+}
+.agent-avatar .av-shine-0 { stop-color: var(--av-shine); }
+.agent-avatar .av-shine-1 { stop-color: var(--av-shine); stop-opacity: 0; }
+.agent-avatar .av-shade-0 { stop-color: var(--av-shade); stop-opacity: 0; }
+.agent-avatar .av-shade-1 { stop-color: var(--av-shade); }
+.agent-avatar .av-ground { fill: var(--av-ground); transform-origin: 20px 36px; }
+.agent-avatar .av-pupil { fill: var(--accent-fg); }
+.agent-avatar .av-happy,
+.agent-avatar .av-brow { fill: none; stroke: var(--accent-fg); stroke-width: 1.5; stroke-linecap: round; opacity: 0; }
+.agent-avatar .av-pupil,
+.agent-avatar .av-happy,
+.agent-avatar .av-brow { transition: opacity var(--dur-2) var(--ease-standard); }
+.agent-avatar .av-figure { transform-origin: 20px 34px; transition: transform var(--dur-4) var(--ease-spring); }
+.agent-avatar .av-move { transform-origin: 20px 20px; }
+.agent-avatar .av-look { transition: transform var(--dur-4) var(--ease-spring); }
+/* The eyes follow a pointer over the avatar (AgentAvatar sets --av-gx/gy). */
+.agent-avatar .av-gaze {
+  transform: translate(calc(var(--av-gx, 0) * 1.6px), calc(var(--av-gy, 0) * 1.2px));
+  transition: transform var(--dur-3) var(--ease-out);
+}
+/* Thinking: eyes up and aside. Working: narrowed, on the task. Unsure: one
+   eye small, one brow up, the body tilted. Done: closed happy arcs. Error:
+   worried brows, the face sinking a little. */
+.agent-avatar[data-state="thinking"] .av-look { transform: translate(1.4px, -1.7px); }
+.agent-avatar[data-state="working"] .av-look { transform: translateY(0.5px) scale(1.12, 0.5); }
+.agent-avatar[data-state="unsure"] .av-figure { transform: rotate(-7deg); }
+.agent-avatar[data-state="unsure"] .l .av-look { transform: scale(0.75); }
+.agent-avatar[data-state="unsure"] .r .av-look { transform: translateY(-0.5px) scale(1.15); }
+.agent-avatar[data-state="unsure"] .r .av-brow { opacity: 1; }
+.agent-avatar[data-state="done"] .av-pupil { opacity: 0; }
+.agent-avatar[data-state="done"] .av-happy { opacity: 1; }
+.agent-avatar[data-state="error"] .av-brow { opacity: 1; }
+.agent-avatar[data-state="error"] .av-look { transform: translateY(0.8px) scale(0.8); }
+.agent-avatar[data-state="error"] .av-figure { transform: translateY(0.8px); }
+/* Loops: a blink now and then, a slow breath while thinking, a small bob
+   while working, a sway while unsure; a hop once done, a shudder on error. */
+.agent-avatar[data-motion="live"]:is([data-state="idle"], [data-state="thinking"], [data-state="unsure"], [data-state="error"]) .av-lid {
+  animation: av-blink calc(var(--dur-bg) * 5) var(--ease-in-out) var(--av-delay) infinite;
+}
+.agent-avatar[data-motion="live"][data-state="thinking"] .av-move {
+  animation: av-breathe calc(var(--dur-bg) * 1.6) var(--ease-in-out) infinite alternate;
+}
+.agent-avatar[data-motion="live"][data-state="working"] .av-move { animation: av-bob var(--dur-6) var(--ease-in-out) infinite alternate; }
+.agent-avatar[data-motion="live"][data-state="working"] .av-ground { animation: av-ground var(--dur-6) var(--ease-in-out) infinite alternate; }
+.agent-avatar[data-motion="live"][data-state="unsure"] .av-move {
+  transform-origin: 20px 34px;
+  animation: av-sway calc(var(--dur-bg) * 1.8) var(--ease-in-out) infinite alternate;
+}
+.agent-avatar[data-motion="live"][data-state="done"] .av-move { animation: av-hop var(--dur-6) var(--ease-out); }
+.agent-avatar[data-motion="live"][data-state="error"] .av-move { animation: av-shudder var(--dur-5) var(--ease-standard); }
+@media (prefers-reduced-motion: reduce) {
+  .agent-avatar *,
+  .agent-avatar *::before { animation: none !important; transition: none !important; }
+}
+@keyframes av-blink {
+  0%, 94%, 100% { transform: scaleY(1); }
+  97% { transform: scaleY(0.1); }
+}
+@keyframes av-breathe { to { transform: scale(1.045); } }
+@keyframes av-bob { to { transform: translateY(-1.1px); } }
+@keyframes av-ground { to { transform: scaleX(0.86); } }
+@keyframes av-sway { to { transform: rotate(4deg); } }
+@keyframes av-hop {
+  40% { transform: translateY(-2.6px); }
+  70% { transform: translateY(0.4px); }
+}
+@keyframes av-shudder {
+  20% { transform: translateX(-1px); }
+  40% { transform: translateX(1px); }
+  60% { transform: translateX(-0.6px); }
+  80% { transform: translateX(0.4px); }
+}
+/* An agent that cannot answer: its main model is gone, no fallback left. */
+.agent-alert {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-full); color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent);
+}
+.agent-alert svg { vertical-align: 0; }
+.agent-pick.bad .select-button,
+.select-list li:has(.agent-alert),
+.mention-popup li.bad b { color: var(--bad); }
+.mention-popup li .agent-avatar,
+.mention-popup li .agent-alert { margin-right: var(--space-1-5); vertical-align: -4px; }
+.conv-agent,
+.author,
+.thinking { display: inline-flex; align-items: center; gap: var(--space-1-5); }
+.conv-agent.bad { color: var(--bad); }
+/* Answered by a fallback: one quiet line under the reply. */
+.fallback-note { margin-top: var(--space-1); font-size: var(--text-xs); color: var(--fg-2); }
+/* Problems under the home bar (Notices.tsx): above the similar chats, never
+   replaced by them. The tint is mixed into the page, so it stays opaque. */
+.notices { margin-top: var(--space-4); }
+.notices ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.notice {
+  display: flex; gap: var(--space-2); align-items: flex-start; padding: 10px 12px; border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--bad) 10%, var(--bg)); border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--bg));
+  font-size: var(--text-sm); color: var(--fg);
+}
+.notice > svg { flex: none; margin-top: 2px; color: var(--bad); }
+.notice-body { display: flex; flex-direction: column; gap: var(--space-0-5); min-width: 0; overflow-wrap: anywhere; }
+.notice-hint { color: var(--fg-2); font-size: var(--text-xs); }
+/* Settings, Agents (AgentsSettings.tsx). */
+.agent-list { list-style: none; margin: 0; padding: 4px 16px; }
+.agent-list > li { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.agent-list > li:last-child { border-bottom: 0; }
+.agent-row { display: flex; align-items: flex-start; gap: var(--space-3); }
+.agent-info { display: flex; flex-direction: column; gap: var(--space-0-5); flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.agent-name { font-weight: var(--w-medium); }
+.agent-list > li.bad .agent-name { color: var(--bad); }
+.agent-models .gone { color: var(--bad); }
+.avatar-editor { margin-top: var(--space-3); padding: 12px; border: 1px solid var(--line); border-radius: var(--r-lg); }
+.avatar-preview { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
+.avatar-preview .seg { flex-wrap: wrap; border-radius: var(--r-lg); }
+.avatar-picks { gap: var(--space-1-5); }
+.avatar-picks button {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 0; padding: 4px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg);
+}
+.avatar-picks button.on { border-color: var(--accent); background: var(--accent-soft); }

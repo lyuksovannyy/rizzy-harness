@@ -1,5 +1,5 @@
 //! Token-saving methods. Every method can be switched off. The master holds
-//! the admin's choice ([`TokenSavings`], `[savings]` in harness.toml) and
+//! the admin's choice ([`TokenSavings`], `[savings]` in config.toml) and
 //! resolves it per turn into [`Savings`], which travels with the prompt.
 //! Nothing here widens what a node allows: graphify also needs the node's
 //! own `node.toml` to permit it.
@@ -18,7 +18,7 @@ pub enum Style {
     Ultra,
 }
 
-/// What the admin chose (harness.toml `[savings]`).
+/// What the admin chose (config.toml `[savings]`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TokenSavings {
@@ -93,7 +93,7 @@ impl TokenSavings {
 }
 
 /// The methods in effect for one turn. The default (a prompt without
-/// settings) is everything off: the behaviour before these methods existed.
+/// settings) is everything off.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Savings {

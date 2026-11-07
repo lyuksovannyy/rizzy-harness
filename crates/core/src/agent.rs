@@ -81,6 +81,20 @@ pub struct AgentSpec {
     pub tools: ToolSelection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Models to try, in order, when the turn's model is unavailable or
+    /// fails before any output (prefixed ids). The master leaves out the
+    /// unavailable ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
+    /// Models the master knows are unavailable (missing from their
+    /// provider's latest listing): a turn on one of these starts with the
+    /// fallbacks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<String>,
+    /// Models of the chain (the turn's own and the fallbacks) that take no
+    /// reasoning effort: a request to one of these goes without `effort`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_effort: Vec<String>,
     /// `low` | `medium` | `high` | `max`; only applied if the model supports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,

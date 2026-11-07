@@ -4,11 +4,16 @@
 mod assets;
 pub mod attachments;
 pub mod auth;
+pub mod avatars;
 pub mod config;
+mod favicon;
 mod http;
+pub mod model_cache;
 pub mod node_setups;
 pub mod nodes;
+pub mod notices;
 pub mod prefs;
+pub mod presets;
 pub mod providers;
 pub mod provision;
 pub mod search;
@@ -42,14 +47,25 @@ pub enum Live {
 }
 
 /// A model the UI may offer, with what it supports (PLAN.md §0: capabilities
-/// come from configuration, never guessed).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// come from configuration, never guessed; unreported is `false`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ModelInfo {
+    /// `<provider_id>::<raw>`.
     pub id: String,
+    pub raw: String,
+    /// The provider's display name.
     pub provider: String,
+    pub provider_id: String,
+    pub name: Option<String>,
+    pub context: Option<u64>,
+    pub max_output: Option<u64>,
     pub effort: bool,
     pub vision: bool,
+    pub tools: bool,
     pub default: bool,
+    /// Missing from its provider's latest listing; the composer does not
+    /// offer it, but sessions and agents naming it still resolve.
+    pub unavailable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +147,11 @@ pub struct PromptOpts {
     /// An answer to a choices or form block; the prompt text is then the
     /// user's note. The node checks it and writes the message.
     pub reply: Option<harness_core::event::FormReply>,
+}
+
+/// Marks a session created without a model: it follows the defaults.
+fn auto_model_key(sid: SessionId) -> String {
+    format!("session-model-auto:{sid}")
 }
 
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
@@ -351,6 +372,92 @@ impl Master {
         lock(&self.inner.agents).clone()
     }
 
+    /// A listed model by its `<provider>::<raw>` id.
+    pub fn find_model(&self, id: &str) -> Option<ModelInfo> {
+        self.models().into_iter().find(|m| m.id == id)
+    }
+
+    /// The admin's default model for `agent_id`, if one is assigned.
+    pub fn agent_model(&self, agent_id: &str) -> Option<String> {
+        self.agent_chain(agent_id).map(|c| c.model)
+    }
+
+    /// The admin's model for `agent_id` and its fallbacks, if assigned.
+    pub fn agent_chain(&self, agent_id: &str) -> Option<config::AgentChain> {
+        let cfg = self.provider_runtime()?.config();
+        let c = cfg.agent_models.get(agent_id)?;
+        Some(config::AgentChain {
+            model: Some(c.model.clone()).filter(|m| cfg.knows_model(m))?,
+            fallbacks: c
+                .fallbacks
+                .iter()
+                .filter(|m| cfg.knows_model(m))
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// The agent's main model: its file's `model`, else the admin's choice,
+    /// else the global default.
+    pub fn agent_main_model(&self, agent: &harness_agents::Agent) -> Option<String> {
+        let cfg = self.provider_runtime()?.config();
+        match &agent.spec.model {
+            Some(m) => Some(m.clone()),
+            None => cfg.agent_default(&agent.id),
+        }
+    }
+
+    /// How `agent_id` looks: the admin's choice or the one its id gives.
+    pub fn agent_avatar(&self, agent_id: &str) -> avatars::AgentAvatar {
+        self.provider_runtime()
+            .and_then(|rt| rt.config().agent_avatars.get(agent_id).copied())
+            .unwrap_or_else(|| avatars::AgentAvatar::default_for(agent_id))
+    }
+
+    /// The fallbacks of `agent_id` running on `model`: its own chain's, else
+    /// (an agent without one runs on the inherited default) those of the
+    /// default agent's chain when `model` is that chain's main model. All of
+    /// them, unavailable ones included; `set_fallbacks` filters.
+    pub fn agent_fallbacks(&self, agent_id: &str, model: Option<&str>) -> Vec<String> {
+        self.agent_chain(agent_id)
+            .or_else(|| {
+                self.agent_chain(harness_agents::DEFAULT_AGENT)
+                    .filter(|g| Some(g.model.as_str()) == model)
+            })
+            .map(|c| c.fallbacks)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| Some(f.as_str()) != model)
+            .collect()
+    }
+
+    /// Put the agent's fallbacks on `spec`, which runs on `model`: the
+    /// available ones, in order, and `model` itself among the unavailable
+    /// when its provider no longer lists it; and the models of that chain
+    /// that take no reasoning effort.
+    fn set_fallbacks(&self, spec: &mut harness_core::agent::AgentSpec, model: Option<&str>) {
+        let Some(cfg) = self.provider_runtime().map(|rt| rt.config()) else {
+            return;
+        };
+        let model = model.map(str::to_string);
+        spec.fallbacks = self
+            .agent_fallbacks(&spec.agent_id, model.as_deref())
+            .into_iter()
+            .filter(|f| !cfg.model_unavailable(f))
+            .collect();
+        spec.unavailable = model
+            .clone()
+            .filter(|m| cfg.model_unavailable(m))
+            .into_iter()
+            .collect();
+        spec.no_effort = model
+            .iter()
+            .chain(&spec.fallbacks)
+            .filter(|m| !self.find_model(m).is_some_and(|m| m.effort))
+            .cloned()
+            .collect();
+    }
+
     /// Resolve an agent id (or the default) to the spec a node runs, dropping
     /// effort when the model is not known to support it.
     pub fn agent_spec(
@@ -363,6 +470,11 @@ impl Master {
 
     /// Like `agent_spec`, with an optional per-message effort that replaces
     /// the agent's. The model-capability gate applies either way.
+    ///
+    /// The model is, in order: the agent file's `model` (a hard override),
+    /// `session_model` (chosen for the session), the admin's default for the
+    /// agent, the global default. Without a session model the result goes
+    /// on the spec, so the session follows the current defaults.
     pub fn agent_spec_with(
         &self,
         agent_id: Option<&str>,
@@ -390,19 +502,36 @@ impl Master {
             spec.effort = Some(e.to_string());
         }
         let models = self.models();
-        let model = spec
-            .model
-            .clone()
-            .or(session_model.map(str::to_string))
-            .or_else(|| models.iter().find(|m| m.default).map(|m| m.id.clone()));
-        let effort_ok = model
-            .as_deref()
-            .is_some_and(|m| models.iter().any(|x| x.id == m && x.effort));
-        if !effort_ok {
+        if spec.model.is_none() && session_model.is_none() {
+            spec.model = self
+                .agent_model(&agent.id)
+                .or_else(|| models.iter().find(|m| m.default).map(|m| m.id.clone()));
+        }
+        let model = spec.model.clone().or(session_model.map(str::to_string));
+        self.set_fallbacks(&mut spec, model.as_deref());
+        // The first model of the chain that takes an effort; the node leaves
+        // it off for the others (`no_effort`).
+        let takes_effort = model
+            .iter()
+            .chain(&spec.fallbacks)
+            .find(|m| self.find_model(m).is_some_and(|m| m.effort))
+            .cloned();
+        if takes_effort.is_none() {
             spec.effort = None;
+        } else if spec.effort.is_none() {
+            // The provider's default effort, for models that take one.
+            spec.effort = self.provider_runtime().and_then(|rt| {
+                let cfg = rt.config();
+                let (p, _) = cfg.resolve_model(takes_effort.as_deref()?)?;
+                serde_json::to_value(p.effort?)
+                    .ok()?
+                    .as_str()
+                    .map(str::to_string)
+            });
         }
         // Sub-agents travel with the spec (nodes keep no definitions). Their
-        // own delegates stay empty: delegation is one level deep.
+        // own delegates stay empty: delegation is one level deep. One with an
+        // admin-assigned model uses it; the rest inherit the parent's.
         spec.delegates = agent
             .delegates
             .iter()
@@ -412,6 +541,20 @@ impl Master {
                 c.effort = None;
                 c.delegates.clear();
                 c.caps = None;
+                if c.model.is_none() {
+                    c.model = self.agent_model(&d.id);
+                }
+                if c.model.is_some() {
+                    let m = c.model.clone();
+                    self.set_fallbacks(&mut c, m.as_deref());
+                } else {
+                    // A child without a model of its own runs on the
+                    // parent's, with the parent's chain.
+                    c.model = model.clone();
+                    c.fallbacks = spec.fallbacks.clone();
+                    c.unavailable = spec.unavailable.clone();
+                    c.no_effort = spec.no_effort.clone();
+                }
                 c
             })
             .collect();
@@ -419,6 +562,17 @@ impl Master {
             spec.caps = None;
         }
         Ok(spec)
+    }
+
+    /// The model a session chose, or `None` when it follows the defaults
+    /// (created without one).
+    async fn session_model(&self, row: &harness_store::SessionRow) -> Option<String> {
+        let key = auto_model_key(row.session_id);
+        let auto = self.inner.mirror.call(move |s| s.kv_get(&key)).await;
+        match auto {
+            Ok(Some(_)) => None,
+            _ => Some(row.model.clone()),
+        }
     }
 
     /// Attach a node link. The first message must be `node.hello`.
@@ -668,20 +822,38 @@ impl Master {
                     Profile::Agentic => "(no worker node; set one up for agentic sessions)".into(),
                 })
             })?;
-        let agent = self.agent_spec(spec.agent_id.as_deref(), spec.model.as_deref())?;
+        // A chosen model is kept as sent; without one the session follows
+        // the agent's default, resolved now and on every turn. Clients
+        // always send the model they show, which is that default unless the
+        // user picked another: the default counts as no choice, so the
+        // session keeps following the defaults.
+        let auto = self.agent_spec(spec.agent_id.as_deref(), None)?;
+        let chosen = spec
+            .model
+            .filter(|m| !m.trim().is_empty())
+            .filter(|m| auto.model.as_deref() != Some(m.as_str()));
+        let agent = match &chosen {
+            None => auto,
+            Some(m) => self.agent_spec(spec.agent_id.as_deref(), Some(m))?,
+        };
+        let model = chosen.clone().or(agent.model.clone());
         let sid = SessionId::new();
         self.send_command(&node_id, |req_id| MasterToNode::Create {
             req_id,
             session_id: sid,
             title: spec.title,
             cwd: spec.cwd,
-            model: spec.model,
+            model,
             approval_mode: spec.approval_mode,
             profile: Some(profile),
             agent: Some(agent),
             incognito: spec.incognito,
         })
         .await?;
+        if chosen.is_none() {
+            let key = auto_model_key(sid);
+            self.inner.mirror.call(move |s| s.kv_set(&key, "1")).await?;
+        }
         Ok(sid)
     }
 
@@ -702,9 +874,8 @@ impl Master {
             compare,
             reply,
         } = opts;
-        let models = self.models();
-        if let Some(bad) = compare.iter().find(|c| !models.iter().any(|m| &m.id == *c)) {
-            return Err(CommandError::Rejected(format!("unknown model {bad:?}")));
+        if let Some(c) = compare.iter().find(|c| self.find_model(c).is_none()) {
+            return Err(CommandError::Rejected(format!("unknown model {c:?}")));
         }
         let row = self
             .inner
@@ -731,8 +902,12 @@ impl Master {
             .filter(|id| reply.is_none() && self.agents().get(id).is_some())
             .map(str::to_string);
         let chosen = asker.or(agent_id).or(mention).or(row.agent_id.clone());
-        let mut agent =
-            self.agent_spec_with(chosen.as_deref(), Some(&row.model), effort.as_deref())?;
+        let session_model = self.session_model(&row).await;
+        let mut agent = self.agent_spec_with(
+            chosen.as_deref(),
+            session_model.as_deref(),
+            effort.as_deref(),
+        )?;
         // Per-turn context goes after the history, not into the system
         // prompt: a system prompt that changes every turn would make the
         // provider re-read (and bill) the whole conversation each time.
@@ -788,7 +963,8 @@ impl Master {
             .call(move |s| s.session(sid))
             .await?
             .ok_or(CommandError::UnknownSession)?;
-        let agent = self.agent_spec(Some(agent_id), Some(&row.model))?;
+        let session_model = self.session_model(&row).await;
+        let agent = self.agent_spec(Some(agent_id), session_model.as_deref())?;
         self.send_command(&row.node_id, |req_id| MasterToNode::SetAgent {
             req_id,
             session_id: sid,
@@ -850,6 +1026,7 @@ impl Master {
             .mirror
             .call(move |s| {
                 s.delete_session(sid, true)?;
+                s.kv_delete(&auto_model_key(sid))?;
                 s.checkpoint()
             })
             .await;

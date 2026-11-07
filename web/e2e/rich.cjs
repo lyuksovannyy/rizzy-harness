@@ -27,8 +27,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { check, log, sleep, chat } = require('./rich/lib.cjs');
+const { createOwner, keywordsOnly } = require('./onboard.cjs');
 
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-rich-'));
 const R = `${S}/repo`;
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -53,13 +54,10 @@ const searx = http.createServer((req, res) => {
 
 async function signUp(p, code) {
   await p.goto(URL_);
-  await p.fill('input[placeholder="claim code"]', code);
-  await p.fill('input[placeholder="username"]', 'alex');
-  await p.fill('input[type=password]', 'admin password');
-  await p.click('text=Create account');
+  await createOwner(p, code);
   await p.waitForSelector('text=Connect an AI provider');
   await p.click('text=Skip: use the built-in demo');
-  await p.click('text=Skip: keywords only');
+  await keywordsOnly(p);
   await p.waitForSelector('text=About you');
   await p.click('button:has-text("Continue")');
   await p.waitForSelector('h2:has-text("Search engine")');
@@ -69,8 +67,9 @@ async function signUp(p, code) {
 
 (async () => {
   await new Promise((r) => searx.listen(0, '127.0.0.1', r));
-  fs.writeFileSync(`${S}/data/harness.toml`, [
-    '[provider]', 'kind = "mock"', 'mock_delay_ms = 20', '',
+  fs.writeFileSync(`${S}/data/config.toml`, [
+    '[[providers]]', 'id = "demo"', 'name = "Demo"', 'preset = "demo"', 'kind = "mock"', 'mock_delay_ms = 20',
+    'models = [{ id = "mock" }]', '',
     '[web]', 'search = "searxng"', `searxng_url = "http://127.0.0.1:${searx.address().port}"`, '',
   ].join('\n'));
   fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${R}"]\n`);

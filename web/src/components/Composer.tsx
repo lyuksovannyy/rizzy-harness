@@ -3,11 +3,14 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
+import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
-import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, type SearchKind, supports } from "../lib/engines";
+import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, engineOrigin, type SearchKind, supports } from "../lib/engines";
+import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
-import type { Agent, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+import { AgentMark, agentAlert } from "./AgentAvatar";
+import type { Agent, AvatarState, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -57,6 +60,8 @@ export function Composer(props: {
   /** Selected agent (home: the choice for the new chat; session: the session's agent). */
   agentId: string;
   onAgentChange: (id: string) => void;
+  /** Session: what the selected agent is doing, for its avatar on the pill. */
+  agentState?: AvatarState;
   /** Session model (session view), for the effort control. */
   sessionModel?: string;
   defaultModel?: string | null;
@@ -95,9 +100,31 @@ export function Composer(props: {
     pickedBy.current = "user";
     setMode(m);
   };
-  const [model, setModel] = useState(
-    () => props.defaultModel ?? props.models.find((m) => m.default)?.id ?? props.models[0]?.id ?? "",
+  // The model: the user's pick in this bar, then the agent's default, the
+  // user's default, the server's. A pick made under another agent gives way
+  // to this agent's default. General's default is the server's, which the
+  // user's own outranks. A leading @agent answers this message, on its
+  // default. Models the provider no longer lists are not offered, though a
+  // session or default naming one still resolves to it.
+  const offered = offeredModels(props.models);
+  const [picked, setPicked] = useState<{ agent: string; model: string } | null>(null);
+  const override = leadingMention(
+    text,
+    props.agents.map((a) => a.id),
   );
+  const answering = override ?? props.agentId;
+  const own = props.agents.find((a) => a.id === answering);
+  const agentDefault = own && own.id !== "general" ? resolveModel(props.models, own.default_model)?.id : undefined;
+  const model =
+    (picked && (picked.agent === answering || !agentDefault) && props.models.some((m) => m.id === picked.model)
+      ? picked.model
+      : undefined) ??
+    agentDefault ??
+    resolveModel(props.models, props.defaultModel)?.id ??
+    offered.find((m) => m.default)?.id ??
+    offered[0]?.id ??
+    "";
+  const setModel = (m: string) => setPicked({ agent: answering, model: m });
   const [effort, setEffort] = useState<Effort | null>(null);
   const [nodeId, setNodeId] = useState(props.workers[0]?.node_id ?? "");
   const [cwd, setCwd] = useState(() => recentFolders()[0] ?? "");
@@ -187,12 +214,6 @@ export function Composer(props: {
 
   // Keep selections valid as lists load.
   useEffect(() => {
-    // Also resets when the provider changed and the old model is gone.
-    if (props.models.length && !props.models.some((m) => m.id === model)) {
-      setModel(props.defaultModel ?? props.models.find((m) => m.default)?.id ?? props.models[0]!.id);
-    }
-  }, [props.models, props.defaultModel, model]);
-  useEffect(() => {
     if (!props.workers.some((w) => w.node_id === nodeId)) setNodeId(props.workers[0]?.node_id ?? "");
   }, [props.workers, nodeId]);
   useEffect(() => {
@@ -240,21 +261,19 @@ export function Composer(props: {
   const engineUrl = (engine ? (kind === "text" ? engine.text : engine.image) : undefined) ?? defaultUrl;
 
   const mention = popupClosed ? null : activeMention(text, caret);
-  const suggestions: { id: string; title: string; hint: string }[] = !mention
+  const suggestions: { id: string; title: string; hint: string; origin?: string | null; agent?: Agent }[] = !mention
     ? []
     : searching
       ? engines
           .filter((e) => e.id.startsWith(mention.query.toLowerCase()) || e.name.toLowerCase().startsWith(mention.query.toLowerCase()))
           .slice(0, 8)
-          .map((e) => ({ id: e.id, title: e.name, hint: abilities(e) }))
-      : filterAgents(props.agents, mention.query).map((a) => ({ id: a.id, title: a.id, hint: a.description || a.name }));
+          .map((e) => ({ id: e.id, title: e.name, hint: abilities(e), origin: engineOrigin(e) }))
+      : filterAgents(props.agents, mention.query).map((a) => ({ id: a.id, title: a.id, hint: a.description || a.name, agent: a }));
   const popupOpen = suggestions.length > 0;
-  const override = leadingMention(
-    text,
-    props.agents.map((a) => a.id),
-  );
+  const pickedAgent = props.agents.find((a) => a.id === props.agentId);
+  const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
   const effortModel = home ? model : props.sessionModel;
-  const effortOk = props.models.find((m) => m.id === effortModel)?.effort ?? false;
+  const effortOk = resolveModel(props.models, effortModel)?.effort ?? false;
 
   const choose = (id: string) => {
     if (!mention) return;
@@ -373,12 +392,14 @@ export function Composer(props: {
               key={a.id}
               role="option"
               aria-selected={i === pick}
-              className={i === pick ? "active" : ""}
+              className={`${i === pick ? "active" : ""}${a.agent && agentAlert(a.agent) ? " bad" : ""}`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 choose(a.id);
               }}
             >
+              {searching && <EngineIcon origin={a.origin ?? null} />}
+              {a.agent && <AgentMark agent={a.agent} size={18} />}
               <b>@{a.id}</b> {searching && <span>{a.title}</span>} <span className="option-hint">{a.hint}</span>
             </li>
           ))}
@@ -444,36 +465,43 @@ export function Composer(props: {
               />
             </>
           )}
-          {mode !== "search" && (
-            <select
-              className="pill"
-              aria-label="agent"
-              value={props.agentId}
-              onChange={(e) => props.onAgentChange(e.target.value)}
-              title={override ? `@${override} ${t("composer.forMessage")}` : undefined}
+          {mode !== "search" && props.agents.length > 0 && (
+            <span
+              className={`agent-pick${pickedAlert ? " bad" : ""}`}
+              title={override ? `@${override} ${t("composer.forMessage")}` : (pickedAlert ?? undefined)}
             >
-              {props.agents.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
+              <Select
+                compact
+                label="agent"
+                value={props.agentId}
+                options={props.agents.map((a) => ({
+                  value: a.id,
+                  label: a.name,
+                  hint: agentAlert(a) ? "model unavailable" : undefined,
+                  icon: <AgentMark agent={a} size={18} state={a.id === props.agentId ? props.agentState : undefined} />,
+                }))}
+                onChange={(id) => {
+                  props.onAgentChange(id);
+                  ta.current?.focus();
+                }}
+              />
+            </span>
           )}
           {override && override !== props.agentId && (
             <span className="pill override">
               <CornerDownRight size={14} /> @{override} {t("composer.forMessage")}
             </span>
           )}
-          {home && mode !== "search" && props.models.length > 1 && (
+          {home && mode !== "search" && offeredModels(props.models, model).length > 1 && (
             <select className="pill" aria-label="model" value={model} onChange={(e) => setModel(e.target.value)}>
-              {props.models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
+              {offeredModels(props.models, model).map((m) => (
+                <option key={m.id} value={m.id} disabled={m.unavailable}>
+                  {modelLabel(m, props.models)}
                 </option>
               ))}
             </select>
           )}
-          {home && mode === "ask" && props.models.length > 1 && (
+          {home && mode === "ask" && offered.some((m) => m.id !== model) && (
             <select
               className="pill"
               aria-label="compare with"
@@ -482,11 +510,11 @@ export function Composer(props: {
               onChange={(e) => setCompareWith(e.target.value || null)}
             >
               <option value="">compare: off</option>
-              {props.models
+              {offered
                 .filter((m) => m.id !== model)
                 .map((m) => (
                   <option key={m.id} value={m.id}>
-                    vs {m.id}
+                    vs {modelLabel(m, props.models)}
                   </option>
                 ))}
             </select>
@@ -555,7 +583,12 @@ export function Composer(props: {
                 value={engine?.id ?? ""}
                 options={engines
                   .filter((e) => supports(e, kind))
-                  .map((e) => ({ value: e.id, label: e.name, hint: abilities(e) }))}
+                  .map((e) => ({
+                    value: e.id,
+                    label: e.name,
+                    hint: abilities(e),
+                    icon: <EngineIcon origin={engineOrigin(e)} />,
+                  }))}
                 onChange={(id) => {
                   setEnginePick((p) => ({ ...p, [kind]: id }));
                   ta.current?.focus();

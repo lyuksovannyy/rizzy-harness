@@ -102,7 +102,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
             </p>
             {join ? (
               <pre className="mono join-cmd">
-                {`harness node join wss://${host}:${join.port} \\\n  --token ${join.token} \\\n  --fingerprint ${join.fingerprint}\nharness node run`}
+                {`rizzy-harness node join wss://${host}:${join.port} \\\n  --token ${join.token} \\\n  --fingerprint ${join.fingerprint}\nrizzy-harness node run`}
               </pre>
             ) : (
               <div className="row">

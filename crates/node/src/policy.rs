@@ -20,7 +20,7 @@ pub struct NodePolicy {
     /// File checkpoints kept per working folder for undo/rewind (0 = off).
     pub checkpoints_keep: usize,
     /// Let agents query a graphify knowledge graph (runs the third-party
-    /// `graphify` program here; install it with `harness graphify install`).
+    /// `graphify` program here; install it with `rizzy-harness graphify install`).
     pub graphify: bool,
 }
 

@@ -56,7 +56,7 @@ jobs:
           docker run -d --name harness-ci -p 127.0.0.1:7777:7777 harness:ci
           for i in $(seq 30); do curl -fsS http://127.0.0.1:7777/ >/dev/null && break; sleep 1; done
           curl -fsS http://127.0.0.1:7777/ | grep -q '<div id="root">'
-          docker exec harness-ci harness claim-code > /dev/null  # exists; not printed
+          docker exec harness-ci rizzy-harness claim-code > /dev/null  # exists; not printed
           # Host networking with 0.0.0.0 must be refused.
           docker run --rm --network host harness:ci 2>&1 | grep "shares the host's network"
 
@@ -92,7 +92,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
-            org.opencontainers.image.title=harness
+            org.opencontainers.image.title=rizzy-harness
             org.opencontainers.image.description=Self-hosted coding-agent harness: central server (web UI, chats, node setup). Nodes run on real hosts, not in containers.
       - uses: docker/build-push-action@v6
         with:
@@ -111,11 +111,11 @@ jobs:
           img=ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}
           docker pull "$img"
           id=$(docker create "$img")
-          docker cp "$id:/usr/local/bin/harness" harness
+          docker cp "$id:/usr/local/bin/rizzy-harness" rizzy-harness
           docker rm "$id"
-          name=harness-$GITHUB_REF_NAME-x86_64-linux-gnu
-          tar czf "$name.tar.gz" harness README.md LICENSE
+          name=rizzy-harness-$GITHUB_REF_NAME-x86_64-linux-gnu
+          tar czf "$name.tar.gz" rizzy-harness README.md LICENSE
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
           gh release create "$GITHUB_REF_NAME" "$name.tar.gz" "$name.tar.gz.sha256" \
-            --title "harness $GITHUB_REF_NAME" --generate-notes \
+            --title "rizzy-harness $GITHUB_REF_NAME" --generate-notes \
             --notes "Docker: \`docker pull $img\`. The binary is built on Debian 13 (glibc 2.41)."

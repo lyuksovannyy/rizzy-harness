@@ -32,13 +32,16 @@ pub struct LlmProvider {
 }
 
 /// `genai` appends paths like `messages` to the base URL, so it must end in `/`.
-fn normalize_base(url: &str) -> String {
+pub(crate) fn normalize_base(url: &str) -> String {
     let mut u = url.trim().to_string();
     if !u.ends_with('/') {
         u.push('/');
     }
     u
 }
+
+/// The bearer sent to endpoints that take no key.
+pub const NO_KEY: &str = "no-key";
 
 impl LlmProvider {
     pub fn new(
@@ -55,10 +58,13 @@ impl LlmProvider {
             move |t: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
                 Ok(ServiceTarget {
                     endpoint: Endpoint::from_owned(endpoint.clone()),
-                    auth: match &api_key {
-                        Some(k) => AuthData::from_single(k.expose().clone()),
-                        None => AuthData::None,
-                    },
+                    // genai refuses a request with no key at all, so a
+                    // key-less endpoint (Ollama, llama.cpp, vLLM, LM Studio)
+                    // gets the placeholder those servers ignore.
+                    auth: AuthData::from_single(match &api_key {
+                        Some(k) => k.expose().clone(),
+                        None => NO_KEY.to_string(),
+                    }),
                     model: ModelIden::new(adapter, t.model.model_name),
                 })
             },
@@ -143,6 +149,41 @@ fn effort(e: Effort) -> ReasoningEffort {
     }
 }
 
+/// A genai error as ours. An HTTP status (which a stream reports as its
+/// first event) becomes `Status`, a failed connection or a timeout `Http`,
+/// so the loop can tell a model-level failure from a broken stream.
+fn provider_error(e: genai::Error) -> ProviderError {
+    let inner = match &e {
+        genai::Error::WebStream { error, .. } => Some(error.as_ref()),
+        _ => None,
+    };
+    let status = |g: &genai::Error| match g {
+        genai::Error::HttpError { status, body, .. } => Some(ProviderError::Status {
+            status: status.as_u16(),
+            body: body.clone(),
+        }),
+        genai::Error::WebModelCall {
+            webc_error: genai::webc::Error::ResponseFailedStatus { status, body, .. },
+            ..
+        } => Some(ProviderError::Status {
+            status: status.as_u16(),
+            body: body.clone(),
+        }),
+        _ => g.status().map(|s| ProviderError::Status {
+            status: s.as_u16(),
+            body: String::new(),
+        }),
+    };
+    if let Some(p) = status(&e).or_else(|| inner?.downcast_ref::<genai::Error>().and_then(status)) {
+        return p;
+    }
+    match inner.and_then(|i| i.downcast_ref::<reqwest::Error>()) {
+        Some(r) if r.is_connect() || r.is_timeout() => ProviderError::Http(r.to_string()),
+        _ if inner.is_some() => ProviderError::Stream(e.to_string()),
+        _ => ProviderError::Http(e.to_string()),
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for LlmProvider {
     fn name(&self) -> &'static str {
@@ -168,12 +209,12 @@ impl Provider for LlmProvider {
             .client
             .exec_chat_stream(&req.model, to_genai(req), Some(&opts))
             .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?
+            .map_err(provider_error)?
             .stream;
         let mut text = String::new();
         let mut out = Completion::default();
         while let Some(ev) = stream.next().await {
-            match ev.map_err(|e| ProviderError::Stream(e.to_string()))? {
+            match ev.map_err(provider_error)? {
                 ChatStreamEvent::Chunk(c) => {
                     if !c.content.is_empty() {
                         text.push_str(&c.content);
@@ -251,57 +292,65 @@ impl Provider for SwappableProvider {
     }
 }
 
-/// List model ids from `GET {base}/models` (OpenAI-compatible and Anthropic
-/// both answer `{"data": [{"id": ...}]}`). Doubles as a key check.
-pub async fn list_models(
-    kind: ApiKind,
-    base_url: &str,
-    api_key: Option<&Secret<String>>,
-) -> Result<Vec<String>, ProviderError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| ProviderError::Http(e.to_string()))?;
-    let url = format!("{}models", normalize_base(base_url));
-    let mut rb = client.get(&url);
-    match (kind, api_key) {
-        (ApiKind::Anthropic, Some(k)) => {
-            rb = rb
-                .header("x-api-key", k.expose())
-                .header("anthropic-version", "2023-06-01");
-        }
-        (ApiKind::Anthropic, None) => {
-            rb = rb.header("anthropic-version", "2023-06-01");
-        }
-        (ApiKind::Openai, Some(k)) => rb = rb.bearer_auth(k.expose()),
-        (ApiKind::Openai, None) => {}
+/// Separates a provider prefix from the provider's own model id
+/// (`openrouter::openai/gpt-4o`); raw ids may contain `/` but not `::`.
+pub const MODEL_SEP: &str = "::";
+
+/// `("openrouter", "openai/gpt-4o")` for a prefixed id, `None` for an id
+/// with no provider prefix (which names no model).
+pub fn split_model(id: &str) -> Option<(&str, &str)> {
+    id.split_once(MODEL_SEP)
+}
+
+/// One provider behind a [`ModelRouter`], under its prefix.
+pub struct Route {
+    pub prefix: String,
+    pub provider: std::sync::Arc<dyn Provider>,
+}
+
+/// Sends each request to the provider named by the model's prefix, with the
+/// prefix stripped.
+pub struct ModelRouter {
+    routes: Vec<Route>,
+}
+
+impl ModelRouter {
+    pub fn new(routes: Vec<Route>) -> Self {
+        Self { routes }
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| ProviderError::Http(e.without_url().to_string()))?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(ProviderError::Status {
-            status,
-            body: body.chars().take(300).collect(),
-        });
+
+    /// The route for `model` and the raw id to send it.
+    pub fn resolve<'a>(&self, model: &'a str) -> Result<(&Route, &'a str), ProviderError> {
+        split_model(model)
+            .and_then(|(prefix, raw)| {
+                self.routes
+                    .iter()
+                    .find(|r| r.prefix == prefix)
+                    .map(|r| (r, raw))
+            })
+            .ok_or_else(|| ProviderError::UnknownModel(model.to_string()))
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| ProviderError::Stream(e.to_string()))?;
-    let mut ids: Vec<String> = v["data"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| m["id"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+}
+
+#[async_trait::async_trait]
+impl Provider for ModelRouter {
+    fn name(&self) -> &'static str {
+        match self.routes.as_slice() {
+            [one] => one.provider.name(),
+            _ => "multi-provider",
+        }
+    }
+
+    async fn complete(
+        &self,
+        req: &ChatRequest,
+        deltas: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        let (route, raw) = self.resolve(&req.model)?;
+        let mut req = req.clone();
+        req.model = raw.to_string();
+        route.provider.complete(&req, deltas).await
+    }
 }
 
 #[cfg(test)]
@@ -348,5 +397,63 @@ mod tests {
         });
         assert_eq!(r.messages.len(), 4);
         assert_eq!(r.tools.as_ref().map(|t| t.len()), Some(1));
+    }
+
+    /// Answers with its own name and the model id it was sent.
+    struct Named(&'static str);
+
+    #[async_trait::async_trait]
+    impl Provider for Named {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            Ok(Completion {
+                text: format!("{} {}", self.0, req.model),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn router_strips_prefix() {
+        let route = |prefix: &str, name: &'static str| Route {
+            prefix: prefix.into(),
+            provider: std::sync::Arc::new(Named(name)),
+        };
+        let r = ModelRouter::new(vec![route("openrouter", "a"), route("nim", "b")]);
+        let ask = |model: &str| {
+            let req = ChatRequest {
+                model: model.into(),
+                messages: vec![],
+                tools: vec![],
+                effort: None,
+                cache: false,
+            };
+            let r = &r;
+            async move {
+                let (tx, _rx) = mpsc::unbounded_channel();
+                r.complete(&req, tx).await.map(|c| c.text)
+            }
+        };
+        assert_eq!(
+            ask("openrouter::openai/gpt-4o").await.unwrap(),
+            "a openai/gpt-4o"
+        );
+        assert_eq!(
+            ask("nim::meta/llama-3.1-70b-instruct").await.unwrap(),
+            "b meta/llama-3.1-70b-instruct"
+        );
+        for unknown in ["gone::x", "openai/gpt-4o"] {
+            assert!(matches!(
+                ask(unknown).await,
+                Err(ProviderError::UnknownModel(_))
+            ));
+        }
+        assert_eq!(r.name(), "multi-provider");
     }
 }

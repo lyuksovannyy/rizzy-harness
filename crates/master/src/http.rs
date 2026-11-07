@@ -10,6 +10,8 @@ use serde_json::json;
 
 use crate::{CommandError, Master, auth};
 
+mod providers;
+
 pub fn router(master: Master) -> Router {
     let api = Router::new()
         .route("/api/setup", get(setup_status).post(setup))
@@ -23,8 +25,49 @@ pub fn router(master: Master) -> Router {
             get(get_classifier).put(put_classifier),
         )
         .route("/api/search", get(search))
-        .route("/api/admin/provider", get(get_provider).put(put_provider))
-        .route("/api/admin/provider/test", post(test_provider))
+        .route("/api/favicon", get(crate::favicon::favicon))
+        .route("/api/admin/providers", get(providers::get_providers))
+        .route(
+            "/api/admin/providers/test",
+            post(providers::test_provider)
+                .put(providers::put_test)
+                .delete(providers::delete_test),
+        )
+        .route(
+            "/api/admin/providers/demo",
+            post(providers::use_demo)
+                .put(providers::put_demo)
+                .delete(providers::delete_demo),
+        )
+        .route(
+            "/api/admin/providers/{id}",
+            axum::routing::put(providers::put_provider).delete(providers::delete_provider),
+        )
+        .route(
+            "/api/admin/providers/models/test",
+            post(providers::test_model),
+        )
+        .route(
+            "/api/admin/providers/{id}/models",
+            get(providers::get_models),
+        )
+        .route(
+            "/api/admin/providers/{id}/models/refresh",
+            post(providers::refresh_models).delete(providers::delete_refresh),
+        )
+        .route(
+            "/api/admin/providers/{id}/models/{raw}",
+            axum::routing::delete(providers::delete_model),
+        )
+        .route(
+            "/api/admin/agent-models",
+            axum::routing::put(providers::put_agent_models),
+        )
+        .route(
+            "/api/admin/agents/{id}/avatar",
+            axum::routing::put(providers::put_agent_avatar),
+        )
+        .route("/api/notices", get(notices))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{id}",
@@ -291,11 +334,52 @@ async fn models(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<s
     Ok(Json(json!({ "models": m.models() })))
 }
 
+/// An agent as the UI lists it: its definition, the admin's model, the
+/// model it runs on and the fallbacks it has there (its own chain's, else
+/// the ones it inherits with the default), which of those are unavailable,
+/// and its avatar.
+fn agent_json(m: &Master, a: &harness_agents::Agent) -> serde_json::Value {
+    let chain = m.agent_chain(&a.id);
+    let main = m.agent_main_model(a);
+    let fallbacks = m.agent_fallbacks(&a.id, main.as_deref());
+    let unavailable: Vec<String> = match m.provider_runtime() {
+        Some(rt) => {
+            let cfg = rt.config();
+            let mut out: Vec<String> = Vec::new();
+            for x in main.iter().chain(&fallbacks) {
+                if cfg.model_unavailable(x) && !out.contains(x) {
+                    out.push(x.clone());
+                }
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+    let mut v = json!(a);
+    v["default_model"] = json!(chain.map(|c| c.model));
+    v["main_model"] = json!(main);
+    v["fallbacks"] = json!(fallbacks);
+    v["unavailable"] = json!(unavailable);
+    v["avatar"] = json!(m.agent_avatar(&a.id));
+    v
+}
+
 async fn agents(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
     require(&m, &headers).await?;
     let set = m.agents();
+    let agents: Vec<serde_json::Value> = set.list().iter().map(|a| agent_json(&m, a)).collect();
     Ok(Json(
-        json!({ "agents": set.list(), "default": set.default_id() }),
+        json!({ "agents": agents, "default": set.default_id() }),
+    ))
+}
+
+async fn notices(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    Ok(Json(
+        json!({ "notices": crate::notices::for_viewer(&m, &who).await }),
     ))
 }
 
@@ -481,26 +565,6 @@ async fn put_classifier(
     Ok(Json(json!({ "ok": true })))
 }
 
-// ---- provider setup (admins) ----
-
-fn provider_json(rt: &crate::providers::ProviderRuntime) -> serde_json::Value {
-    let cfg = rt.config();
-    let p = &cfg.provider;
-    let key = match (&p.api_key_env, &p.api_key_secret) {
-        (Some(v), _) => format!("env:{v}"),
-        (None, Some(_)) => "stored".to_string(),
-        (None, None) => "none".to_string(),
-    };
-    json!({
-        "kind": p.kind,
-        "base_url": cfg.base_url(),
-        "model": p.model,
-        "key": key,
-        "configured": p.kind != crate::config::ProviderKind::Mock,
-        "models": cfg.models.iter().map(|m| json!({"id": m.id, "effort": m.effort, "vision": m.vision})).collect::<Vec<_>>(),
-    })
-}
-
 fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRuntime>> {
     m.provider_runtime().ok_or_else(|| {
         ApiError(
@@ -508,127 +572,6 @@ fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRun
             "provider is not managed by this server".into(),
         )
     })
-}
-
-async fn get_provider(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    Ok(Json(provider_json(&*runtime(&m)?)))
-}
-
-#[derive(Deserialize)]
-struct ProviderBody {
-    kind: crate::config::ProviderKind,
-    #[serde(default)]
-    base_url: Option<String>,
-    /// A new key; omitted = keep the stored one (if any).
-    #[serde(default)]
-    api_key: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    models: Vec<ModelBody>,
-}
-
-#[derive(Deserialize)]
-struct ModelBody {
-    id: String,
-    #[serde(default)]
-    effort: bool,
-    #[serde(default)]
-    vision: bool,
-}
-
-fn secret_name(kind: crate::config::ProviderKind) -> &'static str {
-    match kind {
-        crate::config::ProviderKind::Anthropic => "anthropic",
-        _ => "openai",
-    }
-}
-
-/// The key to use for a test/apply: the new one if given, else the
-/// currently configured one when the provider kind is unchanged.
-fn effective_key(
-    rt: &crate::providers::ProviderRuntime,
-    b: &ProviderBody,
-) -> Option<harness_core::Secret<String>> {
-    if let Some(k) = b.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
-        return Some(harness_core::Secret::new(k.trim().to_string()));
-    }
-    let cfg = rt.config();
-    if cfg.provider.kind == b.kind {
-        crate::providers::resolve_key(&cfg, rt.data_dir())
-            .ok()
-            .and_then(|(k, _)| k)
-    } else {
-        None
-    }
-}
-
-fn effective_base(b: &ProviderBody) -> String {
-    let mut c = crate::config::Config::default();
-    c.provider.kind = b.kind;
-    c.provider.base_url = b.base_url.clone().unwrap_or_default().trim().to_string();
-    c.base_url().to_string()
-}
-
-async fn test_provider(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<ProviderBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let rt = runtime(&m)?;
-    let key = effective_key(&rt, &b);
-    match crate::providers::list_models(b.kind, &effective_base(&b), key.as_ref()).await {
-        Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
-        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
-    }
-}
-
-async fn put_provider(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<ProviderBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let rt = runtime(&m)?;
-    let mut cfg = rt.config();
-    let kind_changed = cfg.provider.kind != b.kind;
-    cfg.provider.kind = b.kind;
-    cfg.provider.base_url = b.base_url.clone().unwrap_or_default().trim().to_string();
-    if let Some(model) = b.model.as_ref().filter(|m| !m.trim().is_empty()) {
-        cfg.provider.model = model.trim().to_string();
-    } else if b.kind == crate::config::ProviderKind::Mock {
-        cfg.provider.model = "mock".into();
-    }
-    cfg.models = b
-        .models
-        .iter()
-        .map(|x| crate::providers::model_config(&x.id, x.effort, x.vision))
-        .collect();
-    if let Some(k) = b.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
-        let name = secret_name(b.kind);
-        crate::secrets::set(
-            &rt.data_dir().join("secrets.toml"),
-            name,
-            Some(&harness_core::Secret::new(k.trim().to_string())),
-        )
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        cfg.provider.api_key_secret = Some(name.into());
-        cfg.provider.api_key_env = None;
-    } else if kind_changed {
-        // The old key belongs to another provider.
-        cfg.provider.api_key_secret = None;
-        cfg.provider.api_key_env = None;
-    }
-    rt.apply(cfg)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
-    m.set_models(rt.models());
-    tracing::info!(kind = ?b.kind, "provider reconfigured");
-    Ok(Json(provider_json(&rt)))
 }
 
 fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
@@ -1214,8 +1157,33 @@ async fn delete_memory(
 }
 
 fn memory_cfg_json(m: &Master, cfg: &crate::config::Config) -> serde_json::Value {
+    use crate::config::{EmbedSource, ProviderKind};
     use harness_memory::Preset;
     let mc = &cfg.memory;
+    // Until a provider is chosen, suggest the default model's provider (else
+    // the first real one), or Ollama when there is none.
+    let suggested = || {
+        let default = cfg.effective_default();
+        let by_default = default
+            .as_deref()
+            .and_then(|d| cfg.resolve_model(d))
+            .map(|(p, _)| p);
+        by_default
+            .into_iter()
+            .chain(&cfg.providers)
+            .find(|p| p.kind != ProviderKind::Mock)
+    };
+    let (source, provider) = match mc.source {
+        EmbedSource::Provider => match cfg.embed_provider().or_else(suggested) {
+            Some(p) => (EmbedSource::Provider, Some(p)),
+            None => (EmbedSource::Ollama, None),
+        },
+        EmbedSource::Ollama => (EmbedSource::Ollama, None),
+    };
+    let (url, model) = match source {
+        EmbedSource::Ollama => (mc.ollama_url(), mc.model()),
+        EmbedSource::Provider => (mc.embeddings_url.as_str(), mc.embeddings_model.clone()),
+    };
     let presets: Vec<serde_json::Value> = [Preset::Fast, Preset::Balanced, Preset::Best]
         .iter()
         .map(|p| {
@@ -1228,13 +1196,33 @@ fn memory_cfg_json(m: &Master, cfg: &crate::config::Config) -> serde_json::Value
         .collect();
     json!({
         "backend": mc.backend,
-        "embeddings_url": mc.embeddings_url,
+        "recall": mc.recall,
+        "source": source,
+        "provider_id": provider.map(|p| &p.id),
+        "embeddings_url": url,
         "embeddings_model": mc.embeddings_model,
         "preset": mc.preset,
-        "model": mc.model(),
+        "model": model,
         "active_model": m.builtin_memory().and_then(|b| b.embedder_model()),
         "presets": presets,
     })
+}
+
+/// Rebuild the live embedder after a provider change, when memory takes
+/// its embeddings from a provider (its URL or key may have changed).
+fn refresh_embedder(m: &Master, rt: &crate::providers::ProviderRuntime) {
+    let cfg = rt.config();
+    if cfg.memory.source != crate::config::EmbedSource::Provider {
+        return;
+    }
+    let Some(bm) = m.builtin_memory() else { return };
+    match crate::providers::embedder(&cfg, rt.data_dir(), &rt.secrets) {
+        Ok(e) => bm.set_embedder(e),
+        Err(e) => {
+            tracing::warn!("memory embeddings off: {e:#}");
+            bm.set_embedder(None);
+        }
+    }
 }
 
 async fn get_memory_cfg(
@@ -1247,22 +1235,68 @@ async fn get_memory_cfg(
 
 #[derive(Deserialize)]
 struct MemoryCfgBody {
-    /// Empty turns vector recall off (keyword recall stays).
+    recall: crate::config::Recall,
+    /// Required for meaning recall.
     #[serde(default)]
-    embeddings_url: String,
+    source: Option<crate::config::EmbedSource>,
     #[serde(default)]
-    embeddings_model: String,
+    provider_id: Option<String>,
+    /// Ollama source only.
     #[serde(default)]
-    preset: harness_memory::Preset,
+    embeddings_url: Option<String>,
+    #[serde(default)]
+    embeddings_model: Option<String>,
+    #[serde(default)]
+    preset: Option<harness_memory::Preset>,
 }
 
-/// Change embeddings live. A non-empty URL is tested with one embedding
-/// call first, so a typo cannot silently degrade recall.
+/// A failed test embedding, worded for the admin.
+fn embed_failure(
+    cfg: &crate::config::Config,
+    e: &harness_memory::Embedder,
+    err: harness_memory::MemoryError,
+) -> ApiError {
+    use harness_memory::MemoryError;
+    let who = match cfg.embed_provider() {
+        Some(p) if cfg.memory.source == crate::config::EmbedSource::Provider => p.name.clone(),
+        _ => "The endpoint".to_string(),
+    };
+    let msg = match &err {
+        // Ollama answers 404 for a missing model too, and says so.
+        MemoryError::EmbedHttp {
+            status: status @ (404 | 405),
+            detail,
+        } if !detail.to_lowercase().contains("model") => {
+            let detail = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            };
+            format!(
+                "{who} has no embeddings endpoint (POST {}/embeddings answered {status}{detail})",
+                e.base_url()
+            )
+        }
+        MemoryError::EmbedHttp {
+            status: 401 | 403, ..
+        } => format!("{err} (check the API key)"),
+        MemoryError::EmbedHttp { .. } => {
+            format!("{err} (is the model `{}` available there?)", e.model)
+        }
+        _ => err.to_string(),
+    };
+    ApiError(StatusCode::BAD_GATEWAY, msg)
+}
+
+/// Change embeddings live. Keywords keeps the source settings as they are;
+/// meaning recall is tested with one embedding call first, so a typo cannot
+/// silently degrade recall.
 async fn put_memory_cfg(
     State(m): State<Master>,
     headers: HeaderMap,
     Json(b): Json<MemoryCfgBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    use crate::config::{EmbedSource, ProviderKind, Recall};
     require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let mut cfg = rt.config();
@@ -1272,31 +1306,91 @@ async fn put_memory_cfg(
             "embeddings settings apply to the built-in memory only".into(),
         ));
     }
-    cfg.memory.embeddings_url = b.embeddings_url.trim().to_string();
-    cfg.memory.embeddings_model = b.embeddings_model.trim().to_string();
-    cfg.memory.preset = b.preset;
+    let bad = |msg: &str| ApiError(StatusCode::BAD_REQUEST, msg.to_string());
+    let old = cfg.memory.clone();
+    cfg.memory.recall = b.recall;
+    if let Some(p) = b.preset {
+        cfg.memory.preset = p;
+    }
+    if b.recall == Recall::Meaning {
+        let source = b
+            .source
+            .ok_or_else(|| bad("choose where embeddings come from"))?;
+        let provider_id = match source {
+            EmbedSource::Provider => {
+                let id = b.provider_id.as_deref().unwrap_or("").trim();
+                match cfg.provider(id) {
+                    None if id.is_empty() => return Err(bad("choose a provider")),
+                    None => return Err(bad("unknown provider")),
+                    Some(p) if p.kind == ProviderKind::Mock => {
+                        return Err(bad("the demo provider has no embeddings"));
+                    }
+                    Some(p) => Some(p.id.clone()),
+                }
+            }
+            EmbedSource::Ollama => None,
+        };
+        let url = b.embeddings_url.as_deref().unwrap_or("").trim();
+        let mc = &mut cfg.memory;
+        mc.source = source;
+        mc.provider_id = provider_id;
+        mc.embeddings_url = match source {
+            EmbedSource::Provider => String::new(),
+            EmbedSource::Ollama => url.trim_end_matches('/').to_string(),
+        };
+        mc.embeddings_model = b
+            .embeddings_model
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+    }
     cfg.validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
     let emb = crate::providers::embedder(&cfg, rt.data_dir(), &rt.secrets)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     if let Some(e) = &emb {
-        e.embed(&["test".to_string()]).await.map_err(|err| {
-            let msg = err.to_string();
-            // Only a server that answered can be missing the model.
-            let hint = if msg.contains("answered") {
-                format!(" (is the model `{}` available there?)", e.model)
-            } else {
-                String::new()
-            };
-            ApiError(StatusCode::BAD_GATEWAY, format!("{msg}{hint}"))
-        })?;
+        e.embed(&["test".to_string()])
+            .await
+            .map_err(|err| embed_failure(&cfg, e, err))?;
     }
-    rt.save(cfg.clone())
+    // The test took a while: save onto the config as it is now, and only
+    // if what the test relied on is unchanged.
+    let _edits = rt.lock_edits().await;
+    let mut latest = rt.config();
+    let provider_of = |c: &crate::config::Config| {
+        c.memory
+            .provider_id
+            .as_deref()
+            .and_then(|id| c.provider(id))
+            .map(|p| {
+                (
+                    p.kind,
+                    p.base_url.clone(),
+                    p.api_key_env.clone(),
+                    p.api_key_secret.clone(),
+                )
+            })
+    };
+    let mut probe = latest.clone();
+    probe.memory = cfg.memory.clone();
+    let memory_moved = serde_json::to_value(&latest.memory).ok() != serde_json::to_value(&old).ok();
+    if memory_moved || provider_of(&probe) != provider_of(&cfg) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "the settings changed while testing; test again".into(),
+        ));
+    }
+    latest.memory = cfg.memory;
+    latest
+        .validate()
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    rt.save(latest.clone())
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(bm) = m.builtin_memory() {
         bm.set_embedder(emb);
     }
-    Ok(Json(memory_cfg_json(&m, &cfg)))
+    Ok(Json(memory_cfg_json(&m, &latest)))
 }
 
 async fn admin_nodes(
@@ -1822,6 +1916,7 @@ async fn put_savings(
 ) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
     require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
+    let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.savings = b;
     rt.save(cfg.clone())
@@ -1837,7 +1932,7 @@ async fn graphify_json(m: &Master) -> serde_json::Value {
         "installed": harness_tools::graphify::installed_version().await,
         "pinned_version": harness_tools::graphify::VERSION,
         "remote_setup": [
-            "harness graphify install",
+            "rizzy-harness graphify install",
             "echo 'graphify = true' >> <data dir>/node.toml   # then restart the node",
         ],
     })
@@ -1885,7 +1980,8 @@ async fn install_graphify(
     if m.graphify().is_none() {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "this server runs no built-in node; run `harness graphify install` on each node".into(),
+            "this server runs no built-in node; run `rizzy-harness graphify install` on each node"
+                .into(),
         ));
     }
     let (ok, log) = match harness_tools::graphify::install().await {

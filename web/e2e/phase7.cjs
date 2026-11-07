@@ -8,10 +8,11 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const { createOwner } = require('./onboard.cjs');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e7-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
-fs.writeFileSync(`${S}/data/harness.toml`, '[provider]\nkind = "mock"\nmock_delay_ms = 2\n');
+fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 2\nmodels = [{ id = "mock" }]\n');
 const URL_ = 'http://127.0.0.1:7795/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
@@ -48,30 +49,30 @@ const emb = http.createServer((req, res) => {
     const errors = [];
     p.on('pageerror', (e) => errors.push(e.message));
     await p.goto(URL_);
-    await p.fill('input[placeholder="claim code"]', code);
-    await p.fill('input[placeholder="username"]', 'alex');
-    await p.fill('input[type=password]', 'admin password');
-    await p.click('text=Create account');
+    await createOwner(p, code);
     await p.waitForSelector('text=Connect an AI provider');
     await p.click('text=Skip: use the built-in demo');
 
     // Memory step: a wrong endpoint is caught by the test call...
     await p.waitForSelector('h2:has-text("Memory")');
-    await p.click('text=Meaning (embeddings model)');
-    await p.fill('input.mono >> nth=0', 'http://127.0.0.1:1/v1');
+    await p.click('[role=radiogroup][aria-label=recall] button:has-text("Meaning")');
+    // Only the demo provider is set up, so embeddings come from Ollama.
+    await p.waitForSelector('[role=radiogroup][aria-label="embeddings source"] button[aria-checked=true]:has-text("Ollama")');
+    const endpoint = 'label:has-text("Ollama endpoint") input';
+    await p.fill(endpoint, 'http://127.0.0.1:1/v1');
     await p.click('text=Save and continue');
     await p.waitForSelector('.error-text');
     log('bad endpoint refused:', (await p.innerText('.error-text')).slice(0, 60));
     // ...the right one is saved.
-    await p.fill('input.mono >> nth=0', embUrl);
-    await p.click('label:has-text("Fast")');
+    await p.fill(endpoint, embUrl);
+    await p.click('[role=radiogroup][aria-label="embeddings model preset"] button:has-text("Fast")');
     await p.screenshot({ path: `${S}/p7-1-onboarding.png` });
     await p.click('text=Save and continue');
     await p.waitForSelector('text=About you');
     await p.click('button:has-text("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
-    const toml = fs.readFileSync(`${S}/data/harness.toml`, 'utf8');
+    const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
     check(toml.includes(embUrl) && toml.includes('preset = "fast"'), 'memory config saved');
 
     // The model proposes a memory; Home offers to review it.

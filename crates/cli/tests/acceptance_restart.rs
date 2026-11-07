@@ -23,7 +23,7 @@ struct Server {
 }
 
 fn start(data: &Path) -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rizzy-harness"))
         .args(["--data-dir", data.to_str().unwrap()])
         .args(["serve", "--bind", "127.0.0.1:0"])
         .env("HARNESS_LOG", "warn")
@@ -163,8 +163,9 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     )
     .unwrap();
     std::fs::write(
-        data.join("harness.toml"),
-        "[provider]\nkind = \"mock\"\nmock_delay_ms = 30\n",
+        data.join("config.toml"),
+        "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\n\
+         mock_delay_ms = 30\n\n[[providers.models]]\nid = \"mock\"\n",
     )
     .unwrap();
     (dir, ws)

@@ -14,6 +14,7 @@
 //! `sources`), recorded with its URL on the tool result so the UI resolves
 //! the model's citations to links it did not write.
 
+pub mod favicon;
 mod sources;
 
 use std::net::{IpAddr, SocketAddr};
@@ -117,9 +118,21 @@ fn check_url(u: &url::Url, allow_private: bool) -> Result<(), String> {
 /// HTTP client for model-chosen URLs. `allow_private` exists for tests only;
 /// `private_redirects` separately controls whether redirects may go inward.
 fn fetch_client(allow_private: bool, private_redirects: bool) -> reqwest::Client {
+    fetch_client_with(allow_private, private_redirects, false)
+}
+
+/// [`fetch_client`], optionally refusing any redirect to a non-https URL.
+fn fetch_client_with(
+    allow_private: bool,
+    private_redirects: bool,
+    https_only: bool,
+) -> reqwest::Client {
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= 5 {
             return attempt.error("too many redirects");
+        }
+        if https_only && attempt.url().scheme() != "https" {
+            return attempt.error("redirect to non-https refused");
         }
         match check_url(attempt.url(), private_redirects) {
             Ok(()) => attempt.follow(),

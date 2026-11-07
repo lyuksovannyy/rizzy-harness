@@ -62,6 +62,25 @@ pub enum ProviderError {
     Status { status: u16, body: String },
     #[error("bad stream: {0}")]
     Stream(String),
+    #[error("no provider serves model {0:?}")]
+    UnknownModel(String),
+}
+
+impl ProviderError {
+    /// A failure of the model or its provider rather than of this request's
+    /// content: the model is unknown or gone, rate-limited, the provider
+    /// fails or cannot be reached. Another model may answer instead.
+    pub fn is_model_level(&self) -> bool {
+        match self {
+            ProviderError::UnknownModel(_) | ProviderError::Http(_) => true,
+            ProviderError::Status { status, body } => match status {
+                404 | 408 | 429 | 500..=599 => true,
+                400 => body.to_ascii_lowercase().contains("model"),
+                _ => false,
+            },
+            ProviderError::Stream(_) => false,
+        }
+    }
 }
 
 #[async_trait::async_trait]

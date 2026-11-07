@@ -3,8 +3,8 @@
 //! * Mode 0600, written atomically (temp file with 0600, then rename).
 //! * Values are `Secret<String>`: redacted in `Debug`, never returned to the
 //!   browser, never logged, never written to the event log.
-//! * Config refers to keys by name (`api_key_secret = "openai"`); headless
-//!   installs can keep using `api_key_env` instead.
+//! * Config refers to keys by name (`api_key_secret = "provider-<id>"`);
+//!   headless installs can keep using `api_key_env` instead.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -104,13 +104,24 @@ mod tests {
     fn set_get_remove_and_permissions() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("secrets.toml");
-        assert!(get(&p, "openai").unwrap().is_none());
-        set(&p, "openai", Some(&Secret::new("sk-abc".into()))).unwrap();
-        set(&p, "anthropic", Some(&Secret::new("sk-ant".into()))).unwrap();
-        assert_eq!(get(&p, "openai").unwrap().unwrap().expose(), "sk-abc");
-        assert_eq!(names(&p).unwrap(), vec!["anthropic", "openai"]);
-        set(&p, "openai", None).unwrap();
-        assert!(get(&p, "openai").unwrap().is_none());
+        assert!(get(&p, "provider-openai").unwrap().is_none());
+        set(&p, "provider-openai", Some(&Secret::new("sk-abc".into()))).unwrap();
+        set(
+            &p,
+            "provider-anthropic",
+            Some(&Secret::new("sk-ant".into())),
+        )
+        .unwrap();
+        assert_eq!(
+            get(&p, "provider-openai").unwrap().unwrap().expose(),
+            "sk-abc"
+        );
+        assert_eq!(
+            names(&p).unwrap(),
+            vec!["provider-anthropic", "provider-openai"]
+        );
+        set(&p, "provider-openai", None).unwrap();
+        assert!(get(&p, "provider-openai").unwrap().is_none());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -118,7 +129,7 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(matches!(
-                get(&p, "anthropic"),
+                get(&p, "provider-anthropic"),
                 Err(SecretsError::Permissions(_))
             ));
         }

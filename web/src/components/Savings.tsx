@@ -87,7 +87,7 @@ function GraphifyCard({ enabled, onToggle }: { enabled: boolean; onToggle: (v: b
       <p className="muted small">
         A third-party knowledge graph of the repository (Graphify-Labs/graphify, Apache-2.0, Python) that agents can
         query instead of reading many files. Off by default: it runs another program on the node. Its graph is kept
-        in harness's data folder, never in your repository, and it gets no API keys.
+        in the rizzy-harness data folder, never in your repository, and it gets no API keys.
       </p>
       {g && (
         <div className="small">

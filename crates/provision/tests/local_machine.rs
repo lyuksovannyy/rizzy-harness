@@ -1,5 +1,5 @@
 //! Runs the real setup scripts on THIS machine (no SSH). It changes the
-//! machine: installs packages, creates the users `harness-admin` and
+//! machine: installs packages, creates the users `rizzy-harness-admin` and
 //! `harness`, loads and removes an nftables table. Root only; run with
 //! `HARNESS_LOCAL_TESTS=1 cargo test -p harness-provision --test local_machine -- --nocapture`.
 //! Steps this machine cannot run (no systemd, no WireGuard module) are
@@ -50,12 +50,12 @@ async fn setup_steps_on_this_machine() {
     let (c, _, e) = sh(&format!("nft -c -f {}", rules.display())).await;
     assert_eq!(c, 0, "{e}");
     let (c, _, e) = sh(&format!(
-        "nft delete table inet harness 2>/dev/null; nft -f {}",
+        "nft delete table inet rizzy_harness 2>/dev/null; nft -f {}",
         rules.display()
     ))
     .await;
     assert_eq!(c, 0, "loading the rules: {e}");
-    let (c, out, _) = sh("nft list table inet harness").await;
+    let (c, out, _) = sh("nft list table inet rizzy_harness").await;
     assert!(
         c == 0 && out.contains("policy drop") && out.contains("udp dport 51820 accept"),
         "{out}"
@@ -66,10 +66,10 @@ async fn setup_steps_on_this_machine() {
         "outbound with firewall loaded: {}",
         if c == 0 { "ok".to_string() } else { e }
     );
-    let (c, _, e) = sh("nft delete table inet harness").await;
+    let (c, _, e) = sh("nft delete table inet rizzy_harness").await;
     assert_eq!(c, 0, "the revert command: {e}");
     assert_ne!(
-        sh("nft list table inet harness").await.0,
+        sh("nft list table inet rizzy_harness").await.0,
         0,
         "table gone after revert"
     );
@@ -79,7 +79,7 @@ async fn setup_steps_on_this_machine() {
     //    this machine's config (the live config is not touched).
     let d = dir.path();
     std::fs::create_dir_all(d.join("conf.d")).unwrap();
-    std::fs::write(d.join("conf.d/10-harness.conf"), "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n").unwrap();
+    std::fs::write(d.join("conf.d/10-rizzy-harness.conf"), "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n").unwrap();
     std::fs::write(
         d.join("sshd_config"),
         format!(
@@ -100,63 +100,65 @@ async fn setup_steps_on_this_machine() {
     );
     println!("ssh drop-in: sshd -T confirms passwords off");
 
-    // 4. harness-admin with sudo, then without.
+    // 4. rizzy-harness-admin with sudo, then without.
     let key =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl harness";
     let (c, _, e) = sh(&scripts::admin_user(key, true)).await;
-    assert_eq!(c, 0, "creating harness-admin: {e}");
-    let (c, out, _) = sh("su -s /bin/bash harness-admin -c 'sudo -n id -u'").await;
+    assert_eq!(c, 0, "creating rizzy-harness-admin: {e}");
+    let (c, out, _) = sh("su -s /bin/bash rizzy-harness-admin -c 'sudo -n id -u'").await;
     assert!(
         c == 0 && out.trim() == "0",
-        "harness-admin has sudo during setup"
+        "rizzy-harness-admin has sudo during setup"
     );
     assert!(
-        std::fs::read_to_string("/home/harness-admin/.ssh/authorized_keys")
+        std::fs::read_to_string("/home/rizzy-harness-admin/.ssh/authorized_keys")
             .unwrap()
             .contains("AAAAC3Nza")
     );
-    let (c, out, _) = sh("passwd -S harness-admin").await;
+    let (c, out, _) = sh("passwd -S rizzy-harness-admin").await;
     assert!(
         c == 0 && out.split_whitespace().nth(1) == Some("L"),
         "password locked: {out}"
     );
     sh(&scripts::drop_admin_sudo()).await;
-    let (c, _, _) = sh("su -s /bin/bash harness-admin -c 'sudo -n true' 2>/dev/null").await;
+    let (c, _, _) = sh("su -s /bin/bash rizzy-harness-admin -c 'sudo -n true' 2>/dev/null").await;
     assert_ne!(c, 0, "sudo removed");
-    println!("harness-admin: created, sudo granted, password locked, sudo removed");
+    println!("rizzy-harness-admin: created, sudo granted, password locked, sudo removed");
 
-    // 4b. The watchdog's read-only sudo rule, as harness-admin (no other sudo).
+    // 4b. The watchdog's read-only sudo rule, as rizzy-harness-admin (no other sudo).
     let watch = |as_admin: bool| async move {
         let script = scripts::WATCH.replace('\'', "'\\''");
         let cmd = if as_admin {
-            format!("su -s /bin/bash harness-admin -c '{script}'")
+            format!("su -s /bin/bash rizzy-harness-admin -c '{script}'")
         } else {
             script
         };
         sh(&cmd).await.1.trim().to_string()
     };
     sh(&format!(
-        "nft delete table inet harness 2>/dev/null; nft -f {}",
+        "nft delete table inet rizzy_harness 2>/dev/null; nft -f {}",
         rules.display()
     ))
     .await;
     assert_eq!(watch(true).await, "fw=on");
-    sh("nft delete table inet harness").await;
+    sh("nft delete table inet rizzy_harness").await;
     assert_eq!(watch(true).await, "fw=off");
-    sh("rm -f /etc/sudoers.d/harness-admin-watch").await;
+    sh("rm -f /etc/sudoers.d/rizzy-harness-admin-watch").await;
     assert_eq!(
         watch(true).await,
         "fw=unknown",
         "without the rule harness cannot look"
     );
-    let (c, _, _) =
-        sh("su -s /bin/bash harness-admin -c 'sudo -n /usr/sbin/nft flush ruleset' 2>/dev/null")
-            .await;
+    let (c, _, _) = sh(
+        "su -s /bin/bash rizzy-harness-admin -c 'sudo -n /usr/sbin/nft flush ruleset' 2>/dev/null",
+    )
+    .await;
     assert_ne!(c, 0);
     sh(&scripts::watch_rule()).await;
-    let (c, _, _) =
-        sh("su -s /bin/bash harness-admin -c 'sudo -n /usr/sbin/nft flush ruleset' 2>/dev/null")
-            .await;
+    let (c, _, _) = sh(
+        "su -s /bin/bash rizzy-harness-admin -c 'sudo -n /usr/sbin/nft flush ruleset' 2>/dev/null",
+    )
+    .await;
     assert_ne!(
         c, 0,
         "the rule allows listing harness's table only, nothing else"
@@ -188,7 +190,7 @@ async fn setup_steps_on_this_machine() {
     let target = harness_provision::ssh::Target {
         host: "127.0.0.1".into(),
         port,
-        user: "harness-admin".into(),
+        user: "rizzy-harness-admin".into(),
     };
     for (pw, expect_password) in [("yes", true), ("no", false)] {
         let mut child = start(pw);
@@ -238,7 +240,7 @@ async fn setup_steps_on_this_machine() {
         "no root-equivalent groups: {out}"
     );
     // `--network none`: some sandboxes block /dev/net/tun (slirp4netns).
-    let (c, out, e) = sh("uid=$(id -u harness); runuser -u harness -- env XDG_RUNTIME_DIR=/run/user/$uid HOME=/home/harness podman run --rm --network none docker.io/library/alpine:3.20 cat /proc/self/uid_map 2>/dev/null").await;
+    let (c, out, e) = sh("uid=$(id -u harness); runuser -u harness -- env XDG_RUNTIME_DIR=/run/user/$uid HOME=/home/rizzy-harness podman run --rm --network none docker.io/library/alpine:3.20 cat /proc/self/uid_map 2>/dev/null").await;
     assert_eq!(c, 0, "{e}");
     let first: Vec<&str> = out
         .lines()
@@ -273,7 +275,7 @@ async fn setup_steps_on_this_machine() {
         let groups = sh("id -nG harness").await.1;
         assert!(groups.split_whitespace().any(|g| g == "docker"), "{groups}");
         // Registries rate-limit; reuse the image Podman already pulled.
-        sh("docker image inspect alpine:3.20 >/dev/null 2>&1 || (uid=$(id -u harness); runuser -u harness -- env XDG_RUNTIME_DIR=/run/user/$uid HOME=/home/harness podman save docker.io/library/alpine:3.20 | docker load)").await;
+        sh("docker image inspect alpine:3.20 >/dev/null 2>&1 || (uid=$(id -u harness); runuser -u harness -- env XDG_RUNTIME_DIR=/run/user/$uid HOME=/home/rizzy-harness podman save docker.io/library/alpine:3.20 | docker load)").await;
         let (c, _, e) = sh("runuser -u harness -g docker -- docker run --rm --network none docker.io/library/alpine:3.20 true").await;
         assert_eq!(c, 0, "{e}");
         assert!(

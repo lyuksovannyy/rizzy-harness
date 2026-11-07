@@ -1,11 +1,19 @@
 // Suggestions for the profile's time zone, country and city fields. Time
 // zones and country names come from the browser (Intl); cities from
-// /cities.json (GeoNames, CC BY 4.0), loaded on first use.
+// /cities.json (GeoNames, CC BY 4.0), loaded on first use. Flags are static
+// files (public/flags, from flag-icons; scripts/flags.mjs).
 
 export interface Suggestion {
   value: string;
   label: string;
   hint?: string;
+  /** An image before the label; `text` shows if it does not load. */
+  icon?: SuggestionIcon;
+}
+
+export interface SuggestionIcon {
+  src: string;
+  text: string;
 }
 
 /** Codes Intl names that are not countries (groups, pseudo-locales, retired codes). */
@@ -115,8 +123,13 @@ export function suggestTimeZones(query: string): Suggestion[] {
   }));
 }
 
+/** A country's flag; some codes Intl names have none (the code shows). */
+export function countryFlag(code: string): SuggestionIcon {
+  return { src: `/flags/${code.toLowerCase()}.svg`, text: code };
+}
+
 export function suggestCountries(query: string): Suggestion[] {
-  return rank(countries(), query, (c) => c.name).map((c) => ({ value: c.name, label: c.name, hint: c.code }));
+  return rank(countries(), query, (c) => c.name).map((c) => ({ value: c.name, label: c.name, icon: countryFlag(c.code) }));
 }
 
 type City = [string, string];

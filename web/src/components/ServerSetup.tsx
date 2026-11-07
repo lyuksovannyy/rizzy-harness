@@ -5,7 +5,7 @@ import { api } from "../api";
 import type { Engine, SetupState, SetupStep } from "../types";
 
 const DOCKER_WARNING =
-  "The `harness` user joins the docker group. Members of that group are effectively root on the server: an agent talked into `docker run -v /:/host` can take it over. Podman runs rootless and does not have this problem.";
+  "The `rizzy-harness` user joins the docker group. Members of that group are effectively root on the server: an agent talked into `docker run -v /:/host` can take it over. Podman runs rootless and does not have this problem.";
 
 function Step({ s, jobId, onState }: { s: SetupStep; jobId: string; onState: (v: SetupState) => void }) {
   const [copied, setCopied] = useState(false);
@@ -184,14 +184,14 @@ export function ServerSetup({ onDone }: { onDone: () => void }) {
       </div>
       {mode === "auto" && user.trim() !== "root" && (
         <div className="hint-warn small">
-          Automatic setup needs the <b>root</b> login. Harness then creates its own user <code>harness-admin</code>{" "}
+          Automatic setup needs the <b>root</b> login. Harness then creates its own user <code>rizzy-harness-admin</code>{" "}
           with its own SSH key and stops using root.
         </div>
       )}
       {mode === "manual" && user.trim() === "root" && (
         <div className="hint-warn small">
           For a server with other things on it, use a normal user instead of root. You can continue with root: harness
-          will then ask whether it may create its own user <code>harness-admin</code> (no sudo, its own key) and take
+          will then ask whether it may create its own user <code>rizzy-harness-admin</code> (no sudo, its own key) and take
           its key off root.
         </div>
       )}

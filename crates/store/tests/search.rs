@@ -17,7 +17,7 @@ fn ev(sid: SessionId, seq: u64, kind: &str, payload: Value) -> RawEvent {
 
 fn chat(s: &Store, owner: &str, title: &str, msgs: &[&str], incognito: bool) -> SessionId {
     let sid = SessionId::new();
-    let mut p = json!({"title": title, "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat"});
+    let mut p = json!({"title": title, "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "approval_mode": "ask"});
     if incognito {
         p["incognito"] = json!(true);
     }

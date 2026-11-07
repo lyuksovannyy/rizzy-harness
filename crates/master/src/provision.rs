@@ -56,7 +56,7 @@ impl Remote for SshRemote {
 }
 
 /// New connections with harness's key and the pinned host key, as the
-/// current user (switches to `harness-admin` once it exists).
+/// current user (switches to `rizzy-harness-admin` once it exists).
 struct KeyConnector {
     target: Mutex<Target>,
     fingerprint: String,
@@ -151,6 +151,37 @@ struct Side {
     answered: Notify,
 }
 
+/// The node's `config.toml` and `secrets.toml`: every provider, each key
+/// copied under its own `provider-<id>` name, and nothing else.
+fn node_provider_files(cfg: &crate::config::Config, data_dir: &Path) -> Option<ProviderFiles> {
+    let mut node = crate::config::Config {
+        providers: Vec::new(),
+        default_model: cfg.default_model.clone(),
+        agent_models: cfg.agent_models.clone(),
+        ..Default::default()
+    };
+    let mut keys = toml::map::Map::new();
+    for p in &cfg.providers {
+        let (key, _) = crate::providers::resolve_key(p, data_dir).ok()?;
+        let mut p = p.clone();
+        p.api_key_env = None;
+        p.api_key_secret = key.as_ref().map(|_| crate::providers::secret_name(&p.id));
+        if let (Some(k), Some(name)) = (key, &p.api_key_secret) {
+            keys.insert(name.clone(), toml::Value::String(k.expose().clone()));
+        }
+        node.providers.push(p);
+    }
+    let secrets_toml = (!keys.is_empty()).then(|| {
+        let mut root = toml::map::Map::new();
+        root.insert("keys".into(), toml::Value::Table(keys));
+        toml::to_string(&toml::Value::Table(root)).unwrap_or_default()
+    });
+    Some(ProviderFiles {
+        harness_toml: toml::to_string(&node).ok()?,
+        secrets_toml,
+    })
+}
+
 fn local_glibc() -> String {
     std::process::Command::new("ldd")
         .arg("--version")
@@ -238,26 +269,7 @@ impl setup::Master for Side {
             return None;
         }
         let rt = self.master.provider_runtime()?;
-        let cfg = rt.config();
-        let (key, _) = crate::providers::resolve_key(&cfg, rt.data_dir()).ok()?;
-        let mut node = crate::config::Config {
-            provider: cfg.provider.clone(),
-            models: cfg.models.clone(),
-            ..Default::default()
-        };
-        node.provider.api_key_env = None;
-        node.provider.api_key_secret = key.as_ref().map(|_| "provider".to_string());
-        let secrets_toml = key.map(|k| {
-            let mut keys = toml::map::Map::new();
-            keys.insert("provider".into(), toml::Value::String(k.expose().clone()));
-            let mut root = toml::map::Map::new();
-            root.insert("keys".into(), toml::Value::Table(keys));
-            toml::to_string(&toml::Value::Table(root)).unwrap_or_default()
-        });
-        Some(ProviderFiles {
-            harness_toml: toml::to_string(&node).ok()?,
-            secrets_toml,
-        })
+        node_provider_files(&rt.config(), rt.data_dir())
     }
 
     fn binary(&self, arch: &str) -> Result<Vec<u8>> {
@@ -486,13 +498,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn node_gets_every_provider_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join("secrets.toml");
+        let key = |v: &str| Some(harness_core::Secret::new(v.to_string()));
+        crate::secrets::set(&secrets, "work-openai", key("k-openai").as_ref()).unwrap();
+        crate::secrets::set(&secrets, "provider-nim", key("k-nim").as_ref()).unwrap();
+        let cfg: crate::config::Config = toml::from_str(concat!(
+            "default_model = \"nim::meta/llama\"\n",
+            "[[providers]]\nid = \"openai\"\nname = \"O\"\npreset = \"openai\"\nkind = \"openai\"\n",
+            "base_url = \"https://api.openai.com/v1\"\napi_key_secret = \"work-openai\"\nmodels = [{ id = \"gpt\" }]\n\n",
+            "[[providers]]\nid = \"nim\"\nname = \"N\"\npreset = \"nvidia_nim\"\nkind = \"openai\"\n",
+            "base_url = \"https://integrate.api.nvidia.com/v1\"\napi_key_secret = \"provider-nim\"\n",
+            "models = [{ id = \"meta/llama\", context = 128000 }]\n\n",
+            "[[providers]]\nid = \"local\"\nname = \"L\"\npreset = \"ollama\"\nkind = \"openai\"\n",
+            "base_url = \"http://localhost:11434/v1\"\nmodels = [{ id = \"qwen\" }]\n",
+        ))
+        .unwrap();
+        let f = node_provider_files(&cfg, dir.path()).unwrap();
+        let node: crate::config::Config = toml::from_str(&f.harness_toml).unwrap();
+        node.validate().unwrap();
+        let names: Vec<_> = node
+            .providers
+            .iter()
+            .map(|p| (p.id.as_str(), p.api_key_secret.as_deref()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("openai", Some("provider-openai")),
+                ("nim", Some("provider-nim")),
+                ("local", None)
+            ]
+        );
+        assert_eq!(node.default_model.as_deref(), Some("nim::meta/llama"));
+        assert_eq!(node.providers[1].models[0].context, Some(128000));
+        let s = f.secrets_toml.unwrap();
+        assert!(
+            s.contains("provider-openai = \"k-openai\"") && s.contains("k-nim"),
+            "{s}"
+        );
+        assert!(!f.harness_toml.contains("k-nim"));
+    }
+
+    #[test]
     fn host_paths_for_printed_commands() {
         let d = Path::new("/data");
-        let p = Path::new("/data/keys/wg-harness.conf");
+        let p = Path::new("/data/keys/rizzy-harness.conf");
         assert_eq!(map_to_host(d, p, None), p);
         assert_eq!(
             map_to_host(d, p, Some("/srv/harness".into())),
-            Path::new("/srv/harness/keys/wg-harness.conf")
+            Path::new("/srv/harness/keys/rizzy-harness.conf")
         );
         // Outside the data dir: unchanged.
         assert_eq!(
