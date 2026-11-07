@@ -56,12 +56,15 @@ export const Markdown = memo(function Markdown(props: {
   blocks?: readonly UiBlock[];
   /** The agent's name for the "from" line of block cards. */
   from?: string | null;
+  /** The message's id, where its progress slots are looked up. */
+  messageId?: string;
 }) {
   const { text, done } = props;
   const md = useMemo(() => prepare(text), [text]);
   const blocks = props.blocks ?? NO_BLOCKS;
   const from = props.from ?? null;
-  const ui = useMemo(() => ({ blocks, from }), [blocks, from]);
+  const messageId = props.messageId ?? null;
+  const ui = useMemo(() => ({ messageId, blocks, from }), [messageId, blocks, from]);
   return (
     <DoneCtx.Provider value={done}>
       <UiCtx.Provider value={ui}>

@@ -16,6 +16,10 @@
 //! * `ui: <name>`    -> streams a canned `ui:` block: choices, form, progress,
 //!   chart, secret (a form asking for a key), bad (a label over the limit),
 //!   unknown (`ui:widget`), two (two questions in one message)
+//! * `progress: <n>` -> a job of `n` steps (default 3, at most 20): one
+//!   message per step with the same `ui:progress` block moved on, each with
+//!   a cheap call (bash `true`, else web_search) so the next step is a new
+//!   request; the last message has every step done and calls nothing
 //! * anything else   -> echoes the message back, streamed word by word
 
 use std::time::Duration;
@@ -107,6 +111,23 @@ fn cite_answer(result: &str) -> Vec<String> {
     words
 }
 
+/// For `progress: <n>`: the number of steps and which one this request is
+/// (1 + the tool results since the user's message, so every call moves the
+/// job on).
+fn progress_step(user: &str, messages: &[ChatMsg]) -> Option<(usize, usize)> {
+    let n = user.strip_prefix("progress:")?.trim();
+    let n = n.parse::<usize>().unwrap_or(3).clamp(1, 20);
+    let since = messages
+        .iter()
+        .rposition(|m| matches!(m, ChatMsg::User(_)))
+        .map_or(0, |i| i + 1);
+    let results = messages[since..]
+        .iter()
+        .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+        .count();
+    Some((n, 1 + results))
+}
+
 /// The first line of a sub-agent's answer in a `delegate` result
 /// (`session: <id>\n@<agent> ended (<reason>):\n<answer>`).
 fn delegate_answer(result: &str) -> Option<String> {
@@ -190,6 +211,36 @@ impl Provider for Mock {
             Some((c, u)) => (c.to_string(), u.to_string()),
             None => (String::new(), raw_user),
         };
+        // Before the generic tool-result branch: a progress job goes on
+        // after each of its own calls.
+        if let Some((n, k)) = progress_step(&user, &req.messages) {
+            let offered = |name: &str| req.tools.iter().any(|t| t.name == name);
+            let call = if offered("bash") {
+                Some(("bash", json!({"command": "true"})))
+            } else if offered("web_search") {
+                Some(("web_search", json!({"query": "progress"})))
+            } else {
+                None
+            };
+            // With nothing to call between steps, the whole job is one message.
+            let k = if call.is_some() { k } else { n };
+            let text = ui::progress(n, k);
+            let words = text.split_inclusive(' ').map(str::to_string).collect();
+            let text = self.stream_words(words, &deltas).await;
+            let tool_calls = match call {
+                Some((tool, input)) if k < n => vec![ToolCallRef {
+                    call_id: harness_core::new_id(),
+                    tool: tool.into(),
+                    input,
+                }],
+                _ => vec![],
+            };
+            return Ok(Completion {
+                text,
+                tool_calls,
+                usage,
+            });
+        }
         // After a tool result, summarise it (or cite it) and stop.
         if let Some(ChatMsg::Tool { content, .. }) = req.messages.last() {
             let words = if user.starts_with("cite:") {

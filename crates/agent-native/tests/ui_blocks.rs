@@ -1,7 +1,7 @@
 //! `ui:` blocks in the agent loop: the agent's level decides which blocks a
 //! recorded message carries, a sub-task is capped at `display`, blocks come
 //! from the text as stored (secrets scrubbed), and the system prompt says
-//! what will show.
+//! what will show. The mock's `progress: <n>` moves one block on per step.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -95,7 +95,7 @@ fn agent(ui: UiLevel) -> AgentSpec {
         agent_id: "general".into(),
         name: "General".into(),
         system_prompt: "Be helpful.".into(),
-        tools: ToolSelection::List(vec![]),
+        tools: ToolSelection::List(vec!["bash".into(), "web_search".into()]),
         model: None,
         effort: None,
         budget: Default::default(),
@@ -140,6 +140,7 @@ struct Turn {
     fixed: Option<String>,
     tool_first: bool,
     secrets: SecretSet,
+    tools: harness_tools::ToolSet,
 }
 
 impl Turn {
@@ -153,6 +154,7 @@ impl Turn {
             fixed: None,
             tool_first: false,
             secrets: SecretSet::default(),
+            tools: vec![],
         }
     }
 
@@ -165,7 +167,7 @@ impl Turn {
         });
         let backend = NativeBackend::new(
             rec.clone(),
-            vec![],
+            self.tools,
             NativeConfig {
                 secrets: self.secrets,
                 ..Default::default()
@@ -302,4 +304,81 @@ async fn the_system_prompt_says_what_each_level_shows() {
     assert!(display.contains("ui:progress") && !display.contains("ui:form"));
     let (_, off) = Turn::new("hi", UiLevel::Off).run().await;
     assert!(!off.contains("ui:") && off.starts_with("Be helpful."));
+}
+
+/// A tool that only answers, under a real tool's name.
+struct Stub(&'static str);
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for Stub {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+    fn description(&self) -> &'static str {
+        "stub"
+    }
+    fn schema(&self) -> Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+    async fn run(&self, _: &harness_tools::ToolCtx, _: Value) -> harness_tools::ToolOutcome {
+        harness_tools::ToolOutcome::ok("ok")
+    }
+}
+
+/// Per message: the block's step statuses and the tool it calls.
+fn progress_run(msgs: &[AssistantMessage]) -> Vec<(Vec<String>, Option<String>)> {
+    msgs.iter()
+        .map(|m| {
+            assert_eq!(summary(&m.blocks), [("progress", None)], "{}", m.text);
+            assert_eq!(m.blocks[0].id, "steps");
+            let steps = m.blocks[0].spec.as_ref().unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .clone();
+            let statuses = steps
+                .iter()
+                .map(|s| s["status"].as_str().unwrap().to_string())
+                .collect();
+            (
+                statuses,
+                m.tool_calls
+                    .first()
+                    .map(|c| format!("{} {}", c.tool, c.input)),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn progress_moves_one_block_on_per_step() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let mut turn = Turn::new("progress: 3", UiLevel::Rich);
+    turn.tools = vec![Arc::new(Stub("bash")), Arc::new(Stub("web_search"))];
+    let (msgs, _) = turn.run().await;
+    let bash = Some(r#"bash {"command":"true"}"#.to_string());
+    assert_eq!(
+        progress_run(&msgs),
+        [
+            (s(&["active", "pending", "pending"]), bash.clone()),
+            (s(&["done", "active", "pending"]), bash),
+            (s(&["done", "done", "done"]), None),
+        ]
+    );
+    // Without bash the calls are searches; without any tool, one message.
+    let mut turn = Turn::new("progress: 2", UiLevel::Rich);
+    turn.tools = vec![Arc::new(Stub("web_search"))];
+    let (msgs, _) = turn.run().await;
+    let search = Some(r#"web_search {"query":"progress"}"#.to_string());
+    assert_eq!(
+        progress_run(&msgs),
+        [
+            (s(&["active", "pending"]), search),
+            (s(&["done", "done"]), None)
+        ]
+    );
+    let (msgs, _) = Turn::new("progress: 3", UiLevel::Rich).run().await;
+    assert_eq!(progress_run(&msgs), [(s(&["done", "done", "done"]), None)]);
 }

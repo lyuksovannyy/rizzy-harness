@@ -6,9 +6,10 @@ import { api } from "../api";
 import { t } from "../lib/i18n";
 import { citeMaps, citeSignature, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "../lib/rich";
 import type { Live } from "../live";
-import { MessageCtx, type MessageInfo } from "../md/context";
+import { MessageCtx, ProgressCtx, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
+import { progressSignature, progressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
@@ -128,6 +129,9 @@ export default function Conversation(props: {
       return info;
     };
   }, [firstSeen, cites]);
+  // Which progress blocks are the turn's live card and which are snapshots.
+  const progressSig = view ? progressSignature(items, view) : "";
+  const slots = useMemo(() => (view ? progressSlots(items, view) : new Map()), [view, progressSig]);
   // Runs of web tool calls show as one "Researched" row; the rest of a run
   // is rendered by its first item.
   const webGroups = groupWeb(items);
@@ -204,160 +208,164 @@ export default function Conversation(props: {
           if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <div className="column">
-          {!view || view.head_seq === 0 ? (
-            <div className="muted pad">Loading…</div>
-          ) : (
-            view.items.map((it, i) => {
-              if (i <= groupedUntil) return null;
-              const web = webGroups.get(i);
-              if (web) {
-                groupedUntil = web.end;
-                return (
-                  <WebGroupCard
-                    key={i}
-                    sessionId={sessionId}
-                    group={web}
-                    tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
-                  />
-                );
-              }
-              // Parallel answers: render the whole group once, side by side.
-              if (it.type === "assistant" && it.variant) {
-                const g = it.variant.group;
-                const first = view.items.findIndex((x) => x.type === "assistant" && x.variant?.group === g);
-                if (first !== i) return null;
-                const answers = view.items.filter(
-                  (x): x is Extract<typeof x, { type: "assistant" }> => x.type === "assistant" && x.variant?.group === g,
-                );
-                const chosen =
-                  view.variant_selection[g] ?? answers.find((a) => a.variant?.index === 0)?.message_id;
-                const busy = running && view.running_turn === g;
-                return (
-                  <div key={i} className="variants" style={{ gridTemplateColumns: `repeat(${answers.length}, minmax(0, 1fr))` }}>
-                    {answers.map((a) => (
-                      <div key={a.message_id} className={`msg assistant variant ${a.message_id === chosen ? "chosen" : ""}`}>
-                        <div className="variant-head small">
-                          <span className="mono">{a.variant?.model}</span>
-                          {a.message_id === chosen ? (
-                            <span className="muted">continuing from this</span>
-                          ) : (
-                            <button
-                              type="button"
-                              className="link"
-                              disabled={busy}
-                              onClick={() => void api.selectVariant(sessionId, g, a.message_id)}
-                            >
-                              Continue with this
-                            </button>
-                          )}
+        <ProgressCtx.Provider value={slots}>
+          <div className="column">
+            {!view || view.head_seq === 0 ? (
+              <div className="muted pad">Loading…</div>
+            ) : (
+              view.items.map((it, i) => {
+                if (i <= groupedUntil) return null;
+                const web = webGroups.get(i);
+                if (web) {
+                  groupedUntil = web.end;
+                  return (
+                    <WebGroupCard
+                      key={i}
+                      sessionId={sessionId}
+                      group={web}
+                      tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
+                    />
+                  );
+                }
+                // Parallel answers: render the whole group once, side by side.
+                if (it.type === "assistant" && it.variant) {
+                  const g = it.variant.group;
+                  const first = view.items.findIndex((x) => x.type === "assistant" && x.variant?.group === g);
+                  if (first !== i) return null;
+                  const answers = view.items.filter(
+                    (x): x is Extract<typeof x, { type: "assistant" }> => x.type === "assistant" && x.variant?.group === g,
+                  );
+                  const chosen =
+                    view.variant_selection[g] ?? answers.find((a) => a.variant?.index === 0)?.message_id;
+                  const busy = running && view.running_turn === g;
+                  return (
+                    <div key={i} className="variants" style={{ gridTemplateColumns: `repeat(${answers.length}, minmax(0, 1fr))` }}>
+                      {answers.map((a) => (
+                        <div key={a.message_id} className={`msg assistant variant ${a.message_id === chosen ? "chosen" : ""}`}>
+                          <div className="variant-head small">
+                            <span className="mono">{a.variant?.model}</span>
+                            {a.message_id === chosen ? (
+                              <span className="muted">continuing from this</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="link"
+                                disabled={busy}
+                                onClick={() => void api.selectVariant(sessionId, g, a.message_id)}
+                              >
+                                Continue with this
+                              </button>
+                            )}
+                          </div>
+                          <MessageCtx.Provider value={infoAt(i)}>
+                            <Markdown
+                              text={a.text}
+                              done={a.done || !busy}
+                              blocks={a.blocks}
+                              from={a.author ? agentName(a.author) : null}
+                              messageId={a.message_id}
+                            />
+                          </MessageCtx.Provider>
+                          {(a.done || !busy) && <CopyMessage text={a.text} />}
                         </div>
+                      ))}
+                    </div>
+                  );
+                }
+                switch (it.type) {
+                  case "user":
+                    return (
+                      <div key={i} className="msg user">
+                        <div className="bubble">{it.text}</div>
+                        {it.attachments && (
+                          <ul className="chips">
+                            {it.attachments.map((n, j) => (
+                              <li key={j} className="chip">
+                                <FileText size={14} /> {n}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  case "assistant": {
+                    const final = it.done || i < liveFrom;
+                    return (
+                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`}>
+                        {it.author && it.author !== activeAgent && (
+                          <div className="author">{agentName(it.author)}</div>
+                        )}
                         <MessageCtx.Provider value={infoAt(i)}>
                           <Markdown
-                            text={a.text}
-                            done={a.done || !busy}
-                            blocks={a.blocks}
-                            from={a.author ? agentName(a.author) : null}
+                            text={it.text}
+                            done={final}
+                            blocks={it.blocks}
+                            from={it.author ? agentName(it.author) : null}
+                            messageId={it.message_id}
                           />
                         </MessageCtx.Provider>
-                        {(a.done || !busy) && <CopyMessage text={a.text} />}
+                        {final && <CopyMessage text={it.text} />}
                       </div>
-                    ))}
-                  </div>
-                );
-              }
-              switch (it.type) {
-                case "user":
-                  return (
-                    <div key={i} className="msg user">
-                      <div className="bubble">{it.text}</div>
-                      {it.attachments && (
-                        <ul className="chips">
-                          {it.attachments.map((n, j) => (
-                            <li key={j} className="chip">
-                              <FileText size={14} /> {n}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  );
-                case "assistant": {
-                  const final = it.done || i < liveFrom;
-                  return (
-                    <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`}>
-                      {it.author && it.author !== activeAgent && (
-                        <div className="author">{agentName(it.author)}</div>
-                      )}
-                      <MessageCtx.Provider value={infoAt(i)}>
-                        <Markdown
-                          text={it.text}
-                          done={final}
-                          blocks={it.blocks}
-                          from={it.author ? agentName(it.author) : null}
+                    );
+                  }
+                  case "tool":
+                    return <ToolCard key={i} sessionId={sessionId} item={it} />;
+                  case "error":
+                    return (
+                      <div key={i} className="msg error">
+                        {it.message}
+                      </div>
+                    );
+                  case "agent_changed":
+                    return (
+                      <div key={i} className="divider">
+                        {it.agent.name}
+                      </div>
+                    );
+                  case "summary":
+                    // Only the latest summary is what the model sees now.
+                    return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
+                      <details key={i} className="divider summary">
+                        <summary>{t("conv.summary")}</summary>
+                        <p>{it.text}</p>
+                      </details>
+                    );
+                  case "turn_end": {
+                    const cp = view.checkpoints[it.turn_id];
+                    const laterChanges = view.items.slice(i + 1).some((x) => {
+                      if (x.type !== "turn_end") return false;
+                      const c = view.checkpoints[x.turn_id];
+                      return !!c && c.files.length > 0 && !c.restored;
+                    });
+                    const undo =
+                      cp && cp.after && (cp.files.length > 0 || laterChanges) ? (
+                        <Undo
+                          key={`u${i}`}
+                          sessionId={sessionId}
+                          turnId={it.turn_id}
+                          files={cp.files}
+                          restored={cp.restored || cp.files.length === 0}
+                          running={running}
+                          laterChanges={laterChanges}
                         />
-                      </MessageCtx.Provider>
-                      {final && <CopyMessage text={it.text} />}
-                    </div>
-                  );
+                      ) : null;
+                    return it.reason === "completed" ? (
+                      undo
+                    ) : (
+                      <div key={i}>
+                        <div className={`divider r-${it.reason}`}>turn {it.reason}</div>
+                        {undo}
+                      </div>
+                    );
+                  }
                 }
-                case "tool":
-                  return <ToolCard key={i} sessionId={sessionId} item={it} />;
-                case "error":
-                  return (
-                    <div key={i} className="msg error">
-                      {it.message}
-                    </div>
-                  );
-                case "agent_changed":
-                  return (
-                    <div key={i} className="divider">
-                      {it.agent.name}
-                    </div>
-                  );
-                case "summary":
-                  // Only the latest summary is what the model sees now.
-                  return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
-                    <details key={i} className="divider summary">
-                      <summary>{t("conv.summary")}</summary>
-                      <p>{it.text}</p>
-                    </details>
-                  );
-                case "turn_end": {
-                  const cp = view.checkpoints[it.turn_id];
-                  const laterChanges = view.items.slice(i + 1).some((x) => {
-                    if (x.type !== "turn_end") return false;
-                    const c = view.checkpoints[x.turn_id];
-                    return !!c && c.files.length > 0 && !c.restored;
-                  });
-                  const undo =
-                    cp && cp.after && (cp.files.length > 0 || laterChanges) ? (
-                      <Undo
-                        key={`u${i}`}
-                        sessionId={sessionId}
-                        turnId={it.turn_id}
-                        files={cp.files}
-                        restored={cp.restored || cp.files.length === 0}
-                        running={running}
-                        laterChanges={laterChanges}
-                      />
-                    ) : null;
-                  return it.reason === "completed" ? (
-                    undo
-                  ) : (
-                    <div key={i}>
-                      <div className={`divider r-${it.reason}`}>turn {it.reason}</div>
-                      {undo}
-                    </div>
-                  );
-                }
-              }
-            })
-          )}
-          {running && view?.running_agent && (
-            <div className="thinking">{agentName(view.running_agent.agent_id)} is working…</div>
-          )}
-        </div>
+              })
+            )}
+            {running && view?.running_agent && (
+              <div className="thinking">{agentName(view.running_agent.agent_id)} is working…</div>
+            )}
+          </div>
+        </ProgressCtx.Provider>
       </div>
 
       <div className="bottom">

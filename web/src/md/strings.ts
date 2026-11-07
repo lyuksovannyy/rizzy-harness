@@ -65,6 +65,14 @@ const en = {
   "ui.step.done": "Done",
   "ui.step.failed": "Failed",
   "ui.step.skipped": "Skipped",
+  "ui.step.stopped": "Stopped",
+  "ui.status.running": "In progress",
+  "ui.status.done": "Done",
+  "ui.status.failed": "Failed",
+  "ui.status.stopped": "Stopped",
+  "ui.turn.cancelled": "turn cancelled",
+  "ui.turn.error": "turn failed",
+  "ui.turn.interrupted": "turn interrupted",
 } as const;
 
 export type RichKey = keyof typeof en;

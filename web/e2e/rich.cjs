@@ -3,7 +3,8 @@
 // the highlighter worker and math chunks, a hostile code block that must
 // not freeze the page, and citations of web results (pills, footer, the
 // web status row), also those a delegated sub-task hands back, and ui
-// blocks (skeleton while streaming, the card, rejected and unknown blocks).
+// blocks (skeleton while streaming, the card, rejected and unknown blocks,
+// a progress block moved on over an agentic turn on the local node).
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -13,7 +14,9 @@ const path = require('path');
 const os = require('os');
 const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-rich-'));
+const R = `${S}/repo`;
 fs.mkdirSync(`${S}/data`, { recursive: true });
+fs.mkdirSync(R, { recursive: true });
 const URL_ = 'http://127.0.0.1:7797/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
@@ -64,6 +67,7 @@ async function skipOnboarding(page) {
     '[provider]', 'kind = "mock"', 'mock_delay_ms = 20', '',
     '[web]', 'search = "searxng"', `searxng_url = "http://127.0.0.1:${searx.address().port}"`, '',
   ].join('\n'));
+  fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${R}"]\n`);
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7797'], { detached: true, stdio: 'ignore' });
   try {
     await sleep(1500);
@@ -285,6 +289,90 @@ async function skipOnboarding(page) {
     check((await p.locator('.msg.assistant .ui-card').count()) === 3 && (await p.locator('.msg.assistant .ui-error').count()) === 2,
       'after reload: 3 cards, 2 errors');
     log('ui: rejected block = code + reason, unknown type = code, one question per message, secret field refused, same after reload');
+
+    // 8. Progress in an agentic turn on the local node: the mock moves one
+    // block id on over three messages, each but the last calling bash. The
+    // turn's latest block is the card; the earlier two are snapshot lines.
+    await p.click('.new-chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'progress: 3');
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await p.fill('.agentic-row input', R);
+    await p.click('.composer .send');
+    // While the first call waits for approval, the first block is the live
+    // card: its active step spins, unless motion is reduced.
+    const allow = p.locator('.approval button:has-text("Allow bash for this session")');
+    await allow.waitFor();
+    const spinner = p.locator('.ui-card .ui-progress .ui-step-active .spin');
+    await spinner.waitFor();
+    check((await p.locator('.ui-progress-status').innerText()) === 'In progress', 'live card is in progress');
+    check((await spinner.evaluate((el) => getComputedStyle(el).animationName)) === 'spin', 'the active step spins');
+    await p.emulateMedia({ reducedMotion: 'reduce' });
+    check((await spinner.evaluate((el) => getComputedStyle(el).animationName)) === 'none', 'no spin under reduced motion');
+    await p.emulateMedia({ reducedMotion: 'no-preference' });
+    await allow.click();
+    await idle();
+    const progressState = async () => {
+      const card = p.locator('.ui-progress');
+      return {
+        cards: await card.count(),
+        framed: await p.locator('.ui-card .ui-progress').count(),
+        snapshots: await p.locator('.ui-progress-snapshot').evaluateAll((els) => els.map((el) => el.textContent)),
+        framedSnapshots: await p.locator('.ui-card .ui-progress-snapshot').count(),
+        done: await card.locator('.ui-step-done').count(),
+        steps: await card.locator('.ui-step').count(),
+        status: await card.locator('.ui-progress-status').innerText(),
+        bar: await card.locator('.ui-bar').getAttribute('aria-valuenow'),
+        spinning: await p.locator('.ui-progress .spin, .ui-progress-snapshot .spin').count(),
+      };
+    };
+    await p.locator('.msg.assistant:has-text("All 3 steps done.") .ui-progress').waitFor();
+    const final = await progressState();
+    const want = {
+      cards: 1,
+      framed: 1,
+      snapshots: ['Working through 3 steps · 0/3 · Step 1', 'Working through 3 steps · 1/3 · Step 2'],
+      framedSnapshots: 0,
+      done: 3,
+      steps: 3,
+      status: 'Done',
+      bar: '100',
+      spinning: 0,
+    };
+    check(JSON.stringify(final) === JSON.stringify(want), 'progress: ' + JSON.stringify(final));
+    check((await p.locator('.msg.assistant').count()) === 3, 'three messages, one per step');
+    await p.screenshot({ path: `${S}/rich-6-progress.png`, fullPage: true });
+    await p.reload();
+    await p.locator('.msg.assistant:has-text("All 3 steps done.") .ui-progress').waitFor();
+    const reloaded = await progressState();
+    check(JSON.stringify(reloaded) === JSON.stringify(want), 'progress after reload: ' + JSON.stringify(reloaded));
+    log('progress: one card with 3 done steps and 2 snapshot lines, also after reload; the live step spins, except under reduced motion');
+
+    // A turn stopped while a step runs: nothing will move the card on, so
+    // its active step has stopped, nothing spins, and the header says why.
+    await p.click('.new-chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'progress: 2');
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await p.fill('.agentic-row input', R);
+    await p.click('.composer .send');
+    await p.locator('.approval button:has-text("Allow bash for this session")').waitFor();
+    await p.locator('.ui-card .ui-progress .ui-step-active .spin').waitFor();
+    await p.click('.send.stop');
+    await idle();
+    const stopped = p.locator('.ui-progress');
+    await stopped.locator('.ui-step-stopped').waitFor();
+    const stoppedState = {
+      status: await stopped.locator('.ui-progress-status').innerText(),
+      steps: await stopped.locator('.ui-step').evaluateAll((els) => els.map((el) => el.className)),
+      spinning: await stopped.locator('.spin').count(),
+    };
+    check(JSON.stringify(stoppedState) === JSON.stringify({
+      status: 'Stopped · turn cancelled',
+      steps: ['ui-step ui-step-stopped', 'ui-step ui-step-pending'],
+      spinning: 0,
+    }), 'stopped: ' + JSON.stringify(stoppedState));
+    log('progress: a cancelled turn leaves the card stopped, with the reason');
 
     // 7. Citations: the labels of a web result become pills naming the
     // host, an unknown label stays text, and a footer lists what was cited.

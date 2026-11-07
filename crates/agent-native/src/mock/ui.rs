@@ -1,5 +1,8 @@
-//! Canned `ui:` blocks for `ui: <name>` (rich_plan §12.3), written the way
-//! a model writes them: a line of prose, then a pretty-printed fence.
+//! Canned `ui:` blocks for `ui: <name>` and `progress: <n>` (rich_plan
+//! §12.3), written the way a model writes them: a line of prose, then a
+//! pretty-printed fence.
+
+use serde_json::{Value, json};
 
 /// The reply for `ui: <name>`, if it is one.
 pub(super) fn canned(name: &str) -> Option<String> {
@@ -80,6 +83,34 @@ const SECRET: &str = r#"{
   ]
 }"#;
 
+/// Step `k` (from 1) of a job of `n` steps: one `ui:progress` block with the
+/// same id each time, the steps before `k` done and step `k` active. From
+/// step `n` on every step is done, so the last message is the final state.
+pub(super) fn progress(n: usize, k: usize) -> String {
+    let last = k >= n;
+    let steps: Vec<Value> = (1..=n)
+        .map(|i| {
+            let status = if last || i < k {
+                "done"
+            } else if i == k {
+                "active"
+            } else {
+                "pending"
+            };
+            json!({"label": format!("Step {i}"), "status": status})
+        })
+        .collect();
+    let body =
+        json!({"id": "steps", "title": format!("Working through {n} steps"), "steps": steps});
+    let lead = if last {
+        format!("All {n} steps done.")
+    } else {
+        format!("Step {k} of {n}.")
+    };
+    // `{:#}` pretty-prints, as a model would write the body.
+    format!("{lead}\n\n```ui:progress\n{body:#}\n```\n")
+}
+
 /// A question whose first label is one character over the limit.
 fn bad() -> String {
     let label = format!("A{}", "a".repeat(80));
@@ -123,5 +154,33 @@ mod tests {
         assert_eq!(fields[0]["refused"], true);
         assert!(fields[1].get("refused").is_none());
         assert!(canned("nope").is_none());
+    }
+
+    /// Each step validates, keeps the id, and moves one step on.
+    #[test]
+    fn progress_steps_validate_and_advance() {
+        let statuses = |n: usize, k: usize| -> Vec<String> {
+            let blocks = extract(&progress(n, k), UiLevel::Rich);
+            assert_eq!(blocks.len(), 1, "{n} {k}");
+            assert_eq!(
+                (blocks[0].id.as_str(), blocks[0].error.as_deref()),
+                ("steps", None)
+            );
+            let steps = blocks[0].spec.as_ref().unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .clone();
+            steps
+                .iter()
+                .map(|s| s["status"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(statuses(3, 1), ["active", "pending", "pending"]);
+        assert_eq!(statuses(3, 2), ["done", "active", "pending"]);
+        assert_eq!(statuses(3, 3), ["done", "done", "done"]);
+        assert_eq!(statuses(3, 7), ["done", "done", "done"]);
+        assert_eq!(statuses(1, 1), ["done"]);
+        assert_eq!(statuses(20, 20).len(), 20);
+        assert!(progress(3, 2).starts_with("Step 2 of 3.\n\n```ui:progress\n{\n"));
     }
 }

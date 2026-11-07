@@ -3,12 +3,15 @@
 // message is final it shows the block Rust validated and stored for this
 // fence (assistant_message.blocks), found by ordinal, hash and type; with
 // no such block the fence is ordinary code, and a block Rust rejected is
-// the code plus the reason. The cards themselves load lazily.
+// the code plus the reason. The cards themselves load lazily. A progress
+// block that a later one in its turn replaced is a one-line snapshot, so it
+// gets no card frame.
 import { lazy, Suspense, useContext, type ComponentProps } from "react";
 import type { ExtraProps } from "react-markdown";
 import type { UiKind } from "../types";
 import { CodeBlock } from "./Code";
-import { DoneCtx, UiCtx } from "./context";
+import { slotKey } from "../ui/blocks";
+import { DoneCtx, ProgressCtx, UiCtx } from "./context";
 import { hastText, type HastNode } from "./hast";
 import { rt } from "./strings";
 
@@ -27,7 +30,8 @@ function Skeleton({ type }: { type: UiKind }) {
 
 export function UiHost(props: Props) {
   const done = useContext(DoneCtx);
-  const { blocks, from } = useContext(UiCtx);
+  const { messageId, blocks, from } = useContext(UiCtx);
+  const slots = useContext(ProgressCtx);
   const type = props["data-type"] ?? "progress";
   if (!done) return <Skeleton type={type} />;
   const ordinal = Number(props["data-ordinal"]);
@@ -44,12 +48,17 @@ export function UiHost(props: Props) {
       </>
     );
   }
+  const slot = block.type === "progress" && messageId ? slots.get(slotKey(messageId, ordinal)) : undefined;
+  const card = (
+    <Suspense fallback={<Skeleton type={type} />}>
+      <UiBlock block={block} slot={slot} />
+    </Suspense>
+  );
+  if (slot?.mode === "snapshot") return card;
   return (
     <section className={`ui-card ui-card-${type}`}>
       <div className="ui-from">{from ? rt("ui.from", { name: from }) : rt("ui.fromAssistant")}</div>
-      <Suspense fallback={<Skeleton type={type} />}>
-        <UiBlock block={block} />
-      </Suspense>
+      {card}
     </section>
   );
 }

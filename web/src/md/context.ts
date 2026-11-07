@@ -1,6 +1,7 @@
 // What a rendered message knows about the conversation around it.
 import { createContext } from "react";
 import type { Source, UiBlock } from "../types";
+import type { ProgressSlots } from "../ui/blocks";
 import type { Provenance } from "./links";
 
 export interface MessageInfo {
@@ -27,6 +28,8 @@ export const DoneCtx = createContext(true);
 /** The message's validated `ui:` blocks (assistant_message.blocks) and who
  * wrote it, for the `ui-block` elements remark-ui makes. */
 export interface UiInfo {
+  /** The message the blocks belong to (for its progress slots). */
+  messageId: string | null;
   blocks: readonly UiBlock[];
   /** The agent's display name; null reads "the assistant". */
   from: string | null;
@@ -34,4 +37,9 @@ export interface UiInfo {
 
 export const NO_BLOCKS: readonly UiBlock[] = [];
 
-export const UiCtx = createContext<UiInfo>({ blocks: NO_BLOCKS, from: null });
+export const UiCtx = createContext<UiInfo>({ messageId: null, blocks: NO_BLOCKS, from: null });
+
+/** Where each progress block of the conversation stands in its turn
+ * (ui/blocks.ts progressSlots). Conversation provides it above every
+ * message, so a new slot re-renders only the blocks, not the Markdown. */
+export const ProgressCtx = createContext<ProgressSlots>(new Map());

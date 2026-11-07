@@ -1179,6 +1179,82 @@ pre.term.web-output {
   color: var(--bad);
 }
 
+/* ui:progress: the turn's latest block as a card, earlier ones as lines. */
+.ui-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ui-progress-status {
+  flex: none;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.ui-progress-done .ui-progress-status { color: var(--ok); }
+.ui-progress-failed .ui-progress-status { color: var(--bad); }
+.ui-progress-stopped .ui-progress-status { color: var(--warn); }
+.ui-bar {
+  height: 6px;
+  margin: 2px 0 10px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.ui-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+.ui-progress-done .ui-bar-fill { background: var(--ok); }
+.ui-progress-failed .ui-bar-fill { background: var(--bad); }
+.ui-progress-stopped .ui-bar-fill { background: var(--warn); }
+.ui-card .ui-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  list-style: none;
+}
+.ui-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ui-icon {
+  display: inline-flex;
+  flex: none;
+  padding-top: 0.2em;
+}
+.ui-step-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-step-detail {
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.ui-step-active .ui-icon { color: var(--accent); }
+.ui-step-done .ui-icon { color: var(--ok); }
+.ui-step-stopped .ui-icon { color: var(--warn); }
+.ui-progress-snapshot {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 6px 0;
+  color: var(--fg-2);
+  font-size: 13px;
+}
+.ui-progress-snapshot .ui-icon { align-self: center; padding-top: 0; }
+.ui-progress-snapshot .ui-title { color: var(--fg); font-weight: 500; }
+.ui-progress-snapshot.ui-progress-done .ui-icon { color: var(--ok); }
+.ui-progress-snapshot.ui-progress-failed .ui-icon { color: var(--bad); }
+@media (prefers-reduced-motion: reduce) {
+  .ui-bar-fill { transition: none; }
+}
+
 /* ---------- Settings ---------- */
 .settings {
   flex: 1;
@@ -1678,6 +1754,11 @@ svg.lucide { vertical-align: -0.15em; flex-shrink: 0; }
 button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* A spinner stands still under reduced motion; its icon and label still
+   say that the work is in progress. */
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}
 
 /* Secondary text in options (search engine abilities and the like). */
 .option-hint { color: var(--fg-2); font-size: 12px; white-space: nowrap; }

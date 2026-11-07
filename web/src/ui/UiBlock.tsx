@@ -1,19 +1,22 @@
 // The cards for `ui:` blocks, in their own lazy chunk: a chat without
 // blocks never loads them. Each spec was validated and cleaned in Rust and
-// every string renders as React text (no Markdown, no links). For now the
-// cards are read-only views of the spec; answering, live progress and the
-// drawn chart replace them type by type.
-import type { ChartSpec, ChoicesSpec, Field, FormSpec, ProgressSpec, UiBlock as Block } from "../types";
+// every string renders as React text (no Markdown, no links). Questions,
+// forms and charts are read-only views of the spec for now; answering and
+// the drawn chart replace them type by type.
+import type { ChartSpec, ChoicesSpec, Field, FormSpec, UiBlock as Block } from "../types";
 import { rt } from "../md/strings";
+import type { ProgressSlot } from "./blocks";
+import Progress from "./Progress";
 
-export default function UiBlock({ block }: { block: Block }) {
+/** `slot` places a progress block in its turn (full or snapshot, ended). */
+export default function UiBlock({ block, slot }: { block: Block; slot?: ProgressSlot }) {
   switch (block.type) {
     case "choices":
       return block.spec ? <Choices spec={block.spec} /> : null;
     case "form":
       return block.spec ? <Form spec={block.spec} /> : null;
     case "progress":
-      return block.spec ? <Progress spec={block.spec} /> : null;
+      return block.spec ? <Progress spec={block.spec} slot={slot} /> : null;
     case "chart":
       return block.spec ? <Chart spec={block.spec} /> : null;
   }
@@ -64,22 +67,6 @@ function Refused({ field }: { field: Field }) {
   return (
     <div className="ui-secret" role="note">
       <span className="ui-field-label">{field.label}</span>: {rt("ui.secret")}
-    </div>
-  );
-}
-
-function Progress({ spec }: { spec: ProgressSpec }) {
-  return (
-    <div className="ui-progress">
-      <p className="ui-title">{spec.title}</p>
-      <ol className="ui-steps">
-        {spec.steps.map((s, i) => (
-          <li key={i} className={`ui-step ui-step-${s.status}`}>
-            <span>{s.label}</span> <span className="muted">· {rt(`ui.step.${s.status}`)}</span>
-            {s.detail && <div className="muted small">{s.detail}</div>}
-          </li>
-        ))}
-      </ol>
     </div>
   );
 }
