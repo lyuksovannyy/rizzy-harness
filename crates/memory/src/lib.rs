@@ -108,9 +108,18 @@ pub fn clean_text(t: &str) -> Result<String> {
             "a memory is at most {MAX_FACT_CHARS} characters"
         )));
     }
-    Ok(t.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .collect())
+    // Facts go into later system prompts and the Memory page: drop controls
+    // and the hidden set (bidi, zero-width, tag characters), the usual
+    // carriers for invisible prompt-injection text.
+    let cleaned: String = t
+        .chars()
+        .filter(|c| (!c.is_control() || *c == '\n') && !harness_core::text::is_hidden(*c))
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() {
+        return Err(MemoryError::Invalid("a memory cannot be empty".into()));
+    }
+    Ok(cleaned)
 }
 
 /// The block added to the system prompt for recalled facts.
@@ -127,4 +136,23 @@ pub fn context_block(facts: &[Fact]) -> Option<String> {
         s.push_str(&f.text);
     }
     Some(s)
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_characters_are_dropped() {
+        let t = clean_text("likes\u{202E} tea\u{200B}\u{E0041}\u{0007}").unwrap();
+        assert_eq!(t, "likes tea");
+        assert!(
+            clean_text("\u{200B}\u{2066}").is_err(),
+            "only hidden characters"
+        );
+        assert_eq!(
+            clean_text("line one\nline two").unwrap(),
+            "line one\nline two"
+        );
+    }
 }
