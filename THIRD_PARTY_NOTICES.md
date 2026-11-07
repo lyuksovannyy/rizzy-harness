@@ -10,6 +10,15 @@ Changes: shortened, reworded, rules merged and renumbered, harness-specific
 parts added. "Caveman" is a trademark of its owner; this project is not
 affiliated with or endorsed by it.
 
+## Bundled in the web UI (lazy chunks)
+
+- Temml (https://github.com/ronkok/Temml), MIT, Copyright (c) 2020 Ron Kok:
+  math rendering, with its `Temml-Local.css` and `Temml.woff2` (a clone of
+  KaTeX_Script-Regular from KaTeX, MIT).
+- refractor (https://github.com/wooorm/refractor), MIT, Copyright (c) Titus
+  Wormer: syntax highlighting, with grammars from Prism
+  (https://github.com/PrismJS/prism), MIT, Copyright (c) Lea Verou.
+
 ## Ideas, no code copied
 
 - Shell output filtering (`crates/tools/src/filter.rs`): ideas from rtk

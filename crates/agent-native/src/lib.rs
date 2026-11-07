@@ -1090,6 +1090,35 @@ mod tests {
         assert_eq!(deltas, m.text);
     }
 
+    /// The rich renderer's demo reaches the log as written: the browser, not
+    /// the agent loop, strips hidden characters and decides what is math.
+    #[tokio::test]
+    async fn mock_rich_demo() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let out = backend()
+            .run_turn(ctx(&host, "rich: demo", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed);
+        let ev = host.events.lock().unwrap();
+        let EventKind::AssistantMessage(m) = ev.last().unwrap() else {
+            panic!()
+        };
+        for part in [
+            "| core | 12.5 | 40 |",
+            "```rust\n",
+            "\\(a^2+b^2=c^2\\)",
+            "$$\n\\int_0^1",
+            "$5 and $10",
+            "> [!WARNING] Check before you run",
+            "![x](https://img.example/p.png?q=s)",
+            "[x](https://evil.example/a?q=1)",
+            "abc\u{202E}def",
+        ] {
+            assert!(m.text.contains(part), "missing {part:?}");
+        }
+    }
+
     #[tokio::test]
     async fn tool_turn_with_approval() {
         let dir = tempfile::tempdir().unwrap();

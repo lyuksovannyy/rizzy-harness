@@ -1,10 +1,13 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import { FileText, Trash2 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
+import { provenanceAt, provenanceIndex, provenanceSignature } from "../lib/rich";
 import type { Live } from "../live";
+import { MessageCtx, NONE, type MessageInfo } from "../md/context";
+import { CopyMessage } from "../md/CopyMessage";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
@@ -106,6 +109,22 @@ export default function Conversation(props: {
 
   const meta = view?.meta;
   const running = !!view?.running_turn;
+  const items = view?.items ?? [];
+  // The view is mutated in place, so memoise on what the result depends on.
+  const provSig = provenanceSignature(items);
+  const firstSeen = useMemo(() => provenanceIndex(items), [view, provSig]);
+  // One stable context value per message, so streaming does not re-render links.
+  const infoAt = useMemo(() => {
+    const cache = new Map<number, MessageInfo>();
+    return (i: number) => {
+      let info = cache.get(i);
+      if (!info) cache.set(i, (info = { provenance: provenanceAt(firstSeen, i), sources: NONE }));
+      return info;
+    };
+  }, [firstSeen]);
+  // Items before the running turn's user message are final even if their
+  // stream was cut off (an interrupted turn leaves done=false).
+  const liveFrom = running ? items.findLastIndex((x) => x.type === "user") : Infinity;
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
   const agentic = (meta?.profile ?? props.row?.profile) === "agentic";
@@ -210,7 +229,10 @@ export default function Conversation(props: {
                             </button>
                           )}
                         </div>
-                        <Markdown text={a.text} />
+                        <MessageCtx.Provider value={infoAt(i)}>
+                          <Markdown text={a.text} done={a.done || !busy} />
+                        </MessageCtx.Provider>
+                        {(a.done || !busy) && <CopyMessage text={a.text} />}
                       </div>
                     ))}
                   </div>
@@ -232,15 +254,20 @@ export default function Conversation(props: {
                       )}
                     </div>
                   );
-                case "assistant":
+                case "assistant": {
+                  const final = it.done || i < liveFrom;
                   return (
                     <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`}>
                       {it.author && it.author !== activeAgent && (
                         <div className="author">{agentName(it.author)}</div>
                       )}
-                      <Markdown text={it.text} />
+                      <MessageCtx.Provider value={infoAt(i)}>
+                        <Markdown text={it.text} done={final} />
+                      </MessageCtx.Provider>
+                      {final && <CopyMessage text={it.text} />}
                     </div>
                   );
+                }
                 case "tool":
                   return <ToolCard key={i} sessionId={sessionId} item={it} />;
                 case "error":

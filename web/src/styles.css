@@ -18,6 +18,17 @@
   --col: 760px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Syntax highlighting (Prism token classes). */
+  --syn-kw: #ff7b72;
+  --syn-str: #a5d6ff;
+  --syn-com: #8b949e;
+  --syn-num: #79c0ff;
+  --syn-fn: #d2a8ff;
+  --syn-type: #ffa657;
+  --syn-attr: #7ee787;
+  --syn-add: #56d364;
+  --syn-del: #f85149;
+  --tone-important: #b392f0;
   color-scheme: dark;
 }
 
@@ -35,6 +46,16 @@
     --accent-fg: #ffffff;
     --add-bg: #e6f6ec;
     --del-bg: #fbe9e9;
+    --syn-kw: #cf222e;
+    --syn-str: #0a3069;
+    --syn-com: #6e7781;
+    --syn-num: #0550ae;
+    --syn-fn: #8250df;
+    --syn-type: #953800;
+    --syn-attr: #116329;
+    --syn-add: #1a7f37;
+    --syn-del: #cf222e;
+    --tone-important: #8250df;
     color-scheme: light;
   }
 }
@@ -560,22 +581,252 @@ select {
   padding: 1px 5px;
   border-radius: 5px;
 }
+.md blockquote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  color: var(--fg-2);
+}
+
+/* ---------- Rich message rendering (md/) ---------- */
+.link-wrap {
+  position: relative;
+}
+.link-host {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+.md a.link-source {
+  text-decoration-style: dotted;
+}
+.md a.link-source::after {
+  content: " ✓";
+  font-size: 0.8em;
+  color: var(--ok);
+}
+.link-off {
+  text-decoration: underline dotted var(--fg-2);
+}
+.link-confirm {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: max-content;
+  max-width: min(28rem, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+  font-size: 13px;
+  color: var(--fg);
+}
+.link-confirm-url {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.link-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+.img-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+  font-size: 0.9em;
+  vertical-align: baseline;
+}
+.md a.img-chip {
+  color: var(--fg);
+  text-decoration: none;
+}
+.img-chip.off {
+  color: var(--fg-2);
+}
+.callout {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--tone);
+  border-radius: 0 10px 10px 0;
+  background: color-mix(in srgb, var(--tone) 9%, transparent);
+}
+.callout > :last-child {
+  margin-bottom: 0;
+}
+.callout-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  color: var(--tone);
+  font-weight: 600;
+}
+.callout-title {
+  color: var(--fg);
+}
+.callout-note { --tone: var(--accent); }
+.callout-tip { --tone: var(--ok); }
+.callout-important { --tone: var(--tone-important); }
+.callout-warning { --tone: var(--warn); }
+.callout-caution { --tone: var(--bad); }
+.table-wrap {
+  margin: 8px 0;
+}
+.table-scroll {
+  overflow: auto;
+  max-height: 60vh;
+}
+.md .table-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-2);
+  padding: 0;
+}
+.th-sort {
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  text-align: inherit;
+}
+th[aria-sort="ascending"] .th-sort::after { content: " ▲"; font-size: 0.7em; }
+th[aria-sort="descending"] .th-sort::after { content: " ▼"; font-size: 0.7em; }
+.table-tools {
+  display: flex;
+  justify-content: flex-end;
+}
+.math-display {
+  margin: 8px 0;
+  overflow-x: auto;
+}
+.math-src {
+  font-family: var(--mono);
+}
+.msg-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.msg.assistant:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .msg-actions {
+    opacity: 1;
+  }
+}
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata { color: var(--syn-com); font-style: italic; }
+.token.keyword,
+.token.atrule,
+.token.rule,
+.token.important,
+.token.selector { color: var(--syn-kw); }
+.token.string,
+.token.char,
+.token.attr-value,
+.token.regex,
+.token.template-string,
+.token.url { color: var(--syn-str); }
+.token.number,
+.token.boolean,
+.token.constant,
+.token.symbol,
+.token.unit { color: var(--syn-num); }
+.token.function,
+.token.function-name,
+.token.macro { color: var(--syn-fn); }
+.token.class-name,
+.token.builtin,
+.token.namespace,
+.token.lifetime-annotation { color: var(--syn-type); }
+.token.attr-name,
+.token.property,
+.token.tag,
+.token.key,
+.token.variable { color: var(--syn-attr); }
+.token.inserted { color: var(--syn-add); }
+.token.deleted { color: var(--syn-del); }
+.token.bold { font-weight: 600; }
+.token.italic { font-style: italic; }
+
 .msg.assistant.streaming .md > :last-child::after {
   content: "▍";
   color: var(--accent);
   animation: pulse 1s steps(2) infinite;
 }
 .codeblock {
-  position: relative;
   margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.codeblock .code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 4px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.codeblock .lang {
+  color: var(--fg-2);
+  font-family: var(--mono);
 }
 .codeblock .copy {
-  position: absolute;
-  top: 6px;
-  right: 6px;
   font-size: 12px;
   padding: 2px 8px;
   background: var(--bg-3);
+}
+/* Inside a block the frame is the wrapper's; the code shows in full unless
+   it is long enough to collapse. */
+.codeblock pre.code {
+  border: 0;
+  border-radius: 0;
+  max-height: none;
+}
+.codeblock.collapsed pre.code {
+  max-height: 22em;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 75%, transparent);
+}
+.codeblock .code-more {
+  display: block;
+  width: 100%;
+  padding: 6px 14px;
+  text-align: left;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
 }
 pre.code,
 pre.term,

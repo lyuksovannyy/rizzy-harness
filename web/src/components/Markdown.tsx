@@ -1,56 +1,41 @@
-// Model output rendered as GitHub-flavoured markdown. Raw HTML is escaped and
-// link URLs go through react-markdown's default safe-protocol filter.
-import { useState } from "react";
-import ReactMarkdown from "react-markdown";
+// Model output rendered as GitHub-flavoured Markdown. Raw HTML stays escaped
+// (no rehype-raw), URLs pass an allowlist, images never load, and syntax
+// highlighting and math render lazily once the message is final (`done`).
+// Conversation provides MessageCtx (provenance and sources for links).
+import { memo, useMemo } from "react";
+import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { Callout } from "../md/Callout";
+import { InlineCode, Pre } from "../md/Code";
+import { DoneCtx } from "../md/context";
+import { ImageChip, Link } from "../md/Link";
+import { prepare, urlTransform } from "../md/pipeline";
+import remarkCallouts from "../md/remark-callouts";
+import { Table } from "../md/Table";
 
-function CodeBlock({ children }: { children?: React.ReactNode }) {
-  const [copied, setCopied] = useState(false);
-  const text = extractText(children);
+// Single-dollar math is off: "$5 and $10" and $HOME are text. prepare()
+// turns \( \) and \[ \] into the $$ forms.
+const remarkPlugins: Options["remarkPlugins"] = [remarkGfm, [remarkMath, { singleDollarTextMath: false }], remarkCallouts];
+
+const components: Components = {
+  a: Link,
+  img: ImageChip,
+  pre: Pre,
+  code: InlineCode,
+  table: Table,
+  aside: Callout,
+};
+
+export const Markdown = memo(function Markdown({ text, done }: { text: string; done: boolean }) {
+  const md = useMemo(() => prepare(text), [text]);
   return (
-    <div className="codeblock">
-      <button
-        type="button"
-        className="copy"
-        onClick={() => {
-          void navigator.clipboard?.writeText(text).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          });
-        }}
-      >
-        {copied ? "Copied" : "Copy"}
-      </button>
-      <pre className="code">{children}</pre>
-    </div>
+    <DoneCtx.Provider value={done}>
+      <div className="md">
+        <ReactMarkdown remarkPlugins={remarkPlugins} components={components} urlTransform={urlTransform}>
+          {md}
+        </ReactMarkdown>
+      </div>
+    </DoneCtx.Provider>
   );
-}
-
-function extractText(node: React.ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(extractText).join("");
-  if (node && typeof node === "object" && "props" in node) {
-    return extractText((node as { props: { children?: React.ReactNode } }).props.children);
-  }
-  return "";
-}
-
-export function Markdown({ text }: { text: string }) {
-  return (
-    <div className="md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer">
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
-}
+});

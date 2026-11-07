@@ -9,6 +9,7 @@
 //! * `memory?`       -> repeats the recalled-memory block (per-turn context)
 //! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel)
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
+//! * `rich: demo`    -> streams Markdown that exercises the rich renderer
 //! * anything else   -> echoes the message back, streamed word by word
 
 use std::time::Duration;
@@ -18,6 +19,44 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::provider::*;
+
+/// Headings, a table with numbers, a fence, math in every supported form, a
+/// price that must stay text, a callout, a remote image and a link with a
+/// query (neither may be fetched), and a hidden bidi override.
+const RICH_DEMO: &str = concat!(
+    r#"## Rich text demo
+
+Build times by crate:
+
+| crate | debug (s) | release (s) |
+|---|---:|---:|
+| core | 12.5 | 40 |
+| web | 8 | 22 |
+| master | 30 | 95 |
+
+```rust
+fn main() {
+    let answer: u32 = 42;
+    println!("{answer}");
+}
+```
+
+Pythagoras: \(a^2+b^2=c^2\), and an integral:
+
+$$
+\int_0^1 x^2\,dx = \frac{1}{3}
+$$
+
+Prices stay text: $5 and $10.
+
+> [!WARNING] Check before you run
+> This deletes the build cache.
+
+![x](https://img.example/p.png?q=s) and [x](https://evil.example/a?q=1)
+
+"#,
+    "Hidden mark: abc\u{202E}def\n"
+);
 
 pub struct Mock {
     pub delay: Duration,
@@ -167,6 +206,15 @@ impl Provider for Mock {
         if let Some(n) = user.strip_prefix("slow:") {
             let n: usize = n.trim().parse().unwrap_or(20);
             let words = (0..n).map(|i| format!("chunk{i} ")).collect();
+            let text = self.stream_words(words, &deltas).await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+            });
+        }
+        if user.strip_prefix("rich:").map(str::trim) == Some("demo") {
+            let words = RICH_DEMO.split_inclusive(' ').map(str::to_string).collect();
             let text = self.stream_words(words, &deltas).await;
             return Ok(Completion {
                 text,

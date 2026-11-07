@@ -65,7 +65,7 @@ type Catalog = typeof en;
 export type Key = { [K in keyof Catalog]: Catalog[K] extends string ? K : never }[keyof Catalog];
 export type ListKey = { [K in keyof Catalog]: Catalog[K] extends readonly string[] ? K : never }[keyof Catalog];
 
-function fill(s: string, vars?: Record<string, string>): string {
+export function fill(s: string, vars?: Record<string, string>): string {
   return vars ? s.replace(/\{(\w+)\}/g, (m, k: string) => vars[k] ?? m) : s;
 }
 

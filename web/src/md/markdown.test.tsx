@@ -1,0 +1,125 @@
+// The whole rendering path (prepare, remark plugins, components) as static
+// markup. Effects do not run here, so this is what a streaming message shows.
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, test } from "vitest";
+import { Markdown } from "../components/Markdown";
+import { MessageCtx, NONE } from "./context";
+import type { Provenance } from "./links";
+
+const md = (text: string, sources: Provenance = NONE) =>
+  renderToStaticMarkup(
+    <MessageCtx.Provider value={{ provenance: NONE, sources }}>
+      <Markdown text={text} done={false} />
+    </MessageCtx.Provider>,
+  );
+
+describe("callouts", () => {
+  test("a [!WARNING] blockquote becomes a titled aside", () => {
+    const out = md("> [!WARNING] Careful now\n> This deletes things.");
+    expect(out).toContain('<aside class="callout callout-warning" role="note">');
+    expect(out).toContain('<span class="callout-label">Warning</span><span class="callout-title">Careful now</span>');
+    expect(out).toContain("<p>This deletes things.</p>");
+    expect(out).not.toContain("[!WARNING]");
+  });
+  test("every tone, case-insensitive, without a title", () => {
+    for (const tone of ["NOTE", "tip", "Important", "WARNING", "caution"]) {
+      const out = md(`> [!${tone}]\n> Body.`);
+      expect(out).toContain(`callout-${tone.toLowerCase()}`);
+      expect(out).not.toContain("callout-title");
+    }
+  });
+  test("an unknown marker or a plain quote stays a blockquote", () => {
+    expect(md("> [!DANGER] x")).toContain("<blockquote>");
+    expect(md("> just a quote")).toContain("<blockquote>");
+  });
+  test("a title with formatting is kept as body text", () => {
+    const out = md("> [!TIP] Use **bold** here");
+    expect(out).toContain("callout-tip");
+    expect(out).toContain("<strong>bold</strong>");
+    expect(out).not.toContain("callout-title");
+  });
+});
+
+describe("safety", () => {
+  test("raw HTML is escaped", () => {
+    const out = md('<script>alert(1)</script> <img src=x onerror="alert(1)">');
+    expect(out).not.toMatch(/<script|<img/);
+    expect(out).toContain("&lt;script&gt;");
+  });
+  test("images never become <img>: a chip with the host, or a note for data:", () => {
+    const out = md("![chart](https://img.example/p.png?q=s) ![d](data:image/png;base64,AAAA) ![j](javascript:alert(1))");
+    expect(out).not.toContain("<img");
+    expect(out).toContain('class="img-chip"');
+    expect(out).toContain("Image: chart · img.example");
+    expect(out).toContain("embedded image (not shown)");
+    expect(out).not.toContain("AAAA");
+    expect(out).not.toContain("javascript");
+  });
+  test("disallowed link schemes render as text", () => {
+    const out = md("[click](javascript:alert(1)) [rel](/api/me)");
+    expect(out).not.toContain("href");
+    expect(out).toContain('<span class="link-off">click</span>');
+  });
+  test("links open safely and show their real host", () => {
+    const out = md("[paypal.com](https://paypal.com.evil.example/login) and <https://docs.example/a>");
+    expect(out).toContain('rel="noopener noreferrer nofollow"');
+    expect(out).toContain('target="_blank"');
+    expect(out).toContain('<span class="link-host">paypal.com.evil.example</span>');
+    // An autolink already shows its address.
+    expect(out.match(/link-host/g)).toHaveLength(1);
+  });
+  test("a link to a verified source is marked as one", () => {
+    const sources: Provenance = { has: (k) => k === "docs.example/a" };
+    expect(md("[docs](https://docs.example/a)", sources)).toContain('class="link-source"');
+  });
+  test("hidden characters are gone", () => {
+    expect(md("abc‮def​ghi")).toContain("abcdefghi");
+  });
+  test("footnotes stay in-page links", () => {
+    const out = md("Note[^1].\n\n[^1]: The note.");
+    expect(out).toContain('href="#user-content-fn-1"');
+    expect(out).not.toMatch(/href="#user-content-fn-1"[^>]*target/);
+  });
+});
+
+describe("code", () => {
+  test("a fenced block has a header with the language and Copy", () => {
+    const out = md("```rust\nfn main() {}\n```");
+    expect(out).toContain('<span class="lang">rust</span>');
+    expect(out).toContain('<code class="language-rust">fn main() {}</code>');
+    // Not highlighted while streaming.
+    expect(out).not.toContain("token");
+  });
+  test("more than 60 lines collapse", () => {
+    const long = Array.from({ length: 61 }, (_, i) => `line ${i}`).join("\n");
+    const out = md("```\n" + long + "\n```");
+    expect(out).toContain('class="codeblock collapsed"');
+    expect(out).toContain("Show all 61 lines");
+    expect(md("```\n" + long.split("\n").slice(0, 60).join("\n") + "\n```")).not.toContain("collapsed");
+  });
+  test("mermaid is labelled source, not a diagram", () => {
+    expect(md("```mermaid\ngraph TD; A-->B\n```")).toContain('<span class="lang">diagram source</span>');
+  });
+});
+
+describe("math", () => {
+  test("\\( \\) and $$ blocks reach the math component as source while streaming", () => {
+    const out = md("Pythagoras: \\(a^2+b^2=c^2\\)\n\n$$\n\\int_0^1 x\\,dx\n$$");
+    expect(out).toContain('<span class="math math-inline"><code class="math-src">a^2+b^2=c^2</code>');
+    expect(out).toContain('<div class="math math-display"><pre class="code math-src"><code>\\int_0^1 x\\,dx</code></pre>');
+  });
+  test("single dollars stay text", () => {
+    const out = md("Prices: $5 and $10, and $HOME/$PATH.");
+    expect(out).toContain("Prices: $5 and $10, and $HOME/$PATH.");
+    expect(out).not.toContain("math");
+  });
+});
+
+describe("tables", () => {
+  test("wrapped, with sortable headers and Copy CSV", () => {
+    const out = md("| crate | time |\n|---|---:|\n| core | 12.5 |\n| web | 8 |");
+    expect(out).toContain('<div class="table-wrap"><div class="table-scroll"><table>');
+    expect(out).toContain('<th aria-sort="none"><button type="button" class="th-sort" title="Sort by crate">crate</button></th>');
+    expect(out).toContain("Copy CSV");
+  });
+});
