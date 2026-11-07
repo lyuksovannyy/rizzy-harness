@@ -52,9 +52,44 @@ pub fn clean_line(s: &str, max: usize) -> String {
     out
 }
 
+/// Model text for a `ui:` block (a question, a label, help text), before
+/// its length is checked: hidden characters dropped, controls and every
+/// whitespace character other than a kept newline read as a space. A
+/// single-line string is [`clean_line`] (whitespace collapsed); a multi-line
+/// one keeps its newlines (`\r\n` and `\r` count as one) as written.
+/// Trimmed either way.
+pub fn clean_text(s: &str, multiline: bool) -> String {
+    if !multiline {
+        // A string has no more characters than bytes, so nothing is cut.
+        return clean_line(s, s.len());
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if is_hidden(c) => {}
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' | '\n' => out.push('\n'),
+            c if c.is_whitespace() || c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_text_strips_the_hidden_set_and_keeps_newlines_only_when_asked() {
+        let s = " Pick\u{202E} one\u{2066}\u{200B}\u{E000}\u{061C}\u{E0041}\u{E0100}\n\tnow\u{7} ";
+        assert_eq!(clean_text(s, false), "Pick one now");
+        assert_eq!(clean_text(s, true), "Pick one\n now");
+        assert_eq!(clean_text("a\r\nb\rc\u{85}d\u{2028}e", true), "a\nb\nc d e");
+        assert_eq!(clean_text("  \u{200B} \n ", true), "");
+        assert_eq!(clean_text(&"é".repeat(50), false).chars().count(), 50);
+    }
 
     #[test]
     fn strips_hidden_and_controls_and_collapses_whitespace() {

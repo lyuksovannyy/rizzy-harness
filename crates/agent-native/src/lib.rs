@@ -454,9 +454,16 @@ impl AgentBackend for NativeBackend {
         } else {
             format!("{base_prompt}\n\nWorking directory: {}", ctx.cwd.display())
         };
-        let style = style::fragment(sv.style);
-        if !style.is_empty() {
-            system = format!("{system}\n\n{style}");
+        // Which ui blocks this turn's replies may show; enforced below when
+        // each message is recorded, not only asked for in the prompt.
+        let ui = harness_core::ui::effective_level(
+            agent.map(|a| a.ui).unwrap_or_default(),
+            &ctx.history,
+        );
+        for part in [style::fragment(sv.style, ui), style::ui_fragment(ui)] {
+            if !part.is_empty() {
+                system = format!("{system}\n\n{part}");
+            }
         }
         if let Some(map) = self.repo_map(&ctx).await {
             system = format!("{system}\n\n{map}");
@@ -500,7 +507,7 @@ impl AgentBackend for NativeBackend {
             None => ctx.user_text.clone(),
         }));
         if !ctx.compare.is_empty() {
-            return self.compare(&ctx, messages, usage, author).await;
+            return self.compare(&ctx, messages, usage, author, ui).await;
         }
         let tools = self.tool_specs(agent, sv);
         // The master only puts an effort on the spec when the model supports it.
@@ -573,14 +580,18 @@ impl AgentBackend for NativeBackend {
                 usage.add(u);
                 usage.context_tokens = u.input_tokens;
             }
-            host.emit(EventKind::AssistantMessage(AssistantMessage {
-                author: author.clone(),
-                variant: None,
-                turn_id: ctx.turn_id.clone(),
-                message_id,
-                text: completion.text.clone(),
-                tool_calls: completion.tool_calls.clone(),
-            }))
+            host.emit(self.assistant_message(
+                AssistantMessage {
+                    author: author.clone(),
+                    variant: None,
+                    turn_id: ctx.turn_id.clone(),
+                    message_id,
+                    text: completion.text.clone(),
+                    tool_calls: completion.tool_calls.clone(),
+                    blocks: vec![],
+                },
+                ui,
+            ))
             .await;
             messages.push(ChatMsg::Assistant {
                 text: completion.text,
@@ -761,6 +772,19 @@ impl NativeBackend {
         map
     }
 
+    /// The event for a finished message: its text as it will be stored
+    /// (the node scrubs every payload; doing it here first makes the
+    /// blocks' hashes match the stored text) and the blocks found in it.
+    fn assistant_message(
+        &self,
+        mut m: AssistantMessage,
+        ui: harness_core::agent::UiLevel,
+    ) -> EventKind {
+        m.text = self.config.secrets.scrub(&m.text);
+        m.blocks = harness_core::ui::extract(&m.text, ui);
+        EventKind::AssistantMessage(m)
+    }
+
     /// Parallel answers: one completion per model, no tools, each recorded
     /// as a variant of the same group (the turn id).
     async fn compare(
@@ -769,6 +793,7 @@ impl NativeBackend {
         messages: Vec<ChatMsg>,
         mut usage: Usage,
         author: Option<String>,
+        ui: harness_core::agent::UiLevel,
     ) -> TurnOutcome {
         let host = ctx.host;
         let runs = ctx.compare.iter().enumerate().map(|(i, model)| {
@@ -813,14 +838,18 @@ impl NativeBackend {
                 .await;
                 match step {
                     Step::Done(Ok(c)) => {
-                        host.emit(EventKind::AssistantMessage(AssistantMessage {
-                            author,
-                            variant: Some(variant),
-                            turn_id: ctx.turn_id.clone(),
-                            message_id,
-                            text: c.text,
-                            tool_calls: vec![],
-                        }))
+                        host.emit(self.assistant_message(
+                            AssistantMessage {
+                                author,
+                                variant: Some(variant),
+                                turn_id: ctx.turn_id.clone(),
+                                message_id,
+                                text: c.text,
+                                tool_calls: vec![],
+                                blocks: vec![],
+                            },
+                            ui,
+                        ))
                         .await;
                         Ok(c.usage)
                     }
@@ -1082,6 +1111,7 @@ mod tests {
             model: None,
             effort: None,
             budget: Default::default(),
+            ui: Default::default(),
             prompt_hash: "h".into(),
             deny_tools: vec![],
             delegates: vec![],
@@ -1582,6 +1612,7 @@ mod tests {
                         tool: "bash".into(),
                         input: json!({}),
                     }],
+                    blocks: vec![],
                 }),
             ),
             mk(
@@ -1657,6 +1688,7 @@ mod tests {
                 message_id: format!("m{n}"),
                 text: format!("answer {n}"),
                 tool_calls: vec![],
+                blocks: vec![],
             }),
             &mut out,
         );

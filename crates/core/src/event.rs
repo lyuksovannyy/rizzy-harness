@@ -259,6 +259,68 @@ pub struct AssistantMessage {
     pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<Variant>,
+    /// The message's `ui:` blocks, validated and normalized from `text` by
+    /// `ui::extract`. The UI renders these specs, never the model's JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<UiBlock>,
+}
+
+/// One `ui:<type>` fence of an assistant message. `ordinal` (its index
+/// among the message's ui fences) and `hash` (of its body) tie it to the
+/// fence the browser finds in the text; a fence whose ordinal, hash and type
+/// do not all match renders as plain code. Exactly one of `spec` and `error`
+/// is set.
+///
+/// Unknown keys are tolerated here like everywhere in the event schema (a
+/// newer node may add some); the model's own JSON is what `ui` rejects
+/// unknown keys in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiBlock {
+    pub ordinal: u32,
+    /// FNV-1a 32-bit of the body's UTF-8 bytes, as 8 lowercase hex digits.
+    pub hash: String,
+    #[serde(rename = "type")]
+    pub kind: UiKind,
+    /// The block's id; `b<ordinal>` when it has no valid one.
+    pub id: String,
+    /// The normalized spec (`ui::ChoicesSpec`, `FormSpec`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Value>,
+    /// Why the block is not shown: `<json path>: <reason>`, harness text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiKind {
+    Choices,
+    Form,
+    Progress,
+    Chart,
+}
+
+impl UiKind {
+    pub const ALL: [UiKind; 4] = [
+        UiKind::Choices,
+        UiKind::Form,
+        UiKind::Progress,
+        UiKind::Chart,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UiKind::Choices => "choices",
+            UiKind::Form => "form",
+            UiKind::Progress => "progress",
+            UiKind::Chart => "chart",
+        }
+    }
+
+    /// Blocks the user answers (they end the turn); the others only show.
+    pub fn is_input(self) -> bool {
+        matches!(self, UiKind::Choices | UiKind::Form)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -529,6 +591,7 @@ mod tests {
                     index: 1,
                     model: None,
                 }),
+                blocks: vec![],
             }),
             EventKind::AgentChanged(AgentChanged { agent }),
             EventKind::VariantSelected(VariantSelected {
@@ -576,6 +639,51 @@ mod tests {
             };
             assert_eq!(s.number(), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn blocks_roundtrip_and_are_omitted_when_empty() {
+        let msg = |blocks| {
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: "t".into(),
+                message_id: "m".into(),
+                text: "x".into(),
+                tool_calls: vec![],
+                author: None,
+                variant: None,
+                blocks,
+            })
+        };
+        let (_, payload) = msg(vec![]).into_parts();
+        assert!(payload.get("blocks").is_none());
+        let k = msg(vec![
+            UiBlock {
+                ordinal: 0,
+                hash: "1c9a3f0e".into(),
+                kind: UiKind::Choices,
+                id: "db".into(),
+                spec: Some(json!({"question": "Which?"})),
+                error: None,
+            },
+            UiBlock {
+                ordinal: 1,
+                hash: "7b02d4aa".into(),
+                kind: UiKind::Form,
+                id: "b1".into(),
+                spec: None,
+                error: Some("body: larger than 16 KiB".into()),
+            },
+        ]);
+        let (kind, payload) = k.clone().into_parts();
+        assert_eq!(
+            payload["blocks"],
+            json!([
+                {"ordinal": 0, "hash": "1c9a3f0e", "type": "choices", "id": "db", "spec": {"question": "Which?"}},
+                {"ordinal": 1, "hash": "7b02d4aa", "type": "form", "id": "b1", "error": "body: larger than 16 KiB"},
+            ])
+        );
+        assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
+        assert!(UiKind::Form.is_input() && !UiKind::Chart.is_input());
     }
 
     #[test]

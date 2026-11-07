@@ -2,11 +2,14 @@
 //! the TypeScript port and must produce exactly `expected`.
 //! Regenerate with `UPDATE_FIXTURES=1 cargo test -p harness-core --test fold_fixture`.
 
+use harness_core::agent::UiLevel;
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId};
 use serde_json::json;
+
+const BLOCKS_TEXT: &str = "Found it.\n\n```ui:progress\n{\"id\": \"fix\", \"title\": \"Fixing\", \"steps\": [{\"label\": \"Find\", \"status\": \"done\"}]}\n```\n\n```ui:choices\n{\"id\": \"next\"}\n```\n";
 
 fn events() -> Vec<RawEvent> {
     let sid: SessionId = "01a19bf2-0000-7000-8000-00000000f1f0".parse().unwrap();
@@ -58,6 +61,7 @@ fn events() -> Vec<RawEvent> {
                 tool: "bash".into(),
                 input: json!({"command": "cargo test"}),
             }],
+            blocks: vec![],
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -126,14 +130,16 @@ fn events() -> Vec<RawEvent> {
                 title: "Tokio".into(),
             }],
         }),
-        // A message with no preceding deltas.
+        // A message with no preceding deltas, with one valid block and one
+        // that is an error.
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
             variant: None,
             turn_id: t(),
             message_id: "m2".into(),
-            text: "Found it.".into(),
+            text: BLOCKS_TEXT.into(),
             tool_calls: vec![],
+            blocks: harness_core::ui::extract(BLOCKS_TEXT, UiLevel::Rich),
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -216,6 +222,7 @@ fn events() -> Vec<RawEvent> {
             message_id: "m3".into(),
             text: "Draft A.".into(),
             tool_calls: vec![],
+            blocks: vec![],
             author: Some("writer".into()),
             variant: Some(Variant {
                 group: "g1".into(),
@@ -228,6 +235,7 @@ fn events() -> Vec<RawEvent> {
             message_id: "m4".into(),
             text: "Draft B.".into(),
             tool_calls: vec![],
+            blocks: vec![],
             author: Some("writer".into()),
             variant: Some(Variant {
                 group: "g1".into(),

@@ -10,16 +10,22 @@
 //! model: optional-model-id
 //! effort: high                                    # low | medium | high | max
 //! budget: standard                                # lean | standard
+//! ui: rich                                        # rich | display | off
 //! delegates: [coder, scout]                       # may hand sub-tasks to these
 //! max_subagents: 4                                # per turn (default 4)
 //! max_subagent_tokens: 200000                     # per turn, all sub-agents
 //! ---
 //! System prompt in markdown...
 //! ```
+//!
+//! `ui` is which `ui:` blocks the agent's replies may show (default `rich`):
+//! `rich` also allows questions and forms the user answers, `display` only
+//! progress and charts, `off` none (fences stay code). A delegated sub-task
+//! runs at `display` at most.
 
 use std::path::Path;
 
-use harness_core::agent::{AgentSpec, Budget, ToolSelection};
+use harness_core::agent::{AgentSpec, Budget, ToolSelection, UiLevel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -62,6 +68,8 @@ struct Frontmatter {
     effort: Option<String>,
     #[serde(default)]
     budget: Budget,
+    #[serde(default)]
+    ui: UiLevel,
     #[serde(default)]
     delegates: Vec<String>,
     #[serde(default)]
@@ -130,6 +138,7 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
         fm.effort.as_deref().unwrap_or(""),
         &fm.delegates.join(","),
         &format!("{:?}/{:?}", fm.max_subagents, fm.max_subagent_tokens),
+        fm.ui.as_str(),
     ] {
         h.update(part.as_bytes());
         h.update([0u8]);
@@ -164,6 +173,7 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
             model: fm.model,
             effort: fm.effort,
             budget: fm.budget,
+            ui: fm.ui,
             prompt_hash,
             deny_tools: vec![],
             delegates: vec![],

@@ -1,6 +1,6 @@
 // What a rendered message knows about the conversation around it.
 import { createContext } from "react";
-import type { Source } from "../types";
+import type { Source, UiBlock } from "../types";
 import type { Provenance } from "./links";
 
 export interface MessageInfo {
@@ -23,3 +23,15 @@ export const MessageCtx = createContext<MessageInfo>({ provenance: NONE, sources
 
 /** False while the message is still streaming: highlighting and math wait. */
 export const DoneCtx = createContext(true);
+
+/** The message's validated `ui:` blocks (assistant_message.blocks) and who
+ * wrote it, for the `ui-block` elements remark-ui makes. */
+export interface UiInfo {
+  blocks: readonly UiBlock[];
+  /** The agent's display name; null reads "the assistant". */
+  from: string | null;
+}
+
+export const NO_BLOCKS: readonly UiBlock[] = [];
+
+export const UiCtx = createContext<UiInfo>({ blocks: NO_BLOCKS, from: null });

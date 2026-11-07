@@ -3,6 +3,7 @@ name: Ultracode
 description: Orchestrator that splits big jobs into sub-tasks for Coder, Scout and Writer, runs them in parallel and integrates the results.
 tools: all
 budget: standard
+ui: rich
 delegates: [coder, scout, writer]
 max_subagents: 4
 max_subagent_tokens: 200000

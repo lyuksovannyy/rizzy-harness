@@ -13,6 +13,9 @@
 //!   then passes on the first line of the (last) sub-agent's answer
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * `rich: demo`    -> streams Markdown that exercises the rich renderer
+//! * `ui: <name>`    -> streams a canned `ui:` block: choices, form, progress,
+//!   chart, secret (a form asking for a key), bad (a label over the limit),
+//!   unknown (`ui:widget`), two (two questions in one message)
 //! * anything else   -> echoes the message back, streamed word by word
 
 use std::time::Duration;
@@ -22,6 +25,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::provider::*;
+
+mod ui;
 
 /// Headings, a table with numbers, a fence, math in every supported form, a
 /// price that must stay text, a callout, a remote image and a link with a
@@ -274,6 +279,15 @@ impl Provider for Mock {
         }
         if user.strip_prefix("rich:").map(str::trim) == Some("demo") {
             let words = RICH_DEMO.split_inclusive(' ').map(str::to_string).collect();
+            let text = self.stream_words(words, &deltas).await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+            });
+        }
+        if let Some(text) = user.strip_prefix("ui:").and_then(|n| ui::canned(n.trim())) {
+            let words = text.split_inclusive(' ').map(str::to_string).collect();
             let text = self.stream_words(words, &deltas).await;
             return Ok(Completion {
                 text,

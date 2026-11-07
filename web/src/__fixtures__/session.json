@@ -202,8 +202,32 @@
     {
       "kind": "assistant_message",
       "payload": {
+        "blocks": [
+          {
+            "hash": "53148ffe",
+            "id": "fix",
+            "ordinal": 0,
+            "spec": {
+              "steps": [
+                {
+                  "label": "Find",
+                  "status": "done"
+                }
+              ],
+              "title": "Fixing"
+            },
+            "type": "progress"
+          },
+          {
+            "error": "question: missing",
+            "hash": "0207640b",
+            "id": "next",
+            "ordinal": 1,
+            "type": "choices"
+          }
+        ],
         "message_id": "m2",
-        "text": "Found it.",
+        "text": "Found it.\n\n```ui:progress\n{\"id\": \"fix\", \"title\": \"Fixing\", \"steps\": [{\"label\": \"Find\", \"status\": \"done\"}]}\n```\n\n```ui:choices\n{\"id\": \"next\"}\n```\n",
         "tool_calls": [],
         "turn_id": "t1"
       },
@@ -505,9 +529,33 @@
       },
       {
         "author": null,
+        "blocks": [
+          {
+            "hash": "53148ffe",
+            "id": "fix",
+            "ordinal": 0,
+            "spec": {
+              "steps": [
+                {
+                  "label": "Find",
+                  "status": "done"
+                }
+              ],
+              "title": "Fixing"
+            },
+            "type": "progress"
+          },
+          {
+            "error": "question: missing",
+            "hash": "0207640b",
+            "id": "next",
+            "ordinal": 1,
+            "type": "choices"
+          }
+        ],
         "done": true,
         "message_id": "m2",
-        "text": "Found it.",
+        "text": "Found it.\n\n```ui:progress\n{\"id\": \"fix\", \"title\": \"Fixing\", \"steps\": [{\"label\": \"Find\", \"status\": \"done\"}]}\n```\n\n```ui:choices\n{\"id\": \"next\"}\n```\n",
         "type": "assistant",
         "variant": null
       },

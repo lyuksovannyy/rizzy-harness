@@ -2,7 +2,8 @@
 // callouts, tables, code, math, hidden characters, Copy), lazy loading of
 // the highlighter worker and math chunks, a hostile code block that must
 // not freeze the page, and citations of web results (pills, footer, the
-// web status row), also those a delegated sub-task hands back.
+// web status row), also those a delegated sub-task hands back, and ui
+// blocks (skeleton while streaming, the card, rejected and unknown blocks).
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -211,6 +212,67 @@ async function skipOnboarding(page) {
     await p.locator('.msg.assistant .md .token.keyword').first().waitFor();
     await p.locator('.msg.assistant .md math').first().waitFor();
     log('reload renders the same');
+
+    // ui blocks: while the fence streams it is a typed skeleton (never the
+    // JSON); once the message is final, the card Rust validated, framed by
+    // the harness ("from <agent>"), from its own lazy chunk.
+    await p.click('.new-chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'ui: choices');
+    await p.click('.mode-switch button:has-text("Ask")');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('.msg.assistant.streaming .ui-skeleton:has-text("Preparing question…")');
+    check(!(await p.locator('.msg.assistant .md').innerText()).includes('"options"'), 'no raw JSON while streaming');
+    check(chunks('UiBlock').length === 0, 'the card chunk waits for the final message');
+    await idle();
+    const choices = p.locator('.msg.assistant').last();
+    await choices.locator('.ui-card .ui-choices').waitFor();
+    check((await choices.locator('.ui-skeleton').count()) === 0, 'the skeleton gives way to the card');
+    check((await choices.locator('.ui-from').innerText()) === 'from General', 'harness frame names the agent');
+    check((await choices.locator('.ui-title').innerText()) === 'Which colour do you like best?', 'the question');
+    const labels = await choices.locator('.ui-option-label').allInnerTexts();
+    check(JSON.stringify(labels) === '["Blue","Green","Red"]', 'options: ' + JSON.stringify(labels));
+    check((await choices.locator('.codeblock').count()) === 0, 'no code for a shown block');
+    check(chunks('UiBlock').length === 1, 'card chunk loaded once');
+    log('ui: skeleton while streaming, then the card', labels.join('/'));
+
+    // 6. Errors: a block Rust rejected is its code plus the reason, an
+    // unknown type is plain code, and a second question in one message is
+    // rejected while the first shows.
+    const send = async (text) => {
+      const before = await p.locator('.msg.assistant').count();
+      await p.fill('.composer textarea', text);
+      await p.keyboard.press('Enter');
+      await p.waitForFunction((n) => document.querySelectorAll('.msg.assistant').length > n, before);
+      await idle();
+      return p.locator('.msg.assistant').last();
+    };
+    const bad = await send('ui: bad');
+    await bad.locator('.ui-error').waitFor();
+    check((await bad.locator('.codeblock .lang').innerText()) === 'ui:choices', 'rejected block shows as code');
+    check((await bad.locator('.ui-error').innerText()) === 'Could not show this question: options[0].label: longer than 80 characters',
+      'error note: ' + (await bad.locator('.ui-error').innerText()));
+    check((await bad.locator('.ui-card').count()) === 0, 'no card for a rejected block');
+    const unknown = await send('ui: unknown');
+    await unknown.locator('.codeblock').waitFor();
+    check((await unknown.locator('.codeblock .lang').innerText()) === 'ui:widget', 'unknown type is plain code');
+    check((await unknown.locator('.ui-error, .ui-card, .ui-skeleton').count()) === 0, 'and no error for it');
+    const two = await send('ui: two');
+    await two.locator('.ui-error').waitFor();
+    check((await two.locator('.ui-card').count()) === 1 && (await two.locator('.codeblock').count()) === 1, 'one card, one code block');
+    check((await two.locator('.ui-error').innerText()) === 'Could not show this question: only one choices or form block per message', 'second question rejected');
+    // A form field that asks for a key is never an input, only the warning.
+    const secret = await send('ui: secret');
+    await secret.locator('.ui-card .ui-secret').waitFor();
+    check((await secret.locator('.ui-secret').innerText()).startsWith('API key: This asks for a secret.'), 'secret note');
+    check((await secret.locator('input, textarea').count()) === 0, 'no input for the key');
+    await p.screenshot({ path: `${S}/rich-5-ui.png`, fullPage: true });
+    // The stored blocks render the same after a reload.
+    await p.reload();
+    await p.locator('.msg.assistant .ui-card').first().waitFor();
+    check((await p.locator('.msg.assistant .ui-card').count()) === 3 && (await p.locator('.msg.assistant .ui-error').count()) === 2,
+      'after reload: 3 cards, 2 errors');
+    log('ui: rejected block = code + reason, unknown type = code, one question per message, secret field refused, same after reload');
 
     // 7. Citations: the labels of a web result become pills naming the
     // host, an unknown label stays text, and a footer lists what was cited.

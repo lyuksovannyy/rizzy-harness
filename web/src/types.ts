@@ -46,6 +46,90 @@ export interface Source {
   title: string;
 }
 
+export type UiKind = "choices" | "form" | "progress" | "chart";
+
+/** One option of a question or of a form's choice field. */
+export interface Choice {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface ChoicesSpec {
+  question: string;
+  options: Choice[];
+  multi: boolean;
+  other: boolean;
+  min?: number;
+  max?: number;
+}
+
+export type FieldType = "text" | "number" | "choice" | "toggle" | "date";
+
+/** A form field, flat: which keys a type has is checked in Rust. */
+export interface Field {
+  id: string;
+  label: string;
+  type: FieldType;
+  /** Asks for a secret: shown as a warning, never as an input. */
+  refused?: boolean;
+  required?: boolean;
+  help?: string;
+  multiline?: boolean;
+  max_length?: number;
+  placeholder?: string;
+  /** Numbers for number and choice fields, `YYYY-MM-DD` for dates. */
+  min?: number | string;
+  max?: number | string;
+  step?: number;
+  default?: string | number | boolean | string[];
+  unit?: string;
+  options?: Choice[];
+  multi?: boolean;
+}
+
+export interface FormSpec {
+  title: string;
+  description?: string;
+  fields: Field[];
+}
+
+export type StepStatus = "pending" | "active" | "done" | "failed" | "skipped";
+
+export interface ProgressSpec {
+  title: string;
+  status?: "running" | "done" | "failed";
+  value?: number;
+  steps: { label: string; status: StepStatus; detail?: string }[];
+}
+
+export interface ChartSpec {
+  kind: "bar" | "line";
+  title?: string;
+  x: { label?: string; values: string[] | number[] };
+  y?: { label?: string; unit?: string };
+  series: { name: string; values: (number | null)[] }[];
+  stacked?: boolean;
+}
+
+interface UiBlockBase {
+  ordinal: number;
+  hash: string;
+  id: string;
+  /** Why the block is not shown (harness text); set when spec is not. */
+  error?: string;
+}
+
+/** A `ui:` block of an assistant message, validated and normalized in Rust
+ * (crates/core/src/ui). The browser renders only these specs. */
+export type UiBlock = UiBlockBase &
+  (
+    | { type: "choices"; spec?: ChoicesSpec }
+    | { type: "form"; spec?: FormSpec }
+    | { type: "progress"; spec?: ProgressSpec }
+    | { type: "chart"; spec?: ChartSpec }
+  );
+
 export interface ToolResult {
   ok: boolean;
   output: string;
@@ -69,6 +153,7 @@ export type Item =
       done: boolean;
       author: string | null;
       variant: Variant | null;
+      blocks?: UiBlock[];
     }
   | {
       type: "tool";

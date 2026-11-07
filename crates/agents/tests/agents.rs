@@ -48,6 +48,33 @@ fn parse_fields_and_hash_changes_with_prompt() {
 }
 
 #[test]
+fn ui_level_parses_defaults_to_rich_and_changes_the_hash() {
+    use harness_core::agent::UiLevel;
+    let with = |ui: &str| {
+        parse(
+            "x",
+            &format!("---\nname: X\ntools: all\n{ui}---\nhi\n"),
+            false,
+        )
+    };
+    let rich = with("").unwrap();
+    assert_eq!(rich.spec.ui, UiLevel::Rich);
+    let display = with("ui: display\n").unwrap();
+    assert_eq!(display.spec.ui, UiLevel::Display);
+    assert_eq!(with("ui: off\n").unwrap().spec.ui, UiLevel::Off);
+    assert_eq!(
+        with("ui: rich\n").unwrap().spec.prompt_hash,
+        rich.spec.prompt_hash
+    );
+    assert_ne!(display.spec.prompt_hash, rich.spec.prompt_hash);
+    assert!(matches!(
+        with("ui: fancy\n"),
+        Err(AgentError::Frontmatter { .. })
+    ));
+    assert!(builtins().iter().all(|a| a.spec.ui == UiLevel::Rich));
+}
+
+#[test]
 fn rejects_bad_definitions() {
     assert!(matches!(
         parse("x", "no frontmatter", false),

@@ -38,6 +38,41 @@ pub enum Budget {
     Standard,
 }
 
+/// Which `ui:` blocks an agent's replies may use (`ui:` in its frontmatter).
+/// The agent loop enforces it when it records a message; the prompt only
+/// tells the model what is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiLevel {
+    /// Every block: questions and forms as well as progress and charts.
+    #[default]
+    Rich,
+    /// Progress and charts only; a question or form shows as an error.
+    Display,
+    /// No blocks: `ui:` fences stay code.
+    Off,
+}
+
+impl UiLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UiLevel::Rich => "rich",
+            UiLevel::Display => "display",
+            UiLevel::Off => "off",
+        }
+    }
+
+    /// The lower of the two levels (`Off` < `Display` < `Rich`).
+    pub fn at_most(self, cap: UiLevel) -> UiLevel {
+        let rank = |l: UiLevel| match l {
+            UiLevel::Off => 0,
+            UiLevel::Display => 1,
+            UiLevel::Rich => 2,
+        };
+        if rank(self) <= rank(cap) { self } else { cap }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
     pub agent_id: String,
@@ -51,6 +86,8 @@ pub struct AgentSpec {
     pub effort: Option<String>,
     #[serde(default)]
     pub budget: Budget,
+    #[serde(default)]
+    pub ui: UiLevel,
     /// Hash of everything above that changes behaviour.
     pub prompt_hash: String,
     /// Tools withheld for this turn whatever `tools` says (e.g. `remember`
@@ -108,5 +145,15 @@ mod tests {
         let some: ToolSelection = serde_json::from_str("[\"read\"]").unwrap();
         assert!(some.allows("read") && !some.allows("bash"));
         assert_eq!(serde_json::to_string(&all).unwrap(), "\"all\"");
+    }
+
+    #[test]
+    fn ui_level_caps() {
+        use UiLevel::*;
+        assert_eq!(Rich.at_most(Display), Display);
+        assert_eq!(Display.at_most(Rich), Display);
+        assert_eq!(Off.at_most(Display), Off);
+        assert_eq!(serde_json::to_string(&Display).unwrap(), "\"display\"");
+        assert_eq!(UiLevel::default(), Rich);
     }
 }

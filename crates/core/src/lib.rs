@@ -9,6 +9,7 @@ pub mod refs;
 pub mod savings;
 pub mod secret;
 pub mod text;
+pub mod ui;
 pub mod view;
 
 pub use event::{EventKind, RawEvent, SessionId};

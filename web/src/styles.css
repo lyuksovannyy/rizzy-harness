@@ -1128,6 +1128,57 @@ pre.term.web-output {
   }
 }
 
+/* ui blocks: a card the model filled in, inside harness chrome ("from …"),
+   a skeleton while it streams, and the reason when Rust rejected it. */
+.ui-card {
+  margin: 10px 0;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-2);
+}
+.ui-from {
+  margin-bottom: 6px;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.ui-skeleton {
+  margin: 10px 0;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--fg-2);
+  font-size: 13px;
+}
+.ui-error {
+  margin: -2px 0 10px;
+  color: var(--bad);
+  font-size: 12px;
+}
+.ui-card .ui-title {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.ui-card .ui-description {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+.ui-card ul,
+.ui-card ol {
+  margin: 0;
+  padding-left: 20px;
+}
+.ui-secret {
+  color: var(--warn);
+}
+.ui-step-done,
+.ui-step-skipped {
+  color: var(--fg-2);
+}
+.ui-step-failed {
+  color: var(--bad);
+}
+
 /* ---------- Settings ---------- */
 .settings {
   flex: 1;

@@ -1,10 +1,13 @@
 // What happens to model text before Markdown parsing, and which URLs survive.
 import { stripHidden } from "./hidden";
 
-/** The Markdown we render and copy: hidden characters out, math normalised.
- * (rehypeStripHidden repeats the strip after parsing, for entities.) */
+/** The Markdown we render and copy: hidden characters out, line endings
+ * LF, math normalised. (rehypeStripHidden repeats the strip after parsing,
+ * for entities.) A ui fence's body then reads exactly as the text Rust
+ * hashed (crates/core/src/ui/scan.rs normalize), which micromark would
+ * otherwise give with its `\r\n` kept. */
 export function prepare(text: string): string {
-  return normalizeMath(stripHidden(text));
+  return normalizeMath(stripHidden(text).replace(/\r\n?/g, "\n"));
 }
 
 // A fence line: optional indent and blockquote markers, then ``` or ~~~.

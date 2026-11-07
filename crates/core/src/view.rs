@@ -30,6 +30,9 @@ pub enum Item {
         done: bool,
         author: Option<String>,
         variant: Option<Variant>,
+        /// Set by the final `assistant_message`; deltas never carry blocks.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<UiBlock>,
     },
     Tool {
         call_id: String,
@@ -179,6 +182,7 @@ impl SessionView {
                         done: false,
                         author: d.author,
                         variant: d.variant,
+                        blocks: vec![],
                     }),
                 }
             }
@@ -192,10 +196,12 @@ impl SessionView {
                         done,
                         author,
                         variant,
+                        blocks,
                         ..
                     }) => {
                         *text = m.text;
                         *done = true;
+                        *blocks = m.blocks;
                         if m.author.is_some() {
                             *author = m.author;
                         }
@@ -211,6 +217,7 @@ impl SessionView {
                                 done: true,
                                 author: m.author,
                                 variant: m.variant,
+                                blocks: m.blocks,
                             })
                         }
                     }
@@ -431,6 +438,54 @@ mod tests {
             panic!("{:?}", v.items[0])
         };
         assert_eq!(r.sources, vec![source]);
+    }
+
+    #[test]
+    fn assistant_items_take_the_final_messages_blocks() {
+        let sid = SessionId::new();
+        let block = UiBlock {
+            ordinal: 0,
+            hash: "811c9dc5".into(),
+            kind: UiKind::Progress,
+            id: "p".into(),
+            spec: Some(json!({"title": "T"})),
+            error: None,
+        };
+        let message = |id: &str, blocks: Vec<UiBlock>| {
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: "t".into(),
+                message_id: id.into(),
+                text: "x".into(),
+                tool_calls: vec![],
+                author: None,
+                variant: None,
+                blocks,
+            })
+        };
+        let evs = vec![
+            ev(
+                sid,
+                1,
+                EventKind::AssistantDelta(AssistantDelta {
+                    author: None,
+                    variant: None,
+                    turn_id: "t".into(),
+                    message_id: "m1".into(),
+                    text: "x".into(),
+                }),
+            ),
+            ev(sid, 2, message("m1", vec![block.clone()])),
+            ev(sid, 3, message("m2", vec![block.clone()])),
+        ];
+        let v = SessionView::fold(&evs).unwrap();
+        for item in &v.items {
+            let Item::Assistant { blocks, .. } = item else {
+                panic!("{item:?}")
+            };
+            assert_eq!(blocks, &vec![block.clone()]);
+        }
+        let json = serde_json::to_value(&v.items[0]).unwrap();
+        assert_eq!(json["blocks"][0]["type"], "progress");
     }
 
     #[test]

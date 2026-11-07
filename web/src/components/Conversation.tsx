@@ -253,7 +253,12 @@ export default function Conversation(props: {
                           )}
                         </div>
                         <MessageCtx.Provider value={infoAt(i)}>
-                          <Markdown text={a.text} done={a.done || !busy} />
+                          <Markdown
+                            text={a.text}
+                            done={a.done || !busy}
+                            blocks={a.blocks}
+                            from={a.author ? agentName(a.author) : null}
+                          />
                         </MessageCtx.Provider>
                         {(a.done || !busy) && <CopyMessage text={a.text} />}
                       </div>
@@ -285,7 +290,12 @@ export default function Conversation(props: {
                         <div className="author">{agentName(it.author)}</div>
                       )}
                       <MessageCtx.Provider value={infoAt(i)}>
-                        <Markdown text={it.text} done={final} />
+                        <Markdown
+                          text={it.text}
+                          done={final}
+                          blocks={it.blocks}
+                          from={it.author ? agentName(it.author) : null}
+                        />
                       </MessageCtx.Provider>
                       {final && <CopyMessage text={it.text} />}
                     </div>

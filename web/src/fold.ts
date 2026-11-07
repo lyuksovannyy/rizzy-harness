@@ -124,15 +124,19 @@ export function apply(v: SessionView, e: RawEvent): void {
         a.done = true;
         if (p.author != null) a.author = p.author;
         if (p.variant != null) a.variant = p.variant;
+        if (p.blocks?.length) a.blocks = p.blocks;
+        else delete a.blocks;
       } else if (p.text !== "") {
-        v.items.push({
+        const item: Extract<Item, { type: "assistant" }> = {
           type: "assistant",
           message_id: p.message_id,
           text: p.text,
           done: true,
           author: p.author ?? null,
           variant: p.variant ?? null,
-        });
+        };
+        if (p.blocks?.length) item.blocks = p.blocks;
+        v.items.push(item);
       }
       break;
     }
