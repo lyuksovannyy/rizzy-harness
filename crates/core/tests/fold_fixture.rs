@@ -25,7 +25,8 @@ fn events() -> Vec<RawEvent> {
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
-            parent_session: None,
+            // A sub-agent's session: the view's meta keeps its parent.
+            parent_session: Some("01a19bf2-0000-7000-8000-00000000f1f1".parse().unwrap()),
             title: "fixture".into(),
             cwd: "/w".into(),
             model: "mock".into(),
@@ -41,6 +42,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: t(),
             text: "fix the bug".into(),
             attachments: vec![],
+            reply: None,
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -206,6 +208,7 @@ fn events() -> Vec<RawEvent> {
                 text: "- fixed a bug".into(),
                 truncated: false,
             }],
+            reply: None,
         }),
         EventKind::HistorySummarized(HistorySummarized {
             turn_id: "t2".into(),
@@ -259,6 +262,17 @@ fn events() -> Vec<RawEvent> {
         EventKind::VariantSelected(VariantSelected {
             group: "g1".into(),
             message_id: "m4".into(),
+        }),
+        // An answer to a question: the canonical text plus the reply.
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t3".into(),
+            text: "Choice answer · next: o1".into(),
+            attachments: vec![],
+            reply: Some(FormReply {
+                message_id: "m2".into(),
+                block_id: "next".into(),
+                values: json!({"selected": ["o1"]}).as_object().unwrap().clone(),
+            }),
         }),
     ];
     let mut out: Vec<RawEvent> = kinds
@@ -319,4 +333,13 @@ fn a_streamed_message_gets_its_final_blocks() {
     assert_eq!(m1["text"], STREAMED.concat());
     assert_eq!(m1["blocks"][0]["id"], "look");
     assert!(m1["blocks"][0]["spec"].is_object());
+    let users: Vec<&serde_json::Value> = view["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "user")
+        .collect();
+    assert!(users[0].get("reply").is_none());
+    assert_eq!(users[2]["reply"]["block_id"], "next");
+    assert!(view["meta"]["parent_session"].is_string());
 }

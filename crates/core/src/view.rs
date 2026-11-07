@@ -18,6 +18,9 @@ pub enum Item {
         /// Attachment file names.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+        /// The answer to an input block, when this message is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<FormReply>,
     },
     /// Turns before this point reach the model only as a summary.
     Summary {
@@ -166,6 +169,7 @@ impl SessionView {
                 turn_id: m.turn_id,
                 text: m.text,
                 attachments: m.attachments.into_iter().map(|a| a.name).collect(),
+                reply: m.reply,
             }),
             EventKind::AssistantDelta(d) => {
                 let found = self.items.iter_mut().rev().find_map(|i| match i {
@@ -486,6 +490,37 @@ mod tests {
         }
         let json = serde_json::to_value(&v.items[0]).unwrap();
         assert_eq!(json["blocks"][0]["type"], "progress");
+    }
+
+    #[test]
+    fn user_items_keep_their_reply() {
+        let sid = SessionId::new();
+        let reply = FormReply {
+            message_id: "m1".into(),
+            block_id: "db".into(),
+            values: json!({"selected": ["pg"]}).as_object().unwrap().clone(),
+        };
+        let msg = |reply| {
+            EventKind::UserMessage(UserMessage {
+                turn_id: "t".into(),
+                text: "Choice answer · db: pg".into(),
+                attachments: vec![],
+                reply,
+            })
+        };
+        let evs = vec![ev(sid, 1, msg(Some(reply.clone()))), ev(sid, 2, msg(None))];
+        let v = SessionView::fold(&evs).unwrap();
+        let replies: Vec<_> = v
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::User { reply, .. } => reply.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(replies, [Some(reply), None]);
+        let json = serde_json::to_value(&v.items[1]).unwrap();
+        assert!(json.get("reply").is_none(), "omitted when absent: {json}");
     }
 
     #[test]

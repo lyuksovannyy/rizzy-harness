@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { Item, Source } from "../types";
-import { citeMaps, citeSignature, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "./rich";
+import { citeMaps, citeSignature, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys, webNotice } from "./rich";
 
 const user = (text: string): Item => ({ type: "user", turn_id: "t", text });
 const assistant = (text: string): Item => ({
@@ -156,5 +156,31 @@ describe("groupWeb", () => {
     expect([...g.keys()]).toEqual([1, 10]);
     expect(g.get(1)).toEqual({ start: 1, end: 4, members: [1, 3, 4], searches: 1, pages: 2 });
     expect(g.get(10)).toEqual({ start: 10, end: 11, members: [10, 11], searches: 2, pages: 0 });
+  });
+});
+
+describe("webNotice", () => {
+  const fetch = (url: string, sources?: Source[]): Item => ({ ...tool("page", "web_fetch", sources), input: { url } } as Item);
+
+  test("hosts read since the user's last message, in reading order, once each", () => {
+    const items = [
+      user("q"),
+      tool("[S1]", "web_search", [src("S1", "https://old.example/a")]),
+      assistant("x"),
+      user("again"),
+      tool("[S2]", "web_search", [src("S2", "https://www.b.example/1"), src("S3", "https://a.example/2")]),
+      fetch("https://c.example/p"),
+      tool("[S4]", "delegate", [src("S4", "https://d.example/")]),
+      tool("ran", "bash"),
+      tool("[S5]", "web_search", [src("S5", "https://b.example/3"), src("S6", "javascript:alert(1)")]),
+      assistant("Which one?"),
+    ];
+    expect(webNotice(items, 9)).toEqual(["b.example", "a.example", "c.example", "d.example"]);
+    expect(webNotice(items, 3)).toEqual(["old.example"]);
+  });
+
+  test("nothing read, nothing to say", () => {
+    expect(webNotice([user("q"), tool("ran", "bash"), assistant("Which?")], 2)).toEqual([]);
+    expect(webNotice([assistant("Which?")], 0)).toEqual([]);
   });
 });

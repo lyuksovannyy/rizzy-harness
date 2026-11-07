@@ -326,3 +326,50 @@ fn expired_incognito_only_selects_idle_incognito() {
     .unwrap();
     assert!(s.expired_incognito(1_000).unwrap().is_empty());
 }
+
+/// A finished turn whose last message holds a question or form the UI
+/// shows waits for the user, like one ending with "?"; a block Rust
+/// rejected is code, not a question.
+#[test]
+fn a_shown_input_block_needs_attention() {
+    let s = Store::open_in_memory().unwrap();
+    let needs_you = |text: &str| -> bool {
+        let sid = SessionId::new();
+        let blocks = harness_core::ui::extract(text, harness_core::agent::UiLevel::Rich);
+        let kinds = [
+            EventKind::TurnStarted(TurnStarted {
+                agent: None,
+                turn_id: "t1".into(),
+            }),
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: "t1".into(),
+                message_id: "m1".into(),
+                text: text.into(),
+                tool_calls: vec![],
+                author: None,
+                variant: None,
+                blocks,
+            }),
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: "t1".into(),
+                reason: TurnEndReason::Completed,
+                usage: None,
+            }),
+        ];
+        s.append("local", &created(sid)).unwrap();
+        for (i, k) in kinds.into_iter().enumerate() {
+            s.append("local", &ev(sid, i as u64 + 2, k)).unwrap();
+        }
+        s.attention(None, "viewer")
+            .unwrap()
+            .iter()
+            .any(|a| a.session_id == sid && a.reason == "question")
+    };
+    let fence = |body: &str| format!("Pick one.\n\n```ui:choices\n{body}\n```\n");
+    assert!(needs_you(&fence(
+        r#"{"id": "c", "question": "Which?", "options": ["a", "b"]}"#
+    )));
+    assert!(!needs_you(&fence(r#"{"id": "c", "question": "Which?"}"#)));
+    assert!(!needs_you("Done."));
+    assert!(needs_you("Shall I go on?"));
+}

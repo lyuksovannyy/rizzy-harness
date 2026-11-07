@@ -129,6 +129,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
     h.send(MasterToNode::Prompt {
         savings: None,
         context: None,
+        reply: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -169,6 +170,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     h.send(MasterToNode::Prompt {
         savings: None,
         context: None,
+        reply: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -199,6 +201,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     h.send(MasterToNode::Prompt {
         savings: None,
         context: None,
+        reply: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -262,6 +265,7 @@ async fn policy_denied_tool_never_runs() {
     h.send(MasterToNode::Prompt {
         savings: None,
         context: None,
+        reply: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -314,6 +318,7 @@ async fn resume_replays_in_batches() {
     h.send(MasterToNode::Prompt {
         savings: None,
         context: None,
+        reply: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -427,6 +432,7 @@ async fn recovers_interrupted_turn_on_start() {
         .send(MasterToNode::Prompt {
             savings: None,
             context: None,
+            reply: None,
             agent: None,
             attachments: vec![],
             compare: vec![],
@@ -485,6 +491,7 @@ async fn sub_task_sessions_ask_no_questions() {
         .send(MasterToNode::Prompt {
             savings: None,
             context: None,
+            reply: None,
             agent: None,
             attachments: vec![],
             compare: vec![],
@@ -540,6 +547,7 @@ async fn git_checkpoints_and_undo() {
     h.send(MasterToNode::Prompt {
         savings: None,
         context: None,
+        reply: None,
         agent: None,
         attachments: vec![],
         compare: vec![],
@@ -597,6 +605,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
         h.send(MasterToNode::Prompt {
             savings: None,
             context: None,
+            reply: None,
             agent: None,
             attachments: vec![],
             compare: vec![],

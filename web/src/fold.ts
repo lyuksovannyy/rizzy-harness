@@ -88,6 +88,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       };
       if (p.agent_id != null) meta!.agent_id = p.agent_id;
       if (p.incognito) meta!.incognito = true;
+      if (p.parent_session != null) meta!.parent_session = p.parent_session;
       v.meta = meta;
       v.active_agent = p.agent_id ?? null;
       break;
@@ -100,6 +101,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       const item: Extract<Item, { type: "user" }> = { type: "user", turn_id: p.turn_id, text: p.text };
       const names = ((p.attachments ?? []) as { name: string }[]).map((a) => a.name);
       if (names.length) item.attachments = names;
+      if (p.reply != null) item.reply = p.reply;
       v.items.push(item);
       break;
     }

@@ -186,6 +186,23 @@ pub struct UserMessage {
     /// log alone must be enough to rebuild what the model saw).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Set when the message answers a `ui:choices` or `ui:form` block; `text`
+    /// is then the harness's canonical answer (ids, formatted values and the
+    /// user's own typing, never model text), plus the user's note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<FormReply>,
+}
+
+/// The user's answer to an input block of an earlier assistant message.
+/// Choices: `{"selected": [option ids], "other"?: text}`. Form: field id to
+/// a string, number, boolean or list of option ids; unanswered optional
+/// fields are left out. The node checks it against its own log
+/// (`ui::check_reply`) before it is recorded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormReply {
+    pub message_id: String,
+    pub block_id: String,
+    pub values: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -531,6 +548,7 @@ mod tests {
                 json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native", "node_id": "local", "approval_mode": "ask", "profile": "agentic"}),
             ),
             ("turn_started", json!({"turn_id": "t1"})),
+            ("user_message", json!({"turn_id": "t1", "text": "hi"})),
             (
                 "assistant_delta",
                 json!({"turn_id": "t1", "message_id": "m1", "text": "hi"}),
@@ -684,6 +702,28 @@ mod tests {
         );
         assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
         assert!(UiKind::Form.is_input() && !UiKind::Chart.is_input());
+    }
+
+    #[test]
+    fn reply_roundtrips() {
+        let mut values = serde_json::Map::new();
+        values.insert("selected".into(), json!(["pg"]));
+        let k = EventKind::UserMessage(UserMessage {
+            turn_id: "t".into(),
+            text: "Choice answer · db: pg".into(),
+            attachments: vec![],
+            reply: Some(FormReply {
+                message_id: "m1".into(),
+                block_id: "db".into(),
+                values,
+            }),
+        });
+        let (kind, payload) = k.clone().into_parts();
+        assert_eq!(
+            payload["reply"],
+            json!({"message_id": "m1", "block_id": "db", "values": {"selected": ["pg"]}})
+        );
+        assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
     }
 
     #[test]

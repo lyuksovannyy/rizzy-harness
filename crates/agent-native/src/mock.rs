@@ -20,7 +20,9 @@
 //!   message per step with the same `ui:progress` block moved on, each with
 //!   a cheap call (bash `true`, else web_search) so the next step is a new
 //!   request; the last message has every step done and calls nothing
-//! * anything else   -> echoes the message back, streamed word by word
+//! * anything else   -> echoes the message back, streamed word by word; an
+//!   answer to a question or form echoes its canonical text
+//!   (`You said: Choice answer · colour: blue`)
 
 use std::time::Duration;
 

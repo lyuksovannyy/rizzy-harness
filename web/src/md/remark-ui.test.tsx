@@ -87,10 +87,14 @@ describe("remark-ui", () => {
     expect(md("```ui:choices\n{}\n```", false)).toContain("Preparing question…");
   });
 
-  test("the card frame names the agent", () => {
+  test("the card frame names the agent, and says what it asks for", () => {
     const c = cases.find((c) => c.name === "form with a refused field")!;
-    expect(md(c.text, true, c.blocks, "Coder")).toContain('<div class="ui-from">from Coder</div>');
-    expect(md(c.text, true, c.blocks)).toContain('<div class="ui-from">from the assistant</div>');
+    expect(md(c.text, true, c.blocks, "Coder")).toContain('<div class="ui-from">Form from Coder</div>');
+    expect(md(c.text, true, c.blocks)).toContain('<div class="ui-from">Form from the assistant</div>');
+    const every = cases.find((c) => c.name === "every type")!;
+    const html = md(every.text, true, every.blocks, "Coder");
+    expect(html).toContain('<div class="ui-from">Question from Coder</div>');
+    expect(html).toContain('<div class="ui-from">from Coder</div>');
   });
 
   test("a rejected block is its code plus the reason", () => {

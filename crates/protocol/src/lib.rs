@@ -100,6 +100,10 @@ pub enum MasterToNode {
         /// the cached prefix does not change. Not stored in the log.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<String>,
+        /// An answer to a choices or form block; `text` is then the user's
+        /// note (may be empty). The node checks it against its own log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<harness_core::event::FormReply>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
@@ -205,5 +209,34 @@ mod tests {
         assert_eq!(v["type"], "approval.respond");
         assert_eq!(v["decision"], "allow_session");
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), d);
+    }
+
+    #[test]
+    fn prompt_reply_roundtrips_and_is_omitted_when_absent() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let prompt = |reply| MasterToNode::Prompt {
+            req_id: "r".into(),
+            session_id: sid,
+            text: String::new(),
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            savings: None,
+            context: None,
+            reply,
+        };
+        let v = serde_json::to_value(prompt(None)).unwrap();
+        assert!(v.get("reply").is_none(), "{v}");
+        let p = prompt(Some(harness_core::event::FormReply {
+            message_id: "m1".into(),
+            block_id: "db".into(),
+            values: json!({"selected": ["pg"]}).as_object().unwrap().clone(),
+        }));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v["reply"],
+            json!({"message_id": "m1", "block_id": "db", "values": {"selected": ["pg"]}})
+        );
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), p);
     }
 }

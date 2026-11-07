@@ -3,7 +3,8 @@
 // the highlighter worker and math chunks, a hostile code block that must
 // not freeze the page, and citations of web results (pills, footer, the
 // web status row), also those a delegated sub-task hands back, and ui
-// blocks (skeleton while streaming, the card, rejected and unknown blocks,
+// blocks (skeleton while streaming, the card, answering a question and a
+// form, a stale question, a refused secret field, rejected and unknown blocks,
 // a progress block moved on over an agentic turn on the local node, and a
 // block cut off when that turn is stopped mid-message).
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
@@ -248,16 +249,71 @@ async function skipOnboarding(page) {
     check(!streamed.includes('"options"') && !streamed.includes('colour"'), 'no raw JSON while streaming: ' + streamed);
     check(chunks('UiBlock').length === 0, 'the card chunk waits for the final message');
     await idle();
-    const choices = p.locator('.msg.assistant').last();
+    // Messages are counted from the top: `.last()` would move on as the
+    // answers arrive.
+    const nthMsg = async () => p.locator('.msg.assistant').nth((await p.locator('.msg.assistant').count()) - 1);
+    const choices = await nthMsg();
     await choices.locator('.ui-card .ui-choices').waitFor();
     check((await choices.locator('.ui-skeleton').count()) === 0, 'the skeleton gives way to the card');
-    check((await choices.locator('.ui-from').innerText()) === 'from General', 'harness frame names the agent');
+    check((await choices.locator('.ui-from').innerText()) === 'Question from General', 'harness frame names the agent');
+    check((await choices.locator('.ui-footer').innerText()) === 'Sends your answers as a message. Never type passwords or keys here.', 'fixed footer');
     check((await choices.locator('.ui-title').innerText()) === 'Which colour do you like best?', 'the question');
     const labels = await choices.locator('.ui-option-label').allInnerTexts();
     check(JSON.stringify(labels) === '["Blue","Green","Red"]', 'options: ' + JSON.stringify(labels));
     check((await choices.locator('.codeblock').count()) === 0, 'no code for a shown block');
     check(chunks('UiBlock').length === 1, 'card chunk loaded once');
     log('ui: skeleton while streaming, then the card', labels.join('/'));
+
+    // 3. A tap answers: the user's bubble names the option, the model gets
+    // the canonical text of ids, and the card is answered and locked.
+    const echoes = () => p.locator('.msg.assistant').count();
+    let before = await echoes();
+    await choices.locator('.ui-option:has-text("Blue")').click();
+    await p.waitForFunction((n) => document.querySelectorAll('.msg.assistant').length > n, before);
+    await idle();
+    const bubble = p.locator('.msg.user .bubble.reply').last();
+    check((await bubble.innerText()).includes('Answered “Which colour do you like best?”') && (await bubble.innerText()).includes('Blue'),
+      'reply bubble: ' + (await bubble.innerText()));
+    check((await (await nthMsg()).innerText()).includes('You said: Choice answer · colour: blue'), 'the model got the canonical answer');
+    const answeredState = async (card) => ({
+      chosen: await card.locator('.ui-option-chosen .ui-option-label').allInnerTexts(),
+      enabled: await card.locator('.ui-option:not([disabled])').count(),
+      state: await card.locator('.ui-state').innerText(),
+    });
+    const wantAnswered = { chosen: ['Blue'], enabled: 0, state: 'Answered' };
+    check(JSON.stringify(await answeredState(choices)) === JSON.stringify(wantAnswered), 'answered: ' + JSON.stringify(await answeredState(choices)));
+    await choices.screenshot({ path: `${S}/rich-5a-answered.png` });
+    log('choices: a tap answers with ids; the card is answered and locked');
+
+    // 9. Stale: typing past a question closes it, and the node refuses a
+    // late answer for it with 409.
+    before = await echoes();
+    await p.fill('.composer textarea', 'ui: choices');
+    await p.keyboard.press('Enter');
+    await p.waitForFunction((n) => document.querySelectorAll('.msg.assistant').length > n, before);
+    await idle();
+    const stale = await nthMsg();
+    await stale.locator('.ui-option:not([disabled])').first().waitFor();
+    before = await echoes();
+    await p.fill('.composer textarea', 'green, please');
+    await p.keyboard.press('Enter');
+    await p.waitForFunction((n) => document.querySelectorAll('.msg.assistant').length > n, before);
+    await idle();
+    check((await stale.locator('.ui-state').innerText()).startsWith('Not answered'), 'stale card: ' + (await stale.locator('.ui-state').innerText()));
+    check((await stale.locator('.ui-option:not([disabled])').count()) === 0, 'stale card is disabled');
+    const late = await p.evaluate(async () => {
+      const sid = location.hash.split('/').pop();
+      const ev = await (await fetch(`/api/sessions/${sid}/events`)).json();
+      const asked = ev.events.filter((e) => e.kind === 'assistant_message' && e.payload.blocks).pop();
+      const r = await fetch(`/api/sessions/${sid}/prompt`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: '', reply: { message_id: asked.payload.message_id, block_id: 'colour', values: { selected: ['red'] } } }),
+      });
+      return { status: r.status, error: (await r.json()).error };
+    });
+    check(late.status === 409 && late.error === 'this form is no longer open', 'late answer: ' + JSON.stringify(late));
+    log('choices: prose closes the question ("Not answered"); a late answer gets', late.status);
 
     // 6. Errors: a block Rust rejected is its code plus the reason, an
     // unknown type is plain code, and a second question in one message is
@@ -268,7 +324,15 @@ async function skipOnboarding(page) {
       await p.keyboard.press('Enter');
       await p.waitForFunction((n) => document.querySelectorAll('.msg.assistant').length > n, before);
       await idle();
-      return p.locator('.msg.assistant').last();
+      return nthMsg();
+    };
+    /** Click Send on a card; returns the echo that answers it. */
+    const submit = async (card) => {
+      const before = await p.locator('.msg.assistant').count();
+      await card.locator('.ui-send').click();
+      await p.waitForFunction((n) => document.querySelectorAll('.msg.assistant').length > n, before);
+      await idle();
+      return nthMsg();
     };
     const bad = await send('ui: bad');
     await bad.locator('.ui-error').waitFor();
@@ -294,13 +358,53 @@ async function skipOnboarding(page) {
     check((await fields.nth(1).locator('.ui-secret').count()) === 0, 'Name is not refused');
     check((await fields.nth(1).locator('.ui-field-label').innerText()) === 'Name', 'Name is a field');
     check((await secret.locator('.ui-secret').count()) === 1, 'only the key is refused');
+    // 5. Nothing can be typed for the key; Name still works.
+    check((await secret.getByLabel('API key').count()) === 0, 'no input for the key');
+    await secret.screenshot({ path: `${S}/rich-5c-secret.png` });
+    await secret.getByLabel('Name', { exact: true }).fill('Ana');
+    const named = await submit(secret);
+    const namedText = await named.innerText();
+    check(namedText.includes('name: "Ana"') && namedText.includes('not shown (asks for a secret): key'), 'secret form answer: ' + namedText);
+    log('secret: no input for the key, Name answered:', JSON.stringify(namedText.split('\n').slice(1)));
+
+    // 4. A form: Send waits for the required field, a value out of range
+    // is an inline error, and the answer reaches the model as ids/values.
+    const trip = await send('ui: form');
+    await trip.locator('.ui-card .ui-form').waitFor();
+    check((await trip.locator('.ui-from').innerText()) === 'Form from General', 'form header');
+    check(await trip.locator('.ui-send').isDisabled(), 'Send off until Travellers is filled');
+    const people = trip.getByLabel('Travellers', { exact: true });
+    await people.fill('13');
+    await trip.locator('.ui-field-error').waitFor();
+    check((await trip.locator('.ui-field-error').innerText()) === 'Must be at most 12', 'inline error: ' + (await trip.locator('.ui-field-error').innerText()));
+    check(await trip.locator('.ui-send').isDisabled(), 'Send off while a value is wrong');
+    await people.fill('3');
+    check((await trip.locator('.ui-field-error').count()) === 0, 'error gone');
+    await trip.getByLabel('Lisbon').check();
+    await p.screenshot({ path: `${S}/rich-5b-form.png`, fullPage: true });
+    const tripEcho = (await (await submit(trip)).innerText());
+    check(tripEcho.includes('Form answer · trip') && tripEcho.includes('people: 3') && tripEcho.includes('dest: lis'), 'form answer: ' + tripEcho);
+    const answers = await trip.locator('.ui-answers dd').allInnerTexts();
+    check(JSON.stringify(answers) === '["3","Lisbon"]' && (await trip.locator('.ui-card').locator('input, textarea, select, button').count()) === 0,
+      'answered form shows its values read-only: ' + JSON.stringify(answers));
+    const tripBubble = await p.locator('.msg.user .bubble.reply').last().innerText();
+    check(tripBubble.includes('Answered “Trip details”') && tripBubble.includes('Travellers: 3') && tripBubble.includes('Destination: Lisbon'), 'form bubble: ' + tripBubble);
+    log('form: Send waits for Travellers, 13 is an inline error, the answer lists people: 3');
     await p.screenshot({ path: `${S}/rich-5-ui.png`, fullPage: true });
-    // The stored blocks render the same after a reload.
+
+    // The stored blocks render the same after a reload; answers stay
+    // answered and locked.
     await p.reload();
     await p.locator('.msg.assistant .ui-card').first().waitFor();
-    check((await p.locator('.msg.assistant .ui-card').count()) === 3 && (await p.locator('.msg.assistant .ui-error').count()) === 2,
-      'after reload: 3 cards, 2 errors');
-    log('ui: rejected block = code + reason, unknown type = code, one question per message, secret field refused, same after reload');
+    // The log can arrive in more than one batch after a reload.
+    await p.waitForFunction(() => document.querySelectorAll('.msg.assistant .ui-card').length >= 5, null, { timeout: 5000 }).catch(() => {});
+    check((await p.locator('.msg.assistant .ui-card').count()) === 5 && (await p.locator('.msg.assistant .ui-error').count()) === 2,
+      `after reload: 5 cards, 2 errors (got ${await p.locator('.msg.assistant .ui-card').count()}, ${await p.locator('.msg.assistant .ui-error').count()})`);
+    const first = p.locator('.msg.assistant .ui-card-choices').first();
+    check(JSON.stringify(await answeredState(first)) === JSON.stringify(wantAnswered), 'answered after reload: ' + JSON.stringify(await answeredState(first)));
+    check((await p.locator('.msg.assistant .ui-card-choices').nth(1).locator('.ui-state').innerText()).startsWith('Not answered'), 'stale after reload');
+    check((await p.locator('.msg.user .bubble.reply').count()) === 3, 'three reply bubbles');
+    log('ui: rejected block = code + reason, unknown type = code, one question per message, secret field refused, answers locked after reload');
 
     // 8. Progress in an agentic turn on the local node: the mock moves one
     // block id on over three messages, each but the last calling bash. The

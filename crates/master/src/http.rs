@@ -948,6 +948,10 @@ struct PromptBody {
     /// Parallel answers: model ids (2-4).
     #[serde(default)]
     compare: Vec<String>,
+    /// An answer to a choices or form block; `text` is then an optional
+    /// note.
+    #[serde(default)]
+    reply: Option<harness_core::event::FormReply>,
 }
 
 #[derive(Deserialize)]
@@ -988,8 +992,11 @@ async fn prompt(
     Json(b): Json<PromptBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    if b.text.trim().is_empty() {
+    if b.text.trim().is_empty() && b.reply.is_none() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "empty prompt".into()));
+    }
+    if let Some(r) = &b.reply {
+        check_reply_body(r, &b)?;
     }
     if b.attachments.len() > crate::attachments::MAX_PER_MESSAGE {
         return Err(ApiError(
@@ -1029,10 +1036,28 @@ async fn prompt(
             ),
             attachments,
             compare: b.compare,
+            reply: b.reply,
         },
     )
     .await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// What an answer may come with. Whether it answers anything is the node's
+/// to say, against its log; this only keeps the request plain.
+fn check_reply_body(r: &harness_core::event::FormReply, b: &PromptBody) -> ApiResult<()> {
+    let bad = |m: &str| Err(ApiError(StatusCode::BAD_REQUEST, m.into()));
+    if !b.attachments.is_empty() {
+        return bad("an answer cannot carry attachments");
+    }
+    if !b.compare.is_empty() {
+        return bad("an answer cannot ask for parallel answers");
+    }
+    let size = serde_json::to_vec(r).map_or(usize::MAX, |v| v.len());
+    if size > harness_core::ui::MAX_REPLY {
+        return bad("the answer is larger than 32 KiB");
+    }
+    Ok(())
 }
 
 async fn cancel(

@@ -25,6 +25,8 @@ export interface SessionCreated {
   profile: Profile;
   agent_id?: string;
   incognito?: boolean;
+  /** Set on a sub-agent's session: the session that delegated to it. */
+  parent_session?: string;
 }
 
 export interface AgentRef {
@@ -130,6 +132,18 @@ export type UiBlock = UiBlockBase &
     | { type: "chart"; spec?: ChartSpec }
   );
 
+/** One answer value: text, a number, a toggle, an option id or several. */
+export type FormValue = string | number | boolean | string[];
+
+/** The user's answer to a choices or form block (user_message.reply).
+ * Choices: `{selected: [option ids], other?: text}`; a form: field id to
+ * value, unanswered optional fields left out. */
+export interface FormReply {
+  message_id: string;
+  block_id: string;
+  values: Record<string, FormValue>;
+}
+
 export interface ToolResult {
   ok: boolean;
   output: string;
@@ -145,7 +159,7 @@ export interface ApprovalState {
 }
 
 export type Item =
-  | { type: "user"; turn_id: string; text: string; attachments?: string[] }
+  | { type: "user"; turn_id: string; text: string; attachments?: string[]; reply?: FormReply }
   | {
       type: "assistant";
       message_id: string;

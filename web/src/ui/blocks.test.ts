@@ -3,6 +3,8 @@ import type { Item, ProgressSpec, SessionView, StepStatus, TurnEndReason, UiBloc
 import {
   currentStep,
   finishedSteps,
+  inputBlock,
+  inputState,
   progressSignature,
   progressSlots,
   progressStatus,
@@ -119,5 +121,78 @@ describe("progress status", () => {
     expect(currentStep(spec("done", "active", "active"))).toBe("Step 2");
     expect(currentStep(spec("done", "done", "pending"))).toBe("Step 2");
     expect(currentStep(spec("pending", "skipped"))).toBeNull();
+  });
+});
+
+describe("inputState", () => {
+  const question: UiBlock = {
+    ordinal: 0,
+    hash: "00000000",
+    type: "choices",
+    id: "colour",
+    spec: { question: "Which?", options: [{ id: "blue", label: "Blue" }, { id: "red", label: "Red" }], multi: false, other: false },
+  };
+  const asked = (id = "q", variant: Variant | null = null) => msg(id, [question], variant);
+  const answer = (message_id = "q", block_id = "colour"): Item => ({
+    type: "user",
+    turn_id: "t2",
+    text: "Choice answer · colour: blue",
+    reply: { message_id, block_id, values: { selected: ["blue"] } },
+  });
+  const view = (over: Partial<Pick<SessionView, "running_turn" | "variant_selection" | "meta">> = {}) => ({
+    ...idle,
+    meta: null,
+    ...over,
+  });
+  const kind = (items: Item[], idx: number, v = view()) => inputState(items, idx, v).kind;
+
+  test("open until something closes or locks it", () => {
+    expect(inputState([user(), asked(), end()], 1, view())).toEqual({ kind: "open" });
+  });
+
+  test("the next user message closes it: answered only by its own reply", () => {
+    expect(inputState([user(), asked(), end(), answer()], 1, view())).toEqual({
+      kind: "answered",
+      values: { selected: ["blue"] },
+    });
+    expect(kind([user(), asked(), end(), user()], 1)).toBe("not_answered");
+    expect(kind([user(), asked(), end(), answer("other")], 1)).toBe("not_answered");
+    expect(kind([user(), asked(), end(), answer("q", "shade")], 1)).toBe("not_answered");
+    // Only the first later message counts.
+    expect(kind([user(), asked(), end(), user(), answer()], 1)).toBe("not_answered");
+  });
+
+  test("a closed card stays closed whatever runs; an open one waits", () => {
+    expect(kind([user(), asked(), end(), user()], 1, view({ running_turn: "t2" }))).toBe("not_answered");
+    expect(kind([user(), asked()], 1, view({ running_turn: "t" }))).toBe("waiting");
+  });
+
+  test("only the parallel answer continued from is open", () => {
+    const items = [user(), asked("a", { group: "g", index: 0 }), asked("b", { group: "g", index: 1 }), end()];
+    expect([kind(items, 1), kind(items, 2)]).toEqual(["open", "choose_variant"]);
+    const chosen = view({ variant_selection: { g: "b" } });
+    expect([kind(items, 1, chosen), kind(items, 2, chosen)]).toEqual(["choose_variant", "open"]);
+    // Waiting comes first.
+    expect(kind(items, 2, view({ running_turn: "t" }))).toBe("waiting");
+  });
+
+  test("a sub-task's questions are not for the user", () => {
+    const meta = {
+      title: "t",
+      cwd: "/w",
+      model: "m",
+      backend: "native",
+      node_id: "local",
+      approval_mode: "ask" as const,
+      profile: "agentic" as const,
+      parent_session: "01a19bf2-0000-7000-8000-00000000f1f1",
+    };
+    expect(kind([user(), asked(), end()], 1, view({ meta }))).toBe("sub_task");
+  });
+
+  test("the shown input block of a message", () => {
+    expect(inputBlock(msg("m", [progress("p"), question]) as Extract<Item, { type: "assistant" }>)?.id).toBe("colour");
+    const rejected = { ...question, spec: undefined, error: "x" } as UiBlock;
+    expect(inputBlock(msg("m", [rejected]) as Extract<Item, { type: "assistant" }>)).toBeUndefined();
   });
 });

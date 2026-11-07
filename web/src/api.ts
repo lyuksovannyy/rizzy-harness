@@ -22,6 +22,7 @@ import type {
   ProviderState,
   RawEvent,
   RemoteNode,
+  FormReply,
   Role,
   SetupState,
   SearchHit,
@@ -136,7 +137,7 @@ export const api = {
   prompt: (
     id: string,
     text: string,
-    opts: { agent_id?: string; effort?: Effort; attachments?: string[]; compare?: string[] } = {},
+    opts: { agent_id?: string; effort?: Effort; attachments?: string[]; compare?: string[]; reply?: FormReply } = {},
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
   upload: async (file: File): Promise<UploadedAttachment> => {
     const res = await fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {

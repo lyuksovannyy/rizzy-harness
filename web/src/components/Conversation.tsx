@@ -1,18 +1,28 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import { FileText, Trash2 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
-import { citeMaps, citeSignature, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "../lib/rich";
+import {
+  citeMaps,
+  citeSignature,
+  groupWeb,
+  provenanceAt,
+  provenanceIndex,
+  provenanceSignature,
+  sourceKeys,
+  webNotice,
+} from "../lib/rich";
 import type { Live } from "../live";
-import { MessageCtx, ProgressCtx, type MessageInfo } from "../md/context";
+import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
-import { progressSignature, progressSlots } from "../ui/blocks";
+import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
+import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
 
 function Undo(props: {
@@ -81,6 +91,16 @@ function Undo(props: {
   );
 }
 
+/** What ui blocks need from the conversation: where each progress block
+ * stands, and whether each question or form can be answered. */
+function BlockCtx(props: { slots: ProgressSlots; inputs: Inputs; children: ReactNode }) {
+  return (
+    <ProgressCtx.Provider value={props.slots}>
+      <InputCtx.Provider value={props.inputs}>{props.children}</InputCtx.Provider>
+    </ProgressCtx.Provider>
+  );
+}
+
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
 }
@@ -132,6 +152,19 @@ export default function Conversation(props: {
   // Which progress blocks are the turn's live card and which are snapshots.
   const progressSig = view ? progressSignature(items, view) : "";
   const slots = useMemo(() => (view ? progressSlots(items, view) : new Map()), [view, progressSig]);
+  // Whether each question or form can be answered now, and what the agent
+  // read before asking it. It changes with what progressSlots watches and
+  // when a web result arrives.
+  const inputs = useMemo((): Inputs => {
+    const byMessage = new Map<string, InputInfo>();
+    if (view) {
+      items.forEach((it, i) => {
+        if (it.type !== "assistant" || !inputBlock(it)) return;
+        byMessage.set(it.message_id, { state: inputState(items, i, view), notice: webNotice(items, i) });
+      });
+    }
+    return { sessionId, byMessage };
+  }, [view, progressSig, citeSig, sessionId]);
   // Runs of web tool calls show as one "Researched" row; the rest of a run
   // is rendered by its first item.
   const webGroups = groupWeb(items);
@@ -209,7 +242,7 @@ export default function Conversation(props: {
           if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <ProgressCtx.Provider value={slots}>
+        <BlockCtx slots={slots} inputs={inputs}>
           <div className="column">
             {!view || view.head_seq === 0 ? (
               <div className="muted pad">Loading…</div>
@@ -278,7 +311,11 @@ export default function Conversation(props: {
                   case "user":
                     return (
                       <div key={i} className="msg user">
-                        <div className="bubble">{it.text}</div>
+                        {it.reply ? (
+                          <ReplyBubble text={it.text} reply={it.reply} block={repliedBlock(view.items, it.reply)} />
+                        ) : (
+                          <div className="bubble">{it.text}</div>
+                        )}
                         {it.attachments && (
                           <ul className="chips">
                             {it.attachments.map((n, j) => (
@@ -368,7 +405,7 @@ export default function Conversation(props: {
               <div className="thinking">{agentName(view.running_agent.agent_id)} is working…</div>
             )}
           </div>
-        </ProgressCtx.Provider>
+        </BlockCtx>
       </div>
 
       <div className="bottom">

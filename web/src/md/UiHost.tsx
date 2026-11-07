@@ -14,7 +14,7 @@ import type { ExtraProps } from "react-markdown";
 import type { UiKind } from "../types";
 import { CodeBlock } from "./Code";
 import { slotKey } from "../ui/blocks";
-import { DoneCtx, ProgressCtx, UiCtx } from "./context";
+import { DoneCtx, InputCtx, ProgressCtx, UiCtx } from "./context";
 import { hastText, type HastNode } from "./hast";
 import { rt } from "./strings";
 
@@ -41,6 +41,7 @@ export function UiHost(props: Props) {
   const done = useContext(DoneCtx);
   const { messageId, blocks, from, cut } = useContext(UiCtx);
   const slots = useContext(ProgressCtx);
+  const inputs = useContext(InputCtx);
   const type = props["data-type"] ?? "progress";
   if (!done) return <Skeleton type={type} />;
   const ordinal = Number(props["data-ordinal"]);
@@ -66,12 +67,22 @@ export function UiHost(props: Props) {
   }
   const slot = block.type === "progress" && messageId ? slots.get(slotKey(messageId, ordinal)) : undefined;
   const snapshot = slot?.mode === "snapshot";
+  const info = messageId ? inputs.byMessage.get(messageId) : undefined;
+  const input = info && { sessionId: inputs.sessionId, messageId, blockId: block.id, info };
   return (
     <section className={snapshot ? "ui-card-snapshot" : `ui-card ui-card-${type}`}>
-      <div className="ui-from">{from ? rt("ui.from", { name: from }) : rt("ui.fromAssistant")}</div>
+      <div className="ui-from">{fromLine(type, from)}</div>
       <Suspense fallback={<Skeleton type={type} />}>
-        <UiBlock block={block} slot={slot} />
+        <UiBlock block={block} slot={slot} input={input} />
       </Suspense>
     </section>
   );
+}
+
+/** Who the card is from, in the harness's words: a question or form says
+ * so, since the user is asked to act on it. */
+function fromLine(type: UiKind, from: string | null): string {
+  if (type === "choices") return from ? rt("ui.fromQuestion", { name: from }) : rt("ui.questionFromAssistant");
+  if (type === "form") return from ? rt("ui.fromForm", { name: from }) : rt("ui.formFromAssistant");
+  return from ? rt("ui.from", { name: from }) : rt("ui.fromAssistant");
 }

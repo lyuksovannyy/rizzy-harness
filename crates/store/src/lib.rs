@@ -292,6 +292,21 @@ fn index_text(kind: &str, payload: &serde_json::Value) -> Option<(&'static str, 
     }
 }
 
+/// Does an assistant message hold a question or form the UI shows? Its
+/// turn then waits for the user like one that ends with a question mark.
+fn asks_with_a_block(payload: &serde_json::Value) -> bool {
+    let Some(blocks) = payload.get("blocks").and_then(|b| b.as_array()) else {
+        return false;
+    };
+    blocks.iter().any(|b| {
+        matches!(
+            b.get("type").and_then(|t| t.as_str()),
+            Some("choices" | "form")
+        ) && b.get("error").is_none()
+            && b.get("spec").is_some_and(|s| s.is_object())
+    })
+}
+
 fn is_incognito(payload: &serde_json::Value) -> bool {
     payload.get("incognito").and_then(|v| v.as_bool()) == Some(true)
 }
@@ -465,7 +480,7 @@ impl Store {
                 if !text.is_empty() {
                     tx.execute(
                         "UPDATE sessions SET last_asks = ?2 WHERE session_id = ?1",
-                        params![sid, text.ends_with('?')],
+                        params![sid, text.ends_with('?') || asks_with_a_block(&e.payload)],
                     )?;
                 }
             }

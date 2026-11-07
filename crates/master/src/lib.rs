@@ -128,6 +128,9 @@ pub struct PromptOpts {
     pub attachments: Vec<harness_core::event::Attachment>,
     /// Parallel answers from these models (2-4, chat only).
     pub compare: Vec<String>,
+    /// An answer to a choices or form block; the prompt text is then the
+    /// user's note. The node checks it and writes the message.
+    pub reply: Option<harness_core::event::FormReply>,
 }
 
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
@@ -696,6 +699,7 @@ impl Master {
             context,
             attachments,
             compare,
+            reply,
         } = opts;
         let models = self.models();
         if let Some(bad) = compare.iter().find(|c| !models.iter().any(|m| &m.id == *c)) {
@@ -707,8 +711,9 @@ impl Master {
             .call(move |s| s.session(sid))
             .await?
             .ok_or(CommandError::UnknownSession)?;
+        // An answer goes to the agent that asked, whatever the note says.
         let mention = leading_mention(&text)
-            .filter(|id| self.agents().get(id).is_some())
+            .filter(|id| reply.is_none() && self.agents().get(id).is_some())
             .map(str::to_string);
         let chosen = agent_id.or(mention).or(row.agent_id.clone());
         let mut agent =
@@ -720,7 +725,9 @@ impl Master {
         if row.incognito {
             // Incognito chats neither write nor read memory.
             agent.deny_tools.push("remember".into());
-        } else if let Some(mem) = self.memory() {
+        } else if let Some(mem) = self.memory().filter(|_| !text.trim().is_empty()) {
+            // An answer with no note has nothing to recall by: the answer
+            // itself is ids and values, written on the node.
             match mem.recall(row.owner_id.as_deref(), &text, 6).await {
                 Ok(facts) => turn_context.extend(harness_memory::context_block(&facts)),
                 Err(err) => tracing::warn!(error = %err, "memory recall failed"),
@@ -737,6 +744,7 @@ impl Master {
             compare,
             savings,
             context: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
+            reply,
         })
         .await
     }

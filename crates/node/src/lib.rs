@@ -270,6 +270,7 @@ impl NodeRuntime {
                 compare,
                 savings,
                 context,
+                reply,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
@@ -278,8 +279,13 @@ impl NodeRuntime {
                     context,
                     refs: None,
                 };
+                let input = session::Input {
+                    text,
+                    attachments,
+                    reply,
+                };
                 match self.session(session_id) {
-                    Some(s) => s.prompt(text, agent, attachments, compare, extra).await,
+                    Some(s) => s.prompt(input, agent, compare, extra).await,
                     None => Err("unknown session".into()),
                 }
             }

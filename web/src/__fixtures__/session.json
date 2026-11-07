@@ -8,6 +8,7 @@
         "cwd": "/w",
         "model": "mock",
         "node_id": "local",
+        "parent_session": "01a19bf2-0000-7000-8000-00000000f1f1",
         "profile": "agentic",
         "title": "fixture"
       },
@@ -449,11 +450,30 @@
       "ts_ms": 1700000000029
     },
     {
+      "kind": "user_message",
+      "payload": {
+        "reply": {
+          "block_id": "next",
+          "message_id": "m2",
+          "values": {
+            "selected": [
+              "o1"
+            ]
+          }
+        },
+        "text": "Choice answer · next: o1",
+        "turn_id": "t3"
+      },
+      "seq": 31,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000030
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 31,
+      "seq": 32,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -469,7 +489,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 31,
+    "head_seq": 32,
     "items": [
       {
         "text": "fix the bug",
@@ -675,6 +695,20 @@
         "result": null,
         "tool": "read",
         "type": "tool"
+      },
+      {
+        "reply": {
+          "block_id": "next",
+          "message_id": "m2",
+          "values": {
+            "selected": [
+              "o1"
+            ]
+          }
+        },
+        "text": "Choice answer · next: o1",
+        "turn_id": "t3",
+        "type": "user"
       }
     ],
     "meta": {
@@ -683,6 +717,7 @@
       "cwd": "/w",
       "model": "mock",
       "node_id": "local",
+      "parent_session": "01a19bf2-0000-7000-8000-00000000f1f1",
       "profile": "agentic",
       "title": "fixture"
     },

@@ -1,6 +1,7 @@
 //! Shared `ui:` block fixture: `web/src/md/remark-ui.test.tsx` renders the
 //! same texts and must find every block here at its ordinal, hash and type,
-//! and `web/src/md/fnv.test.ts` checks the hashes.
+//! `web/src/md/fnv.test.ts` checks the hashes, and `web/src/ui/form.test.ts`
+//! must accept and reject every reply exactly as `ui::answer` does.
 //! Regenerate with `UPDATE_FIXTURES=1 cargo test -p harness-core --test ui_fixture`.
 //!
 //! Each case records, by hand, what the browser must do with it: how many
@@ -11,7 +12,8 @@
 //! stored blocks, and it must show no card at all: plain code instead.
 
 use harness_core::agent::UiLevel;
-use harness_core::ui::{extract, fnv1a32};
+use harness_core::event::UiBlock;
+use harness_core::ui::{answer, extract, fnv1a32};
 use serde_json::{Value, json};
 
 const CHOICES: &str = r#"{"id": "db", "question": "Which database?", "options": [{"id": "pg", "label": "PostgreSQL", "description": "Best default"}, "SQLite"]}"#;
@@ -189,6 +191,114 @@ fn cases() -> Vec<Case> {
     ]
 }
 
+/// The one valid block of a `ui:<kind>` fence.
+fn block(kind: &str, body: Value) -> UiBlock {
+    let b = extract(&fence(kind, &body.to_string()), UiLevel::Rich).remove(0);
+    assert!(b.error.is_none(), "{:?}", b.error);
+    b
+}
+
+/// Answers to a question and a form, each valid or invalid, for the
+/// browser's checks to agree with.
+fn replies() -> Vec<Value> {
+    let single = block(
+        "choices",
+        json!({"id": "colour", "question": "Which colour?", "options": [{"id": "blue", "label": "Blue"}, {"id": "green", "label": "Green"}, {"id": "red", "label": "Red"}]}),
+    );
+    let other = block(
+        "choices",
+        json!({"id": "db", "question": "Which database?", "options": ["PostgreSQL", "SQLite"], "other": true}),
+    );
+    let multi = block(
+        "choices",
+        json!({"id": "lint", "question": "Which linters?", "options": ["eslint", "prettier", "biome"], "multi": true, "other": true, "min": 2, "max": 2}),
+    );
+    let form = block(
+        "form",
+        json!({"id": "trip", "title": "Trip", "fields": [
+            {"id": "people", "label": "Travellers", "type": "number", "required": true, "min": 1, "max": 12, "step": 1, "unit": "people"},
+            {"id": "dest", "label": "Destination", "type": "choice", "options": [{"id": "lis", "label": "Lisbon"}, {"id": "rom", "label": "Rome"}]},
+            {"id": "extras", "label": "Extras", "type": "choice", "multi": true, "options": ["Breakfast", "Parking", "Late checkout"], "max": 2},
+            {"id": "start", "label": "Start", "type": "date", "min": "2026-11-08", "max": "2027-11-08"},
+            {"id": "flex", "label": "Flexible", "type": "toggle"},
+            {"id": "notes", "label": "Notes", "type": "text", "multiline": true, "max_length": 20},
+            {"id": "name", "label": "Name", "type": "text", "max_length": 10},
+            {"id": "budget", "label": "Budget", "type": "number", "step": 0.5},
+            {"id": "key", "label": "API key", "type": "text"}
+        ]}),
+    );
+    let with = |extra: Value| {
+        let mut v = json!({"people": 2});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v
+    };
+    let cases: Vec<(&UiBlock, Value)> = vec![
+        (&single, json!({"selected": ["blue"]})),
+        (&single, json!({"selected": []})),
+        (&single, json!({"selected": ["blue", "red"]})),
+        (&single, json!({"selected": ["pink"]})),
+        (&single, json!({"selected": ["blue", "blue"]})),
+        (&single, json!({"selected": "blue"})),
+        (&single, json!({})),
+        (&single, json!({"selected": ["blue"], "other": "teal"})),
+        (&single, json!({"selected": ["blue"], "shade": "dark"})),
+        (&other, json!({"selected": [], "other": "MariaDB 11"})),
+        (&other, json!({"selected": ["o1"], "other": "MariaDB"})),
+        (&other, json!({"selected": [], "other": "  "})),
+        (&other, json!({"selected": [], "other": "a\nb"})),
+        (&other, json!({"selected": [], "other": "é".repeat(500)})),
+        (&other, json!({"selected": [], "other": "x".repeat(501)})),
+        (&multi, json!({"selected": ["o3", "o1"]})),
+        (&multi, json!({"selected": ["o1"], "other": "stylelint"})),
+        (
+            &multi,
+            json!({"selected": ["o1", "o2"], "other": "stylelint"}),
+        ),
+        (&multi, json!({"selected": ["o1"]})),
+        (&multi, json!({"selected": ["o1", "o2", "o3"]})),
+        (
+            &form,
+            json!({"people": 3, "dest": "lis", "extras": ["o2", "o1"], "start": "2026-12-01", "flex": true, "notes": "Window seat,\nplease", "name": "Ana", "budget": 120.5}),
+        ),
+        (&form, json!({"people": 12.0, "flex": false})),
+        (&form, json!({})),
+        (&form, json!({"people": "2"})),
+        (&form, json!({"people": 0})),
+        (&form, json!({"people": 13})),
+        (&form, json!({"people": 2.5})),
+        (&form, with(json!({"budget": 0.25}))),
+        (&form, with(json!({"dest": "par"}))),
+        (&form, with(json!({"dest": ["lis"]}))),
+        (&form, with(json!({"extras": []}))),
+        (&form, with(json!({"extras": ["o1", "o2", "o3"]}))),
+        (&form, with(json!({"extras": ["o1", "o1"]}))),
+        (&form, with(json!({"start": "2026-02-30"}))),
+        (&form, with(json!({"start": "2026-11-07"}))),
+        (&form, with(json!({"start": "2027-11-09"}))),
+        (&form, with(json!({"flex": "yes"}))),
+        (&form, with(json!({"notes": ""}))),
+        (&form, with(json!({"notes": "x".repeat(21)}))),
+        (&form, with(json!({"name": "a\nb"}))),
+        (&form, with(json!({"name": 7}))),
+        (&form, with(json!({"key": "sk-123"}))),
+        (&form, with(json!({"colour": 1}))),
+        (&form, with(json!({"Bad Key": 1}))),
+        (&form, json!({"zz": 1})),
+    ];
+    cases
+        .into_iter()
+        .map(|(b, values)| {
+            let got = answer(b, values.as_object().unwrap());
+            json!({
+                "type": b.kind, "spec": b.spec, "values": values, "ok": got.is_ok(),
+                "canonical": got.as_ref().ok(), "error": got.as_ref().err(),
+            })
+        })
+        .collect()
+}
+
 fn doc() -> Value {
     let texts: Vec<Value> = cases()
         .into_iter()
@@ -221,7 +331,7 @@ fn doc() -> Value {
     .into_iter()
     .map(|s| json!({"input": s, "hash": format!("{:08x}", fnv1a32(s.as_bytes()))}))
     .collect();
-    json!({"texts": texts, "hashes": hashes})
+    json!({"texts": texts, "hashes": hashes, "replies": replies()})
 }
 
 #[test]
@@ -299,6 +409,11 @@ fn fixture_cases_say_what_they_mean() {
         hidden[0]["hash"],
         format!("{:08x}", fnv1a32(PROGRESS.as_bytes()))
     );
+    let replies = doc["replies"].as_array().unwrap();
+    assert_eq!(replies[0]["canonical"], "Choice answer · colour: blue");
+    assert_eq!(replies[2]["error"], "selected: pick only one");
+    assert!(replies.iter().filter(|r| r["ok"] == true).count() >= 6);
+    assert!(replies.iter().filter(|r| r["ok"] == false).count() >= 30);
     assert_eq!(case("unterminated at the end").len(), 1);
     assert_eq!(case("nine blocks").len(), 8);
     // Where the parsers disagree, Rust does make valid blocks: no card is

@@ -1602,6 +1602,7 @@ mod tests {
                     turn_id: "t".into(),
                     text: "hi".into(),
                     attachments: vec![],
+                    reply: None,
                 }),
             ),
             mk(
@@ -1626,6 +1627,7 @@ mod tests {
                     turn_id: "t2".into(),
                     text: "again".into(),
                     attachments: vec![],
+                    reply: None,
                 }),
             ),
         ];
@@ -1682,6 +1684,7 @@ mod tests {
                 turn_id: t.clone(),
                 text: format!("question {n} {}", "word ".repeat(200)),
                 attachments: vec![],
+                reply: None,
             }),
             &mut out,
         );

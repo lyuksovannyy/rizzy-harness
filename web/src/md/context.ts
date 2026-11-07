@@ -1,7 +1,7 @@
 // What a rendered message knows about the conversation around it.
 import { createContext } from "react";
 import type { Source, UiBlock } from "../types";
-import type { ProgressSlots } from "../ui/blocks";
+import type { InputState, ProgressSlots } from "../ui/blocks";
 import type { Provenance } from "./links";
 
 export interface MessageInfo {
@@ -46,3 +46,19 @@ export const UiCtx = createContext<UiInfo>({ messageId: null, blocks: NO_BLOCKS,
  * (ui/blocks.ts progressSlots). Conversation provides it above every
  * message, so a new slot re-renders only the blocks, not the Markdown. */
 export const ProgressCtx = createContext<ProgressSlots>(new Map());
+
+/** What a question or form card knows about the conversation. */
+export interface InputInfo {
+  state: InputState;
+  /** Hosts of the web pages read since the user's last message. */
+  notice: string[];
+}
+
+/** The input blocks of the conversation, by message id (ui/blocks.ts
+ * inputState, lib/rich.ts webNotice), and where answers go. */
+export interface Inputs {
+  sessionId: string | null;
+  byMessage: ReadonlyMap<string, InputInfo>;
+}
+
+export const InputCtx = createContext<Inputs>({ sessionId: null, byMessage: new Map() });

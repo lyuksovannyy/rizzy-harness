@@ -1276,6 +1276,172 @@ pre.term.web-output {
   .ui-bar-fill { transition: none; }
 }
 
+/* ui:choices and ui:form: the model's options and fields inside harness
+   chrome (where it had been reading, why it is locked, the fixed footer). */
+.ui-notice {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--fg);
+  font-size: 13px;
+}
+.ui-footer,
+.ui-state,
+.ui-hint {
+  margin: 8px 0 0;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.ui-hint { margin: -2px 0 6px; }
+.ui-state { color: var(--fg); }
+.ui-send-error {
+  margin: 8px 0 0;
+  color: var(--bad);
+  font-size: 13px;
+}
+.ui-choices:focus { outline: none; }
+.ui-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.ui-option:hover:not(:disabled):not(:has(input:disabled)) { background: var(--bg-hover); }
+/* A locked card keeps the picked option readable; the others recede. */
+.ui-option:disabled,
+.ui-option:has(input:disabled) { cursor: default; opacity: 1; }
+.ui-option:disabled:not(.ui-option-chosen),
+.ui-option:has(input:disabled):not(.ui-option-chosen) { color: var(--fg-2); }
+.ui-option-chosen {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  font-weight: 500;
+}
+.ui-option-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-option-desc {
+  color: var(--fg-2);
+  font-size: 13px;
+}
+.ui-option input { margin-top: 0.3em; }
+.ui-other,
+.ui-field input[type="text"],
+.ui-field input[type="number"],
+.ui-field input[type="date"],
+.ui-field textarea,
+.ui-field select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.ui-field input[type="number"] { width: 9em; }
+.ui-field input[type="date"] { width: auto; }
+.ui-field textarea { resize: vertical; }
+.ui-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.ui-send:disabled { opacity: 0.45; cursor: default; }
+.ui-other-answer { margin: 6px 0 0; }
+.ui-card .ui-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0;
+  list-style: none;
+}
+.ui-field-label { font-weight: 500; }
+.ui-help,
+.ui-count {
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.ui-count { display: block; text-align: right; }
+.ui-field-error {
+  margin-top: 4px;
+  color: var(--bad);
+  font-size: 13px;
+}
+.ui-number {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ui-number input[type="range"] { flex: 1; min-width: 120px; margin-top: 6px; }
+.ui-choice-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 6px;
+}
+.ui-choice-list label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Inputs are full width by default; these sit next to their text. */
+.ui-card input[type="radio"],
+.ui-card input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+.ui-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-answers {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+.ui-answers > div { display: flex; gap: 8px; }
+.ui-answers dt { color: var(--fg-2); }
+.ui-answers dt::after { content: ":"; }
+.ui-answers dd { margin: 0; }
+.msg.user .bubble.reply { white-space: normal; }
+.reply-head {
+  color: var(--fg-2);
+  font-size: 13px;
+}
+.reply-values {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.reply-values li { white-space: pre-wrap; }
+.reply-label { color: var(--fg-2); }
+.reply-note {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+
 /* ---------- Settings ---------- */
 .settings {
   flex: 1;

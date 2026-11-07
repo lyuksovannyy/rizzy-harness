@@ -33,6 +33,3302 @@
       "input": "{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}"
     }
   ],
+  "replies": [
+    {
+      "canonical": "Choice answer · colour: blue",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "blue"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: pick one",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": []
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: pick only one",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "blue",
+          "red"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: not one of the options",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "pink"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: an option is picked twice",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "blue",
+          "blue"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: expected a list of option ids",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": "blue"
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: missing",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {}
+    },
+    {
+      "canonical": null,
+      "error": "other: not allowed for this question",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "teal",
+        "selected": [
+          "blue"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "shade: unknown key",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "blue",
+            "label": "Blue"
+          },
+          {
+            "id": "green",
+            "label": "Green"
+          },
+          {
+            "id": "red",
+            "label": "Red"
+          }
+        ],
+        "other": false,
+        "question": "Which colour?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "blue"
+        ],
+        "shade": "dark"
+      }
+    },
+    {
+      "canonical": "Choice answer · db: other \"MariaDB 11\"",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "o1",
+            "label": "PostgreSQL"
+          },
+          {
+            "id": "o2",
+            "label": "SQLite"
+          }
+        ],
+        "other": true,
+        "question": "Which database?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "MariaDB 11",
+        "selected": []
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: pick only one",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "o1",
+            "label": "PostgreSQL"
+          },
+          {
+            "id": "o2",
+            "label": "SQLite"
+          }
+        ],
+        "other": true,
+        "question": "Which database?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "MariaDB",
+        "selected": [
+          "o1"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "other: must not be empty",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "o1",
+            "label": "PostgreSQL"
+          },
+          {
+            "id": "o2",
+            "label": "SQLite"
+          }
+        ],
+        "other": true,
+        "question": "Which database?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "  ",
+        "selected": []
+      }
+    },
+    {
+      "canonical": null,
+      "error": "other: must be one line",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "o1",
+            "label": "PostgreSQL"
+          },
+          {
+            "id": "o2",
+            "label": "SQLite"
+          }
+        ],
+        "other": true,
+        "question": "Which database?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "a\nb",
+        "selected": []
+      }
+    },
+    {
+      "canonical": "Choice answer · db: other \"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "o1",
+            "label": "PostgreSQL"
+          },
+          {
+            "id": "o2",
+            "label": "SQLite"
+          }
+        ],
+        "other": true,
+        "question": "Which database?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "selected": []
+      }
+    },
+    {
+      "canonical": null,
+      "error": "other: longer than 500 characters",
+      "ok": false,
+      "spec": {
+        "multi": false,
+        "options": [
+          {
+            "id": "o1",
+            "label": "PostgreSQL"
+          },
+          {
+            "id": "o2",
+            "label": "SQLite"
+          }
+        ],
+        "other": true,
+        "question": "Which database?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "selected": []
+      }
+    },
+    {
+      "canonical": "Choice answer · lint: o1, o3",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "max": 2,
+        "min": 2,
+        "multi": true,
+        "options": [
+          {
+            "id": "o1",
+            "label": "eslint"
+          },
+          {
+            "id": "o2",
+            "label": "prettier"
+          },
+          {
+            "id": "o3",
+            "label": "biome"
+          }
+        ],
+        "other": true,
+        "question": "Which linters?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "o3",
+          "o1"
+        ]
+      }
+    },
+    {
+      "canonical": "Choice answer · lint: o1, other \"stylelint\"",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "max": 2,
+        "min": 2,
+        "multi": true,
+        "options": [
+          {
+            "id": "o1",
+            "label": "eslint"
+          },
+          {
+            "id": "o2",
+            "label": "prettier"
+          },
+          {
+            "id": "o3",
+            "label": "biome"
+          }
+        ],
+        "other": true,
+        "question": "Which linters?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "stylelint",
+        "selected": [
+          "o1"
+        ]
+      }
+    },
+    {
+      "canonical": "Choice answer · lint: o1, o2, other \"stylelint\"",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "max": 2,
+        "min": 2,
+        "multi": true,
+        "options": [
+          {
+            "id": "o1",
+            "label": "eslint"
+          },
+          {
+            "id": "o2",
+            "label": "prettier"
+          },
+          {
+            "id": "o3",
+            "label": "biome"
+          }
+        ],
+        "other": true,
+        "question": "Which linters?"
+      },
+      "type": "choices",
+      "values": {
+        "other": "stylelint",
+        "selected": [
+          "o1",
+          "o2"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: pick at least 2",
+      "ok": false,
+      "spec": {
+        "max": 2,
+        "min": 2,
+        "multi": true,
+        "options": [
+          {
+            "id": "o1",
+            "label": "eslint"
+          },
+          {
+            "id": "o2",
+            "label": "prettier"
+          },
+          {
+            "id": "o3",
+            "label": "biome"
+          }
+        ],
+        "other": true,
+        "question": "Which linters?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "o1"
+        ]
+      }
+    },
+    {
+      "canonical": null,
+      "error": "selected: pick at most 2",
+      "ok": false,
+      "spec": {
+        "max": 2,
+        "min": 2,
+        "multi": true,
+        "options": [
+          {
+            "id": "o1",
+            "label": "eslint"
+          },
+          {
+            "id": "o2",
+            "label": "prettier"
+          },
+          {
+            "id": "o3",
+            "label": "biome"
+          }
+        ],
+        "other": true,
+        "question": "Which linters?"
+      },
+      "type": "choices",
+      "values": {
+        "selected": [
+          "o1",
+          "o2",
+          "o3"
+        ]
+      }
+    },
+    {
+      "canonical": "Form answer · trip\n- people: 3\n- dest: lis\n- extras: o1, o2\n- start: 2026-12-01\n- flex: yes\n- notes: \"Window seat,\\nplease\"\n- name: \"Ana\"\n- budget: 120.5\n- not shown (asks for a secret): key",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "budget": 120.5,
+        "dest": "lis",
+        "extras": [
+          "o2",
+          "o1"
+        ],
+        "flex": true,
+        "name": "Ana",
+        "notes": "Window seat,\nplease",
+        "people": 3,
+        "start": "2026-12-01"
+      }
+    },
+    {
+      "canonical": "Form answer · trip\n- people: 12\n- flex: no\n- not answered: dest, extras, start, notes, name, budget\n- not shown (asks for a secret): key",
+      "error": null,
+      "ok": true,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "flex": false,
+        "people": 12.0
+      }
+    },
+    {
+      "canonical": null,
+      "error": "people: required",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {}
+    },
+    {
+      "canonical": null,
+      "error": "people: expected a number",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": "2"
+      }
+    },
+    {
+      "canonical": null,
+      "error": "people: must be at least 1",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": 0
+      }
+    },
+    {
+      "canonical": null,
+      "error": "people: must be at most 12",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": 13
+      }
+    },
+    {
+      "canonical": null,
+      "error": "people: must be in steps of 1 from 1",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": 2.5
+      }
+    },
+    {
+      "canonical": null,
+      "error": "budget: must be in steps of 0.5 from 0",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "budget": 0.25,
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "dest: not one of the options",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "dest": "par",
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "dest: expected an option id",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "dest": [
+          "lis"
+        ],
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "extras: pick at least 1",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "extras": [],
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "extras: pick at most 2",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "extras": [
+          "o1",
+          "o2",
+          "o3"
+        ],
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "extras: an option is picked twice",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "extras": [
+          "o1",
+          "o1"
+        ],
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "start: not a date (YYYY-MM-DD)",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": 2,
+        "start": "2026-02-30"
+      }
+    },
+    {
+      "canonical": null,
+      "error": "start: must be 2026-11-08 or later",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": 2,
+        "start": "2026-11-07"
+      }
+    },
+    {
+      "canonical": null,
+      "error": "start: must be 2027-11-08 or earlier",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "people": 2,
+        "start": "2027-11-09"
+      }
+    },
+    {
+      "canonical": null,
+      "error": "flex: expected true or false",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "flex": "yes",
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "notes: must not be empty",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "notes": "",
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "notes: longer than 20 characters",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "notes": "xxxxxxxxxxxxxxxxxxxxx",
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "name: must be one line",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "name": "a\nb",
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "name: expected text",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "name": 7,
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "key: asks for a secret, so it takes no value",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "key": "sk-123",
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "colour: not a field of this form",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "colour": 1,
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "values: not a field of this form",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "Bad Key": 1,
+        "people": 2
+      }
+    },
+    {
+      "canonical": null,
+      "error": "zz: not a field of this form",
+      "ok": false,
+      "spec": {
+        "fields": [
+          {
+            "id": "people",
+            "label": "Travellers",
+            "max": 12,
+            "min": 1,
+            "required": true,
+            "step": 1,
+            "type": "number",
+            "unit": "people"
+          },
+          {
+            "id": "dest",
+            "label": "Destination",
+            "multi": false,
+            "options": [
+              {
+                "id": "lis",
+                "label": "Lisbon"
+              },
+              {
+                "id": "rom",
+                "label": "Rome"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "extras",
+            "label": "Extras",
+            "max": 2,
+            "min": 1,
+            "multi": true,
+            "options": [
+              {
+                "id": "o1",
+                "label": "Breakfast"
+              },
+              {
+                "id": "o2",
+                "label": "Parking"
+              },
+              {
+                "id": "o3",
+                "label": "Late checkout"
+              }
+            ],
+            "required": false,
+            "type": "choice"
+          },
+          {
+            "id": "start",
+            "label": "Start",
+            "max": "2027-11-08",
+            "min": "2026-11-08",
+            "required": false,
+            "type": "date"
+          },
+          {
+            "default": false,
+            "id": "flex",
+            "label": "Flexible",
+            "type": "toggle"
+          },
+          {
+            "id": "notes",
+            "label": "Notes",
+            "max_length": 20,
+            "multiline": true,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "name",
+            "label": "Name",
+            "max_length": 10,
+            "multiline": false,
+            "required": false,
+            "type": "text"
+          },
+          {
+            "id": "budget",
+            "label": "Budget",
+            "required": false,
+            "step": 0.5,
+            "type": "number"
+          },
+          {
+            "id": "key",
+            "label": "API key",
+            "refused": true,
+            "type": "text"
+          }
+        ],
+        "title": "Trip"
+      },
+      "type": "form",
+      "values": {
+        "zz": 1
+      }
+    }
+  ],
   "texts": [
     {
       "blocks": [

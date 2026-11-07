@@ -1,6 +1,6 @@
 // Pure derivations over the folded timeline for rich message rendering.
 import type { Provenance } from "../md/links";
-import { parseUrl, seenKeys, urlKeysIn } from "../md/links";
+import { hostOf, parseUrl, seenKeys, urlKeysIn } from "../md/links";
 import type { Item, Source } from "../types";
 
 // User items and tool results never change once created, so their tokens
@@ -163,4 +163,27 @@ export function groupWeb(items: Item[]): Map<number, WebGroup> {
   });
   close();
   return groups;
+}
+
+/**
+ * The hosts of the web pages the agent read since the user's last message
+ * before `index` (from web tools and sub-tasks, by their sources). A
+ * question asked after reading them may be the page talking, not the
+ * agent, so its card says where it has been.
+ */
+export function webNotice(items: Item[], index: number): string[] {
+  const hosts: string[] = [];
+  let from = index;
+  while (from > 0 && items[from - 1]!.type !== "user") from--;
+  for (const it of items.slice(from, index)) {
+    if (!citable(it)) continue;
+    const urls = it.result?.sources?.map((s) => s.url) ?? [];
+    if (!urls.length && it.tool === "web_fetch" && typeof it.input?.url === "string") urls.push(it.input.url);
+    for (const url of urls) {
+      const u = parseUrl(url);
+      const host = u && (u.protocol === "https:" || u.protocol === "http:") ? hostOf(u) : null;
+      if (host && !hosts.includes(host)) hosts.push(host);
+    }
+  }
+  return hosts;
 }

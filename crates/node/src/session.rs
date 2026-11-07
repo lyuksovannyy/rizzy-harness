@@ -43,6 +43,15 @@ pub(crate) struct Session {
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
 }
 
+/// What the user sent with a prompt.
+pub(crate) struct Input {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    /// An answer to a choices or form block: `text` is then the user's
+    /// note, and the message records the canonical answer before it.
+    pub reply: Option<FormReply>,
+}
+
 /// A sub-agent's private worktree.
 struct Isolation {
     root: PathBuf,
@@ -233,14 +242,16 @@ impl Session {
 
     pub(crate) async fn prompt(
         self: &Arc<Self>,
-        text: String,
+        input: Input,
         agent: Option<AgentSpec>,
-        attachments: Vec<Attachment>,
         compare: Vec<String>,
         extra: TurnExtra,
     ) -> Result<(), String> {
         if !compare.is_empty() && (self.profile != Profile::Chat || compare.len() > 4) {
             return Err("parallel answers need a chat and at most 4 models".into());
+        }
+        if input.reply.is_some() && (!input.attachments.is_empty() || !compare.is_empty()) {
+            return Err("an answer goes alone, without attachments or parallel answers".into());
         }
         let turn_id = new_id();
         let cancel = CancellationToken::new();
@@ -255,16 +266,59 @@ impl Session {
                 savings: extra.savings.clone(),
             });
         }
-        let this = self.clone();
-        let msg = UserMessage {
-            turn_id: turn_id.clone(),
-            text,
-            attachments,
+        let msg = match self.user_message(turn_id.clone(), input).await {
+            Ok(msg) => msg,
+            Err(e) => {
+                self.release(&turn_id);
+                return Err(e);
+            }
         };
+        let this = self.clone();
         tokio::spawn(async move {
             this.run_turn(msg, agent, compare, extra, cancel).await;
         });
         Ok(())
+    }
+
+    /// The message a turn starts with. An answer is checked against the
+    /// log here, while the caller holds the turn slot: nothing else can
+    /// append (another prompt, a variant choice) until the turn has
+    /// recorded it, so the log checked is the log it joins.
+    async fn user_message(&self, turn_id: String, input: Input) -> Result<UserMessage, String> {
+        let Input {
+            text,
+            attachments,
+            reply,
+        } = input;
+        let text = match &reply {
+            None => text,
+            Some(r) => {
+                let id = self.id;
+                let history = self
+                    .node
+                    .cfg
+                    .store
+                    .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let canonical = harness_core::ui::check_reply(&history, r)?;
+                harness_core::ui::answer_text(canonical, &text)
+            }
+        };
+        Ok(UserMessage {
+            turn_id,
+            text,
+            attachments,
+            reply,
+        })
+    }
+
+    /// Free the turn slot if `turn_id` still holds it.
+    fn release(&self, turn_id: &str) {
+        let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+        if t.as_ref().is_some_and(|t| t.turn_id == turn_id) {
+            *t = None;
+        }
     }
 
     async fn run_turn(
@@ -348,10 +402,7 @@ impl Session {
             usage: usage.clone(),
         }))
         .await;
-        let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
-        if t.as_ref().is_some_and(|t| t.turn_id == turn_id) {
-            *t = None;
-        }
+        self.release(&turn_id);
         (reason, usage)
     }
 
@@ -589,6 +640,7 @@ impl Session {
             turn_id,
             text: task,
             attachments: vec![],
+            reply: None,
         };
         let extra = TurnExtra {
             savings,

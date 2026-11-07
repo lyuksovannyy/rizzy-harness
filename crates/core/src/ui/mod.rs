@@ -9,12 +9,18 @@
 //! a spec has been through [`clean_text`] and its length checked, a field or
 //! question that asks for a secret is refused ([`secret_like`]), and an
 //! error is harness text (a JSON path and a reason), never model text.
+//!
+//! The user answers a choices or form block with the next message; the
+//! node checks it against its log ([`check_reply`]) and records the
+//! canonical text [`answer`] writes, which carries no model text.
 
+mod answer;
 mod chart;
 mod choices;
 mod form;
 mod progress;
 mod read;
+mod reply;
 mod scan;
 mod secret;
 
@@ -25,11 +31,13 @@ use crate::agent::UiLevel;
 use crate::event::{UiBlock, UiKind};
 
 pub use crate::text::clean_text;
+pub use answer::{Values, answer};
 pub use chart::{ChartKind, ChartSpec, Series, XAxis, XValues, YAxis};
 pub use choices::{Choice, ChoicesSpec, MAX_OTHER};
 pub use form::{Field, FieldType, FormSpec, is_date, on_grid};
 pub use progress::{ProgressSpec, ProgressStatus, Step, StepStatus};
 pub use read::valid_id;
+pub use reply::{MAX_REPLY, NOT_OPEN, answer_text, check_reply};
 pub use scan::{Fence, MAX_BLOCKS, fnv1a32, normalize, scan};
 pub use secret::secret_like;
 

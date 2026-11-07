@@ -1,7 +1,7 @@
 // Pure derivations over the folded timeline for ui blocks (rich_plan §6.2).
 // Nothing here is stored: a reload folds the same log and gets the same
 // answer.
-import type { Item, ProgressSpec, SessionView, TurnEndReason } from "../types";
+import type { FormValue, Item, ProgressSpec, SessionView, TurnEndReason } from "../types";
 
 /** Where one progress block stands in its turn. */
 export interface ProgressSlot {
@@ -112,3 +112,49 @@ export function currentStep(spec: ProgressSpec): string | null {
   if (active) return active.label;
   return spec.steps.findLast((s) => s.status === "done")?.label ?? null;
 }
+
+/** Whether a question or form can be answered now, and if not, why not. */
+export type InputState =
+  | { kind: "open" }
+  /** The next user message answered it, with these values. */
+  | { kind: "answered"; values: Record<string, FormValue> }
+  /** The conversation went on without an answer. */
+  | { kind: "not_answered" }
+  /** A turn is running; answers wait for it. */
+  | { kind: "waiting" }
+  /** One of several parallel answers that is not the one continued from. */
+  | { kind: "choose_variant" }
+  /** A sub-task's session: its questions go to the parent agent. */
+  | { kind: "sub_task" };
+
+/**
+ * The state of the input block of the assistant item at `idx`, in this
+ * order: a later user message closes it (answered when that message is
+ * its reply); then a running turn, an unchosen parallel answer and a
+ * sub-task session lock it; otherwise it is open. The node checks the same
+ * against its log; this only decides what the card offers.
+ */
+export function inputState(
+  items: readonly Item[],
+  idx: number,
+  view: Pick<SessionView, "running_turn" | "variant_selection" | "meta">,
+): InputState {
+  const it = items[idx];
+  if (it?.type !== "assistant") return { kind: "not_answered" };
+  const next = items.slice(idx + 1).find((x) => x.type === "user");
+  if (next?.type === "user") {
+    const block = inputBlock(it);
+    const r = next.reply;
+    return r && block && r.message_id === it.message_id && r.block_id === block.id
+      ? { kind: "answered", values: r.values }
+      : { kind: "not_answered" };
+  }
+  if (view.running_turn) return { kind: "waiting" };
+  if (unchosen(it, view.variant_selection)) return { kind: "choose_variant" };
+  if (view.meta?.parent_session) return { kind: "sub_task" };
+  return { kind: "open" };
+}
+
+/** A message's shown question or form (Rust allows at most one). */
+export const inputBlock = (it: Assistant) =>
+  it.blocks?.find((b) => (b.type === "choices" || b.type === "form") && !!b.spec);
