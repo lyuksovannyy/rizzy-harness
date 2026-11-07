@@ -1,14 +1,18 @@
 // Hidden characters: bidi controls (U+061C, U+200E-200F, U+202A-202E,
 // U+2066-2069), zero-width characters (U+200B-200D, U+2060-2064), the BOM,
-// private-use characters, tag characters and the supplementary variation
-// selectors. They hide or reorder text, so what the user reads (and what
-// Copy gives them) would differ from what is there; tag characters and
-// variation selectors are the usual carriers for invisible prompt-injection
-// text. clean_text in Rust strips the same set.
+// private-use characters, and the default-ignorable code points no script
+// needs: deprecated format characters (U+2065-206F), unassigned specials
+// (U+FFF0-FFF8), musical beam controls (U+1D173-1D17A) and the whole tag and
+// variation-selector plane (U+E0000-E0FFF). They hide or reorder text, so
+// what the user reads (and what Copy gives them) would differ from what is
+// there; tag characters and variation selectors are the usual carriers for
+// invisible prompt-injection text. The soft hyphen and the BMP variation
+// selectors (emoji style) shape real text and stay. clean_text in Rust
+// strips the same set.
 import type { HastNode } from "./hast";
 
 const HIDDEN =
-  /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\uE000-\uF8FF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+  /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFF0-\uFFF8\uE000-\uF8FF\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu;
 
 export function stripHidden(text: string): string {
   return text.replace(HIDDEN, "");

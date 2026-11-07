@@ -44,7 +44,7 @@ const visualText = (loc) => loc.evaluate((el) => {
 });
 
 // The hidden set of web/src/md/hidden.ts that a page can show (the BMP part).
-const HIDDEN = /[\u{061C}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{FEFF}\u{E000}-\u{F8FF}]/u;
+const HIDDEN = /[\u{061C}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{206F}\u{FEFF}\u{FFF0}-\u{FFF8}\u{E000}-\u{F8FF}]/u;
 
 /** Chat helpers bound to one page; `repo` is the agentic workspace. */
 function chat(p, repo) {
@@ -87,6 +87,13 @@ function chat(p, repo) {
       await card.locator('.ui-send').click();
       return waitAnswer(before);
     },
+    /** Focuses a control on a card, presses `key` and returns the answer. */
+    async press(card, selector, key = 'Enter') {
+      const before = await count();
+      await card.locator(selector).focus();
+      await p.keyboard.press(key);
+      return waitAnswer(before);
+    },
     /** Picks an option on a card and returns the answer to it. */
     async pick(card, label) {
       const before = await count();
@@ -96,4 +103,7 @@ function chat(p, repo) {
   };
 }
 
-module.exports = { log, check, sleep, eventually, contrast, visualText, HIDDEN, chat };
+/** Is `loc` the focused element? Otherwise says what is. */
+const focused = (loc) => loc.evaluate((el) => el === document.activeElement || `focus on ${document.activeElement?.outerHTML.slice(0, 80)}`);
+
+module.exports = { log, check, sleep, eventually, contrast, visualText, focused, HIDDEN, chat };

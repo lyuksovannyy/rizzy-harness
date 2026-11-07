@@ -2,10 +2,14 @@
 //! model) before the UI shows it as a label.
 //!
 //! The hidden set matches `web/src/md/hidden.ts`: bidi controls, zero-width
-//! characters, the BOM, private-use characters, tag characters and the
-//! supplementary variation selectors. They hide or reorder text, so what the
-//! user reads would differ from what is there; tag characters and variation
+//! characters, the BOM, private-use characters, and the default-ignorable
+//! code points that no script needs (the deprecated format characters, the
+//! musical beam controls, the unassigned specials and the whole tag and
+//! variation-selector plane). They hide or reorder text, so what the user
+//! reads would differ from what is there; tag characters and variation
 //! selectors are the usual carriers for invisible prompt-injection text.
+//! The other default-ignorable code points (soft hyphen, Hangul fillers,
+//! the Mongolian and BMP variation selectors, …) shape real text and stay.
 
 /// True for a character of the hidden set.
 pub fn is_hidden(c: char) -> bool {
@@ -13,12 +17,12 @@ pub fn is_hidden(c: char) -> bool {
         '\u{061C}'
         | '\u{200B}'..='\u{200F}'
         | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{2069}'
+        | '\u{2060}'..='\u{206F}'
         | '\u{FEFF}'
+        | '\u{FFF0}'..='\u{FFF8}'
         | '\u{E000}'..='\u{F8FF}'
-        | '\u{E0000}'..='\u{E007F}'
-        | '\u{E0100}'..='\u{E01EF}')
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}')
 }
 
 /// One line of plain text: hidden characters and controls dropped, every run
@@ -101,6 +105,14 @@ mod tests {
             "abcde f g"
         );
         assert_eq!(clean_line("tag\u{E0041}\u{E0100}s", 100), "tags");
+        // The rest of the default-ignorable code points that draw nothing.
+        assert_eq!(
+            clean_line(
+                "a\u{2065}\u{206A}\u{206F}\u{FFF0}\u{FFF8}\u{1D173}\u{1D17A}\u{E0080}\u{E01F0}\u{E0FFF}b",
+                100
+            ),
+            "ab"
+        );
         assert_eq!(clean_line("\u{202E}\u{200B}", 100), "");
     }
 

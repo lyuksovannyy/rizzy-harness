@@ -21,6 +21,15 @@ describe("hostOf", () => {
     expect(hostOf(u("mailto:a%E2%80%8Bb@x.example"))).toBe("a%E2%80%8Bb@x.example");
     expect(hostOf(u("mailto:a%0Ab@x.example"))).toBe("a%0Ab@x.example");
   });
+  test("a mail domain shows as the punycode host, as for http links", () => {
+    // [Google support](mailto:support@gооgle.com), with Cyrillic о.
+    expect(hostOf(u("mailto:support@g%D0%BE%D0%BEgle.com"))).toBe("support@xn--ggle-55da.com");
+    expect(hostOf(u("https://g%D0%BE%D0%BEgle.com/"))).toBe("xn--ggle-55da.com");
+    expect(hostOf(u("mailto:J%C3%BCrgen@B%C3%BCcher.Example"))).toBe("Jürgen@xn--bcher-kva.example");
+    // Not a plain host: shown as written, encoded.
+    expect(hostOf(u("mailto:a@evil.example/paypal.com"))).toBe("a@evil.example/paypal.com");
+    expect(hostOf(u("mailto:a@b%2Fc.example"))).toBe("a@b%2Fc.example");
+  });
 });
 
 describe("urlKey", () => {
@@ -97,6 +106,11 @@ describe("needsConfirm", () => {
       // a mail address with hidden characters, or one that carries a token
       "mailto:%E2%80%AEelpmaxe.live@troppus",
       "mailto:AbCd1234EfGh5678@evil.example",
+      // a look-alike or punycode mail domain, or one that is not a plain host
+      "mailto:support@g%D0%BE%D0%BEgle.com",
+      "mailto:support@xn--ggle-55da.com",
+      "mailto:a@evil.example/paypal.com",
+      "mailto:nobody",
     ]) {
       expect(needsConfirm(u(s), none), s).toBe(true);
     }

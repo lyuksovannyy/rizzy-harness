@@ -3,7 +3,7 @@
 // locked, the fixed footer), sending the answer, and the draft kept while
 // the user types. The node checks every answer against its log; nothing
 // here decides whether an answer counts.
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import type { InputInfo } from "../md/context";
 import { rt } from "../md/strings";
@@ -51,10 +51,12 @@ export function saveDraft(p: InputProps, draft: unknown, empty: boolean) {
  * Send an answer. `ready` is false while the card cannot send (locked, a
  * preview, already sending). After a successful POST it stays busy until
  * the log closes the card (the answer arrives as the next user message).
+ * `frame` is the card's body (focusable, named by its question or title).
  */
 export function useSend(p: InputProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const frame = useRef<HTMLDivElement>(null);
   const kind = p.info.state.kind;
   useEffect(() => {
     if (kind !== "open") setBusy(false);
@@ -62,6 +64,11 @@ export function useSend(p: InputProps) {
   const ready = kind === "open" && !!p.sessionId && !!p.messageId && !busy;
   const send = async (values: Record<string, FormValue>) => {
     if (!ready) return;
+    // The control that sent is disabled now and gone once the card is
+    // answered, which would drop keyboard focus to the top of the page; it
+    // moves to the card, which stays. Only from inside the card: focus
+    // elsewhere is the user's.
+    if (frame.current?.contains(document.activeElement)) frame.current.focus();
     setBusy(true);
     setError(null);
     try {
@@ -72,7 +79,7 @@ export function useSend(p: InputProps) {
       setBusy(false);
     }
   };
-  return { ready, busy, error, send };
+  return { ready, busy, error, send, frame };
 }
 
 function hostList(hosts: string[]): string {

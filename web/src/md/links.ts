@@ -16,19 +16,32 @@ export function parseUrl(href: string): URL | null {
 }
 
 /** The host the browser will contact (punycode ASCII), without a leading
- * www.; for mailto it is the address, left percent-encoded when decoding it
- * would give hidden or control characters (they could make it read as
- * another address). */
+ * www.; for mailto it is the address (see mailAddress), or the address as
+ * written, percent-encoded, when it is not a plain one. */
 export function hostOf(u: URL): string {
-  if (u.protocol === "mailto:") {
-    const addr = decodeSafe(u.pathname);
-    return oddChars(addr) ? u.pathname : addr;
-  }
+  if (u.protocol === "mailto:") return mailAddress(u) ?? u.pathname;
   return u.hostname.replace(/^www\./, "");
 }
 
 const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
 const oddChars = (s: string) => hasHidden(s) || CONTROL.test(s);
+
+// What the URL parser would read as something other than a host name.
+const NOT_HOST = /[\s/?#\\:@[\]%]/;
+
+/** A mailto address as shown: decoded, with the domain written as the URL
+ * parser writes a host (punycode), so `gооgle.com` with Cyrillic о cannot
+ * read as google.com. Null when the address holds hidden or control
+ * characters (they could make it read as another one) or its domain is not
+ * a plain host name. */
+function mailAddress(u: URL): string | null {
+  const addr = decodeSafe(u.pathname);
+  const at = addr.lastIndexOf("@");
+  const domain = addr.slice(at + 1);
+  if (oddChars(addr) || at < 0 || !domain || NOT_HOST.test(domain)) return null;
+  const host = parseUrl(`http://${domain}`)?.hostname;
+  return host ? addr.slice(0, at + 1) + host : null;
+}
 
 function decodeSafe(s: string): string {
   try {
@@ -109,14 +122,15 @@ function tokenLike(s: string): boolean {
  * nowhere but the model and that could carry data out (a query, a fragment,
  * a path that is long, holds a token-like run or a `;param`, a long or
  * token-like host label, many labels) or mislead (a punycode host,
- * credentials before the host, hidden characters in a mail address).
+ * credentials before the host, a mail address with hidden characters or a
+ * punycode or odd domain).
  */
 export function needsConfirm(u: URL, provenance: Provenance): boolean {
   if (provenance.has(linkKey(u))) return false;
   if (u.search !== "" || u.hash !== "") return true;
   if (u.protocol === "mailto:") {
-    const addr = decodeSafe(u.pathname);
-    return oddChars(addr) || addr.length > 64 || tokenLike(addr);
+    const addr = mailAddress(u);
+    return addr === null || addr.includes("xn--") || addr.length > 64 || tokenLike(addr);
   }
   const labels = u.hostname.replace(/^www\./, "").split(".");
   return (

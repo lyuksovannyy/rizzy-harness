@@ -3,7 +3,7 @@
 // on the click; otherwise the user picks and presses the harness's Send.
 // Keys 1-8 move to an option (and tick it in a multiple choice); they
 // never send by themselves.
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { rt } from "../md/strings";
 import type { ChoicesSpec } from "../types";
 import { checkReply, isBlank } from "./form";
@@ -25,8 +25,9 @@ function restore(spec: ChoicesSpec, raw: unknown): Draft {
 
 export default function Choices({ spec, input }: { spec: ChoicesSpec; input: InputProps }) {
   const [draft, setDraft] = useState<Draft>(() => restore(spec, loadDraft(input)));
-  const { ready, busy, error, send } = useSend(input);
+  const { ready, busy, error, send, frame } = useSend(input);
   const buttons = useRef<(HTMLElement | null)[]>([]);
+  const titleId = useId();
   const state = input.info.state;
   const open = state.kind === "open";
   useEffect(() => {
@@ -66,8 +67,11 @@ export default function Choices({ spec, input }: { spec: ChoicesSpec; input: Inp
 
   return (
     <InputFrame info={input.info} error={error}>
-      <div className="ui-choices" tabIndex={-1} onKeyDown={onKey}>
-        <p className="ui-title">{spec.question}</p>
+      {/* One group named by the question, so the options are read with it. */}
+      <div className="ui-choices" tabIndex={-1} role="group" aria-labelledby={titleId} ref={frame} onKeyDown={onKey}>
+        <p className="ui-title" id={titleId}>
+          {spec.question}
+        </p>
         {spec.multi && (
           <p className="ui-hint">
             {spec.min === spec.max
@@ -75,7 +79,7 @@ export default function Choices({ spec, input }: { spec: ChoicesSpec; input: Inp
               : rt("ui.pickRange", { min: String(spec.min), max: String(spec.max) })}
           </p>
         )}
-        <div className={`ui-options${spec.multi ? " ui-options-multi" : ""}`} role={spec.multi ? "group" : undefined}>
+        <div className={`ui-options${spec.multi ? " ui-options-multi" : ""}`}>
           {spec.options.map((o, i) => {
             const chosen = shown.selected.includes(o.id);
             const text = (

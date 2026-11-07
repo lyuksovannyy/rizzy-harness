@@ -2,8 +2,10 @@
 // host, an unknown label stays text, a footer lists what was cited, and the
 // web row is in the harness's words. Also: the hover card, sources open
 // without a confirm, labels stable across turns and a reload, the shimmer,
-// and the labels a delegated sub-task hands back.
-const { check, log } = require('./lib.cjs');
+// and the labels a delegated sub-task hands back; from the final reviews,
+// focus back on the pill after Escape in the card and a readable unknown
+// label.
+const { check, log, contrast, focused } = require('./lib.cjs');
 
 module.exports = async function cite(t) {
   const { p, ctx, S } = t;
@@ -16,6 +18,10 @@ module.exports = async function cite(t) {
   check((await cited.locator('.cite').first().getAttribute('href')) === 'https://a.example/rust', 'a pill links to its source');
   check((await cited.locator('.cite-missing').innerText()) === '[S9]', 'an unknown label stays text');
   check((await cited.locator('.cite-missing').getAttribute('title')) === 'No such source', 'with a note');
+  // Muted by its colour alone: dimmed with opacity it fell to 3.3:1.
+  const missing = cited.locator('.cite-missing');
+  const ratio = await contrast(missing, p.locator('body'));
+  check((await missing.evaluate((el) => getComputedStyle(el).opacity)) === '1' && ratio >= 4.5, `unknown label at ${ratio.toFixed(2)}:1`);
   check((await cited.locator('.sources summary').innerText()) === 'Sources (2)', 'footer counts the cited sources');
   check((await cited.locator('.sources li').count()) === 2, 'footer lists two sources');
   check((await cited.locator('.md').innerText()).includes('Unknown [S9].'), 'text around the labels stays');
@@ -34,6 +40,15 @@ module.exports = async function cite(t) {
   check((await cited.locator('.cite-card .cite-card-item').count()) === 2, 'a group card lists both sources');
   await p.keyboard.press('Escape');
   check((await cited.locator('.cite-card').count()) === 0, 'Escape closes the card');
+  // Tab goes from the pill into its card; Escape there closes the card and
+  // puts focus back on the pill, not at the top of the page.
+  // (The third pill still has focus, so the first one: a focus event opens it.)
+  const group = cited.locator('.cite').first();
+  await group.focus();
+  await p.keyboard.press('Tab');
+  check((await focused(cited.locator('.cite-card-item').first())) === true, 'Tab moves into the card');
+  await p.keyboard.press('Escape');
+  check((await cited.locator('.cite-card').count()) === 0 && (await focused(group)) === true, 'Escape in the card: closed, focus on the pill');
 
   // A source needs no confirm: the click opens it (the page is stubbed).
   await ctx.route(/^https:\/\/a\.example\//, (r) => r.fulfill({ status: 200, contentType: 'text/plain', body: 'source page' }));

@@ -1246,7 +1246,8 @@ copy them identically (shared fixture).
 
 **What was built**
 * **Markdown** (`web/src/md/`): hidden characters (bidi controls, zero-width, BOM,
-  private use, tags, variation selectors) stripped before parsing and again after it,
+  private use, tags, variation selectors and the other default-ignorable code points
+  no script needs) stripped before parsing and again after it,
   since micromark decodes `&#x202E;`; links only for http(s), mailto and in-page
   fragments, always showing the real host in an isolated LTR `<bdi>`, with a
   full-URL confirm for odd URLs that neither the user nor a web result brought;
@@ -1260,7 +1261,9 @@ copy them identically (shared fixture).
   emits only `<span class>` and text.
 * **Math:** `\( \)` and `$$` (never single `$`, so prices stay text), Temml in a lazy
   chunk with trust off and expansion/size limits, then a pass that keeps only MathML
-  layout attributes and strips hidden characters. Shown as source while streaming,
+  layout attributes and strips hidden characters. An inline formula paints only
+  inside its own box (a negative `\kern` or `\smash`+`\raisebox` cannot reach a
+  card's harness lines); display math scrolls in its own. Shown as source while streaming,
   on a TeX error, past 4,000 chars, and (step 11) for `\ref`/`\eqref`, which Temml
   leaves empty for a post-processor we do not run.
 * **Citations:** web results are labelled `[S<n>]` from a session-wide book (shared
@@ -1283,6 +1286,11 @@ copy them identically (shared fixture).
   `prompt_hash`), enforced in the agent loop; delegated sub-tasks get `display` at
   most. The block instructions (about 230 tokens) follow the level.
 * **Attention:** a message with an open question marks the chat as waiting.
+* **Keyboard and screen readers:** closing a link confirm or a citation card puts
+  focus back on the link or pill; a card answered from the keyboard keeps focus on
+  its body, a group named by its question or title; fields say they are required
+  and wrong; sort arrows are not read; text colours (syntax, callouts, muted labels)
+  are checked at 4.5:1 in `theme.test.ts`.
 
 **Grammar of `ui:` fences** (`ui::scan`; the browser's `md/remark-ui.ts` marks the same)
 * Scanned on the text as stored: secrets scrubbed, the hidden set stripped, CR and
@@ -1353,14 +1361,17 @@ the error "interactive blocks are off for this agent".
    counts as an address either).
 3. Phishing: no password or hidden field, no model-chosen button label (always
    "Send"), no text defaults; secret-asking questions and fields refused in Rust, with
-   the lexicon read as a person sees it (look-alike letters, fullwidth, soft hyphens);
+   the lexicon read as a person sees it (NFKD base letters, a look-alike table, any
+   other non-ASCII letter in a word with ASCII letters read as any letter, every
+   default-ignorable code point dropped);
    harness chrome on every card ("Question from <agent>", "Sends your answers as a
    message. Never type passwords or keys here.", "Asked after reading: hosts" after
    web content); every answer is a real click, and keys 1-8 only move between options.
 4. Links and images: protocol allowlist; the real host always visible; a confirm with
    the full URL for a URL outside provenance (user text and web results only) with a
    query, fragment, long path, `;param`, token-like run, long or many host labels,
-   punycode, credentials or an odd mail address; `noopener noreferrer nofollow` and
+   punycode, credentials or an odd mail address (a mail domain shows as punycode
+   too); `noopener noreferrer nofollow` and
    no referrer; images never fetched; no favicons, previews or unfurls.
 5. Citations resolve only to sources our SSRF-safe web tools recorded; titles are
    cleaned text; a fragment counts only exactly.

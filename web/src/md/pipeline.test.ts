@@ -10,6 +10,16 @@ describe("stripHidden", () => {
     expect(hasHidden(`a${hidden}b`)).toBe(true);
     expect(hasHidden("plain")).toBe(false);
   });
+  test("removes the other default-ignorable code points that draw nothing, as clean_text does", () => {
+    // Deprecated format characters, musical beam controls, unassigned
+    // specials and the unassigned rest of the tag plane: Chrome draws
+    // "Pass\u{1D173}word" exactly as wide as "Password".
+    for (const c of ["\u{2065}", "\u{206A}", "\u{206F}", "\u{FFF0}", "\u{FFF8}", "\u{1D173}", "\u{1D17A}", "\u{E0080}", "\u{E01F0}", "\u{E0FFF}"]) {
+      expect(stripHidden(`Pass${c}word`), c.codePointAt(0)!.toString(16)).toBe("Password");
+    }
+    // Soft hyphens and the BMP variation selectors shape real text.
+    expect(stripHidden("co\u{AD}op \u{2764}\u{FE0F}")).toBe("co\u{AD}op \u{2764}\u{FE0F}");
+  });
   test("keeps ordinary text, emoji and accents", () => {
     expect(stripHidden("café 🚀 日本 ñ ❤\u{FE0F}\n\ttab")).toBe("café 🚀 日本 ñ ❤\u{FE0F}\n\ttab");
   });

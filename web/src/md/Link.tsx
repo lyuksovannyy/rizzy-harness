@@ -94,7 +94,13 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
   const { provenance, sources } = useContext(MessageCtx);
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLAnchorElement>(null);
-  const close = useCallback(() => setOpen(false), []);
+  // The confirm holds focus while open; closing it from the keyboard or
+  // its own buttons hands focus back to the link (it would drop to the top
+  // of the page with the removed button). A click elsewhere keeps its own.
+  const close = useCallback((refocus: boolean) => {
+    setOpen(false);
+    if (refocus) anchor.current?.focus();
+  }, []);
   // With a fragment only when it is the source's own (see linkKey).
   const source = sources.has(linkKey(u));
   const confirm = !source && needsConfirm(u, provenance);
@@ -131,15 +137,16 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
 
 /** The confirm is a popover in the top layer, placed under (or above) its
  * link (see useAnchored). */
-function LinkConfirm({ url, anchor, onClose }: { url: string; anchor: RefObject<HTMLAnchorElement | null>; onClose: () => void }) {
+function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement | null>; onClose: (refocus: boolean) => void }) {
+  const { url, anchor, onClose } = props;
   const box = useRef<HTMLSpanElement>(null);
   const [copied, copy] = useCopy();
   useAnchored(box, anchor);
   useEffect(() => {
     box.current?.querySelector("button")?.focus();
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose(true);
     const onDown = (e: MouseEvent) => {
-      if (!box.current?.contains(e.target as Node)) onClose();
+      if (!box.current?.contains(e.target as Node)) onClose(false);
     };
     document.addEventListener("keydown", onKey);
     document.addEventListener("mousedown", onDown);
@@ -158,7 +165,7 @@ function LinkConfirm({ url, anchor, onClose }: { url: string; anchor: RefObject<
           className="primary"
           onClick={() => {
             window.open(url, "_blank", "noopener,noreferrer");
-            onClose();
+            onClose(true);
           }}
         >
           {rt("open")}
@@ -166,7 +173,7 @@ function LinkConfirm({ url, anchor, onClose }: { url: string; anchor: RefObject<
         <button type="button" onClick={() => copy(url)}>
           {copied ? rt("copied") : rt("copy")}
         </button>
-        <button type="button" onClick={onClose}>
+        <button type="button" onClick={() => onClose(true)}>
           {rt("cancel")}
         </button>
       </span>

@@ -66,6 +66,9 @@ tokio-util = "0.7.20"
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Base letters for the secret guard (harness-core ui::secret); already in
+# the tree through pdf-extract.
+unicode-normalization = "0.1.26"
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
 
 [profile.release]

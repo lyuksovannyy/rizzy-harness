@@ -1,8 +1,9 @@
 // rich_plan 12.4 items 2 (lazy chunks) and 1 (rich: demo), plus what the
 // Markdown reviews added: the math clean pass, hidden characters, the bidi
-// host label, the confirm in a scrolling table, table sort, Copy, and a
-// hostile code block that must not freeze the page.
-const { check, log, eventually, visualText, HIDDEN } = require('./lib.cjs');
+// host label, the confirm in a scrolling table (and where focus goes when
+// it closes), table sort (its names and focus ring), Copy, and a hostile
+// code block that must not freeze the page.
+const { check, log, eventually, focused, visualText, HIDDEN } = require('./lib.cjs');
 
 module.exports = async function markdown(t) {
   const { p, ctx, S, requests, chunks } = t;
@@ -69,10 +70,20 @@ module.exports = async function markdown(t) {
   await p.screenshot({ path: `${S}/rich-1-confirm.png` });
   await confirm.locator('button:has-text("Cancel")').click();
   check((await demo.locator('.link-confirm').count()) === 0, 'Cancel closes the confirm');
+  check((await focused(link.locator('a'))) === true, 'Cancel gives focus back to the link');
+  // From the keyboard: Enter opens it with focus on Open, Escape closes it
+  // and focus is on the link again (not the top of the page).
+  await link.locator('a').focus();
+  await p.keyboard.press('Enter');
+  await confirm.waitFor();
+  check((await focused(confirm.locator('button.primary'))) === true, 'focus on Open');
+  await p.keyboard.press('Escape');
+  check((await demo.locator('.link-confirm').count()) === 0 && (await focused(link.locator('a'))) === true, 'Escape gives focus back to the link');
   // The image chip follows the same rule.
   await demo.locator('a.img-chip').click();
   await demo.locator('.link-confirm').waitFor();
   await p.keyboard.press('Escape');
+  check((await focused(demo.locator('a.img-chip'))) === true, 'and focus goes back to the chip');
   check(ctx.pages().length === 1, 'nothing opened');
 
   // A confirm opened inside a scrolling table is not clipped by it.
@@ -96,6 +107,18 @@ module.exports = async function markdown(t) {
   await release.click();
   check((await demo.locator('th:has-text("release (s)")').getAttribute('aria-sort')) === 'descending', 'aria-sort');
   check((await demo.locator('tbody tr').first().innerText()).startsWith('master'), 'sorted by release time, descending');
+  // The arrow is drawn, not read: aria-sort says it, so the name is the
+  // column's alone.
+  const head = await demo.locator('th:has-text("release (s)")').ariaSnapshot();
+  check(head.includes('button "release (s)"') && !/[▲▼]/.test(head), 'header name without the arrow: ' + head);
+  // The keyboard focus ring sits inside the cell: outside it, the table's
+  // scroller and the next sticky cell would hide most of it.
+  await p.keyboard.press('Shift+Tab');
+  const ring = await p.evaluate(() => {
+    const el = document.activeElement;
+    return { text: el.textContent, visible: el.matches(':focus-visible'), offset: getComputedStyle(el).outlineOffset };
+  });
+  check(ring.text === 'debug (s)' && ring.visible && ring.offset === '-2px', 'focus ring inside the header cell: ' + JSON.stringify(ring));
 
   // Copy gives the Markdown as rendered: no hidden character, math normalised.
   await demo.hover();

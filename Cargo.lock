@@ -1698,6 +1698,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio-util",
+ "unicode-normalization",
  "uuid",
 ]
 

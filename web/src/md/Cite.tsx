@@ -82,7 +82,14 @@ function Pill({ found }: { found: Resolved[] }) {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) hide();
       }}
       onKeyDown={(e) => {
-        if (e.key === "Escape") setOpen(false);
+        if (e.key !== "Escape") return;
+        // Focus on a link in the card would go with the card, to the top
+        // of the page; it goes back to the pill instead. (The pill's focus
+        // reopens the card; the close below comes after it.)
+        if (document.activeElement !== anchor.current && e.currentTarget.contains(document.activeElement)) {
+          anchor.current?.focus();
+        }
+        setOpen(false);
       }}
     >
       <a

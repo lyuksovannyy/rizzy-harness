@@ -125,6 +125,15 @@ describe("Choices", () => {
     expect(h).toMatch(/class="primary ui-send" disabled/);
   });
 
+  test("the options are a group named by the question, single or multiple", () => {
+    for (const spec of [colours, { ...colours, multi: true, min: 1, max: 2 }]) {
+      const h = choices(spec);
+      const group = h.match(/<div class="ui-choices" tabindex="-1" role="group" aria-labelledby="([^"]+)"/);
+      expect(group, h).not.toBeNull();
+      expect(h).toContain(`<p class="ui-title" id="${group![1]}">Which colour?</p>`);
+    }
+  });
+
   test("an answered question marks what was picked", () => {
     const h = choices({ ...colours, other: true }, props({ kind: "answered", values: { selected: [], other: "Teal" } }));
     expect(text(h)).toContain("Answered");
@@ -149,6 +158,37 @@ describe("Form", () => {
     // Travellers is required and empty: Send is off, with no error yet.
     expect(h).toMatch(/class="primary ui-send" disabled/);
     expect(h).not.toContain("ui-field-error");
+  });
+
+  test("screen readers hear which fields are required and which are wrong", () => {
+    const req: FormSpec = {
+      title: "Trip",
+      fields: [
+        { id: "people", label: "Travellers", type: "number", required: true, min: 1, max: 12, step: 1 },
+        { id: "dest", label: "Destination", type: "choice", required: true, multi: false, options: [{ id: "lis", label: "Lisbon" }, { id: "rom", label: "Rome" }] },
+        { id: "extras", label: "Extras", type: "choice", required: true, multi: true, options: [{ id: "b", label: "Breakfast" }, { id: "p", label: "Parking" }] },
+        { id: "city", label: "City", type: "choice", required: true, multi: false, options: "abcdef".split("").map((id) => ({ id, label: id })) },
+        { id: "start", label: "Start", type: "date", required: true },
+        { id: "name", label: "Name", type: "text", required: true },
+        { id: "notes", label: "Notes", type: "text", required: false },
+      ],
+    };
+    withDraft({ people: "13" });
+    const h = renderToStaticMarkup(<Form spec={req} input={props()} />);
+    const tag = (re: RegExp) => h.match(re)?.[0] ?? "";
+    for (const control of [/<input id="[^"]+" type="number"[^>]*>/, /<select[^>]*>/, /<input id="[^"]+" type="date"[^>]*>/, /<input(?=[^>]*type="text")[^>]*>/]) {
+      expect(tag(control), String(control)).toContain('aria-required="true"');
+    }
+    // The radio group carries it; a checkbox group's name says it.
+    expect(h).toMatch(/role="radiogroup" aria-labelledby="[^"]+" aria-required="true"/);
+    const extras = h.match(/role="group" aria-labelledby="([^" ]+) ([^"]+)"/)!;
+    expect(h).toContain(`id="${extras[2]}" class="muted"> (required)</span>`);
+    // Only Notes is optional.
+    expect(h.match(/aria-required="true"/g)).toHaveLength(5);
+    // 13 is out of range: the field says it is wrong, and why.
+    const people = tag(/<input id="[^"]+" type="number"[^>]*>/);
+    expect(people).toContain('aria-invalid="true"');
+    expect(h.match(/aria-invalid="true"/g)).toHaveLength(1);
   });
 
   test("answers that are each fine but too large together say so", () => {

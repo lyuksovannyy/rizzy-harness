@@ -25,7 +25,8 @@ const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export default function Form({ spec, input }: { spec: FormSpec; input: InputProps }) {
   const [draft, setDraft] = useState<Draft>(() => restore(spec, loadDraft(input)));
-  const { ready, busy, error, send } = useSend(input);
+  const { ready, busy, error, send, frame } = useSend(input);
+  const titleId = useId();
   const state = input.info.state;
   const open = state.kind === "open";
   const values = formValues(spec, draft);
@@ -36,8 +37,10 @@ export default function Form({ spec, input }: { spec: FormSpec; input: InputProp
   if (state.kind === "answered") {
     return (
       <InputFrame info={input.info} error={null}>
-        <div className="ui-form">
-          <p className="ui-title">{spec.title}</p>
+        <div className="ui-form" tabIndex={-1} role="group" aria-labelledby={titleId} ref={frame}>
+          <p className="ui-title" id={titleId}>
+            {spec.title}
+          </p>
           <dl className="ui-answers">
             {answerLines({ type: "form", spec, ordinal: 0, hash: "", id: input.blockId }, state.values).map((l, i) => (
               <div key={i}>
@@ -54,8 +57,11 @@ export default function Form({ spec, input }: { spec: FormSpec; input: InputProp
   const set = (id: string, v: Draft[string]) => setDraft((d) => ({ ...d, [id]: v }));
   return (
     <InputFrame info={input.info} error={error}>
-      <div className="ui-form">
-        <p className="ui-title">{spec.title}</p>
+      {/* The same frame as above: focus moved here on Send stays (useSend). */}
+      <div className="ui-form" tabIndex={-1} role="group" aria-labelledby={titleId} ref={frame}>
+        <p className="ui-title" id={titleId}>
+          {spec.title}
+        </p>
         {spec.description && <p className="ui-description">{spec.description}</p>}
         <ul className="ui-fields">
           {spec.fields.map((f) => (
@@ -111,9 +117,19 @@ function FieldRow(p: RowProps) {
   const id = useId();
   const f = p.field;
   // Radio and checkbox groups are labelled as a group; one control by its id.
-  const group = f.type === "choice" && (f.multi || (f.options?.length ?? 0) <= 5);
+  const radios = f.type === "choice" && !f.multi && (f.options?.length ?? 0) <= 5;
+  const boxes = f.type === "choice" && !!f.multi;
+  const group = radios || boxes;
+  const error = p.error ? `${id}-e` : undefined;
+  // A radio group can say it is required and wrong; ARIA has neither for a
+  // plain group, so a checkbox group's name carries the "(required)".
+  const groupAttrs = radios
+    ? { role: "radiogroup", "aria-labelledby": `${id}-l`, "aria-required": f.required || undefined, "aria-invalid": error ? true : undefined, "aria-describedby": error }
+    : boxes
+      ? { role: "group", "aria-labelledby": f.required ? `${id}-l ${id}-r` : `${id}-l`, "aria-describedby": error }
+      : {};
   return (
-    <div className={`ui-field ui-field-${f.type}`} role={group ? "group" : undefined} aria-labelledby={group ? `${id}-l` : undefined}>
+    <div className={`ui-field ui-field-${f.type}`} {...groupAttrs}>
       {f.type !== "toggle" &&
         (group ? (
           <span id={`${id}-l`} className="ui-field-label">
@@ -124,7 +140,11 @@ function FieldRow(p: RowProps) {
             {f.label}
           </label>
         ))}
-      {f.required && <span className="muted"> ({rt("ui.required")})</span>}
+      {f.required && (
+        <span id={`${id}-r`} className="muted">
+          {` (${rt("ui.required")})`}
+        </span>
+      )}
       {f.help && <div className="ui-help">{f.help}</div>}
       <Control {...p} id={id} />
       {p.error && (
@@ -140,8 +160,13 @@ function Control(p: RowProps & { id: string }) {
   const f = p.field;
   const str = typeof p.value === "string" ? p.value : "";
   const list = Array.isArray(p.value) ? p.value : [];
-  // The field's error is read out with it.
-  const describedBy = p.error ? `${p.id}-e` : undefined;
+  // Read out with the field: that it is required, that its value is
+  // wrong, and why. (A group says it itself, in FieldRow.)
+  const aria = {
+    "aria-required": f.required || undefined,
+    "aria-invalid": p.error ? true : undefined,
+    "aria-describedby": p.error ? `${p.id}-e` : undefined,
+  };
   switch (f.type) {
     case "text": {
       const max = f.max_length ?? 500;
@@ -150,7 +175,7 @@ function Control(p: RowProps & { id: string }) {
         value: str,
         placeholder: f.placeholder,
         disabled: p.disabled,
-        "aria-describedby": describedBy,
+        ...aria,
       };
       return (
         <>
@@ -179,7 +204,7 @@ function Control(p: RowProps & { id: string }) {
             max={max}
             step={f.step ?? "any"}
             value={str}
-            aria-describedby={describedBy}
+            {...aria}
             disabled={p.disabled}
             onChange={(e) => p.set(e.target.value)}
           />
@@ -227,7 +252,7 @@ function Control(p: RowProps & { id: string }) {
         );
       }
       return (
-        <select id={p.id} value={str} aria-describedby={describedBy} disabled={p.disabled} onChange={(e) => p.set(e.target.value)}>
+        <select id={p.id} value={str} {...aria} disabled={p.disabled} onChange={(e) => p.set(e.target.value)}>
           <option value="">{rt("ui.choose")}</option>
           {options.map((o) => (
             <option key={o.id} value={o.id}>
@@ -258,7 +283,7 @@ function Control(p: RowProps & { id: string }) {
           min={typeof f.min === "string" ? f.min : undefined}
           max={typeof f.max === "string" ? f.max : undefined}
           value={str}
-          aria-describedby={describedBy}
+          {...aria}
           disabled={p.disabled}
           onChange={(e) => p.set(e.target.value)}
         />

@@ -61,14 +61,14 @@
     --del-bg: #fbe9e9;
     --syn-kw: #cf222e;
     --syn-str: #0a3069;
-    --syn-com: #6e7781;
+    --syn-com: #57606a;
     --syn-num: #0550ae;
     --syn-fn: #8250df;
     --syn-type: #953800;
     --syn-attr: #116329;
     --syn-add: #1a7f37;
     --syn-del: #cf222e;
-    --tone-important: #8250df;
+    --tone-important: #6f42c1;
     --chart-1: #2a78d6;
     --chart-2: #cc5220;
     --chart-3: #13875f;
@@ -650,9 +650,12 @@ select {
   background: color-mix(in srgb, var(--accent) 22%, var(--bg-3));
   color: var(--fg);
 }
+/* Muted by colour alone (with opacity it fell under 4.5:1); the dotted
+   line says there is a note on hover (its title, "No such source"). */
 .cite-missing {
   color: var(--fg-2);
-  opacity: 0.7;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
 }
 /* A popover in the top layer, placed like .link-confirm. */
 .cite-card {
@@ -803,8 +806,16 @@ select {
   font-weight: 600;
   text-align: inherit;
 }
-th[aria-sort="ascending"] .th-sort::after { content: " ▲"; font-size: 0.7em; }
-th[aria-sort="descending"] .th-sort::after { content: " ▼"; font-size: 0.7em; }
+/* The arrow is decoration: aria-sort already says it, and without the empty
+   alt text the button would be read as "crate, black up-pointing triangle". */
+th[aria-sort="ascending"] .th-sort::after { content: " ▲" / ""; font-size: 0.7em; }
+th[aria-sort="descending"] .th-sort::after { content: " ▼" / ""; font-size: 0.7em; }
+/* Inside the cell: the table's scroller clips an outer ring at the top and
+   left, and the next sticky header cell paints over its right edge. */
+.th-sort:focus-visible,
+.th-sort-icon:focus-visible {
+  outline-offset: -2px;
+}
 /* A header cell with a link: the content as written, then its own small
    sort button (a link cannot sit inside a button). */
 .th-cell {
@@ -835,6 +846,19 @@ th:not([aria-sort="none"]) .th-sort-icon {
 .math-display {
   margin: 8px 0;
   overflow-x: auto;
+}
+/* Model TeX can move its marks out of its own box: a negative \kern has no
+   limit (Temml caps only positive sizes), \smash with \raisebox lifts text
+   with no height, \llap positions it absolutely. Unclipped, a formula could
+   paint over a card's harness lines (the fixed footer, "from <agent>").
+   Display math scrolls inside its own box; inline math paints only inside
+   its own, and contain: paint also holds what is positioned. A little
+   margin keeps glyph overhang (an italic f) visible. */
+.math-inline > .math-out:not([hidden]) {
+  display: inline-block;
+  max-width: 100%;
+  contain: paint;
+  overflow-clip-margin: 2px;
 }
 .math-src {
   font-family: var(--mono);
@@ -1503,7 +1527,13 @@ pre.term.web-output {
   color: var(--bad);
   font-size: 13px;
 }
-.ui-choices:focus { outline: none; }
+/* After a card sends, focus rests on its body (useSend): the usual ring
+   shows it to the keyboard; a click inside shows none (:focus-visible). */
+.ui-choices:focus-visible,
+.ui-form:focus-visible {
+  border-radius: 8px;
+  outline-offset: 4px;
+}
 .ui-options {
   display: flex;
   flex-direction: column;

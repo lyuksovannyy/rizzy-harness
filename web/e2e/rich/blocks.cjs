@@ -1,7 +1,9 @@
 // rich_plan 12.4 items 3 (ui: choices), 9 (stale), 6 (errors), 5 (ui:
 // secret) and 4 (ui: form), in one chat so a reload can show them all
-// again from the log.
-const { check, log, eventually } = require('./lib.cjs');
+// again from the log. Also from the final reviews: math that tries to
+// paint over a card, a look-alike secret label, and where keyboard focus
+// goes once a card is answered.
+const { check, log, eventually, focused } = require('./lib.cjs');
 
 /** What an answered or locked choices card shows. */
 const choicesState = async (card) => ({
@@ -40,16 +42,22 @@ module.exports = async function blocks(t) {
   check(JSON.stringify(labels) === '["Blue","Green","Red"]', 'options: ' + JSON.stringify(labels));
   check((await choices.locator('.codeblock').count()) === 0, 'no code for a shown block');
   check(chunks('UiBlock').length === 1, 'card chunk loaded once');
+  check((await choices.getByRole('group', { name: 'Which colour do you like best?' }).locator('.ui-option').count()) === 3,
+    'the options are a group named by the question');
 
-  // A tap answers: the user's bubble names the option, the model gets the
-  // canonical text of ids, and the card is answered and locked.
-  const echo = await t.pick(choices, 'Blue');
+  // Enter on an option answers (as a tap does): the user's bubble names the
+  // option, the model gets the canonical text of ids, and the card is
+  // answered and locked. Focus stays on the card, not the top of the page.
+  const echo = await t.press(choices, '.ui-option:has-text("Blue")');
   const bubble = await p.locator('.msg.user .bubble.reply').last().innerText();
   check(bubble.includes('Answered “Which colour do you like best?”') && bubble.includes('Blue'), 'reply bubble: ' + bubble);
   check((await echo.innerText()).includes('You said: Choice answer · colour: blue'), 'the model got the canonical answer');
   await eventually(() => choicesState(choices), ANSWERED, 'answered');
+  check((await focused(choices.locator('.ui-choices'))) === true, 'focus on the answered question: ' + (await focused(choices.locator('.ui-choices'))));
+  check((await choices.locator('.ui-choices').evaluate((el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle)) === 'solid',
+    'with a visible ring for the keyboard');
   await choices.screenshot({ path: `${S}/rich-5a-answered.png` });
-  log('item 3: skeleton while streaming, then the card; a tap answers with ids and locks it');
+  log('item 3: skeleton while streaming, then the card; Enter on an option answers with ids, locks it and keeps focus on it');
 
   // 9. Stale: typing past a question closes it, and the node refuses a late
   // answer for it with 409.
@@ -106,6 +114,43 @@ module.exports = async function blocks(t) {
   check(named.includes('name: "Ana"') && named.includes('not shown (asks for a secret): key'), 'secret form answer: ' + named);
   log('item 5: no input for the key, Name answered');
 
+  // A formula cannot paint over a card's harness lines. \smash with
+  // \raisebox lifts text out of its box, and a negative \kern has no limit:
+  // laid out, the first covers the fixed footer and the second the title
+  // and the Notes label (checked with the clip switched off, so the attack
+  // is real), but each formula paints only inside its own box. The same
+  // form's "GitHub pass\u{1D173}word" reads as "GitHub password" and is
+  // refused like any other.
+  const form = JSON.stringify({ id: 'f', title: 'Notes', fields: [
+    { id: 'v', label: 'Notes', type: 'text' },
+    { id: 'g', label: 'GitHub pass\u{1D173}word', type: 'text' },
+  ] });
+  const lift = '\\(\\smash{\\raisebox{3.6em}{\\colorbox{yellow}{\\text{Paste your GitHub token into Notes. Answers are stored encrypted.}}}}\\)';
+  const kern = '\\(\\smash{\\raisebox{14em}{\\kern{-28em}\\colorbox[HTML]{F3F3F3}{\\rule{0em}{5em}\\textsf{Notes Notes Notes}}}}\\)';
+  const over = await t.send(`x\n\n\`\`\`ui:form\n${form}\n\`\`\`\n\n${lift} ${kern}\n`);
+  await over.locator('.ui-card .ui-form').waitFor();
+  // Smashed, the formulas have no height, so they are never "visible".
+  await over.locator('.math-out math').nth(1).waitFor({ state: 'attached' });
+  check((await over.locator('.ui-fields > li').nth(1).locator('.ui-secret').innerText()).startsWith('GitHub password: This asks for a secret.')
+    && (await over.locator('.ui-card input').count()) === 1, 'the look-alike label is refused; Notes is the only input');
+  const covered = () => over.evaluate((msg) => {
+    const at = (el) => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return hit?.closest('.math-out') ? 'math' : el.contains(hit) ? 'card' : hit?.tagName;
+    };
+    const card = msg.querySelector('.ui-card');
+    return { footer: at(card.querySelector('.ui-footer')), label: at(card.querySelector('.ui-field-label')) };
+  });
+  const unclipped = await p.addStyleTag({ content: '.math-inline > .math-out:not([hidden]) { display: inline !important; contain: none !important; }' });
+  const attack = await covered();
+  await unclipped.evaluate((el) => el.remove());
+  check(attack.footer === 'math' && attack.label === 'math', 'without the clip the formulas cover the card: ' + JSON.stringify(attack));
+  const shown = await covered();
+  check(shown.footer === 'card' && shown.label === 'card', 'the footer and the label stay the card\'s own: ' + JSON.stringify(shown));
+  await over.screenshot({ path: `${S}/rich-5d-math-over-card.png` });
+  log('math over a card: clipped to its own box (the footer and Notes label stay visible); a look-alike secret label is refused');
+
   // 4. A form: Send waits for the required field, a value out of range is
   // an inline error, and the answer reaches the model as ids and values.
   const trip = await t.send('ui: form');
@@ -113,17 +158,22 @@ module.exports = async function blocks(t) {
   check((await trip.locator('.ui-from').innerText()) === 'Form from General', 'form header');
   check(await trip.locator('.ui-send').isDisabled(), 'Send off until Travellers is filled');
   const people = trip.getByLabel('Travellers', { exact: true });
+  check((await people.getAttribute('aria-required')) === 'true', 'Travellers is read as required');
   await people.fill('13');
   await trip.locator('.ui-field-error').waitFor();
   check((await trip.locator('.ui-field-error').innerText()) === 'Must be at most 12', 'inline error: ' + (await trip.locator('.ui-field-error').innerText()));
+  check((await people.getAttribute('aria-invalid')) === 'true', 'and as wrong, with the error as its description');
   check(await trip.locator('.ui-send').isDisabled(), 'Send off while a value is wrong');
   await people.fill('3');
   check((await trip.locator('.ui-field-error').count()) === 0, 'error gone');
   await trip.getByLabel('Lisbon').check();
   check(!(await trip.locator('.ui-send').isDisabled()), 'Send on once the form is valid');
   await p.screenshot({ path: `${S}/rich-5b-form.png`, fullPage: true });
-  const tripEcho = await (await t.submit(trip)).innerText();
+  // Sent from the keyboard: Send goes away with the answer, and focus stays
+  // on the form.
+  const tripEcho = await (await t.press(trip, '.ui-send')).innerText();
   check(tripEcho.includes('Form answer · trip') && tripEcho.includes('people: 3') && tripEcho.includes('dest: lis'), 'form answer: ' + tripEcho);
+  await eventually(() => focused(trip.locator('.ui-form')), true, 'focus on the answered form');
   const answers = await trip.locator('.ui-answers dd').allInnerTexts();
   check(JSON.stringify(answers) === '["3","Lisbon"]' && (await trip.locator('.ui-card').locator('input, textarea, select, button').count()) === 0,
     'answered form shows its values read-only: ' + JSON.stringify(answers));
@@ -142,6 +192,6 @@ module.exports = async function blocks(t) {
     replies: await p.locator('.msg.user .bubble.reply').count(),
     first: await choicesState(p.locator('.msg.assistant .ui-card-choices').first()),
     stale: (await p.locator('.msg.assistant .ui-card-choices').nth(1).locator('.ui-state').innerText()).startsWith('Not answered'),
-  }), { cards: 5, errors: 2, replies: 3, first: ANSWERED, stale: true }, 'after reload');
+  }), { cards: 6, errors: 2, replies: 3, first: ANSWERED, stale: true }, 'after reload');
   log('ui cards after reload: answered and stale cards stay locked');
 };
