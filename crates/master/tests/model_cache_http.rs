@@ -135,7 +135,7 @@ struct T {
 
 async fn start() -> T {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = Config::load(&dir.path().join("harness.toml")).unwrap();
+    let cfg = Config::load(&dir.path().join("config.toml")).unwrap();
     let (rt, _env) = ProviderRuntime::start(cfg, dir.path(), SecretSet::default()).unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -293,7 +293,7 @@ async fn listing_cache_marks_and_clears() {
         (flag("loc::a"), flag("loc::b"), flag("loc::mine")),
         (json!(false), json!(true), json!(false))
     );
-    let file = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
+    let file = std::fs::read_to_string(t.dir.path().join("config.toml")).unwrap();
     assert!(file.contains("unavailable = true"), "{file}");
 
     // Saving the provider again keeps the mark and its time; the client's
@@ -448,8 +448,7 @@ async fn delete_override_cleans_references() {
         Some(json!({"agent_models": {
                         "general": {"model": "loc::a", "fallbacks": ["loc::org/b"]},
                         "writer": {"model": "loc::org/b", "fallbacks": ["loc::a"]},
-                        // The bare form older clients send: no fallbacks.
-                        "coder": "loc::org/b"},
+                        "coder": {"model": "loc::org/b"}},
                     "default_model": "loc::org/b"})),
     )
     .await;
@@ -477,7 +476,7 @@ async fn delete_override_cleans_references() {
     assert_eq!(v["default_model"], "loc::a");
     let (_, models) = call(&t, Method::GET, "/api/models", None).await;
     assert!(!models.to_string().contains("org/b"));
-    let file = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
+    let file = std::fs::read_to_string(t.dir.path().join("config.toml")).unwrap();
     assert!(!file.contains("org/b"), "{file}");
 
     let (st, v) = call(
@@ -548,7 +547,7 @@ async fn provider_without_models() {
     };
     let (_, models) = call(&t, Method::GET, "/api/models", None).await;
     chat_left(&v, &models);
-    let cfg = Config::load(&t.dir.path().join("harness.toml")).unwrap();
+    let cfg = Config::load(&t.dir.path().join("config.toml")).unwrap();
     assert!(cfg.provider("loc").unwrap().models.is_empty());
     assert!(cfg.provider("demo").is_some());
 
@@ -758,8 +757,12 @@ async fn fallbacks_and_notices() {
             "repeats main",
         ),
         (
-            json!({"general": {"model": "loc::a", "fallbacks": ["loc::b", "b"]}}),
+            json!({"general": {"model": "loc::a", "fallbacks": ["loc::b", "loc::b"]}}),
             "repeats a fallback",
+        ),
+        (
+            json!({"general": {"model": "a", "fallbacks": []}}),
+            "no provider prefix",
         ),
         (
             json!({"general": {"model": "loc::a", "fallbacks": ["loc::nope"]}}),
@@ -785,7 +788,7 @@ async fn fallbacks_and_notices() {
         "/api/admin/agent-models",
         Some(json!({
             "agent_models": {
-                "general": {"model": "loc::a", "fallbacks": ["b"]},
+                "general": {"model": "loc::a", "fallbacks": ["loc::b"]},
                 "coder": {"model": "loc::c", "fallbacks": []},
                 // One model may serve several agents.
                 "writer": {"model": "loc::a", "fallbacks": []},
@@ -797,10 +800,9 @@ async fn fallbacks_and_notices() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
         v["agent_models"]["general"],
-        json!({"model": "loc::a", "fallbacks": ["loc::b"]}),
-        "stored prefixed"
+        json!({"model": "loc::a", "fallbacks": ["loc::b"]})
     );
-    let file = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
+    let file = std::fs::read_to_string(t.dir.path().join("config.toml")).unwrap();
     assert!(file.contains("[agent_models.general]"), "{file}");
 
     let bob = member(&t, "bob").await;
@@ -977,7 +979,7 @@ async fn inherited_fallbacks_and_effort() {
 }
 
 /// Every agent has a stable avatar from its id until an admin sets one,
-/// which is saved in harness.toml; bad bodies, unknown agents and members
+/// which is saved in config.toml; bad bodies, unknown agents and members
 /// are refused.
 #[tokio::test]
 async fn agent_avatars() {
@@ -1002,7 +1004,7 @@ async fn agent_avatars() {
     assert_eq!((&v["id"], &v["avatar"]), (&json!("coder"), &mine));
     let (_, agents) = call(&t, Method::GET, "/api/agents", None).await;
     assert_eq!(agent(&agents, "coder")["avatar"], mine);
-    let file = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
+    let file = std::fs::read_to_string(t.dir.path().join("config.toml")).unwrap();
     assert!(file.contains("[agent_avatars.coder]"), "{file}");
     assert!(file.contains("shape = \"hexagon\""), "{file}");
 

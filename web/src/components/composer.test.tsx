@@ -82,6 +82,7 @@ describe("model for a mention", () => {
     vision: false,
     tools: false,
     default: id === "openai::gpt-4o",
+    unavailable: false,
   });
   test("a leading @agent sends with that agent's default", () => {
     const host = document.createElement("div");
@@ -92,8 +93,8 @@ describe("model for a mention", () => {
         <Composer
           where="home"
           agents={[
-            { id: "general", name: "General", description: "", builtin: true, default_model: null, fallbacks: [], unavailable: [] },
-            { id: "coder", name: "Coder", description: "", builtin: true, default_model: "anthropic::claude-x", fallbacks: [], unavailable: [] },
+            { id: "general", name: "General", description: "", builtin: true, default_model: null, main_model: "openai::gpt-4o", fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } },
+            { id: "coder", name: "Coder", description: "", builtin: true, default_model: "anthropic::claude-x", main_model: "anthropic::claude-x", fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } },
           ]}
           models={[info("openai::gpt-4o"), info("anthropic::claude-x")]}
           workers={[]}
@@ -131,6 +132,7 @@ describe("models the provider dropped", () => {
     vision: false,
     tools: false,
     default: false,
+    unavailable: false,
     ...more,
   });
   const mount = (models: ReturnType<typeof info>[], defaultModel?: string) => {

@@ -184,7 +184,7 @@ export type Item =
   | { type: "agent_changed"; agent: AgentRef }
   | { type: "summary"; through_seq: number; text: string }
   /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
-  | { type: "fallback"; turn_id: string; model: string; from: string | null; reason?: string | null };
+  | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null };
 
 export interface SessionView {
   session_id: string | null;
@@ -236,14 +236,13 @@ export interface Agent {
   builtin: boolean;
   /** The admin's default model for this agent (prefixed); null when it has no chain of its own. */
   default_model: string | null;
-  /** The model it runs on (prefixed): its own, else the server default. Missing from an older server. */
-  main_model?: string | null;
+  /** The model it runs on (prefixed): its own, else the server default. */
+  main_model: string | null;
   /** Tried in order when the default fails or is unavailable (prefixed). */
   fallbacks: string[];
   /** Its default and fallbacks that the provider no longer lists. */
   unavailable: string[];
-  /** Missing only from an older server: derived from the id then. */
-  avatar?: AgentAvatar;
+  avatar: AgentAvatar;
 }
 
 export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";
@@ -292,8 +291,8 @@ export interface ModelInfo {
   tools: boolean;
   default: boolean;
   /** The provider no longer lists it: kept so sessions and agents naming it
-   * still resolve, but not offered for new picks. Missing from an older server. */
-  unavailable?: boolean;
+   * still resolve, but not offered for new picks. */
+  unavailable: boolean;
 }
 
 export type BackdropPref = "animated" | "still" | "off";
@@ -478,8 +477,7 @@ export interface MemoryFact {
 
 export type Preset = "fast" | "balanced" | "best";
 
-export type MemorySource = "provider" | "ollama" | "custom";
-export type ApiStyle = "openai" | "anthropic";
+export type MemorySource = "provider" | "ollama";
 
 export interface MemoryCfg {
   backend: "builtin" | "mem0" | "off";
@@ -488,8 +486,6 @@ export interface MemoryCfg {
   provider_id: string | null;
   embeddings_url: string;
   embeddings_model: string;
-  api_style: ApiStyle;
-  key: "stored" | "none";
   preset: Preset;
   /** Effective. */
   model: string;

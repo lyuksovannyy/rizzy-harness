@@ -15,7 +15,7 @@ use crate::{Error, Result};
 /// The tunnel network; the master is `.1`.
 pub const NET: &str = "10.77.0";
 pub const MASTER_IP: &str = "10.77.0.1";
-pub const IFACE: &str = "wg-harness";
+pub const IFACE: &str = "rizzy-harness";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
@@ -168,7 +168,7 @@ mod tests {
         m.save(dir.path()).unwrap();
         let again = MasterWg::load_or_create(dir.path()).unwrap();
         assert_eq!(again.public_key, m.public_key);
-        let conf = std::fs::read_to_string(dir.path().join("wg-harness.conf")).unwrap();
+        let conf = std::fs::read_to_string(dir.path().join("rizzy-harness.conf")).unwrap();
         assert!(
             conf.contains("Endpoint = 203.0.113.7:51820")
                 && conf.contains("PersistentKeepalive = 25")
@@ -176,7 +176,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for f in ["wg.json", "wg-harness.conf"] {
+            for f in ["wg.json", "rizzy-harness.conf"] {
                 assert_eq!(
                     std::fs::metadata(dir.path().join(f))
                         .unwrap()

@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createOwner, keywordsOnly } = require('./onboard.cjs');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e5-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}"]\n`);
@@ -155,9 +155,9 @@ function fakeProvider() {
     await p.waitForSelector('text=Hello from fake-large');
     log('reply from fake provider with default model');
 
-    // The key landed in secrets.toml, never in harness.toml.
-    const toml = fs.readFileSync(`${S}/data/harness.toml`, 'utf8');
-    check(!toml.includes(KEY) && toml.includes('fake-large'), 'harness.toml has config but no key');
+    // The key landed in secrets.toml, never in config.toml.
+    const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
+    check(!toml.includes(KEY) && toml.includes('fake-large'), 'config.toml has config but no key');
     check(fs.readFileSync(`${S}/data/secrets.toml`, 'utf8').includes(KEY), 'secrets.toml has the key');
     check((fs.statSync(`${S}/data/secrets.toml`).mode & 0o777) === 0o600, 'secrets.toml is 0600');
     log('files ok: key only in secrets.toml (0600)');

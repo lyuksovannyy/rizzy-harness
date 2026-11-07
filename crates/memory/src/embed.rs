@@ -37,8 +37,7 @@ impl Preset {
 /// How the key is sent: `Authorization: Bearer` (OpenAI style) or
 /// `x-api-key` plus `anthropic-version` (Anthropic style). The request and
 /// response bodies are the OpenAI `/embeddings` shape either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApiStyle {
     #[default]
     Openai,

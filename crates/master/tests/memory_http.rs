@@ -443,12 +443,12 @@ struct C {
     mem: Arc<SqliteMemory>,
 }
 
-/// A server wired like `harness serve`: config and memory from the data
+/// A server wired like `rizzy-harness serve`: config and memory from the data
 /// dir, which `setup` prepares first.
 async fn start_cfg(setup: impl FnOnce(&std::path::Path)) -> C {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
-    let cfg = harness_master::config::Config::load(&dir.path().join("harness.toml")).unwrap();
+    let cfg = harness_master::config::Config::load(&dir.path().join("config.toml")).unwrap();
     let secrets = harness_core::SecretSet::default();
     let (_, mem) = harness_master::providers::memory(&cfg, dir.path(), &secrets).unwrap();
     let mem = mem.unwrap();
@@ -562,14 +562,9 @@ async fn embeddings_from_a_provider_follow_it() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["active_model"], "emb-1");
-    assert_eq!(
-        (&v["key"], &v["api_style"]),
-        (&json!("none"), &json!("openai"))
-    );
     assert_eq!(seen_a.last()["authorization"], "Bearer pk-1");
     // The provider's key is resolved live, never copied.
-    assert!(!file(&c, "harness.toml").contains("pk-1"));
-    assert!(!file(&c, "secrets.toml").contains("embeddings"));
+    assert!(!file(&c, "config.toml").contains("pk-1"));
 
     // The provider moves and gets a new key: the embedder follows at once.
     put_provider(&c, "acme", "custom_openai", &b, "pk-2").await;
@@ -587,7 +582,6 @@ async fn embeddings_from_a_provider_follow_it() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["api_style"], "anthropic");
     let last = seen_a.last();
     assert_eq!(last["x_api_key"], "ak-1");
     assert_eq!(last["anthropic_version"], "2023-06-01");
@@ -636,14 +630,13 @@ async fn embeddings_failures_say_why() {
 }
 
 #[tokio::test]
-async fn ollama_and_custom_sources_and_their_key() {
+async fn ollama_source() {
     let c = start_cfg(|_| {}).await;
     let (a, seen_a) = fake_embeddings(true).await;
-    let (b, seen_b) = fake_embeddings(true).await;
     // Ollama: the preset's model, no key.
     let (st, v) = put_mem(
         &c,
-        json!({"recall": "meaning", "source": "ollama", "embeddings_url": a, "preset": "fast"}),
+        json!({"recall": "meaning", "source": "ollama", "embeddings_url": format!("{a}/"), "preset": "fast"}),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
@@ -651,164 +644,18 @@ async fn ollama_and_custom_sources_and_their_key() {
         (&v["model"], &v["active_model"]),
         (&json!("all-minilm"), &json!("all-minilm"))
     );
+    assert_eq!(v["embeddings_url"], json!(a));
     assert_eq!(seen_a.last()["authorization"], Value::Null);
-    // Custom without a model, or with a key over plain http elsewhere: 400.
-    let (st, _) = put_mem(
-        &c,
-        json!({"recall": "meaning", "source": "custom", "embeddings_url": a}),
-    )
-    .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, v) = put_mem(
-        &c,
-        json!({"recall": "meaning", "source": "custom", "embeddings_url": "http://embed.example/v1",
-               "embeddings_model": "e", "embeddings_key": "ek-1"}),
-    )
-    .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
-    // Custom with its own key.
-    let custom = |url: &str, style: &str, key: Option<&str>| {
-        json!({"recall": "meaning", "source": "custom", "embeddings_url": url,
-               "embeddings_model": "e", "api_style": style, "embeddings_key": key})
-    };
-    let (st, v) = put_mem(&c, custom(&a, "openai", Some("ek-1"))).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["key"], "stored");
-    assert_eq!(seen_a.last()["authorization"], "Bearer ek-1");
-    assert!(file(&c, "secrets.toml").contains("ek-1"));
-    assert!(!file(&c, "harness.toml").contains("ek-1"));
-    // Omitted key, same URL: kept; Anthropic style sends it as x-api-key.
-    let (st, v) = put_mem(&c, custom(&a, "anthropic", None)).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["key"], "stored");
-    let last = seen_a.last();
-    assert_eq!(
-        (&last["x_api_key"], &last["anthropic_version"]),
-        (&json!("ek-1"), &json!("2023-06-01"))
-    );
-    assert_eq!(last["authorization"], Value::Null);
-    // Keywords only: nothing is called, the custom settings stay.
+    // Keywords only: nothing is called, the Ollama settings stay.
+    let before = seen_a.count();
     let (st, v) = put_mem(&c, json!({"recall": "keywords"})).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
-        (&v["source"], &v["key"]),
-        (&json!("custom"), &json!("stored"))
+        (&v["source"], &v["embeddings_url"]),
+        (&json!("ollama"), &json!(a))
     );
     assert_eq!(v["active_model"], Value::Null);
-    // Another URL without a key: the stored key is not sent there, and goes.
-    let (st, v) = put_mem(&c, custom(&b, "openai", None)).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["key"], "none");
-    assert_eq!(seen_b.last()["authorization"], Value::Null);
-    assert!(!file(&c, "secrets.toml").contains("ek-1"));
-    // Switching away from custom clears a new key too.
-    put_mem(&c, custom(&b, "openai", Some("ek-2"))).await;
-    assert!(file(&c, "secrets.toml").contains("ek-2"));
-    let (st, v) = put_mem(
-        &c,
-        json!({"recall": "meaning", "source": "ollama", "embeddings_url": b}),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["key"], "none");
-    assert!(!file(&c, "secrets.toml").contains("ek-2"));
-    recall(&c).await;
-    assert_eq!(seen_b.last()["authorization"], Value::Null);
-}
-
-#[tokio::test]
-async fn legacy_embeddings_config_loads() {
-    let (a, seen) = fake_embeddings(true).await;
-    let c = start_cfg(|dir| {
-        std::fs::write(
-            dir.join("harness.toml"),
-            format!("[memory]\nembeddings_url = \"{a}\"\nembeddings_model = \"old-e\"\nembeddings_key_secret = \"embeddings\"\n"),
-        )
-        .unwrap();
-        harness_master::secrets::set(
-            &dir.join("secrets.toml"),
-            "embeddings",
-            Some(&Secret::new("ek-old".into())),
-        )
-        .unwrap();
-    })
-    .await;
-    let (_, v) = call(&c, Method::GET, "/api/admin/memory", None).await;
-    assert_eq!(
-        (&v["recall"], &v["source"], &v["key"], &v["api_style"]),
-        (
-            &json!("meaning"),
-            &json!("custom"),
-            &json!("stored"),
-            &json!("openai")
-        )
-    );
-    assert_eq!(v["active_model"], "old-e");
-    recall(&c).await;
-    assert_eq!(seen.last()["authorization"], "Bearer ek-old");
-}
-
-/// The custom source's stored key lists that endpoint's models when asked
-/// (`memory: true`, same URL only), and a failed save keeps the old key.
-#[tokio::test]
-async fn custom_source_key_lists_models_and_survives_a_failed_save() {
-    use axum::http::HeaderMap;
-    use axum::response::IntoResponse;
-    let app = axum::Router::new()
-        .route(
-            "/v1/models",
-            axum::routing::get(|h: HeaderMap| async move {
-                if h.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer ek-9") {
-                    axum::Json(json!({"data": [{"id": "emb-1"}]})).into_response()
-                } else {
-                    (StatusCode::UNAUTHORIZED, "no").into_response()
-                }
-            }),
-        )
-        .route(
-            "/v1/embeddings",
-            axum::routing::post(|| async {
-                axum::Json(json!({"data": [{"index": 0, "embedding": [1.0, 0.0]}]}))
-            }),
-        );
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/v1", l.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    let c = start_cfg(|_| {}).await;
-    let custom = |key: &str| {
-        json!({"recall": "meaning", "source": "custom", "embeddings_url": url,
-               "embeddings_model": "e", "embeddings_key": key})
-    };
-    let (st, v) = put_mem(&c, custom("ek-9")).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let test = |memory: bool| {
-        let body =
-            json!({"preset": "custom_openai", "base_url": format!("{url}/"), "memory": memory});
-        let c = &c;
-        async move {
-            call(c, Method::POST, "/api/admin/providers/test", Some(body))
-                .await
-                .1
-        }
-    };
-    let v = test(true).await;
-    assert_eq!(
-        (&v["ok"], &v["models"][0]["id"]),
-        (&json!(true), &json!("emb-1")),
-        "{v}"
-    );
-    assert_eq!(test(false).await["ok"], false, "only when asked");
-
-    let tmp = c.dir.path().join("harness.toml.tmp");
-    std::fs::create_dir(&tmp).unwrap();
-    let (st, _) = put_mem(&c, custom("ek-10")).await;
-    assert!(!st.is_success());
-    std::fs::remove_dir(&tmp).unwrap();
-    let secrets = file(&c, "secrets.toml");
-    assert!(
-        secrets.contains("ek-9") && !secrets.contains("ek-10"),
-        "{secrets}"
-    );
+    assert_eq!(seen_a.count(), before);
 }
 
 /// A provider change made while the memory test embedding runs is not
@@ -841,7 +688,7 @@ async fn memory_save_does_not_undo_concurrent_provider_changes() {
     let ((st, v), (dst, _)) = tokio::join!(
         put_mem(
             &c,
-            json!({"recall": "meaning", "source": "custom", "embeddings_url": slow,
+            json!({"recall": "meaning", "source": "ollama", "embeddings_url": slow,
                    "embeddings_model": "e"}),
         ),
         later(Method::DELETE, "/api/admin/providers/gone", None),
@@ -849,7 +696,7 @@ async fn memory_save_does_not_undo_concurrent_provider_changes() {
     assert_eq!((st, dst), (StatusCode::OK, StatusCode::OK), "{v}");
     let (_, p) = call(&c, Method::GET, "/api/admin/providers", None).await;
     assert!(!p.to_string().contains("\"gone\""), "{p}");
-    assert!(!file(&c, "harness.toml").contains("gone"));
+    assert!(!file(&c, "config.toml").contains("gone"));
 
     let moved = json!({"name": "Acme emb", "preset": "custom_openai", "base_url": fast,
                        "api_key": "k-emb-2", "models": [{"id": "chat-1"}]});

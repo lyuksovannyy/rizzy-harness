@@ -77,7 +77,7 @@ struct T {
 async fn start_with(setup: impl FnOnce(&std::path::Path)) -> T {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
-    let cfg = Config::load(&dir.path().join("harness.toml")).unwrap();
+    let cfg = Config::load(&dir.path().join("config.toml")).unwrap();
     let secrets = SecretSet::default();
     let (rt, _env) = ProviderRuntime::start(cfg, dir.path(), secrets.clone()).unwrap();
     let rt = Arc::new(rt);
@@ -317,7 +317,7 @@ async fn admin_configures_provider_live() {
     assert!(!v.to_string().contains(KEY), "key never returned");
 
     // Files: config names the secret, the secret file holds it (0600).
-    let toml = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
+    let toml = std::fs::read_to_string(t.dir.path().join("config.toml")).unwrap();
     assert!(
         toml.contains("[[providers]]")
             && toml.contains("api_key_secret = \"provider-fake\"")
@@ -335,7 +335,7 @@ async fn admin_configures_provider_live() {
             0o600
         );
     }
-    let reloaded = Config::load(&t.dir.path().join("harness.toml")).unwrap();
+    let reloaded = Config::load(&t.dir.path().join("config.toml")).unwrap();
     assert_eq!(reloaded.default_model.as_deref(), Some("fake::fake-1"));
     assert_eq!(reloaded.providers[0].models[0].context, Some(4096));
 
@@ -437,9 +437,6 @@ async fn admin_configures_provider_live() {
         let (st, _, _) = req(&t, m, path, Some(body), Some(&bc)).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{path}");
     }
-    // The old single-provider routes are gone.
-    let (st, _) = admin(&t, Method::GET, "/api/admin/provider", None).await;
-    assert_ne!(st, StatusCode::OK);
 }
 
 /// Fixed presets keep their own URL and need a key; ids are checked.
@@ -522,8 +519,8 @@ async fn fixed_presets_pin_their_url() {
     }
 }
 
-/// Two providers: prefixes route, legacy ids find their provider, agent
-/// defaults apply to new sessions, and deleting cleans up.
+/// Two providers: prefixes route, agent defaults apply to new sessions, and
+/// deleting cleans up.
 #[tokio::test]
 async fn several_providers_route_by_prefix() {
     let a = fake_openai("A", &["shared", "a-only"]).await;
@@ -555,16 +552,13 @@ async fn several_providers_route_by_prefix() {
 
     let (_, text) = chat(&t, Some("beta::shared"), "hi").await;
     assert_eq!(text, "B shared, my key is [REDACTED]");
-    // Legacy unprefixed ids: the first provider listing it.
-    let (_, text) = chat(&t, Some("b-only"), "hi").await;
-    assert_eq!(text, "B b-only, my key is [REDACTED]");
-    let (_, text) = chat(&t, Some("shared"), "hi").await;
+    let (_, text) = chat(&t, Some("alpha::shared"), "hi").await;
     assert_eq!(text, "A shared, my key is [REDACTED]");
 
     // Per-agent defaults: unknown agents and models are refused.
     for body in [
-        json!({"agent_models": {"nobody": "beta::b-only"}}),
-        json!({"agent_models": {"general": "beta::nope"}}),
+        json!({"agent_models": {"nobody": {"model": "beta::b-only"}}}),
+        json!({"agent_models": {"general": {"model": "beta::nope"}}}),
         json!({"agent_models": {}, "default_model": "gone::x"}),
     ] {
         let (st, _) = admin(&t, Method::PUT, "/api/admin/agent-models", Some(body)).await;
@@ -574,14 +568,14 @@ async fn several_providers_route_by_prefix() {
         &t,
         Method::PUT,
         "/api/admin/agent-models",
-        Some(json!({"agent_models": {"general": "beta::b-only", "writer": "a-only"}})),
+        Some(json!({"agent_models": {"general": {"model": "beta::b-only"}, "writer": {"model": "alpha::a-only"}}})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
         v["agent_models"]["writer"],
         json!({"model": "alpha::a-only", "fallbacks": []}),
-        "stored prefixed"
+        "stored"
     );
     assert_eq!(v["default_model"], "alpha::shared", "kept while valid");
     let (_, agents) = admin(&t, Method::GET, "/api/agents", None).await;
@@ -665,47 +659,6 @@ async fn several_providers_route_by_prefix() {
     assert_eq!(v["default_model"], "demo::mock");
 }
 
-/// An older single-provider harness.toml keeps working: one provider, its
-/// key under the old secret name, ids answer both prefixed and bare.
-#[tokio::test]
-async fn legacy_config_keeps_working() {
-    let fake = fake_openai("old", &["fake-1"]).await;
-    let toml = format!(
-        "[provider]\nkind = \"openai\"\nbase_url = \"{fake}\"\nmodel = \"fake-1\"\napi_key_secret = \"openai\"\n\n[[models]]\nid = \"fake-1\"\nvision = true\n"
-    );
-    let t = start_with(|dir| {
-        std::fs::write(dir.join("harness.toml"), toml).unwrap();
-        harness_master::secrets::set(
-            &dir.join("secrets.toml"),
-            "openai",
-            Some(&Secret::new(KEY.into())),
-        )
-        .unwrap();
-    })
-    .await;
-    let (_, v) = admin(&t, Method::GET, "/api/admin/providers", None).await;
-    let p = &v["providers"][0];
-    // A custom endpoint gets an id from its host, never a preset's.
-    let port = reqwest::Url::parse(&fake).unwrap().port().unwrap();
-    let id = format!("127-0-0-1-{port}");
-    assert_eq!(
-        (&p["id"], &p["preset"], &p["key"]),
-        (&json!(id), &json!("custom_openai"), &json!("stored"))
-    );
-    assert_eq!(v["default_model"], format!("{id}::fake-1"));
-    let (_, m) = admin(&t, Method::GET, "/api/models", None).await;
-    assert_eq!(ids(&m), [format!("{id}::fake-1")]);
-    assert_eq!(m["models"][0]["vision"], true);
-    let (_, text) = chat(&t, Some("fake-1"), "hi").await;
-    assert_eq!(text, "old fake-1, my key is [REDACTED]");
-    // Settings that only read the config still work, and nothing is
-    // rewritten until something changes.
-    let (st, _) = admin(&t, Method::GET, "/api/admin/memory", None).await;
-    assert_eq!(st, StatusCode::OK);
-    let file = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
-    assert!(file.contains("[provider]"));
-}
-
 /// One prefix, one provider: action paths and other presets' ids are
 /// refused with a reason, the demo can be removed, and a failed save keeps
 /// the key that goes with the saved URL.
@@ -757,9 +710,9 @@ async fn prefixes_conflicts_and_failed_saves() {
     assert_eq!(v["providers"].as_array().unwrap().len(), 1);
     assert_eq!(v["configured"], true);
 
-    // harness.toml cannot be written: the save fails, and the stored key
+    // config.toml cannot be written: the save fails, and the stored key
     // is still the one for the URL that stays saved.
-    let tmp = t.dir.path().join("harness.toml.tmp");
+    let tmp = t.dir.path().join("config.toml.tmp");
     std::fs::create_dir(&tmp).unwrap();
     let (st, v) = admin(
         &t,
@@ -808,7 +761,7 @@ async fn default_model_sent_by_the_client_still_follows_defaults() {
         &t,
         Method::PUT,
         "/api/admin/agent-models",
-        Some(json!({"agent_models": {"general": "beta::m2"}, "default_model": "beta::m2"})),
+        Some(json!({"agent_models": {"general": {"model": "beta::m2"}}, "default_model": "beta::m2"})),
     )
     .await;
     assert_eq!(st, StatusCode::OK);

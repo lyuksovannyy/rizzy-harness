@@ -1,15 +1,13 @@
-// Model ids are `<provider_id>::<raw>`. Ids saved before providers had
-// prefixes (old sessions, preferences) are raw: they mean the first
-// provider listing that id.
+// Model ids are `<provider_id>::<raw>`.
 import type { AgentChain, ModelInfo, Prefs, ProviderModel } from "../types";
 
-/** The model `id` names, prefixed or legacy raw. */
+/** The model `id` names. */
 export function resolveModel(models: ModelInfo[], id: string | null | undefined): ModelInfo | undefined {
   if (!id) return undefined;
-  return models.find((m) => m.id === id) ?? (id.includes("::") ? undefined : models.find((m) => m.raw === id));
+  return models.find((m) => m.id === id);
 }
 
-/** The raw id of a prefixed model, for short labels; a legacy raw id as it is. */
+/** The raw id of a prefixed model, for short labels. */
 export function rawModel(id: string): string {
   const i = id.indexOf("::");
   return i < 0 ? id : id.slice(i + 2) || id;
@@ -17,11 +15,11 @@ export function rawModel(id: string): string {
 
 /** What a fallback note says: who answered and why; the main model and
  * the provider's error on hover. */
-export function fallbackNote(n: { model: string; from: string | null; reason?: string | null }): { text: string; title: string } {
+export function fallbackNote(n: { model: string; from: string; reason?: string | null }): { text: string; title: string } {
   const failed = !!n.reason && n.reason !== "unavailable";
   return {
     text: `Answered by ${rawModel(n.model)} — the main model ${failed ? "failed" : "was unavailable"}`,
-    title: [n.from && `Main model: ${rawModel(n.from)}`, failed && n.reason].filter(Boolean).join("\n"),
+    title: [`Main model: ${rawModel(n.from)}`, failed && n.reason].filter(Boolean).join("\n"),
   };
 }
 
@@ -143,8 +141,8 @@ export function planProblems(p: Plan, ids: string[], agents: { id: string; name:
   return out;
 }
 
-/** The plan a form starts from: the saved agents, General on the old
- * global default when it has none of its own, and `local`'s models (one
+/** The plan a form starts from: the saved agents, General on the server
+ * default model when it has no chain of its own, and `local`'s models (one
  * provider's prefix) as `::raw`. Models `drop` names are left out. */
 export function planFrom(
   saved: Record<string, AgentChain>,

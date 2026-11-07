@@ -116,16 +116,10 @@ pub fn build(cfg: &Config, data_dir: &Path) -> anyhow::Result<Built> {
         routes.push(Route {
             prefix: p.id.clone(),
             provider,
-            models: p.models.iter().map(|m| m.id.clone()).collect(),
         });
     }
-    let default = cfg.effective_default();
-    let fallback = default
-        .as_deref()
-        .and_then(harness_agent_native::llm::split_model)
-        .map(|(prefix, _)| prefix);
     Ok(Built {
-        provider: Arc::new(ModelRouter::new(routes, fallback)),
+        provider: Arc::new(ModelRouter::new(routes)),
         keys,
         env_remove,
     })
@@ -218,17 +212,17 @@ impl ProviderRuntime {
     /// Validate and persist a config change that does not touch the provider.
     pub fn save(&self, cfg: Config) -> anyhow::Result<()> {
         cfg.validate()?;
-        cfg.save(&self.data_dir.join("harness.toml"))?;
+        cfg.save(&self.data_dir.join(harness_core::CONFIG_FILE))?;
         *self.config.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
         Ok(())
     }
 
-    /// Validate, build, persist to `harness.toml`, then switch. Running turns
+    /// Validate, build, persist to `config.toml`, then switch. Running turns
     /// finish on the old provider; the next turn uses the new one.
     pub fn apply(&self, cfg: Config) -> anyhow::Result<()> {
         cfg.validate()?;
         let built = build(&cfg, &self.data_dir)?;
-        cfg.save(&self.data_dir.join("harness.toml"))?;
+        cfg.save(&self.data_dir.join(harness_core::CONFIG_FILE))?;
         for k in built.keys {
             self.secrets.add(k);
         }
@@ -270,23 +264,12 @@ fn secret(data_dir: &Path, name: &Option<String>) -> anyhow::Result<Option<Secre
     }
 }
 
-/// The embedder for `[memory]`, when meaning recall is on.
+/// The embedder for `[memory]`, when meaning recall is on. A provider
+/// source uses that provider's URL and its key as resolved now.
 pub fn embedder(
     cfg: &Config,
     data_dir: &Path,
     secrets: &SecretSet,
-) -> anyhow::Result<Option<harness_memory::Embedder>> {
-    embedder_with(cfg, data_dir, secrets, None)
-}
-
-/// Like [`embedder`], with `new_key` (a custom endpoint's key not saved
-/// yet) in place of the stored one. A provider source uses that provider's
-/// URL and its key as resolved now.
-pub fn embedder_with(
-    cfg: &Config,
-    data_dir: &Path,
-    secrets: &SecretSet,
-    new_key: Option<Secret<String>>,
 ) -> anyhow::Result<Option<harness_memory::Embedder>> {
     use crate::config::{EmbedSource, Recall};
     use harness_memory::ApiStyle;
@@ -308,13 +291,6 @@ pub fn embedder_with(
             (p.base_url.clone(), key, style)
         }
         EmbedSource::Ollama => (m.ollama_url().to_string(), None, ApiStyle::Openai),
-        EmbedSource::Custom => {
-            let key = match new_key {
-                Some(k) => Some(k),
-                None => secret(data_dir, &m.embeddings_key_secret)?,
-            };
-            (m.embeddings_url.clone(), key, m.api_style)
-        }
     };
     if key.is_some() && !crate::config::url_allowed(&url) {
         anyhow::bail!(

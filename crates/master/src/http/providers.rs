@@ -123,24 +123,6 @@ pub(super) struct TestBody {
     /// Reuse this provider's saved key (same base URL only).
     #[serde(default)]
     provider_id: Option<String>,
-    /// Reuse the custom embeddings key saved in `[memory]` (same URL only).
-    #[serde(default)]
-    memory: bool,
-}
-
-/// The custom embeddings key `[memory]` keeps, only if it was saved for
-/// `base`.
-fn memory_key(rt: &ProviderRuntime, base: &str) -> Option<Secret<String>> {
-    let cfg = rt.config();
-    let mc = &cfg.memory;
-    if mc.source != crate::config::EmbedSource::Custom
-        || !presets::same_url(&mc.embeddings_url, base)
-    {
-        return None;
-    }
-    crate::secrets::get(&secrets_path(rt), mc.embeddings_key_secret.as_deref()?)
-        .ok()
-        .flatten()
 }
 
 pub(super) async fn test_provider(
@@ -171,11 +153,7 @@ pub(super) async fn test_provider(
                         || (sp.api_key_env.is_none() && sp.api_key_secret.is_none()))
             })
         });
-    let memory = (typed.is_none() && saved.is_none() && b.memory)
-        .then(|| memory_key(&rt, &base))
-        .flatten();
-    let own = own && memory.is_none();
-    let key = typed.or(saved).or(memory);
+    let key = typed.or(saved);
     let ollama = p.id == "ollama";
     match crate::providers::list_models(p.kind, &base, key.as_ref(), ollama).await {
         Ok(models) => {
@@ -517,8 +495,8 @@ where
 
 #[derive(Deserialize)]
 pub(super) struct AgentModelsBody {
-    /// Agent id -> its model and fallbacks (a bare model id: no
-    /// fallbacks); `null` removes the agent's assignment.
+    /// Agent id -> its model and fallbacks; `null` removes the agent's
+    /// assignment.
     #[serde(default)]
     agent_models: BTreeMap<String, Option<AgentChain>>,
     /// Missing: unchanged. `null`: falls back (agent `general`, first model).
@@ -537,7 +515,8 @@ pub(super) async fn put_agent_models(
     let mut cfg = rt.config();
     let agents = m.agents();
     let model = |cfg: &Config, id: &str| {
-        cfg.canonical_model(id)
+        cfg.knows_model(id)
+            .then(|| id.to_string())
             .ok_or_else(|| bad(format!("unknown model {id:?}")))
     };
     for (agent, choice) in b.agent_models {
@@ -718,11 +697,10 @@ pub(super) struct ModelTestBody {
     base_url: Option<String>,
     #[serde(default)]
     api_key: Option<String>,
-    /// The API style of a bare `base_url` (custom memory endpoints).
+    /// The API kind of a bare `base_url`.
     #[serde(default)]
     kind: Option<ProviderKind>,
-    /// An embeddings model: embed a word instead of chatting. Also reuses
-    /// the custom embeddings key `[memory]` keeps (same URL only).
+    /// An embeddings model: embed a word instead of chatting.
     #[serde(default)]
     memory: bool,
 }
@@ -779,9 +757,7 @@ pub(super) async fn test_model(
     {
         return fail("enter the provider's own model id".into());
     }
-    let key = new_key(&b.api_key)
-        .or_else(|| stored_key(&rt, b.provider_id.as_deref(), &base))
-        .or_else(|| b.memory.then(|| memory_key(&rt, &base)).flatten());
+    let key = new_key(&b.api_key).or_else(|| stored_key(&rt, b.provider_id.as_deref(), &base));
     if key.is_some() && !crate::config::url_allowed(&base) {
         return fail("a key goes to https:// only (plain http only for localhost)".into());
     }

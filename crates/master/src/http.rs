@@ -1158,7 +1158,7 @@ async fn delete_memory(
 
 fn memory_cfg_json(m: &Master, cfg: &crate::config::Config) -> serde_json::Value {
     use crate::config::{EmbedSource, ProviderKind};
-    use harness_memory::{ApiStyle, Preset};
+    use harness_memory::Preset;
     let mc = &cfg.memory;
     // Until a provider is chosen, suggest the default model's provider (else
     // the first real one), or Ollama when there is none.
@@ -1178,16 +1178,11 @@ fn memory_cfg_json(m: &Master, cfg: &crate::config::Config) -> serde_json::Value
             Some(p) => (EmbedSource::Provider, Some(p)),
             None => (EmbedSource::Ollama, None),
         },
-        s => (s, None),
-    };
-    let api_style = match provider {
-        Some(p) if p.kind == ProviderKind::Anthropic => ApiStyle::Anthropic,
-        Some(_) => ApiStyle::Openai,
-        None => mc.api_style,
+        EmbedSource::Ollama => (EmbedSource::Ollama, None),
     };
     let (url, model) = match source {
         EmbedSource::Ollama => (mc.ollama_url(), mc.model()),
-        _ => (mc.embeddings_url.as_str(), mc.embeddings_model.clone()),
+        EmbedSource::Provider => (mc.embeddings_url.as_str(), mc.embeddings_model.clone()),
     };
     let presets: Vec<serde_json::Value> = [Preset::Fast, Preset::Balanced, Preset::Best]
         .iter()
@@ -1206,8 +1201,6 @@ fn memory_cfg_json(m: &Master, cfg: &crate::config::Config) -> serde_json::Value
         "provider_id": provider.map(|p| &p.id),
         "embeddings_url": url,
         "embeddings_model": mc.embeddings_model,
-        "api_style": api_style,
-        "key": if mc.embeddings_key_secret.is_some() { "stored" } else { "none" },
         "preset": mc.preset,
         "model": model,
         "active_model": m.builtin_memory().and_then(|b| b.embedder_model()),
@@ -1248,16 +1241,11 @@ struct MemoryCfgBody {
     source: Option<crate::config::EmbedSource>,
     #[serde(default)]
     provider_id: Option<String>,
+    /// Ollama source only.
     #[serde(default)]
     embeddings_url: Option<String>,
     #[serde(default)]
     embeddings_model: Option<String>,
-    #[serde(default)]
-    api_style: Option<harness_memory::ApiStyle>,
-    /// Custom source only; omitted or empty keeps the stored key while the
-    /// URL it was saved for stays.
-    #[serde(default)]
-    embeddings_key: Option<String>,
     #[serde(default)]
     preset: Option<harness_memory::Preset>,
 }
@@ -1308,7 +1296,7 @@ async fn put_memory_cfg(
     headers: HeaderMap,
     Json(b): Json<MemoryCfgBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    use crate::config::{EMBEDDINGS_SECRET, EmbedSource, ProviderKind, Recall};
+    use crate::config::{EmbedSource, ProviderKind, Recall};
     require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let mut cfg = rt.config();
@@ -1324,7 +1312,6 @@ async fn put_memory_cfg(
     if let Some(p) = b.preset {
         cfg.memory.preset = p;
     }
-    let mut new_key = None;
     if b.recall == Recall::Meaning {
         let source = b
             .source
@@ -1341,23 +1328,15 @@ async fn put_memory_cfg(
                     Some(p) => Some(p.id.clone()),
                 }
             }
-            _ => None,
+            EmbedSource::Ollama => None,
         };
-        if source == EmbedSource::Custom {
-            new_key = b
-                .embeddings_key
-                .as_deref()
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .map(|k| harness_core::Secret::new(k.to_string()));
-        }
         let url = b.embeddings_url.as_deref().unwrap_or("").trim();
         let mc = &mut cfg.memory;
         mc.source = source;
         mc.provider_id = provider_id;
         mc.embeddings_url = match source {
             EmbedSource::Provider => String::new(),
-            _ => url.trim_end_matches('/').to_string(),
+            EmbedSource::Ollama => url.trim_end_matches('/').to_string(),
         };
         mc.embeddings_model = b
             .embeddings_model
@@ -1365,23 +1344,10 @@ async fn put_memory_cfg(
             .unwrap_or("")
             .trim()
             .to_string();
-        mc.api_style = match source {
-            EmbedSource::Custom => b.api_style.unwrap_or_default(),
-            _ => Default::default(),
-        };
-        // A stored key stays only with the custom URL it was saved for.
-        let keep = source == EmbedSource::Custom
-            && old.source == EmbedSource::Custom
-            && crate::presets::same_url(&old.embeddings_url, &mc.embeddings_url);
-        mc.embeddings_key_secret = match (&new_key, keep) {
-            (Some(_), _) => Some(EMBEDDINGS_SECRET.to_string()),
-            (None, true) => old.embeddings_key_secret.clone(),
-            (None, false) => None,
-        };
     }
     cfg.validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let emb = crate::providers::embedder_with(&cfg, rt.data_dir(), &rt.secrets, new_key.clone())
+    let emb = crate::providers::embedder(&cfg, rt.data_dir(), &rt.secrets)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     if let Some(e) = &emb {
         e.embed(&["test".to_string()])
@@ -1419,17 +1385,8 @@ async fn put_memory_cfg(
     latest
         .validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let secrets_path = rt.data_dir().join("secrets.toml");
-    providers::with_secret(&secrets_path, EMBEDDINGS_SECRET, new_key.as_ref(), || {
-        rt.save(latest.clone())
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-    })?;
-    // Only our own name: a key referenced by hand is left alone.
-    if old.embeddings_key_secret.as_deref() == Some(EMBEDDINGS_SECRET)
-        && latest.memory.embeddings_key_secret.is_none()
-    {
-        let _ = crate::secrets::set(&secrets_path, EMBEDDINGS_SECRET, None);
-    }
+    rt.save(latest.clone())
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(bm) = m.builtin_memory() {
         bm.set_embedder(emb);
     }
@@ -1975,7 +1932,7 @@ async fn graphify_json(m: &Master) -> serde_json::Value {
         "installed": harness_tools::graphify::installed_version().await,
         "pinned_version": harness_tools::graphify::VERSION,
         "remote_setup": [
-            "harness graphify install",
+            "rizzy-harness graphify install",
             "echo 'graphify = true' >> <data dir>/node.toml   # then restart the node",
         ],
     })
@@ -2023,7 +1980,8 @@ async fn install_graphify(
     if m.graphify().is_none() {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "this server runs no built-in node; run `harness graphify install` on each node".into(),
+            "this server runs no built-in node; run `rizzy-harness graphify install` on each node"
+                .into(),
         ));
     }
     let (ok, log) = match harness_tools::graphify::install().await {

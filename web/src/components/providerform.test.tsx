@@ -71,8 +71,10 @@ const agent = (id: string, name: string): Agent => ({
   description: "",
   builtin: true,
   default_model: null,
+  main_model: null,
   fallbacks: [],
   unavailable: [],
+  avatar: { shape: "circle", eyes: "round", accent: "blue" },
 });
 const AGENTS = [agent("general", "General"), agent("coder", "Coder")];
 
@@ -157,7 +159,7 @@ describe("wait after a test", () => {
     expect(host.textContent).toContain("May train on your prompts.");
     testProvider.mockResolvedValue({
       ok: true,
-      models: [{ id: "meta/llama-3.1-70b-instruct", name: null, context: 131072, max_output: null, effort: null, vision: false, tools: true }],
+      models: [m("meta/llama-3.1-70b-instruct", { context: 131072, vision: false, tools: true })],
     });
     type(field("API key"), "nvapi-test");
     await act(async () => button("Test connection").click());

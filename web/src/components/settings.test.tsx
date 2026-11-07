@@ -46,8 +46,10 @@ const agent = (id: string, name: string, more: Partial<Agent> = {}): Agent => ({
   description: "",
   builtin: true,
   default_model: null,
+  main_model: null,
   fallbacks: [],
   unavailable: [],
+  avatar: { shape: "circle", eyes: "round", accent: "blue" },
   ...more,
 });
 
@@ -56,7 +58,7 @@ function render(prefs: Partial<Prefs>) {
     root.render(
       <Settings
         me={{ user_id: "u", username: "alex", role: "member", can_agentic: false, must_change_password: false }}
-        agents={[agent("general", "General"), agent("coder", "Coder", { unavailable: ["openai::gpt-4"] })]}
+        agents={[agent("general", "General"), agent("coder", "Coder", { main_model: "openai::gpt-4", unavailable: ["openai::gpt-4"] })]}
         models={[model("gpt-4", true), model("gpt-4o")]}
         prefs={{ search_url: "", default_agent: null, default_model: null, ...prefs } as Prefs}
         onPrefs={() => {}}

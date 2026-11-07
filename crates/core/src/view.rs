@@ -60,7 +60,7 @@ pub enum Item {
     Fallback {
         turn_id: String,
         model: String,
-        from: Option<String>,
+        from: String,
         /// Why `from` was not used: "unavailable", or the provider's error.
         #[serde(default)]
         reason: Option<String>,
@@ -323,7 +323,7 @@ impl SessionView {
             EventKind::ModelFallback(f) => self.items.push(Item::Fallback {
                 turn_id: f.turn_id,
                 model: f.model,
-                from: Some(f.from),
+                from: f.from,
                 reason: f.reason,
             }),
         }

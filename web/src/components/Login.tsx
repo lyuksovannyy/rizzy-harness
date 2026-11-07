@@ -5,7 +5,7 @@ import { useCopy } from "../md/copy";
 import { Eye, EyeOff } from "lucide-react";
 import { MIN_PASSWORD, passwordStrength } from "../lib/password";
 
-const CLAIM_COMMAND = "harness claim-code";
+const CLAIM_COMMAND = "rizzy-harness claim-code";
 
 /** A claim code is 20 characters in 4 groups; the server ignores case,
  * dashes and spaces, so only the characters count here. */

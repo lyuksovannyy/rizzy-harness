@@ -6,10 +6,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createOwner, keywordsOnly } = require('./onboard.cjs');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e4-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
-fs.writeFileSync(`${S}/data/harness.toml`, '[provider]\nkind = "mock"\nmock_delay_ms = 5\n');
+fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 5\nmodels = [{ id = "mock" }]\n');
 fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}"]\n`);
 const URL_ = 'http://127.0.0.1:7799/';
 

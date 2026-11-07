@@ -23,7 +23,7 @@ const smallHast: Plugin = {
   resolveId: (id) => (id === "hastscript" ? fileURLToPath(new URL("./src/md/hast-h.ts", import.meta.url)) : null),
 };
 
-// `npm run dev` proxies the API to a running `harness serve`. Start it with
+// `npm run dev` proxies the API to a running `rizzy-harness serve`. Start it with
 // `--allowed-host localhost:5173` so the dev origin passes the Origin check.
 export default defineConfig({
   plugins: [react()],

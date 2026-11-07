@@ -80,7 +80,7 @@ fn session_row_tracks_agent_and_profile() {
     };
     s.append(
         "master",
-        &ev(1, "session_created", json!({"title": "t", "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "agent_id": "general"})),
+        &ev(1, "session_created", json!({"title": "t", "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "agent_id": "general", "approval_mode": "ask"})),
     )
     .unwrap();
     let r = &s.sessions().unwrap()[0];

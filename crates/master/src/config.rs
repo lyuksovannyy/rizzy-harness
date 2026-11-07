@@ -1,4 +1,4 @@
-//! `harness.toml`: master-side configuration. API keys are never stored here:
+//! `config.toml`: master-side configuration. API keys are never stored here:
 //! they are referenced by environment-variable name (`api_key_env`) or by name
 //! in the 0600 `secrets.toml` (`api_key_secret`).
 
@@ -8,11 +8,9 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
-/// The whole file. Older files with a single `[provider]` and a global
-/// `[[models]]` still load: they become one entry of `[[providers]]` (see
-/// `RawConfig`), and the next save writes the new shape.
+/// The whole file. Loading repairs stale references (see `normalize`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(try_from = "RawConfig")]
+#[serde(from = "RawConfig")]
 pub struct Config {
     /// Model providers. Model ids are `<provider id>::<raw id>`.
     pub providers: Vec<ProviderConfig>,
@@ -51,12 +49,10 @@ impl Default for Config {
     }
 }
 
-/// What the file may contain, old shape included.
+/// What the file may contain; any part may be missing.
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct RawConfig {
-    provider: Option<LegacyProvider>,
-    models: Vec<ModelConfig>,
     providers: Vec<ProviderConfig>,
     default_model: Option<String>,
     agent_models: BTreeMap<String, AgentChain>,
@@ -68,10 +64,8 @@ struct RawConfig {
     savings: harness_core::savings::TokenSavings,
 }
 
-impl TryFrom<RawConfig> for Config {
-    type Error = String;
-
-    fn try_from(r: RawConfig) -> Result<Self, String> {
+impl From<RawConfig> for Config {
+    fn from(r: RawConfig) -> Self {
         let mut c = Config {
             providers: r.providers,
             default_model: r.default_model,
@@ -83,32 +77,15 @@ impl TryFrom<RawConfig> for Config {
             voice: r.voice,
             savings: r.savings,
         };
-        match r.provider {
-            Some(_) if !c.providers.is_empty() => {
-                return Err("use [[providers]] or the older [provider], not both".into());
-            }
-            Some(legacy) => {
-                let (p, model) = legacy.migrate(r.models);
-                if c.default_model.is_none() {
-                    c.default_model = Some(format!("{}::{model}", p.id));
-                }
-                c.providers.push(p);
-            }
-            None if !r.models.is_empty() => {
-                return Err("[[models]] needs [provider]; list models under [[providers]]".into());
-            }
-            None => {}
-        }
         c.normalize();
-        Ok(c)
+        c
     }
 }
 
 /// An agent's model and, in order, the models tried when it is unavailable
-/// or fails before answering. Files before fallbacks existed (up to commit
-/// 2a501fe) hold a bare model id: `general = "a::m1"`.
+/// or fails before answering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "RawChain")]
+#[serde(deny_unknown_fields)]
 pub struct AgentChain {
     pub model: String,
     #[serde(default)]
@@ -126,26 +103,6 @@ impl AgentChain {
     /// The main model, then the fallbacks.
     pub fn models(&self) -> impl Iterator<Item = &String> {
         std::iter::once(&self.model).chain(&self.fallbacks)
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawChain {
-    Bare(String),
-    Full {
-        model: String,
-        #[serde(default)]
-        fallbacks: Vec<String>,
-    },
-}
-
-impl From<RawChain> for AgentChain {
-    fn from(r: RawChain) -> Self {
-        match r {
-            RawChain::Bare(model) => AgentChain::new(model),
-            RawChain::Full { model, fallbacks } => AgentChain { model, fallbacks },
-        }
     }
 }
 
@@ -194,107 +151,30 @@ pub enum EmbedSource {
     Provider,
     /// Ollama at `embeddings_url` (default [`OLLAMA_URL`]), no key.
     Ollama,
-    /// Any endpoint with its own key (`embeddings_key_secret`), sent the
-    /// way `api_style` says.
-    Custom,
 }
 
 pub const OLLAMA_URL: &str = "http://localhost:11434/v1";
 
-/// The `secrets.toml` name of a custom embeddings endpoint's key.
-pub const EMBEDDINGS_SECRET: &str = "embeddings";
-
 /// Long-term memory. Embedding settings apply live; the backend needs a restart.
-/// Files from before `source` existed are read through `RawMemory`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "RawMemory")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct MemoryConfig {
     pub backend: MemoryBackend,
     pub recall: Recall,
     pub source: EmbedSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
-    /// Base URL serving `/embeddings` (Ollama and custom sources).
+    /// Ollama's base URL (Ollama source only).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub embeddings_url: String,
-    /// Empty: the preset's model (Ollama only; the others need one).
+    /// Empty: the preset's model (Ollama only; a provider source needs one).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub embeddings_model: String,
-    /// Custom sources only; a provider source follows the provider's kind.
-    pub api_style: harness_memory::ApiStyle,
     pub preset: harness_memory::Preset,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embeddings_key_secret: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub mem0_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem0_key_secret: Option<String>,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        RawMemory::default().into()
-    }
-}
-
-/// `[memory]` as written, `recall` and `source` missing in older files.
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RawMemory {
-    backend: MemoryBackend,
-    recall: Option<Recall>,
-    source: Option<EmbedSource>,
-    provider_id: Option<String>,
-    embeddings_url: String,
-    embeddings_model: String,
-    api_style: harness_memory::ApiStyle,
-    preset: harness_memory::Preset,
-    embeddings_key_secret: Option<String>,
-    mem0_url: String,
-    mem0_key_secret: Option<String>,
-}
-
-impl From<RawMemory> for MemoryConfig {
-    /// Older files: a URL meant meaning recall, from Ollama when it is the
-    /// local Ollama port without a key, else from a custom endpoint; no URL
-    /// meant keywords only.
-    fn from(r: RawMemory) -> Self {
-        let url = r.embeddings_url.trim_end_matches('/').to_string();
-        let (recall, source) = match r.source {
-            Some(s) => (r.recall.unwrap_or_default(), s),
-            None if url.is_empty() => (Recall::Keywords, EmbedSource::default()),
-            None => {
-                let ollama = is_local(&url)
-                    && host_of(&url).ends_with(":11434")
-                    && r.embeddings_key_secret.is_none();
-                let s = if ollama {
-                    EmbedSource::Ollama
-                } else {
-                    EmbedSource::Custom
-                };
-                (r.recall.unwrap_or(Recall::Meaning), s)
-            }
-        };
-        // Older files left the model empty to mean the preset's model; a
-        // custom source needs it written out.
-        let mut embeddings_model = r.embeddings_model;
-        if r.source.is_none() && source == EmbedSource::Custom && embeddings_model.is_empty() {
-            embeddings_model = r.preset.ollama_model().to_string();
-        }
-        Self {
-            backend: r.backend,
-            recall,
-            source,
-            provider_id: r.provider_id,
-            embeddings_url: url,
-            embeddings_model,
-            api_style: r.api_style,
-            preset: r.preset,
-            embeddings_key_secret: r.embeddings_key_secret,
-            mem0_url: r.mem0_url,
-            mem0_key_secret: r.mem0_key_secret,
-        }
-    }
 }
 
 impl MemoryConfig {
@@ -506,97 +386,6 @@ pub fn valid_provider_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
 }
 
-/// The single `[provider]` of older files.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct LegacyProvider {
-    kind: ProviderKind,
-    base_url: String,
-    model: String,
-    api_key_env: Option<String>,
-    api_key_secret: Option<String>,
-    effort: Option<harness_agent_native::Effort>,
-    mock_delay_ms: u64,
-}
-
-impl Default for LegacyProvider {
-    fn default() -> Self {
-        Self {
-            kind: ProviderKind::Mock,
-            base_url: String::new(),
-            model: "mock".into(),
-            api_key_env: None,
-            api_key_secret: None,
-            effort: None,
-            mock_delay_ms: 40,
-        }
-    }
-}
-
-impl LegacyProvider {
-    /// One `[[providers]]` entry and its default model's raw id. The id is
-    /// the preset whose URL matches, else one made from the host.
-    fn migrate(self, models: Vec<ModelConfig>) -> (ProviderConfig, String) {
-        if self.kind == ProviderKind::Mock {
-            return (ProviderConfig::demo(self.mock_delay_ms), "mock".into());
-        }
-        let base = match (self.base_url.trim(), self.kind) {
-            ("", ProviderKind::Anthropic) => "https://api.anthropic.com/v1".to_string(),
-            ("", _) => "https://api.openai.com/v1".to_string(),
-            (u, _) => u.to_string(),
-        };
-        let (id, name, preset) = match crate::presets::by_url(self.kind, &base) {
-            Some(p) => (p.id.to_string(), p.label.to_string(), p.id.to_string()),
-            None => (
-                legacy_custom_id(&base),
-                host_of(&base),
-                crate::presets::custom_for(self.kind).to_string(),
-            ),
-        };
-        let mut models = models;
-        if !self.model.is_empty() && !models.iter().any(|m| m.id == self.model) {
-            models.insert(
-                0,
-                ModelConfig {
-                    id: self.model.clone(),
-                    ..Default::default()
-                },
-            );
-        }
-        (
-            ProviderConfig {
-                id,
-                name,
-                preset,
-                kind: self.kind,
-                base_url: base,
-                api_key_env: self.api_key_env,
-                api_key_secret: self.api_key_secret,
-                effort: self.effort,
-                mock_delay_ms: None,
-                models,
-            },
-            self.model,
-        )
-    }
-}
-
-/// `api.deepseek.com` from `https://api.deepseek.com/v1` (with `:port` when
-/// it is not the scheme's default). Never the userinfo.
-pub fn host_of(url: &str) -> String {
-    if let Ok(u) = reqwest::Url::parse(url)
-        && let Some(h) = u.host_str()
-    {
-        return match u.port() {
-            Some(p) => format!("{h}:{p}"),
-            None => h.to_string(),
-        };
-    }
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let auth = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    auth.rsplit('@').next().unwrap_or(auth).to_string()
-}
-
 /// https, or plain http to this machine only; never with userinfo (which
 /// would hide the real host behind a `localhost` prefix).
 pub fn url_allowed(u: &str) -> bool {
@@ -607,37 +396,11 @@ pub fn url_allowed(u: &str) -> bool {
     no_userinfo && p.host_str().is_some() && (p.scheme() == "https" || is_local_url(&p))
 }
 
-fn is_local(u: &str) -> bool {
-    reqwest::Url::parse(u).is_ok_and(|p| is_local_url(&p))
-}
-
 fn is_local_url(p: &reqwest::Url) -> bool {
     p.scheme() == "http"
         && p.username().is_empty()
         && p.password().is_none()
         && matches!(p.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
-}
-
-/// A provider id (model prefix) for a migrated custom endpoint, from its
-/// host: never a preset's id, so adding that preset later cannot replace it.
-fn legacy_custom_id(base: &str) -> String {
-    let id: String = host_of(base)
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | '0'..='9' | '_' | '-' => c,
-            _ => '-',
-        })
-        .collect();
-    let id: String = id.trim_matches(['-', '_']).chars().take(32).collect();
-    let id = id.trim_end_matches(['-', '_']).to_string();
-    let taken =
-        crate::presets::get(&id).is_some() || crate::presets::RESERVED_IDS.contains(&id.as_str());
-    if !valid_provider_id(&id) || taken {
-        "custom".to_string()
-    } else {
-        id
-    }
 }
 
 impl Config {
@@ -715,22 +478,11 @@ impl Config {
         if !eu.is_empty() && !eu.starts_with("http://") && !eu.starts_with("https://") {
             bail!("[memory] embeddings_url must be an http(s) URL");
         }
-        if mc.recall == Recall::Meaning {
-            match mc.source {
-                EmbedSource::Provider if self.embed_provider().is_none() => {
-                    bail!("[memory] provider_id must name a configured (non-demo) provider")
-                }
-                EmbedSource::Custom if eu.is_empty() => {
-                    bail!("[memory] source = \"custom\" needs embeddings_url")
-                }
-                EmbedSource::Custom if mc.embeddings_key_secret.is_some() && !url_allowed(eu) => {
-                    bail!(
-                        "[memory] embeddings_url must be https:// to send a key (plain http only for localhost)"
-                    )
-                }
-                _ => {}
+        if mc.recall == Recall::Meaning && mc.source == EmbedSource::Provider {
+            if self.embed_provider().is_none() {
+                bail!("[memory] provider_id must name a configured (non-demo) provider");
             }
-            if mc.source != EmbedSource::Ollama && mc.embeddings_model.is_empty() {
+            if mc.embeddings_model.is_empty() {
                 bail!("[memory] embeddings_model is required unless source = \"ollama\"");
             }
         }
@@ -765,25 +517,17 @@ impl Config {
         self.providers.iter().find(|p| p.id == id)
     }
 
-    /// A model id to its provider and model. Prefixed ids must match
-    /// exactly; a legacy unprefixed id is the first provider listing it.
+    /// A `<provider>::<raw>` model id to its provider and model, matched
+    /// exactly.
     pub fn resolve_model(&self, id: &str) -> Option<(&ProviderConfig, &ModelConfig)> {
-        match harness_agent_native::llm::split_model(id) {
-            Some((prefix, raw)) => {
-                let p = self.provider(prefix)?;
-                Some((p, p.model(raw)?))
-            }
-            None => self
-                .providers
-                .iter()
-                .find_map(|p| p.model(id).map(|m| (p, m))),
-        }
+        let (prefix, raw) = harness_agent_native::llm::split_model(id)?;
+        let p = self.provider(prefix)?;
+        Some((p, p.model(raw)?))
     }
 
-    /// The canonical (prefixed) form of a model id, if it is known.
-    pub fn canonical_model(&self, id: &str) -> Option<String> {
-        self.resolve_model(id)
-            .map(|(p, m)| format!("{}::{}", p.id, m.id))
+    /// Whether `id` names a configured model.
+    pub fn knows_model(&self, id: &str) -> bool {
+        self.resolve_model(id).is_some()
     }
 
     /// The model sessions get when nobody chose one: `default_model`, else
@@ -805,7 +549,8 @@ impl Config {
                     .get(harness_agents::DEFAULT_AGENT)
                     .map(|c| &c.model),
             )
-            .find_map(|m| self.canonical_model(m))
+            .find(|m| self.knows_model(m))
+            .cloned()
             .or_else(|| first(true))
             .or_else(|| first(false))
     }
@@ -814,7 +559,9 @@ impl Config {
     pub fn agent_default(&self, agent: &str) -> Option<String> {
         self.agent_models
             .get(agent)
-            .and_then(|c| self.canonical_model(&c.model))
+            .map(|c| &c.model)
+            .filter(|m| self.knows_model(m))
+            .cloned()
             .or_else(|| self.effective_default())
     }
 
@@ -825,16 +572,14 @@ impl Config {
             .is_some_and(|(_, m)| m.unavailable)
     }
 
-    /// `chain` with canonical ids, without repeats and models that no
-    /// longer resolve. A main model that is gone gives way to the first
-    /// fallback left; `None` when nothing is left.
+    /// `chain` without repeats and models that no longer resolve. A main
+    /// model that is gone gives way to the first fallback left; `None` when
+    /// nothing is left.
     fn repair_chain(&self, chain: AgentChain) -> Option<AgentChain> {
         let mut ids: Vec<String> = Vec::new();
         for m in chain.models() {
-            if let Some(c) = self.canonical_model(m)
-                && !ids.contains(&c)
-            {
-                ids.push(c);
+            if self.knows_model(m) && !ids.contains(m) {
+                ids.push(m.clone());
             }
         }
         let mut ids = ids.into_iter();
@@ -858,8 +603,12 @@ impl Config {
             .into_iter()
             .filter_map(|(a, c)| self.repair_chain(c).map(|c| (a, c)))
             .collect();
-        if let Some(m) = &self.default_model {
-            self.default_model = self.canonical_model(m);
+        if self
+            .default_model
+            .as_ref()
+            .is_some_and(|m| !self.knows_model(m))
+        {
+            self.default_model = None;
         }
         if self.default_model.is_none() {
             self.default_model = self.effective_default();
@@ -880,8 +629,7 @@ impl Config {
             .filter(|p| p.kind != ProviderKind::Mock)
     }
 
-    /// Whether `model` (prefixed or legacy) is known to accept a
-    /// reasoning-effort setting.
+    /// Whether `model` is known to accept a reasoning-effort setting.
     pub fn supports_effort(&self, model: &str) -> bool {
         self.resolve_model(model)
             .is_some_and(|(p, m)| effort_allowed(p, m))
@@ -905,48 +653,44 @@ impl Config {
 mod tests {
     use super::*;
 
+    const DEEPSEEK: &str = concat!(
+        "[[providers]]\nid = \"ds\"\nname = \"DeepSeek\"\npreset = \"custom_openai\"\n",
+        "kind = \"openai\"\nmodels = [{ id = \"deepseek-chat\" }]\n",
+    );
+
     #[test]
     fn parses_and_validates() {
-        let c: Config = toml::from_str(
-            "[provider]\nkind = \"openai\"\nbase_url = \"https://api.deepseek.com\"\nmodel = \"deepseek-chat\"\napi_key_env = \"DEEPSEEK_API_KEY\"\n",
-        )
+        let c: Config = toml::from_str(&format!(
+            "{DEEPSEEK}base_url = \"https://api.deepseek.com\"\napi_key_env = \"DEEPSEEK_API_KEY\"\n"
+        ))
         .unwrap();
         c.validate().unwrap();
         let p = &c.providers[0];
         assert_eq!(p.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-        // No preset has exactly this URL: a custom entry named after the
-        // host, under an id no preset uses.
-        assert_eq!(
-            (p.id.as_str(), p.preset.as_str()),
-            ("api-deepseek-com", "custom_openai")
-        );
-        assert_eq!(p.name, "api.deepseek.com");
-        assert_eq!(
-            c.default_model.as_deref(),
-            Some("api-deepseek-com::deepseek-chat")
-        );
-        for (base, id) in [
-            ("http://localhost:1234/v1", "localhost-1234"),
-            ("https://api.openai.com/v1/", "openai"),
-            ("https://OpenAI/v1", "custom"),
-        ] {
-            let c: Config = toml::from_str(&format!(
-                "[provider]\nkind = \"openai\"\nbase_url = \"{base}\"\nmodel = \"m\"\napi_key_env = \"K\"\n"
-            ))
-            .unwrap();
-            assert_eq!(c.providers[0].id, id, "{base}");
+        assert_eq!(c.default_model.as_deref(), Some("ds::deepseek-chat"));
+        assert!(c.configured());
+        for base in ["http://example.com", "http://localhost.evil.com/v1", ""] {
+            let bad: Config =
+                toml::from_str(&format!("{DEEPSEEK}base_url = \"{base}\"\n")).unwrap();
+            assert!(bad.validate().is_err(), "{base:?}");
         }
-        let bad: Config = toml::from_str(
-            "[provider]\nkind = \"openai\"\nbase_url = \"http://example.com\"\nmodel = \"x\"\n",
+        assert!(
+            toml::from_str::<Config>(&format!(
+                "{DEEPSEEK}base_url = \"https://api.deepseek.com\"\napi_key = \"sk-x\"\n"
+            ))
+            .is_err(),
+            "no inline keys"
+        );
+        let mock: Config = toml::from_str(
+            "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\nmock_delay_ms = 5\nmodels = [{ id = \"mock\" }]\n",
         )
         .unwrap();
-        assert!(bad.validate().is_err());
-        assert!(toml::from_str::<Config>("[provider]\napi_key = \"sk-x\"\n").is_err());
-        let local: Config = toml::from_str(
-            "[provider]\nkind = \"openai\"\nbase_url = \"http://localhost.evil.com/v1\"\nmodel = \"x\"\n",
-        )
-        .unwrap();
-        assert!(local.validate().is_err(), "not localhost");
+        assert_eq!(mock.providers[0].mock_delay_ms, Some(5));
+        assert_eq!(mock.default_model.as_deref(), Some("demo::mock"));
+        assert!(!mock.configured());
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.default_model.as_deref(), Some("demo::mock"));
+        assert!(!empty.configured());
     }
 
     /// Plain http only to this machine: a `localhost` prefix hiding the
@@ -975,115 +719,50 @@ mod tests {
         ] {
             assert!(!url_allowed(bad), "{bad}");
         }
-        assert_eq!(
-            host_of("http://localhost:x@evil.example/v1"),
-            "evil.example"
-        );
-        assert_eq!(host_of("https://api.deepseek.com/v1"), "api.deepseek.com");
-        assert_eq!(host_of("http://localhost:11434/v1"), "localhost:11434");
     }
 
     #[test]
-    fn anthropic_needs_key_and_defaults_endpoint() {
-        let c: Config = toml::from_str(
-            "[provider]\nkind = \"anthropic\"\nmodel = \"claude-x\"\napi_key_secret = \"anthropic\"\neffort = \"high\"\n\n[[models]]\nid = \"claude-x\"\neffort = true\n",
-        )
-        .unwrap();
-        c.validate().unwrap();
-        let p = &c.providers[0];
-        assert_eq!(
-            (p.id.as_str(), p.preset.as_str()),
-            ("anthropic", "anthropic")
+    fn anthropic_needs_a_key_and_takes_no_effort() {
+        let ant = concat!(
+            "[[providers]]\nid = \"anthropic\"\nname = \"Anthropic\"\npreset = \"anthropic\"\n",
+            "kind = \"anthropic\"\nbase_url = \"https://api.anthropic.com/v1\"\neffort = \"high\"\n",
+            "models = [{ id = \"claude-x\", effort = true }]\n",
         );
-        assert_eq!(p.base_url, "https://api.anthropic.com/v1");
-        assert_eq!(p.api_key_secret.as_deref(), Some("anthropic"));
+        let c: Config =
+            toml::from_str(&format!("{ant}api_key_secret = \"provider-anthropic\"\n")).unwrap();
+        c.validate().unwrap();
         // Listed with effort, but never for Anthropic (PLAN.md R8).
-        assert!(!c.supports_effort("claude-x"));
         assert!(!c.supports_effort("anthropic::claude-x"));
         assert!(!c.supports_effort("other"));
         assert!(
             crate::providers::model_list(&c).iter().all(|m| !m.effort),
             "the model list agrees"
         );
-        let nokey: Config =
-            toml::from_str("[provider]\nkind = \"anthropic\"\nmodel = \"claude-x\"\n").unwrap();
+        let nokey: Config = toml::from_str(ant).unwrap();
         assert!(nokey.validate().is_err());
-        let both: Config = toml::from_str(
-            "[provider]\nkind = \"openai\"\nmodel = \"m\"\napi_key_env = \"A\"\napi_key_secret = \"b\"\n",
-        )
+        let both: Config = toml::from_str(&format!(
+            "{DEEPSEEK}base_url = \"https://api.deepseek.com\"\napi_key_env = \"A\"\napi_key_secret = \"b\"\n"
+        ))
         .unwrap();
         assert!(both.validate().is_err());
     }
 
-    /// An old file loads as one provider, keeps its models and key, and is
-    /// saved in the new shape, which loads back the same.
+    /// Agent chains round-trip, and a main model that is gone gives way
+    /// to its first fallback.
     #[test]
-    fn legacy_file_migrates_and_round_trips() {
-        let c: Config = toml::from_str(concat!(
-            "[provider]\nkind = \"openai\"\nbase_url = \"https://openrouter.ai/api/v1/\"\n",
-            "model = \"openai/gpt-4o\"\napi_key_secret = \"openai\"\n\n",
-            "[[models]]\nid = \"openai/gpt-4o\"\nvision = true\n\n",
-            "[[models]]\nid = \"deepseek/r1\"\neffort = true\n\n",
-            "[chat]\nsummarize_after_tokens = 0\n",
-        ))
-        .unwrap();
-        c.validate().unwrap();
-        assert_eq!(c.providers.len(), 1);
-        let p = &c.providers[0];
-        assert_eq!(
-            (p.id.as_str(), p.name.as_str()),
-            ("openrouter", "OpenRouter")
-        );
-        assert_eq!(p.api_key_secret.as_deref(), Some("openai"));
-        assert_eq!(p.models.len(), 2);
-        assert_eq!(p.models[0].vision, Some(true));
-        assert_eq!(
-            c.default_model.as_deref(),
-            Some("openrouter::openai/gpt-4o")
-        );
-        assert!(c.supports_effort("openrouter::deepseek/r1"));
-        assert_eq!(c.chat.summarize_after_tokens, 0);
-
-        let text = toml::to_string(&c).unwrap();
-        assert!(
-            text.contains("[[providers]]") && !text.contains("[provider]\n"),
-            "{text}"
-        );
-        let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.providers[0].models, p.models);
-        assert_eq!(back.default_model, c.default_model);
-
-        let mock: Config =
-            toml::from_str("[provider]\nkind = \"mock\"\nmock_delay_ms = 5\n").unwrap();
-        assert_eq!(mock.providers[0].id, "demo");
-        assert_eq!(mock.providers[0].mock_delay_ms, Some(5));
-        assert_eq!(mock.default_model.as_deref(), Some("demo::mock"));
-        assert!(!mock.configured());
-        let empty: Config = toml::from_str("").unwrap();
-        assert_eq!(empty.default_model.as_deref(), Some("demo::mock"));
-        assert!(toml::from_str::<Config>(
-            "[provider]\nkind = \"mock\"\n\n[[providers]]\nid = \"demo\"\nname = \"D\"\npreset = \"demo\"\nkind = \"mock\"\n"
-        )
-        .is_err());
-    }
-
-    /// `[agent_models]` as commit 2a501fe wrote it (bare ids) loads as
-    /// chains without fallbacks; the new shape round-trips, and a main
-    /// model that is gone gives way to its first fallback.
-    #[test]
-    fn agent_chains_migrate_and_repair() {
+    fn agent_chains_round_trip_and_repair() {
         let providers = concat!(
             "[[providers]]\nid = \"a\"\nname = \"A\"\npreset = \"custom_openai\"\nkind = \"openai\"\n",
             "base_url = \"http://localhost:8000/v1\"\nmodels = [{ id = \"m1\" }, { id = \"m2\" }, { id = \"m3\" }]\n",
         );
-        let old: Config = toml::from_str(&format!(
-            "[agent_models]\ncoder = \"a::m2\"\ngeneral = \"m1\"\n\n{providers}"
+        let c: Config = toml::from_str(&format!(
+            "[agent_models.coder]\nmodel = \"a::m2\"\n\n[agent_models.general]\nmodel = \"a::m1\"\n\n{providers}"
         ))
         .unwrap();
-        assert_eq!(old.agent_models["general"], AgentChain::new("a::m1"));
-        assert_eq!(old.agent_models["coder"], AgentChain::new("a::m2"));
+        assert_eq!(c.agent_models["general"], AgentChain::new("a::m1"));
+        assert_eq!(c.agent_models["coder"], AgentChain::new("a::m2"));
 
-        let mut c = old.clone();
+        let mut c = c.clone();
         c.agent_models.insert(
             "writer".into(),
             AgentChain {
@@ -1128,7 +807,8 @@ mod tests {
     fn defaults_and_ids() {
         let mut c: Config = toml::from_str(concat!(
             "default_model = \"gone::x\"\n",
-            "[agent_models]\ncoder = \"b::m2\"\ngeneral = \"a::m1\"\nwriter = \"gone::y\"\n\n",
+            "[agent_models.coder]\nmodel = \"b::m2\"\n\n[agent_models.general]\nmodel = \"a::m1\"\n\n",
+            "[agent_models.writer]\nmodel = \"gone::y\"\n\n",
             "[[providers]]\nid = \"a\"\nname = \"A\"\npreset = \"custom_openai\"\nkind = \"openai\"\n",
             "base_url = \"http://localhost:8000/v1\"\nmodels = [{ id = \"m1\" }]\n\n",
             "[[providers]]\nid = \"b\"\nname = \"B\"\npreset = \"custom_openai\"\nkind = \"openai\"\n",
@@ -1141,10 +821,12 @@ mod tests {
         assert!(!c.agent_models.contains_key("writer"));
         assert_eq!(c.agent_default("coder").as_deref(), Some("b::m2"));
         assert_eq!(c.agent_default("writer").as_deref(), Some("a::m1"));
-        // Legacy unprefixed: the first provider listing it.
-        assert_eq!(c.canonical_model("m1").as_deref(), Some("a::m1"));
-        assert_eq!(c.canonical_model("m2").as_deref(), Some("b::m2"));
-        assert_eq!(c.canonical_model("b::m3"), None);
+        assert!(c.resolve_model("b::m1").is_some());
+        assert!(c.resolve_model("b::m3").is_none());
+        assert!(
+            c.resolve_model("m1").is_none(),
+            "an id needs its provider prefix"
+        );
         c.providers[1].id = "a".into();
         assert!(c.validate().is_err(), "duplicate id");
         for (id, ok) in [
@@ -1160,61 +842,37 @@ mod tests {
     }
 
     #[test]
-    fn memory_legacy_and_sources() {
-        let mem = |toml_text: &str| toml::from_str::<Config>(toml_text).unwrap().memory;
-        // Older files: no `source`; the URL decides.
-        let m = mem("[memory]\nembeddings_url = \"http://localhost:11434/v1/\"\n");
-        assert_eq!((m.recall, m.source), (Recall::Meaning, EmbedSource::Ollama));
-        assert_eq!(m.ollama_url(), "http://localhost:11434/v1");
-        let m = mem(
-            "[memory]\nembeddings_url = \"http://localhost:11434/v1\"\nembeddings_key_secret = \"k\"\n",
+    fn memory_sources() {
+        let m = toml::from_str::<Config>("[memory]\npreset = \"best\"\n")
+            .unwrap()
+            .memory;
+        assert_eq!(
+            (m.recall, m.source),
+            (Recall::Keywords, EmbedSource::Provider)
         );
-        assert_eq!(m.source, EmbedSource::Custom, "a key means custom");
-        let m = mem(
-            "[memory]\nembeddings_url = \"https://api.example.com/v1\"\nembeddings_model = \"e\"\n",
-        );
-        assert_eq!((m.recall, m.source), (Recall::Meaning, EmbedSource::Custom));
-        // An empty model meant the preset's; such files still load.
-        for url in [
-            "http://192.168.1.10:11434/v1",
-            "http://ollama:11434/v1",
-            "http://localhost:8080/v1",
-        ] {
-            let c: Config =
-                toml::from_str(&format!("[memory]\nembeddings_url = \"{url}\"\n")).unwrap();
-            c.validate().unwrap();
-            assert_eq!(c.memory.source, EmbedSource::Custom);
-            assert_eq!(c.memory.model(), c.memory.preset.ollama_model());
-            assert_eq!(c.memory.embeddings_model, c.memory.preset.ollama_model());
-        }
-        let c: Config = toml::from_str(
-            "[memory]\nembeddings_url = \"http://localhost:11434/v1\"\nembeddings_key_secret = \"k\"\n",
-        )
-        .unwrap();
-        c.validate().unwrap();
-        let m = mem("[memory]\npreset = \"best\"\n");
-        assert_eq!(m.recall, Recall::Keywords);
         assert_eq!(Config::default().memory.recall, Recall::Keywords);
-        // The new shape round-trips.
+        // Ollama: no model needed (the preset's), and it round-trips.
         let mut c = Config::default();
         c.memory.recall = Recall::Meaning;
-        c.memory.source = EmbedSource::Custom;
-        c.memory.embeddings_url = "https://e.example/v1".into();
-        c.memory.embeddings_model = "embed-1".into();
-        c.memory.api_style = harness_memory::ApiStyle::Anthropic;
+        c.memory.source = EmbedSource::Ollama;
+        c.memory.embeddings_url = "http://localhost:11434/v1".into();
         c.validate().unwrap();
+        assert_eq!(c.memory.model(), c.memory.preset.ollama_model());
         let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
-        assert_eq!(back.memory.source, EmbedSource::Custom);
-        assert_eq!(back.memory.api_style, harness_memory::ApiStyle::Anthropic);
-        // A key goes over https (or to localhost) only.
-        c.memory.embeddings_url = "http://e.example/v1".into();
-        c.memory.embeddings_key_secret = Some(EMBEDDINGS_SECRET.into());
-        assert!(c.validate().is_err());
-        c.memory.embeddings_model.clear();
-        c.memory.embeddings_key_secret = None;
-        assert!(c.validate().is_err(), "custom needs a model");
-        // Provider source: the demo is no provider for embeddings, and a
-        // provider that is gone falls back to keywords.
+        assert_eq!(back.memory.source, EmbedSource::Ollama);
+        assert_eq!(back.memory.ollama_url(), "http://localhost:11434/v1");
+        c.memory.embeddings_url = "localhost:11434".into();
+        assert!(c.validate().is_err(), "not an http(s) URL");
+        // Provider source: a real provider and a model.
+        let mut c: Config = toml::from_str(&format!(
+            "{DEEPSEEK}base_url = \"https://api.deepseek.com\"\n\n[memory]\nrecall = \"meaning\"\nprovider_id = \"ds\"\n"
+        ))
+        .unwrap();
+        assert!(c.validate().is_err(), "a provider source needs a model");
+        c.memory.embeddings_model = "e".into();
+        c.validate().unwrap();
+        // The demo is no provider for embeddings, and a provider that is
+        // gone falls back to keywords.
         let mut c = Config::default();
         c.memory.recall = Recall::Meaning;
         c.memory.source = EmbedSource::Provider;

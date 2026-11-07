@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { emptyView } from "../fold";
 import type { Agent, AgentAvatar as Avatar, Item, SessionView } from "../types";
-import { AgentAvatar, AgentMark, agentAlert, AVATAR_ACCENTS, defaultAvatar, EYES, SHAPES, STATES } from "./AgentAvatar";
+import { AgentAvatar, AgentMark, agentAlert, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
 import { DONE_MS, sessionFace, useAvatarState } from "./avatarState";
 import { AgentsSettings } from "./AgentsSettings";
 import { Composer } from "./Composer";
@@ -46,8 +46,10 @@ const agent = (over: Partial<Agent> = {}): Agent => ({
   description: "",
   builtin: true,
   default_model: "openai::gpt-x",
+  main_model: "openai::gpt-x",
   fallbacks: [],
   unavailable: [],
+  avatar: { shape: "circle", eyes: "round", accent: "blue" },
   ...over,
 });
 
@@ -97,16 +99,6 @@ describe("AgentAvatar", () => {
     expect(svg().dataset.motion).toBe("still");
     expect(svg().dataset.state).toBe("thinking");
   });
-
-  test("the default face is stable per id and valid", () => {
-    const a = defaultAvatar("general");
-    expect(defaultAvatar("general")).toEqual(a);
-    expect(SHAPES).toContain(a.shape);
-    expect(EYES).toContain(a.eyes);
-    expect(AVATAR_ACCENTS).toContain(a.accent);
-    const faces = new Set(["general", "coder", "writer", "researcher", "planner", "reviewer"].map((id) => JSON.stringify(defaultAvatar(id))));
-    expect(faces.size).toBeGreaterThan(1);
-  });
 });
 
 describe("the unavailable badge", () => {
@@ -124,9 +116,8 @@ describe("the unavailable badge", () => {
 
   test("an agent with no chain of its own, on a gone server default", () => {
     // No agent_models entry: the server lists the default it runs on.
-    const bare = { default_model: null, fallbacks: [], unavailable: ["openai::gpt-x"] };
+    const bare = { default_model: null, main_model: "openai::gpt-x", fallbacks: [], unavailable: ["openai::gpt-x"] };
     expect(agentAlert(agent(bare))).toMatch(/Coder's model gpt-x is no longer available/);
-    expect(agentAlert(agent({ ...bare, main_model: "openai::gpt-x" }))).toMatch(/gpt-x/);
     expect(agentAlert(agent({ default_model: null, main_model: "openai::gpt-y", unavailable: [] }))).toBeNull();
     // The model it runs on, when the server says, outranks the admin's chain.
     expect(agentAlert(agent({ main_model: "x::own", unavailable: ["x::own"] }))).toMatch(/model own is no longer/);

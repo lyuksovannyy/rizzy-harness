@@ -372,19 +372,9 @@ impl Master {
         lock(&self.inner.agents).clone()
     }
 
-    /// A listed model by id: prefixed exactly, or a legacy unprefixed id by
-    /// its raw id (the first provider listing it).
+    /// A listed model by its `<provider>::<raw>` id.
     pub fn find_model(&self, id: &str) -> Option<ModelInfo> {
-        let models = self.models();
-        let exact = models.iter().find(|m| m.id == id);
-        exact
-            .or_else(|| {
-                harness_agent_native::llm::split_model(id)
-                    .is_none()
-                    .then(|| models.iter().find(|m| m.raw == id))
-                    .flatten()
-            })
-            .cloned()
+        self.models().into_iter().find(|m| m.id == id)
     }
 
     /// The admin's default model for `agent_id`, if one is assigned.
@@ -397,11 +387,12 @@ impl Master {
         let cfg = self.provider_runtime()?.config();
         let c = cfg.agent_models.get(agent_id)?;
         Some(config::AgentChain {
-            model: cfg.canonical_model(&c.model)?,
+            model: Some(c.model.clone()).filter(|m| cfg.knows_model(m))?,
             fallbacks: c
                 .fallbacks
                 .iter()
-                .filter_map(|m| cfg.canonical_model(m))
+                .filter(|m| cfg.knows_model(m))
+                .cloned()
                 .collect(),
         })
     }
@@ -411,7 +402,7 @@ impl Master {
     pub fn agent_main_model(&self, agent: &harness_agents::Agent) -> Option<String> {
         let cfg = self.provider_runtime()?.config();
         match &agent.spec.model {
-            Some(m) => Some(cfg.canonical_model(m).unwrap_or_else(|| m.clone())),
+            Some(m) => Some(m.clone()),
             None => cfg.agent_default(&agent.id),
         }
     }
@@ -428,19 +419,15 @@ impl Master {
     /// default agent's chain when `model` is that chain's main model. All of
     /// them, unavailable ones included; `set_fallbacks` filters.
     pub fn agent_fallbacks(&self, agent_id: &str, model: Option<&str>) -> Vec<String> {
-        let Some(cfg) = self.provider_runtime().map(|rt| rt.config()) else {
-            return Vec::new();
-        };
-        let model = model.and_then(|m| cfg.canonical_model(m).or(Some(m.to_string())));
         self.agent_chain(agent_id)
             .or_else(|| {
                 self.agent_chain(harness_agents::DEFAULT_AGENT)
-                    .filter(|g| Some(&g.model) == model.as_ref())
+                    .filter(|g| Some(g.model.as_str()) == model)
             })
             .map(|c| c.fallbacks)
             .unwrap_or_default()
             .into_iter()
-            .filter(|f| Some(f) != model.as_ref())
+            .filter(|f| Some(f.as_str()) != model)
             .collect()
     }
 
@@ -452,7 +439,7 @@ impl Master {
         let Some(cfg) = self.provider_runtime().map(|rt| rt.config()) else {
             return;
         };
-        let model = model.and_then(|m| cfg.canonical_model(m).or(Some(m.to_string())));
+        let model = model.map(str::to_string);
         spec.fallbacks = self
             .agent_fallbacks(&spec.agent_id, model.as_deref())
             .into_iter()
@@ -835,16 +822,15 @@ impl Master {
                     Profile::Agentic => "(no worker node; set one up for agentic sessions)".into(),
                 })
             })?;
-        // A chosen model is kept in its canonical (prefixed) form; without
-        // one the session follows the agent's default, resolved now and on
-        // every turn. Clients always send the model they show, which is
-        // that default unless the user picked another: the default counts
-        // as no choice, so the session keeps following the defaults.
+        // A chosen model is kept as sent; without one the session follows
+        // the agent's default, resolved now and on every turn. Clients
+        // always send the model they show, which is that default unless the
+        // user picked another: the default counts as no choice, so the
+        // session keeps following the defaults.
         let auto = self.agent_spec(spec.agent_id.as_deref(), None)?;
         let chosen = spec
             .model
             .filter(|m| !m.trim().is_empty())
-            .map(|m| self.find_model(&m).map(|x| x.id).unwrap_or(m))
             .filter(|m| auto.model.as_deref() != Some(m.as_str()));
         let agent = match &chosen {
             None => auto,
@@ -888,14 +874,9 @@ impl Master {
             compare,
             reply,
         } = opts;
-        let compare = compare
-            .into_iter()
-            .map(|c| {
-                self.find_model(&c)
-                    .map(|m| m.id)
-                    .ok_or_else(|| CommandError::Rejected(format!("unknown model {c:?}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(c) = compare.iter().find(|c| self.find_model(c).is_none()) {
+            return Err(CommandError::Rejected(format!("unknown model {c:?}")));
+        }
         let row = self
             .inner
             .mirror

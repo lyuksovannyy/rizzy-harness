@@ -246,7 +246,6 @@ export function MemoryCfgForm(props: {
         const meaning = c.recall === "meaning";
         if (meaning && c.source === "provider" && list.some((p) => p.id === c.provider_id)) setFrom(`provider:${c.provider_id}`);
         else if (meaning && c.source === "ollama") setFrom("ollama");
-        else if (meaning && c.source === "custom") setFrom("custom");
         else setFrom(list[0] ? `provider:${list[0].id}` : "ollama");
         if (c.source === "ollama" && c.embeddings_url) setOllamaUrl(c.embeddings_url);
         setPick(c.source === "ollama" && c.embeddings_model ? "custom" : c.preset);
@@ -297,7 +296,7 @@ export function MemoryCfgForm(props: {
   if (cfg.backend !== "builtin") {
     return (
       <div className="stack">
-        <div className="muted">Memory uses the {cfg.backend} backend (set in harness.toml).</div>
+        <div className="muted">Memory uses the {cfg.backend} backend (set in config.toml).</div>
         {onward}
       </div>
     );
@@ -317,8 +316,8 @@ export function MemoryCfgForm(props: {
   const shown = [...added, ...(listing?.models ?? []).filter((m) => !added.some((x) => x.id === m.id))];
   if (model && !shown.some((m) => m.id === model)) shown.unshift(byHand(model));
   const target = provider
-    ? { provider_id: provider.id, preset: provider.preset, base_url: provider.base_url, kind: provider.kind, memory: true }
-    : { preset: "ollama", base_url: ollamaUrl.trim(), kind: "openai" as const, memory: true };
+    ? { provider_id: provider.id, preset: provider.preset, base_url: provider.base_url, kind: provider.kind }
+    : { preset: "ollama", base_url: ollamaUrl.trim(), kind: "openai" as const };
   const picker = tag && (
     <>
       {listing?.busy && !listing.models && <div className="muted small">Listing models…</div>}
@@ -384,7 +383,7 @@ export function MemoryCfgForm(props: {
         setErr(null);
         setMsg(null);
         try {
-          const body: Parameters<typeof api.saveMemoryCfg>[0] = { recall, source: provider ? "provider" : from === "ollama" ? "ollama" : cfg.source, preset: keep };
+          const body: Parameters<typeof api.saveMemoryCfg>[0] = { recall, source: provider ? "provider" : "ollama", preset: keep };
           if (meaning && provider) Object.assign(body, { provider_id: provider.id, embeddings_model: model.trim() });
           if (meaning && from === "ollama")
             Object.assign(body, { embeddings_url: ollamaUrl.trim(), embeddings_model: pick === "custom" ? model.trim() : "" });
@@ -463,12 +462,6 @@ export function MemoryCfgForm(props: {
               </div>
               {pick === "custom" && picker}
             </>
-          )}
-          {from === "custom" && cfg.source === "custom" && cfg.embeddings_url && (
-            <span className="field-hint">
-              Now <span className="mono">{cfg.embeddings_model}</span> at <span className="mono">{cfg.embeddings_url}</span>. Register the
-              endpoint as a provider to change it.
-            </span>
           )}
         </>
       )}

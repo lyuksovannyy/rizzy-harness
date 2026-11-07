@@ -39,7 +39,7 @@ const m = (id: string): ProviderModel => ({
   unavailable: false,
   missing_since: null,
 });
-const agent = (id: string, name: string): Agent => ({ id, name, description: "", builtin: true, default_model: null, fallbacks: [], unavailable: [] });
+const agent = (id: string, name: string): Agent => ({ id, name, description: "", builtin: true, default_model: null, main_model: null, fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } });
 const STATE: ProvidersState = {
   providers: [],
   presets: [
@@ -66,8 +66,6 @@ const CFG: MemoryCfg = {
   provider_id: null,
   embeddings_url: "",
   embeddings_model: "",
-  api_style: "openai",
-  key: "none",
   preset: "balanced",
   model: "nomic-embed-text",
   active_model: null,

@@ -56,7 +56,7 @@ impl Remote for SshRemote {
 }
 
 /// New connections with harness's key and the pinned host key, as the
-/// current user (switches to `harness-admin` once it exists).
+/// current user (switches to `rizzy-harness-admin` once it exists).
 struct KeyConnector {
     target: Mutex<Target>,
     fingerprint: String,
@@ -151,7 +151,7 @@ struct Side {
     answered: Notify,
 }
 
-/// The node's `harness.toml` and `secrets.toml`: every provider, each key
+/// The node's `config.toml` and `secrets.toml`: every provider, each key
 /// copied under its own `provider-<id>` name, and nothing else.
 fn node_provider_files(cfg: &crate::config::Config, data_dir: &Path) -> Option<ProviderFiles> {
     let mut node = crate::config::Config {
@@ -502,12 +502,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let secrets = dir.path().join("secrets.toml");
         let key = |v: &str| Some(harness_core::Secret::new(v.to_string()));
-        crate::secrets::set(&secrets, "openai", key("k-legacy").as_ref()).unwrap();
+        crate::secrets::set(&secrets, "work-openai", key("k-openai").as_ref()).unwrap();
         crate::secrets::set(&secrets, "provider-nim", key("k-nim").as_ref()).unwrap();
         let cfg: crate::config::Config = toml::from_str(concat!(
             "default_model = \"nim::meta/llama\"\n",
             "[[providers]]\nid = \"openai\"\nname = \"O\"\npreset = \"openai\"\nkind = \"openai\"\n",
-            "base_url = \"https://api.openai.com/v1\"\napi_key_secret = \"openai\"\nmodels = [{ id = \"gpt\" }]\n\n",
+            "base_url = \"https://api.openai.com/v1\"\napi_key_secret = \"work-openai\"\nmodels = [{ id = \"gpt\" }]\n\n",
             "[[providers]]\nid = \"nim\"\nname = \"N\"\npreset = \"nvidia_nim\"\nkind = \"openai\"\n",
             "base_url = \"https://integrate.api.nvidia.com/v1\"\napi_key_secret = \"provider-nim\"\n",
             "models = [{ id = \"meta/llama\", context = 128000 }]\n\n",
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(node.providers[1].models[0].context, Some(128000));
         let s = f.secrets_toml.unwrap();
         assert!(
-            s.contains("provider-openai = \"k-legacy\"") && s.contains("k-nim"),
+            s.contains("provider-openai = \"k-openai\"") && s.contains("k-nim"),
             "{s}"
         );
         assert!(!f.harness_toml.contains("k-nim"));
@@ -544,11 +544,11 @@ mod tests {
     #[test]
     fn host_paths_for_printed_commands() {
         let d = Path::new("/data");
-        let p = Path::new("/data/keys/wg-harness.conf");
+        let p = Path::new("/data/keys/rizzy-harness.conf");
         assert_eq!(map_to_host(d, p, None), p);
         assert_eq!(
             map_to_host(d, p, Some("/srv/harness".into())),
-            Path::new("/srv/harness/keys/wg-harness.conf")
+            Path::new("/srv/harness/keys/rizzy-harness.conf")
         );
         // Outside the data dir: unchanged.
         assert_eq!(

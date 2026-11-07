@@ -18,15 +18,15 @@ WORKDIR /src
 COPY . .
 COPY --from=web /src/web/dist web/dist
 RUN cargo build --release --locked -p harness \
- && install -m 0755 target/release/harness /harness
+ && install -m 0755 target/release/rizzy-harness /rizzy-harness
 
 FROM ${REGISTRY}/debian:trixie-slim
 # No apt: the only extra file needed is the CA bundle (provider APIs, web tools).
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin harness \
- && mkdir /data && chown harness:harness /data && chmod 0700 /data
-COPY --from=build /harness /usr/local/bin/harness
-USER harness
+RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin rizzy-harness \
+ && mkdir /data && chown rizzy-harness:rizzy-harness /data && chmod 0700 /data
+COPY --from=build /rizzy-harness /usr/local/bin/rizzy-harness
+USER rizzy-harness
 ENV HARNESS_DATA_DIR=/data \
     HARNESS_CONTAINER=1 \
     HARNESS_NO_LOCAL_NODE=1
@@ -34,5 +34,5 @@ VOLUME /data
 EXPOSE 7777
 # serve shuts down cleanly on SIGINT; PID 1 would ignore SIGTERM.
 STOPSIGNAL SIGINT
-ENTRYPOINT ["harness"]
+ENTRYPOINT ["rizzy-harness"]
 CMD ["serve", "--bind", "0.0.0.0:7777"]

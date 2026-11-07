@@ -1,4 +1,4 @@
-//! Event schema. See PLAN.md §2. Changes here must be additive.
+//! Event schema. See PLAN.md §2.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -125,7 +125,6 @@ pub struct SessionCreated {
     pub model: String,
     pub backend: String,
     pub node_id: String,
-    #[serde(default)]
     pub approval_mode: crate::policy::ApprovalMode,
     pub profile: Profile,
     /// The agent active when the session started.
@@ -304,9 +303,8 @@ pub struct AssistantMessage {
 /// do not all match renders as plain code. Exactly one of `spec` and `error`
 /// is set.
 ///
-/// Unknown keys are tolerated here like everywhere in the event schema (a
-/// newer node may add some); the model's own JSON is what `ui` rejects
-/// unknown keys in.
+/// Unknown keys are tolerated here like everywhere in the event schema; the
+/// model's own JSON is what `ui` rejects unknown keys in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiBlock {
     pub ordinal: u32,
@@ -480,7 +478,6 @@ pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Input tokens of the turn's last model call: the context size.
-    #[serde(default)]
     pub context_tokens: u64,
     /// Of `input_tokens`, how many were read from the provider's prompt
     /// cache (billed at a fraction) and how many were written to it.
@@ -765,7 +762,7 @@ mod tests {
 
     #[test]
     fn additive_fields_tolerated() {
-        // Extra unknown fields from a newer node must not break an older reader.
+        // Unknown fields are ignored, not rejected.
         let k = EventKind::from_parts(
             "turn_started",
             json!({"turn_id": "t1", "added_later": true}),

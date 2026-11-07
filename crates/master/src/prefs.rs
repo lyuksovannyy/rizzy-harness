@@ -301,15 +301,17 @@ mod context_tests {
         assert!(one_of("backdrop", &Some("system".into()), BACKDROPS).is_err());
     }
 
+    /// Optional fields may be left out; set ones round-trip; a misspelt
+    /// or mistyped field is an error, not silently dropped.
     #[test]
-    fn stored_prefs_without_backdrop_fields_load_with_the_defaults() {
-        let p: Prefs =
-            serde_json::from_str(r#"{"search_url":"https://example.com/?q={q}","theme":"dark"}"#)
-                .expect("old prefs load");
-        assert_eq!(p.backdrop, None);
+    fn prefs_round_trip_and_reject_unknown_fields() {
+        let p: Prefs = serde_json::from_str(r#"{"search_url":"https://example.com/?q={q}"}"#)
+            .expect("a minimal body parses");
+        assert_eq!((p.theme, p.backdrop), (None, None));
         assert!(!p.backdrop_chats);
         let back: Prefs = serde_json::from_str(
             &serde_json::to_string(&Prefs {
+                theme: Some("dark".into()),
                 backdrop: Some("still".into()),
                 backdrop_chats: true,
                 ..Default::default()
@@ -317,39 +319,16 @@ mod context_tests {
             .unwrap(),
         )
         .unwrap();
+        assert_eq!(back.theme.as_deref(), Some("dark"));
         assert_eq!(back.backdrop.as_deref(), Some("still"));
         assert!(back.backdrop_chats);
-        let typo = serde_json::from_str::<Prefs>(
-            r#"{"search_url":"https://example.com/?q={q}","backdrops":"off"}"#,
-        );
-        assert!(typo.is_err());
-        let wrong_type = serde_json::from_str::<Prefs>(
-            r#"{"search_url":"https://example.com/?q={q}","backdrop_chats":"yes"}"#,
-        );
-        assert!(wrong_type.is_err());
-    }
-
-    #[test]
-    fn stored_prefs_without_a_theme_load_with_the_defaults() {
-        let p: Prefs =
-            serde_json::from_str(r#"{"search_url":"https://example.com/?q={q}","accent":"green"}"#)
-                .expect("old prefs load");
-        assert_eq!(p.theme, None);
-        assert_eq!(p.accent.as_deref(), Some("green"));
-        let back: Prefs = serde_json::from_str(
-            &serde_json::to_string(&Prefs {
-                theme: Some("dark".into()),
-                ..Default::default()
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(back.theme.as_deref(), Some("dark"));
-        // A misspelt field is still an error, not silently dropped.
-        let typo = serde_json::from_str::<Prefs>(
+        for bad in [
             r#"{"search_url":"https://example.com/?q={q}","themes":"dark"}"#,
-        );
-        assert!(typo.is_err());
+            r#"{"search_url":"https://example.com/?q={q}","backdrops":"off"}"#,
+            r#"{"search_url":"https://example.com/?q={q}","backdrop_chats":"yes"}"#,
+        ] {
+            assert!(serde_json::from_str::<Prefs>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

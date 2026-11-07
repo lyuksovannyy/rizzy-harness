@@ -125,14 +125,10 @@ async fn serve() -> (String, Seen) {
 fn backend(base: &str) -> NativeBackend {
     let key = harness_core::Secret::new("sk-test".into());
     let p = LlmProvider::new(ApiKind::Openai, base, Some(key)).unwrap();
-    let router = ModelRouter::new(
-        vec![Route {
-            prefix: "loc".into(),
-            models: vec![],
-            provider: Arc::new(p),
-        }],
-        None,
-    );
+    let router = ModelRouter::new(vec![Route {
+        prefix: "loc".into(),
+        provider: Arc::new(p),
+    }]);
     NativeBackend::new(Arc::new(router), Vec::new(), NativeConfig::default())
 }
 

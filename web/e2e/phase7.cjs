@@ -9,10 +9,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createOwner } = require('./onboard.cjs');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e7-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
-fs.writeFileSync(`${S}/data/harness.toml`, '[provider]\nkind = "mock"\nmock_delay_ms = 2\n');
+fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 2\nmodels = [{ id = "mock" }]\n');
 const URL_ = 'http://127.0.0.1:7795/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
@@ -72,7 +72,7 @@ const emb = http.createServer((req, res) => {
     await p.click('button:has-text("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
-    const toml = fs.readFileSync(`${S}/data/harness.toml`, 'utf8');
+    const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
     check(toml.includes(embUrl) && toml.includes('preset = "fast"'), 'memory config saved');
 
     // The model proposes a memory; Home offers to review it.

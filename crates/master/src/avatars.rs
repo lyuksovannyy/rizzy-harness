@@ -1,6 +1,6 @@
 //! How an agent looks in the UI: a shape with eyes in one of the accents.
 //! The browser draws it and animates its expression; the server only keeps
-//! the admin's choice (`[agent_avatars.<id>]` in harness.toml) and derives a
+//! the admin's choice (`[agent_avatars.<id>]` in config.toml) and derives a
 //! stable default from the agent id for the rest.
 
 use serde::{Deserialize, Serialize};

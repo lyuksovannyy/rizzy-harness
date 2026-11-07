@@ -442,7 +442,7 @@ mod tests {
             "Pass\u{20D0}word",
             "Pass\u{FE20}word",
             "Pass\u{E0100}word",
-            // Default-ignorable code points outside the old hidden set.
+            // Default-ignorable code points outside the format-character ranges.
             "Pass\u{1D173}word",
             "Pass\u{FFF0}word",
             "Pass\u{E0080}word",

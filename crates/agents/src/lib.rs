@@ -7,7 +7,7 @@
 //! name: Coder
 //! description: Software engineer that edits and tests code.
 //! tools: [bash, read, write, edit, grep, glob]   # or: all
-//! model: optional-model-id
+//! model: openrouter::openai/gpt-4o                # optional, <provider>::<raw>
 //! effort: high                                    # low | medium | high | max
 //! budget: standard                                # lean | standard
 //! ui: rich                                        # rich | display | off

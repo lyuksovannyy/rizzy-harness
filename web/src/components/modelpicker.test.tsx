@@ -37,8 +37,10 @@ const agent = (id: string, name: string): Agent => ({
   description: "",
   builtin: true,
   default_model: null,
+  main_model: null,
   fallbacks: [],
   unavailable: [],
+  avatar: { shape: "circle", eyes: "round", accent: "blue" },
 });
 const AGENTS = [agent("general", "General"), agent("coder", "Coder")];
 

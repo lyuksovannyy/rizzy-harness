@@ -9,8 +9,8 @@ mod net;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use harness_agent_native::{NativeBackend, NativeConfig, Provider};
-use harness_core::APP_NAME;
 use harness_core::event::Profile;
+use harness_core::{BRAND, CONFIG_FILE};
 use harness_master::{Master, auth};
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::{Durability, Store};
@@ -19,9 +19,9 @@ use harness_master::config::Config;
 use harness_master::providers::ProviderRuntime;
 
 #[derive(Parser)]
-#[command(name = APP_NAME, version, about = "Self-hosted coding-agent harness")]
+#[command(name = BRAND, version, about = "Self-hosted coding-agent harness")]
 struct Cli {
-    /// Data directory (default: ~/.local/share/harness).
+    /// Data directory (default: ~/.local/share/rizzy-harness).
     #[arg(long, global = true, env = "HARNESS_DATA_DIR")]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -121,7 +121,7 @@ fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
         Some(d) => d.clone(),
         None => dirs::data_local_dir()
             .context("no data directory; pass --data-dir")?
-            .join(APP_NAME),
+            .join(BRAND),
     };
     std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
     #[cfg(unix)]
@@ -185,7 +185,7 @@ async fn serve(
             if tls { "" } else { " and WITHOUT TLS: passwords and cookies travel in clear text" }
         ),
     }
-    let cfg = Config::load(&dir.join("harness.toml"))?;
+    let cfg = Config::load(&dir.join(CONFIG_FILE))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
     let secrets = harness_core::SecretSet::default();
     let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
@@ -321,10 +321,10 @@ async fn serve(
     }
     // Printed (not logged) so tests and users can find the port; never a secret.
     let scheme = if tls { "https" } else { "http" };
-    println!("{APP_NAME} listening on {scheme}://{addr}");
+    println!("{BRAND} listening on {scheme}://{addr}");
     if unclaimed {
         println!(
-            "first run: open the page and enter the claim code from {} (or run `{APP_NAME} claim-code`)",
+            "first run: open the page and enter the claim code from {} (or run `{BRAND} claim-code`)",
             dir.join("claim-code").display()
         );
     }
@@ -427,7 +427,7 @@ async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> any
         node_id: node_id.clone(),
     };
     std::fs::write(dir.join("remote.toml"), toml::to_string(&remote)?)?;
-    println!("joined as node `{node_id}`. Start it with: {APP_NAME} node run");
+    println!("joined as node `{node_id}`. Start it with: {BRAND} node run");
     println!(
         "this node's own policy is {} (it decides what the master may do here)",
         dir.join("node.toml").display()
@@ -441,7 +441,7 @@ async fn node_run(dir: &Path) -> anyhow::Result<()> {
             .context("not joined yet: run `node join` first")?,
     )?;
     let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
-    let cfg = Config::load(&dir.join("harness.toml"))?;
+    let cfg = Config::load(&dir.join(CONFIG_FILE))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
     let secrets = harness_core::SecretSet::default();
     let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
@@ -513,8 +513,8 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
         check(bin, found);
     }
     check(
-        "harness.toml",
-        Config::load(&dir.join("harness.toml"))
+        CONFIG_FILE,
+        Config::load(&dir.join(CONFIG_FILE))
             .map(|c| {
                 let ids: Vec<&str> = c.providers.iter().map(|p| p.id.as_str()).collect();
                 format!(

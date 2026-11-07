@@ -32,8 +32,6 @@ const CFG: MemoryCfg = {
   provider_id: "openai",
   embeddings_url: "",
   embeddings_model: "text-embedding-3-small",
-  api_style: "openai",
-  key: "none",
   preset: "balanced",
   model: "text-embedding-3-small",
   active_model: "text-embedding-3-small",
@@ -140,7 +138,6 @@ describe("embeddings model", () => {
       preset: "mistral",
       base_url: "https://mistral.example/v1",
       kind: "openai",
-      memory: true,
       model: "mistral-embed",
     });
     act(() => button("Add model").click());

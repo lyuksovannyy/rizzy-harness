@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createOwner, keywordsOnly } = require('./onboard.cjs');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e9-'));
 const D = `${S}/data`, R = `${S}/repo`;
 fs.mkdirSync(D, { recursive: true });
@@ -34,7 +34,7 @@ const whisper = http.createServer((req, res) => {
 
 (async () => {
   await new Promise((r) => whisper.listen(0, '127.0.0.1', r));
-  fs.writeFileSync(`${D}/harness.toml`, [
+  fs.writeFileSync(`${D}/config.toml`, [
     // Two demo models to compare (demo::mock and demo::mock-big).
     '[[providers]]', 'id = "demo"', 'name = "Demo"', 'preset = "demo"', 'kind = "mock"', 'mock_delay_ms = 5',
     'models = [{ id = "mock" }, { id = "mock-big" }]', '',

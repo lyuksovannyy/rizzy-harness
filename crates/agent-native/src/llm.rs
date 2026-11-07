@@ -296,53 +296,39 @@ impl Provider for SwappableProvider {
 /// (`openrouter::openai/gpt-4o`); raw ids may contain `/` but not `::`.
 pub const MODEL_SEP: &str = "::";
 
-/// `("openrouter", "openai/gpt-4o")` for a prefixed id, `None` for a legacy
-/// unprefixed one.
+/// `("openrouter", "openai/gpt-4o")` for a prefixed id, `None` for an id
+/// with no provider prefix (which names no model).
 pub fn split_model(id: &str) -> Option<(&str, &str)> {
     id.split_once(MODEL_SEP)
 }
 
-/// One provider behind a [`ModelRouter`]: its prefix and the raw ids it lists.
+/// One provider behind a [`ModelRouter`], under its prefix.
 pub struct Route {
     pub prefix: String,
     pub provider: std::sync::Arc<dyn Provider>,
-    pub models: Vec<String>,
 }
 
 /// Sends each request to the provider named by the model's prefix, with the
-/// prefix stripped. A legacy unprefixed id goes to the first provider that
-/// lists it, else to the fallback (the default model's provider).
+/// prefix stripped.
 pub struct ModelRouter {
     routes: Vec<Route>,
-    fallback: Option<usize>,
 }
 
 impl ModelRouter {
-    pub fn new(routes: Vec<Route>, fallback: Option<&str>) -> Self {
-        let fallback = fallback
-            .and_then(|f| routes.iter().position(|r| r.prefix == f))
-            .or((!routes.is_empty()).then_some(0));
-        Self { routes, fallback }
+    pub fn new(routes: Vec<Route>) -> Self {
+        Self { routes }
     }
 
     /// The route for `model` and the raw id to send it.
     pub fn resolve<'a>(&self, model: &'a str) -> Result<(&Route, &'a str), ProviderError> {
-        let unknown = || ProviderError::UnknownModel(model.to_string());
-        match split_model(model) {
-            Some((prefix, raw)) => self
-                .routes
-                .iter()
-                .find(|r| r.prefix == prefix)
-                .map(|r| (r, raw))
-                .ok_or_else(unknown),
-            None => self
-                .routes
-                .iter()
-                .find(|r| r.models.iter().any(|m| m == model))
-                .or_else(|| self.fallback.map(|i| &self.routes[i]))
-                .map(|r| (r, model))
-                .ok_or_else(unknown),
-        }
+        split_model(model)
+            .and_then(|(prefix, raw)| {
+                self.routes
+                    .iter()
+                    .find(|r| r.prefix == prefix)
+                    .map(|r| (r, raw))
+            })
+            .ok_or_else(|| ProviderError::UnknownModel(model.to_string()))
     }
 }
 
@@ -434,19 +420,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_strips_prefix_and_resolves_legacy_ids() {
-        let route = |prefix: &str, name: &'static str, models: &[&str]| Route {
+    async fn router_strips_prefix() {
+        let route = |prefix: &str, name: &'static str| Route {
             prefix: prefix.into(),
             provider: std::sync::Arc::new(Named(name)),
-            models: models.iter().map(|m| m.to_string()).collect(),
         };
-        let r = ModelRouter::new(
-            vec![
-                route("openrouter", "a", &["openai/gpt-4o", "shared"]),
-                route("nim", "b", &["meta/llama-3.1-70b-instruct", "shared"]),
-            ],
-            Some("nim"),
-        );
+        let r = ModelRouter::new(vec![route("openrouter", "a"), route("nim", "b")]);
         let ask = |model: &str| {
             let req = ChatRequest {
                 model: model.into(),
@@ -469,13 +448,12 @@ mod tests {
             ask("nim::meta/llama-3.1-70b-instruct").await.unwrap(),
             "b meta/llama-3.1-70b-instruct"
         );
-        // Legacy: the first provider listing it, else the fallback.
-        assert_eq!(ask("shared").await.unwrap(), "a shared");
-        assert_eq!(ask("old-model").await.unwrap(), "b old-model");
-        assert!(matches!(
-            ask("gone::x").await,
-            Err(ProviderError::UnknownModel(_))
-        ));
+        for unknown in ["gone::x", "openai/gpt-4o"] {
+            assert!(matches!(
+                ask(unknown).await,
+                Err(ProviderError::UnknownModel(_))
+            ));
+        }
         assert_eq!(r.name(), "multi-provider");
     }
 }

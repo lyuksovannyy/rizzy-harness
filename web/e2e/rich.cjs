@@ -29,7 +29,7 @@ const os = require('os');
 const { check, log, sleep, chat } = require('./rich/lib.cjs');
 const { createOwner, keywordsOnly } = require('./onboard.cjs');
 
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-rich-'));
 const R = `${S}/repo`;
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -67,8 +67,9 @@ async function signUp(p, code) {
 
 (async () => {
   await new Promise((r) => searx.listen(0, '127.0.0.1', r));
-  fs.writeFileSync(`${S}/data/harness.toml`, [
-    '[provider]', 'kind = "mock"', 'mock_delay_ms = 20', '',
+  fs.writeFileSync(`${S}/data/config.toml`, [
+    '[[providers]]', 'id = "demo"', 'name = "Demo"', 'preset = "demo"', 'kind = "mock"', 'mock_delay_ms = 20',
+    'models = [{ id = "mock" }]', '',
     '[web]', 'search = "searxng"', `searxng_url = "http://127.0.0.1:${searx.address().port}"`, '',
   ].join('\n'));
   fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${R}"]\n`);

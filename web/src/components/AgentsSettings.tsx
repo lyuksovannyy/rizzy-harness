@@ -6,7 +6,7 @@ import { api } from "../api";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, AgentAvatar as Avatar, AvatarState } from "../types";
 import { rawModel } from "../lib/models";
-import { AgentAvatar, AgentMark, agentAlert, agentMainModel, AVATAR_ACCENTS, defaultAvatar, EYES, SHAPES, STATES } from "./AgentAvatar";
+import { AgentAvatar, AgentMark, agentAlert, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
 
 /** One radio group of avatar choices, each drawn as the avatar it gives. */
 function Picks<K extends keyof Avatar>(props: {
@@ -45,7 +45,7 @@ function Picks<K extends keyof Avatar>(props: {
 }
 
 function AvatarEditor(props: { agent: Agent; onSaved: () => void; onClose: () => void }) {
-  const [avatar, setAvatar] = useState<Avatar>(props.agent.avatar ?? defaultAvatar(props.agent.id));
+  const [avatar, setAvatar] = useState<Avatar>(props.agent.avatar);
   const [state, setState] = useState<AvatarState>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -116,11 +116,11 @@ export function AgentsSettings(props: { agents: Agent[]; admin: boolean; onChang
     <ul className="card agent-list">
       {props.agents.map((a) => {
         const alert = agentAlert(a);
-        const gone = a.unavailable ?? [];
+        const gone = a.unavailable;
         // With no chain of its own it runs on the server default, and its
         // fallbacks are General's: show them after the model they back up.
-        const main = agentMainModel(a);
-        const fallbacks = a.fallbacks ?? [];
+        const main = a.main_model;
+        const fallbacks = a.fallbacks;
         const head = a.default_model ?? (fallbacks.length ? main : null);
         const chain = head ? [head, ...fallbacks] : [];
         return (

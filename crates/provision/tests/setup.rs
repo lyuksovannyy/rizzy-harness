@@ -47,7 +47,7 @@ impl Remote for Srv {
         } else if script.contains("wg genkey") {
             "NODE_PUBKEY=nodepub=\n".into()
         } else if script.contains("node join") {
-            "joined as node `vps-1`. Start it with: harness node run\ninstalled\n".into()
+            "joined as node `vps-1`. Start it with: rizzy-harness node run\ninstalled\n".into()
         } else {
             String::new()
         };
@@ -75,7 +75,7 @@ impl Connector for Conn {
         if self.0.lock().unwrap().locked {
             return Err(Error::Ssh("connection refused".into()));
         }
-        let kind = if self.0.lock().unwrap().user == "harness-admin" {
+        let kind = if self.0.lock().unwrap().user == "rizzy-harness-admin" {
             "admin"
         } else {
             "key"
@@ -102,7 +102,7 @@ impl Master for M {
     }
     fn wg_add_peer(&self, p: Peer) -> Result<String> {
         self.0.lock().unwrap().peers.push(p);
-        Ok("sudo wg-quick up /data/keys/wg-harness.conf".into())
+        Ok("sudo wg-quick up /data/keys/rizzy-harness.conf".into())
     }
     async fn join_args(&self) -> Result<String> {
         Ok("wss://10.77.0.1:7443 --token T --fingerprint F".into())
@@ -169,7 +169,7 @@ async fn automatic_setup_runs_every_step_in_order() {
     let log = Log::default();
     assert_eq!(auto(&w, &log).await.unwrap(), "vps-1");
     let w = w.lock().unwrap();
-    // The root (password) connection only inspected, created harness-admin
+    // The root (password) connection only inspected, created rizzy-harness-admin
     // and added the user's own key to root.
     let pw: Vec<_> = w
         .ran
@@ -180,12 +180,12 @@ async fn automatic_setup_runs_every_step_in_order() {
     assert_eq!(pw.len(), 3, "{pw:#?}");
     assert!(pw[0].contains("os-release"));
     assert!(
-        pw[1].contains("useradd --create-home --shell /bin/bash harness-admin")
+        pw[1].contains("useradd --create-home --shell /bin/bash rizzy-harness-admin")
             && pw[1].contains("NOPASSWD")
             && pw[1].contains("AAAAharness")
     );
     assert!(pw[2].contains("AAAAuser"));
-    // Everything after that ran as harness-admin.
+    // Everything after that ran as rizzy-harness-admin.
     assert!(
         w.ran.iter().skip(3).all(|r| r.0 == "admin"),
         "{:?}",
@@ -200,13 +200,13 @@ async fn automatic_setup_runs_every_step_in_order() {
                 ("useradd --create-home --shell /bin/bash", "admin"),
                 ("AAAAuser", "own-key"),
                 ("apt-get install -y -q wireguard-tools", "packages"),
-                ("10-harness.conf\ngrep", "ssh"),
+                ("10-rizzy-harness.conf\ngrep", "ssh"),
                 (
-                    "harness-revert-ssh.timer 2>/dev/null || true\necho confirmed",
+                    "rizzy-harness-revert-ssh.timer 2>/dev/null || true\necho confirmed",
                     "ssh-confirm",
                 ),
                 ("firewall.nft <<", "firewall"),
-                ("harness-firewall.service <<", "fw-confirm"),
+                ("rizzy-harness-firewall.service <<", "fw-confirm"),
                 ("enable-linger", "podman"),
                 ("wg genkey", "wireguard"),
                 ("node join", "install"),
@@ -234,7 +234,7 @@ async fn automatic_setup_runs_every_step_in_order() {
             "drop-sudo"
         ]
     );
-    assert_eq!(w.uploads, [("/tmp/harness.upload".to_string(), 1000)]);
+    assert_eq!(w.uploads, [("/tmp/rizzy-harness.upload".to_string(), 1000)]);
     assert_eq!(w.peers[0].endpoint, "203.0.113.7:51820");
     assert!(
         log.snapshot().iter().all(|s| s.status == Status::Ok),
@@ -271,7 +271,7 @@ async fn docker_and_keeping_sudo_are_flagged() {
     assert!(
         w.ran
             .iter()
-            .any(|r| r.1.contains("usermod -aG docker harness"))
+            .any(|r| r.1.contains("usermod -aG docker rizzy-harness"))
     );
     assert!(
         !w.ran.iter().any(|r| r.1.contains("sudo removed")),
@@ -310,7 +310,7 @@ async fn lockout_stops_before_confirming_so_the_change_reverts() {
     assert!(
         !w.ran
             .iter()
-            .any(|r| r.1.contains("harness-firewall.service <<")),
+            .any(|r| r.1.contains("rizzy-harness-firewall.service <<")),
         "never confirmed"
     );
     assert!(!w.ran.iter().any(|r| r.1.contains("wg genkey")), "stopped");
@@ -392,7 +392,7 @@ async fn manual_mode_only_inspects_and_explains() {
         engine
             .script
             .unwrap()
-            .contains("usermod -aG docker harness")
+            .contains("usermod -aG docker rizzy-harness")
             && engine.detail.contains("effectively root")
     );
     assert!(get("harness").script.unwrap().contains("--token T"));
@@ -404,7 +404,7 @@ async fn manual_mode_only_inspects_and_explains() {
 
 #[tokio::test]
 async fn manual_root_login_offers_harness_own_user() {
-    // Answer "create": harness-admin without sudo, key removed from root.
+    // Answer "create": rizzy-harness-admin without sudo, key removed from root.
     let w = world(FRESH);
     w.lock().unwrap().answers = vec!["create"];
     let (conn, m) = (Conn(w.clone()), M(w.clone()));
@@ -437,11 +437,12 @@ async fn manual_root_login_offers_harness_own_user() {
     let admin = ran
         .iter()
         .find(|r| {
-            r.1.contains("useradd --create-home --shell /bin/bash harness-admin")
+            r.1.contains("useradd --create-home --shell /bin/bash rizzy-harness-admin")
         })
         .unwrap();
     assert!(
-        admin.1.contains("rm -f /etc/sudoers.d/harness-admin") && !admin.1.contains("NOPASSWD:ALL"),
+        admin.1.contains("rm -f /etc/sudoers.d/rizzy-harness-admin")
+            && !admin.1.contains("NOPASSWD:ALL"),
         "no sudo in manual mode"
     );
     assert!(
@@ -449,7 +450,11 @@ async fn manual_root_login_offers_harness_own_user() {
             .any(|r| r.1.contains("grep -vxF 'ssh-ed25519 AAAAharness harness'")),
         "key removed from root"
     );
-    assert_eq!(ran.last().unwrap().0, "admin", "re-check as harness-admin");
+    assert_eq!(
+        ran.last().unwrap().0,
+        "admin",
+        "re-check as rizzy-harness-admin"
+    );
 
     // Answer "keep": stays root, flagged.
     let w = world(FRESH);
@@ -518,6 +523,6 @@ async fn protections_can_be_opted_out() {
     assert!(
         !w.ran
             .iter()
-            .any(|r| r.1.contains("10-harness.conf") || r.1.contains("firewall.nft"))
+            .any(|r| r.1.contains("10-rizzy-harness.conf") || r.1.contains("firewall.nft"))
     );
 }

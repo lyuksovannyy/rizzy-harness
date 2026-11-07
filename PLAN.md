@@ -225,8 +225,8 @@ Phase 4 when they have content.
 
 ### Data dir
 
-`$HARNESS_DATA_DIR` or `~/.local/share/harness/` (`dirs` crate):
-`master.db`, `node.db`, `ui-token` (0600), `harness.toml`, `node.toml`,
+`$HARNESS_DATA_DIR` or `~/.local/share/rizzy-harness/` (`dirs` crate):
+`master.db`, `node.db`, `ui-token` (0600), `config.toml`, `node.toml`,
 later `keys/`.
 
 The embedded node keeps its **own** `node.db` even though it shares a process
@@ -247,8 +247,8 @@ Wire/storage form (`RawEvent`) — what the store and protocol carry:
 
 * `(session_id, seq)` is the primary key and the idempotency key.
   `seq` starts at 1 and is contiguous; a gap is a bug or a missing replay.
-* The master mirror stores `kind` and `payload` **opaquely**. An older master
-  can mirror events from a newer node; it just renders unknown kinds generically.
+* The master mirror stores `kind` and `payload` **opaquely**; kinds it does not
+  know are mirrored as they are and rendered generically.
 * Typed form (`harness_core::EventKind`) is a serde enum with
   `tag = "kind", content = "payload"`. Unknown kinds deserialize to an error at
   the typed layer only; the raw layer never fails on them.
@@ -329,8 +329,8 @@ creates mirror rows for sessions it has never seen. This makes the link
 self-healing with no ordering assumptions beyond per-session FIFO.
 
 Pairing (Phase 2): Ed25519 identities on both sides. Node runs
-`harness node join <master-url>`; master shows the node fingerprint; operator
-approves it in the UI (or `harness pair approve <fp>`); key is pinned. Each
+`rizzy-harness node join <master-url>`; master shows the node fingerprint; operator
+approves it in the UI (or `rizzy-harness pair approve <fp>`); key is pinned. Each
 connection is a challenge-response over the TLS channel (both sides sign a
 nonce bound to the session). The node pins the master's key on first use
 (SSH-style) and refuses a changed key loudly.
@@ -393,12 +393,12 @@ login page.
   later, skill frontmatter; `serde_yaml` is deprecated and its forks idle.
 * **`cargo-deny`** in CI: permissive licences only; MPL-2.0 allowed solely for
   `option-ext` (via `dirs`, unmodified); internal crates are `publish = false`.
-* **Model registry** in `harness.toml`: `[[providers]]`, each with its
+* **Model registry** in `config.toml`: `[[providers]]`, each with its
   `models` and what the provider reported about them (context, max output,
   effort, vision, tools; unreported = unsupported). Model ids are
   `<provider id>::<raw id>` (`::` because raw ids contain `/`); one router
   provider sends each request by prefix. Effort is only sent to models with
-  `effort = true`. Older single-`[provider]` files migrate on load.
+  `effort = true`.
 * **Process-group kill via `nix::sys::signal::killpg`** (safe API, no `unsafe`
   in our code); `tokio::process::Command::process_group(0)`.
 * **Approval modes:** `ask_all` (every tool), `ask` (default: mutating tools),
@@ -527,7 +527,7 @@ against the 50 MB soft budget.
 * No OS sandbox for bash (R2). The UI token is single-user (R5).
 * Not tested against real vendors yet (no keys in CI); SSE parsing is tested against recorded chunk shapes (R4).
 
-**Next:** Phase 2. Threat model T7/T8 first, then `harness node join`, Ed25519 pairing, WSS bridge
+**Next:** Phase 2. Threat model T7/T8 first, then `rizzy-harness node join`, Ed25519 pairing, WSS bridge
 onto the existing `NodeLink`, network-drop tests.
 
 ### 2026-11-02 — Phase 2 (foundations): done
@@ -568,8 +568,7 @@ onto the existing `NodeLink`, network-drop tests.
 passwords and forced change; per-user privacy (admins too); per-user agentic grant;
 admin API (`/api/users`, `/api/me/password`); last-admin/self guards; sign-out on
 disable/delete/reset; login throttle; minimal Users panel, password screens and a
-Chat/Agentic choice in the web UI. Removed every compatibility shim (migrations,
-role alias, token-file rename); the schema is created complete.
+Chat/Agentic choice in the web UI. The schema is created complete.
 
 **Evidence:** `cargo test --workspace` green incl. 5 account HTTP tests (forced
 change, privacy, grant, disable/reset/delete, last-admin, throttle); Playwright on
@@ -666,8 +665,8 @@ chat works.
 * Provider setup without restart: Anthropic or any OpenAI-compatible endpoint (presets for
   OpenAI, DeepSeek, OpenRouter, Ollama, custom). "Test connection" calls `GET {base}/models`
   with the typed key; the admin picks which models to offer, a default, and which accept
-  effort. Apply = validate → build → write `harness.toml` → key into `secrets.toml` (0600,
-  never in `harness.toml`, never returned by the API) → hot-swap the provider behind both
+  effort. Apply = validate → build → write `config.toml` → key into `secrets.toml` (0600,
+  never in `config.toml`, never returned by the API) → hot-swap the provider behind both
   runtimes. The new key joins the shared redaction set at once, so tool output and logs
   scrub it without a restart.
 * Profile: display name, IANA time zone (prefilled from the browser, validated server-side),
@@ -695,7 +694,7 @@ chat works.
 * Provider apply is admin-only but affects every account at once; there is no per-user
   provider or key yet (teams/workspaces later).
 * The wizard depends on `GET /models`; a gateway without it cannot be set up from the UI
-  (only via `harness.toml`). A typed-model fallback is a small follow-up if it bites.
+  (only via `config.toml`). A typed-model fallback is a small follow-up if it bites.
 
 **Next:** Phase 6, chat capability (web search tool, attachments, token meter, rolling
 summary, incognito TTL).
@@ -874,7 +873,7 @@ unversioned, pin the image.
   there, but the user must open it. No cost cap in money, only tokens.
 * Delegation runs on the parent's node only (no cross-node fan-out yet) and sub-agents
   share the workspace without worktrees, so parallel coders can collide on files.
-* Remote nodes need their own provider config and key (`harness.toml` on the node).
+* Remote nodes need their own provider config and key (`config.toml` on the node).
 * No rate limit on failed node handshakes (each costs a signature check; audit logged).
 
 **Next:** Phase 9 (later items).
@@ -996,13 +995,13 @@ Settings → Nodes → *Set up a server over SSH*. New crate `harness-provision`
 with systemd, lack root/passwordless sudo, have a different CPU or older glibc than
 this build, or already run ufw, firewalld, Docker or other firewall rules ("not a
 fresh server, use manual setup"). Then: packages (`wireguard-tools`, `nftables`);
-key-only SSH (a `10-harness.conf` drop-in, which wins over cloud-init's `50-…`,
+key-only SSH (a `10-rizzy-harness.conf` drop-in, which wins over cloud-init's `50-…`,
 checked with `sshd -t`; the user's own public key is added first so they keep
-access); firewall (own `inet harness` nftables table: inbound only SSH and UDP
+access); firewall (own `inet rizzy_harness` nftables table: inbound only SSH and UDP
 51820; outbound open for agents); WireGuard (node key generated on the node; master
 peer only); then the user brings the master's side up once with root (shown
 command, then *continue*); then harness installs itself as an unprivileged
-`harness` user with a hardened systemd unit, joins over the tunnel and waits for the
+`rizzy-harness` user with a hardened systemd unit, joins over the tunnel and waits for the
 node to come online. **SSH and firewall changes arm a systemd timer that reverts them
 after 120 s; they are confirmed only after a new key login works**, so a bad rule
 cannot lock the user out (tested: on a lost connection the confirm never runs).
@@ -1022,7 +1021,7 @@ WireGuard key that appeared is registered with the master automatically.
   master's interface needs root once; harness does not run as root, so it prints
   `sudo wg-quick up …` (or `wg syncconf` for later nodes) instead.
 * Copying the model provider's API key to a node is opt-in: nodes run model calls
-  themselves. It lands in the node's `secrets.toml` (0600), not `harness.toml`.
+  themselves. It lands in the node's `secrets.toml` (0600), not `config.toml`.
 * russh without its `rsa` feature (RUSTSEC-2023-0071, unfixed); RSA-only private keys
   are not accepted; use the password once or an ed25519/ECDSA key.
 
@@ -1045,20 +1044,20 @@ Run a first automatic setup on a throwaway VPS before trusting it with a real on
 ### 2026-11-03 — Node setup: users, distros, container engine
 
 **Users (who is who on a node).**
-* `harness-admin`: harness's own SSH login, its own ed25519 key, locked password.
+* `rizzy-harness-admin`: harness's own SSH login, its own ed25519 key, locked password.
   *Automatic* mode **requires the root login** (refused in the form, the API and again
-  after login if uid ≠ 0). With root, harness creates `harness-admin` with
+  after login if uid ≠ 0). With root, harness creates `rizzy-harness-admin` with
   passwordless sudo for the setup, proves the key login, adds the user's own public
   key to root if given, and drops the root connection. Everything after that runs as
-  `harness-admin` via `sudo -n`. **At the end harness removes its own sudo** (opt-in
+  `rizzy-harness-admin` via `sudo -n`. **At the end harness removes its own sudo** (opt-in
   to keep it): a master holding passwordless root on every node would turn a master
   compromise into root everywhere, which breaks T5. Re-running automatic setup then
   needs root again.
 * *Manual* mode should get a **normal user**. Root is accepted with a warning. After the
-  login, harness asks: *Create harness's own user* (creates `harness-admin` **without**
+  login, harness asks: *Create harness's own user* (creates `rizzy-harness-admin` **without**
   sudo, switches to it, removes its key from root) or *Keep using root* (flagged).
 * `harness`: the unprivileged runtime user the node service runs as. Agents' commands
-  run as it. It never has sudo, and it is a different user from `harness-admin`. If
+  run as it. It never has sudo, and it is a different user from `rizzy-harness-admin`. If
   the agent's user could sudo, a prompt injection would mean root.
 
 **Distributions.** Fully supported: **Debian 13** and **Ubuntu 26.04 LTS** (constant
@@ -1079,9 +1078,9 @@ now a normal (non-system) user so it can get subordinate ids.
 **Evidence:** distro tier and engine-readiness tests; scripts parse (`bash -n`) and
 carry their guards; the subuid range pick and key removal ran against real files;
 scripted-server tests for: root required, order (admin user → … → engine →
-WireGuard → install → drop sudo), all post-bootstrap commands as `harness-admin`,
+WireGuard → install → drop sudo), all post-bootstrap commands as `rizzy-harness-admin`,
 Docker and kept-sudo flagged, distro tiers, manual root question (create: no sudo, key
-off root, re-check as harness-admin; keep: flagged); HTTP (automatic with non-root
+off root, re-check as rizzy-harness-admin; keep: flagged); HTTP (automatic with non-root
 refused, only offered answers accepted); `web/e2e/setup.cjs` (warnings, root
 question, engine step). **Still not run on a real Debian 13 / Ubuntu 26.04 VPS**
 (no systemd here): the apt, podman-rootless and docker steps are untested in reality.
@@ -1103,8 +1102,8 @@ over SSH* manages them.
   does not give harness root, by design.
 * **Watchdog** (master, every 10 min, plus *Check now*): read-only. SSH: an SSH
   `none` auth probe lists the methods the server offers; `password` or
-  `keyboard-interactive` = problem. Firewall: `sudo -n nft list table inet harness`
-  through a sudo rule that allows **only that command** (added for `harness-admin` in
+  `keyboard-interactive` = problem. Firewall: `sudo -n nft list table inet rizzy_harness`
+  through a sudo rule that allows **only that command** (added for `rizzy-harness-admin` in
   both modes). It reports, it never repairs. Problems go to *Waiting for you* under the
   bar (admins only) and to a browser notification. The toggles switch the watch only.
 * **Firewall off/on** button in automatic mode (dead-man revert when turning on).
@@ -1118,8 +1117,8 @@ over SSH* manages them.
 --test local_machine`, this VPS: Ubuntu 24.04, root, no systemd, no WireGuard module):
 inspection facts; the nftables table loads, outbound still works, and it reverts cleanly;
 the SSH drop-in passes `sshd -t`/`sshd -T` (password and kbd-interactive off, root
-`prohibit-password`); `harness-admin` with sudo, then sudo dropped, locked password; the
-watch-only sudo rule allows `nft list table inet harness` and nothing else; the russh
+`prohibit-password`); `rizzy-harness-admin` with sudo, then sudo dropped, locked password; the
+watch-only sudo rule allows `nft list table inet rizzy_harness` and nothing else; the russh
 auth probe against the real OpenSSH matches the OpenSSH fingerprint and sees password on
 and off; rootless Podman as `harness` (container uid 0 → a subuid on the host); Docker
 group access.
@@ -1150,7 +1149,7 @@ the setup already). `REGISTRY` build arg for Docker Hub mirrors.
 
 **Networking, two ways:**
 * `compose.yaml` default, **host networking**: the master reaches nodes through the
-  host's `wg-harness` and binds loopback / `10.77.0.1` exactly as on bare metal. The
+  host's `rizzy-harness` and binds loopback / `10.77.0.1` exactly as on bare metal. The
   `sudo wg-quick up …` command printed during node setup is run on the host;
   `HARNESS_HOST_DATA_DIR` maps the printed path to the host's (`./data`).
 * Own network (UI and chats only): inside the container `0.0.0.0` is allowed
@@ -1194,11 +1193,11 @@ biggest saving was missing entirely: **no prompt caching**, and memory recall wa
 into the system prompt on every turn, which would have defeated any cache.
 
 **Settings.** `TokenSavings` (`[savings]`, Settings → Token savings) is resolved per turn
-into `Savings` (`for_turn(chat)`) and sent with `session.prompt` (additive protocol
-field; absent = everything off, so old masters and tests behave as before). Chat turns
-never get agentic methods and are capped at the `lite` style. Sub-agents inherit the
-parent turn's settings. Per-turn context (memory recall, page context) is a separate
-`context` field placed after the history, never in the system prompt.
+into `Savings` (`for_turn(chat)`) and sent with `session.prompt` (absent = everything
+off). Chat turns never get agentic methods and are capped at the `lite` style.
+Sub-agents inherit the parent turn's settings. Per-turn context (memory recall, page
+context) is a separate `context` field placed after the history, never in the system
+prompt.
 
 **Methods.** (1) Prompt caching: genai `CacheControl::Ephemeral` on the system prompt
 (covers tools + system) and on the newest message; cache reads/writes are counted in
@@ -1217,7 +1216,7 @@ irreversible actions, questions" rules are kept in every level. (7) `harness-cod
 tree-sitter tags for Rust/Python/JS/TS/Go → `outline` tool and a PageRank-ranked repo
 map (built once per folder per hour, so it does not churn the cached prefix).
 (8) graphify: `graph_query` shells out to the pinned `graphifyy==0.9.102` (installed by
-`harness graphify install` via uv or pipx, or the settings button for the built-in
+`rizzy-harness graphify install` via uv or pipx, or the settings button for the built-in
 node). It needs the node's own `graphify = true` (node-local policy stays
 authoritative; the master toggle can only turn it off), writes its graph under the
 node's data dir via `GRAPHIFY_OUT`, and gets the tool env with secrets removed.
@@ -1492,8 +1491,7 @@ more contrast and print) and the art tokens (`--art-max`, `--art-peak`, `--glow`
 
 **Deviations.** Shell applies the theme only once the preferences have loaded (the
 spec's effect would clear the pre-painted theme for a moment). A preview does not
-write the mirrors, so a reload before Save comes back to what is saved. The legacy
-`--radius` alias is gone (nothing uses it). The reduced-motion overrides for the
+write the mirrors, so a reload before Save comes back to what is saved. The reduced-motion overrides for the
 greeting and the running dot sit next to their rules, since an earlier rule of the
 same specificity would lose. `select.pill` sizes to the chosen option
 (`field-sizing: content`). The ETag for files outside `assets/` is left for the
@@ -1507,8 +1505,8 @@ declaration; `--fg`, `--fg-2` and the status colours on nine surfaces; each of t
 six accents as text on three surfaces and on its 9% and 16% tints, under
 `--accent-fg`, and as a focus ring; syntax, chart and callout pairs as before; the
 art budget. Vitest: `appearance` (attributes, mirrors, preview, theme colour), and
-Composer's mode attribution and thumb. Rust: the theme list, old stored prefs
-without a theme, typos still rejected, and the settings API accepting dark and
+Composer's mode attribution and thumb. Rust: the theme list, prefs
+without a theme loading with the defaults, typos still rejected, and the settings API accepting dark and
 system and refusing others. e2e (phase5): preview, revert on leaving, Save, the
 mirror, no flash (a new page in a light OS with the settings request held back is
 dark from the start) and System handing the theme back to the OS.
@@ -1575,7 +1573,7 @@ bounds, determinism, 80% moved by a new seed, the ripple, a full zone, 64 lines
 under 5 ms), the magnifier's branches, topics, mixing (share, quotas, never a
 title, no duplicates), the list parser and fetch-once, the field (zone mask, flip
 rate ± 10%, streak limits), the Backdrop layer machine and the mirror. Rust: the
-backdrop list and old prefs, the settings API, the ETag. e2e (`backdrop.cjs`):
+backdrop list and the prefs defaults, the settings API, the ETag. e2e (`backdrop.cjs`):
 each mode's art, aria-hidden, nothing under the column or composer, one fetch,
 the 700 ms debounce, a new wall per new chat, never the user's title, pause when
 hidden, contrast over every background in both themes, no light on touch,
@@ -1583,15 +1581,12 @@ reduced motion, Off and Still, and the gutter only beside wide chats.
 
 ### 2026-11-07 — Several providers, model parameters, per-agent defaults
 
-`harness.toml` holds `[[providers]]` (id = model prefix, preset, kind,
-base_url, key reference, models) plus `default_model` and `[agent_models]`.
-Old files (`[provider]` + `[[models]]`) load as one provider: the preset whose
-URL matches names it, else an id made from the host (never a preset's id, so
-adding that preset later cannot replace it); the next save writes the new
-shape. An old `[memory]` with a URL but no model gets the preset's model
-written out, as it was used before. The router (`agent-native/src/llm.rs`) resolves `<prefix>::<raw>`,
-strips the prefix, and sends legacy unprefixed ids to the first provider listing
-them, else to the default model's provider; it is swapped whole on any change.
+`config.toml` holds `[[providers]]` (id = model prefix, preset, kind,
+base_url, key reference, models) plus `default_model` and `[agent_models]`;
+an agent's entry is `{ model, fallbacks }`. Memory embeddings come from a
+provider or from Ollama. The router (`agent-native/src/llm.rs`) resolves
+`<prefix>::<raw>` and strips the prefix; an id without a known prefix is an
+unknown model. It is swapped whole on any change.
 
 Presets live in `master/src/presets.rs`; fixed ones pin their URL (a client URL
 is ignored). Keys are stored per provider as `provider-<id>`, reused for a test
@@ -1624,8 +1619,7 @@ now goes on the turn's spec from the master instead of the node's config.
 **Deviations.** `custom_openai` needs no key (local servers often take none).
 Deleting the last provider brings the demo provider back. The ids `demo` and
 `test` are reserved (their paths are actions); PUT on them answers 400 and
-DELETE removes a provider that has one. `POST /api/admin/providers/test` takes
-`memory: true` to reuse the custom embeddings key for the same URL.
+DELETE removes a provider that has one.
 
 Favicons (`/api/favicon`): https on every hop, redirects included; one user
 runs at most two uncached fetches, a free slot is waited for at most 2 s (503,

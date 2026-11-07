@@ -18,6 +18,7 @@ const info = (id: string): ModelInfo => ({
   vision: false,
   tools: false,
   default: false,
+  unavailable: false,
 });
 const MODELS = [info("openai::gpt-4o")];
 const prefs = (default_model: string | null) => ({ default_model }) as Prefs;
@@ -26,9 +27,9 @@ describe("savable prefs", () => {
   test("a removed provider's model goes as the server default", () => {
     expect(savablePrefs(prefs("groq::llama-3"), MODELS).default_model).toBeNull();
   });
-  test("known and legacy raw ids are kept", () => {
+  test("a known id is kept; an unprefixed one is unknown", () => {
     expect(savablePrefs(prefs("openai::gpt-4o"), MODELS).default_model).toBe("openai::gpt-4o");
-    expect(savablePrefs(prefs("gpt-4o"), MODELS).default_model).toBe("gpt-4o");
+    expect(savablePrefs(prefs("gpt-4o"), MODELS).default_model).toBeNull();
   });
   test("nothing is dropped before the models are known", () => {
     expect(savablePrefs(prefs("groq::llama-3"), []).default_model).toBe("groq::llama-3");
@@ -95,7 +96,7 @@ describe("agent plans", () => {
     };
     const p = planFrom(saved, null, "openai", (id) => id.startsWith("demo::"));
     expect(p).toEqual({ general: { model: "::gpt-4o", fallbacks: ["groq::llama"] }, coder: { model: null, fallbacks: [] } });
-    // An older config set only the global default.
+    // General without a chain of its own starts on the server default model.
     expect(planFrom({}, "groq::llama", "openai").general).toEqual({ model: "groq::llama", fallbacks: [] });
   });
 

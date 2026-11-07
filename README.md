@@ -33,7 +33,7 @@ cargo build --release
 ```
 
 ```bash
-./target/release/harness serve
+./target/release/rizzy-harness serve
 ```
 
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
@@ -45,11 +45,11 @@ chats. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
 
 ```bash
-./target/release/harness claim-code
+./target/release/rizzy-harness claim-code
 ```
 
 Scripts can call the API with `Authorization: Bearer <token>`, using the token
-printed by `harness token`.
+printed by `rizzy-harness token`.
 
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
@@ -74,10 +74,10 @@ still version beside chats when the window is wide enough.
 
 ## Configuration
 
-Everything lives in the data directory (`~/.local/share/harness`, or
+Everything lives in the data directory (`~/.local/share/rizzy-harness`, or
 `--data-dir` / `HARNESS_DATA_DIR`).
 
-`harness.toml`: model providers. API keys never go in this file: reference an
+`config.toml`: model providers. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600
 `secrets.toml` (`api_key_secret`; onboarding and Settings → AI provider write
 it for you, as `provider-<id>`). Several providers can be connected at once;
@@ -146,7 +146,7 @@ which model answered. An agent without an `[agent_models]` entry runs on
 the default (General's main model) with General's fallbacks; a sub-agent
 without a model of its own runs on its parent's model with the parent's
 fallbacks. A reasoning effort goes only to the models of the chain that take
-one. Older files with `coder = "<model id>"` still load (no fallbacks). Unavailable models in use show as notices on the home screen:
+one. Unavailable models in use show as notices on the home screen:
 admins see all of them, other users those behind an agent's main model, the
 global default or their own default.
 
@@ -157,10 +157,6 @@ with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
 not set it by hand either.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
-Older files with a single `[provider]` and `[[models]]` still load (as one
-provider) and are rewritten in this shape on the next change. An endpoint no
-preset matches gets an id made from its host (for example `localhost-1234`),
-so its models are `localhost-1234::<model>`; unprefixed ids keep working.
 
 Chats and web tools (restart after changing):
 
@@ -178,13 +174,11 @@ fetch = true                         # web_fetch: public addresses only, URLs fr
 [memory]
 backend = "builtin"                  # builtin | mem0 | off (restart to switch)
 recall = "meaning"                   # keywords | meaning (all of this is settable in the UI)
-source = "ollama"                    # provider | ollama | custom: where embeddings come from
+source = "ollama"                    # provider | ollama: where embeddings come from
 # provider_id = "mistral"            # for source = "provider": uses that provider's URL and key
-embeddings_url = "http://localhost:11434/v1"  # for ollama and custom
+embeddings_url = "http://localhost:11434/v1"  # for ollama
 preset = "balanced"                  # fast | balanced | best (Ollama model names)
-# embeddings_model = "nomic-embed-text"  # overrides the preset; required for provider and custom
-# api_style = "openai"               # custom only: openai (Bearer) | anthropic (x-api-key)
-# embeddings_key_secret = "embeddings"   # custom only ([keys] in secrets.toml)
+# embeddings_model = "nomic-embed-text"  # overrides the preset; required for provider
 # mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
 
@@ -222,7 +216,7 @@ graphify = false                     # let agents query a graphify knowledge gra
 ### Token savings
 
 Settings → Token savings (admin) switches each method on or off; it is
-stored as `[savings]` in `harness.toml` and applies from the next message.
+stored as `[savings]` in `config.toml` and applies from the next message.
 
 | Method | Default | Applies to | What it does |
 |---|---|---|---|
@@ -249,14 +243,14 @@ node: Settings → Token savings → *Install graphify*, then *Allow*. On anothe
 node (each node decides for itself):
 
 ```bash
-harness graphify install
+rizzy-harness graphify install
 ```
 
 then add `graphify = true` to that node's `node.toml` and restart it. The
 graph is stored in the node's data folder, never in your repository, and
 graphify gets no API keys.
 
-`harness doctor` checks the setup.
+`rizzy-harness doctor` checks the setup.
 
 ## Rich messages
 
@@ -325,7 +319,7 @@ your WireGuard peers. Add `--tls` so the browser treats the page as secure
 data directory once on each device:
 
 ```bash
-./target/release/harness serve --bind 10.8.0.1:7777 --tls
+./target/release/rizzy-harness serve --bind 10.8.0.1:7777 --tls
 ```
 
 ## Central server in Docker
@@ -347,7 +341,7 @@ HARNESS_TAG=edge docker compose up -d
 build this checkout instead, uncomment `build: .` in `compose.yaml`.)
 
 ```bash
-docker compose exec harness harness claim-code
+docker compose exec harness rizzy-harness claim-code
 ```
 
 Then open `http://127.0.0.1:7777` (from elsewhere: `ssh -L 7777:127.0.0.1:7777`
@@ -361,7 +355,7 @@ or the WireGuard address). Notes:
   `0.0.0.0` (`HARNESS_CONTAINER=1`); **never publish on `0.0.0.0`**: Docker's
   published ports bypass ufw/iptables rules on the host. A different host
   port needs `HARNESS_ALLOWED_HOSTS=127.0.0.1:8080` (the Host header check).
-- Setting up a node prints `sudo wg-quick up <data>/keys/wg-harness.conf`: run it
+- Setting up a node prints `sudo wg-quick up <data>/keys/rizzy-harness.conf`: run it
   **on the host**. `HARNESS_HOST_DATA_DIR` (set in compose) makes the printed path
   the host's. Then add `--node-listen 10.77.0.1:7443` to the command.
 - Nodes receive the master's own binary, built on Debian 13: fine for Debian 13
@@ -377,7 +371,7 @@ Agentic sessions can run on other machines. Start the master with a node port
 (TLS with a pinned self-signed certificate; only joined nodes get in):
 
 ```bash
-./target/release/harness serve --node-listen 0.0.0.0:7443
+./target/release/rizzy-harness serve --node-listen 0.0.0.0:7443
 ```
 
 The easy way: Settings → Nodes → **Set up a server over SSH**. Check the
@@ -385,9 +379,9 @@ server's host key, log in once with a password or key (harness installs its
 own key and does not keep yours), and pick:
 
 - **Automatic** for a fresh VPS, logging in as **root**: harness creates its
-  own user `harness-admin`, sets up WireGuard, an nftables firewall, key-only
+  own user `rizzy-harness-admin`, sets up WireGuard, an nftables firewall, key-only
   SSH, the container engine and the node (which runs as the unprivileged
-  user `harness`), then removes its own sudo. Risky steps revert themselves
+  user `rizzy-harness`), then removes its own sudo. Risky steps revert themselves
   after 2 minutes unless harness can still log in.
 - **Manual** for a server with other things on it, logging in as a **normal
   user**: a checklist with the commands to run. With root, harness asks
@@ -408,7 +402,7 @@ tested. Test it on a throwaway VPS first.
 
 By hand: in Settings → Nodes choose **Create join command** and run the two printed
 commands on the other machine (same binary). That machine needs its own
-`harness.toml` (provider + key) and `node.toml` (its workspace roots and
+`config.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
 
@@ -426,10 +420,10 @@ cargo test --workspace
 cd web && npm test && npm run typecheck
 ```
 
-UI dev server with hot reload (proxies `/api` to a running `harness serve`):
+UI dev server with hot reload (proxies `/api` to a running `rizzy-harness serve`):
 
 ```bash
-./target/debug/harness serve --allowed-host localhost:5173
+./target/debug/rizzy-harness serve --allowed-host localhost:5173
 ```
 
 ```bash
@@ -445,41 +439,41 @@ cd web && npm run build && npm run size
 End-to-end UI flows against the real binary (needs Playwright + Chromium):
 
 ```bash
-node web/e2e/phase3.cjs target/debug/harness
+node web/e2e/phase3.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/phase4.cjs target/debug/harness
+node web/e2e/phase4.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/phase5.cjs target/debug/harness
+node web/e2e/phase5.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/phase6.cjs target/debug/harness
+node web/e2e/phase6.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/phase7.cjs target/debug/harness
+node web/e2e/phase7.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/phase8.cjs target/debug/harness
+node web/e2e/phase8.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/phase9.cjs target/debug/harness
+node web/e2e/phase9.cjs target/debug/rizzy-harness
 ```
 
 ```bash
-node web/e2e/attention.cjs target/debug/harness
+node web/e2e/attention.cjs target/debug/rizzy-harness
 ```
 
 Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):
 
 ```bash
-node web/e2e/rich.cjs target/debug/harness
+node web/e2e/rich.cjs target/debug/rizzy-harness
 ```
 
 ```bash
@@ -487,13 +481,13 @@ cargo build -p harness-provision --features test-util --example fake_sshd
 ```
 
 ```bash
-node web/e2e/setup.cjs target/debug/harness target/debug/examples/fake_sshd
+node web/e2e/setup.cjs target/debug/rizzy-harness target/debug/examples/fake_sshd
 ```
 
 Token savings page (graphify part runs only when it is installed):
 
 ```bash
-node web/e2e/savings.cjs target/debug/harness
+node web/e2e/savings.cjs target/debug/rizzy-harness
 ```
 
 Token savings against a real model (key from the environment, never printed):
@@ -503,10 +497,10 @@ BENCH_BASE_URL=https://api.example/v1 BENCH_KEY=... BENCH_MODEL=some-model cargo
 ```
 
 The container (a running image published on `127.0.0.1:7781`, with a
-harness.toml without providers, i.e. the built-in demo one, in its data volume):
+config.toml without providers, i.e. the built-in demo one, in its data volume):
 
 ```bash
-node web/e2e/container.cjs http://127.0.0.1:7781/ "$(docker exec <container> harness claim-code)"
+node web/e2e/container.cjs http://127.0.0.1:7781/ "$(docker exec <container> rizzy-harness claim-code)"
 ```
 
 The Phase 1 acceptance test (`crates/cli/tests/acceptance_restart.rs`)

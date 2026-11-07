@@ -50,10 +50,8 @@ pub async fn for_viewer(m: &Master, who: &Principal) -> Vec<Notice> {
     let admin = who.is_admin();
     let mut uses: BTreeMap<String, Uses> = BTreeMap::new();
     let mut mark = |id: &str, f: &mut dyn FnMut(&mut Uses)| {
-        if let Some(c) = cfg.canonical_model(id)
-            && cfg.model_unavailable(&c)
-        {
-            f(uses.entry(c).or_default());
+        if cfg.model_unavailable(id) {
+            f(uses.entry(id.to_string()).or_default());
         }
     };
     for a in m.agents().list() {

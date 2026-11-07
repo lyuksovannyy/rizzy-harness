@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createOwner, keywordsOnly } = require('./onboard.cjs');
-const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
+const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e6-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
 const URL_ = 'http://127.0.0.1:7796/';
@@ -37,8 +37,9 @@ async function skipOnboarding(page) {
 (async () => {
   await new Promise((r) => searx.listen(0, '127.0.0.1', r));
   const sx = `http://127.0.0.1:${searx.address().port}`;
-  fs.writeFileSync(`${S}/data/harness.toml`, [
-    '[provider]', 'kind = "mock"', 'mock_delay_ms = 2', '',
+  fs.writeFileSync(`${S}/data/config.toml`, [
+    '[[providers]]', 'id = "demo"', 'name = "Demo"', 'preset = "demo"', 'kind = "mock"', 'mock_delay_ms = 2',
+    'models = [{ id = "mock" }]', '',
     '[chat]', 'summarize_after_tokens = 400', '',
     '[web]', 'search = "searxng"', `searxng_url = "${sx}"`, '',
   ].join('\n'));

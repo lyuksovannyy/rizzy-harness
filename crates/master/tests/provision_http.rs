@@ -181,7 +181,7 @@ async fn manual_setup_installs_harness_key_and_forgets_the_password() {
         v["setups"][0]["commands"]["ssh_off"]
             .as_str()
             .unwrap()
-            .contains("10-harness.conf")
+            .contains("10-rizzy-harness.conf")
     );
     let sid = rec["id"].as_str().unwrap().to_string();
     // Manual mode: harness does not touch the firewall itself.

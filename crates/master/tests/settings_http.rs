@@ -190,7 +190,7 @@ async fn settings_defaults_validation_and_isolation() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    // Defaults for older saved settings: DuckDuckGo images, no custom engines.
+    // Left out: DuckDuckGo images, no custom engines.
     assert_eq!(
         v["image_search_url"],
         "https://duckduckgo.com/?q={q}&iax=images&ia=images"

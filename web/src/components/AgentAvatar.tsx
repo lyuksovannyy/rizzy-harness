@@ -15,7 +15,7 @@ export const STATES: AvatarState[] = ["idle", "thinking", "working", "unsure", "
 
 const REDUCE = "(prefers-reduced-motion: reduce)";
 
-/** FNV-1a: small and stable, the same id always gives the same face. */
+/** FNV-1a: small and stable, the same input always gives the same number. */
 function hash(s: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
@@ -23,16 +23,6 @@ function hash(s: string): number {
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
-}
-
-/** The face an agent has until an admin picks one (the server sends its own). */
-export function defaultAvatar(id: string): Avatar {
-  const h = hash(id);
-  return {
-    shape: SHAPES[h % SHAPES.length]!,
-    eyes: EYES[(h >>> 8) % EYES.length]!,
-    accent: AVATAR_ACCENTS[(h >>> 16) % AVATAR_ACCENTS.length]!,
-  };
 }
 
 // The bodies in a 40×40 box, drawn with a round stroke of their own paint
@@ -148,20 +138,13 @@ export function AgentAvatar(props: {
   );
 }
 
-/** The model an agent runs on: what the server says, else its own chain's;
- * with no chain it runs on the server default, the only model its
- * `unavailable` can then name. */
-export function agentMainModel(agent: Pick<Agent, "main_model" | "default_model" | "fallbacks" | "unavailable">): string | null {
-  return agent.main_model ?? agent.default_model ?? ((agent.fallbacks ?? []).length ? null : (agent.unavailable?.[0] ?? null));
-}
-
 /** Why an agent is in trouble, or null: its main model is gone, whether or
  * not a fallback still answers in its place. */
-export function agentAlert(agent: Pick<Agent, "name" | "main_model" | "default_model" | "fallbacks" | "unavailable">): string | null {
-  const main = agentMainModel(agent);
-  const gone = agent.unavailable ?? [];
+export function agentAlert(agent: Pick<Agent, "name" | "main_model" | "fallbacks" | "unavailable">): string | null {
+  const main = agent.main_model;
+  const gone = agent.unavailable;
   if (!main || !gone.includes(main)) return null;
-  const next = (agent.fallbacks ?? []).find((f) => f !== main && !gone.includes(f));
+  const next = agent.fallbacks.find((f) => f !== main && !gone.includes(f));
   return next
     ? `${agent.name}'s model ${rawModel(main)} is no longer available; answering with fallback ${rawModel(next)}.`
     : `${agent.name}'s model ${rawModel(main)} is no longer available, and no fallback is left to answer instead.`;
@@ -181,11 +164,6 @@ export function AgentMark(props: { agent: Agent; state?: AvatarState; size?: num
     );
   }
   return (
-    <AgentAvatar
-      avatar={props.agent.avatar ?? defaultAvatar(props.agent.id)}
-      state={props.state}
-      size={size}
-      title={props.title}
-    />
+    <AgentAvatar avatar={props.agent.avatar} state={props.state} size={size} title={props.title} />
   );
 }

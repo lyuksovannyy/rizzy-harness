@@ -82,9 +82,6 @@ const WARNING_TITLE = {
   data_collection: "Your data may be collected",
 } as const;
 
-/** A listed model, with the marks an older server leaves out. */
-const fresh = (m: ProviderModel): ProviderModel => ({ ...m, custom: !!m.custom, unavailable: !!m.unavailable, missing_since: m.missing_since ?? null });
-
 const bare = (raw: string): ProviderModel => ({
   id: raw,
   name: null,
@@ -151,7 +148,7 @@ export function ProviderForm(props: {
   const [touched, setTouched] = useState({ name: !!edit, prefix: !!edit });
   const [key, setKey] = useState("");
   // The provider's saved models (and models added by hand), and its latest listing.
-  const [own, setOwn] = useState<ProviderModel[]>(() => (embeddings ? [] : (existing?.models.map(fresh) ?? [])));
+  const [own, setOwn] = useState<ProviderModel[]>(() => (embeddings ? [] : (existing?.models ?? [])));
   const [listing, setListing] = useState<ProviderModel[] | null>(null);
   const [fetched, setFetched] = useState<number | null>(null);
   const [chosen, setChosen] = useState<string[]>(() => (embeddings ? [] : (existing?.models.map((m) => m.id) ?? [])));
@@ -180,7 +177,7 @@ export function ProviderForm(props: {
       if (want.current !== id) return;
       if (!l.models.length) l = await api.refreshProviderModels(id);
       if (want.current !== id) return;
-      setListing(l.models.map(fresh));
+      setListing(l.models);
       setFetched(l.fetched_ms);
     } catch {
       // The saved models still show; a refresh or a test lists again.
@@ -197,7 +194,7 @@ export function ProviderForm(props: {
     setPresetId(id);
     setSavedAs(null);
     setBase(ex?.base_url ?? p?.base_url ?? "");
-    setOwn(embeddings ? [] : (ex?.models.map(fresh) ?? []));
+    setOwn(embeddings ? [] : (ex?.models ?? []));
     setChosen(embeddings ? [] : (ex?.models.map((m) => m.id) ?? []));
     setPlan(planFor(ex?.id ?? null));
     setListing(null);
@@ -270,7 +267,7 @@ export function ProviderForm(props: {
       if (!r.ok) throw new Error(r.error || "The test failed.");
       // Chosen models this endpoint does not have (and the form never saved) go.
       const keep = new Set([...r.models.map((m) => m.id), ...own.map((m) => m.id)]);
-      setListing(r.models.map(fresh));
+      setListing(r.models);
       setFetched(Date.now());
       setChosen((c) => c.filter((id) => keep.has(id)));
       setPlan((p) => dropModels(p, (id) => !id.startsWith("::") || keep.has(id.slice(2))));
@@ -292,7 +289,7 @@ export function ProviderForm(props: {
     setErr(null);
     try {
       const l = await api.refreshProviderModels(existing.id);
-      setListing(l.models.map(fresh));
+      setListing(l.models);
       setFetched(l.fetched_ms);
       props.onListed?.();
     } catch (x) {
@@ -386,7 +383,6 @@ export function ProviderForm(props: {
             base_url: preset.url_editable ? url : undefined,
             api_key: key || undefined,
             kind: preset.kind,
-            ...(embeddings ? { memory: true } : {}),
           })
         : null,
   };

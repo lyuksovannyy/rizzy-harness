@@ -236,21 +236,6 @@ pub fn same_url(a: &str, b: &str) -> bool {
     a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
 }
 
-/// The non-custom preset of `kind` whose fixed URL is `url`.
-pub fn by_url(kind: ProviderKind, url: &str) -> Option<&'static Preset> {
-    PRESETS
-        .iter()
-        .find(|p| !p.custom && p.kind == kind && p.base_url.is_some_and(|u| same_url(u, url)))
-}
-
-/// The custom preset for an API kind.
-pub fn custom_for(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => "custom_anthropic",
-        _ => "custom_openai",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

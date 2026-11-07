@@ -31,7 +31,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   useEffect(() => {
     if (steps) return;
     // Admins configure the provider unless one is already set up (e.g. via
-    // harness.toml on a headless install).
+    // config.toml on a headless install).
     if (!admin || providersErr) setSteps(["profile", "search"]);
     else if (providers) setSteps(providers.configured ? ["profile", "search"] : ["provider", "memory", "profile", "search"]);
   }, [admin, providers, providersErr, steps]);

@@ -19,7 +19,6 @@ import type {
   NodeInfo,
   Prefs,
   Profile,
-  ApiStyle,
   MemorySource,
   AgentChain,
   ModelListing,
@@ -174,8 +173,7 @@ export const api = {
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
   providers: () => call<ProvidersState>("GET", "/api/admin/providers"),
   /** Always resolves; a failed connection is `{ok: false, error}`. */
-  /** `memory`: reuse the embeddings key saved in [memory] when the URL matches. */
-  testProvider: (b: { preset: string; base_url?: string; api_key?: string; provider_id?: string; memory?: boolean }) =>
+  testProvider: (b: { preset: string; base_url?: string; api_key?: string; provider_id?: string }) =>
     call<{ ok: true; models: ProviderModel[] } | { ok: false; error: string }>("POST", "/api/admin/providers/test", b),
   saveProvider: (
     id: string,
@@ -200,7 +198,6 @@ export const api = {
     base_url?: string;
     api_key?: string;
     kind?: ProviderKind;
-    memory?: boolean;
   }) => call<ModelTestResult>("POST", "/api/admin/providers/models/test", b),
   saveAgentModels: (b: { agent_models: Record<string, AgentChain | null>; default_model?: string | null }) =>
     call<ProvidersState>("PUT", "/api/admin/agent-models", b),
@@ -220,8 +217,6 @@ export const api = {
     provider_id?: string;
     embeddings_url?: string;
     embeddings_model?: string;
-    api_style?: ApiStyle;
-    embeddings_key?: string;
     preset: Preset;
   }) =>
     call<MemoryCfg>("PUT", "/api/admin/memory", b),

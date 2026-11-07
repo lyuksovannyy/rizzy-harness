@@ -60,7 +60,7 @@ describe("Notices", () => {
       root.render(
         <Notices
           notices={[notice({ id: "a", can_fix: true }), notice({ id: "b", model: "x::y" })]}
-          agents={agents.map((a) => ({ ...a, description: "", builtin: true, default_model: null, fallbacks: [], unavailable: [] }))}
+          agents={agents.map((a) => ({ ...a, description: "", builtin: true, default_model: null, main_model: null, fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } }))}
         />,
       ),
     );
@@ -81,11 +81,11 @@ describe("model_fallback", () => {
     const v = fold([
       ev(1, "turn_started", { turn_id: "t", agent: null }),
       ev(2, "model_fallback", { turn_id: "t", model: "anthropic::claude-y", from: "openai::gpt-old" }),
-      ev(3, "model_fallback", { turn_id: "t", model: "a::b", reason: "429 Too Many Requests" }),
+      ev(3, "model_fallback", { turn_id: "t", model: "a::b", from: "openai::gpt-4o", reason: "429 Too Many Requests" }),
     ]);
     expect(v.items).toEqual([
       { type: "fallback", turn_id: "t", model: "anthropic::claude-y", from: "openai::gpt-old", reason: null },
-      { type: "fallback", turn_id: "t", model: "a::b", from: null, reason: "429 Too Many Requests" },
+      { type: "fallback", turn_id: "t", model: "a::b", from: "openai::gpt-4o", reason: "429 Too Many Requests" },
     ]);
     expect(v.unknown_events).toBe(0);
   });
@@ -97,15 +97,12 @@ describe("the fallback note", () => {
       text: "Answered by b — the main model was unavailable",
       title: "Main model: gpt-old",
     });
-    expect(fallbackNote({ model: "a::b", from: null })).toEqual({ text: "Answered by b — the main model was unavailable", title: "" });
-    const failed = fallbackNote({ model: "a::b", from: "gpt-4o", reason: "429 Too Many Requests" });
+    const failed = fallbackNote({ model: "a::b", from: "openai::gpt-4o", reason: "429 Too Many Requests" });
     expect(failed.text).toBe("Answered by b — the main model failed");
-    // A legacy unprefixed id keeps its first letter.
     expect(failed.title).toBe("Main model: gpt-4o\n429 Too Many Requests");
   });
 
-  test("rawModel leaves an unprefixed id whole", () => {
-    expect(rawModel("gpt-4o")).toBe("gpt-4o");
+  test("rawModel takes the provider prefix off", () => {
     expect(rawModel("a::b")).toBe("b");
     expect(rawModel("a::")).toBe("a::");
   });
