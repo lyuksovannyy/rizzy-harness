@@ -29,6 +29,10 @@ LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 # Everyday query starts; each is also expanded with " a" .. " z".
 GENERAL_PREFIXES = [
+    "how to fix", "how to clean", "how to draw", "how to play", "how to install", "how to change",
+    "how to turn off", "how to connect", "how to calculate", "how to grow", "how to train", "how to start a",
+    "where to buy", "is it safe to", "who invented", "fun facts about", "ideas for", "what is the best",
+    "how many days until", "when was", "how do you", "best way to learn",
     "how to", "what is", "what are", "why is", "why do", "why does", "when is", "when does",
     "where is", "who is", "can i", "can you", "is it", "how much", "how many", "how long",
     "how do i", "what time", "what does", "best way to", "weather", "time in", "how to make",
@@ -66,6 +70,15 @@ BLOCK = re.compile(
 )
 
 
+# The wall's content policy, shared with web/src/bg/wallLists.test.ts.
+POLICY_FILE = Path(__file__).resolve().parent.parent / "src" / "bg" / "wall-policy.json"
+POLICY = [
+    re.compile(r"\b(?:" + "|".join(words) + r")\b", re.I)
+    for key, words in json.loads(POLICY_FILE.read_text(encoding="utf-8")).items()
+    if not key.startswith("$")
+]
+
+
 def fetch(q: str, hl: str = "en", gl: str = "us") -> list[str]:
     url = ENDPOINT + "?" + urllib.parse.urlencode({"client": "firefox", "hl": hl, "gl": gl, "q": q})
     req = urllib.request.Request(url, headers={"User-Agent": "rizzy-harness query harvester"})
@@ -79,7 +92,7 @@ def clean(s: str) -> str | None:
     s = " ".join(s.split()).strip().lower()
     if not 6 <= len(s) <= 60 or len(s.split()) < 2:
         return None
-    if any(ord(c) < 32 for c in s) or BLOCK.search(s):
+    if any(ord(c) < 32 for c in s) or BLOCK.search(s) or any(p.search(s) for p in POLICY):
         return None
     if not re.fullmatch(r"[a-z0-9 '&+.,?!:/-]+", s):
         return None
@@ -131,6 +144,7 @@ def main() -> int:
     ap.add_argument("--min", type=int, default=1000, help="general queries to collect at least")
     ap.add_argument("--refilter", action="store_true", help="only re-apply the filter to the written lists")
     ap.add_argument("--topics-only", action="store_true", help="keep queries.txt, rebuild the topic lists")
+    ap.add_argument("--general-only", action="store_true", help="rebuild queries.txt, keep the topic lists")
     args = ap.parse_args()
     if args.refilter:
         for p in [OUT / "queries.txt", *sorted((OUT / "topics").glob("*.txt"))]:
@@ -142,10 +156,18 @@ def main() -> int:
         general = (OUT / "queries.txt").read_text(encoding="utf-8").splitlines()
         seen.update(general)
     else:
-        general = harvest(expand(GENERAL_PREFIXES), seen, args.min + 200, "general")
+        # Breadth first, a few suggestions per seed: every prefix gets its
+        # turn before any prefix gets a second letter, so no single start
+        # ("how to fix ...") dominates the wall.
+        seeds = list(GENERAL_PREFIXES)
+        for c in LETTERS:
+            seeds.extend(f"{p} {c}" for p in GENERAL_PREFIXES)
+        general = harvest(seeds, seen, args.min + 200, "general", per_seed=5)
         if len(general) < args.min:
             print(f"only {len(general)} general queries (wanted {args.min})", file=sys.stderr)
         (OUT / "queries.txt").write_text("\n".join(general) + "\n", encoding="utf-8")
+    if args.general_only:
+        return 0 if len(general) >= args.min else 1
     topics_dir = OUT / "topics"
     topics_dir.mkdir(exist_ok=True)
     for name, prefixes in TOPICS.items():
