@@ -56,7 +56,10 @@ TOPICS = {
 BLOCK = re.compile(
     r"\b(porn|sex|sexy|nude|nudes|naked|xxx|onlyfans|hentai|nsfw|escort|fetish|dick|pussy|boobs|"
     r"dead|died|death|dies|killed|murder|arrested|arrest|shooting|suicide|obituary|funeral|"
-    r"leaked|scandal|affair|divorce|girlfriend|boyfriend|wife|husband|net worth|age of)\b",
+    r"leaked|scandal|affair|divorce|girlfriend|boyfriend|wife|husband|net worth|age of|"
+    # Politics and drugs: divisive or awkward on a decorative wall.
+    r"trump|biden|harris|obama|maga|democrat\w*|republican\w*|election|congress|senate|"
+    r"gaza|israel|hamas|putin|zelensky|weed|marijuana|cocaine|meth)\b",
     re.I,
 )
 
@@ -110,10 +113,22 @@ def expand(prefixes: list[str]) -> list[str]:
     return seeds
 
 
+def refilter(path: Path) -> None:
+    """Apply the current filter to an already written list."""
+    if path.exists():
+        kept = [q for q in path.read_text(encoding="utf-8").splitlines() if q and clean(q)]
+        path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--min", type=int, default=1000, help="general queries to collect at least")
+    ap.add_argument("--refilter", action="store_true", help="only re-apply the filter to the written lists")
     args = ap.parse_args()
+    if args.refilter:
+        for p in [OUT / "queries.txt", *sorted((OUT / "topics").glob("*.txt"))]:
+            refilter(p)
+        return 0
     seen: set[str] = set()
     general = harvest(expand(GENERAL_PREFIXES), seen, args.min + 200, "general")
     if len(general) < args.min:
