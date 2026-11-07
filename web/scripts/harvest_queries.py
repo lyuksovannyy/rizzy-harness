@@ -40,7 +40,9 @@ GENERAL_PREFIXES = [
 TOPICS = {
     "software-development": ["python how to", "javascript how to", "how to learn programming", "react", "rust programming",
                              "git how to", "docker", "sql query", "typescript", "how to code", "linux command", "api"],
-    "robotics": ["robot", "robotics", "arduino", "raspberry pi", "ros2", "servo motor", "drone how to", "3d printing"],
+    "robotics": ["how to build a robot", "robot arm", "robotics engineer", "robotics for beginners", "arduino",
+                 "raspberry pi", "ros2", "servo motor", "stepper motor", "how to build a drone", "3d printing",
+                 "industrial robot"],
     "careers": ["how to get a job", "job interview", "resume", "cover letter", "remote jobs", "salary", "how to ask for a raise",
                 "linkedin", "career change"],
     "health": ["symptoms of", "how to lose weight", "how much water", "how to sleep", "vitamin", "is it healthy to"],
@@ -84,7 +86,9 @@ def clean(s: str) -> str | None:
     return s
 
 
-def harvest(seeds: list[str], seen: set[str], target: int | None, label: str) -> list[str]:
+def harvest(
+    seeds: list[str], seen: set[str], target: int | None, label: str, per_seed: int = 10
+) -> list[str]:
     got: list[str] = []
     for i, seed in enumerate(seeds):
         if target and len(got) >= target:
@@ -94,11 +98,13 @@ def harvest(seeds: list[str], seen: set[str], target: int | None, label: str) ->
         except (urllib.error.URLError, TimeoutError, ValueError) as e:
             print(f"stopping {label}: {e}", file=sys.stderr)
             break
+        taken = 0
         for s in results:
             c = clean(s)
-            if c and c not in seen:
+            if c and c not in seen and taken < per_seed:
                 seen.add(c)
                 got.append(c)
+                taken += 1
         if i % 25 == 0:
             print(f"{label}: {i + 1}/{len(seeds)} requests, {len(got)} queries", file=sys.stderr)
         time.sleep(PAUSE_S)
@@ -124,25 +130,32 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--min", type=int, default=1000, help="general queries to collect at least")
     ap.add_argument("--refilter", action="store_true", help="only re-apply the filter to the written lists")
+    ap.add_argument("--topics-only", action="store_true", help="keep queries.txt, rebuild the topic lists")
     args = ap.parse_args()
     if args.refilter:
         for p in [OUT / "queries.txt", *sorted((OUT / "topics").glob("*.txt"))]:
             refilter(p)
         return 0
     seen: set[str] = set()
-    general = harvest(expand(GENERAL_PREFIXES), seen, args.min + 200, "general")
-    if len(general) < args.min:
-        print(f"only {len(general)} general queries (wanted {args.min})", file=sys.stderr)
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "queries.txt").write_text("\n".join(general) + "\n", encoding="utf-8")
+    if args.topics_only:
+        general = (OUT / "queries.txt").read_text(encoding="utf-8").splitlines()
+        seen.update(general)
+    else:
+        general = harvest(expand(GENERAL_PREFIXES), seen, args.min + 200, "general")
+        if len(general) < args.min:
+            print(f"only {len(general)} general queries (wanted {args.min})", file=sys.stderr)
+        (OUT / "queries.txt").write_text("\n".join(general) + "\n", encoding="utf-8")
     topics_dir = OUT / "topics"
     topics_dir.mkdir(exist_ok=True)
     for name, prefixes in TOPICS.items():
         seeds = []
-        for p in prefixes:
-            seeds.append(p)
-            seeds.extend(f"{p} {c}" for c in "abcdefghilmnoprstw")
-        q = harvest(seeds, seen, 120, name)
+        # Breadth first: every prefix, then the prefixes with a letter, so a
+        # topic is not just variations of its first prefix.
+        seeds.extend(prefixes)
+        for c in "abcdhimprstw":
+            seeds.extend(f"{p} {c}" for p in prefixes)
+        q = harvest(seeds, seen, 120, name, per_seed=4)
         (topics_dir / f"{name}.txt").write_text("\n".join(q) + "\n", encoding="utf-8")
     print(f"general {len(general)}; topics written to {topics_dir}", file=sys.stderr)
     return 0 if len(general) >= args.min else 1
