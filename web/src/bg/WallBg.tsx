@@ -10,7 +10,7 @@ import { FINE_POINTER, useMedia } from "./hooks";
 import type { Mixer } from "./mix";
 import { lineCount, placeLine, tiersFor, type Placed, type Tier } from "./place";
 import { between, mulberry32 } from "./rng";
-import type { TitleRow } from "./topics";
+import type { History } from "./topics";
 import type { BgProps } from "./types";
 import { layWall, measureText, useWallData } from "./wallKit";
 import "./wall.css";
@@ -21,7 +21,10 @@ type Line = Placed & { id: number; since: number; phase: Phase };
 
 /** A line must have shown this long before the cadence may retire it. */
 const OLD_MS = 8000;
-const OUT_MS = 700;
+/** --dur-6, the wall-out animation's length. */
+const OUT_MS = 720;
+/** --dur-6, the wall-in animation's length. */
+const IN_MS = 720;
 const TYPE_MS = 32;
 const SETTLE_MS = 400;
 
@@ -29,11 +32,11 @@ const live = (l: Line) => l.phase !== "out" && l.phase !== "gone";
 /** Lines near the composer leave last: the ripple in reverse. */
 const exitStagger = (delay: number) => Math.round(120 * (1 - clamp(0, (delay - 20) / 720, 1)));
 
-export default function WallBg(p: BgProps & { titles: readonly TitleRow[] }) {
+export default function WallBg(p: BgProps & { history: History }) {
   const { zones, motion, state, paused, seed } = p;
   const animated = motion === "animated";
   const tiers = tiersFor(zones.w);
-  const data = useWallData(p.titles, lineCount(zones));
+  const data = useWallData(p.history, lineCount(zones));
   // The lines live in a ref and render on demand: the cadence changes one
   // line every few seconds and must read the current set, not a stale render.
   const lines = useRef<Line[]>([]);
@@ -142,13 +145,19 @@ export default function WallBg(p: BgProps & { titles: readonly TitleRow[] }) {
     return () => timers.forEach(clearTimeout);
   }, [animated, paused, state, data]);
 
-  // Typing: straight into data-text, never through React state.
+  // Typing: straight into data-text, never through React state. A hidden
+  // tab stops it, and it picks up from the last letter it typed.
   const typer = useRef<{ id: number; stop(): void } | null>(null);
+  useEffect(() => {
+    if (!paused) return;
+    typer.current?.stop();
+    typer.current = null;
+  }, [paused]);
   useEffect(() => {
     const l = lines.current.find((x) => x.phase === "typing");
     const el = l && els.current.get(l.id);
-    if (!l || !el || typer.current?.id === l.id) return;
-    let i = 0;
+    if (paused || !l || !el || typer.current?.id === l.id) return;
+    let i = el.dataset.text?.length ?? 0;
     const t = setInterval(() => {
       el.dataset.text = l.text.slice(0, ++i);
       if (i < l.text.length) return;
@@ -205,12 +214,18 @@ export default function WallBg(p: BgProps & { titles: readonly TitleRow[] }) {
   useEffect(() => {
     if (!laid) return;
     const last = Math.max(0, ...lines.current.map((l) => l.delay));
-    const t = setTimeout(() => onEntered.current(), animated && !quick.current ? last + 700 + p.delay : 0);
+    const t = setTimeout(() => onEntered.current(), animated && !quick.current ? last + IN_MS + p.delay : 0);
     return () => clearTimeout(t);
   }, [laid]);
 
   return (
-    <div className={quick.current ? "wall quick" : "wall"} data-state={state} data-motion={motion} style={{ "--delay": `${p.delay}ms` } as CSSProperties}>
+    <div
+      className={quick.current ? "wall quick" : "wall"}
+      data-state={state}
+      data-motion={motion}
+      data-parallax={parallax ? "" : undefined}
+      style={{ "--delay": `${p.delay}ms` } as CSSProperties}
+    >
       {tiers.map((t, ti) => (
         <div
           key={ti}

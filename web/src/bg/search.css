@@ -1,7 +1,8 @@
 /* Search mode's magnifier (SearchBg.tsx). Each wrapper owns one transform:
    .mag places it, .mag-drop falls in and leaves, .mag-float bobs, .mag-tilt
    holds the 3D pose. Idle periods of 7 s and 11 s never line up, so the
-   motion never visibly repeats. */
+   motion never visibly repeats; they are periods, not transitions, so
+   they are not on the duration scale. */
 .mag {
   position: absolute;
   left: 0;
@@ -83,34 +84,34 @@
 }
 
 .mag[data-motion="animated"] .mag-drop {
-  animation: mag-enter 1000ms var(--delay) both;
+  animation: mag-enter var(--dur-bg) var(--delay) both;
 }
 .mag[data-motion="animated"] .mag-shadow {
-  animation: mag-shadow-in 1000ms var(--delay) both;
+  animation: mag-shadow-in var(--dur-bg) var(--delay) both;
 }
 .mag[data-motion="animated"] .mag-shadow::before {
-  animation: mag-breathe 7s var(--ease-in-out) calc(1s + var(--delay)) infinite alternate;
+  animation: mag-breathe 7s var(--ease-in-out) calc(var(--dur-bg) + var(--delay)) infinite alternate;
 }
 .mag[data-motion="animated"] .mag-float {
-  animation: mag-float 7s var(--ease-in-out) calc(1s + var(--delay)) infinite alternate;
+  animation: mag-float 7s var(--ease-in-out) calc(var(--dur-bg) + var(--delay)) infinite alternate;
 }
 .mag[data-motion="animated"] .mag-tilt {
-  animation: mag-tilt 11s var(--ease-in-out) calc(1s + var(--delay)) infinite alternate backwards;
+  animation: mag-tilt 11s var(--ease-in-out) calc(var(--dur-bg) + var(--delay)) infinite alternate backwards;
 }
 .mag[data-motion="animated"] .mag-glint::before {
-  animation: mag-glint 9s var(--ease-in-out) calc(0.9s + var(--delay)) infinite;
+  animation: mag-glint 9s var(--ease-in-out) calc(var(--dur-bg) + var(--delay)) infinite;
 }
 .mag[data-state="enter"] .mag-drop,
 .mag[data-state="exit"] .mag-drop {
   will-change: transform;
 }
 .mag[data-motion="animated"][data-state="exit"] .mag-drop {
-  animation: mag-exit 420ms cubic-bezier(0.5, 0, 0.75, 0) both;
+  animation: mag-exit var(--dur-4) var(--ease-exit) both;
 }
 .mag[data-motion="animated"][data-state="exit"] .mag-shadow {
   animation: none;
   opacity: 0;
-  transition: opacity 150ms var(--ease-in);
+  transition: opacity var(--dur-2) var(--ease-in);
 }
 @media (prefers-reduced-motion: reduce) {
   .mag *,

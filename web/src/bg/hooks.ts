@@ -1,5 +1,6 @@
 // What the backgrounds need to know about the browser: whether motion is
-// welcome, whether the tab is visible, and whether there is a mouse.
+// welcome, whether the tab is visible, whether there is a mouse, and how
+// dense the screen is.
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { BackdropPref } from "../types";
 
@@ -47,6 +48,29 @@ export function useMotionLevel(pref: BackdropPref): Motion | null {
   const saveData = !!(navigator as { connection?: { saveData?: boolean } }).connection?.saveData;
   if (pref === "off") return null;
   return pref === "still" || reduce || saveData ? "still" : "animated";
+}
+
+// A query for the current ratio stops matching when the ratio changes (the
+// window moved to another screen, or the page was zoomed), so each change
+// re-arms the watch with the new ratio.
+function onRatio(cb: () => void) {
+  let m: MediaQueryList | null = null;
+  const fire = () => {
+    arm();
+    cb();
+  };
+  const arm = () => {
+    m?.removeEventListener("change", fire);
+    m = matchMedia(`(resolution: ${devicePixelRatio}dppx)`);
+    m.addEventListener("change", fire);
+  };
+  arm();
+  return () => m?.removeEventListener("change", fire);
+}
+
+/** The device pixel ratio, kept current: canvas art rebuilds when it changes. */
+export function useDevicePixelRatio(): number {
+  return useSyncExternalStore(onRatio, () => devicePixelRatio || 1, () => 1);
 }
 
 /** Changes whenever the theme or accent does, so canvas art re-reads its colours. */

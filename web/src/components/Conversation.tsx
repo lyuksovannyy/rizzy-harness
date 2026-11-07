@@ -17,7 +17,7 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
-import type { TitleRow } from "../bg/topics";
+import type { History } from "../bg/topics";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
@@ -117,8 +117,8 @@ export default function Conversation(props: {
   agents: Agent[];
   models: ModelInfo[];
   voice?: boolean;
-  /** "Also in chats" is on: the titles the gutter's wall mixes by. */
-  gutter?: readonly TitleRow[] | null;
+  /** "Also in chats" is on: the history the gutter's wall mixes by. */
+  gutter?: History | null;
 }) {
   const { live, sessionId } = props;
   useEffect(() => {
@@ -196,7 +196,7 @@ export default function Conversation(props: {
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
       {props.gutter && (
         <Suspense fallback={null}>
-          <ChatGutter sessionId={sessionId} agentic={agentic} titles={props.gutter} />
+          <ChatGutter sessionId={sessionId} agentic={agentic} history={props.gutter} />
         </Suspense>
       )}
       <header className="conv-head">

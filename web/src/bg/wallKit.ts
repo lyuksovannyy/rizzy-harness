@@ -5,7 +5,7 @@ import type { Zones } from "./geom";
 import { createMixer, quotas, share, type Mixer } from "./mix";
 import { placeWall, type Placed, type Tier } from "./place";
 import { mulberry32 } from "./rng";
-import { topicWeights, type TitleRow, type Topic } from "./topics";
+import { topicWeights, type History, type Topic } from "./topics";
 import { GENERAL_LIST, loadList, topicList } from "./wallData";
 
 export type WallData = {
@@ -13,7 +13,7 @@ export type WallData = {
   topics: Map<Topic, string[]>;
   p: Map<Topic, number>;
   share: number;
-  titles: string[];
+  banned: readonly string[];
   /** The lists took over 4 s: the wall just fades in, no ripple. */
   late: boolean;
 };
@@ -23,14 +23,14 @@ export type WallData = {
  * once per page load. What the wall starts with is kept: titles that change
  * while it shows do not reshuffle it.
  */
-export function useWallData(titles: readonly TitleRow[], n: number): WallData | null {
+export function useWallData(history: History, n: number): WallData | null {
   const [data, setData] = useState<WallData | null>(null);
-  const start = useRef({ titles, n });
+  const start = useRef({ history, n });
   useEffect(() => {
     let alive = true;
     const t0 = performance.now();
-    const { titles, n } = start.current;
-    const { m, p } = topicWeights(titles, Date.now());
+    const { history, n } = start.current;
+    const { m, p } = topicWeights(history.titles, Date.now());
     const s = share(m);
     const need = [...quotas(n, s, p)].filter(([, q]) => q > 0).map(([t]) => t);
     const lists = need.map((t) => loadList(topicList(t)).catch(() => [] as string[]));
@@ -42,7 +42,7 @@ export function useWallData(titles: readonly TitleRow[], n: number): WallData | 
           topics: new Map(need.map((t, i) => [t, topics[i]!])),
           p,
           share: s,
-          titles: titles.map((r) => r.title),
+          banned: history.banned,
           late: performance.now() - t0 > 4000,
         });
       },

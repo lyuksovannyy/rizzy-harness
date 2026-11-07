@@ -236,34 +236,32 @@
   --r-2xl: 24px;
   --r-full: 999px;
   /* Anything that moves uses --dur-3 or longer, so reduced motion makes it
-     instant; colour and opacity use --dur-1 or --dur-2 and still fade. */
+     instant; colour and opacity use --dur-1 or --dur-2 and still fade. The
+     home backgrounds take the long end: a layer leaves in --dur-3, wall
+     lines come and go in --dur-6, the magnifier drops and a new line
+     settles in --dur-bg. Their scripts wait the same times (bg/*.tsx). */
   --dur-1: 100ms;
   --dur-2: 160ms;
   --dur-3: 240ms;
   --dur-4: 360ms;
   --dur-5: 520ms;
+  --dur-6: 720ms;
   --dur-bg: 1000ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  /* Leaving for good: slow to start, then gone. */
+  --ease-exit: cubic-bezier(0.5, 0, 0.75, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-  /* About 3% and 10% overshoot. */
+  /* About 3% overshoot. */
   --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
-  --ease-spring-strong: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-settle: var(--ease-spring-strong);
-}
-@supports (transition-timing-function: linear(0, 1)) {
-  :root {
-    /* A damped spring: 8% overshoot, then 0.7% under. */
-    --ease-settle: linear(0, 0.073, 0.242, 0.444, 0.64, 0.805, 0.929, 1.013, 1.061, 1.081, 1.082, 1.072,
-      1.056, 1.039, 1.024, 1.011, 1.002, 0.997, 0.994, 0.993, 0.993, 0.995, 0.996, 0.997, 0.999);
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-3: 1ms;
     --dur-4: 1ms;
     --dur-5: 1ms;
+    --dur-6: 1ms;
     --dur-bg: 1ms;
   }
 }
@@ -779,7 +777,11 @@ input.sidebar-search:focus-visible {
 .backdrop-layer.cut {
   opacity: 0;
 }
-.backdrop[data-paused] * {
+/* A hidden tab freezes everything, the magnifier's glint and the wall's
+   caret (pseudo-elements) included. */
+.backdrop[data-paused] *,
+.backdrop[data-paused] *::before,
+.backdrop[data-paused] *::after {
   animation-play-state: paused !important;
 }
 /* Texture behind text is noise to these users and on paper. */
@@ -802,8 +804,10 @@ input.sidebar-search:focus-visible {
   box-shadow: var(--shadow-1);
   transition: border-color var(--dur-2) var(--ease-standard);
 }
+/* The full accent is at least 3:1 against the page and the composer
+   (theme.test.ts), so the border is the focus indicator, as on fields. */
 .composer:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-color: var(--accent);
 }
 .composer textarea,
 .composer textarea:focus-visible {
@@ -1144,6 +1148,15 @@ select.pill {
   color: var(--fg-2);
   font-size: 0.8em;
   white-space: nowrap;
+}
+.md a {
+  color: var(--accent);
+  text-decoration-color: var(--accent-line);
+  text-underline-offset: 2px;
+}
+.md a:hover {
+  color: var(--accent-hover);
+  text-decoration-color: currentColor;
 }
 .md a.link-source {
   text-decoration-style: dotted;
@@ -2268,14 +2281,20 @@ pre.term.web-output {
   flex-direction: column;
   gap: var(--space-4);
 }
+/* One size for every checkbox label, in a form's field or not. */
 .check,
 .form label.check {
   display: inline-flex;
   flex-direction: row;
   align-items: center;
   gap: var(--space-2);
+  font-size: var(--text-md);
   font-weight: var(--w-regular);
   color: var(--fg);
+}
+.form label.check.small,
+.check.small {
+  font-size: var(--text-xs);
 }
 table.users {
   width: 100%;

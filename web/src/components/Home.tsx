@@ -7,7 +7,7 @@ import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
 import { Similar, type SimilarHandle } from "./Similar";
-import type { TitleRow } from "../bg/topics";
+import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
 
 // The mode backgrounds load on their own, and not at all when turned off.
@@ -36,7 +36,7 @@ export function Home(props: {
   nodeAttention?: NodeAttention[];
   /** New per home visit: the background re-rolls with it. */
   seed: number;
-  titles: readonly TitleRow[];
+  history: History;
 }) {
   const [similarCount, setSimilarCount] = useState(0);
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
@@ -77,7 +77,7 @@ export function Home(props: {
             seed={props.seed}
             pref={backdrop}
             typing={typed.text.trim() !== ""}
-            titles={props.titles}
+            history={props.history}
           />
         </Suspense>
       )}

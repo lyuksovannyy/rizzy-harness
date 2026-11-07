@@ -6,10 +6,10 @@
   inset: 0;
 }
 .bin-host[data-motion="animated"] {
-  animation: bin-in 480ms var(--ease-out) var(--delay, 0ms) both;
+  animation: bin-in var(--dur-5) var(--ease-out) var(--delay, 0ms) both;
 }
 .bin-host[data-motion="animated"][data-state="exit"] {
-  animation: bin-out 300ms var(--ease-in) both;
+  animation: bin-out var(--dur-3) var(--ease-in) both;
 }
 @keyframes bin-in {
   from {

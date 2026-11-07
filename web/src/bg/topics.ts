@@ -17,6 +17,14 @@ export type Topic =
 
 export type TitleRow = { title: string; updated_ms: number };
 
+/**
+ * What the wall knows of the user's chats. `titles`, the chats the sidebar
+ * lists, steer the topics. `banned` is every chat's title, incognito and
+ * sub-agent chats included: it only keeps a bundled line that equals one
+ * off the wall, so a question asked in private never shows up later.
+ */
+export type History = { titles: readonly TitleRow[]; banned: readonly string[] };
+
 /** A strong keyword alone matches a topic; a weak one counts half. */
 export const KEYWORDS: Record<Topic, { strong: string[]; weak: string[] }> = {
   "software-development": {

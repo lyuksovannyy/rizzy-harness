@@ -9,6 +9,7 @@ import type { BgProps } from "./types";
 import "./search.css";
 
 const DEPTH = 10;
+/** --dur-bg. */
 const ENTER_MS = 1000;
 
 export default function SearchBg(p: BgProps & { typing: boolean }) {

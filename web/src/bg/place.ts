@@ -15,7 +15,7 @@ export type Tier = {
   maxChars: number;
   /** Parallax travel, times 8 px. */
   depth: number;
-  /** How far a line may run past the side edges, as a part of its width. */
+  /** How far a line may run past the right edge, as a part of its width. */
   bleed: number;
 };
 
@@ -96,9 +96,11 @@ export function placeLine(c: Ctx, ti: number, deck: Deck, taken: readonly Rect[]
 }
 
 function bestSpot(c: Ctx, w: number, h: number, t: Tier, taken: readonly Rect[]) {
-  const bleed = t.bleed * w;
-  const x0 = 12 - bleed;
-  const x1 = c.zones.w - w - 12 + bleed;
+  // Far lines may run off the right edge, the window's, to suggest a wall
+  // that goes on. Never off the left: while the sidebar shows, that edge is
+  // a panel's, and a line cut against it reads as cut short.
+  const x0 = 12;
+  const x1 = c.zones.w - w - 12 + t.bleed * w;
   const y1 = c.zones.h - h - 12;
   if (x1 < x0 || y1 < 12) return null;
   let best: { x: number; y: number } | null = null;

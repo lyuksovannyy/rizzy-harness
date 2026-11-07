@@ -22,6 +22,9 @@ export function readInk(el: Element): Ink {
 
 export type Atlas = { canvas: HTMLCanvasElement; cw: number; ch: number };
 
+/** The atlas's cell in CSS px: the pitch the field must lay its grid out at. */
+export const pitch = (a: Atlas, dpr: number) => ({ cw: a.cw / dpr, ch: a.ch / dpr });
+
 export function makeAtlas(ink: Ink, dpr: number): Atlas {
   const cw = Math.round(CELL_W * dpr);
   const ch = Math.round(CELL_H * dpr);

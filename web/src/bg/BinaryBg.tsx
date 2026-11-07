@@ -1,25 +1,37 @@
 // Agentic mode: a quiet field of 0s and 1s with a soft light that follows the
 // mouse. The light is a porthole onto a brighter copy of the field, so moving
-// it costs three transforms a frame and no repaint. Its own clock is capped
-// at 30 ticks a second; when ticks run slow the field calms down, and if
-// they stay very slow it goes still. Without a mouse there is no light.
+// it costs three transforms a frame and no repaint; over the content, where
+// the field is clear, its glow dims so it never shows as an empty smudge.
+// Its own clock is capped at 30 ticks a second; when ticks run slow the
+// field calms down, and if they stay very slow it goes still. Without a
+// mouse there is no light.
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { capDpr, Field, FLIP_RATE } from "./binaryField";
-import { drawCells, fitCanvas, makeAtlas, readInk, type Atlas, type Ink } from "./binaryDraw";
-import { clamp } from "./geom";
-import { FINE_POINTER, useMedia, useThemeVersion } from "./hooks";
+import { drawCells, fitCanvas, makeAtlas, pitch, readInk, type Atlas, type Ink } from "./binaryDraw";
+import { clamp, type Zones } from "./geom";
+import { FINE_POINTER, useDevicePixelRatio, useMedia, useThemeVersion } from "./hooks";
 import { loop } from "./loop";
 import type { BgProps } from "./types";
 import "./binary.css";
 
 const BRIGHT_GAIN = 2.6;
+/** --dur-5, the bin-in animation's length. */
+const ENTER_MS = 520;
 const BOOT_MS = [0, 120, 260];
 const PUBLISH_MS = 2000;
 /** The tick interval while the light rests: about 15 a second. */
 const RESTING_MS = 66;
+/** A resize rebuilds the field once the size has held this long. */
+const SETTLE_MS = 300;
 
 /** The light's radius: about a sixth of the smaller side. */
 const radius = (w: number, h: number) => clamp(140, 0.16 * Math.min(w, h), 200);
+
+/** How much of the field the light can show here: the mask at its centre and halfway out. */
+function openness(f: Field, x: number, y: number, r: number): number {
+  const d = 0.5 * r;
+  return (f.maskAt(x, y) + f.maskAt(x - d, y) + f.maskAt(x + d, y) + f.maskAt(x, y - d) + f.maskAt(x, y + d)) / 5;
+}
 
 /** Half the flips and a single streak, for a machine that struggles. */
 function calm(f: Field) {
@@ -47,7 +59,10 @@ export default function BinaryBg(p: BgProps) {
   const running = p.motion === "animated" && !tooSlow;
   const spot = running && fine;
   const inkVersion = useThemeVersion();
+  const dpr = capDpr(useDevicePixelRatio());
   const { zones, seed } = p;
+  // The zones the field was last built for: the light is sized and placed by them.
+  const [built, setBuilt] = useState<Zones | null>(null);
   const exiting = useRef(false);
   exiting.current = p.state === "exit";
   const onEntered = useRef(p.onEntered);
@@ -56,35 +71,44 @@ export default function BinaryBg(p: BgProps) {
   // that was calmed for slow ticks stays calm.
   const life = useRef({ elapsed: -p.delay, booted: 0, calm: false });
 
-  // Build and draw the whole field: on mount, resize, zone change, theme change.
+  // Build and draw the whole field: on mount and for new content zones,
+  // theme, seed or screen at once; for a new size only once it has held,
+  // since a dragged window changes it every frame. Meanwhile the old canvas
+  // stays, clipped or a little short. The bright copy is only sized here:
+  // the clock draws it whole when the light comes on.
   useEffect(() => {
     const h = host.current;
     const b = baseEl.current;
     if (!h || !b) return;
-    const ink = readInk(h);
-    const dpr = capDpr(devicePixelRatio);
-    const field = new Field({ w: zones.w, h: zones.h, zones: zones.ex, seed, artMax: ink.artMax, artPeak: ink.artPeak });
-    const atlas = makeAtlas(ink, dpr);
-    const base = fitCanvas(b, field, atlas, dpr);
-    if (!base) return;
-    const bright = spot && brightEl.current ? fitCanvas(brightEl.current, field, atlas, dpr) : null;
-    if (life.current.calm) calm(field);
-    drawCells(base, atlas, field, null);
-    if (bright) drawCells(bright, atlas, field, null, BRIGHT_GAIN, ink.artPeak);
-    engine.current = { field, atlas, ink, base, bright };
-  }, [zones, seed, inkVersion, spot]);
+    const build = () => {
+      const ink = readInk(h);
+      const atlas = makeAtlas(ink, dpr);
+      const field = new Field({ w: zones.w, h: zones.h, clear: zones.clear, calm: zones.column, seed, artMax: ink.artMax, artPeak: ink.artPeak, ...pitch(atlas, dpr) });
+      const base = fitCanvas(b, field, atlas, dpr);
+      if (!base) return;
+      const bright = spot && brightEl.current ? fitCanvas(brightEl.current, field, atlas, dpr) : null;
+      if (life.current.calm) calm(field);
+      drawCells(base, atlas, field, null);
+      engine.current = { field, atlas, ink, base, bright };
+      setBuilt(zones);
+    };
+    if (!built || (built.w === zones.w && built.h === zones.h)) return build();
+    const t = setTimeout(build, SETTLE_MS);
+    return () => clearTimeout(t);
+  }, [zones, seed, inkVersion, spot, dpr]);
 
   useEffect(() => {
-    const t = setTimeout(() => onEntered.current(), running ? 480 + p.delay : 0);
+    const t = setTimeout(() => onEntered.current(), running ? ENTER_MS + p.delay : 0);
     return () => clearTimeout(t);
   }, [running, p.delay]);
 
-  // The clock: flips, streaks and the light.
+  // The clock: flips, streaks and the light. It restarts with each build,
+  // which also re-measures where the field is on the page.
   useEffect(() => {
-    if (!running || p.paused) return;
+    if (!running || p.paused || !built) return;
     const h = host.current!;
     let rect = h.getBoundingClientRect();
-    const R = radius(zones.w, zones.h);
+    const R = radius(built.w, built.h);
     const light = { x: 0, y: 0, tx: 0, ty: 0, i: 0, moved: -1e9, away: true, placed: false, shown: -1 };
     const l = life.current;
     let ema = 0;
@@ -93,6 +117,7 @@ export default function BinaryBg(p: BgProps) {
     let sincePublish = 0;
     let ticks = 0;
     let brightStale = true;
+    let drawn: Engine | null = null;
 
     const onMove = (e: PointerEvent) => {
       if (e.pointerType === "touch") return;
@@ -114,7 +139,7 @@ export default function BinaryBg(p: BgProps) {
       addEventListener("resize", onResize);
     }
 
-    const moveLight = (dt: number) => {
+    const moveLight = (f: Field, dt: number) => {
       const k = 1 - Math.exp(-dt / 110);
       light.x += (light.tx - light.x) * k;
       light.y += (light.ty - light.y) * k;
@@ -126,10 +151,11 @@ export default function BinaryBg(p: BgProps) {
       if (light.i === 0 && light.shown === 0) return;
       light.shown = light.i;
       const at = `translate3d(${(light.x - R).toFixed(1)}px, ${(light.y - R).toFixed(1)}px, 0)`;
-      for (const el of [spotEl.current, glowEl.current]) {
+      const glow = light.i * openness(f, light.x, light.y, R);
+      for (const [el, o] of [[spotEl.current, light.i], [glowEl.current, glow]] as const) {
         if (!el) continue;
         el.style.transform = at;
-        el.style.opacity = light.i.toFixed(3);
+        el.style.opacity = o.toFixed(3);
       }
       if (brightEl.current) brightEl.current.style.transform = `translate3d(${(R - light.x).toFixed(1)}px, ${(R - light.y).toFixed(1)}px, 0)`;
     };
@@ -138,7 +164,9 @@ export default function BinaryBg(p: BgProps) {
       const e = engine.current;
       if (!e) return;
       const t0 = performance.now();
-      if (spot) moveLight(step);
+      // A rebuilt field starts with a blank bright copy.
+      if (e !== drawn) [drawn, brightStale] = [e, true];
+      if (spot) moveLight(e.field, step);
       l.elapsed += step;
       while (l.booted < BOOT_MS.length && l.elapsed >= BOOT_MS[l.booted]!) {
         e.field.spawn();
@@ -179,9 +207,10 @@ export default function BinaryBg(p: BgProps) {
       removeEventListener("blur", onBlur);
       removeEventListener("resize", onResize);
     };
-  }, [running, spot, p.paused, zones]);
+  }, [running, spot, p.paused, built]);
 
-  const vars = { "--spot": `${2 * radius(zones.w, zones.h)}px`, "--delay": `${p.delay}ms` } as CSSProperties;
+  const sized = built ?? zones;
+  const vars = { "--spot": `${2 * radius(sized.w, sized.h)}px`, "--delay": `${p.delay}ms` } as CSSProperties;
   return (
     <div
       ref={host}

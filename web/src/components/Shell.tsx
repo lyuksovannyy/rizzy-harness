@@ -227,13 +227,17 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   };
 
   const listed = useMemo(() => sessions.filter((x) => !x.incognito && !x.parent_id), [sessions]);
-  // What the Ask wall infers topics from: the titles the sidebar lists. They
-  // never show on the wall; untitled chats say nothing.
-  const titles = useMemo(
-    () => listed.filter((x) => x.title && x.title !== t("session.untitled")).map((x) => ({ title: x.title, updated_ms: x.updated_ms })),
-    [listed],
+  // The Ask wall infers topics from the titles the sidebar lists (untitled
+  // chats say nothing), and keeps every chat's title off the wall, the
+  // incognito and sub-agent ones the sidebar hides included.
+  const history = useMemo(
+    () => ({
+      titles: listed.filter((x) => x.title && x.title !== t("session.untitled")).map((x) => ({ title: x.title, updated_ms: x.updated_ms })),
+      banned: sessions.map((x) => x.title).filter(Boolean),
+    }),
+    [listed, sessions],
   );
-  const gutter = prefs?.backdrop_chats && prefs.backdrop !== "off" ? titles : null;
+  const gutter = prefs?.backdrop_chats && prefs.backdrop !== "off" ? history : null;
   const workers = nodes.filter((n) => n.connected && n.profile === "agentic");
   const agenticBlocked = agenticBlockReason(me.can_agentic, workers.length);
   const defaultAgent = prefs?.default_agent ?? serverDefaultAgent;
@@ -378,7 +382,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               attention={attention}
               nodeAttention={nodeAttention}
               seed={home.seed}
-              titles={titles}
+              history={history}
             />
           )}
         </Suspense>

@@ -9,7 +9,7 @@ import type { Mode } from "../lib/modes";
 import { inflate, sameZones, type Rect, type Zones } from "./geom";
 import { useHidden, useMotionLevel, type BackdropPref } from "./hooks";
 import type { BgProps, LayerState } from "./types";
-import type { TitleRow } from "./topics";
+import type { History } from "./topics";
 
 const load = {
   search: () => import("./SearchBg"),
@@ -20,8 +20,10 @@ const SearchBg = lazy(load.search);
 const WallBg = lazy(load.ask);
 const BinaryBg = lazy(load.agentic);
 
-/** How long each mode takes to leave; its layer is removed after that. */
-const EXIT_MS: Record<Mode, number> = { search: 420, ask: 400, agentic: 300 };
+/** How long each mode takes to leave (its --dur-* token; the wall's lines
+ *  leave over --dur-3 plus a stagger of up to 120 ms); its layer is removed
+ *  after that. A plain fade is --dur-2. */
+const EXIT_MS: Record<Mode, number> = { search: 360, ask: 360, agentic: 240 };
 const FADE_MS = 160;
 const OVERLAP_MS = 140;
 
@@ -33,7 +35,7 @@ function Backdrop(props: {
   pref: BackdropPref;
   /** The composer has text: the magnifier's lens warms up. */
   typing: boolean;
-  titles: readonly TitleRow[];
+  history: History;
 }) {
   const motion = useMotionLevel(props.pref);
   const paused = useHidden();
@@ -101,7 +103,7 @@ function Backdrop(props: {
                 {l.mode === "search" ? (
                   <SearchBg {...p} typing={props.typing} />
                 ) : l.mode === "ask" ? (
-                  <WallBg {...p} titles={props.titles} />
+                  <WallBg {...p} history={props.history} />
                 ) : (
                   <BinaryBg {...p} />
                 )}
@@ -163,8 +165,20 @@ function readZones(b: HTMLElement, col: HTMLElement): Zones {
   });
   const column = inflate(rel(col.getBoundingClientRect()), 24);
   const ex = [column];
+  // What each child of the column shows: a range's box is the greeting's
+  // words, not its full-width line.
+  const range = document.createRange();
+  const clear: Rect[] = [];
+  for (const child of col.children) {
+    range.selectNodeContents(child);
+    const r = range.getBoundingClientRect();
+    if (r.width && r.height) clear.push(rel(r));
+  }
   const bar = document.querySelector<HTMLElement>(".topbar");
-  if (bar && getComputedStyle(bar).display !== "none") ex.push(inflate(rel(bar.getBoundingClientRect()), 8));
+  if (bar && getComputedStyle(bar).display !== "none") {
+    ex.push(inflate(rel(bar.getBoundingClientRect()), 8));
+    clear.push(ex[1]!);
+  }
   const composer = col.querySelector(".composer");
-  return { w: Math.round(o.width), h: Math.round(o.height), ex, column, composer: composer ? rel(composer.getBoundingClientRect()) : column };
+  return { w: Math.round(o.width), h: Math.round(o.height), ex, column, composer: composer ? rel(composer.getBoundingClientRect()) : column, clear };
 }

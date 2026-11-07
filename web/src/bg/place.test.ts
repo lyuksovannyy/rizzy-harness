@@ -54,9 +54,10 @@ describe("placeWall", () => {
           expect(z.ex.some((r) => hits(inflate(a, 0.8 * m, 0.5 * m), r))).toBe(false);
           expect(a.y).toBeGreaterThanOrEqual(12);
           expect(a.y + a.h).toBeLessThanOrEqual(h - 12);
-          // Only the far tiers run past the sides, by at most 30% of their width.
+          // Never past the left edge (the sidebar's); only the far tiers
+          // run past the right one, by at most 30% of their width.
           const bleed = tiersFor(w)[a.tier]!.bleed * a.w;
-          expect(a.x).toBeGreaterThanOrEqual(12 - bleed - 1);
+          expect(a.x).toBeGreaterThanOrEqual(12);
           expect(a.x + a.w).toBeLessThanOrEqual(w - 12 + bleed + 1);
           for (const b of lines.slice(i + 1)) {
             const g = Math.min(m, px(b, w));

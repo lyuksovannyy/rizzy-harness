@@ -1,7 +1,8 @@
 // Which bundled list each wall line comes from. With little history the wall
 // is all general queries; as titles about a topic pile up, that topic's list
 // takes a growing share (up to 60%). The user's own words never appear: the
-// titles only steer the choice, and a bundled line that equals one is skipped.
+// titles only steer the choice, and a bundled line that equals any chat's
+// title (incognito ones too) is skipped.
 import { apportion, type Deck } from "./place";
 import { shuffle } from "./rng";
 import type { Topic } from "./topics";
@@ -45,9 +46,10 @@ export function createMixer(o: {
   topics: ReadonlyMap<Topic, readonly string[]>;
   p: ReadonlyMap<Topic, number>;
   share: number;
-  titles: readonly string[];
+  /** Texts that must never show: every chat's title. */
+  banned: readonly string[];
 }): Mixer {
-  const banned = new Set(o.titles.map(normalize));
+  const banned = new Set(o.banned.map(normalize));
   const onWall = new Set<string>();
   const deck = (list: readonly string[]): Deck => {
     const items = shuffle(

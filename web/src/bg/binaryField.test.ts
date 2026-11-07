@@ -1,9 +1,13 @@
-// The binary field as data: grid, zone mask, flip rate and streak limits.
+// The binary field as data: grid, mask, flip rate and streak limits.
 import { describe, expect, test } from "vitest";
-import { capDpr, CELL_H, CELL_W, Field, FLIP_RATE, gridSize, maxStreaks, zoneMask } from "./binaryField";
+import { CALM, CALM_FADE, capDpr, CELL_H, CELL_W, FADE_X, FADE_Y, Field, fieldMask, FLIP_RATE, gridSize, maxStreaks } from "./binaryField";
+import { homeZones } from "./testkit";
 
 const zone = { x: 200, y: 200, w: 400, h: 200 };
-const make = (w = 1020, h = 800, zones = [zone], seed = 1) => new Field({ w, h, zones, seed, artMax: 0.12, artPeak: 0.28 });
+const make = (w = 1020, h = 800, clear = [zone], seed = 1) => new Field({ w, h, clear, seed, artMax: 0.12, artPeak: 0.28 });
+/** Cell centres in CSS px, with their index. */
+const cells = (f: Field) =>
+  Array.from({ length: f.cols * f.rows }, (_, i) => ({ i, x: ((i % f.cols) + 0.5) * f.cw, y: (Math.floor(i / f.cols) + 0.5) * f.ch }));
 
 describe("binaryField", () => {
   test("grid size and the DPR cap", () => {
@@ -13,24 +17,69 @@ describe("binaryField", () => {
     expect(capDpr(0)).toBe(1);
   });
 
-  test("the zone mask: nothing inside, a smooth ramp out to 72 px", () => {
-    expect(zoneMask(300, 300, [zone])).toBe(0);
-    expect(zoneMask(zone.x - 16, 300, [zone])).toBe(0);
-    expect(zoneMask(zone.x - 16 - 72, 300, [zone])).toBe(1);
-    const mid = zoneMask(zone.x - 16 - 36, 300, [zone]);
+  test("the mask: nothing on content, back to full along an ellipse", () => {
+    expect(fieldMask(300, 300, [zone])).toBe(0);
+    expect(fieldMask(zone.x, 300, [zone])).toBe(0);
+    expect(fieldMask(zone.x - FADE_X, 300, [zone])).toBe(1);
+    expect(fieldMask(300, zone.y - FADE_Y, [zone])).toBe(1);
+    const mid = fieldMask(zone.x - FADE_X / 2, 300, [zone]);
     expect(mid).toBeGreaterThan(0.3);
     expect(mid).toBeLessThan(0.7);
-    expect(zoneMask(10, 10, [])).toBe(1);
+    // Off a corner the ramps meet as an ellipse, not a square.
+    expect(fieldMask(zone.x - 0.6 * FADE_X, zone.y - 0.6 * FADE_Y, [zone])).toBeGreaterThan(0.5);
+    expect(fieldMask(zone.x - 0.8 * FADE_X, zone.y - 0.8 * FADE_Y, [zone])).toBe(1);
+    expect(fieldMask(10, 10, [])).toBe(1);
   });
 
-  test("cells in a zone stay empty while the field lives, streaks included", () => {
+  test("the column only quiets the field", () => {
+    const col = { x: 100, y: 100, w: 600, h: 300 };
+    expect(fieldMask(400, 250, [], col)).toBeCloseTo(CALM);
+    expect(fieldMask(col.x - CALM_FADE, 250, [], col)).toBe(1);
+    const mid = fieldMask(col.x - CALM_FADE / 2, 250, [], col);
+    expect(mid).toBeGreaterThan(CALM);
+    expect(mid).toBeLessThan(1);
+    expect(fieldMask(300, 300, [zone], col)).toBe(0);
+  });
+
+  // At 1280 × 800 the column fills all but 130 px on each side of the
+  // backdrop: the field must still read as a field there, not a frame.
+  test("beside the column and the greeting, at a laptop size, the field shows", () => {
+    const z = homeZones(1020, 800);
+    const f = new Field({ w: z.w, h: z.h, clear: z.clear, calm: z.column, seed: 1, artMax: 0.12, artPeak: 0.28 });
+    const [greeting, composer] = z.clear as [typeof zone, typeof zone];
+    const band = cells(f).filter((c) => c.y > composer.y && c.y < composer.y + composer.h);
+    const gutters = band.filter((c) => c.x < z.column.x || c.x > z.column.x + z.column.w);
+    expect(gutters.length).toBeGreaterThan(50);
+    expect(gutters.every((c) => f.base[c.i]! > 0)).toBe(true);
+    const far = gutters.filter((c) => c.x < composer.x - FADE_X || c.x > composer.x + composer.w + FADE_X);
+    expect(far.every((c) => f.maskAt(c.x, c.y) >= CALM)).toBe(true);
+    // Inside the column, beside the greeting's words.
+    const beside = cells(f).filter((c) => c.y > greeting.y && c.y < greeting.y + greeting.h && c.x < greeting.x - FADE_X && c.x > z.column.x);
+    expect(beside.length).toBeGreaterThan(20);
+    expect(beside.every((c) => f.maskAt(c.x, c.y) >= CALM * 0.99)).toBe(true);
+  });
+
+  // The atlas rounds a cell to whole device pixels (15 px at 1.1x, not
+  // 15.4); the grid must use that pitch to cover the width and to mask
+  // each cell where it is drawn.
+  test("at a fractional pixel ratio the grid follows the drawn pitch", () => {
+    const dpr = 1.1;
+    const [cw, ch] = [Math.round(CELL_W * dpr) / dpr, Math.round(CELL_H * dpr) / dpr];
+    const f = new Field({ w: 1020, h: 800, clear: [zone], seed: 1, artMax: 0.12, artPeak: 0.28, cw, ch });
+    expect(f.cols * cw).toBeGreaterThanOrEqual(1020);
+    expect(f.rows * ch).toBeGreaterThanOrEqual(800);
+    const inside = cells(f).filter((c) => c.x > zone.x && c.x < zone.x + zone.w && c.y > zone.y && c.y < zone.y + zone.h);
+    expect(inside.length).toBeGreaterThan(100);
+    expect(inside.every((c) => f.base[c.i] === 0)).toBe(true);
+    const outside = cells(f).filter((c) => fieldMask(c.x, c.y, [zone]) === 1);
+    expect(outside.every((c) => f.base[c.i]! > 0)).toBe(true);
+  });
+
+  test("cells on content stay empty while the field lives, streaks included", () => {
     const f = make();
-    const inside: number[] = [];
-    for (let i = 0; i < f.cols * f.rows; i++) {
-      const cx = ((i % f.cols) + 0.5) * CELL_W;
-      const cy = (Math.floor(i / f.cols) + 0.5) * CELL_H;
-      if (cx > zone.x && cx < zone.x + zone.w && cy > zone.y && cy < zone.y + zone.h) inside.push(i);
-    }
+    const inside = cells(f)
+      .filter((c) => c.x > zone.x && c.x < zone.x + zone.w && c.y > zone.y && c.y < zone.y + zone.h)
+      .map((c) => c.i);
     expect(inside.length).toBeGreaterThan(100);
     for (let t = 0; t < 600; t++) {
       if (t % 30 === 0) f.spawn();

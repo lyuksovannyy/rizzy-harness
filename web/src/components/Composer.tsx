@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
+import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
 import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, type SearchKind, supports } from "../lib/engines";
 import { Select } from "./Select";
@@ -526,11 +527,12 @@ export function Composer(props: {
           )}
           {searching && (
             <>
-              <div className="seg" role="radiogroup" aria-label="search kind">
+              <div className="seg" role="radiogroup" aria-label="search kind" onKeyDown={radioKeys}>
                 <button
                   type="button"
                   role="radio"
                   aria-checked={kind === "text"}
+                  tabIndex={radioTab(kind === "text")}
                   className={kind === "text" ? "on" : ""}
                   onClick={() => setSearchKind("text")}
                 >
@@ -540,6 +542,7 @@ export function Composer(props: {
                   type="button"
                   role="radio"
                   aria-checked={kind === "image"}
+                  tabIndex={radioTab(kind === "image")}
                   className={kind === "image" ? "on" : ""}
                   onClick={() => setSearchKind("image")}
                 >
@@ -578,6 +581,7 @@ export function Composer(props: {
               role="radiogroup"
               aria-label="mode"
               title={t("mode.hint")}
+              onKeyDown={radioKeys}
             >
               <span className="mode-thumb" aria-hidden="true" />
               {MODES.map((m) => {
@@ -588,6 +592,7 @@ export function Composer(props: {
                     type="button"
                     role="radio"
                     aria-checked={mode === m}
+                    tabIndex={radioTab(mode === m)}
                     className={mode === m ? "on" : ""}
                     disabled={disabled}
                     title={disabled ? (props.agenticBlocked ?? undefined) : undefined}

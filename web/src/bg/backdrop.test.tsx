@@ -56,7 +56,7 @@ async function show(mode: Mode, seed = 1, pref: BackdropPref = "animated") {
   await act(async () => {
     root.render(
       <>
-        <Backdrop mode={mode} seed={seed} pref={pref} typing={false} titles={[]} />
+        <Backdrop mode={mode} seed={seed} pref={pref} typing={false} history={{ titles: [], banned: [] }} />
         <div className="column" />
       </>,
     );
@@ -82,7 +82,7 @@ describe("Backdrop", () => {
     await show("search");
     expect(layers()).toEqual(["ask:exit", "search:idle"]);
     expect(host.querySelector<HTMLElement>("[data-art=search]")!.dataset.delay).toBe("140");
-    await wait(399);
+    await wait(359);
     expect(layers()).toHaveLength(2);
     await wait(2);
     expect(layers()).toEqual(["search:idle"]);

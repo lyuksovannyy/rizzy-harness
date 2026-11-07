@@ -5,12 +5,12 @@
 // session's id, so a chat always looks the same. Nothing here moves.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { CELL_H, capDpr, Field } from "./binaryField";
-import { drawCells, fitCanvas, makeAtlas, readInk } from "./binaryDraw";
+import { drawCells, fitCanvas, makeAtlas, pitch, readInk } from "./binaryDraw";
 import { sameZones, type Rect, type Zones } from "./geom";
-import { useThemeVersion } from "./hooks";
+import { useDevicePixelRatio, useThemeVersion } from "./hooks";
 import { WIDE, type Tier } from "./place";
 import { fnv1a } from "./rng";
-import type { TitleRow } from "./topics";
+import type { History } from "./topics";
 import { layWall, useWallData } from "./wallKit";
 import "./wall.css";
 import "./gutter.css";
@@ -21,7 +21,7 @@ const EDGE = 48;
 const STRENGTH = 0.5;
 const TIERS: Tier[] = WIDE.slice(0, 2).map((t) => ({ ...t, alpha: t.alpha * STRENGTH, bleed: 0 }));
 
-export default function ChatGutter(props: { sessionId: string; agentic: boolean; titles: readonly TitleRow[] }) {
+export default function ChatGutter(props: { sessionId: string; agentic: boolean; history: History }) {
   const host = useRef<HTMLDivElement>(null);
   const [zones, setZones] = useState<Zones | null>(null);
   useLayoutEffect(() => {
@@ -40,7 +40,7 @@ export default function ChatGutter(props: { sessionId: string; agentic: boolean;
       }
       const w = Math.round(o.width);
       const h = Math.round(o.height);
-      const next = { w, h, ex, column: ex[0]!, composer: ex[0]! };
+      const next = { w, h, ex, column: ex[0]!, composer: ex[0]!, clear: ex };
       setZones((prev) => (sameZones(prev, next) ? prev : next));
     };
     measure();
@@ -51,7 +51,7 @@ export default function ChatGutter(props: { sessionId: string; agentic: boolean;
   const seed = fnv1a(props.sessionId);
   return (
     <div ref={host} className="gutter" aria-hidden="true">
-      {zones && (props.agentic ? <StillField zones={zones} seed={seed} /> : <StillWall zones={zones} seed={seed} titles={props.titles} />)}
+      {zones && (props.agentic ? <StillField zones={zones} seed={seed} /> : <StillWall zones={zones} seed={seed} history={props.history} />)}
     </div>
   );
 }
@@ -62,9 +62,9 @@ function gutterLines(z: Zones): number {
   return Math.max(2, Math.floor(((z.w - col.w) * z.h) / 30000));
 }
 
-function StillWall(props: { zones: Zones; seed: number; titles: readonly TitleRow[] }) {
+function StillWall(props: { zones: Zones; seed: number; history: History }) {
   const n = gutterLines(props.zones);
-  const data = useWallData(props.titles, n);
+  const data = useWallData(props.history, n);
   const lines = useMemo(() => (data ? layWall(data, props.seed, props.zones, TIERS, n).lines : []), [data, props.seed, props.zones, n]);
   return (
     <div className="wall" data-motion="still">
@@ -90,20 +90,20 @@ function StillWall(props: { zones: Zones; seed: number; titles: readonly TitleRo
 function StillField(props: { zones: Zones; seed: number }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const theme = useThemeVersion();
+  const dpr = capDpr(useDevicePixelRatio());
   const { zones, seed } = props;
   useEffect(() => {
     const c = canvas.current;
     if (!c) return;
     const ink = readInk(c);
-    const dpr = capDpr(devicePixelRatio);
     // The zones already include the strip by the column; the field's own
-    // mask would widen it by another 88 px, so it gets the column alone.
+    // fade would widen it by another 72 px, so it gets the column alone.
     const col = zones.ex[0]!;
     const inner = { ...col, x: col.x + EDGE, w: col.w - 2 * EDGE, y: -CELL_H, h: zones.h + 2 * CELL_H };
-    const field = new Field({ w: zones.w, h: zones.h, zones: [inner], seed, artMax: ink.artMax * STRENGTH, artPeak: 0 });
     const atlas = makeAtlas(ink, dpr);
+    const field = new Field({ w: zones.w, h: zones.h, clear: [inner], seed, artMax: ink.artMax * STRENGTH, artPeak: 0, ...pitch(atlas, dpr) });
     const ctx = fitCanvas(c, field, atlas, dpr);
     if (ctx) drawCells(ctx, atlas, field, null);
-  }, [zones, seed, theme]);
+  }, [zones, seed, theme, dpr]);
   return <canvas ref={canvas} className="bin-base" style={{ position: "absolute", left: 0, top: 0 }} />;
 }

@@ -7,9 +7,12 @@ export type Rect = { x: number; y: number; w: number; h: number };
  * The backdrop's size and where its art must not go, all relative to the
  * backdrop. `column` is the home column inflated by 24 px (also `ex[0]`);
  * `ex` adds the top bar when it shows; `composer` is the bar itself, the
- * centre the wall ripples out from.
+ * centre the wall ripples out from. `clear` is the content alone (the
+ * greeting's words, the composer, any list under it, and the top bar):
+ * the binary field fades out around that and only quiets the rest of the
+ * column.
  */
-export type Zones = { w: number; h: number; ex: Rect[]; column: Rect; composer: Rect };
+export type Zones = { w: number; h: number; ex: Rect[]; column: Rect; composer: Rect; clear: Rect[] };
 
 export const inflate = (r: Rect, dx: number, dy = dx): Rect => ({
   x: r.x - dx,
@@ -39,5 +42,10 @@ export const clamp = (lo: number, v: number, hi: number) => Math.min(hi, Math.ma
 export function sameZones(a: Zones | null, b: Zones): boolean {
   if (!a || a.ex.length !== b.ex.length || a.w !== b.w || a.h !== b.h) return false;
   const eq = (p: Rect, q: Rect) => p.x === q.x && p.y === q.y && p.w === q.w && p.h === q.h;
-  return eq(a.composer, b.composer) && a.ex.every((r, i) => eq(r, b.ex[i]!));
+  return (
+    eq(a.composer, b.composer) &&
+    a.ex.every((r, i) => eq(r, b.ex[i]!)) &&
+    a.clear.length === b.clear.length &&
+    a.clear.every((r, i) => eq(r, b.clear[i]!))
+  );
 }

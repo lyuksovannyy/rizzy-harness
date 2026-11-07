@@ -1,16 +1,20 @@
 // Agentic mode's field of 0s and 1s, as data: which digit each cell shows and
 // how strongly. BinaryBg draws it. Soft clouds of density come from value
-// noise; cells near the column fade to nothing, so the greeting and composer
-// sit on a clean background. Life is slow: 1.2% of cells flip each second,
-// and a few streaks run down like rain.
+// noise. The field fades out around the content itself (the greeting's
+// words, the composer) and is only quieter across the rest of the column,
+// so it reads as a background the content sits on, not a frame around it.
+// Life is slow: 1.2% of cells flip each second, and a few streaks run down
+// like rain.
 import { between, mulberry32 } from "./rng";
 import type { Rect } from "./geom";
 
+/** The cell in CSS px. The drawn cell is rounded to whole device pixels, so
+ *  BinaryBg passes the field that pitch: cells are masked where they land. */
 export const CELL_W = 14;
 export const CELL_H = 16;
 /** Sharper than 1.5x costs more than it shows at this alpha. */
 export const capDpr = (dpr: number) => Math.min(dpr || 1, 1.5);
-export const gridSize = (w: number, h: number) => ({ cols: Math.ceil(w / CELL_W), rows: Math.ceil(h / CELL_H) });
+export const gridSize = (w: number, h: number, cw = CELL_W, ch = CELL_H) => ({ cols: Math.ceil(w / cw), rows: Math.ceil(h / ch) });
 export const maxStreaks = (cols: number) => (cols < 30 ? 1 : cols < 60 ? 2 : 3);
 
 export const FLIP_RATE = 0.012;
@@ -39,15 +43,33 @@ export function valueNoise(seed: number): (x: number, y: number) => number {
   return (x, y) => (octave(x / 12, y / 12) + 0.35 * octave(x / 5 + 31, y / 5 + 17)) / 1.35;
 }
 
-/** 0 inside a zone (grown by 16 px), rising smoothly to 1 over the next 72 px. */
-export function zoneMask(px: number, py: number, zones: readonly Rect[]): number {
-  let d = Infinity;
-  for (const r of zones) {
-    const dx = Math.max(r.x - 16 - px, 0, px - (r.x + r.w + 16));
-    const dy = Math.max(r.y - 16 - py, 0, py - (r.y + r.h + 16));
-    d = Math.min(d, Math.hypot(dx, dy));
+/** How far the field takes to come back beside content, and above or below it. */
+export const FADE_X = 72;
+export const FADE_Y = 40;
+/** The column's share of full strength, reached again CALM_FADE px outside it. */
+export const CALM = 0.55;
+export const CALM_FADE = 120;
+
+/**
+ * How much of the field shows at a point. Nothing on a `clear` rect, rising
+ * to full strength along an ellipse FADE_X px to the side and FADE_Y px
+ * above and below, so a wide composer does not clear the whole row. Inside
+ * `calm` (the column) everything is at CALM of that, rising to full over
+ * CALM_FADE px outside it.
+ */
+export function fieldMask(px: number, py: number, clear: readonly Rect[], calm?: Rect | null): number {
+  let m = 1;
+  for (const r of clear) {
+    const ex = Math.max(r.x - px, 0, px - (r.x + r.w)) / FADE_X;
+    const ey = Math.max(r.y - py, 0, py - (r.y + r.h)) / FADE_Y;
+    const e = Math.hypot(ex, ey);
+    if (e < 1) m = Math.min(m, smooth(e));
   }
-  return d >= 72 ? 1 : smooth(d / 72);
+  if (calm && m > 0) {
+    const d = Math.hypot(Math.max(calm.x - px, 0, px - (calm.x + calm.w)), Math.max(calm.y - py, 0, py - (calm.y + calm.h)));
+    if (d < CALM_FADE) m *= CALM + (1 - CALM) * smooth(d / CALM_FADE);
+  }
+  return m;
 }
 
 type Streak = { col: number; head: number; speed: number; tail: number; row: number };
@@ -63,8 +85,11 @@ export class Field {
   readonly alpha: Float32Array;
   /** 1 where a streak's head shows, drawn in the streak colour. */
   readonly hot: Uint8Array;
-  /** The zone mask, so a streak's peak fades near the column too. */
+  /** The mask, so a streak's peak fades near the content too. */
   private mask: Float32Array;
+  /** The pitch in CSS px. */
+  readonly cw: number;
+  readonly ch: number;
   private peak: number;
   /** Cells that changed since the last `takeDirty()`. */
   private dirty: Int32Array;
@@ -80,8 +105,22 @@ export class Field {
   flipRate = FLIP_RATE;
   streakLimit: number;
 
-  constructor(o: { w: number; h: number; zones: readonly Rect[]; seed: number; artMax: number; artPeak: number }) {
-    const { cols, rows } = gridSize(o.w, o.h);
+  constructor(o: {
+    w: number;
+    h: number;
+    /** Where nothing shows: see fieldMask. */
+    clear: readonly Rect[];
+    calm?: Rect | null;
+    seed: number;
+    artMax: number;
+    artPeak: number;
+    /** The pitch in CSS px; CELL_W × CELL_H unless the atlas rounded it. */
+    cw?: number;
+    ch?: number;
+  }) {
+    this.cw = o.cw ?? CELL_W;
+    this.ch = o.ch ?? CELL_H;
+    const { cols, rows } = gridSize(o.w, o.h, this.cw, this.ch);
     this.cols = cols;
     this.rows = rows;
     const n = cols * rows;
@@ -99,7 +138,7 @@ export class Field {
       const c = i % cols;
       const r = (i / cols) | 0;
       this.value[i] = this.rng() < 0.5 ? 0 : 1;
-      const mask = zoneMask((c + 0.5) * CELL_W, (r + 0.5) * CELL_H, o.zones);
+      const mask = fieldMask((c + 0.5) * this.cw, (r + 0.5) * this.ch, o.clear, o.calm);
       this.mask[i] = mask;
       // Value noise bunches around 0.5; stretching it makes the clouds read.
       const cloud = smooth(Math.min(1, Math.max(0, (noise(c, r) - 0.2) / 0.6)));
@@ -111,6 +150,13 @@ export class Field {
     this.peak = o.artPeak;
     this.streakLimit = maxStreaks(cols);
     this.untilStreak = between(this.rng, 1400, 3200);
+  }
+
+  /** The mask at a point in CSS px (1 off the field). */
+  maskAt(x: number, y: number): number {
+    const c = Math.floor(x / this.cw);
+    const r = Math.floor(y / this.ch);
+    return c < 0 || r < 0 || c >= this.cols || r >= this.rows ? 1 : this.mask[r * this.cols + c]!;
   }
 
   /** Cells that may show anything at all. */

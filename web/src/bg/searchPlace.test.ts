@@ -10,6 +10,7 @@ const zones = (w: number, h: number, col: Rect, more: Rect[] = []): Zones => ({
   ex: [col, ...more],
   column: col,
   composer: col,
+  clear: [col],
 });
 const box = (s: { x: number; y: number; size: number }) => ({ x: s.x, y: s.y, w: s.size, h: s.size * (1 + SHADOW_ROOM) });
 

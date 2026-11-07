@@ -92,6 +92,25 @@ describe("theme", () => {
     }
   });
 
+  // Links in messages are the accent, and on hover --accent-hover (86%
+  // accent, 14% text colour): both are text on the page. The composer's
+  // focus border is the accent between the page and the composer itself.
+  test.each(THEMES)("%s: message links and the composer's focus border", (_, theme) => {
+    expect(declarations(darkBlock)["--accent-hover"]).toBe("color-mix(in srgb, var(--accent) 86%, var(--fg))");
+    expect(css).toMatch(/\.md a \{\s*color: var\(--accent\);/);
+    expect(css).toMatch(/\.md a:hover \{\s*color: var\(--accent-hover\);/);
+    expect(css).toMatch(/\.composer:focus-within \{\s*border-color: var\(--accent\);/);
+    for (const name of ACCENTS) {
+      const a = theme[`--accent-${name}`]!;
+      const hover = mix(a, theme["--fg"]!, 0.86);
+      expect(contrast(a, theme["--bg"]!), `${name} link on --bg`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(hover, theme["--bg"]!), `${name} hovered link ${hover} on --bg`).toBeGreaterThanOrEqual(4.5);
+      for (const surface of ["--bg", "--surface"]) {
+        expect(contrast(a, theme[surface]!), `${name} composer focus on ${surface}`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
   // A bar or line is a graphical object: WCAG AA asks 3:1 against what it
   // is drawn on, the card.
   test.each(THEMES)("%s: chart series colours stand out from the card", (_, theme) => {

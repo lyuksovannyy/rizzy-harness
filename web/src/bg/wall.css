@@ -11,6 +11,12 @@
   position: absolute;
   inset: 0;
 }
+/* While the tiers drift with the mouse each is its own layer, moved by the
+   compositor; without it every fractional offset re-rasters the whole tier.
+   Phones have no parallax and do not pay for the layers. */
+.wall[data-parallax] .wall-tier {
+  will-change: transform;
+}
 .wall-line {
   position: absolute;
   left: 0;
@@ -33,26 +39,26 @@
 }
 
 .wall[data-motion="animated"] .wall-line {
-  animation: wall-in 700ms var(--ease-out) calc(var(--d) + var(--delay)) both;
+  animation: wall-in var(--dur-6) var(--ease-out) calc(var(--d) + var(--delay)) both;
 }
 .wall[data-motion="animated"].quick .wall-line {
-  animation: wall-fade 300ms var(--ease-out) var(--delay) both;
+  animation: wall-fade var(--dur-3) var(--ease-out) var(--delay) both;
 }
 .wall[data-motion="animated"] .wall-line.fresh {
-  animation: wall-in 900ms var(--ease-out) both;
+  animation: wall-in var(--dur-bg) var(--ease-out) both;
 }
 .wall[data-motion="animated"] .wall-line.typing,
 .wall[data-motion="animated"] .wall-line.typed {
   animation: none;
 }
 .wall[data-motion] .wall-line.out {
-  animation: wall-out 700ms var(--ease-in) both;
+  animation: wall-out var(--dur-6) var(--ease-in) both;
 }
 .wall[data-motion] .wall-line.gone {
   animation: wall-out var(--dur-2) var(--ease-in) both;
 }
 .wall[data-motion="animated"][data-state="exit"] .wall-line:not(.out, .gone) {
-  animation: wall-out 280ms var(--ease-in) var(--xd) both;
+  animation: wall-out var(--dur-3) var(--ease-in) var(--xd) both;
 }
 /* The caret: solid while typing, then two blinks at 1 Hz and away. */
 .wall-line.typing::after,
