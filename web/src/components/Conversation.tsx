@@ -4,15 +4,15 @@ import { FileText, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
-import { provenanceAt, provenanceIndex, provenanceSignature } from "../lib/rich";
+import { citeMaps, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "../lib/rich";
 import type { Live } from "../live";
-import { MessageCtx, NONE, type MessageInfo } from "../md/context";
+import { MessageCtx, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
-import { ToolCard } from "./ToolCard";
+import { ToolCard, WebGroupCard } from "./ToolCard";
 
 function Undo(props: {
   sessionId: string;
@@ -113,15 +113,25 @@ export default function Conversation(props: {
   // The view is mutated in place, so memoise on what the result depends on.
   const provSig = provenanceSignature(items);
   const firstSeen = useMemo(() => provenanceIndex(items), [view, provSig]);
+  // Sources come only from web tools, so the same signature covers them.
+  const cites = useMemo(() => citeMaps(items), [view, provSig]);
   // One stable context value per message, so streaming does not re-render links.
   const infoAt = useMemo(() => {
     const cache = new Map<number, MessageInfo>();
-    return (i: number) => {
+    return (i: number): MessageInfo => {
       let info = cache.get(i);
-      if (!info) cache.set(i, (info = { provenance: provenanceAt(firstSeen, i), sources: NONE }));
+      if (!info) {
+        const c = cites(i);
+        info = { provenance: provenanceAt(firstSeen, i), sources: sourceKeys(c), cites: c };
+        cache.set(i, info);
+      }
       return info;
     };
-  }, [firstSeen]);
+  }, [firstSeen, cites]);
+  // Runs of web tool calls show as one "Researched" row; the rest of a run
+  // is rendered by its first item.
+  const webGroups = groupWeb(items);
+  let groupedUntil = -1;
   // Items before the running turn's user message are final even if their
   // stream was cut off (an interrupted turn leaves done=false).
   const liveFrom = running ? items.findLastIndex((x) => x.type === "user") : Infinity;
@@ -199,6 +209,19 @@ export default function Conversation(props: {
             <div className="muted pad">Loading…</div>
           ) : (
             view.items.map((it, i) => {
+              if (i <= groupedUntil) return null;
+              const web = webGroups.get(i);
+              if (web) {
+                groupedUntil = web.end;
+                return (
+                  <WebGroupCard
+                    key={i}
+                    sessionId={sessionId}
+                    group={web}
+                    tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
+                  />
+                );
+              }
               // Parallel answers: render the whole group once, side by side.
               if (it.type === "assistant" && it.variant) {
                 const g = it.variant.group;

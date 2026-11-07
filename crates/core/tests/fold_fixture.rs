@@ -89,6 +89,7 @@ fn events() -> Vec<RawEvent> {
             output: "1 failed".into(),
             exit_code: Some(101),
             truncated: false,
+            sources: vec![],
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -103,6 +104,27 @@ fn events() -> Vec<RawEvent> {
             output: "     1\tfn main() {}".into(),
             exit_code: None,
             truncated: false,
+            sources: vec![],
+        }),
+        // A web tool's result carries the sources behind its labels.
+        EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
+            turn_id: t(),
+            call_id: "c5".into(),
+            tool: "web_search".into(),
+            input: json!({"query": "tokio"}),
+        }),
+        EventKind::ToolCallFinished(ToolCallFinished {
+            call_id: "c5".into(),
+            ok: true,
+            output: "[S1] Tokio\n    https://tokio.rs/\n    An async runtime".into(),
+            exit_code: None,
+            truncated: false,
+            sources: vec![Source {
+                id: "S1".into(),
+                url: "https://tokio.rs/".into(),
+                title: "Tokio".into(),
+            }],
         }),
         // A message with no preceding deltas.
         EventKind::AssistantMessage(AssistantMessage {

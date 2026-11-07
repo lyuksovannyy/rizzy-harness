@@ -155,7 +155,10 @@ export function apply(v: SessionView, e: RawEvent): void {
     }
     case "tool_call_finished": {
       const t = lastTool(v, p.call_id);
-      if (t) t.result = { ok: p.ok, output: p.output, exit_code: p.exit_code ?? null };
+      if (t) {
+        t.result = { ok: p.ok, output: p.output, exit_code: p.exit_code ?? null };
+        if (p.sources?.length) t.result.sources = p.sources;
+      }
       break;
     }
     case "approval_requested": {

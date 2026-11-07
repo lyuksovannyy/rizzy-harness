@@ -167,6 +167,39 @@
       "ts_ms": 1700000000012
     },
     {
+      "kind": "tool_call_started",
+      "payload": {
+        "call_id": "c5",
+        "input": {
+          "query": "tokio"
+        },
+        "tool": "web_search",
+        "turn_id": "t1"
+      },
+      "seq": 14,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000013
+    },
+    {
+      "kind": "tool_call_finished",
+      "payload": {
+        "call_id": "c5",
+        "ok": true,
+        "output": "[S1] Tokio\n    https://tokio.rs/\n    An async runtime",
+        "sources": [
+          {
+            "id": "S1",
+            "title": "Tokio",
+            "url": "https://tokio.rs/"
+          }
+        ],
+        "truncated": false
+      },
+      "seq": 15,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000014
+    },
+    {
       "kind": "assistant_message",
       "payload": {
         "message_id": "m2",
@@ -174,9 +207,9 @@
         "tool_calls": [],
         "turn_id": "t1"
       },
-      "seq": 14,
+      "seq": 16,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000013
+      "ts_ms": 1700000000015
     },
     {
       "kind": "tool_call_started",
@@ -190,9 +223,9 @@
         "tool": "edit",
         "turn_id": "t1"
       },
-      "seq": 15,
+      "seq": 17,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000014
+      "ts_ms": 1700000000016
     },
     {
       "kind": "approval_requested",
@@ -203,9 +236,9 @@
         "reason": "changes files",
         "tool": "edit"
       },
-      "seq": 16,
+      "seq": 18,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000015
+      "ts_ms": 1700000000017
     },
     {
       "kind": "checkpoint",
@@ -214,9 +247,9 @@
         "phase": "before",
         "turn_id": "t1"
       },
-      "seq": 17,
+      "seq": 19,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000016
+      "ts_ms": 1700000000018
     },
     {
       "kind": "error",
@@ -224,9 +257,9 @@
         "message": "node restarted",
         "turn_id": "t1"
       },
-      "seq": 18,
+      "seq": 20,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000017
+      "ts_ms": 1700000000019
     },
     {
       "kind": "turn_ended",
@@ -239,9 +272,9 @@
           "output_tokens": 2
         }
       },
-      "seq": 19,
+      "seq": 21,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000018
+      "ts_ms": 1700000000020
     },
     {
       "kind": "agent_changed",
@@ -252,9 +285,9 @@
           "prompt_hash": "h1"
         }
       },
-      "seq": 20,
+      "seq": 22,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000019
+      "ts_ms": 1700000000021
     },
     {
       "kind": "turn_started",
@@ -266,9 +299,9 @@
         },
         "turn_id": "t2"
       },
-      "seq": 21,
+      "seq": 23,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000020
+      "ts_ms": 1700000000022
     },
     {
       "kind": "user_message",
@@ -284,9 +317,9 @@
         "text": "@writer draft the changelog",
         "turn_id": "t2"
       },
-      "seq": 22,
+      "seq": 24,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000021
+      "ts_ms": 1700000000023
     },
     {
       "kind": "history_summarized",
@@ -295,9 +328,9 @@
         "through_seq": 3,
         "turn_id": "t2"
       },
-      "seq": 23,
+      "seq": 25,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000022
+      "ts_ms": 1700000000024
     },
     {
       "kind": "assistant_delta",
@@ -311,9 +344,9 @@
           "index": 0
         }
       },
-      "seq": 24,
+      "seq": 26,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000023
+      "ts_ms": 1700000000025
     },
     {
       "kind": "assistant_message",
@@ -328,9 +361,9 @@
           "index": 0
         }
       },
-      "seq": 25,
+      "seq": 27,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000024
+      "ts_ms": 1700000000026
     },
     {
       "kind": "assistant_message",
@@ -345,9 +378,9 @@
           "index": 1
         }
       },
-      "seq": 26,
+      "seq": 28,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000025
+      "ts_ms": 1700000000027
     },
     {
       "kind": "tool_call_started",
@@ -360,9 +393,9 @@
         "tool": "read",
         "turn_id": "t2"
       },
-      "seq": 27,
+      "seq": 29,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000026
+      "ts_ms": 1700000000028
     },
     {
       "kind": "variant_selected",
@@ -370,16 +403,16 @@
         "group": "g1",
         "message_id": "m4"
       },
-      "seq": 28,
+      "seq": 30,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000027
+      "ts_ms": 1700000000029
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 29,
+      "seq": 31,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -395,7 +428,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 29,
+    "head_seq": 31,
     "items": [
       {
         "text": "fix the bug",
@@ -445,6 +478,29 @@
           "output": "     1\tfn main() {}"
         },
         "tool": "read",
+        "type": "tool"
+      },
+      {
+        "approval": null,
+        "author": null,
+        "call_id": "c5",
+        "input": {
+          "query": "tokio"
+        },
+        "live_output": "",
+        "result": {
+          "exit_code": null,
+          "ok": true,
+          "output": "[S1] Tokio\n    https://tokio.rs/\n    An async runtime",
+          "sources": [
+            {
+              "id": "S1",
+              "title": "Tokio",
+              "url": "https://tokio.rs/"
+            }
+          ]
+        },
+        "tool": "web_search",
         "type": "tool"
       },
       {

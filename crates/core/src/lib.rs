@@ -7,6 +7,7 @@ pub mod event;
 pub mod policy;
 pub mod savings;
 pub mod secret;
+pub mod text;
 pub mod view;
 
 pub use event::{EventKind, RawEvent, SessionId};

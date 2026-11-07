@@ -295,6 +295,35 @@ pub struct ToolCallFinished {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub truncated: bool,
+    /// Pages a web tool read or found, under the labels its output gave them
+    /// (`[S3]`), so the UI can resolve the model's citations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<Source>,
+}
+
+/// A web page behind a citation label. Only the harness's web tools write
+/// these, so a label resolves to a URL the model did not choose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Source {
+    /// The label without brackets, e.g. `S4`; stable for the whole session.
+    pub id: String,
+    pub url: String,
+    /// Plain text (see `text::clean_line`), at most `Source::MAX_TITLE` chars.
+    pub title: String,
+}
+
+impl Source {
+    pub const MAX_TITLE: usize = 200;
+
+    /// The label's number (`S4` -> 4), if it is one.
+    pub fn number(&self) -> Option<u32> {
+        let digits = self.id.strip_prefix('S')?;
+        // `parse` would also take "+4".
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -452,6 +481,10 @@ mod tests {
                 "tool_call_started",
                 json!({"turn_id": "t1", "call_id": "c", "tool": "bash", "input": {}}),
             ),
+            (
+                "tool_call_finished",
+                json!({"call_id": "c", "ok": true, "output": "x", "truncated": false}),
+            ),
         ];
         for (kind, payload) in minimal {
             let k = EventKind::from_parts(kind, payload.clone()).unwrap();
@@ -507,6 +540,41 @@ mod tests {
             let (kind, payload) = k.clone().into_parts();
             assert_eq!(kind, k.name());
             assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
+        }
+    }
+
+    #[test]
+    fn sources_roundtrip() {
+        let k = EventKind::ToolCallFinished(ToolCallFinished {
+            call_id: "c".into(),
+            ok: true,
+            output: "[S4] Tokio\n    https://tokio.rs/".into(),
+            exit_code: None,
+            truncated: false,
+            sources: vec![Source {
+                id: "S4".into(),
+                url: "https://tokio.rs/".into(),
+                title: "Tokio".into(),
+            }],
+        });
+        let (kind, payload) = k.clone().into_parts();
+        assert_eq!(
+            payload["sources"],
+            json!([{"id": "S4", "url": "https://tokio.rs/", "title": "Tokio"}])
+        );
+        assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
+        let s = Source {
+            id: "S12".into(),
+            url: String::new(),
+            title: String::new(),
+        };
+        assert_eq!(s.number(), Some(12));
+        for bad in ["x3", "S", "S+3", "S-1"] {
+            let s = Source {
+                id: bad.into(),
+                ..s.clone()
+            };
+            assert_eq!(s.number(), None, "{bad}");
         }
     }
 

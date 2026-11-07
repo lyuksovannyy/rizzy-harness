@@ -5,7 +5,8 @@ use std::sync::Arc;
 use axum::Router;
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::get;
-use harness_tools::{Tool, ToolCtx};
+use harness_core::event::Source;
+use harness_tools::{RefBook, Tool, ToolCtx};
 use harness_web::{SearchBackend, WebFetch, WebSearch};
 use serde_json::json;
 
@@ -77,11 +78,18 @@ async fn searxng_and_brave() {
     });
     let out = s.run(&ctx(&[]), json!({"query": "tokio"})).await;
     assert!(out.ok, "{}", out.output);
-    assert!(
-        out.output
-            .contains("1. Tokio docs\n   https://tokio.rs/tokio/tutorial")
+    assert_eq!(
+        out.output,
+        "[S1] Tokio docs\n    https://tokio.rs/tokio/tutorial\n    An async runtime"
     );
-    assert!(!out.output.contains("No url"));
+    assert_eq!(
+        out.sources,
+        [Source {
+            id: "S1".into(),
+            url: "https://tokio.rs/tokio/tutorial".into(),
+            title: "Tokio docs".into(),
+        }]
+    );
 
     let b = WebSearch::new(SearchBackend::Brave {
         api_key: harness_core::Secret::new("bk".into()),
@@ -104,6 +112,53 @@ async fn searxng_and_brave() {
     })
     .with_brave_url(&format!("{base}/brave"));
     assert!(!bad.run(&ctx(&[]), json!({"query": "x"})).await.ok);
+}
+
+/// Labels continue from the session's earlier ones, a page keeps its label
+/// across tools, and every label in the output has its source.
+#[tokio::test]
+async fn labels_are_stable_across_calls() {
+    let base = server().await;
+    let s = WebSearch::new(SearchBackend::Searxng {
+        base_url: base.clone(),
+    });
+    let mut c = ctx(&[]);
+    let mut book = RefBook::default();
+    for u in ["https://a.example/", "https://b.example/"] {
+        book.label(u);
+    }
+    c.refs = std::sync::Arc::new(std::sync::Mutex::new(book));
+    let out = s.run(&c, json!({"query": "tokio"})).await;
+    assert!(
+        out.output.starts_with("[S3] Tokio docs\n"),
+        "{}",
+        out.output
+    );
+    let again = s.run(&c, json!({"query": "tokio"})).await;
+    assert_eq!(again.output, out.output);
+
+    let f = WebFetch::allowing_private();
+    let page = format!("{base}/page");
+    c.observed = Arc::new(vec![page.clone()]);
+    let out = f.run(&c, json!({"url": page})).await;
+    assert!(out.ok, "{}", out.output);
+    assert!(
+        out.output.starts_with(&format!("[S4] T\nURL: {page}\n\n")),
+        "{}",
+        out.output
+    );
+    assert_eq!(
+        out.sources,
+        [Source {
+            id: "S4".into(),
+            url: page.clone(),
+            title: "T".into(),
+        }]
+    );
+    // Read again (even with a fragment): the same label.
+    let out = f.run(&c, json!({"url": format!("{page}#top")})).await;
+    assert!(out.output.starts_with("[S4] T\n"), "{}", out.output);
+    assert_eq!(out.sources[0].url, page);
 }
 
 #[tokio::test]
@@ -170,6 +225,12 @@ async fn fetch_readable_markdown_vs_all_text() {
         assert!(!md.output.contains(gone), "{gone} kept:\n{}", md.output);
     }
     assert!(md.output.contains("`tokio::spawn`"), "{}", md.output);
+    // The readable title labels the page.
+    assert!(
+        md.output.starts_with("[S1] Tokio guide\nURL: "),
+        "{}",
+        md.output
+    );
     assert!(md.output.contains("Spawning"), "{}", md.output);
     assert!(md.output.contains("first item"), "{}", md.output);
     assert!(md.output.len() < all.output.len());

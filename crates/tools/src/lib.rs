@@ -9,13 +9,14 @@ mod fs;
 pub mod graphify;
 mod outline;
 pub mod outputs;
+mod refs;
 mod search;
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use harness_core::event::OutputStream;
+use harness_core::event::{OutputStream, Source};
 use harness_core::policy::ToolRisk;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -25,6 +26,7 @@ pub use bash::Bash;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
 pub use outputs::{OutputStore, ToolOutput};
+pub use refs::RefBook;
 pub use search::{Glob, Grep};
 
 /// Cap on what the model sees from one tool call.
@@ -47,6 +49,8 @@ pub struct ToolCtx {
     pub savings: harness_core::savings::Savings,
     /// Where full outputs of filtered commands are kept (`tool_output`).
     pub outputs: Option<Arc<OutputStore>>,
+    /// Citation labels for web results, shared by every call of the turn.
+    pub refs: Arc<Mutex<RefBook>>,
 }
 
 impl ToolCtx {
@@ -61,7 +65,16 @@ impl ToolCtx {
             observed: Arc::default(),
             savings: Default::default(),
             outputs: None,
+            refs: Arc::default(),
         }
+    }
+
+    /// The citation label for a URL (see [`RefBook`]).
+    pub fn label(&self, url: &str) -> String {
+        self.refs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .label(url)
     }
 
     /// Resolve a user/model-supplied path against the workspace and enforce
@@ -125,12 +138,14 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolOutcome {
     pub ok: bool,
     pub output: String,
     pub exit_code: Option<i32>,
     pub truncated: bool,
+    /// Pages behind the `[S<n>]` labels in `output` (web tools only).
+    pub sources: Vec<Source>,
 }
 
 impl ToolOutcome {
@@ -139,18 +154,17 @@ impl ToolOutcome {
         Self {
             ok: true,
             output,
-            exit_code: None,
             truncated,
+            ..Default::default()
         }
     }
 
     pub fn err(output: impl Into<String>) -> Self {
         let (output, truncated) = cap(output.into());
         Self {
-            ok: false,
             output,
-            exit_code: None,
             truncated,
+            ..Default::default()
         }
     }
 }
@@ -231,6 +245,26 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         let ctx = ToolCtx::new(dir.path());
         assert!(ctx.resolve("link/file").is_err());
+    }
+
+    #[test]
+    fn outcomes_carry_no_sources_unless_a_tool_adds_them() {
+        assert!(ToolOutcome::default().sources.is_empty());
+        assert!(ToolOutcome::ok("x").sources.is_empty());
+        assert!(!ToolOutcome::err("x").ok);
+    }
+
+    #[test]
+    fn calls_of_one_turn_share_labels() {
+        let a = ToolCtx::new("/");
+        let b = ToolCtx {
+            refs: a.refs.clone(),
+            ..ToolCtx::new("/")
+        };
+        assert_eq!(a.label("https://a.example/"), "S1");
+        assert_eq!(b.label("https://b.example/"), "S2");
+        assert_eq!(b.label("https://a.example/"), "S1");
+        assert_eq!(ToolCtx::new("/").label("https://b.example/"), "S1");
     }
 
     #[test]

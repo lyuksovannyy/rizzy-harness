@@ -7,7 +7,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   type ComponentProps,
@@ -15,6 +14,7 @@ import {
   type RefObject,
 } from "react";
 import type { ExtraProps } from "react-markdown";
+import { useAnchored } from "./anchored";
 import { MessageCtx } from "./context";
 import { useCopy } from "./copy";
 import { reactText } from "./hast";
@@ -129,35 +129,11 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
 }
 
 /** The confirm is a popover in the top layer, placed under (or above) its
- * link: a scrolling table or any other overflow box would clip it in place. */
+ * link (see useAnchored). */
 function LinkConfirm({ url, anchor, onClose }: { url: string; anchor: RefObject<HTMLAnchorElement | null>; onClose: () => void }) {
   const box = useRef<HTMLSpanElement>(null);
   const [copied, copy] = useCopy();
-  useLayoutEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    el.showPopover();
-    const place = () => {
-      const a = anchor.current?.getBoundingClientRect();
-      if (!a) return;
-      const gap = 4;
-      const margin = 8;
-      const left = Math.max(margin, Math.min(a.left, window.innerWidth - el.offsetWidth - margin));
-      const below = a.bottom + gap;
-      const above = a.top - gap - el.offsetHeight;
-      const fits = below + el.offsetHeight <= window.innerHeight - margin || above < margin;
-      el.style.left = `${left}px`;
-      el.style.top = `${fits ? below : above}px`;
-    };
-    place();
-    // Capture: a scroll of any box (the message list, a table) moves the link.
-    window.addEventListener("scroll", place, true);
-    window.addEventListener("resize", place);
-    return () => {
-      window.removeEventListener("scroll", place, true);
-      window.removeEventListener("resize", place);
-    };
-  }, [anchor]);
+  useAnchored(box, anchor);
   useEffect(() => {
     box.current?.querySelector("button")?.focus();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();

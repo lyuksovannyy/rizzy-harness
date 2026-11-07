@@ -64,8 +64,10 @@ async function skipOnboarding(page) {
 
     // 1. Web search runs as a tool in a chat.
     await ask('search: riga tram times');
-    await p.waitForSelector('.tool >> text=web_search');
-    await p.waitForSelector('text=Tool said: 1. Riga trams timetable');
+    await p.waitForSelector('.tool-web >> text=Searched “riga tram times” · 1 result');
+    // The mock repeats the result's first line; its label shows as a pill.
+    await p.waitForSelector('.msg.assistant:has-text("Tool said:") .cite:has-text("rigassatiksme.lv")');
+    await p.waitForSelector('.msg.assistant >> text=Riga trams timetable');
     log('web_search answered through the fake SearXNG');
     // web_fetch never reaches loopback, even with a URL the user typed.
     await p.fill('.composer textarea', 'fetch: http://127.0.0.1:7796/api/me');

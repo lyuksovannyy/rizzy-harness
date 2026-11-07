@@ -1,7 +1,8 @@
 // Rich messages end-to-end: the Markdown baseline (links, image chips,
 // callouts, tables, code, math, hidden characters, Copy), lazy loading of
-// the highlighter worker and math chunks, and a hostile code block that
-// must not freeze the page.
+// the highlighter worker and math chunks, a hostile code block that must
+// not freeze the page, and citations of web results (pills, footer, the
+// web status row).
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -31,13 +32,15 @@ const visualText = (loc) => loc.evaluate((el) => {
   return xs.sort((a, b) => a[1] - b[1]).map((x) => x[0]).join('');
 });
 
-// A fake SearXNG on loopback (configured by the admin, so allowed).
+// A fake SearXNG on loopback (configured by the admin, so allowed). A
+// query with "slow" in it answers after a while, so the running row shows.
 const searx = http.createServer((req, res) => {
+  const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
   res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify({ results: [
+  setTimeout(() => res.end(JSON.stringify({ results: [
     { title: 'Rust language', url: 'https://a.example/rust', content: 'A language empowering everyone' },
     { title: 'The Rust book', url: 'https://b.example/book', content: 'Learn Rust' },
-  ] }));
+  ] })), q.includes('slow') ? 2500 : 0);
 });
 
 async function skipOnboarding(page) {
@@ -204,6 +207,80 @@ async function skipOnboarding(page) {
     await p.locator('.msg.assistant .md .token.keyword').first().waitFor();
     await p.locator('.msg.assistant .md math').first().waitFor();
     log('reload renders the same');
+
+    // 7. Citations: the labels of a web result become pills naming the
+    // host, an unknown label stays text, and a footer lists what was cited.
+    await p.click('.new-chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'cite: rust');
+    await p.click('.mode-switch button:has-text("Ask")');
+    await p.keyboard.press('Enter');
+    const row = p.locator('.tool-web .web-status');
+    await p.waitForSelector('.tool-web .web-status:has-text("Searched “rust” · 2 results")');
+    await idle();
+    const cited = p.locator('.msg.assistant').last();
+    await cited.locator('.cite').first().waitFor();
+    const pills = await cited.locator('.cite').allInnerTexts();
+    check(JSON.stringify(pills) === JSON.stringify(['a.example', 'b.example', 'a.example +1']), 'pills: ' + JSON.stringify(pills));
+    check((await cited.locator('.cite').first().getAttribute('href')) === 'https://a.example/rust', 'a pill links to its source');
+    check((await cited.locator('.cite-missing').innerText()) === '[S9]', 'an unknown label stays text');
+    check((await cited.locator('.cite-missing').getAttribute('title')) === 'No such source', 'with a note');
+    check((await cited.locator('.sources summary').innerText()) === 'Sources (2)', 'footer counts the cited sources');
+    check((await cited.locator('.sources li').count()) === 2, 'footer lists two sources');
+    check((await cited.locator('.md').innerText()).includes('Unknown [S9].'), 'text around the labels stays');
+    log('cite: pills', pills.join(', '), '· [S9] plain · footer of 2 · row:', await row.innerText());
+
+    // Hover or focus shows the title and the full URL.
+    await cited.locator('.cite').first().hover();
+    const card = cited.locator('.cite-card');
+    await card.waitFor();
+    check((await card.locator('.cite-card-title').innerText()) === 'Rust language', 'card title');
+    check((await card.locator('.cite-card-url').innerText()) === 'https://a.example/rust', 'card URL');
+    await p.screenshot({ path: `${S}/rich-4-cite.png` });
+    await p.mouse.move(0, 0);
+    await card.waitFor({ state: 'detached' });
+    await cited.locator('.cite').nth(2).focus();
+    check((await cited.locator('.cite-card .cite-card-item').count()) === 2, 'a group card lists both sources');
+    await p.keyboard.press('Escape');
+    check((await cited.locator('.cite-card').count()) === 0, 'Escape closes the card');
+
+    // A source needs no confirm: the click opens it (the page is stubbed).
+    await ctx.route(/^https:\/\/a\.example\//, (r) => r.fulfill({ status: 200, contentType: 'text/plain', body: 'source page' }));
+    const [popup] = await Promise.all([ctx.waitForEvent('page'), cited.locator('.cite').first().click()]);
+    check(popup.url() === 'https://a.example/rust', 'opened ' + popup.url());
+    check((await cited.locator('.link-confirm').count()) === 0, 'no confirm for a source');
+    await popup.close();
+
+    // The finished row opens to host · title per result.
+    await p.locator('.tool-web .tool-head').click();
+    const results = await p.locator('.tool-web .web-results li').allInnerTexts();
+    check(JSON.stringify(results) === JSON.stringify(['a.example · Rust language', 'b.example · The Rust book']), 'results: ' + JSON.stringify(results));
+
+    // Labels are stable for the session: the same pages cite the same way
+    // in a later turn, and a reload resolves them again.
+    await p.fill('.composer textarea', 'cite: rust again');
+    await p.keyboard.press('Enter');
+    await p.waitForFunction(() => document.querySelectorAll('.msg.assistant').length >= 2);
+    await idle();
+    const again = await p.locator('.msg.assistant').last().locator('.cite').allInnerTexts();
+    check(JSON.stringify(again) === JSON.stringify(pills), 'same labels in a later turn: ' + JSON.stringify(again));
+    await p.reload();
+    await p.locator('.msg.assistant .cite').first().waitFor();
+    check((await p.locator('.msg.assistant').first().locator('.cite').allInnerTexts()).join() === pills.join(), 'pills after reload');
+    log('cite: source opens without a confirm, results listed, labels stable across turns and reload');
+
+    // While a search runs, its row shimmers, unless motion is reduced.
+    await p.fill('.composer textarea', 'cite: slow rust');
+    await p.keyboard.press('Enter');
+    const running = p.locator('.tool-web .web-status.shimmer:has-text("Searching the web for “slow rust”")');
+    await running.waitFor();
+    check((await running.evaluate((el) => getComputedStyle(el).animationName)) === 'shimmer', 'shimmer runs');
+    await p.emulateMedia({ reducedMotion: 'reduce' });
+    check((await running.evaluate((el) => getComputedStyle(el).animationName)) === 'none', 'no shimmer under reduced motion');
+    await p.emulateMedia({ reducedMotion: 'no-preference' });
+    await p.waitForSelector('.tool-web .web-status:has-text("Searched “slow rust” · 2 results")');
+    await idle();
+    log('web row: shimmer while running, none under reduced motion');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

@@ -5,6 +5,8 @@
 //! * `read: <path>`  -> one `read` tool call, then a summary
 //! * `search: <q>`  -> one `web_search` tool call, then a summary
 //! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
+//! * `cite: <q>`     -> one `web_search` call, then an answer citing the
+//!   first two labels of its result and one label that does not exist
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
 //! * `memory?`       -> repeats the recalled-memory block (per-turn context)
 //! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel)
@@ -74,6 +76,31 @@ Reversed: [&#x202E;moc.knab](https://evil.example/) and more.
     "Hidden mark: abc\u{202E}def\n"
 );
 
+/// `Answer [S1] and [S2], both [S1][S2]. Unknown [S9].` with the first two
+/// labels the result gave (labels are session-wide, so they are not always
+/// S1 and S2): single labels, an adjacent pair and a label with no source.
+fn cite_answer(result: &str) -> Vec<String> {
+    let labels: Vec<String> = result
+        .lines()
+        .filter_map(|l| l.strip_prefix('[')?.split_once(']'))
+        .map(|(id, _)| format!("[{id}]"))
+        .take(2)
+        .collect();
+    let mut words = vec!["Answer ".to_string()];
+    match labels.as_slice() {
+        [a, b] => words.extend([
+            format!("{a} "),
+            "and ".into(),
+            format!("{b}, "),
+            format!("both {a}{b}. "),
+        ]),
+        [a] => words.push(format!("{a}. ")),
+        _ => {}
+    }
+    words.extend(["Unknown ".into(), "[S9].".into()]);
+    words
+}
+
 pub struct Mock {
     pub delay: Duration,
 }
@@ -133,18 +160,6 @@ impl Provider for Mock {
                 usage,
             });
         }
-        // After a tool result, summarise it and stop.
-        if let Some(ChatMsg::Tool { content, .. }) = req.messages.last() {
-            let first = content.lines().next().unwrap_or("").to_string();
-            let text = self
-                .stream_words(vec!["Tool ".into(), "said: ".into(), first], &deltas)
-                .await;
-            return Ok(Completion {
-                text,
-                tool_calls: vec![],
-                usage,
-            });
-        }
         let raw_user = req
             .messages
             .iter()
@@ -162,6 +177,21 @@ impl Provider for Mock {
             Some((c, u)) => (c.to_string(), u.to_string()),
             None => (String::new(), raw_user),
         };
+        // After a tool result, summarise it (or cite it) and stop.
+        if let Some(ChatMsg::Tool { content, .. }) = req.messages.last() {
+            let words = if user.starts_with("cite:") {
+                cite_answer(content)
+            } else {
+                let first = content.lines().next().unwrap_or("").to_string();
+                vec!["Tool ".into(), "said: ".into(), first]
+            };
+            let text = self.stream_words(words, &deltas).await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+            });
+        }
         let call = |tool: &str, input| Completion {
             text: String::new(),
             tool_calls: vec![ToolCallRef {
@@ -177,7 +207,10 @@ impl Provider for Mock {
         if let Some(path) = user.strip_prefix("read:") {
             return Ok(call("read", json!({"path": path.trim()})));
         }
-        if let Some(q) = user.strip_prefix("search:") {
+        if let Some(q) = user
+            .strip_prefix("search:")
+            .or_else(|| user.strip_prefix("cite:"))
+        {
             return Ok(call("web_search", json!({"query": q.trim()})));
         }
         if let Some(rest) = user.strip_prefix("delegate:") {

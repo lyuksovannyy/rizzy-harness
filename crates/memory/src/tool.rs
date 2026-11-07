@@ -33,12 +33,9 @@ impl Tool for Remember {
     }
     async fn run(&self, _ctx: &ToolCtx, input: Value) -> ToolOutcome {
         match input.get("text").and_then(|v| v.as_str()) {
-            Some(t) if crate::clean_text(t).is_ok() => ToolOutcome {
-                ok: true,
-                output: "Proposed. The user will confirm or discard it in Memory.".into(),
-                exit_code: None,
-                truncated: false,
-            },
+            Some(t) if crate::clean_text(t).is_ok() => {
+                ToolOutcome::ok("Proposed. The user will confirm or discard it in Memory.")
+            }
             _ => ToolOutcome::err(format!(
                 "`text` must be a non-empty sentence of at most {} characters",
                 crate::MAX_FACT_CHARS

@@ -57,6 +57,8 @@ pub struct ToolResult {
     pub ok: bool,
     pub output: String,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<Source>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -234,6 +236,7 @@ impl SessionView {
                         ok: f.ok,
                         output: f.output,
                         exit_code: f.exit_code,
+                        sources: f.sources,
                     });
                 }
             }
@@ -385,6 +388,49 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_results_keep_their_sources() {
+        let sid = SessionId::new();
+        let source = Source {
+            id: "S1".into(),
+            url: "https://a.example/".into(),
+            title: "A".into(),
+        };
+        let evs = vec![
+            ev(
+                sid,
+                1,
+                EventKind::ToolCallStarted(ToolCallStarted {
+                    author: None,
+                    turn_id: "t".into(),
+                    call_id: "c".into(),
+                    tool: "web_search".into(),
+                    input: json!({"query": "a"}),
+                }),
+            ),
+            ev(
+                sid,
+                2,
+                EventKind::ToolCallFinished(ToolCallFinished {
+                    call_id: "c".into(),
+                    ok: true,
+                    output: "[S1] A".into(),
+                    exit_code: None,
+                    truncated: false,
+                    sources: vec![source.clone()],
+                }),
+            ),
+        ];
+        let v = SessionView::fold(&evs).unwrap();
+        let Item::Tool {
+            result: Some(r), ..
+        } = &v.items[0]
+        else {
+            panic!("{:?}", v.items[0])
+        };
+        assert_eq!(r.sources, vec![source]);
     }
 
     #[test]

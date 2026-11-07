@@ -39,10 +39,18 @@ export interface Variant {
   model?: string;
 }
 
+/** A page behind a citation label (`S4`), written by the web tools only. */
+export interface Source {
+  id: string;
+  url: string;
+  title: string;
+}
+
 export interface ToolResult {
   ok: boolean;
   output: string;
   exit_code: number | null;
+  sources?: Source[];
 }
 
 export interface ApprovalState {

@@ -3,13 +3,13 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 import { Markdown } from "../components/Markdown";
-import { MessageCtx, NONE } from "./context";
+import { MessageCtx, NO_CITES, NONE } from "./context";
 import { hasHidden } from "./hidden";
 import type { Provenance } from "./links";
 
 const md = (text: string, sources: Provenance = NONE) =>
   renderToStaticMarkup(
-    <MessageCtx.Provider value={{ provenance: NONE, sources }}>
+    <MessageCtx.Provider value={{ provenance: NONE, sources, cites: NO_CITES }}>
       <Markdown text={text} done={false} />
     </MessageCtx.Provider>,
   );

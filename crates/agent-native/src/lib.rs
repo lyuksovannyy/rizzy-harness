@@ -14,7 +14,7 @@ use std::time::Duration;
 use harness_core::backend::{AgentBackend, TurnCtx, TurnOutcome};
 use harness_core::event::*;
 use harness_core::{RawEvent, new_id};
-use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
+use harness_tools::{RefBook, ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
 pub use provider::{
@@ -268,8 +268,7 @@ impl NativeBackend {
                             "session: {}\n@{} ended ({reason}):\n{body}",
                             o.child, spec.agent_id
                         ),
-                        exit_code: None,
-                        truncated: false,
+                        ..Default::default()
                     },
                     o.usage.unwrap_or_default(),
                 )
@@ -486,6 +485,9 @@ impl AgentBackend for NativeBackend {
             .or(self.config.effort);
         let mut allowed_for_session: HashSet<String> = HashSet::new();
         let (mut subagents, mut sub_tokens) = (0u32, 0u64);
+        // Citation labels continue from the whole log (not only the part
+        // after a summary), so `[S3]` names one page for the whole session.
+        let refs = Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history)));
 
         for _ in 0..MAX_STEPS {
             let message_id = new_id();
@@ -599,6 +601,7 @@ impl AgentBackend for NativeBackend {
                                 output: r.clone(),
                                 exit_code: None,
                                 truncated: false,
+                                sources: vec![],
                             }))
                             .await;
                             messages.push(ChatMsg::Tool {
@@ -626,6 +629,7 @@ impl AgentBackend for NativeBackend {
                         output: output.clone(),
                         exit_code: None,
                         truncated: outcome.truncated,
+                        sources: vec![],
                     }))
                     .await;
                     messages.push(ChatMsg::Tool {
@@ -652,16 +656,35 @@ impl AgentBackend for NativeBackend {
                 .await;
                 let observed = observed_text(&messages);
                 let outcome = self
-                    .run_tool(&ctx, host, &call, &mut allowed_for_session, &observed)
+                    .run_tool(
+                        &ctx,
+                        host,
+                        &call,
+                        &mut allowed_for_session,
+                        &observed,
+                        &refs,
+                    )
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
+                // Scrubbed like the output, so a source never shows what the
+                // output it labels hides.
+                let sources = outcome
+                    .sources
+                    .into_iter()
+                    .map(|s| Source {
+                        url: self.config.secrets.scrub(&s.url),
+                        title: self.config.secrets.scrub(&s.title),
+                        ..s
+                    })
+                    .collect();
                 host.emit(EventKind::ToolCallFinished(ToolCallFinished {
                     call_id: call.call_id.clone(),
                     ok: outcome.ok,
                     output: output.clone(),
                     exit_code: outcome.exit_code,
                     truncated: outcome.truncated,
+                    sources,
                 }))
                 .await;
                 messages.push(ChatMsg::Tool {
@@ -870,6 +893,7 @@ impl NativeBackend {
         call: &ToolCallRef,
         allowed_for_session: &mut HashSet<String>,
         observed: &[String],
+        refs: &Arc<std::sync::Mutex<RefBook>>,
     ) -> ToolOutcome {
         let offered = ctx.agent.as_ref().is_none_or(|a| a.allows_tool(&call.tool));
         let Some(tool) = self
@@ -917,6 +941,7 @@ impl NativeBackend {
             observed: Arc::new(observed.to_vec()),
             savings: ctx.extra.savings.clone(),
             outputs: Some(self.outputs.clone()),
+            refs: refs.clone(),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both.
@@ -1190,6 +1215,128 @@ mod tests {
         let all = outputs.concat();
         assert!(!all.contains("sk-supersecret-123"), "{all}");
         assert!(all.contains("[REDACTED]"));
+    }
+
+    /// Stands in for the web tools: labels the page in `query` (a URL) and
+    /// one fixed page, the way web_search does.
+    struct FakeSearch;
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for FakeSearch {
+        fn name(&self) -> &'static str {
+            "web_search"
+        }
+        fn description(&self) -> &'static str {
+            "fake"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+            let urls = [
+                input["query"].as_str().unwrap_or(""),
+                "https://fixed.example/",
+            ];
+            let sources: Vec<Source> = urls
+                .iter()
+                .map(|u| Source {
+                    id: ctx.label(u),
+                    url: u.to_string(),
+                    title: format!("Title sk-supersecret-123 {u}"),
+                })
+                .collect();
+            let output = sources
+                .iter()
+                .map(|s| format!("[{}] {}\n    {}", s.id, s.title, s.url))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ToolOutcome {
+                sources,
+                ..ToolOutcome::ok(output)
+            }
+        }
+    }
+
+    /// Labels continue from the session's log, the same page keeps its
+    /// label, the finished event carries the sources (scrubbed like the
+    /// output), and the mock's `cite:` answer cites what the result gave.
+    #[tokio::test]
+    async fn tool_results_carry_session_stable_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let b = NativeBackend::new(
+            Arc::new(mock::Mock {
+                delay: Duration::from_millis(1),
+            }),
+            vec![Arc::new(FakeSearch)],
+            NativeConfig {
+                secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(
+                    "sk-supersecret-123".into(),
+                )]),
+                ..Default::default()
+            },
+        );
+        let sid = SessionId::new();
+        let earlier = |seq: u64, id: &str, url: &str| {
+            let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+                call_id: format!("old{seq}"),
+                ok: true,
+                output: String::new(),
+                exit_code: None,
+                truncated: false,
+                sources: vec![Source {
+                    id: id.into(),
+                    url: url.into(),
+                    title: "old".into(),
+                }],
+            })
+            .into_parts();
+            RawEvent {
+                session_id: sid,
+                seq,
+                ts_ms: 0,
+                kind,
+                payload,
+            }
+        };
+        let mut c = ctx(&host, "cite: https://new.example/", dir.path());
+        c.history = vec![
+            earlier(2, "S1", "https://fixed.example/"),
+            earlier(3, "S3", "https://other.example/"),
+        ];
+        assert_eq!(b.run_turn(c).await.reason, TurnEndReason::Completed);
+        let ev = host.events.lock().unwrap();
+        let f = ev
+            .iter()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let ids: Vec<(&str, &str)> = f
+            .sources
+            .iter()
+            .map(|s| (s.id.as_str(), s.url.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("S4", "https://new.example/"),
+                ("S1", "https://fixed.example/")
+            ]
+        );
+        assert!(f.output.starts_with("[S4] "), "{}", f.output);
+        for s in &f.sources {
+            assert!(!s.title.contains("sk-supersecret"), "{}", s.title);
+            assert!(s.title.contains("[REDACTED]"), "{}", s.title);
+        }
+        let EventKind::AssistantMessage(m) = ev.last().unwrap() else {
+            panic!("{:?}", ev.last())
+        };
+        assert_eq!(m.text, "Answer [S4] and [S1], both [S4][S1]. Unknown [S9].");
     }
 
     #[tokio::test]

@@ -234,13 +234,14 @@ impl Tool for Bash {
                     output: format!("{output}\n[exit code: {code_str}]"),
                     exit_code: code,
                     truncated,
+                    ..Default::default()
                 }
             }
             End::Cancelled => ToolOutcome {
                 ok: false,
                 output: format!("{output}\n[cancelled: process group killed]"),
-                exit_code: None,
                 truncated,
+                ..Default::default()
             },
             End::TimedOut => ToolOutcome {
                 ok: false,
@@ -248,8 +249,8 @@ impl Tool for Bash {
                     "{output}\n[timed out after {}s: process group killed]",
                     timeout.as_secs()
                 ),
-                exit_code: None,
                 truncated,
+                ..Default::default()
             },
         }
     }

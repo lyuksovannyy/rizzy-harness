@@ -9,6 +9,12 @@
 //! * **URL provenance.** A URL is fetched only if it appears in text the
 //!   user or a tool supplied (`ToolCtx::observed`). A prompt-injected page
 //!   cannot make the model build `https://evil/?q=<your data>`.
+//!
+//! Every page in a result gets a session-stable citation label (`[S4]`, see
+//! `sources`), recorded with its URL on the tool result so the UI resolves
+//! the model's citations to links it did not write.
+
+mod sources;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -19,6 +25,7 @@ use harness_core::policy::ToolRisk;
 use harness_tools::{Tool, ToolCtx, ToolOutcome};
 use serde::Serialize;
 use serde_json::{Value, json};
+use sources::cite_hint;
 
 /// Largest response body read, in bytes.
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
@@ -168,9 +175,11 @@ pub fn provenance_ok(u: &url::Url, observed: &[String]) -> bool {
     })
 }
 
-/// The page's main content as Markdown (readability extraction), or `None`
-/// when extraction finds too little (then the caller falls back to all text).
-pub fn readable_markdown(html: &str, url: &str) -> Option<String> {
+/// The page's main content as Markdown (readability extraction) and its
+/// title, or `None` when extraction finds too little (then the caller falls
+/// back to all text). The title is not repeated in the Markdown: the tool
+/// output's label line carries it.
+pub fn readable_markdown(html: &str, url: &str) -> Option<(String, String)> {
     let mut r = dom_smoothie::Readability::new(html, Some(url), None).ok()?;
     let article = r.parse().ok()?;
     let md = htmd::convert(&article.content).ok()?;
@@ -178,17 +187,19 @@ pub fn readable_markdown(html: &str, url: &str) -> Option<String> {
     if md.chars().count() < 200 {
         return None;
     }
-    let title = article.title.trim();
-    Some(if title.is_empty() {
-        md.to_string()
-    } else {
-        format!("# {title}\n\n{md}")
-    })
+    Some((md.to_string(), article.title.trim().to_string()))
+}
+
+/// A page as text, with the title the page gives itself (if any).
+struct Page {
+    text: String,
+    title: Option<String>,
+    truncated: bool,
 }
 
 /// Read at most `MAX_BODY` bytes and turn the page into text: the main
 /// article as Markdown when `readable`, else all of the page's text.
-async fn read_page(resp: reqwest::Response, readable: bool) -> Result<(String, bool), String> {
+async fn read_page(resp: reqwest::Response, readable: bool) -> Result<Page, String> {
     let page_url = resp.url().to_string();
     let ctype = resp
         .headers()
@@ -215,7 +226,7 @@ async fn read_page(resp: reqwest::Response, readable: bool) -> Result<(String, b
         }
         body.extend_from_slice(&chunk);
     }
-    let text = if html {
+    let (text, title) = if html {
         let extracted = if readable {
             let (b, u) = (
                 String::from_utf8_lossy(&body).into_owned(),
@@ -229,18 +240,29 @@ async fn read_page(resp: reqwest::Response, readable: bool) -> Result<(String, b
             None
         };
         match extracted {
-            Some(md) => md,
-            None => html2text::from_read(&body[..], 100).map_err(|e| e.to_string())?,
+            Some((md, title)) => (md, Some(title)),
+            None => (
+                html2text::from_read(&body[..], 100).map_err(|e| e.to_string())?,
+                sources::html_title(&body),
+            ),
         }
     } else {
-        String::from_utf8_lossy(&body).into_owned()
+        (String::from_utf8_lossy(&body).into_owned(), None)
     };
     let chars = text.chars().count();
     if chars > MAX_PAGE_CHARS {
         let cut: String = text.chars().take(MAX_PAGE_CHARS).collect();
-        return Ok((format!("{cut}\n\n[... page truncated ...]"), true));
+        return Ok(Page {
+            text: format!("{cut}\n\n[... page truncated ...]"),
+            title,
+            truncated: true,
+        });
     }
-    Ok((text, truncated))
+    Ok(Page {
+        text,
+        title,
+        truncated,
+    })
 }
 
 pub struct WebFetch {
@@ -287,8 +309,12 @@ impl Tool for WebFetch {
         "web_fetch"
     }
     fn description(&self) -> &'static str {
-        "Fetch a web page and return its text. Only URLs that the user gave or that a \
-         previous tool result (e.g. web_search) contained can be fetched."
+        concat!(
+            "Fetch a web page and return its text, labelled like [S5]. Only URLs that the \
+             user gave or that a previous tool result (e.g. web_search) contained can be \
+             fetched.",
+            cite_hint!()
+        )
     }
     fn schema(&self) -> Value {
         json!({
@@ -327,17 +353,24 @@ impl Tool for WebFetch {
             Err(e) => return ToolOutcome::err(format!("fetch failed: {}", root_cause(&e))),
         };
         let status = resp.status();
-        let final_url = resp.url().to_string();
+        let mut final_url = resp.url().clone();
         if !status.is_success() {
             return ToolOutcome::err(format!("{final_url} answered {status}"));
         }
+        // The fragment never reached the server: the page is the URL without it.
+        final_url.set_fragment(None);
         match read_page(resp, ctx.savings.web_readability).await {
-            Ok((text, truncated)) => ToolOutcome {
-                ok: true,
-                output: format!("URL: {final_url}\n\n{text}"),
-                exit_code: None,
-                truncated,
-            },
+            Ok(page) => {
+                let (output, source) =
+                    sources::fetch_output(ctx, &final_url, page.title.as_deref(), &page.text);
+                ToolOutcome {
+                    ok: true,
+                    output,
+                    truncated: page.truncated,
+                    sources: vec![source],
+                    ..Default::default()
+                }
+            }
             Err(e) => ToolOutcome::err(e),
         }
     }
@@ -398,20 +431,19 @@ impl WebSearch {
     }
 
     pub async fn search(&self, q: &str, count: usize) -> Result<Vec<SearchResult>, String> {
+        // Engines pass on whatever the pages say: titles and snippets are
+        // cleaned to plain lines, and a hit without an http(s) URL is dropped.
         let take = |v: &Value, title: &str, url: &str, snip: &str| -> Vec<SearchResult> {
             v.as_array()
                 .map(|a| {
                     a.iter()
                         .filter_map(|r| {
-                            Some(SearchResult {
-                                title: r.get(title)?.as_str()?.trim().to_string(),
-                                url: r.get(url)?.as_str()?.to_string(),
-                                snippet: r
-                                    .get(snip)
-                                    .and_then(|s| s.as_str())
-                                    .map(strip_tags)
-                                    .unwrap_or_default(),
-                            })
+                            let text = |k: &str| r.get(k).and_then(|s| s.as_str()).map(strip_tags);
+                            sources::search_result(
+                                &text(title)?,
+                                r.get(url)?.as_str()?,
+                                &text(snip).unwrap_or_default(),
+                            )
                         })
                         .take(count)
                         .collect()
@@ -466,11 +498,7 @@ fn strip_tags(s: &str) -> String {
             _ => {}
         }
     }
-    out.replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    sources::decode_entities(&out)
 }
 
 #[async_trait::async_trait]
@@ -479,8 +507,12 @@ impl Tool for WebSearch {
         "web_search"
     }
     fn description(&self) -> &'static str {
-        "Search the web. Returns titles, URLs and snippets; use web_fetch on a URL to read \
-         the page. Prefer this for current events and facts you are unsure of."
+        concat!(
+            "Search the web. Returns a label like [S2], the title, URL and snippet per \
+             result; use web_fetch on a URL to read the page. Prefer this for current events \
+             and facts you are unsure of.",
+            cite_hint!()
+        )
     }
     fn schema(&self) -> Value {
         json!({
@@ -509,23 +541,14 @@ impl Tool for WebSearch {
             _ = ctx.cancel.cancelled() => return ToolOutcome::err("[cancelled]"),
         };
         match res {
-            Ok(rs) if rs.is_empty() => ToolOutcome {
-                ok: true,
-                output: "No results.".into(),
-                exit_code: None,
-                truncated: false,
-            },
-            Ok(rs) => ToolOutcome {
-                ok: true,
-                output: rs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| format!("{}. {}\n   {}\n   {}", i + 1, r.title, r.url, r.snippet))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                exit_code: None,
-                truncated: false,
-            },
+            Ok(rs) if rs.is_empty() => ToolOutcome::ok("No results."),
+            Ok(rs) => {
+                let (output, sources) = sources::search_output(ctx, &rs);
+                ToolOutcome {
+                    sources,
+                    ..ToolOutcome::ok(output)
+                }
+            }
             Err(e) => ToolOutcome::err(e),
         }
     }

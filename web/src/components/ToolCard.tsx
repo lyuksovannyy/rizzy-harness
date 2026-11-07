@@ -1,9 +1,76 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Globe, Search } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
-import type { Decision, Item } from "../types";
+import type { WebGroup } from "../lib/rich";
+import { stripHidden } from "../md/hidden";
+import { hostOf, parseUrl } from "../md/links";
+import { rt } from "../md/strings";
+import type { Decision, Item, Source } from "../types";
 
 type Tool = Extract<Item, { type: "tool" }>;
+type Status = "waiting" | "ok" | "failed" | "denied" | "running";
+
+function statusOf(item: Tool): Status {
+  if (item.approval && item.approval.decision === null) return "waiting";
+  if (item.result) return item.result.ok ? "ok" : "failed";
+  return item.approval?.decision === "deny" ? "denied" : "running";
+}
+
+const EXTERNAL = { target: "_blank", rel: "noopener noreferrer nofollow", referrerPolicy: "no-referrer" } as const;
+
+/** The model's query as one short line of plain text. */
+function queryText(q: unknown): string {
+  const s = stripHidden(typeof q === "string" ? q : "").replace(/\s+/g, " ").trim();
+  return s.length > 100 ? `${s.slice(0, 99)}…` : s;
+}
+
+/** The host a fetch reads: the page it ended on once done, else the URL asked for. */
+function fetchHost(item: Tool): string {
+  const u = parseUrl(item.result?.sources?.[0]?.url ?? String(item.input?.url ?? ""));
+  return u && (u.protocol === "https:" || u.protocol === "http:") ? hostOf(u) : rt("web.page");
+}
+
+/** The head of a web tool's card, in the harness's words. */
+function webStatus(item: Tool, status: Status): string {
+  if (item.tool === "web_search") {
+    const q = queryText(item.input?.query);
+    if (status === "waiting") return rt("web.wantsSearch", { q });
+    if (status === "running") return rt("web.searching", { q });
+    if (status === "ok") {
+      const n = item.result?.sources?.length ?? 0;
+      return n === 1 ? rt("web.searched1", { q }) : rt("web.searched", { q, n: String(n) });
+    }
+    return rt("web.searchFailed", { q });
+  }
+  const host = fetchHost(item);
+  if (status === "waiting") return rt("web.wantsRead", { host });
+  if (status === "running") return rt("web.reading", { host });
+  return rt(status === "ok" ? "web.read" : "web.readFailed", { host });
+}
+
+/** host · title per page a web tool returned. */
+function SourceRows({ sources }: { sources: Source[] }) {
+  return (
+    <ul className="web-results">
+      {sources.map((s) => {
+        const u = parseUrl(s.url);
+        if (!u || (u.protocol !== "https:" && u.protocol !== "http:")) return null;
+        const host = hostOf(u);
+        return (
+          <li key={s.id}>
+            <a href={u.href} {...EXTERNAL}>
+              <bdi dir="ltr" className="web-host">
+                {host}
+              </bdi>
+              {" · "}
+              <span className="web-title">{stripHidden(s.title) || host}</span>
+            </a>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 function summary(t: Tool): string {
   const i = t.input ?? {};
@@ -50,17 +117,12 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
   const [open, setOpen] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const status = pending
-    ? "waiting"
-    : item.result
-      ? item.result.ok
-        ? "ok"
-        : "failed"
-      : item.approval?.decision === "deny"
-        ? "denied"
-        : "running";
-  // Open while it matters; collapse finished successful calls by default.
-  const expanded = open ?? (status !== "ok" || item.tool === "edit");
+  const status = statusOf(item);
+  const web = item.tool === "web_search" || item.tool === "web_fetch";
+  // Open while it matters; collapse finished successful calls by default. A
+  // web call says what it does in its head, so it opens only on trouble.
+  const expanded =
+    open ?? (web ? status === "failed" || status === "denied" : status !== "ok" || item.tool === "edit");
 
   const decide = async (d: Decision) => {
     if (!item.approval) return;
@@ -79,17 +141,26 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
   // A delegated sub-task runs in its own session: link to it.
   const child = item.tool === "delegate" ? /session: ([0-9a-f-]{36})/.exec(output)?.[1] : undefined;
 
+  const Icon = item.tool === "web_search" ? Search : Globe;
   return (
-    <div className={`tool tool-${status}`}>
-      <button className="tool-head" onClick={() => setOpen(!expanded)}>
-        <span className={`tool-status s-${status}`}>{status}</span>
-        <span className="tool-name">{item.tool}</span>
-        <span className="tool-summary mono ellipsis">{summary(item)}</span>
-        {item.result?.exit_code !== null && item.result?.exit_code !== undefined && (
-          <span className="muted mono">exit {item.result.exit_code}</span>
-        )}
-        <span className="chev">{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
-      </button>
+    <div className={`tool tool-${status}${web ? " tool-web" : ""}`}>
+      {web ? (
+        <button className="tool-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+          <Icon size={14} aria-hidden className={`s-${status}`} />
+          <span className={`web-status ellipsis${status === "running" ? " shimmer" : ""}`}>{webStatus(item, status)}</span>
+          <span className="chev">{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+        </button>
+      ) : (
+        <button className="tool-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+          <span className={`tool-status s-${status}`}>{status}</span>
+          <span className="tool-name">{item.tool}</span>
+          <span className="tool-summary mono ellipsis">{summary(item)}</span>
+          {item.result?.exit_code !== null && item.result?.exit_code !== undefined && (
+            <span className="muted mono">exit {item.result.exit_code}</span>
+          )}
+          <span className="chev">{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+        </button>
+      )}
       {child && (
         <a className="child-link small" href={`#/s/${child}`}>
           Open @{item.input?.agent} session{status === "running" ? " (approvals for its tools appear there)" : ""}
@@ -117,7 +188,12 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
           {item.approval.decision === "deny" ? "Denied" : "Allowed"} ({item.approval.by})
         </div>
       )}
-      {expanded && (
+      {expanded && web && status === "ok" && (
+        <div className="tool-body">
+          <SourceRows sources={item.result?.sources ?? []} />
+        </div>
+      )}
+      {expanded && !(web && status === "ok") && (
         <div className="tool-body">
           {item.tool === "edit" && <EditDiff input={item.input} />}
           {item.tool === "write" && (
@@ -125,6 +201,42 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
           )}
           {item.tool === "bash" && <pre className="term cmd">$ {item.input?.command}</pre>}
           {output && <pre className="term">{output}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Several web calls in a row: one "Researched · 2 searches, 3 pages" row
+ * that opens to their cards. Open while one of them runs or failed. */
+export function WebGroupCard({ sessionId, group, tools }: { sessionId: string; group: WebGroup; tools: Tool[] }) {
+  const [open, setOpen] = useState<boolean | null>(null);
+  const statuses = tools.map(statusOf);
+  const busy = statuses.some((s) => s === "running" || s === "waiting");
+  const trouble = statuses.some((s) => s === "failed" || s === "denied");
+  const expanded = open ?? (busy || trouble);
+  const count = (n: number, one: "web.searches1" | "web.pages1", many: "web.searches" | "web.pages") =>
+    n === 1 ? rt(one) : rt(many, { n: String(n) });
+  const parts = [
+    group.searches ? count(group.searches, "web.searches1", "web.searches") : "",
+    group.pages ? count(group.pages, "web.pages1", "web.pages") : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return (
+    <div className="tool-group">
+      <button type="button" className="tool-group-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+        <Globe size={14} aria-hidden />
+        <span className={`web-status${busy ? " shimmer" : ""}`}>
+          {rt(busy ? "web.researching" : "web.researched", { parts })}
+        </span>
+        <span className="chev">{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+      </button>
+      {expanded && (
+        <div className="tool-group-body">
+          {tools.map((t) => (
+            <ToolCard key={t.call_id} sessionId={sessionId} item={t} />
+          ))}
         </div>
       )}
     </div>
