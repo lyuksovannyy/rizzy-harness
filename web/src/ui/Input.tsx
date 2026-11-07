@@ -7,7 +7,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api";
 import type { InputInfo } from "../md/context";
 import { rt } from "../md/strings";
-import type { FormValue } from "../types";
+import type { FormReply, FormValue } from "../types";
 
 export interface InputProps {
   sessionId: string | null;
@@ -20,6 +20,13 @@ export interface InputProps {
 export const PREVIEW: InputInfo = { state: { kind: "open" }, notice: [] };
 
 const draftKey = (p: InputProps) => `harness.ui.${p.messageId ?? ""}#${p.blockId}`;
+
+/** The answer as it is sent, which is also what its size is checked on. */
+export const replyOf = (p: InputProps, values: Record<string, FormValue>): FormReply => ({
+  message_id: p.messageId ?? "",
+  block_id: p.blockId,
+  values,
+});
 
 // Session storage can be full, off or blocked; a lost draft is fine.
 export function loadDraft(p: InputProps): unknown {
@@ -58,7 +65,7 @@ export function useSend(p: InputProps) {
     setBusy(true);
     setError(null);
     try {
-      await api.prompt(p.sessionId!, "", { reply: { message_id: p.messageId!, block_id: p.blockId, values } });
+      await api.prompt(p.sessionId!, "", { reply: replyOf(p, values) });
       saveDraft(p, null, true);
     } catch (x) {
       setError(x instanceof Error ? x.message : String(x));

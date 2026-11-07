@@ -6,8 +6,8 @@ import { useEffect, useId, useState } from "react";
 import { rt } from "../md/strings";
 import type { Field, FormSpec } from "../types";
 import { answerLines } from "./answer";
-import { checkReply, fieldError, formValues, initialDraft, type Draft } from "./form";
-import { InputFrame, loadDraft, saveDraft, SendButton, useSend, type InputProps } from "./Input";
+import { checkReply, fieldError, formValues, initialDraft, TOO_LARGE, type Draft } from "./form";
+import { InputFrame, loadDraft, replyOf, saveDraft, SendButton, useSend, type InputProps } from "./Input";
 
 /** A stored draft, kept only where it still fits a shown field. */
 function restore(spec: FormSpec, raw: unknown): Draft {
@@ -50,7 +50,7 @@ export default function Form({ spec, input }: { spec: FormSpec; input: InputProp
       </InputFrame>
     );
   }
-  const problem = checkReply("form", spec, values);
+  const problem = checkReply("form", spec, replyOf(input, values));
   const set = (id: string, v: Draft[string]) => setDraft((d) => ({ ...d, [id]: v }));
   return (
     <InputFrame info={input.info} error={error}>
@@ -77,6 +77,12 @@ export default function Form({ spec, input }: { spec: FormSpec; input: InputProp
           ))}
         </ul>
         <div className="ui-actions">
+          {/* The one problem no single field shows: all of it together. */}
+          {problem === TOO_LARGE && (
+            <p className="ui-field-error" role="alert">
+              {cap(problem)}
+            </p>
+          )}
           <SendButton disabled={!ready || problem !== null} busy={busy} onClick={() => void send(values)} />
         </div>
       </div>

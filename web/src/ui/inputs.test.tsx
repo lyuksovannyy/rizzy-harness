@@ -1,7 +1,7 @@
 // Question and form cards, and the reply bubble, as static markup: the
 // harness chrome, locked states, refused fields, answered values.
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { ReplyBubble } from "../components/ReplyBubble";
 import type { InputInfo } from "../md/context";
 import type { ChoicesSpec, FormSpec, UiBlock } from "../types";
@@ -38,6 +38,17 @@ const props = (state: InputState = { kind: "open" }, notice: string[] = []): Inp
 const choices = (spec: ChoicesSpec, p = props()) => renderToStaticMarkup(<Choices spec={spec} input={p} />);
 const form = (p = props()) => renderToStaticMarkup(<Form spec={trip} input={p} />);
 const text = (h: string) => h.replace(/<[^>]+>/g, "").replaceAll("&#x27;", "'");
+
+/** Render as if the user had typed `draft` into the card (props()'s ids). */
+function withDraft(draft: unknown) {
+  const kept = new Map([["harness.ui.m#b", JSON.stringify(draft)]]);
+  vi.stubGlobal("sessionStorage", {
+    getItem: (k: string) => kept.get(k) ?? null,
+    setItem: () => {},
+    removeItem: () => {},
+  });
+}
+afterEach(() => void vi.unstubAllGlobals());
 
 describe("harness chrome", () => {
   test("the fixed footer, and where the agent had been reading", () => {
@@ -91,6 +102,29 @@ describe("Choices", () => {
     expect(h).toMatch(/class="primary ui-send" disabled/);
   });
 
+  test("a typed Other is one of the picks that Pick N allows", () => {
+    const spec: ChoicesSpec = { ...colours, options: [...colours.options, { id: "green", label: "Green" }], multi: true, other: true, min: 2, max: 2 };
+    const boxes = (h: string) => h.match(/<input type="checkbox"[^>]*>/g)!.map((b) => b.includes("disabled"));
+    const other = (h: string) => h.match(/<input type="text"[^>]*>/)![0];
+    // Two boxes ticked: Other cannot be started.
+    withDraft({ selected: ["blue", "red"], other: "" });
+    let h = choices(spec);
+    expect(boxes(h)).toEqual([false, false, true]);
+    expect(other(h)).toContain("disabled");
+    expect(h).not.toMatch(/class="primary ui-send" disabled/);
+    // One box and Other: the last box waits, Other can still be cleared.
+    withDraft({ selected: ["blue"], other: "Teal" });
+    h = choices(spec);
+    expect(boxes(h)).toEqual([false, true, true]);
+    expect(other(h)).not.toContain("disabled");
+    expect(h).not.toMatch(/class="primary ui-send" disabled/);
+    // A draft from before the limit counted Other: too many, Send is off.
+    withDraft({ selected: ["blue", "red"], other: "Teal" });
+    h = choices(spec);
+    expect(other(h)).not.toContain("disabled");
+    expect(h).toMatch(/class="primary ui-send" disabled/);
+  });
+
   test("an answered question marks what was picked", () => {
     const h = choices({ ...colours, other: true }, props({ kind: "answered", values: { selected: [], other: "Teal" } }));
     expect(text(h)).toContain("Answered");
@@ -115,6 +149,22 @@ describe("Form", () => {
     // Travellers is required and empty: Send is off, with no error yet.
     expect(h).toMatch(/class="primary ui-send" disabled/);
     expect(h).not.toContain("ui-field-error");
+  });
+
+  test("answers that are each fine but too large together say so", () => {
+    const long: FormSpec = {
+      title: "Essay",
+      fields: Array.from({ length: 9 }, (_, i) => ({ id: `p${i}`, label: `Part ${i}`, type: "text" as const, multiline: true, max_length: 4000 })),
+    };
+    const draft = (n: number) => Object.fromEntries(long.fields.map((f) => [f.id, "x".repeat(n)]));
+    withDraft(draft(3500));
+    let h = renderToStaticMarkup(<Form spec={long} input={props()} />);
+    expect(h).not.toContain("ui-field-error");
+    expect(h).not.toMatch(/class="primary ui-send" disabled/);
+    withDraft(draft(3700));
+    h = renderToStaticMarkup(<Form spec={long} input={props()} />);
+    expect(text(h)).toContain("The answer is larger than 32 KiB");
+    expect(h).toMatch(/class="primary ui-send" disabled/);
   });
 
   test("an answered form shows its values read-only", () => {

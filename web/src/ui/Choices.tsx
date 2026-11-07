@@ -7,7 +7,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { rt } from "../md/strings";
 import type { ChoicesSpec } from "../types";
 import { checkReply, isBlank } from "./form";
-import { InputFrame, loadDraft, saveDraft, SendButton, useSend, type InputProps } from "./Input";
+import { InputFrame, loadDraft, replyOf, saveDraft, SendButton, useSend, type InputProps } from "./Input";
 
 interface Draft {
   selected: string[];
@@ -37,13 +37,17 @@ export default function Choices({ spec, input }: { spec: ChoicesSpec; input: Inp
   const shown = state.kind === "answered" ? restore(spec, state.values) : draft;
   const direct = !spec.multi && !spec.other;
   const values = () => ({ selected: draft.selected, ...(isBlank(draft.other) ? {} : { other: draft.other }) });
-  const problem = checkReply("choices", spec, values());
+  const problem = checkReply("choices", spec, replyOf(input, values()));
+  // A typed "Other" is one of the answers "Pick N" allows.
+  const max = spec.max ?? Infinity;
+  const answers = (d: Draft) => d.selected.length + (isBlank(d.other) ? 0 : 1);
+  const full = spec.multi && answers(draft) >= max;
 
   const pick = (id: string) =>
     setDraft((d) => {
       if (spec.multi) {
         if (d.selected.includes(id)) return { ...d, selected: d.selected.filter((x) => x !== id) };
-        return d.selected.length < (spec.max ?? Infinity) ? { ...d, selected: [...d.selected, id] } : d;
+        return answers(d) < max ? { ...d, selected: [...d.selected, id] } : d;
       }
       // One answer: an option or "Other", not both.
       return { selected: d.selected[0] === id ? [] : [id], other: "" };
@@ -88,7 +92,7 @@ export default function Choices({ spec, input }: { spec: ChoicesSpec; input: Inp
                   ref={(el) => void (buttons.current[i] = el)}
                   checked={chosen}
                   // At the most: the others wait until one is unticked.
-                  disabled={!ready || (!chosen && draft.selected.length >= (spec.max ?? Infinity))}
+                  disabled={!ready || (!chosen && full)}
                   onChange={() => pick(o.id)}
                 />
                 <span className="ui-option-text">{text}</span>
@@ -126,7 +130,8 @@ export default function Choices({ spec, input }: { spec: ChoicesSpec; input: Inp
               placeholder={rt("ui.other")}
               aria-label={rt("ui.otherLabel")}
               value={draft.other}
-              disabled={!ready}
+              // Once full it can still be cleared, never started.
+              disabled={!ready || (full && isBlank(draft.other))}
               onChange={(e) => {
                 const other = e.target.value;
                 setDraft((d) => ({ selected: spec.multi || isBlank(other) ? d.selected : [], other }));

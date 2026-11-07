@@ -180,13 +180,15 @@ fn field(mut o: Obj) -> Res<Field> {
 }
 
 /// Does any of a field's text ask for a secret, alone or read together
-/// (a label "Seed" with the help "phrase")? Option text counts too: it can
-/// point at another field ("type your key in Notes").
+/// (a label "Seed" with the help "phrase")? Every string the card shows
+/// counts: a number's unit sits right beside its input ("CVV"), and option
+/// text can point at another field ("type your key in Notes").
 fn asks_for_secret(o: &Obj, id: &str, label: &str, help: Option<&str>) -> bool {
     let mut texts = vec![id.to_string(), label.to_string()];
     texts.extend(help.map(str::to_string));
     let raw = |v: Option<&Value>| v.and_then(Value::as_str).map(|s| clean_text(s, false));
     texts.extend(raw(o.peek("placeholder")));
+    texts.extend(raw(o.peek("unit")));
     if let Some(Value::Array(options)) = o.peek("options") {
         for v in options {
             match v {
@@ -423,6 +425,9 @@ mod tests {
             json!({"id": "x", "label": "Value", "type": "text", "placeholder": "sk-... (API key)"}),
             json!({"id": "x", "label": "Value", "type": "number", "placeholder": "PIN"}),
             json!({"id": "api_key", "label": "Value", "type": "text"}),
+            // A unit is shown right beside its number input.
+            json!({"id": "card", "label": "Card ending 4242", "type": "number", "unit": "CVV"}),
+            json!({"id": "unlock", "label": "Unlock code", "type": "number", "unit": "PIN"}),
         ] {
             let got = one(f.clone()).unwrap();
             assert_eq!(got["refused"], true, "{f}");
@@ -441,6 +446,7 @@ mod tests {
             json!({"id": "x", "label": "Provider", "type": "choice", "options": ["Pass\u{ad}word", "b"]}),
             json!({"id": "x", "label": "Seed", "type": "text", "help": "Phrase (12 words)"}),
             json!({"id": "x", "label": "Social", "type": "text", "placeholder": "security number"}),
+            json!({"id": "x", "label": "Card", "type": "number", "unit": "number"}),
         ] {
             let got = one(f.clone()).unwrap();
             assert_eq!(got["refused"], true, "{f}");

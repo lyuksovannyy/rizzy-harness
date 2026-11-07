@@ -1,13 +1,25 @@
-// The answer rules of crates/core/src/ui/answer.rs, for inline errors and
-// the Send button only: the node checks every answer again against its own
-// log, and that check is the one that counts. ui.json holds the two to the
-// same verdict and the same first error for every reply case.
+// The answer rules of crates/core/src/ui/answer.rs and reply.rs
+// (`answer_reply`), for inline errors and the Send button only: the node
+// checks every answer again against its own log, and that check is the one
+// that counts. ui.json holds the two to the same verdict and the same first
+// error for every reply case.
 import type { Choice, ChoicesSpec, Field, FormSpec, FormValue } from "../types";
 
 /** The longest "Other…" answer. */
 export const MAX_OTHER = 500;
 
+/** The largest answer, serialized, in bytes (MAX_REPLY in reply.rs). */
+export const MAX_REPLY = 32 * 1024;
+export const TOO_LARGE = "the answer is larger than 32 KiB";
+
 export type Values = Record<string, unknown>;
+
+/** An answer as it is sent; `values` may hold anything until checked. */
+export interface Reply {
+  message_id: string;
+  block_id: string;
+  values: Values;
+}
 
 type Err = string | null;
 
@@ -21,10 +33,16 @@ export const isBlank = (s: string) => BLANK.test(s);
 const has = (v: Values, k: string) => Object.hasOwn(v, k) && v[k] !== undefined;
 const keys = (v: Values) => Object.keys(v).filter((k) => has(v, k)).sort();
 
-/** The first reason `values` do not answer the block, worded as Rust
- * words it, or null when they do. */
-export function checkReply(type: "choices" | "form", spec: ChoicesSpec | FormSpec, values: Values): Err {
-  return type === "choices" ? choices(spec as ChoicesSpec, values) : form(spec as FormSpec, values);
+/** The first reason `reply` does not answer the block, worded as Rust
+ * words it, or null when it does. */
+export function checkReply(type: "choices" | "form", spec: ChoicesSpec | FormSpec, reply: Reply): Err {
+  // Every field has its own limit; long text fields can pass them all and
+  // still add up to more than the node takes. JSON.stringify escapes
+  // strings as serde_json does, so the two count the same bytes (numbers
+  // may differ by a byte or two in exponent form).
+  if (new TextEncoder().encode(JSON.stringify(reply)).length > MAX_REPLY) return TOO_LARGE;
+  const v = reply.values;
+  return type === "choices" ? choices(spec as ChoicesSpec, v) : form(spec as FormSpec, v);
 }
 
 function choices(spec: ChoicesSpec, v: Values): Err {
@@ -42,10 +60,10 @@ function choices(spec: ChoicesSpec, v: Values): Err {
   }
   const n = picked.length + (other ? 1 : 0);
   if (spec.multi) {
-    // "Other" can make up the minimum; the maximum is about the options.
+    // "Other" is one more answer, toward the minimum and the maximum alike.
     const min = spec.min ?? 1;
     const max = spec.max ?? Infinity;
-    if (picked.length > max) return `selected: pick at most ${max}`;
+    if (n > max) return `selected: pick at most ${max}`;
     if (n < min) return `selected: pick at least ${min}`;
   } else if (n === 0) return "selected: pick one";
   else if (n > 1) return "selected: pick only one";
@@ -140,9 +158,21 @@ function typedText(v: unknown, at: string, max: number, multiline: boolean): Err
   return null;
 }
 
-/** A number as the harness writes it: 3, not 3.0. */
+/** A number as the harness writes it: 3, not 3.0, and never with an
+ * exponent (Rust's f64 Display): 1e21 is 1000000000000000000000. */
 export function num(n: number): string {
-  return Number.isInteger(n) && Math.abs(n) < 9e15 ? String(Math.trunc(n) || 0) : String(n);
+  if (Number.isInteger(n) && Math.abs(n) < 9e15) return String(Math.trunc(n) || 0);
+  // String() already gives the shortest digits that read back as n, as
+  // Rust does; only the exponent form needs writing out.
+  const m = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(String(n));
+  if (!m) return String(n);
+  const [, sign, lead, rest = "", exp] = m;
+  const digits = lead + rest;
+  // JS uses an exponent only from 1e21 up (more whole digits than the 17
+  // significant ones) and below 1e-6, so the point never falls inside.
+  const point = 1 + Number(exp);
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  return sign + digits + "0".repeat(point - digits.length);
 }
 
 const onGrid = (v: number, base: number, step: number) => {

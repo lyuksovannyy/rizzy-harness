@@ -37,7 +37,9 @@ pub use choices::{Choice, ChoicesSpec, MAX_OTHER};
 pub use form::{Field, FieldType, FormSpec, is_date, on_grid};
 pub use progress::{ProgressSpec, ProgressStatus, Step, StepStatus};
 pub use read::valid_id;
-pub use reply::{MAX_REPLY, NOT_OPEN, answer_text, check_reply};
+pub use reply::{
+    MAX_REPLY, NOT_OPEN, TOO_LARGE, answer_reply, answer_text, check_reply, too_large,
+};
 pub use scan::{Fence, MAX_BLOCKS, fnv1a32, normalize, scan};
 pub use secret::secret_like;
 

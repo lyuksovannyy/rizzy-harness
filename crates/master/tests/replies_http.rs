@@ -1,6 +1,7 @@
 //! Answering a ui:choices block over HTTP (rich_plan §7.1): the prompt
 //! route takes a `reply` with an empty note, refuses what an answer cannot
-//! carry, and the node's check comes back as 409.
+//! carry, the node's check comes back as 409, and the answer goes to the
+//! agent that asked.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -225,4 +226,56 @@ async fn replies_over_http() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["error"], harness_core::ui::NOT_OPEN);
+}
+
+/// A turn routed by @mention leaves the session's agent as it was; the
+/// answer to that turn's question still goes to the agent that asked it.
+#[tokio::test]
+async fn an_answer_goes_to_the_agent_that_asked() {
+    let t = start().await;
+    let (alex, _) = accounts(&t).await;
+    let (_, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "chat"})),
+        &alex,
+    )
+    .await;
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let prompt = format!("/api/sessions/{sid}/prompt");
+    let ask = json!({"text": "@writer ui: choices"});
+    req(&t, Method::POST, &prompt, Some(ask), &alex).await;
+    let events = settled(&t, &sid, &alex, 1).await;
+    let asked = &events
+        .iter()
+        .find(|e| e["kind"] == "assistant_message" && e["payload"]["blocks"].is_array())
+        .unwrap()["payload"];
+    assert_eq!(asked["author"], "writer");
+    let reply = json!({"message_id": asked["message_id"], "block_id": "colour", "values": {"selected": ["blue"]}});
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &prompt,
+        Some(json!({"text": "", "reply": reply})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let events = settled(&t, &sid, &alex, 2).await;
+    let agents: Vec<&str> = events
+        .iter()
+        .filter(|e| e["kind"] == "turn_started")
+        .map(|e| e["payload"]["agent"]["agent_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(agents, ["writer", "writer"]);
+    let (_, row) = req(
+        &t,
+        Method::GET,
+        &format!("/api/sessions/{sid}"),
+        None,
+        &alex,
+    )
+    .await;
+    assert_eq!(row["agent_id"], "general");
 }

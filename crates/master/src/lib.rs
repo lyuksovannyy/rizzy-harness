@@ -687,6 +687,7 @@ impl Master {
 
     /// Run a turn. The agent is, in order: `agent_id` (explicit, e.g. from the
     /// mention popup), a leading `@agent` in the text, the session's agent.
+    /// An answer (`reply`) goes to the agent that asked, ahead of all three.
     pub async fn prompt(
         &self,
         sid: SessionId,
@@ -711,11 +712,25 @@ impl Master {
             .call(move |s| s.session(sid))
             .await?
             .ok_or(CommandError::UnknownSession)?;
-        // An answer goes to the agent that asked, whatever the note says.
+        // An answer goes to the agent that asked, whatever the note says: an
+        // @mentioned agent's turn leaves the session's agent as it was, and
+        // only the asker knows its ids and has the prompt that explains the
+        // answer. If that agent is gone, the usual order applies.
+        let asker = match &reply {
+            Some(r) => {
+                let message_id = r.message_id.clone();
+                self.inner
+                    .mirror
+                    .call(move |s| s.open_message_author(sid, &message_id))
+                    .await?
+            }
+            None => None,
+        };
+        let asker = asker.filter(|id| self.agents().get(id).is_some());
         let mention = leading_mention(&text)
             .filter(|id| reply.is_none() && self.agents().get(id).is_some())
             .map(str::to_string);
-        let chosen = agent_id.or(mention).or(row.agent_id.clone());
+        let chosen = asker.or(agent_id).or(mention).or(row.agent_id.clone());
         let mut agent =
             self.agent_spec_with(chosen.as_deref(), Some(&row.model), effort.as_deref())?;
         // Per-turn context goes after the history, not into the system

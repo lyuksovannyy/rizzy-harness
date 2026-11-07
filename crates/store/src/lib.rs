@@ -957,6 +957,31 @@ impl Store {
         Ok(out)
     }
 
+    /// The agent that wrote assistant message `message_id`, looked for only
+    /// after the session's last user message: only a message there can
+    /// still take an answer (`ui::check_reply`), so older turns are never
+    /// read. `None` when it is not there or names no agent.
+    pub fn open_message_author(&self, sid: SessionId, message_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT kind, payload FROM events WHERE session_id = ?1 AND kind IN ('user_message', 'assistant_message') ORDER BY seq DESC",
+        )?;
+        let mut rows = stmt.query(params![sid.to_string()])?;
+        while let Some(row) = rows.next()? {
+            if row.get::<_, String>(0)? == "user_message" {
+                break;
+            }
+            let payload: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+            if payload.get("message_id").and_then(|v| v.as_str()) == Some(message_id) {
+                return Ok(payload
+                    .get("author")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(

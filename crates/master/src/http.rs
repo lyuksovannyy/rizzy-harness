@@ -1053,9 +1053,8 @@ fn check_reply_body(r: &harness_core::event::FormReply, b: &PromptBody) -> ApiRe
     if !b.compare.is_empty() {
         return bad("an answer cannot ask for parallel answers");
     }
-    let size = serde_json::to_vec(r).map_or(usize::MAX, |v| v.len());
-    if size > harness_core::ui::MAX_REPLY {
-        return bad("the answer is larger than 32 KiB");
+    if harness_core::ui::too_large(r) {
+        return bad(harness_core::ui::TOO_LARGE);
     }
     Ok(())
 }

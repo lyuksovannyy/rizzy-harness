@@ -373,3 +373,50 @@ fn a_shown_input_block_needs_attention() {
     assert!(!needs_you("Done."));
     assert!(needs_you("Shall I go on?"));
 }
+
+#[test]
+fn an_open_message_names_the_agent_that_wrote_it() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    let said = |seq, id: &str, author: Option<&str>| {
+        ev(
+            sid,
+            seq,
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: "t".into(),
+                message_id: id.into(),
+                text: "Which?".into(),
+                tool_calls: vec![],
+                author: author.map(Into::into),
+                variant: None,
+                blocks: vec![],
+            }),
+        )
+    };
+    let user = ev(
+        sid,
+        3,
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t2".into(),
+            text: "hi".into(),
+            attachments: vec![],
+            reply: None,
+        }),
+    );
+    for e in [
+        created(sid),
+        said(2, "old", Some("coder")),
+        user,
+        said(4, "m1", Some("writer")),
+        said(5, "m2", None),
+    ] {
+        s.append("local", &e).unwrap();
+    }
+    let author = |id: &str| s.open_message_author(sid, id).unwrap();
+    assert_eq!(author("m1").as_deref(), Some("writer"));
+    assert_eq!(author("m2"), None);
+    // Before the last user message (no longer open), or not there at all.
+    assert_eq!(author("old"), None);
+    assert_eq!(author("zz"), None);
+    assert_eq!(s.open_message_author(SessionId::new(), "m1").unwrap(), None);
+}

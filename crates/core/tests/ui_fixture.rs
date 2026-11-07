@@ -1,7 +1,7 @@
 //! Shared `ui:` block fixture: `web/src/md/remark-ui.test.tsx` renders the
 //! same texts and must find every block here at its ordinal, hash and type,
 //! `web/src/md/fnv.test.ts` checks the hashes, and `web/src/ui/form.test.ts`
-//! must accept and reject every reply exactly as `ui::answer` does.
+//! must accept and reject every reply exactly as `ui::answer_reply` does.
 //! Regenerate with `UPDATE_FIXTURES=1 cargo test -p harness-core --test ui_fixture`.
 //!
 //! Each case records, by hand, what the browser must do with it: how many
@@ -12,8 +12,8 @@
 //! stored blocks, and it must show no card at all: plain code instead.
 
 use harness_core::agent::UiLevel;
-use harness_core::event::UiBlock;
-use harness_core::ui::{answer, extract, fnv1a32};
+use harness_core::event::{FormReply, UiBlock};
+use harness_core::ui::{MAX_REPLY, answer_reply, extract, fnv1a32};
 use serde_json::{Value, json};
 
 const CHOICES: &str = r#"{"id": "db", "question": "Which database?", "options": [{"id": "pg", "label": "PostgreSQL", "description": "Best default"}, "SQLite"]}"#;
@@ -234,6 +234,39 @@ fn replies() -> Vec<Value> {
             .extend(extra.as_object().unwrap().clone());
         v
     };
+    // Bounds that JS would print with an exponent; the errors name them.
+    let wide = block(
+        "form",
+        json!({"id": "wide", "title": "Wide", "fields": [
+            {"id": "n", "label": "N", "type": "number", "min": 1e-7, "max": 1e21, "step": 1e-7}
+        ]}),
+    );
+    // Nine long text fields: every answer within its field, together at
+    // the size cap or one byte over it.
+    let fields: Vec<Value> = (1..=9)
+        .map(|i| json!({"id": format!("p{i}"), "label": format!("Part {i}"), "type": "text", "multiline": true, "max_length": 4000}))
+        .collect();
+    let essay = block(
+        "form",
+        json!({"id": "essay", "title": "Essay", "fields": fields}),
+    );
+    let sized = |over: usize| {
+        // A two-byte letter, and a quote and a line break that each take
+        // two bytes once escaped, so both sides count encoded bytes.
+        let mut v = json!({"p1": "é\"\n".repeat(1000)});
+        for i in 2..=8 {
+            v[format!("p{i}")] = json!("x".repeat(3700));
+        }
+        let fill = |n: usize| {
+            let mut v = v.clone();
+            v["p9"] = json!("y".repeat(n));
+            v
+        };
+        let base = serde_json::to_vec(&reply_to(&essay, fill(0)))
+            .unwrap()
+            .len();
+        fill(MAX_REPLY - base + over)
+    };
     let cases: Vec<(&UiBlock, Value)> = vec![
         (&single, json!({"selected": ["blue"]})),
         (&single, json!({"selected": []})),
@@ -286,17 +319,32 @@ fn replies() -> Vec<Value> {
         (&form, with(json!({"colour": 1}))),
         (&form, with(json!({"Bad Key": 1}))),
         (&form, json!({"zz": 1})),
+        (&wide, json!({"n": 1e22})),
+        (&wide, json!({"n": 1e-8})),
+        (&wide, json!({"n": 1.5e-7})),
+        (&wide, json!({"n": 5e20})),
+        (&essay, sized(0)),
+        (&essay, sized(1)),
     ];
     cases
         .into_iter()
         .map(|(b, values)| {
-            let got = answer(b, values.as_object().unwrap());
+            let reply = reply_to(b, values);
+            let got = answer_reply(b, &reply);
             json!({
-                "type": b.kind, "spec": b.spec, "values": values, "ok": got.is_ok(),
+                "type": b.kind, "spec": b.spec, "reply": reply, "ok": got.is_ok(),
                 "canonical": got.as_ref().ok(), "error": got.as_ref().err(),
             })
         })
         .collect()
+}
+
+fn reply_to(b: &UiBlock, values: Value) -> FormReply {
+    FormReply {
+        message_id: "01JC6Z8Q2V3W4X5Y6Z7A8B9C0D".into(),
+        block_id: b.id.clone(),
+        values: values.as_object().unwrap().clone(),
+    }
 }
 
 fn doc() -> Value {
@@ -412,6 +460,28 @@ fn fixture_cases_say_what_they_mean() {
     let replies = doc["replies"].as_array().unwrap();
     assert_eq!(replies[0]["canonical"], "Choice answer · colour: blue");
     assert_eq!(replies[2]["error"], "selected: pick only one");
+    let essay: Vec<&Value> = replies
+        .iter()
+        .filter(|r| r["reply"]["block_id"] == "essay")
+        .collect();
+    assert_eq!(essay[0]["ok"], true, "exactly at the cap");
+    assert_eq!(essay[1]["error"], harness_core::ui::TOO_LARGE);
+    let wide = |n: usize| {
+        replies
+            .iter()
+            .filter(|r| r["reply"]["block_id"] == "wide")
+            .nth(n)
+            .unwrap()
+    };
+    assert_eq!(
+        wide(0)["error"],
+        "n: must be at most 1000000000000000000000"
+    );
+    assert_eq!(wide(1)["error"], "n: must be at least 0.0000001");
+    assert_eq!(
+        wide(3)["canonical"],
+        "Form answer · wide\n- n: 500000000000000000000"
+    );
     assert!(replies.iter().filter(|r| r["ok"] == true).count() >= 6);
     assert!(replies.iter().filter(|r| r["ok"] == false).count() >= 30);
     assert_eq!(case("unterminated at the end").len(), 1);

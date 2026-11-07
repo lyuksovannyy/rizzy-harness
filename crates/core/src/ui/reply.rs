@@ -9,19 +9,35 @@ use std::collections::HashMap;
 
 use super::answer::answer;
 use crate::RawEvent;
-use crate::event::{AssistantMessage, EventKind, FormReply};
+use crate::event::{AssistantMessage, EventKind, FormReply, UiBlock};
 
 /// The largest reply, serialized, in bytes.
 pub const MAX_REPLY: usize = 32 * 1024;
 
+pub const TOO_LARGE: &str = "the answer is larger than 32 KiB";
+
 pub const NOT_OPEN: &str = "this form is no longer open";
 
-/// The canonical text for `reply` (see `answer`), or why the session does
-/// not take it now.
-pub fn check_reply(history: &[RawEvent], reply: &FormReply) -> Result<String, String> {
-    if serde_json::to_vec(reply).map_or(usize::MAX, |b| b.len()) > MAX_REPLY {
-        return Err("the answer is larger than 32 KiB".into());
+/// Is `reply` over [`MAX_REPLY`] once serialized?
+pub fn too_large(reply: &FormReply) -> bool {
+    serde_json::to_vec(reply).map_or(true, |b| b.len() > MAX_REPLY)
+}
+
+/// The canonical text for `reply` to `block` (see `answer`), or why its
+/// values do not answer it: the size first, then every value rule. Each
+/// field has its own length limit, so a form of long text fields can pass
+/// them all and still be too large in total. `web/src/ui/form.ts` runs the
+/// same checks in the same order (ui.json holds the two together).
+pub fn answer_reply(block: &UiBlock, reply: &FormReply) -> Result<String, String> {
+    if too_large(reply) {
+        return Err(TOO_LARGE.into());
     }
+    answer(block, &reply.values)
+}
+
+/// The canonical text for `reply` (see `answer_reply`), or why the session
+/// does not take it now.
+pub fn check_reply(history: &[RawEvent], reply: &FormReply) -> Result<String, String> {
     let mut parent = false;
     let mut asked: Option<AssistantMessage> = None;
     let mut answered = false;
@@ -65,7 +81,7 @@ pub fn check_reply(history: &[RawEvent], reply: &FormReply) -> Result<String, St
     let Some(block) = m.blocks.iter().find(|b| b.id == reply.block_id) else {
         return Err("no such question or form in that message".into());
     };
-    answer(block, &reply.values)
+    answer_reply(block, reply)
 }
 
 /// What the user message says: the canonical answer, then the user's note.
@@ -239,10 +255,28 @@ mod tests {
             "db",
             json!({"selected": ["o1"], "other": "x".repeat(MAX_REPLY)}),
         );
-        assert_eq!(
-            check_reply(&h, &big),
-            Err("the answer is larger than 32 KiB".into())
+        assert_eq!(check_reply(&h, &big), Err(TOO_LARGE.into()));
+    }
+
+    #[test]
+    fn long_fields_can_be_too_large_together() {
+        let fields: Vec<Value> = (1..=9)
+            .map(|i| json!({"id": format!("p{i}"), "label": "Part", "type": "text", "multiline": true, "max_length": 4000}))
+            .collect();
+        let text = format!(
+            "```ui:form\n{}\n```\n",
+            json!({"id": "essay", "title": "Essay", "fields": fields})
         );
+        let block = &super::super::extract(&text, UiLevel::Rich)[0];
+        let each = |n: usize| {
+            let values: serde_json::Map<String, Value> = (1..=9)
+                .map(|i| (format!("p{i}"), json!("x".repeat(n))))
+                .collect();
+            reply("m1", "essay", Value::Object(values))
+        };
+        assert!(answer_reply(block, &each(3500)).is_ok());
+        // Every field is within its 4000 characters; together they are not.
+        assert_eq!(answer_reply(block, &each(3700)), Err(TOO_LARGE.into()));
     }
 
     #[test]

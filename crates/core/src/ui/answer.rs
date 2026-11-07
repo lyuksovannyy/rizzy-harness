@@ -51,10 +51,10 @@ fn choices(id: &str, spec: &ChoicesSpec, values: &Values) -> Result<String, Stri
     };
     let n = picked.len() + usize::from(other.is_some());
     if spec.multi {
-        // "Other" can make up the minimum, but the maximum is about the
-        // offered options: someone who picks them all may still add one.
+        // "Other" is one more answer, toward the minimum and the maximum
+        // alike: the card says "Pick 2", and the model asked for at most 2.
         let (min, max) = (spec.min.unwrap_or(1), spec.max.unwrap_or(u32::MAX));
-        if picked.len() as u32 > max {
+        if n as u32 > max {
             return Err(format!("selected: pick at most {max}"));
         }
         if (n as u32) < min {
@@ -376,12 +376,15 @@ mod tests {
             run(&b, json!({"selected": ["green"], "other": "biome \"x\""})),
             Ok("Choice answer · colour: green, other \"biome \\\"x\\\"\"".into())
         );
-        // The maximum is about the offered options.
-        assert!(run(&b, json!({"selected": ["red", "blue"], "other": "teal"})).is_ok());
         for (values, err) in [
             (json!({"selected": ["red"]}), "selected: pick at least 2"),
             (
                 json!({"selected": ["red", "blue", "green"]}),
+                "selected: pick at most 2",
+            ),
+            // "Pick 2" means two answers, "Other" included.
+            (
+                json!({"selected": ["red", "blue"], "other": "teal"}),
                 "selected: pick at most 2",
             ),
             (
@@ -516,6 +519,28 @@ mod tests {
         assert_eq!(
             run(&trip(), json!({"zz": 1})),
             Err("zz: not a field of this form".into())
+        );
+    }
+
+    #[test]
+    fn numbers_in_errors_never_use_exponents() {
+        let b = block(
+            "form",
+            json!({"id": "f", "title": "F", "fields": [
+                {"id": "n", "label": "N", "type": "number", "min": 1e-7, "max": 1e21}
+            ]}),
+        );
+        assert_eq!(
+            run(&b, json!({"n": 1e22})),
+            Err("n: must be at most 1000000000000000000000".into())
+        );
+        assert_eq!(
+            run(&b, json!({"n": 1e-8})),
+            Err("n: must be at least 0.0000001".into())
+        );
+        assert_eq!(
+            run(&b, json!({"n": 5e20})),
+            Ok("Form answer · f\n- n: 500000000000000000000".into())
         );
     }
 

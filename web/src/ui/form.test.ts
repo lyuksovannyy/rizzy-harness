@@ -1,35 +1,39 @@
 import { describe, expect, it } from "vitest";
 import fixture from "../__fixtures__/ui.json";
 import type { ChoicesSpec, FormSpec } from "../types";
-import { checkReply, fieldError, formValues, initialDraft, isBlank, isDate, num } from "./form";
+import { checkReply, fieldError, formValues, initialDraft, isBlank, isDate, num, TOO_LARGE, type Reply, type Values } from "./form";
 
 interface ReplyCase {
   type: "choices" | "form";
   spec: ChoicesSpec | FormSpec;
-  values: Record<string, unknown>;
+  reply: Reply;
   ok: boolean;
   error: string | null;
   canonical: string | null;
 }
 
 const replies = (fixture as unknown as { replies: ReplyCase[] }).replies;
+const reply = (values: Values): Reply => ({ message_id: "m1", block_id: "trip", values });
 
 describe("checkReply", () => {
   it("agrees with Rust on every reply in ui.json", () => {
     expect(replies.length).toBeGreaterThan(30);
     for (const r of replies) {
-      expect({ values: r.values, error: checkReply(r.type, r.spec, r.values) }).toEqual({
-        values: r.values,
-        error: r.error,
-      });
+      // The values name the case when it fails (long ones by their size).
+      const values = JSON.stringify(r.reply.values).slice(0, 200);
+      expect({ values, error: checkReply(r.type, r.spec, r.reply) }).toEqual({ values, error: r.error });
       expect(r.ok).toBe(r.error === null);
     }
+    // The cases these rules were wrong for once.
+    const errors = replies.map((r) => r.error);
+    expect(errors).toContain(TOO_LARGE);
+    expect(errors).toContain("n: must be at most 1000000000000000000000");
   });
 
   it("treats undefined as absent and null as a wrong value", () => {
     const spec = replies.find((r) => r.type === "form")!.spec as FormSpec;
-    expect(checkReply("form", spec, { people: 2, notes: undefined })).toBeNull();
-    expect(checkReply("form", spec, { people: 2, notes: null })).toBe("notes: expected text");
+    expect(checkReply("form", spec, reply({ people: 2, notes: undefined }))).toBeNull();
+    expect(checkReply("form", spec, reply({ people: 2, notes: null }))).toBe("notes: expected text");
   });
 });
 
@@ -59,6 +63,14 @@ describe("form inputs", () => {
     expect(["2024-02-29", "0001-01-01", "2026-12-31"].every(isDate)).toBe(true);
     expect(["2023-02-29", "0000-01-01", "2026-13-01", "2026-1-01", "\uff12\uff10\uff12\uff16-01-01"].some(isDate)).toBe(false);
     expect([num(3), num(12.0), num(-0), num(0.5)]).toEqual(["3", "12", "0", "0.5"]);
+    // f64 Display never writes an exponent.
+    expect([num(1e21), num(-1.5e22), num(1e-7), num(-2.5e-8), num(1e16)]).toEqual([
+      "1000000000000000000000",
+      "-15000000000000000000000",
+      "0.0000001",
+      "-0.000000025",
+      "10000000000000000",
+    ]);
     expect(isBlank(" \u3000\u0085")).toBe(true);
     expect(isBlank("\ufeff")).toBe(false);
   });

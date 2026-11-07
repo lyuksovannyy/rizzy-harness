@@ -339,7 +339,16 @@ impl Provider for Mock {
                 usage,
             });
         }
-        if let Some(text) = user.strip_prefix("ui:").and_then(|n| ui::canned(n.trim())) {
+        // `@writer ui: choices` asks as Writer: the master leaves the mention
+        // in the text, and tests check that the answer goes back to Writer.
+        let unmentioned = user
+            .strip_prefix('@')
+            .and_then(|r| r.split_once(' '))
+            .map_or(user.as_str(), |(_, rest)| rest);
+        if let Some(text) = unmentioned
+            .strip_prefix("ui:")
+            .and_then(|n| ui::canned(n.trim()))
+        {
             let words = text.split_inclusive(' ').map(str::to_string).collect();
             let text = self.stream_words(words, &deltas).await;
             return Ok(Completion {
