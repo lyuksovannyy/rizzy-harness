@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # web
 web/node_modules/
 web/dist/
+
+# python
+__pycache__/
