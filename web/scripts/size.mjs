@@ -1,18 +1,21 @@
-// Bundle budget (PLAN.md Phase 3): the new-tab home screen must stay small.
-// Reads Vite's manifest; gzips every JS chunk; prints them; fails if over
-// budget or if heavy code lands where it must not (see the checks below).
-import { readdirSync, readFileSync } from "node:fs";
+// Bundle budget (PLAN.md Phase 3 and "Rich messages"): the new-tab home
+// screen must stay small, and heavy libraries must stay in the lazy chunks
+// that need them. Reads Vite's manifest, prints every emitted file with its
+// gzip size, and fails if over budget or if a library lands where it must
+// not (see the markers below).
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 
 const INITIAL_KB = 110;
 const TOTAL_KB = 300;
-const dist = new URL("../dist/", import.meta.url).pathname;
+const web = new URL("../", import.meta.url).pathname;
+const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));
 
-const read = (file) => readFileSync(join(dist, file));
+const read = (file) => readFileSync(file.startsWith("/") ? file : join(dist, file));
 const gz = (file) => gzipSync(read(file)).length / 1024;
-const entries = Object.values(manifest).filter((c) => c.isEntry);
+const failures = [];
 
 // Initial = entry chunks plus their static imports (not dynamic ones).
 const initial = new Set();
@@ -24,11 +27,10 @@ const walk = (key) => {
 };
 for (const [key, c] of Object.entries(manifest)) if (c.isEntry) walk(key);
 
-// Every emitted chunk counts. The manifest lists the main build only, not
-// the highlighter worker or the grammar chunks it loads.
-const allJs = readdirSync(join(dist, "assets"))
-  .filter((f) => f.endsWith(".js"))
-  .map((f) => `assets/${f}`);
+// Every emitted file counts. The manifest lists the main build only, not the
+// highlighter worker or the grammar chunks it loads.
+const assets = readdirSync(join(dist, "assets")).map((f) => `assets/${f}`);
+const allJs = assets.filter((f) => f.endsWith(".js"));
 const sizes = new Map(allJs.map((f) => [f, gz(f)]));
 const initialKb = [...initial].filter((f) => f.endsWith(".js")).reduce((a, f) => a + sizes.get(f), 0);
 const totalKb = allJs.reduce((a, f) => a + sizes.get(f), 0);
@@ -36,30 +38,51 @@ const totalKb = allJs.reduce((a, f) => a + sizes.get(f), 0);
 for (const f of [...allJs].sort((a, b) => sizes.get(b) - sizes.get(a))) {
   console.log(`  ${sizes.get(f).toFixed(1).padStart(6)} KB  ${initial.has(f) ? "initial " : "        "}${f}`);
 }
-console.log(`initial JS: ${initialKb.toFixed(1)} KB gzip (budget ${INITIAL_KB})`);
-console.log(`total JS:   ${totalKb.toFixed(1)} KB gzip (budget ${TOTAL_KB}), ${allJs.length} chunks, ${entries.length} entry`);
-
-// Strings that only the named library contains (they survive minification).
-const failures = [];
-const has = (file, re) => re.test(read(file).toString("utf8"));
-for (const f of allJs) {
-  // micromark-extension-math's HTML half imports KaTeX; it must tree-shake out.
-  if (has(f, /KaTeX parse error/)) failures.push(`${f} contains KaTeX`);
-  if (has(f, /mermaidAPI/)) failures.push(`${f} contains mermaid`);
+// Stylesheets and fonts come with their chunks but are outside the JS
+// budget; they are listed so the whole download is visible. A font is
+// compressed already, so its own size is what travels.
+for (const f of assets.filter((f) => !f.endsWith(".js")).sort()) {
+  const font = /\.(woff2?|ttf|otf)$/.test(f);
+  const kb = font ? read(f).length / 1024 : gz(f);
+  console.log(`  ${kb.toFixed(1).padStart(6)} KB  ${(font ? "font" : f.split(".").pop()).padEnd(8)}${f}`);
 }
-// Math and highlighting load lazily, never with the home screen or a chat.
-const eager = [...initial, ...allJs.filter((f) => /\/Conversation-/.test(f))];
-for (const f of eager) {
-  if (has(f, /temml/i)) failures.push(`${f} contains Temml`);
-  if (has(f, /Unknown language|languages\.extend/)) failures.push(`${f} contains the highlighter`);
+console.log(`initial JS: ${initialKb.toFixed(1)} KB gzip (budget ${INITIAL_KB})`);
+console.log(`total JS:   ${totalKb.toFixed(1)} KB gzip (budget ${TOTAL_KB}), ${allJs.length} chunks`);
+
+/** The emitted chunks a lazy part must have; none means it is not lazy any more. */
+const chunk = (re, what) => {
+  const found = allJs.filter((f) => re.test(f));
+  if (found.length === 0) failures.push(`no ${what} chunk in dist/assets`);
+  return found;
+};
+// What the home screen and every chat load: math and highlighting must not.
+const eager = [...initial, ...chunk(/\/Conversation-/, "Conversation")];
+const installed = (file) => [join(web, "node_modules", file)].filter(existsSync);
+
+// Each library is found by a string only it contains, one that survives
+// minification. A marker must also match where the library does live (its
+// lazy chunk, or its installed package when nothing may bundle it);
+// otherwise a check against it would pass without testing anything.
+const markers = [
+  // micromark-extension-math's HTML half imports KaTeX; it must tree-shake out.
+  { lib: "KaTeX", re: /KaTeX parse error/, banned: allJs, home: installed("katex/dist/katex.mjs") },
+  // Our own code names mermaid fences, so the marker is the library's API
+  // object. Mermaid is not installed, so there is nothing to hold it to.
+  { lib: "mermaid", re: /mermaidAPI/, banned: allJs, home: [] },
+  // refractor's build has no `Prism.languages`: its core throws "Unknown
+  // language" and its grammars call `languages.extend`.
+  { lib: "Temml", re: /temml/i, banned: eager, home: chunk(/\/math-/, "math") },
+  { lib: "the highlighter", re: /Unknown language|languages\.extend/, banned: eager, home: chunk(/\/highlight\.worker-/, "highlighter worker") },
+];
+const has = (file, re) => re.test(read(file).toString("utf8"));
+for (const m of markers) {
+  for (const f of m.banned) if (has(f, m.re)) failures.push(`${f} contains ${m.lib}`);
+  if (m.home.length && !m.home.some((f) => has(f, m.re))) failures.push(`the ${m.lib} marker ${m.re} matches nothing in ${m.home.join(", ")}`);
 }
 // A worker has no DOM: a browser build that needs one breaks highlighting.
 for (const f of allJs.filter((f) => /\/highlight\.worker-/.test(f))) {
   if (has(f, /\b(document|window)\./)) failures.push(`${f} uses the DOM, which a worker does not have`);
 }
-for (const msg of failures) console.error(msg);
 if (initialKb > INITIAL_KB || totalKb > TOTAL_KB) failures.push("bundle budget exceeded");
-if (failures.length) {
-  console.error(failures.at(-1));
-  process.exit(1);
-}
+for (const msg of failures) console.error(msg);
+if (failures.length) process.exit(1);

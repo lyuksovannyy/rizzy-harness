@@ -19,8 +19,8 @@ code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
 **Status:** Phases 1–8 done and most of Phase 9 (checkpoints with undo, sub-agent
-worktrees, parallel answers, voice input). See PLAN.md for what is left out
-and why.
+worktrees, parallel answers, voice input), and [rich messages](#rich-messages).
+See PLAN.md for what is left out and why.
 
 ## Quick start
 
@@ -175,6 +175,65 @@ graph is stored in the node's data folder, never in your repository, and
 graphify gets no API keys.
 
 `harness doctor` checks the setup.
+
+## Rich messages
+
+Replies render as Markdown: headings, lists, GFM tables (click a header to
+sort, **Copy CSV**), task lists, footnotes, callouts (`> [!NOTE]`, `[!TIP]`,
+`[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`), code with its language, **Copy**
+and syntax highlighting once the reply is finished, and math written as
+`\( … \)` or `$$ … $$` (a single `$` stays a dollar sign). **Copy** on a
+reply copies its Markdown.
+
+When a search or a fetched page backs a reply, its claims carry citations
+such as `[S2]`: a pill naming the site, the title and address on hover, and
+a **Sources** list under the reply. A citation can only point to a page the
+web tools actually returned.
+
+Agents can also put these blocks in a reply (a fence with `ui:<type>` and a
+JSON body, which the server checks before anything is shown):
+
+| Block | Shows |
+|---|---|
+| `ui:choices` | A question with options to tap (one or several, optionally "Other…"). Ends the reply. |
+| `ui:form` | A short form: text, number, choice, toggle and date fields. Ends the reply. |
+| `ui:progress` | A progress card that the agent updates as a job moves on; earlier states fold into one line each. |
+| `ui:chart` | A bar or line chart, with **Show data** and **Copy CSV**. |
+
+An answer to a question or form is sent as your next message. The agent gets
+only the ids and values you chose (`Choice answer · colour: blue`), plus
+anything you typed. Typing a normal message instead leaves the question
+unanswered.
+Never type passwords or keys into a chat: fields and questions that ask for
+them are refused, and keys belong in Settings.
+
+Each agent decides which blocks it may use, with `ui:` in its file
+(`<data>/agents/<id>.md`; a file with a built-in's id, such as `coder.md`,
+replaces that agent, so start from its copy in `crates/agents/builtin/`):
+
+```markdown
+---
+name: Reviewer
+description: Reads code and reports problems.
+tools: [read, grep, glob]
+ui: display        # rich (default): every block; display: progress and charts; off: none
+---
+You review code and report problems. You do not edit files.
+```
+
+With `off`, `ui:` fences stay ordinary code. Sub-tasks an agent delegates are
+limited to `display`.
+
+**Deliberately not loaded:** images in replies are never fetched (you see a
+chip naming the image and its site, which works like a link), and there are
+no link previews, favicons or unfurls, because each of them would tell a
+site the model chose that you are reading the reply. Links always show their
+real site, and an unusual one (with a query, or a long or odd address) shows
+the full address and asks before it opens.
+
+With the built-in demo provider, try `rich: demo`, `ui: choices`, `ui: form`,
+`ui: chart`, `progress: 3` (Agentic mode) and `cite: rust` (needs a search
+engine).
 
 ## Using it from other devices (WireGuard)
 
@@ -333,6 +392,12 @@ node web/e2e/phase9.cjs target/debug/harness
 
 ```bash
 node web/e2e/attention.cjs target/debug/harness
+```
+
+Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):
+
+```bash
+node web/e2e/rich.cjs target/debug/harness
 ```
 
 ```bash

@@ -33,11 +33,13 @@ describe("renderMath", () => {
     expect(el.querySelector("msup")).not.toBeNull();
   });
 
-  test("links Temml makes for \\ref and \\eqref lose their href", () => {
-    for (const tex of ["\\ref{root}", "\\eqref{x}"]) {
-      // Temml does emit one, even with trust off.
-      expect(temml.renderToString(tex, OPTIONS)).toContain("href=");
-      expect(render(tex, true).querySelectorAll("[href]")).toHaveLength(0);
+  test("\\ref and \\eqref, left empty for Temml's post-processor, throw (MathTeX shows the source)", () => {
+    for (const tex of ["\\ref{root}", "\\eqref{x}", "a + \\eqref{x}"]) {
+      // Temml emits an empty link for it, even with trust off.
+      expect(temml.renderToString(tex, OPTIONS)).toMatch(/<a href='#[^']*' class="tml-ref[^"]*"><\/a>/);
+      const el = document.createElement("span");
+      expect(() => renderMath(tex, el, true), tex).toThrow(/unresolved/);
+      expect(el.childNodes, tex).toHaveLength(0);
     }
   });
 

@@ -38,6 +38,13 @@ export function renderMath(tex: string, el: HTMLElement, display: boolean): void
   temml.render(tex, el, { ...OPTIONS, displayMode: display });
   // `el` itself is ours (React's class and hidden); only Temml's output is cleaned.
   for (const child of [...el.childNodes]) clean(child);
+  // Temml leaves \ref and \eqref empty for its post-processor to number from
+  // the \label ids, which we remove and never run it for. Such a formula
+  // would silently lose that part, so it shows as source instead.
+  if (el.querySelector(".tml-ref:empty")) {
+    el.replaceChildren();
+    throw new Error("unresolved \\ref");
+  }
 }
 
 function clean(node: Node): void {

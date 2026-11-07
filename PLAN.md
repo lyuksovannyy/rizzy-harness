@@ -361,6 +361,7 @@ login page.
 | T12 | Password guessing / account takeover | Login throttle (5 failures per username per 15 min → 429). Trade-off accepted: an attacker can lock out a known username for 15 minutes. No self-signup; admin-created accounts start with a temporary password that must be changed; disabling, deleting or resetting a password signs the user out everywhere. The last active admin cannot be removed or demoted, and admins cannot change their own access. |
 | T13 | Credentials sniffed on the network | Default bind is 127.0.0.1. `--insecure-bind` serves plain HTTP with a loud warning (VPN/tailnet only); real TLS arrives with the node link (Phase 8). |
 | T9 | Runaway processes | Bash runs in its own process group; cancel/timeout sends SIGTERM then SIGKILL to the group. Cancel propagates master → node as `session.cancel`. Output is capped. |
+| T14 | Model output (possibly steered by injected web or repo content) phishes, exfiltrates or poses as the harness through what the chat renders | No model HTML, scripts, iframes or remote images; links show their real host and odd ones need a confirm with the full URL; `ui:` blocks are validated in Rust and drawn from the stored spec in a "from <agent>" frame; secret-asking questions and fields are refused; answers carry ids, never model text; the node checks every answer against its log. Details: Status, "2026-11-07 — Rich messages". |
 
 ---
 
@@ -443,6 +444,15 @@ literally, its MIT notice goes in `web/THIRD_PARTY.md`.
 * **R9** `genai` enables serde_json `preserve_order` workspace-wide (feature
   unification). Harmless (map equality ignores order), but anything comparing
   JSON *text* must compare values instead; the fixture test does.
+* **R10** `Temml.woff2` (shipped with Temml's `Temml-Local.css`, used for
+  `\mathscr` and primes) is a modified KaTeX_Script font under the SIL OFL 1.1,
+  but its own licence field says it was made with FontCreator's home edition
+  and "may not be used for commercial purposes". Undecided: keep it, ask
+  upstream, or drop the font (script capitals and primes then come from
+  whatever font the browser falls back to). See THIRD_PARTY_NOTICES.md.
+* **R11** Rich blocks are tested with the mock provider only: how often real
+  models write valid `ui:` blocks, and follow "end your reply after it", is not
+  measured.
 
 ---
 
@@ -1223,3 +1233,207 @@ Honest limits: one task, one model, n=3, and high run-to-run variance (the "off"
 ranged 40k–126k). The router reported no cached tokens, so prompt caching is not part of
 these numbers (it is covered by the Anthropic wire test, not measured live). Treat the
 direction as solid and the percentages as indicative.
+
+### 2026-11-07 — Rich messages
+
+Built in eleven steps (commits from `1d96c07`). Model output is untrusted, so the
+renderer, not the model, decides what links, images, code, math and cards may do.
+Everything rich comes from the reply text or from tool results already in the log:
+no new event kinds, no new protocol command, no pending state across a restart.
+Three additive optional fields carry it (`assistant_message.blocks`,
+`user_message.reply`, `tool_call_finished.sources`); the Rust fold and `fold.ts`
+copy them identically (shared fixture).
+
+**What was built**
+* **Markdown** (`web/src/md/`): hidden characters (bidi controls, zero-width, BOM,
+  private use, tags, variation selectors) stripped before parsing and again after it,
+  since micromark decodes `&#x202E;`; links only for http(s), mailto and in-page
+  fragments, always showing the real host in an isolated LTR `<bdi>`, with a
+  full-URL confirm for odd URLs that neither the user nor a web result brought;
+  images never load (a chip that follows the link rules); GitHub callouts; tables
+  with sticky sortable headers and Copy CSV (formula cells defused); code with its
+  language, Copy and collapse past 60 lines; mermaid as labelled source; Copy message.
+* **Highlighting:** refractor (Prism grammars), 19 languages, each its own lazy chunk,
+  run in a module worker once the message is final. A block gets 1,500 ms, then the
+  worker is stopped and the block stays plain (Prism took 33 s on 48k chars of
+  hostile tsx). Caps: 20,000 chars, 1,000 lines, 1,000 chars per line. A walker
+  emits only `<span class>` and text.
+* **Math:** `\( \)` and `$$` (never single `$`, so prices stay text), Temml in a lazy
+  chunk with trust off and expansion/size limits, then a pass that keeps only MathML
+  layout attributes and strips hidden characters. Shown as source while streaming,
+  on a TeX error, past 4,000 chars, and (step 11) for `\ref`/`\eqref`, which Temml
+  leaves empty for a post-processor we do not run.
+* **Citations:** web results are labelled `[S<n>]` from a session-wide book (shared
+  with delegated sub-tasks) and recorded as `sources`. A label in a reply is a pill
+  naming the host (`host +k` for a run), with title and URL on hover or focus, a
+  "Sources (n)" footer, and muted text for a label with no source. Web calls are
+  harness-worded rows ("Searched “q” · N results", "Read host") that open to
+  host · title and to what the model read; a run of them folds into "Researched".
+* **`ui:` blocks:** `choices`, `form`, `progress`, `chart`, validated and normalized
+  once in Rust (`harness_core::ui`). The browser never parses model JSON: it draws
+  the stored spec, as React text and SVG, in a "from <agent>" frame, from lazy
+  chunks (`UiBlock`, `Chart`). Progress: within a turn the latest block of an id is
+  the card and earlier ones are snapshot lines; a stopped turn stops the card; a
+  message cut off inside a block shows a note, never half a JSON body.
+* **Answers:** a question or form ends the turn; the answer is the next user message,
+  checked by the node (below), shown as a reply bubble, and the card locks.
+* **Memory proposals:** an accepted `remember` call is a note, "Suggested a memory …
+  Review in Memory", instead of a JSON card.
+* **Agent setting** `ui: rich | display | off` (frontmatter, default `rich`, part of
+  `prompt_hash`), enforced in the agent loop; delegated sub-tasks get `display` at
+  most. The block instructions (about 230 tokens) follow the level.
+* **Attention:** a message with an open question marks the chat as waiting.
+
+**Grammar of `ui:` fences** (`ui::scan`; the browser's `md/remark-ui.ts` marks the same)
+* Scanned on the text as stored: secrets scrubbed, the hidden set stripped, CR and
+  CRLF read as LF.
+* Opener at column 0: three or more backticks or tildes, then exactly `ui:<type>`
+  (`choices`, `form`, `progress`, `chart`) and optional spaces. Anything else after
+  the run (a meta string, an unknown type) makes an ordinary fence.
+* Ordinary fences (indent 0-3) are skipped to their closer, so ui fences inside them
+  are not blocks; neither are indented, list or quote fences.
+* Closer: indent 0-3, the same character, a run at least as long, then only spaces.
+  An unterminated fence is no block and ends the scan.
+* Body: the lines between, joined with `\n`, one JSON object, at most 16 KiB. At most
+  8 blocks per message, at most one choices or form, and that only in a message that
+  calls no tool ("a question must end the reply").
+* A block is stored as `{ordinal, hash, type, id, spec | error}`; the hash is FNV-1a
+  32 over the body. The browser shows a spec only when ordinal, hash and type all
+  match the fence micromark found, so where the two parsers disagree (an HTML block
+  swallowing a fence) it fails closed to code. Errors are harness text
+  (`options[0].label: longer than 80 characters`), never model text, shown under the
+  code as "Could not show this question: …".
+
+**Block schemas in brief.** Every object rejects unknown keys; ids match
+`^[a-z][a-z0-9_-]{0,31}$`; every string goes through `clean_text` and is measured in
+characters; defaults are written out in the normalized spec.
+
+| Block | Keys | Rules |
+|---|---|---|
+| `ui:choices` (input) | `id`, `question`, `options`, `multi`, `other`, `min`, `max` | question ≤200; 2-8 options, each `{id?, label ≤80, description? ≤200}` or a label string (ids `o1`… when missing), unique; `min`/`max` only with `multi`; `other` adds a typed answer ≤500 that counts toward both; a question or option that asks for a secret is an error |
+| `ui:form` (input) | `id`, `title`, `description`, `fields` | title ≤120, description ≤400 (either asking for a secret is an error); 1-12 fields of `id`, `label` ≤120, `type`, `required`, `help` ≤200, and per type: `text` (`multiline`, `max_length` 1-4000, default 500, `placeholder` ≤100, never a default), `number` (`min`, `max`, `step`, `default` on the grid, `unit` ≤16), `choice` (2-20 options, `multi`, `default`, `min`/`max`), `toggle` (`default`, never required), `date` (real `YYYY-MM-DD`, min ≤ default ≤ max). A field whose id, label, help, placeholder, unit or options ask for a secret is kept only as `{id, label, type, refused}`: a warning, never an input |
+| `ui:progress` (display) | `id`, `title`, `status`, `value`, `steps` | title ≤120; status running, done or failed; value 0-1; 1-20 steps of `label` ≤120, `status` (pending, active, done, failed, skipped), `detail` ≤200 |
+| `ui:chart` (display) | `id`, `kind`, `title`, `x`, `y`, `series`, `stacked` | bar or line; title ≤120; 1-100 x values, all strings ≤40 or all numbers; y label ≤60, unit ≤12; 1-6 series, name ≤40, one number or null per x value; `stacked` only for bars |
+
+`off` makes no blocks (fences stay code); `display` turns choices and forms into
+the error "interactive blocks are off for this agent".
+
+**How answers return to the model**
+1. The card posts `{"text": note, "reply": {"message_id", "block_id", "values"}}` to
+   the existing owner-checked `POST /api/sessions/{id}/prompt`. Values: choices
+   `{"selected": [ids], "other"?: text}`; forms `{field id: string | number | boolean
+   | [ids]}`. 400 for a reply with attachments or compare, or over 32 KiB; empty text
+   is allowed only with a reply.
+2. The master runs it as the agent that asked (the message's author), never reroutes
+   by @mention, and recalls memory from the note alone. `Prompt.reply` is additive;
+   the protocol stays v1.
+3. The node reserves the turn slot, then `ui::check_reply` checks the reply against
+   its own log: the message exists, no user message follows it, it is the chosen
+   parallel answer, the session is no sub-task, the block is a shown choices or form,
+   and the values pass every rule (types, required, ranges and step grid, offered
+   ids, min/max, `other`, real dates, nothing for a refused field). A failure frees
+   the slot and returns 409 with the reason; holding the slot means nothing is
+   appended between the check and the turn.
+4. The recorded text, which the model sees, is the canonical answer plus the note:
+   only ids, harness-written numbers, dates and yes/no, and the user's typing
+   JSON-quoted, never a model label (`Choice answer · colour: blue`; `Form answer ·
+   trip`, `- people: 3`, `- dest: lis`, `- not answered: notes`, `- not shown (asks
+   for a secret): key`).
+5. A reload folds the same log: answered cards stay locked with their values, and
+   other tabs lock over the WebSocket. Approvals are untouched: replies never answer
+   one.
+
+**Security rules (in code, not in the prompt)**
+1. No model HTML, script or iframe: raw HTML stays escaped; blocks are Rust-validated
+   JSON drawn as text nodes; highlighting goes through the span-only walker; Temml
+   runs with trust off and a clean pass; charts are our SVG. The CSP is unchanged
+   (Temml's CSS and font come from 'self').
+2. Model strings never become user-role text, so a form cannot launder a model URL
+   into the web_fetch provenance set (an IPv4 shorthand such as "1.5" no longer
+   counts as an address either).
+3. Phishing: no password or hidden field, no model-chosen button label (always
+   "Send"), no text defaults; secret-asking questions and fields refused in Rust, with
+   the lexicon read as a person sees it (look-alike letters, fullwidth, soft hyphens);
+   harness chrome on every card ("Question from <agent>", "Sends your answers as a
+   message. Never type passwords or keys here.", "Asked after reading: hosts" after
+   web content); every answer is a real click, and keys 1-8 only move between options.
+4. Links and images: protocol allowlist; the real host always visible; a confirm with
+   the full URL for a URL outside provenance (user text and web results only) with a
+   query, fragment, long path, `;param`, token-like run, long or many host labels,
+   punycode, credentials or an odd mail address; `noopener noreferrer nofollow` and
+   no referrer; images never fetched; no favicons, previews or unfurls.
+5. Citations resolve only to sources our SSRF-safe web tools recorded; titles are
+   cleaned text; a fragment counts only exactly.
+6. Hidden text is stripped in Markdown, math output and `clean_text`; the memory note
+   shows such characters as codes, since they are what would be remembered.
+7. The node is the authority on answers; `ui/form.ts` mirrors the rules for inline
+   errors only and is held to Rust by `ui.json`.
+8. Limits: body 16 KiB, 8 blocks and 1 input per message, 8 options (20 in a form),
+   12 fields, 20 steps, 6 series × 100 points, TeX 4,000 chars, the highlighting caps
+   and budget above, replies 32 KiB.
+9. Blocks come from the scrubbed text, and whole payloads are scrubbed on append.
+
+**Threat notes (T14).** Injected web or repo content can steer the model into
+asking: the card names the hosts read since the user's message and secret questions
+are refused, but a model can still ask in prose, as before. A block cannot pose as the
+harness: every one, snapshot lines included, sits in a "from <agent>" frame, and
+approvals live only in tool cards. Exfiltration needs a click on a link whose real
+host is shown; the confirm is UX, not a barrier, and a user who presses Open sends
+what the URL carries. Hostile input cannot freeze the tab (worker budget, TeX limits,
+block caps). A stale or replayed answer is refused against the log; an answer runs as
+the agent that asked, at its ui level.
+
+**Out of scope, and why**
+* Sandboxed HTML/JS widgets, artifacts, MCP Apps: they need a second origin (today one
+  port, `frame-ancestors 'none'`, no frame-src) and are the largest phishing surface.
+* Mermaid: 194-251 KB gzip even lazy, against the remaining budget; shown as source.
+* A blocking mid-turn `ask_user` tool, tool-driven cards: new kinds, a route, restart
+  recovery and about 1k more prompt tokens; forms that end the turn cover both modes.
+* Reasoning summaries and provider-native citations: provider streaming plumbing of
+  their own; `[S<n>]` works for every provider and the mock.
+* Model buttons that call tools, suggestion chips: they bypass the model and
+  approvals, or turn model text into user text in one click.
+* Remote images, an image proxy, favicons, unfurls: the exfiltration channel, plus
+  SSRF and tracking.
+* remend streaming repair, single-dollar math, a `ui:table` block, highlight.js,
+  Shiki, KaTeX, a WYSIWYG composer: cosmetic, ambiguous with prices, a duplicate of
+  GFM tables, or larger than what was chosen.
+* Branching, edit, regenerate, read aloud; weather, maps, image generation; tool
+  progress events; an auto-repair loop for invalid blocks; more chart kinds; inline
+  Keep/Discard for memories: separate features, third-party data, model cost, or a
+  new API.
+
+**Measured bundle sizes** (`npm run size`, gzip, after this step): initial JS
+86.1 KB (budget 110; 86.2 before rich messages), total JS 267.5 KB (budget 300;
+153.1 before, about 262 projected). Every chat loads the Conversation chunk, 64.3 KB
+with remark-math and the md plugins. On demand only: math (Temml) 58.7 KB, the
+highlighter worker 9.6 KB plus 20.5 KB of grammars in 25 chunks, UiBlock 4.2 KB, the
+form rules 3.2 KB, Chart 4.1 KB. Outside the JS budget: the math stylesheet 1.8 KB
+and Temml.woff2 9.2 KB. `size.mjs` prints every
+file and fails if KaTeX or mermaid reach any chunk, or Temml or the highlighter reach
+the initial set or the Conversation chunk; each marker must also match where its
+library lives, so a renamed string cannot turn a check into a pass. (The markers are
+`mermaidAPI`, since our own code names mermaid fences, and `Unknown language` /
+`languages.extend`, since refractor's build has no `Prism.languages`.)
+
+**Deviations from the plan, as built:** a refused field is named in the answer
+text, so the model does not ask again in other words; "Other" counts toward a
+choice's minimum and maximum; a question must end the reply; answers run as the
+asking agent; the secret lexicon also catches "key" and "token" alone, look-alike
+spellings, units and option text; snapshot lines have a compact "from" frame;
+unclosed fences in finished messages are "cut off" notes; the 32 KiB cap is also
+checked in the browser; keys 1-8 never send.
+
+**Tests.** Rust: scanner, `clean_text`, every schema and limit, levels, the secret
+lexicon, `check_reply` and canonical goldens, fold and protocol round trips, node
+session (stale, running turn, slot freed on error), master HTTP (200/400/404/409),
+store attention; `ui.json` is shared with vitest, which also covers the Markdown
+pipeline, links, citations, highlighting (fake worker), math (real Temml under
+happy-dom), cards, charts and themes. `web/e2e/rich.cjs` (sections in
+`web/e2e/rich/`) checks each item of the plan's e2e list once, in about 40 s. In this
+step it was mutation-checked: removing any of fourteen features one at a time (the
+image chip, the link confirm, math and highlighting waiting for the final message,
+the highlight budget, the streaming skeleton, the lazy chart chunk, hidden-character
+stripping before and after parsing, the `\eqref` fallback, the memory note, the
+refused field, the stale-answer check, the secret lexicon) made it fail. Open: R10
+(the Temml font's licence) and R11 (no real model run).
