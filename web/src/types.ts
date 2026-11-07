@@ -242,6 +242,8 @@ export interface ModelInfo {
   default: boolean;
 }
 
+export type BackdropPref = "animated" | "still" | "off";
+
 export interface Prefs {
   search_url: string;
   image_search_url?: string;
@@ -255,6 +257,10 @@ export interface Prefs {
   accent?: string | null;
   /** A forced theme; null follows the OS. */
   theme?: "light" | "dark" | null;
+  /** How the home screen's per-mode backgrounds move; null is animated. */
+  backdrop?: BackdropPref | null;
+  /** A still, fainter background beside chats on wide screens. */
+  backdrop_chats?: boolean;
   onboarded?: boolean;
 }
 

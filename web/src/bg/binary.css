@@ -1,0 +1,47 @@
+/* Agentic mode's field and its cursor light (BinaryBg.tsx). The light is a
+   round porthole onto a brighter copy of the field plus a faint accent glow;
+   both only ever move by transform. */
+.bin-host {
+  position: absolute;
+  inset: 0;
+}
+.bin-host[data-motion="animated"] {
+  animation: bin-in 480ms var(--ease-out) var(--delay, 0ms) both;
+}
+.bin-host[data-motion="animated"][data-state="exit"] {
+  animation: bin-out 300ms var(--ease-in) both;
+}
+@keyframes bin-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes bin-out {
+  to {
+    opacity: 0;
+  }
+}
+.bin-base,
+.bin-bright {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+.bin-spot,
+.bin-glow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--spot, 360px);
+  height: var(--spot, 360px);
+  border-radius: 50%;
+  opacity: 0;
+}
+.bin-spot {
+  overflow: hidden;
+  -webkit-mask-image: radial-gradient(closest-side, #000 35%, transparent 100%);
+  mask-image: radial-gradient(closest-side, #000 35%, transparent 100%);
+}
+.bin-glow {
+  background: radial-gradient(circle closest-side, var(--glow), transparent);
+}

@@ -55,6 +55,16 @@ const chunk = (re, what) => {
   if (found.length === 0) failures.push(`no ${what} chunk in dist/assets`);
   return found;
 };
+// The mode backgrounds and their host load only when one shows, and the
+// still copy beside chats only when it is turned on.
+const backgrounds = [
+  ...chunk(/\/Backdrop-/, "background host"),
+  ...chunk(/\/SearchBg-/, "Search background"),
+  ...chunk(/\/WallBg-/, "Ask background"),
+  ...chunk(/\/BinaryBg-/, "Agentic background"),
+  ...chunk(/\/ChatGutter-/, "chat gutter"),
+];
+for (const f of backgrounds) if (initial.has(f)) failures.push(`${f} is in the initial load`);
 // What the home screen and every chat load: math and highlighting must not.
 const eager = [...initial, ...chunk(/\/Conversation-/, "Conversation")];
 const installed = (file) => [join(web, "node_modules", file)].filter(existsSync);

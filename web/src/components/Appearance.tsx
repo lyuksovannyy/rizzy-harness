@@ -1,12 +1,13 @@
-// Settings, Preferences, Appearance: theme and accent. A pick shows at once
-// as a preview; Save keeps it, and leaving the tab without saving goes back
-// to what is saved. Every control is type="button": they sit in the form.
+// Settings, Preferences, Appearance: theme, accent and the home backgrounds.
+// A theme or accent pick shows at once as a preview; Save keeps it, and
+// leaving the tab without saving goes back to what is saved. Every control
+// is type="button": they sit in the form.
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { applyAppearance, withThemeTransition } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import type { Prefs } from "../types";
-import { ACCENTS, THEMES } from "./forms";
+import { ACCENTS, BACKDROPS, THEMES } from "./forms";
 
 const ICONS = { system: Monitor, light: Sun, dark: Moon } as const;
 
@@ -33,6 +34,7 @@ export function AppearanceFields(props: { prefs: Prefs; saved: Prefs; onChange: 
   };
   const theme = p.theme ?? "system";
   const accent = p.accent ?? "blue";
+  const backdrop = p.backdrop ?? "animated";
 
   return (
     <>
@@ -73,6 +75,36 @@ export function AppearanceFields(props: { prefs: Prefs; saved: Prefs; onChange: 
               />
             ))}
           </div>
+        </div>
+        <div className="field">
+          {t("settings.backdrop")}
+          <div className="seg" role="radiogroup" aria-label="backgrounds">
+            {BACKDROPS.map((x) => (
+              <button
+                key={x}
+                type="button"
+                role="radio"
+                aria-checked={backdrop === x}
+                className={backdrop === x ? "on" : ""}
+                onClick={() => props.onChange({ ...p, backdrop: x === "animated" ? null : x })}
+              >
+                {t(`backdrop.${x}`)}
+              </button>
+            ))}
+          </div>
+          <span className="field-hint">{t("settings.backdropHint")}</span>
+        </div>
+        <div className="field">
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={!!p.backdrop_chats}
+              disabled={backdrop === "off"}
+              onChange={(e) => props.onChange({ ...p, backdrop_chats: e.target.checked })}
+            />
+            {t("settings.backdropChats")}
+          </label>
+          <span className="field-hint">{t("settings.backdropChatsHint")}</span>
         </div>
       </div>
     </>

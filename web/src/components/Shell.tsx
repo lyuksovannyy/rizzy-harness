@@ -1,6 +1,6 @@
 import { Menu, SquarePen } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
 import { t } from "../lib/i18n";
@@ -8,7 +8,7 @@ import { type ClassifierState, decide, emptyState, parseState, record, serialize
 import { agenticBlockReason, type Mode } from "../lib/modes";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
-import { applyAppearance } from "../lib/appearance";
+import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
 import type { Agent, AttentionItem, Me, ModelInfo, NodeAttention, NodeInfo, Prefs, SessionRow } from "../types";
 import type { Submission } from "./Composer";
@@ -21,6 +21,8 @@ const Settings = lazy(() => import("./Settings"));
 const Onboarding = lazy(() => import("./Onboarding"));
 
 const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
+/** A home visit's background seed (bg/rng.ts would bring the whole PRNG into the first load). */
+const newSeed = () => crypto.getRandomValues(new Uint32Array(1))[0]!;
 const COLLAPSED_KEY = "harness.sidebarCollapsed";
 
 type Route =
@@ -75,6 +77,10 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   });
   const [drawer, setDrawer] = useState(false);
   const route = useRoute();
+  // Each visit to the home screen re-rolls its background: arriving there,
+  // or New chat while already there (Home stays mounted then).
+  const [home, setHome] = useState(() => ({ kind: route.kind, seed: newSeed() }));
+  if (home.kind !== route.kind) setHome({ kind: route.kind, seed: route.kind === "home" ? newSeed() : home.seed });
   const classifier = useRef<ClassifierState>(emptyState());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -195,6 +201,9 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   useEffect(() => {
     if (loaded) applyAppearance(prefs?.theme, prefs?.accent);
   }, [loaded, prefs?.theme, prefs?.accent]);
+  useEffect(() => {
+    if (loaded) writeBackdropMirror(prefs?.backdrop);
+  }, [loaded, prefs?.backdrop]);
 
   useSyncExternalStore(
     (l) => live.subscribe(l),
@@ -217,6 +226,14 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     onLogout();
   };
 
+  const listed = useMemo(() => sessions.filter((x) => !x.incognito && !x.parent_id), [sessions]);
+  // What the Ask wall infers topics from: the titles the sidebar lists. They
+  // never show on the wall; untitled chats say nothing.
+  const titles = useMemo(
+    () => listed.filter((x) => x.title && x.title !== t("session.untitled")).map((x) => ({ title: x.title, updated_ms: x.updated_ms })),
+    [listed],
+  );
+  const gutter = prefs?.backdrop_chats && prefs.backdrop !== "off" ? titles : null;
   const workers = nodes.filter((n) => n.connected && n.profile === "agentic");
   const agenticBlocked = agenticBlockReason(me.can_agentic, workers.length);
   const defaultAgent = prefs?.default_agent ?? serverDefaultAgent;
@@ -266,6 +283,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
 
   const navigate = (r: Route) => {
     setDrawer(false);
+    if (r.kind === "home" && route.kind === "home") setHome({ kind: "home", seed: newSeed() });
     go(r);
   };
 
@@ -289,7 +307,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       {!collapsed && (
         <Sidebar
           me={me}
-          sessions={sessions.filter((x) => !x.incognito && !x.parent_id)}
+          sessions={listed}
           nodes={nodes}
           selected={selected}
           conn={live.state}
@@ -327,6 +345,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               agents={agents}
               models={models}
               voice={voice}
+              gutter={gutter}
             />
           ) : route.kind === "settings" ? (
             <Settings
@@ -358,6 +377,8 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               voice={voice}
               attention={attention}
               nodeAttention={nodeAttention}
+              seed={home.seed}
+              titles={titles}
             />
           )}
         </Suspense>

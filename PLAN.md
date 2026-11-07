@@ -1508,3 +1508,71 @@ without a theme, typos still rejected, and the settings API accepting dark and
 system and refusing others. e2e (phase5): preview, revert on leaving, Save, the
 mirror, no flash (a new page in a light OS with the settings request held back is
 dark from the start) and System handing the theme back to the OS.
+
+### 2026-11-07 — Calm visual system: the mode backgrounds
+
+The second part of the motion pass (the "Calm" spec, sections 3 and 4): each
+mode in the home bar gets its own faint background.
+
+**What was built.** `bg/Backdrop.tsx` sits behind the home column and keeps one
+layer per mode: on a change the old layer plays its exit while the new one enters
+140 ms later, at most two layers live at a time, and one cut short mid-entrance
+just fades. A new chat (a new seed from Shell, also when New chat is pressed on
+Home) re-rolls the wall and the field the same way. Zones (the column grown by
+24 px, the top bar) are measured with a ResizeObserver, once per frame at most;
+nothing is ever drawn inside them. Search (`SearchBg`, CSS only) drops a 2.5D
+magnifier in from above the top edge: ten copies of the glyph 3 px apart in a 3D
+context make a real side face; it overshoots, settles, then floats (7 s) and tilts
+(11 s) while a glint crosses the lens every 9 s and the lens warms while the
+composer has text. Ask (`WallBg`) lays out 8-64 queries in five depth tiers
+(three on phones) with Mitchell's best candidate, seeded per visit, rippling out
+from the composer; every 2.6 ± 0.8 s one line older than 8 s fades and another
+takes a free spot, one in three mid-tier replacements typed out; the near tiers
+drift against the mouse. The text is CSS `content: attr(data-text)`, so it stays
+out of the accessibility tree, find-in-page and copy. The lists are fetched only
+when the wall shows, once per page load. Topics are inferred in the browser from
+the sidebar's titles (`bg/topics.ts`; a topic needs two titles; recent chats count
+more), and their share grows from 0 at two matched titles to 60% at thirty
+(`bg/mix.ts`); a bundled line equal to one of the user's titles is skipped.
+Agentic (`BinaryBg`) draws a seeded field of 0s and 1s on a canvas from a glyph
+atlas, redrawing only changed cells: 1.2% flip per second, up to three streaks
+fall like rain, and a soft light follows the mouse as a porthole onto a brighter
+copy, moved by transforms only. The clock (`bg/loop.ts`) asks for a frame only
+when a tick is due: 30 a second while the light moves, 15 while it rests. Under
+"Still", reduced motion or data saving, everything renders its rest frame and
+changes cross-fade; a hidden tab pauses all of it. Settings → Preferences →
+Appearance adds **Home background** (Animated, Still, Off; mirrored in
+localStorage so a reload never starts what was turned off) and **Also in chats**
+(`ChatGutter`: a still, half-strength wall or field in gutters of 180 px or more).
+`assets.rs` now sends an ETag for files outside `assets/` and answers 304, so the
+wall lists, `theme.js` and `cities.json` are not downloaded again unchanged.
+
+**Deviations.** The Backdrop host is a lazy chunk too (1.6 KB), loaded only when
+a background is on, which keeps the first load at 87 KB instead of 89. Backdrop
+finds the column through the DOM: a later sibling's ref is not attached yet when
+its layout effect runs. Exits are timed by Backdrop, so `onExited` is gone from
+the contract. Hooks live in `bg/hooks.ts`, not `lib/appearance.ts`. Placement
+checks collisions directly (64 lines at most) instead of a spatial hash. Lines
+over 44 characters are dropped from the lists rather than cut. Topic phrases go
+up to three words ("two weeks notice"). The field's noise is stretched so its
+density clouds read. The magnifier's shadow breathes on a pseudo-element: two
+animations of one property on one element kept Chrome from compositing it.
+
+**Measured** (headless Chromium, no GPU, 1280×860): Agentic tick 0.2 ms on
+average (budget 2); main thread about 29 ms/s with the light resting, most of it
+Chrome copying the software canvas to the compositor (about 0.9 ms a frame, which
+a GPU-backed canvas avoids); Search idle 3 ms/s and Ask idle 1.2 ms/s against
+about 1.2 ms/s for the page alone. Bundle: initial JS 87.4 KB (86.8 before),
+total 286 KB (269 before), with the host 1.6, Search 1.3, Ask 2.0 + 5.0 shared,
+Agentic 1.8 + 2.0 shared and the gutter 1.1 KB, all lazy (size.mjs checks).
+
+**Tests.** Vitest: rng, placement (no overlaps with margins, clear of zones,
+bounds, determinism, 80% moved by a new seed, the ripple, a full zone, 64 lines
+under 5 ms), the magnifier's branches, topics, mixing (share, quotas, never a
+title, no duplicates), the list parser and fetch-once, the field (zone mask, flip
+rate ± 10%, streak limits), the Backdrop layer machine and the mirror. Rust: the
+backdrop list and old prefs, the settings API, the ETag. e2e (`backdrop.cjs`):
+each mode's art, aria-hidden, nothing under the column or composer, one fetch,
+the 700 ms debounce, a new wall per new chat, never the user's title, pause when
+hidden, contrast over every background in both themes, no light on touch,
+reduced motion, Off and Still, and the gutter only beside wide chats.

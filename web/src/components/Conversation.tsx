@@ -1,7 +1,7 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import { FileText, Trash2 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
 import {
@@ -17,6 +17,7 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
+import type { TitleRow } from "../bg/topics";
 import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
@@ -24,6 +25,9 @@ import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
+
+// Opt-in, and only its own small chunk: most people never load it.
+const ChatGutter = lazy(() => import("../bg/ChatGutter"));
 
 function Undo(props: {
   sessionId: string;
@@ -113,6 +117,8 @@ export default function Conversation(props: {
   agents: Agent[];
   models: ModelInfo[];
   voice?: boolean;
+  /** "Also in chats" is on: the titles the gutter's wall mixes by. */
+  gutter?: readonly TitleRow[] | null;
 }) {
   const { live, sessionId } = props;
   useEffect(() => {
@@ -187,7 +193,12 @@ export default function Conversation(props: {
   };
 
   return (
-    <section className="conversation">
+    <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
+      {props.gutter && (
+        <Suspense fallback={null}>
+          <ChatGutter sessionId={sessionId} agentic={agentic} titles={props.gutter} />
+        </Suspense>
+      )}
       <header className="conv-head">
         <div className="conv-title">
           <h1 className="ellipsis">{meta?.title ?? props.row?.title ?? "…"}</h1>

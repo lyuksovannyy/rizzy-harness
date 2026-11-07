@@ -1,0 +1,100 @@
+/* Ask mode's query wall (WallBg.tsx) and its still copy beside chats. The
+   text is --art-ink at the tier's share of --art-max: texture, never a
+   second layer of reading. Lines only fade and shift by a few pixels. */
+.wall {
+  position: absolute;
+  inset: 0;
+  font-family: var(--sans);
+  user-select: none;
+}
+.wall-tier {
+  position: absolute;
+  inset: 0;
+}
+.wall-line {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-weight: var(--w-regular);
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+  color: color-mix(in srgb, var(--art-ink) calc(var(--art-max) * var(--a) * 100%), transparent);
+  transform: translate3d(var(--x), var(--y), 0);
+}
+.wall-line::before {
+  content: attr(data-text);
+}
+/* A faint search-field outline around some of the near lines. */
+.wall-line.pill {
+  padding: 0.25em 0.8em;
+  border: 1px solid currentColor;
+  border-radius: var(--r-full);
+}
+
+.wall[data-motion="animated"] .wall-line {
+  animation: wall-in 700ms var(--ease-out) calc(var(--d) + var(--delay)) both;
+}
+.wall[data-motion="animated"].quick .wall-line {
+  animation: wall-fade 300ms var(--ease-out) var(--delay) both;
+}
+.wall[data-motion="animated"] .wall-line.fresh {
+  animation: wall-in 900ms var(--ease-out) both;
+}
+.wall[data-motion="animated"] .wall-line.typing,
+.wall[data-motion="animated"] .wall-line.typed {
+  animation: none;
+}
+.wall[data-motion] .wall-line.out {
+  animation: wall-out 700ms var(--ease-in) both;
+}
+.wall[data-motion] .wall-line.gone {
+  animation: wall-out var(--dur-2) var(--ease-in) both;
+}
+.wall[data-motion="animated"][data-state="exit"] .wall-line:not(.out, .gone) {
+  animation: wall-out 280ms var(--ease-in) var(--xd) both;
+}
+/* The caret: solid while typing, then two blinks at 1 Hz and away. */
+.wall-line.typing::after,
+.wall-line.typed::after {
+  content: "";
+  display: inline-block;
+  width: 1.5px;
+  height: 1em;
+  margin-left: 0.08em;
+  vertical-align: -0.14em;
+  background: currentColor;
+}
+.wall-line.typed::after {
+  animation:
+    wall-blink 1s steps(1) 2,
+    wall-out var(--dur-4) var(--ease-in) 2s forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wall-line,
+  .wall-line::after {
+    animation: none !important;
+  }
+}
+
+@keyframes wall-in {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--x), calc(var(--y) + 8px), 0);
+  }
+}
+@keyframes wall-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes wall-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes wall-blink {
+  50% {
+    opacity: 0;
+  }
+}

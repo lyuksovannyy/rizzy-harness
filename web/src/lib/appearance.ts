@@ -2,12 +2,15 @@
 // reads them) and in localStorage mirrors that public/theme.js applies
 // before the first paint, so a reload never flashes the other theme or the
 // default accent while the preferences load.
+import type { BackdropPref } from "../types";
 
 /** A forced theme; null follows the OS. The server also stores "system". */
 export type Theme = "light" | "dark";
 
 export const THEME_KEY = "harness.theme";
 export const ACCENT_KEY = "harness.accent";
+/** The home background choice, so Home never starts one the user turned off before the preferences arrive. */
+export const BACKDROP_KEY = "harness.backdrop";
 
 function remember(key: string, value: string | null) {
   try {
@@ -49,4 +52,18 @@ export function withThemeTransition(fn: () => void): void {
   const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (still || typeof document.startViewTransition !== "function") fn();
   else document.startViewTransition(fn);
+}
+
+/** The saved home background, as the last load left it (animated when unknown). */
+export function readBackdropMirror(): BackdropPref {
+  try {
+    const v = localStorage.getItem(BACKDROP_KEY);
+    return v === "still" || v === "off" ? v : "animated";
+  } catch {
+    return "animated";
+  }
+}
+
+export function writeBackdropMirror(v: BackdropPref | null | undefined): void {
+  remember(BACKDROP_KEY, v === "still" || v === "off" ? v : null);
 }

@@ -61,6 +61,14 @@ pub struct Prefs {
     /// One of `THEMES`; none follows the OS (the web sends none for "system").
     #[serde(default)]
     pub theme: Option<String>,
+    /// One of `BACKDROPS`: how the home screen's per-mode backgrounds move;
+    /// none is "animated".
+    #[serde(default)]
+    pub backdrop: Option<String>,
+    /// A still, fainter background beside chats on wide screens (off unless
+    /// the backdrop is off too).
+    #[serde(default)]
+    pub backdrop_chats: bool,
     /// Set when the user finished (or skipped) onboarding.
     #[serde(default)]
     pub onboarded: bool,
@@ -72,6 +80,7 @@ fn default_image_search() -> String {
 
 pub const ACCENTS: &[&str] = &["blue", "violet", "green", "orange", "pink", "gray"];
 pub const THEMES: &[&str] = &["system", "light", "dark"];
+pub const BACKDROPS: &[&str] = &["animated", "still", "off"];
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -87,6 +96,8 @@ impl Default for Prefs {
             city: None,
             accent: None,
             theme: None,
+            backdrop: None,
+            backdrop_chats: false,
             onboarded: false,
         }
     }
@@ -151,6 +162,7 @@ impl Prefs {
         }
         one_of("accent", &self.accent, ACCENTS)?;
         one_of("theme", &self.theme, THEMES)?;
+        one_of("backdrop", &self.backdrop, BACKDROPS)?;
         if let Some(a) = &self.default_agent
             && m.agents().get(a).is_none()
         {
@@ -273,6 +285,48 @@ mod context_tests {
             Err("theme must be one of system, light, dark".into())
         );
         assert!(one_of("accent", &Some("teal".into()), ACCENTS).is_err());
+    }
+
+    #[test]
+    fn backdrop_comes_from_its_list() {
+        for b in BACKDROPS {
+            assert_eq!(one_of("backdrop", &Some((*b).into()), BACKDROPS), Ok(()));
+        }
+        assert_eq!(one_of("backdrop", &None, BACKDROPS), Ok(()));
+        assert_eq!(
+            one_of("backdrop", &Some("party".into()), BACKDROPS),
+            Err("backdrop must be one of animated, still, off".into())
+        );
+        // "system" is a theme, not a backdrop.
+        assert!(one_of("backdrop", &Some("system".into()), BACKDROPS).is_err());
+    }
+
+    #[test]
+    fn stored_prefs_without_backdrop_fields_load_with_the_defaults() {
+        let p: Prefs =
+            serde_json::from_str(r#"{"search_url":"https://example.com/?q={q}","theme":"dark"}"#)
+                .expect("old prefs load");
+        assert_eq!(p.backdrop, None);
+        assert!(!p.backdrop_chats);
+        let back: Prefs = serde_json::from_str(
+            &serde_json::to_string(&Prefs {
+                backdrop: Some("still".into()),
+                backdrop_chats: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(back.backdrop.as_deref(), Some("still"));
+        assert!(back.backdrop_chats);
+        let typo = serde_json::from_str::<Prefs>(
+            r#"{"search_url":"https://example.com/?q={q}","backdrops":"off"}"#,
+        );
+        assert!(typo.is_err());
+        let wrong_type = serde_json::from_str::<Prefs>(
+            r#"{"search_url":"https://example.com/?q={q}","backdrop_chats":"yes"}"#,
+        );
+        assert!(wrong_type.is_err());
     }
 
     #[test]

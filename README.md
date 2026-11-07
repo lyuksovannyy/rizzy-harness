@@ -60,6 +60,18 @@ at once and is kept with Save; leaving without saving goes back. The browser
 remembers the saved choice, so a reload paints it straight away, before the
 preferences arrive from the server.
 
+The home screen shows a faint background for the mode in the bar: Search, a
+magnifier that drops in from above; Ask, a wall of commonly asked questions
+that is laid out anew for every new chat; Agentic, a field of 0s and 1s with a
+soft light that follows the mouse (not on touch screens). The wall's lists
+ship with the app (`web/public/wall`). As your history grows, topics guessed
+from your own chat titles (software, robotics, careers and so on) show up more
+often; the guess runs in your browser only, is never stored or sent, and your
+own words never appear on the wall. **Home background** turns the motion off
+(**Still**) or the backgrounds off altogether (**Off**); the system's
+reduce-motion setting also keeps them still. **Also in chats** adds a quieter,
+still version beside chats when the window is wide enough.
+
 ## Configuration
 
 Everything lives in the data directory (`~/.local/share/harness`, or

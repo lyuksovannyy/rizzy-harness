@@ -1,0 +1,204 @@
+/* Search mode's magnifier (SearchBg.tsx). Each wrapper owns one transform:
+   .mag places it, .mag-drop falls in and leaves, .mag-float bobs, .mag-tilt
+   holds the 3D pose. Idle periods of 7 s and 11 s never line up, so the
+   motion never visibly repeats. */
+.mag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--mag-size);
+  height: var(--mag-size);
+  transform: translate3d(var(--mag-x), var(--mag-y), 0);
+  transition: transform var(--dur-4) var(--ease-standard);
+  perspective: 900px;
+}
+.mag-defs {
+  position: absolute;
+}
+.mag-drop,
+.mag-float,
+.mag-tilt,
+.mag-layer {
+  position: absolute;
+  inset: 0;
+}
+.mag-float {
+  perspective: 900px;
+}
+/* The base pose points the handle down and right, at the composer. */
+.mag-tilt {
+  transform-style: preserve-3d;
+  transform: rotateX(10deg) rotateY(-16deg) rotateZ(-6deg);
+}
+.mag-layer {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  transform: translateZ(calc(var(--i) * -3px));
+  opacity: calc(1 - var(--i) * 0.04);
+}
+.mag-warm {
+  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  opacity: 0;
+  transition: opacity var(--dur-3) var(--ease-standard);
+}
+.mag[data-typing] .mag-warm {
+  opacity: 1;
+}
+/* A band of light crossing the lens, clipped to it. */
+.mag-glint {
+  position: absolute;
+  left: 19.5%;
+  top: 19.5%;
+  width: 42.2%;
+  height: 42.2%;
+  border-radius: 50%;
+  overflow: hidden;
+  transform: translateZ(1px);
+}
+.mag-glint::before {
+  content: "";
+  position: absolute;
+  left: 30%;
+  top: -30%;
+  width: 40%;
+  height: 160%;
+  background: linear-gradient(90deg, transparent, var(--mag-glint), transparent);
+  transform: translateX(-150%) rotate(20deg);
+}
+/* The shadow lands with the drop; its gradient breathes on its own layer,
+   since two animations of one property cannot run on the compositor. */
+.mag-shadow {
+  position: absolute;
+  left: 15%;
+  top: 108%;
+  width: 70%;
+  height: 14%;
+}
+.mag-shadow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(closest-side, var(--mag-shadow), transparent);
+}
+
+.mag[data-motion="animated"] .mag-drop {
+  animation: mag-enter 1000ms var(--delay) both;
+}
+.mag[data-motion="animated"] .mag-shadow {
+  animation: mag-shadow-in 1000ms var(--delay) both;
+}
+.mag[data-motion="animated"] .mag-shadow::before {
+  animation: mag-breathe 7s var(--ease-in-out) calc(1s + var(--delay)) infinite alternate;
+}
+.mag[data-motion="animated"] .mag-float {
+  animation: mag-float 7s var(--ease-in-out) calc(1s + var(--delay)) infinite alternate;
+}
+.mag[data-motion="animated"] .mag-tilt {
+  animation: mag-tilt 11s var(--ease-in-out) calc(1s + var(--delay)) infinite alternate backwards;
+}
+.mag[data-motion="animated"] .mag-glint::before {
+  animation: mag-glint 9s var(--ease-in-out) calc(0.9s + var(--delay)) infinite;
+}
+.mag[data-state="enter"] .mag-drop,
+.mag[data-state="exit"] .mag-drop {
+  will-change: transform;
+}
+.mag[data-motion="animated"][data-state="exit"] .mag-drop {
+  animation: mag-exit 420ms cubic-bezier(0.5, 0, 0.75, 0) both;
+}
+.mag[data-motion="animated"][data-state="exit"] .mag-shadow {
+  animation: none;
+  opacity: 0;
+  transition: opacity 150ms var(--ease-in);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mag *,
+  .mag *::before {
+    animation: none !important;
+  }
+}
+
+/* --drop starts it fully above the top edge, face tipped towards the viewer. */
+@keyframes mag-enter {
+  0% {
+    transform: translateY(var(--drop)) rotateX(34deg);
+    opacity: 0;
+    animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  8% {
+    opacity: 1;
+  }
+  58% {
+    transform: translateY(10px) rotateX(-5deg);
+    animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+  }
+  80% {
+    transform: translateY(-3px) rotateX(1.5deg);
+    animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes mag-shadow-in {
+  0%,
+  45% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  58% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mag-exit {
+  0% {
+    transform: none;
+    opacity: 1;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(var(--drop)) rotateX(24deg);
+    opacity: 0;
+  }
+}
+@keyframes mag-float {
+  to {
+    transform: translateY(-8px);
+  }
+}
+@keyframes mag-breathe {
+  from {
+    transform: none;
+    opacity: 1;
+  }
+  to {
+    transform: scale(0.92);
+    opacity: 0.8;
+  }
+}
+@keyframes mag-tilt {
+  from {
+    transform: rotateX(8deg) rotateY(-18deg) rotateZ(-6deg);
+  }
+  to {
+    transform: rotateX(13deg) rotateY(-10deg) rotateZ(-4deg);
+  }
+}
+@keyframes mag-glint {
+  0% {
+    transform: translateX(-150%) rotate(20deg);
+  }
+  14%,
+  100% {
+    transform: translateX(260%) rotate(20deg);
+  }
+}

@@ -1,5 +1,5 @@
 import { DEFAULT_IMAGE_SEARCH } from "../lib/engines";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
 import type { Agent, ModelInfo, NodeInfo, Prefs, AttentionItem, NodeAttention } from "../types";
@@ -7,7 +7,11 @@ import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
 import { Similar, type SimilarHandle } from "./Similar";
-import { Backdrop } from "../bg/Backdrop";
+import type { TitleRow } from "../bg/topics";
+import { readBackdropMirror } from "../lib/appearance";
+
+// The mode backgrounds load on their own, and not at all when turned off.
+const Backdrop = lazy(() => import("../bg/Backdrop"));
 
 /** How long a mode the bar picked must hold before the background follows. */
 const AUTO_SETTLE_MS = 700;
@@ -30,6 +34,9 @@ export function Home(props: {
   voice?: boolean;
   attention?: AttentionItem[];
   nodeAttention?: NodeAttention[];
+  /** New per home visit: the background re-rolls with it. */
+  seed: number;
+  titles: readonly TitleRow[];
 }) {
   const [similarCount, setSimilarCount] = useState(0);
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
@@ -48,6 +55,9 @@ export function Home(props: {
   useEffect(() => () => {
     if (settle.current) clearTimeout(settle.current);
   }, []);
+  // Until the preferences arrive, the choice the last load saved.
+  const [mirror] = useState(readBackdropMirror);
+  const backdrop = props.prefs ? (props.prefs.backdrop ?? "animated") : mirror;
   const similar = useRef<SimilarHandle>(null);
   const [agentId, setAgentId] = useState(props.defaultAgent);
   useEffect(() => setAgentId(props.defaultAgent), [props.defaultAgent]);
@@ -60,7 +70,17 @@ export function Home(props: {
 
   return (
     <section className="home">
-      <Backdrop mode={bgMode} />
+      {backdrop !== "off" && (
+        <Suspense fallback={null}>
+          <Backdrop
+            mode={bgMode}
+            seed={props.seed}
+            pref={backdrop}
+            typing={typed.text.trim() !== ""}
+            titles={props.titles}
+          />
+        </Suspense>
+      )}
       <div className="column">
         <h1 className="greeting">{greeting(now, props.username, props.timeZone)}</h1>
         <p className="muted subtitle">{t("home.subtitle")}</p>

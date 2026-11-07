@@ -2,7 +2,7 @@
 // Theme and accent on <html> and in the mirrors public/theme.js reads
 // before the first paint.
 import { beforeEach, describe, expect, test } from "vitest";
-import { ACCENT_KEY, applyAppearance, THEME_KEY } from "./appearance";
+import { ACCENT_KEY, applyAppearance, BACKDROP_KEY, readBackdropMirror, THEME_KEY, writeBackdropMirror } from "./appearance";
 
 const root = () => document.documentElement;
 
@@ -53,5 +53,20 @@ describe("applyAppearance", () => {
     applyAppearance(null, null);
     expect(metas()).toEqual(["#111113", "#fcfcfc"]);
     root().style.removeProperty("--bg");
+  });
+});
+
+describe("the home background mirror", () => {
+  test("still and off are remembered; animated is the default and leaves nothing", () => {
+    expect(readBackdropMirror()).toBe("animated");
+    writeBackdropMirror("off");
+    expect(localStorage.getItem(BACKDROP_KEY)).toBe("off");
+    expect(readBackdropMirror()).toBe("off");
+    writeBackdropMirror("still");
+    expect(readBackdropMirror()).toBe("still");
+    writeBackdropMirror(null);
+    expect(localStorage.getItem(BACKDROP_KEY)).toBeNull();
+    localStorage.setItem(BACKDROP_KEY, "loud");
+    expect(readBackdropMirror()).toBe("animated");
   });
 });

@@ -1,0 +1,27 @@
+/* The still background beside a chat (ChatGutter.tsx): behind everything in
+   the conversation, faded out next to the column; the header and the
+   composer area cover it. It never moves. */
+.conversation.with-gutter {
+  position: relative;
+  isolation: isolate;
+}
+.conversation.with-gutter > .conv-head,
+.conversation.with-gutter > .bottom {
+  background: var(--bg);
+}
+.gutter {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  contain: strict;
+  overflow: hidden;
+  --edge: calc(min(var(--col), 100%) / 2);
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(50% - var(--edge) - 48px), transparent calc(50% - var(--edge)), transparent calc(50% + var(--edge)), #000 calc(50% + var(--edge) + 48px));
+  mask-image: linear-gradient(90deg, #000 calc(50% - var(--edge) - 48px), transparent calc(50% - var(--edge)), transparent calc(50% + var(--edge)), #000 calc(50% + var(--edge) + 48px));
+}
+@media (forced-colors: active), (prefers-contrast: more), print {
+  .gutter {
+    display: none;
+  }
+}

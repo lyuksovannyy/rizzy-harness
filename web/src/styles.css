@@ -764,6 +764,21 @@ input.sidebar-search:focus-visible {
   position: absolute;
   inset: 0;
 }
+/* Without motion a mode change is a plain cross-fade; so is a layer that
+   has to leave before its entrance finished. */
+.backdrop[data-motion="still"] .backdrop-layer,
+.backdrop-layer.cut {
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+@starting-style {
+  .backdrop[data-motion="still"] .backdrop-layer {
+    opacity: 0;
+  }
+}
+.backdrop[data-motion="still"] .backdrop-layer[data-state="exit"],
+.backdrop-layer.cut {
+  opacity: 0;
+}
 .backdrop[data-paused] * {
   animation-play-state: paused !important;
 }
@@ -2760,7 +2775,10 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   display: inline-flex; align-items: center; gap: var(--space-1-5);
 }
 .field > .seg,
-.field > .swatches { align-self: flex-start; }
+.field > .swatches,
+.field > .check { align-self: flex-start; }
+.field-hint { font-size: var(--text-xs); font-weight: var(--w-regular); color: var(--fg-2); }
+.check:has(input:disabled) { opacity: 0.45; }
 .seg button:hover:not(:disabled) { background: none; color: var(--fg); }
 .seg button.on { background: var(--thumb); box-shadow: var(--shadow-thumb); color: var(--fg); font-weight: var(--w-medium); }
 .row.wrap { flex-wrap: wrap; }

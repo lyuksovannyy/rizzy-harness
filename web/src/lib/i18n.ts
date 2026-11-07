@@ -63,6 +63,14 @@ const en = {
   "theme.system": "System",
   "theme.light": "Light",
   "theme.dark": "Dark",
+  "settings.backdrop": "Home background",
+  "backdrop.animated": "Animated",
+  "backdrop.still": "Still",
+  "backdrop.off": "Off",
+  "settings.backdropHint":
+    "Each mode has its own background on the home screen. Still keeps them without motion; your system's reduce-motion setting does the same.",
+  "settings.backdropChats": "Also in chats",
+  "settings.backdropChatsHint": "A quiet, still version beside chats on wide screens.",
   "home.toReview": "{n} new memories to review",
   "home.toReviewOne": "1 new memory to review",
 } as const;
