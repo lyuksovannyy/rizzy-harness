@@ -1,5 +1,5 @@
 //! How web results reach the model and the UI: each page gets a session-
-//! stable label (`[S4]`, see `harness_tools::RefBook`) in the tool output,
+//! stable label (`[S4]`, see `harness_core::refs::RefBook`) in the tool output,
 //! and the same label, URL and cleaned title go into `ToolOutcome::sources`
 //! so the UI can turn the model's `[S4]` into a link it did not write.
 

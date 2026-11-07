@@ -1055,6 +1055,34 @@ pre.diff .del {
 .web-host {
   color: var(--fg-2);
 }
+/* The full address or query a web call sends: wrapped, never cut. */
+.web-input {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.web-input-label {
+  color: var(--fg-2);
+}
+.web-input-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.web-output summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.web-output pre.term,
+pre.term.web-output {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.web-output pre.term {
+  margin-top: 6px;
+}
 .tool-group {
   border: 1px solid var(--line);
   border-radius: 14px;

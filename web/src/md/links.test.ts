@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { hostOf, needsConfirm, parseUrl, textShowsTarget, urlKey, urlKeysIn, type Provenance } from "./links";
+import { hostOf, linkKey, needsConfirm, parseUrl, textShowsTarget, urlKey, urlKeysIn, type Provenance } from "./links";
 
 const u = (s: string) => parseUrl(s)!;
 const none: Provenance = { has: () => false };
@@ -28,6 +28,14 @@ describe("urlKey", () => {
     expect(urlKey(u("https://www.example.com/a/?q=1#frag"))).toBe("example.com/a/?q=1");
     expect(urlKey(u("http://example.com/a/"))).toBe("example.com/a");
     expect(urlKey(u("https://example.com"))).toBe("example.com");
+  });
+});
+
+describe("linkKey", () => {
+  test("is urlKey plus the fragment", () => {
+    expect(linkKey(u("https://www.example.com/a/?q=1#frag"))).toBe("example.com/a/?q=1#frag");
+    expect(linkKey(u("https://example.com/a/"))).toBe("example.com/a");
+    expect(linkKey(u("https://example.com/a#"))).toBe("example.com/a");
   });
 });
 
@@ -91,8 +99,14 @@ describe("needsConfirm", () => {
   test("a URL the user or a tool wrote needs no confirm", () => {
     const prov = of("look at https://www.example.com/search?q=rust please");
     expect(needsConfirm(u("https://example.com/search?q=rust"), prov)).toBe(false);
-    expect(needsConfirm(u("https://example.com/search?q=rust#top"), prov)).toBe(false);
     expect(needsConfirm(u("https://example.com/search?q=secret"), prov)).toBe(true);
+  });
+  test("a fragment counts only as it was seen: the page's scripts can read it", () => {
+    const prov = of("see https://example.com/docs#install and https://example.com/a");
+    expect(needsConfirm(u("https://example.com/docs#install"), prov)).toBe(false);
+    expect(needsConfirm(u("https://example.com/docs"), prov)).toBe(false);
+    expect(needsConfirm(u("https://example.com/docs#c2VjcmV0LXRva2Vu"), prov)).toBe(true);
+    expect(needsConfirm(u("https://example.com/a#top"), prov)).toBe(true);
   });
 });
 

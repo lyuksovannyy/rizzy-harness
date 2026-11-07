@@ -9,15 +9,15 @@ mod fs;
 pub mod graphify;
 mod outline;
 pub mod outputs;
-mod refs;
 mod search;
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use harness_core::event::{OutputStream, Source};
 use harness_core::policy::ToolRisk;
+use harness_core::refs::SharedRefs;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -26,7 +26,6 @@ pub use bash::Bash;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
 pub use outputs::{OutputStore, ToolOutput};
-pub use refs::RefBook;
 pub use search::{Glob, Grep};
 
 /// Cap on what the model sees from one tool call.
@@ -50,7 +49,7 @@ pub struct ToolCtx {
     /// Where full outputs of filtered commands are kept (`tool_output`).
     pub outputs: Option<Arc<OutputStore>>,
     /// Citation labels for web results, shared by every call of the turn.
-    pub refs: Arc<Mutex<RefBook>>,
+    pub refs: SharedRefs,
 }
 
 impl ToolCtx {
@@ -69,7 +68,7 @@ impl ToolCtx {
         }
     }
 
-    /// The citation label for a URL (see [`RefBook`]).
+    /// The citation label for a URL (see [`harness_core::refs::RefBook`]).
     pub fn label(&self, url: &str) -> String {
         self.refs
             .lock()

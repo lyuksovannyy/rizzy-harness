@@ -7,7 +7,7 @@ import { memo, useMemo } from "react";
 import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { Callout } from "../md/Callout";
+import { Callout, CalloutTitle } from "../md/Callout";
 import { CiteRef, SourcesFooter } from "../md/Cite";
 import { InlineCode, Pre } from "../md/Code";
 import { DoneCtx } from "../md/context";
@@ -30,7 +30,8 @@ const remarkPlugins: Options["remarkPlugins"] = [
 // that character references (&#x202E;) decode to.
 const rehypePlugins: Options["rehypePlugins"] = [rehypeStripHidden, rehypeSourcesLast];
 
-// The custom elements remark-cite makes are not HTML tags, hence the cast.
+// The custom elements remark-callouts and remark-cite make are not HTML
+// tags, hence the cast.
 const components = {
   a: Link,
   img: ImageChip,
@@ -38,6 +39,7 @@ const components = {
   code: InlineCode,
   table: Table,
   aside: Callout,
+  "callout-title": CalloutTitle,
   "cite-ref": CiteRef,
   "cite-sources": SourcesFooter,
 } as Components;

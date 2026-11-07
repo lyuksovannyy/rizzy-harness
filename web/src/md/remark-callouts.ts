@@ -1,6 +1,8 @@
 // GitHub-style callouts: a blockquote whose first line is [!NOTE], [!TIP],
 // [!IMPORTANT], [!WARNING] or [!CAUTION] becomes an `aside` with a tone. The
-// rest of that line, if it is plain text, is the title.
+// rest of that line, if it is plain text, is the title: a `callout-title`
+// element with a text child (not a property), so the plugins after this one
+// (citation labels) see it like any other text.
 import type { Blockquote, Root } from "mdast";
 
 export const TONES = ["note", "tip", "important", "warning", "caution"] as const;
@@ -50,8 +52,12 @@ function callout(q: Blockquote) {
   if (first.value === "") p.children.shift();
   if (p.children[0]?.type === "break") p.children.shift();
   if (p.children.length === 0) q.children.shift();
+  if (title) {
+    const head = { type: "calloutTitle", data: { hName: "callout-title" }, children: [{ type: "text", value: title }] };
+    (q.children as unknown[]).unshift(head);
+  }
   (q as { data?: Record<string, unknown> }).data = {
     hName: "aside",
-    hProperties: { className: ["callout", `callout-${tone}`], role: "note", dataTone: tone, dataTitle: title || undefined },
+    hProperties: { className: ["callout", `callout-${tone}`], role: "note", dataTone: tone },
   };
 }

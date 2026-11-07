@@ -120,7 +120,7 @@ async fn one(provider: Arc<LlmProvider>, model: &str, savings: Savings) -> Run {
             compare: vec![],
             extra: TurnExtra {
                 savings,
-                context: None,
+                ..Default::default()
             },
             cancel: Default::default(),
             host: &host,

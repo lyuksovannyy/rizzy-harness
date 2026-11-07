@@ -4,7 +4,7 @@ import { FileText, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
-import { citeMaps, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "../lib/rich";
+import { citeMaps, citeSignature, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "../lib/rich";
 import type { Live } from "../live";
 import { MessageCtx, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
@@ -113,8 +113,8 @@ export default function Conversation(props: {
   // The view is mutated in place, so memoise on what the result depends on.
   const provSig = provenanceSignature(items);
   const firstSeen = useMemo(() => provenanceIndex(items), [view, provSig]);
-  // Sources come only from web tools, so the same signature covers them.
-  const cites = useMemo(() => citeMaps(items), [view, provSig]);
+  const citeSig = citeSignature(items);
+  const cites = useMemo(() => citeMaps(items), [view, citeSig]);
   // One stable context value per message, so streaming does not re-render links.
   const infoAt = useMemo(() => {
     const cache = new Map<number, MessageInfo>();

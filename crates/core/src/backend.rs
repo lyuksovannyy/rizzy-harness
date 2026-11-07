@@ -9,8 +9,9 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::RawEvent;
-use crate::event::{EventKind, TurnEndReason, Usage};
+use crate::event::{EventKind, Source, TurnEndReason, Usage};
 use crate::policy::{Decision, ToolRisk};
+use crate::refs::SharedRefs;
 
 #[async_trait::async_trait]
 pub trait TurnHost: Send + Sync {
@@ -23,11 +24,13 @@ pub trait TurnHost: Send + Sync {
 
     /// Run `task` as `agent` in a new child session on this node and wait for
     /// its turn to end. `started` is called with the child's id as soon as it
-    /// exists (so the UI can link to it while it works).
+    /// exists (so the UI can link to it while it works). The child labels its
+    /// web results from `refs`, the caller's book.
     async fn delegate(
         &self,
         _agent: crate::agent::AgentSpec,
         _task: String,
+        _refs: SharedRefs,
         _cancel: CancellationToken,
         _started: Box<dyn FnOnce(crate::SessionId) + Send>,
     ) -> Result<DelegateOutcome, String> {
@@ -43,6 +46,9 @@ pub struct DelegateOutcome {
     pub text: String,
     pub reason: TurnEndReason,
     pub usage: Option<Usage>,
+    /// The pages the child's web tools returned, with the labels its answer
+    /// cites them by.
+    pub sources: Vec<Source>,
 }
 
 pub struct TurnCtx<'a> {
@@ -63,7 +69,7 @@ pub struct TurnCtx<'a> {
 }
 
 /// Per-turn inputs that are not part of the agent definition.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct TurnExtra {
     /// Token-saving methods in effect for this turn.
     pub savings: crate::savings::Savings,
@@ -71,6 +77,10 @@ pub struct TurnExtra {
     /// sent after the history, not in the system prompt, so the cached
     /// prefix stays the same from turn to turn. Never stored.
     pub context: Option<String>,
+    /// A delegated sub-task's parent book: its labels continue the parent's
+    /// numbering, so `[S3]` in the answer it returns names the parent's S3.
+    /// `None` means the book comes from this session's own log.
+    pub refs: Option<SharedRefs>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -9,7 +9,8 @@
 //!   first two labels of its result and one label that does not exist
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
 //! * `memory?`       -> repeats the recalled-memory block (per-turn context)
-//! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel)
+//! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel),
+//!   then passes on the first line of the (last) sub-agent's answer
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * `rich: demo`    -> streams Markdown that exercises the rich renderer
 //! * anything else   -> echoes the message back, streamed word by word
@@ -101,6 +102,13 @@ fn cite_answer(result: &str) -> Vec<String> {
     words
 }
 
+/// The first line of a sub-agent's answer in a `delegate` result
+/// (`session: <id>\n@<agent> ended (<reason>):\n<answer>`).
+fn delegate_answer(result: &str) -> Option<String> {
+    let (_, answer) = result.strip_prefix("session: ")?.split_once("):\n")?;
+    Some(answer.lines().next()?.to_string())
+}
+
 pub struct Mock {
     pub delay: Duration,
 }
@@ -181,6 +189,8 @@ impl Provider for Mock {
         if let Some(ChatMsg::Tool { content, .. }) = req.messages.last() {
             let words = if user.starts_with("cite:") {
                 cite_answer(content)
+            } else if let Some(answer) = delegate_answer(content) {
+                vec!["Sub-agent ".into(), "said: ".into(), answer]
             } else {
                 let first = content.lines().next().unwrap_or("").to_string();
                 vec!["Tool ".into(), "said: ".into(), first]

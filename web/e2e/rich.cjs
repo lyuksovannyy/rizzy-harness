@@ -2,7 +2,7 @@
 // callouts, tables, code, math, hidden characters, Copy), lazy loading of
 // the highlighter worker and math chunks, a hostile code block that must
 // not freeze the page, and citations of web results (pills, footer, the
-// web status row).
+// web status row), also those a delegated sub-task hands back.
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -33,12 +33,16 @@ const visualText = (loc) => loc.evaluate((el) => {
 });
 
 // A fake SearXNG on loopback (configured by the admin, so allowed). A
-// query with "slow" in it answers after a while, so the running row shows.
+// query with "slow" in it answers after a while, so the running row shows;
+// one with "other" finds a new page and one already known.
 const searx = http.createServer((req, res) => {
   const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
   res.setHeader('content-type', 'application/json');
+  const first = q.includes('other')
+    ? { title: 'Other page', url: 'https://c.example/other', content: 'Something else' }
+    : { title: 'Rust language', url: 'https://a.example/rust', content: 'A language empowering everyone' };
   setTimeout(() => res.end(JSON.stringify({ results: [
-    { title: 'Rust language', url: 'https://a.example/rust', content: 'A language empowering everyone' },
+    first,
     { title: 'The Rust book', url: 'https://b.example/book', content: 'Learn Rust' },
   ] })), q.includes('slow') ? 2500 : 0);
 });
@@ -251,10 +255,14 @@ async function skipOnboarding(page) {
     check((await cited.locator('.link-confirm').count()) === 0, 'no confirm for a source');
     await popup.close();
 
-    // The finished row opens to host · title per result.
+    // The finished row opens to the query, host · title per result, and
+    // (one more click) the text the model read.
     await p.locator('.tool-web .tool-head').click();
+    check((await p.locator('.tool-web .web-input-value').innerText()) === 'rust', 'the query in full');
     const results = await p.locator('.tool-web .web-results li').allInnerTexts();
     check(JSON.stringify(results) === JSON.stringify(['a.example · Rust language', 'b.example · The Rust book']), 'results: ' + JSON.stringify(results));
+    await p.locator('.tool-web details.web-output summary').click();
+    check((await p.locator('.tool-web details.web-output pre').innerText()).startsWith('[S1] Rust language'), 'the output the model read');
 
     // Labels are stable for the session: the same pages cite the same way
     // in a later turn, and a reload resolves them again.
@@ -281,6 +289,28 @@ async function skipOnboarding(page) {
     await p.waitForSelector('.tool-web .web-status:has-text("Searched “slow rust” · 2 results")');
     await idle();
     log('web row: shimmer while running, none under reduced motion');
+
+    // 8. A sub-task's citations: the sub-agent numbers on from this
+    // session (its new page is S3, a known one keeps S2), and the labels it
+    // hands back resolve to its pages here, not to this session's S1.
+    await p.click('.new-chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'cite: rust');
+    await p.click('.mode-switch button:has-text("Ask")');
+    await p.selectOption('.composer select[aria-label="agent"]', 'ultracode');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('.tool-web .web-status:has-text("Searched “rust” · 2 results")');
+    await idle();
+    await p.fill('.composer textarea', 'delegate: scout=cite: other rust');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('.msg.assistant:has-text("Sub-agent said:") .cite');
+    await idle();
+    const relayed = p.locator('.msg.assistant:has-text("Sub-agent said:")');
+    const subPills = await relayed.locator('.cite').allInnerTexts();
+    check(JSON.stringify(subPills) === JSON.stringify(['c.example', 'b.example', 'c.example +1']), 'sub-task pills: ' + JSON.stringify(subPills));
+    check((await relayed.locator('.cite').first().getAttribute('href')) === 'https://c.example/other', 'the sub-task page');
+    check((await relayed.locator('.md').innerText()).includes('Unknown [S9].'), 'its unknown label stays text');
+    log('delegate: the sub-task cites on from the session, and its labels resolve here:', subPills.join(', '));
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

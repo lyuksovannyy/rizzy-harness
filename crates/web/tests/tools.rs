@@ -6,7 +6,8 @@ use axum::Router;
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::get;
 use harness_core::event::Source;
-use harness_tools::{RefBook, Tool, ToolCtx};
+use harness_core::refs::RefBook;
+use harness_tools::{Tool, ToolCtx};
 use harness_web::{SearchBackend, WebFetch, WebSearch};
 use serde_json::json;
 

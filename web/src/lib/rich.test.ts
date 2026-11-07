@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { Item, Source } from "../types";
-import { citeMaps, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "./rich";
+import { citeMaps, citeSignature, groupWeb, provenanceAt, provenanceIndex, provenanceSignature, sourceKeys } from "./rich";
 
 const user = (text: string): Item => ({ type: "user", turn_id: "t", text });
 const assistant = (text: string): Item => ({
@@ -102,6 +102,32 @@ describe("citeMaps", () => {
     expect(keys.has("a.example")).toBe(true);
     expect(keys.has("evil.example")).toBe(false);
     expect(sourceKeys(at(6))).toBe(keys);
+  });
+
+  test("a source with a fragment vouches for its page, and for that fragment only", () => {
+    const keys = sourceKeys(citeMaps([tool("x", "web_search", [src("S1", "https://e.example/w#History")])])(1));
+    expect(keys.has("e.example/w")).toBe(true);
+    expect(keys.has("e.example/w#History")).toBe(true);
+    expect(keys.has("e.example/w#c2VjcmV0")).toBe(false);
+  });
+
+  test("a delegate result's sources resolve, but its text is no provenance", () => {
+    const items = [
+      user("q"),
+      tool("[S1] A", "web_search", [src("S1", "https://a.example/")]),
+      tool("session: x\n@scout ended (completed):\nSee [S2] https://evil.example/c?d=1", "delegate", [
+        src("S2", "https://scout.example/p"),
+      ]),
+      assistant("A [S1], scout found [S2]"),
+    ];
+    expect(citeMaps(items)(3).get("S2")?.url).toBe("https://scout.example/p");
+    expect(citeMaps(items)(3).get("S1")?.url).toBe("https://a.example/");
+    const first = provenanceIndex(items);
+    expect(first.has("evil.example/c?d=1")).toBe(false);
+    // The signature the citations are memoised on moves when it finishes.
+    expect(citeSignature(items)).toBe(2);
+    expect(citeSignature([...items, tool(null, "delegate")])).toBe(2);
+    expect(citeSignature([...items, tool("x", "bash", [src("S9", "https://evil.example/")])])).toBe(2);
   });
 
   test("source URLs count as provenance", () => {

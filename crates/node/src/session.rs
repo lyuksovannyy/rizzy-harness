@@ -9,6 +9,7 @@ use harness_core::agent::AgentSpec;
 use harness_core::backend::{TurnCtx, TurnExtra, TurnHost};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ToolRisk};
+use harness_core::refs::SharedRefs;
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId, new_id, now_ms};
 use harness_protocol::NodeToMaster;
@@ -531,6 +532,7 @@ impl Session {
         &self,
         agent: AgentSpec,
         task: String,
+        refs: SharedRefs,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
@@ -586,6 +588,7 @@ impl Session {
         let extra = TurnExtra {
             savings,
             context: None,
+            refs: Some(refs),
         };
         let (reason, usage) = child
             .run_turn(msg, Some(agent), vec![], extra, cancel)
@@ -594,13 +597,14 @@ impl Session {
             Some(i) => Some(self.merge_back(i, child_id).await),
             None => None,
         };
-        let text = self
+        let log = self
             .node
             .cfg
             .store
             .call(move |s| s.events_after(child_id, 0, usize::MAX >> 1))
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let text = log
             .iter()
             .rev()
             .find_map(|e| match e.typed() {
@@ -608,6 +612,8 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_default();
+        // Whatever the answer cites, the parent resolves through these.
+        let sources = harness_core::refs::sources_in(&log);
         let text = match merge_note {
             Some(n) => format!("{text}\n\n[{n}]"),
             None => text,
@@ -617,6 +623,7 @@ impl Session {
             text,
             reason,
             usage,
+            sources,
         })
     }
 
@@ -738,10 +745,11 @@ impl TurnHost for Session {
         &self,
         agent: AgentSpec,
         task: String,
+        refs: SharedRefs,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
-        self.run_child(agent, task, cancel, started).await
+        self.run_child(agent, task, refs, cancel, started).await
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {

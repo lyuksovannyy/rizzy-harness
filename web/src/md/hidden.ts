@@ -20,6 +20,16 @@ export function hasHidden(text: string): boolean {
   return ANY_HIDDEN.test(text);
 }
 
+// The hidden set plus control characters other than tab and newline.
+const SHOWN = new RegExp(`${HIDDEN.source}|[\\x00-\\x08\\x0B-\\x1F\\x7F-\\x9F]`, "gu");
+
+/** Hidden and control characters as visible codes (`<U+202E>`), for text
+ * the user has to check as it really is: what a web call sends, what a
+ * page said to the model. Stripping them would hide exactly what to see. */
+export function showHidden(text: string): string {
+  return text.replace(SHOWN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}>`);
+}
+
 /**
  * The same strip after parsing. Markdown decodes character references
  * (`&#x202E;`, `&zwj;`, …) into the characters themselves, so prepare()'s

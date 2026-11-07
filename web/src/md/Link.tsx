@@ -18,7 +18,7 @@ import { useAnchored } from "./anchored";
 import { MessageCtx } from "./context";
 import { useCopy } from "./copy";
 import { reactText } from "./hast";
-import { hostOf, needsConfirm, parseUrl, textShowsTarget, urlKey } from "./links";
+import { hostOf, linkKey, needsConfirm, parseUrl, textShowsTarget } from "./links";
 import { rt } from "./strings";
 
 type AProps = ComponentProps<"a"> & ExtraProps;
@@ -95,7 +95,8 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLAnchorElement>(null);
   const close = useCallback(() => setOpen(false), []);
-  const source = sources.has(urlKey(u));
+  // With a fragment only when it is the source's own (see linkKey).
+  const source = sources.has(linkKey(u));
   const confirm = !source && needsConfirm(u, provenance);
   const guard = (e: React.MouseEvent) => {
     if (!confirm) return;

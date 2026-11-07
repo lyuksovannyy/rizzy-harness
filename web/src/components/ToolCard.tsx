@@ -2,7 +2,7 @@ import { ChevronDown, ChevronRight, Globe, Search } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import type { WebGroup } from "../lib/rich";
-import { stripHidden } from "../md/hidden";
+import { showHidden, stripHidden } from "../md/hidden";
 import { hostOf, parseUrl } from "../md/links";
 import { rt } from "../md/strings";
 import type { Decision, Item, Source } from "../types";
@@ -46,6 +46,30 @@ function webStatus(item: Tool, status: Status): string {
   if (status === "waiting") return rt("web.wantsRead", { host });
   if (status === "running") return rt("web.reading", { host });
   return rt(status === "ok" ? "web.read" : "web.readFailed", { host });
+}
+
+const asText = (v: unknown) => (typeof v === "string" ? v : (JSON.stringify(v) ?? ""));
+
+/** What a web call sends, in full: the address a fetch reads, or the query
+ * a search hands to the engine. Data the model wants out would ride in it,
+ * so nothing is cut and hidden characters show as codes. A web address is
+ * shown parsed (punycode host, percent-encoded rest), as it is requested. */
+export function webInput(item: Tool): string {
+  if (item.tool === "web_search") return showHidden(asText(item.input?.query));
+  const raw = asText(item.input?.url);
+  const u = parseUrl(raw);
+  return u && (u.protocol === "https:" || u.protocol === "http:") ? u.href : showHidden(raw);
+}
+
+function WebInput({ item }: { item: Tool }) {
+  return (
+    <div className="web-input">
+      <span className="web-input-label">{rt(item.tool === "web_search" ? "web.query" : "web.address")}</span>
+      <bdi dir="ltr" className="web-input-value mono">
+        {webInput(item)}
+      </bdi>
+    </div>
+  );
 }
 
 /** host · title per page a web tool returned. */
@@ -168,6 +192,7 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
       )}
       {pending && item.approval && (
         <div className="approval">
+          {web && <WebInput item={item} />}
           <div className="approval-reason">{item.approval.reason}</div>
           <div className="row">
             <button className="primary" disabled={busy} onClick={() => decide("allow")}>
@@ -188,12 +213,23 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
           {item.approval.decision === "deny" ? "Denied" : "Allowed"} ({item.approval.by})
         </div>
       )}
-      {expanded && web && status === "ok" && (
+      {expanded && web && (
         <div className="tool-body">
-          <SourceRows sources={item.result?.sources ?? []} />
+          {!pending && <WebInput item={item} />}
+          {!!item.result?.sources?.length && <SourceRows sources={item.result.sources} />}
+          {/* What the model read, as text: where injected instructions would show. */}
+          {output &&
+            (status === "ok" ? (
+              <details className="web-output">
+                <summary>{rt("web.output")}</summary>
+                <pre className="term">{showHidden(output)}</pre>
+              </details>
+            ) : (
+              <pre className="term web-output">{showHidden(output)}</pre>
+            ))}
         </div>
       )}
-      {expanded && !(web && status === "ok") && (
+      {expanded && !web && (
         <div className="tool-body">
           {item.tool === "edit" && <EditDiff input={item.input} />}
           {item.tool === "write" && (

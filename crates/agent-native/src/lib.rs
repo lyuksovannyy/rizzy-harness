@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use harness_core::backend::{AgentBackend, TurnCtx, TurnOutcome};
 use harness_core::event::*;
+use harness_core::refs::{RefBook, SharedRefs};
 use harness_core::{RawEvent, new_id};
-use harness_tools::{RefBook, ToolCtx, ToolOutcome, ToolSet};
+use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
 pub use provider::{
@@ -199,12 +200,27 @@ impl NativeBackend {
         specs
     }
 
+    /// Scrubbed like the output, so a source never shows what the output
+    /// it labels hides.
+    fn scrub_sources(&self, sources: Vec<Source>) -> Vec<Source> {
+        sources
+            .into_iter()
+            .map(|s| Source {
+                url: self.config.secrets.scrub(&s.url),
+                title: self.config.secrets.scrub(&s.title),
+                ..s
+            })
+            .collect()
+    }
+
     /// Run one `delegate` call. Returns the result and the child's usage.
+    /// The child labels its web results from `refs`, this turn's book.
     async fn run_delegate(
         &self,
         ctx: &TurnCtx<'_>,
         host: &dyn harness_core::backend::TurnHost,
         call: &ToolCallRef,
+        refs: &SharedRefs,
     ) -> (ToolOutcome, Usage) {
         let none = Usage::default();
         let Some(agent) = ctx.agent.as_ref() else {
@@ -237,7 +253,13 @@ impl NativeBackend {
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
             let _ = tx.send(sid);
         });
-        let run = host.delegate(spec.clone(), task, ctx.cancel.child_token(), started);
+        let run = host.delegate(
+            spec.clone(),
+            task,
+            refs.clone(),
+            ctx.cancel.child_token(),
+            started,
+        );
         let call_id = call.call_id.clone();
         // Link to the child as soon as it exists, while it still works.
         let link = async {
@@ -268,6 +290,9 @@ impl NativeBackend {
                             "session: {}\n@{} ended ({reason}):\n{body}",
                             o.child, spec.agent_id
                         ),
+                        // The labels the answer cites resolve through these
+                        // in the parent, as they did in the child.
+                        sources: o.sources,
                         ..Default::default()
                     },
                     o.usage.unwrap_or_default(),
@@ -487,7 +512,13 @@ impl AgentBackend for NativeBackend {
         let (mut subagents, mut sub_tokens) = (0u32, 0u64);
         // Citation labels continue from the whole log (not only the part
         // after a summary), so `[S3]` names one page for the whole session.
-        let refs = Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history)));
+        // A sub-task numbers on in its parent's book instead: its answer goes
+        // back to the parent verbatim, labels and all.
+        let refs = ctx
+            .extra
+            .refs
+            .clone()
+            .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history))));
 
         for _ in 0..MAX_STEPS {
             let message_id = new_id();
@@ -616,7 +647,9 @@ impl AgentBackend for NativeBackend {
                     }
                 }
                 let results = futures::future::join_all(
-                    admitted.iter().map(|c| self.run_delegate(&ctx, host, c)),
+                    admitted
+                        .iter()
+                        .map(|c| self.run_delegate(&ctx, host, c, &refs)),
                 )
                 .await;
                 for (call, (outcome, u)) in admitted.into_iter().zip(results) {
@@ -629,7 +662,7 @@ impl AgentBackend for NativeBackend {
                         output: output.clone(),
                         exit_code: None,
                         truncated: outcome.truncated,
-                        sources: vec![],
+                        sources: self.scrub_sources(outcome.sources),
                     }))
                     .await;
                     messages.push(ChatMsg::Tool {
@@ -667,24 +700,13 @@ impl AgentBackend for NativeBackend {
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
-                // Scrubbed like the output, so a source never shows what the
-                // output it labels hides.
-                let sources = outcome
-                    .sources
-                    .into_iter()
-                    .map(|s| Source {
-                        url: self.config.secrets.scrub(&s.url),
-                        title: self.config.secrets.scrub(&s.title),
-                        ..s
-                    })
-                    .collect();
                 host.emit(EventKind::ToolCallFinished(ToolCallFinished {
                     call_id: call.call_id.clone(),
                     ok: outcome.ok,
                     output: output.clone(),
                     exit_code: outcome.exit_code,
                     truncated: outcome.truncated,
-                    sources,
+                    sources: self.scrub_sources(outcome.sources),
                 }))
                 .await;
                 messages.push(ChatMsg::Tool {
@@ -893,7 +915,7 @@ impl NativeBackend {
         call: &ToolCallRef,
         allowed_for_session: &mut HashSet<String>,
         observed: &[String],
-        refs: &Arc<std::sync::Mutex<RefBook>>,
+        refs: &SharedRefs,
     ) -> ToolOutcome {
         let offered = ctx.agent.as_ref().is_none_or(|a| a.allows_tool(&call.tool));
         let Some(tool) = self
@@ -1337,6 +1359,178 @@ mod tests {
             panic!("{:?}", ev.last())
         };
         assert_eq!(m.text, "Answer [S4] and [S1], both [S4][S1]. Unknown [S9].");
+    }
+
+    /// Runs a delegated task as a child turn on the same backend, the way
+    /// the node's session does: own events, the parent's book, and the
+    /// child's sources handed back.
+    struct DelegatingHost {
+        parent: RecHost,
+        child: RecHost,
+        backend: Arc<NativeBackend>,
+        cwd: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHost for DelegatingHost {
+        async fn emit(&self, kind: EventKind) {
+            self.parent.emit(kind).await
+        }
+        async fn approve(&self, c: &str, tool: &str, i: &Value, risk: ToolRisk) -> Decision {
+            self.parent.approve(c, tool, i, risk).await
+        }
+        async fn delegate(
+            &self,
+            agent: harness_core::agent::AgentSpec,
+            task: String,
+            refs: SharedRefs,
+            cancel: tokio_util::sync::CancellationToken,
+            started: Box<dyn FnOnce(SessionId) + Send>,
+        ) -> Result<harness_core::backend::DelegateOutcome, String> {
+            let child = SessionId::new();
+            started(child);
+            let mut c = ctx(&self.child, &task, &self.cwd);
+            c.agent = Some(agent);
+            c.extra.refs = Some(refs);
+            c.cancel = cancel;
+            let out = self.backend.run_turn(c).await;
+            let ev = self.child.events.lock().unwrap();
+            let text = ev
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    EventKind::AssistantMessage(m) if !m.text.is_empty() => Some(m.text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let sources = ev
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::ToolCallFinished(f) => Some(f.sources.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            Ok(harness_core::backend::DelegateOutcome {
+                child,
+                text,
+                reason: out.reason,
+                usage: out.usage,
+                sources,
+            })
+        }
+    }
+
+    /// A sub-task numbers its web results on from the parent's book, and the
+    /// delegate result carries the child's sources, so the labels in the
+    /// answer it hands back name the same pages in the parent.
+    #[tokio::test]
+    async fn delegated_answers_cite_in_the_parents_numbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(NativeBackend::new(
+            Arc::new(mock::Mock {
+                delay: Duration::from_millis(1),
+            }),
+            vec![Arc::new(FakeSearch)],
+            NativeConfig::default(),
+        ));
+        let host = DelegatingHost {
+            parent: RecHost::new(Decision::Allow),
+            child: RecHost::new(Decision::Allow),
+            backend: backend.clone(),
+            cwd: dir.path().to_path_buf(),
+        };
+        let researcher = harness_core::agent::AgentSpec {
+            agent_id: "researcher".into(),
+            tools: harness_core::agent::ToolSelection::List(vec!["web_search".into()]),
+            ..scout()
+        };
+        let lead = harness_core::agent::AgentSpec {
+            agent_id: "lead".into(),
+            tools: harness_core::agent::ToolSelection::List(vec![]),
+            delegates: vec![researcher],
+            ..scout()
+        };
+        let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+            call_id: "old".into(),
+            ok: true,
+            output: String::new(),
+            exit_code: None,
+            truncated: false,
+            sources: vec![
+                Source {
+                    id: "S1".into(),
+                    url: "https://fixed.example/".into(),
+                    title: "old".into(),
+                },
+                Source {
+                    id: "S2".into(),
+                    url: "https://other.example/".into(),
+                    title: "old".into(),
+                },
+            ],
+        })
+        .into_parts();
+        let mut c = ctx(
+            &host.parent,
+            "delegate: researcher=cite: https://new.example/",
+            dir.path(),
+        );
+        c.agent = Some(lead);
+        c.history = vec![RawEvent {
+            session_id: SessionId::new(),
+            seq: 1,
+            ts_ms: 0,
+            kind,
+            payload,
+        }];
+        // Coerce the host to the trait object the context holds.
+        let parent_host: &dyn TurnHost = &host;
+        c.host = parent_host;
+        assert_eq!(backend.run_turn(c).await.reason, TurnEndReason::Completed);
+
+        let labels = |sources: &[Source]| -> Vec<(String, String)> {
+            sources
+                .iter()
+                .map(|s| (s.id.clone(), s.url.clone()))
+                .collect()
+        };
+        let want = vec![
+            ("S3".to_string(), "https://new.example/".to_string()),
+            ("S1".to_string(), "https://fixed.example/".to_string()),
+        ];
+        let child = host.child.events.lock().unwrap();
+        let searched = child
+            .iter()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some(f.sources.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(labels(&searched), want);
+        drop(child);
+
+        let parent = host.parent.events.lock().unwrap();
+        let delegated = parent
+            .iter()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            delegated.output.contains("Answer [S3] and [S1]"),
+            "{}",
+            delegated.output
+        );
+        assert_eq!(labels(&delegated.sources), want);
+        let EventKind::AssistantMessage(m) = parent.last().unwrap() else {
+            panic!("{:?}", parent.last())
+        };
+        assert_eq!(
+            m.text,
+            "Sub-agent said: Answer [S3] and [S1], both [S3][S1]. Unknown [S9]."
+        );
     }
 
     #[tokio::test]

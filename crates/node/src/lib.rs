@@ -276,6 +276,7 @@ impl NodeRuntime {
                 let extra = harness_core::backend::TurnExtra {
                     savings: savings.unwrap_or_default(),
                     context,
+                    refs: None,
                 };
                 match self.session(session_id) {
                     Some(s) => s.prompt(text, agent, attachments, compare, extra).await,

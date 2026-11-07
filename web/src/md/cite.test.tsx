@@ -2,6 +2,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 import { Markdown } from "../components/Markdown";
+import { sourceKeys } from "../lib/rich";
 import type { Source } from "../types";
 import { MessageCtx, NONE } from "./context";
 import { labelRuns } from "./remark-cite";
@@ -63,6 +64,39 @@ describe("citation pills", () => {
   test("labels inside emphasis, lists and tables still resolve", () => {
     const out = md("*fast [S1]*\n\n- item [S2]\n\n| a |\n|---|\n| [S1] |\n");
     expect(pills(out)).toEqual(["a.example", "b.example", "a.example"]);
+  });
+
+  test("a header cell's label stays text: the cell is a sort button", () => {
+    const out = md("| a [S1] | b |\n|---|---|\n| x [S2] | y |\n");
+    const head = out.slice(out.indexOf("<thead>"), out.indexOf("</thead>"));
+    expect(head).toContain(">a [S1]</button>");
+    expect(head).not.toContain("cite");
+    expect(pills(out)).toEqual(["b.example"]);
+  });
+
+  test("a callout title's label is a pill in the title", () => {
+    const out = md("> [!NOTE] Title [S1]\n> body [S2]");
+    const head = out.slice(out.indexOf('<div class="callout-head">'), out.indexOf("</div>"));
+    expect(head).toContain('<span class="callout-title">Title <span class="cite-wrap">');
+    expect(pills(head)).toEqual(["a.example"]);
+    expect(pills(out)).toEqual(["a.example", "b.example"]);
+    expect(out).not.toContain("[S1]");
+  });
+});
+
+describe("links to sources", () => {
+  const linked = (text: string) =>
+    renderToStaticMarkup(
+      <MessageCtx.Provider value={{ provenance: NONE, sources: sourceKeys(CITES), cites: CITES }}>
+        <Markdown text={text} done />
+      </MessageCtx.Provider>,
+    );
+  test("a link to a source page is marked verified", () => {
+    expect(linked("[Official docs](https://a.example/rust)")).toContain('class="link-source"');
+  });
+  test("not with a fragment the source did not have: the page's scripts can read it", () => {
+    const out = linked("[Official docs](https://a.example/rust#c2VjcmV0LXRva2VuLTEyMzQ1Njc4OTA)");
+    expect(out).not.toContain("link-source");
   });
 });
 

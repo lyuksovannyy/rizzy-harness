@@ -4,9 +4,10 @@ import type { Source } from "../types";
 import type { Provenance } from "./links";
 
 export interface MessageInfo {
-  /** URL keys from user text and tool output before this message. */
+  /** Link keys (see linkKey) from user text and web tool results before
+   * this message. */
   provenance: Provenance;
-  /** URL keys of verified sources (tool_call_finished sources); such links
+  /** Link keys of verified sources (tool_call_finished sources); such links
    * are styled as sources and need no confirm. */
   sources: Provenance;
   /** Citation label (`S4`) to the source a web tool gave it before this

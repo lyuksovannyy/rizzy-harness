@@ -1,6 +1,6 @@
 // Pure derivations over the folded timeline for rich message rendering.
 import type { Provenance } from "../md/links";
-import { parseUrl, urlKey, urlKeysIn } from "../md/links";
+import { parseUrl, seenKeys, urlKeysIn } from "../md/links";
 import type { Item, Source } from "../types";
 
 // User items and tool results never change once created, so their tokens
@@ -24,6 +24,14 @@ export const WEB_TOOLS = new Set(["web_search", "web_fetch"]);
 type ToolItem = Extract<Item, { type: "tool" }>;
 
 const isWeb = (it: Item): it is ToolItem => it.type === "tool" && WEB_TOOLS.has(it.tool);
+
+// Where citation labels resolve: the web tools' sources, and on a delegate
+// result the sources its sub-task's web tools recorded (the harness copies
+// them there; the sub-agent's answer cites them by the same labels). Only
+// the sources, never a delegate's output: that is the sub-agent's writing.
+const CITABLE = new Set([...WEB_TOOLS, "delegate"]);
+
+const citable = (it: Item): it is ToolItem => it.type === "tool" && CITABLE.has(it.tool);
 
 const counts = (it: Item) => it.type === "user" || (isWeb(it) && !!it.result);
 
@@ -53,7 +61,7 @@ function resultKeys(r: NonNullable<ToolItem["result"]>): string[] {
     keys = urlKeysIn(r.output);
     for (const s of r.sources ?? []) {
       const u = parseUrl(s.url);
-      if (u) keys.push(urlKey(u));
+      if (u) keys.push(...seenKeys(u));
     }
     keysCache.set(r, keys);
   }
@@ -70,17 +78,25 @@ const NO_SOURCES: ReadonlyMap<string, Source> = new Map();
 /** The sources a message's citation labels can name. */
 export type CiteMaps = (index: number) => ReadonlyMap<string, Source>;
 
+/** Changes exactly when citeMaps' input does: a web or delegate call that
+ * finished. */
+export function citeSignature(items: Item[]): number {
+  let n = 0;
+  for (const it of items) if (citable(it) && it.result) n++;
+  return n;
+}
+
 /**
- * For the item at an index: label to source, from every web tool result
- * before it (a later one wins for a label it repeats; labels are
- * session-stable, so that is the same page). Changes only when a web tool
- * finishes, like provenanceIndex.
+ * For the item at an index: label to source, from every web or delegate
+ * result before it (a later one wins for a label it repeats; labels are
+ * session-stable, and a sub-task numbers on from its parent, so that is the
+ * same page).
  */
 export function citeMaps(items: Item[]): CiteMaps {
   const steps: { from: number; map: ReadonlyMap<string, Source> }[] = [];
   let map = NO_SOURCES;
   items.forEach((it, i) => {
-    const sources = isWeb(it) ? it.result?.sources : undefined;
+    const sources = citable(it) ? it.result?.sources : undefined;
     if (!sources?.length) return;
     const next = new Map(map);
     for (const s of sources) next.set(s.id, s);
@@ -94,14 +110,14 @@ export function citeMaps(items: Item[]): CiteMaps {
 
 const sourceKeyCache = new WeakMap<ReadonlyMap<string, Source>, Provenance>();
 
-/** The URL keys of a cite map's sources: links to them are verified. */
+/** The link keys of a cite map's sources: links to them are verified. */
 export function sourceKeys(cites: ReadonlyMap<string, Source>): Provenance {
   let p = sourceKeyCache.get(cites);
   if (!p) {
     const keys = new Set<string>();
     for (const s of cites.values()) {
       const u = parseUrl(s.url);
-      if (u) keys.add(urlKey(u));
+      if (u) for (const k of seenKeys(u)) keys.add(k);
     }
     p = { has: (k) => keys.has(k) };
     sourceKeyCache.set(cites, p);

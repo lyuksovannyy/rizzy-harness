@@ -48,18 +48,33 @@ export function urlKey(u: URL): string {
   return s.startsWith("www.") ? s.slice(4) : s;
 }
 
+/** What a link is checked against: urlKey plus the fragment. The fragment
+ * never reaches the server, but scripts on the page can read it, so a link
+ * only counts as seen (or as a source) with exactly the fragment it was
+ * seen with, or with none. */
+export function linkKey(u: URL): string {
+  return urlKey(u) + u.hash;
+}
+
+/** The keys a seen URL vouches for: itself without its fragment, and with
+ * it when it has one. */
+export function seenKeys(u: URL): string[] {
+  const key = urlKey(u);
+  if (!key) return [];
+  return u.hash ? [key, key + u.hash] : [key];
+}
+
 // Same tokenizer as the server's provenance_ok.
 const SPLIT = /[\s<>"'`()[\]{}|]+/;
 
-/** URL keys of every URL-ish token in a text (anything with a dot). */
+/** Link keys of every URL-ish token in a text (anything with a dot). */
 export function urlKeysIn(text: string): string[] {
   const keys: string[] = [];
   for (const raw of text.split(SPLIT)) {
     const tok = raw.replace(/[.,;:!?]+$/, "");
     if (!tok.includes(".")) continue;
     const u = parseUrl(tok.startsWith("http://") || tok.startsWith("https://") ? tok : `https://${tok}`);
-    const key = u ? urlKey(u) : "";
-    if (key) keys.push(key);
+    if (u) keys.push(...seenKeys(u));
   }
   return keys;
 }
@@ -84,7 +99,7 @@ function tokenLike(s: string): boolean {
  * credentials before the host, hidden characters in a mail address).
  */
 export function needsConfirm(u: URL, provenance: Provenance): boolean {
-  if (provenance.has(urlKey(u))) return false;
+  if (provenance.has(linkKey(u))) return false;
   if (u.search !== "" || u.hash !== "") return true;
   if (u.protocol === "mailto:") {
     const addr = decodeSafe(u.pathname);
