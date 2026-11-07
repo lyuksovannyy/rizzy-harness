@@ -4,7 +4,8 @@
 // not freeze the page, and citations of web results (pills, footer, the
 // web status row), also those a delegated sub-task hands back, and ui
 // blocks (skeleton while streaming, the card, rejected and unknown blocks,
-// a progress block moved on over an agentic turn on the local node).
+// a progress block moved on over an agentic turn on the local node, and a
+// block cut off when that turn is stopped mid-message).
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -21,6 +22,17 @@ const URL_ = 'http://127.0.0.1:7797/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+/** WCAG contrast of an element's text colour on another's background. */
+async function contrast(fg, bg) {
+  const rgb = (s) => s.match(/[\d.]+/g).slice(0, 3).map(Number);
+  const lum = ([r, g, b]) => [r, g, b]
+    .map((c) => (c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
+    .reduce((a, c, i) => a + c * [0.2126, 0.7152, 0.0722][i], 0);
+  const a = lum(rgb(await fg.evaluate((el) => getComputedStyle(el).color)));
+  const b = lum(rgb(await bg.evaluate((el) => getComputedStyle(el).backgroundColor)));
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
 const HIDDEN = /[\u{061C}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{FEFF}\u{E000}-\u{F8FF}]/u;
 
 /** The characters of an element's first text node, in on-screen order. */
@@ -318,7 +330,7 @@ async function skipOnboarding(page) {
         cards: await card.count(),
         framed: await p.locator('.ui-card .ui-progress').count(),
         snapshots: await p.locator('.ui-progress-snapshot').evaluateAll((els) => els.map((el) => el.textContent)),
-        framedSnapshots: await p.locator('.ui-card .ui-progress-snapshot').count(),
+        snapshotFrom: await p.locator('.ui-card-snapshot:has(.ui-progress-snapshot) > .ui-from').allInnerTexts(),
         done: await card.locator('.ui-step-done').count(),
         steps: await card.locator('.ui-step').count(),
         status: await card.locator('.ui-progress-status').innerText(),
@@ -332,7 +344,7 @@ async function skipOnboarding(page) {
       cards: 1,
       framed: 1,
       snapshots: ['Working through 3 steps · 0/3 · Step 1', 'Working through 3 steps · 1/3 · Step 2'],
-      framedSnapshots: 0,
+      snapshotFrom: ['from General', 'from General'],
       done: 3,
       steps: 3,
       status: 'Done',
@@ -372,7 +384,51 @@ async function skipOnboarding(page) {
       steps: ['ui-step ui-step-stopped', 'ui-step ui-step-pending'],
       spinning: 0,
     }), 'stopped: ' + JSON.stringify(stoppedState));
-    log('progress: a cancelled turn leaves the card stopped, with the reason');
+    // The status colours are readable on the card in both themes: 4.5:1 for
+    // the status words, 3:1 for the step icon.
+    for (const colorScheme of ['light', 'dark']) {
+      await p.emulateMedia({ colorScheme });
+      const card = p.locator('.ui-card-progress');
+      const words = await contrast(stopped.locator('.ui-progress-status'), card);
+      const icon = await contrast(stopped.locator('.ui-step-stopped .ui-icon'), card);
+      check(words >= 4.5 && icon >= 3, `${colorScheme}: stopped status ${words.toFixed(2)}:1, icon ${icon.toFixed(2)}:1`);
+    }
+    await p.emulateMedia({ colorScheme: 'light' });
+    log('progress: a cancelled turn leaves the card stopped, with the reason, readable in both themes');
+
+    // A turn stopped while the next progress message streams: that message
+    // never reached Rust, so its fence has no block. It is a harness note,
+    // not half a JSON body as code, live and after a reload.
+    await p.click('.new-chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'progress: 3');
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await p.fill('.agentic-row input', R);
+    await p.click('.composer .send');
+    await p.locator('.approval button:has-text("Allow bash for this session")').click();
+    await p.locator('.msg.assistant.streaming .ui-skeleton').waitFor();
+    await p.click('.send.stop');
+    await idle();
+    const cutState = async () => {
+      const last = p.locator('.msg.assistant').last();
+      const text = await last.innerText();
+      return {
+        cut: await last.locator('.ui-cut').allInnerTexts(),
+        code: await last.locator('pre, .codeblock').count(),
+        json: text.includes('ui:progress') || text.includes('"steps"'),
+        card: await p.locator('.ui-card-progress .ui-progress-status').innerText(),
+      };
+    };
+    const wantCut = { cut: ['Cut off before it was finished'], code: 0, json: false, card: 'Stopped · turn cancelled' };
+    await p.locator('.msg.assistant .ui-cut').waitFor();
+    const cutLive = await cutState();
+    check(JSON.stringify(cutLive) === JSON.stringify(wantCut), 'cut off: ' + JSON.stringify(cutLive));
+    await p.screenshot({ path: `${S}/rich-6b-cut.png`, fullPage: true });
+    await p.reload();
+    await p.locator('.msg.assistant .ui-cut').waitFor();
+    const cutReloaded = await cutState();
+    check(JSON.stringify(cutReloaded) === JSON.stringify(wantCut), 'cut off after reload: ' + JSON.stringify(cutReloaded));
+    log('progress: a message stopped mid-block shows "cut off", never its partial JSON, also after reload');
 
     // 7. Citations: the labels of a web result become pills naming the
     // host, an unknown label stays text, and a footer lists what was cited.

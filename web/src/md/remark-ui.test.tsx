@@ -13,8 +13,8 @@ import { ProgressCtx } from "./context";
 import { fnv1a } from "./fnv";
 import { uiOpener } from "./remark-ui";
 
-const md = (text: string, done: boolean, blocks: readonly UiBlock[] = [], from: string | null = null) =>
-  renderToStaticMarkup(<Markdown text={text} done={done} blocks={blocks} from={from} />);
+const md = (text: string, done: boolean, blocks: readonly UiBlock[] = [], from: string | null = null, cut = false) =>
+  renderToStaticMarkup(<Markdown text={text} done={done} blocks={blocks} from={from} cut={cut} />);
 
 const count = (html: string, cls: string) => html.split(`class="${cls}`).length - 1;
 const unescape = (html: string) =>
@@ -29,12 +29,14 @@ describe("ui.json parity", () => {
     expect(count(md(c.text, false), "ui-skeleton")).toBe(c.web_marks);
     // Once final, each stored block the browser finds shows: a card for a
     // spec, the code and the reason for an error. A marked fence with no
-    // matching block stays code.
+    // matching block stays code, unless the text never closes it.
     const html = unescape(md(c.text, true, c.blocks));
     expect(count(html, "ui-card")).toBe(c.cards);
     expect(count(html, "ui-error")).toBe(c.errors);
     for (const b of c.blocks) if (b.error) expect(html).toContain(`: ${b.error}</div>`);
-    expect(count(html, "codeblock")).toBeGreaterThanOrEqual(c.web_marks - c.cards);
+    const cut = c.name === "unterminated at the end" ? 1 : 0;
+    expect(count(html, "ui-cut")).toBe(cut);
+    expect(count(html, "codeblock")).toBeGreaterThanOrEqual(c.web_marks - c.cards - cut);
   });
 
   test("the browser hashes what Rust hashed", () => {
@@ -98,19 +100,59 @@ describe("remark-ui", () => {
     expect(html).toContain("Could not show this question: interactive blocks are off for this agent");
   });
 
-  test("a progress block a later one replaced loses the card frame", () => {
+  test("a progress block a later one replaced is a compact frame that still names the agent", () => {
     const c = cases.find((c) => c.name === "every type")!;
     const progress = c.blocks.find((b) => b.type === "progress")!;
     const render = (slot: ProgressSlot) =>
       renderToStaticMarkup(
         <ProgressCtx.Provider value={new Map([[slotKey("m", progress.ordinal), slot]])}>
-          <Markdown text={c.text} done blocks={c.blocks} messageId="m" />
+          <Markdown text={c.text} done blocks={c.blocks} messageId="m" from="Coder" />
         </ProgressCtx.Provider>,
       );
     // The case has two progress blocks; only the first has a slot here.
     expect(count(render({ mode: "full", ended: false }), "ui-card ui-card-progress")).toBe(2);
-    expect(count(render({ mode: "snapshot", ended: false }), "ui-card ui-card-progress")).toBe(1);
-    expect(count(render({ mode: "snapshot", ended: false }), "ui-card")).toBe(c.cards - 1);
+    const snap = render({ mode: "snapshot", ended: false });
+    expect(count(snap, "ui-card ui-card-progress")).toBe(1);
+    expect(snap).toContain('<section class="ui-card-snapshot"><div class="ui-from">from Coder</div>');
+    // Every block, snapshot or card, sits under a "from" label.
+    expect(count(snap, "ui-from")).toBe(c.cards);
+  });
+
+  test("a message cut off mid-stream hides its unfinished fences", () => {
+    const text = 'Step 2 of 3.\n\n```ui:progress\n{\n  "id": "steps",\n  "steps": [';
+    const closed = "Done.\n\n```ui:choices\n{}\n```\n";
+    for (const t of [text, closed]) {
+      const html = md(t, true, [], null, true);
+      expect(html).toContain('<div class="ui-cut" role="note">Cut off before it was finished</div>');
+      expect(html).not.toMatch(/codeblock|steps|ui:progress|ui:choices/);
+    }
+    // A message that did finish keeps the code fallback for a closed fence
+    // Rust made no block of.
+    expect(md(closed, true)).toContain('<span class="lang">ui:choices</span>');
+    // A stored block still shows, even if the message was cut after it.
+    const c = cases.find((c) => c.name === "form with a refused field")!;
+    expect(count(md(c.text, true, c.blocks, null, true), "ui-card")).toBe(c.cards);
+  });
+
+  test("a fence the text never closes is cut off, even in a finished message", () => {
+    for (const text of [
+      '```ui:form\n{"id": "trip", "title": "Tr',
+      '```ui:form\n{"id": "trip", "title": "Tr\n',
+      "```ui:form",
+      "```ui:form\n{}\n``",
+      "````ui:form\n{}\n```",
+      "~~~ui:form\n{}\n```",
+      "Text first.\n\n```ui:chart\n{",
+    ]) {
+      const html = md(text, true);
+      expect(html, text).toContain('class="ui-cut"');
+      expect(html, text).not.toContain("codeblock");
+    }
+    for (const text of ["```ui:form\n{}\n```", "```ui:form\n{}\n   ```  ", "````ui:form\n{}\n`````", "~~~ui:form\n{}\n~~~"]) {
+      const html = md(text, true);
+      expect(html, text).not.toContain("ui-cut");
+      expect(html, text).toContain("codeblock");
+    }
   });
 
   test("opener lines", () => {

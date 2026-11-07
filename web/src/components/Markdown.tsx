@@ -58,13 +58,17 @@ export const Markdown = memo(function Markdown(props: {
   from?: string | null;
   /** The message's id, where its progress slots are looked up. */
   messageId?: string;
+  /** Shown as final although its stream never finished: its fences are
+   * cut off, not code. */
+  cut?: boolean;
 }) {
   const { text, done } = props;
   const md = useMemo(() => prepare(text), [text]);
   const blocks = props.blocks ?? NO_BLOCKS;
   const from = props.from ?? null;
   const messageId = props.messageId ?? null;
-  const ui = useMemo(() => ({ messageId, blocks, from }), [messageId, blocks, from]);
+  const cut = !!props.cut;
+  const ui = useMemo(() => ({ messageId, blocks, from, cut }), [messageId, blocks, from, cut]);
   return (
     <DoneCtx.Provider value={done}>
       <UiCtx.Provider value={ui}>

@@ -44,6 +44,11 @@
     --fg-2: #5d5d5d;
     --accent: #2563eb;
     --accent-fg: #ffffff;
+    /* The dark theme's status colours are pale; on light surfaces they need
+       to be this dark to reach 4.5:1 as text (theme.test.ts checks it). */
+    --ok: #177535;
+    --warn: #8a5d00;
+    --bad: #c4202b;
     --add-bg: #e6f6ec;
     --del-bg: #fbe9e9;
     --syn-kw: #cf222e;
@@ -1129,7 +1134,8 @@ pre.term.web-output {
 }
 
 /* ui blocks: a card the model filled in, inside harness chrome ("from …"),
-   a skeleton while it streams, and the reason when Rust rejected it. */
+   a skeleton while it streams, the reason when Rust rejected it, and a note
+   where the message was cut off before the block was finished. */
 .ui-card {
   margin: 10px 0;
   padding: 10px 14px 12px;
@@ -1142,7 +1148,8 @@ pre.term.web-output {
   color: var(--fg-2);
   font-size: 12px;
 }
-.ui-skeleton {
+.ui-skeleton,
+.ui-cut {
   margin: 10px 0;
   padding: 14px;
   border: 1px dashed var(--line);
@@ -1239,11 +1246,25 @@ pre.term.web-output {
 .ui-step-active .ui-icon { color: var(--accent); }
 .ui-step-done .ui-icon { color: var(--ok); }
 .ui-step-stopped .ui-icon { color: var(--warn); }
+/* A snapshot keeps its "from" label, inline, and a rule instead of the
+   card, so it still reads as the model's content, not a harness row. */
+.ui-card-snapshot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  margin: 6px 0;
+  padding: 1px 0 1px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--fg-2) 45%, transparent);
+}
+.ui-card-snapshot .ui-from {
+  margin: 0;
+}
 .ui-progress-snapshot {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  margin: 6px 0;
+  min-width: 0;
   color: var(--fg-2);
   font-size: 13px;
 }

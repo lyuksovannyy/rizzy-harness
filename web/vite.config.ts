@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -25,4 +26,7 @@ export default defineConfig({
   // The highlighter worker loads each grammar as its own chunk, which needs
   // an ES module worker.
   worker: { format: "es", plugins: () => [noEntityDecoding] },
+  // theme.test.ts reads the stylesheet as text (`?raw`); vitest otherwise
+  // turns every CSS import into an empty string.
+  test: { css: { include: [/styles\.css/] } },
 });

@@ -33,11 +33,14 @@ export interface UiInfo {
   blocks: readonly UiBlock[];
   /** The agent's display name; null reads "the assistant". */
   from: string | null;
+  /** The message stopped mid-stream (its turn was cancelled, failed or
+   * interrupted), so Rust never stored its blocks. */
+  cut: boolean;
 }
 
 export const NO_BLOCKS: readonly UiBlock[] = [];
 
-export const UiCtx = createContext<UiInfo>({ messageId: null, blocks: NO_BLOCKS, from: null });
+export const UiCtx = createContext<UiInfo>({ messageId: null, blocks: NO_BLOCKS, from: null, cut: false });
 
 /** Where each progress block of the conversation stands in its turn
  * (ui/blocks.ts progressSlots). Conversation provides it above every

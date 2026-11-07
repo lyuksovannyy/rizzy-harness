@@ -58,6 +58,7 @@ const en = {
   "ui.what.progress": "progress",
   "ui.what.chart": "chart",
   "ui.error": "Could not show this {what}: {error}",
+  "ui.cut": "Cut off before it was finished",
   "ui.required": "required",
   "ui.secret": "This asks for a secret. Never type passwords or keys into a chat; add keys in Settings.",
   "ui.step.pending": "Pending",

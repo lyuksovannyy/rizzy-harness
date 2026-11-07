@@ -137,7 +137,8 @@ export default function Conversation(props: {
   const webGroups = groupWeb(items);
   let groupedUntil = -1;
   // Items before the running turn's user message are final even if their
-  // stream was cut off (an interrupted turn leaves done=false).
+  // stream was cut off (a cancelled, failed or interrupted turn leaves
+  // done=false); such a message is shown as cut off.
   const liveFrom = running ? items.findLastIndex((x) => x.type === "user") : Infinity;
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
@@ -261,6 +262,7 @@ export default function Conversation(props: {
                             <Markdown
                               text={a.text}
                               done={a.done || !busy}
+                              cut={!a.done && !busy}
                               blocks={a.blocks}
                               from={a.author ? agentName(a.author) : null}
                               messageId={a.message_id}
@@ -299,6 +301,7 @@ export default function Conversation(props: {
                           <Markdown
                             text={it.text}
                             done={final}
+                            cut={final && !it.done}
                             blocks={it.blocks}
                             from={it.author ? agentName(it.author) : null}
                             messageId={it.message_id}
