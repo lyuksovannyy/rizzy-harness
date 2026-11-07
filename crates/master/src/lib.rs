@@ -4,11 +4,14 @@
 mod assets;
 pub mod attachments;
 pub mod auth;
+pub mod avatars;
 pub mod config;
 mod favicon;
 mod http;
+pub mod model_cache;
 pub mod node_setups;
 pub mod nodes;
+pub mod notices;
 pub mod prefs;
 pub mod presets;
 pub mod providers;
@@ -60,6 +63,9 @@ pub struct ModelInfo {
     pub vision: bool,
     pub tools: bool,
     pub default: bool,
+    /// Missing from its provider's latest listing; the composer does not
+    /// offer it, but sessions and agents naming it still resolve.
+    pub unavailable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -383,10 +389,86 @@ impl Master {
 
     /// The admin's default model for `agent_id`, if one is assigned.
     pub fn agent_model(&self, agent_id: &str) -> Option<String> {
+        self.agent_chain(agent_id).map(|c| c.model)
+    }
+
+    /// The admin's model for `agent_id` and its fallbacks, if assigned.
+    pub fn agent_chain(&self, agent_id: &str) -> Option<config::AgentChain> {
         let cfg = self.provider_runtime()?.config();
-        cfg.agent_models
-            .get(agent_id)
-            .and_then(|m| cfg.canonical_model(m))
+        let c = cfg.agent_models.get(agent_id)?;
+        Some(config::AgentChain {
+            model: cfg.canonical_model(&c.model)?,
+            fallbacks: c
+                .fallbacks
+                .iter()
+                .filter_map(|m| cfg.canonical_model(m))
+                .collect(),
+        })
+    }
+
+    /// The agent's main model: its file's `model`, else the admin's choice,
+    /// else the global default.
+    pub fn agent_main_model(&self, agent: &harness_agents::Agent) -> Option<String> {
+        let cfg = self.provider_runtime()?.config();
+        match &agent.spec.model {
+            Some(m) => Some(cfg.canonical_model(m).unwrap_or_else(|| m.clone())),
+            None => cfg.agent_default(&agent.id),
+        }
+    }
+
+    /// How `agent_id` looks: the admin's choice or the one its id gives.
+    pub fn agent_avatar(&self, agent_id: &str) -> avatars::AgentAvatar {
+        self.provider_runtime()
+            .and_then(|rt| rt.config().agent_avatars.get(agent_id).copied())
+            .unwrap_or_else(|| avatars::AgentAvatar::default_for(agent_id))
+    }
+
+    /// The fallbacks of `agent_id` running on `model`: its own chain's, else
+    /// (an agent without one runs on the inherited default) those of the
+    /// default agent's chain when `model` is that chain's main model. All of
+    /// them, unavailable ones included; `set_fallbacks` filters.
+    pub fn agent_fallbacks(&self, agent_id: &str, model: Option<&str>) -> Vec<String> {
+        let Some(cfg) = self.provider_runtime().map(|rt| rt.config()) else {
+            return Vec::new();
+        };
+        let model = model.and_then(|m| cfg.canonical_model(m).or(Some(m.to_string())));
+        self.agent_chain(agent_id)
+            .or_else(|| {
+                self.agent_chain(harness_agents::DEFAULT_AGENT)
+                    .filter(|g| Some(&g.model) == model.as_ref())
+            })
+            .map(|c| c.fallbacks)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| Some(f) != model.as_ref())
+            .collect()
+    }
+
+    /// Put the agent's fallbacks on `spec`, which runs on `model`: the
+    /// available ones, in order, and `model` itself among the unavailable
+    /// when its provider no longer lists it; and the models of that chain
+    /// that take no reasoning effort.
+    fn set_fallbacks(&self, spec: &mut harness_core::agent::AgentSpec, model: Option<&str>) {
+        let Some(cfg) = self.provider_runtime().map(|rt| rt.config()) else {
+            return;
+        };
+        let model = model.and_then(|m| cfg.canonical_model(m).or(Some(m.to_string())));
+        spec.fallbacks = self
+            .agent_fallbacks(&spec.agent_id, model.as_deref())
+            .into_iter()
+            .filter(|f| !cfg.model_unavailable(f))
+            .collect();
+        spec.unavailable = model
+            .clone()
+            .filter(|m| cfg.model_unavailable(m))
+            .into_iter()
+            .collect();
+        spec.no_effort = model
+            .iter()
+            .chain(&spec.fallbacks)
+            .filter(|m| !self.find_model(m).is_some_and(|m| m.effort))
+            .cloned()
+            .collect();
     }
 
     /// Resolve an agent id (or the default) to the spec a node runs, dropping
@@ -439,17 +521,21 @@ impl Master {
                 .or_else(|| models.iter().find(|m| m.default).map(|m| m.id.clone()));
         }
         let model = spec.model.clone().or(session_model.map(str::to_string));
-        let effort_ok = model
-            .as_deref()
-            .and_then(|m| self.find_model(m))
-            .is_some_and(|m| m.effort);
-        if !effort_ok {
+        self.set_fallbacks(&mut spec, model.as_deref());
+        // The first model of the chain that takes an effort; the node leaves
+        // it off for the others (`no_effort`).
+        let takes_effort = model
+            .iter()
+            .chain(&spec.fallbacks)
+            .find(|m| self.find_model(m).is_some_and(|m| m.effort))
+            .cloned();
+        if takes_effort.is_none() {
             spec.effort = None;
         } else if spec.effort.is_none() {
             // The provider's default effort, for models that take one.
             spec.effort = self.provider_runtime().and_then(|rt| {
                 let cfg = rt.config();
-                let (p, _) = cfg.resolve_model(model.as_deref()?)?;
+                let (p, _) = cfg.resolve_model(takes_effort.as_deref()?)?;
                 serde_json::to_value(p.effort?)
                     .ok()?
                     .as_str()
@@ -470,6 +556,17 @@ impl Master {
                 c.caps = None;
                 if c.model.is_none() {
                     c.model = self.agent_model(&d.id);
+                }
+                if c.model.is_some() {
+                    let m = c.model.clone();
+                    self.set_fallbacks(&mut c, m.as_deref());
+                } else {
+                    // A child without a model of its own runs on the
+                    // parent's, with the parent's chain.
+                    c.model = model.clone();
+                    c.fallbacks = spec.fallbacks.clone();
+                    c.unavailable = spec.unavailable.clone();
+                    c.no_effort = spec.no_effort.clone();
                 }
                 c
             })

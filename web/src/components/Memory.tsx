@@ -1,9 +1,11 @@
 // Memory: what the assistant remembers about you. Proposals from chats wait
 // here for a confirm; only confirmed facts are used.
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { ApiStyle, FactKind, MemoryCfg, MemoryFact, MemorySource, Preset, ProviderModel, ProviderState } from "../types";
+import { embedFirst } from "../lib/models";
+import type { FactKind, MemoryCfg, MemoryFact, Preset, ProviderModel, ProvidersState } from "../types";
 import { ModelPicker } from "./ModelPicker";
+import { ProviderForm } from "./ProviderForm";
 import { Seg } from "./Seg";
 
 const KIND_LABEL: Record<FactKind, string> = { fact: "Fact", preference: "Preference", location: "Location" };
@@ -145,105 +147,135 @@ export function MemoryPage(props: { version: number }) {
   );
 }
 
-/** "embedding" in the id or name first, then "embed", then the rest. */
-export function embedRank(m: ProviderModel): number {
-  const s = `${m.id} ${m.name ?? ""}`.toLowerCase();
-  return s.includes("embedding") ? 0 : s.includes("embed") ? 1 : 2;
-}
-
-export const embedFirst = (a: ProviderModel, b: ProviderModel) => embedRank(a) - embedRank(b) || a.id.localeCompare(b.id);
-
 const OLLAMA_URL = "http://localhost:11434/v1";
 type PresetPick = Preset | "custom";
 const PICK_LABEL: Record<PresetPick, string> = { fast: "Fast", balanced: "Balanced", best: "Best", custom: "Custom" };
 const errText = (x: unknown) => (x instanceof Error ? x.message : String(x));
 
+/** Where embeddings come from in the form: a configured provider, Ollama,
+ * or a provider registered here (saved as a provider source). */
+type From = `provider:${string}` | "ollama" | "custom";
+
 interface Listing {
-  /** Which endpoint it lists: `provider:<id>`, `ollama:<url>`, `custom:<url>`. */
-  tag: string;
   models: ProviderModel[] | null;
+  fetched: number | null;
   error: string | null;
   busy: boolean;
 }
 
-/** One model listing at a time, through the provider test endpoint. */
-function useListing() {
-  const [listing, setListing] = useState<Listing | null>(null);
-  const list = useCallback(async (tag: string, req: Parameters<typeof api.testProvider>[0]) => {
-    setListing({ tag, models: null, error: null, busy: true });
-    const done = (l: Omit<Listing, "tag" | "busy">) => setListing((s) => (s?.tag === tag ? { tag, busy: false, ...l } : s));
+/** Model listings by source: a provider's is the server's cache, Ollama's
+ * is asked for. Each is fetched once; the picker's refresh asks again. */
+function useListings() {
+  const [all, setAll] = useState<Record<string, Listing>>({});
+  const run = useCallback(async (tag: string, get: () => Promise<{ models: ProviderModel[]; fetched: number | null }>) => {
+    setAll((a) => ({ ...a, [tag]: { models: a[tag]?.models ?? null, fetched: a[tag]?.fetched ?? null, error: null, busy: true } }));
     try {
-      const r = await api.testProvider(req);
-      done(r.ok ? { models: r.models, error: null } : { models: null, error: r.error });
+      const r = await get();
+      setAll((a) => ({ ...a, [tag]: { ...r, error: null, busy: false } }));
     } catch (x) {
-      done({ models: null, error: errText(x) });
+      setAll((a) => ({ ...a, [tag]: { models: a[tag]?.models ?? null, fetched: a[tag]?.fetched ?? null, error: errText(x), busy: false } }));
     }
   }, []);
-  return [listing, list] as const;
+  return [all, run] as const;
 }
 
+const providerList = (id: string, refresh: boolean) => async () => {
+  let l = refresh ? await api.refreshProviderModels(id) : await api.providerModels(id);
+  // Nothing cached: list once.
+  if (!refresh && !l.models.length) l = await api.refreshProviderModels(id);
+  return { models: l.models, fetched: l.fetched_ms };
+};
+const ollamaList = (url: string) => async () => {
+  const r = await api.testProvider({ preset: "ollama", base_url: url });
+  if (!r.ok) throw new Error(r.error);
+  return { models: r.models, fetched: Date.now() };
+};
+
+/** A model id the listing does not have, as an entry the picker can show. */
+const byHand = (id: string): ProviderModel => ({
+  id,
+  name: null,
+  context: null,
+  max_output: null,
+  effort: null,
+  vision: null,
+  tools: null,
+  custom: true,
+  unavailable: false,
+  missing_since: null,
+});
+
 /** Admin: recall by keywords, or by meaning through an embeddings model
- * from a configured provider, Ollama, or another endpoint. */
+ * from a configured provider, Ollama, or a provider registered here. */
 export function MemoryCfgForm(props: {
   onSaved?: () => void;
   saveLabel?: string;
   /** Extra buttons at the start of the save row (onboarding's Back). */
   actions?: ReactNode;
+  /** The providers, when the page keeps them (onboarding); else loaded here. */
+  providers?: ProvidersState | null;
+  onProviders?: (s: ProvidersState) => void;
 }) {
   const [cfg, setCfg] = useState<MemoryCfg | null>(null);
-  const [providers, setProviders] = useState<ProviderState[]>([]);
+  const [loaded, setLoaded] = useState<ProvidersState | null>(null);
+  const pstate = props.providers ?? loaded;
+  const providers = pstate?.providers.filter((p) => p.kind !== "mock") ?? [];
   const [recall, setRecall] = useState<MemoryCfg["recall"]>("keywords");
-  const [source, setSource] = useState<MemorySource>("ollama");
-  const [providerId, setProviderId] = useState("");
+  const [from, setFrom] = useState<From>("ollama");
   const [ollamaUrl, setOllamaUrl] = useState(OLLAMA_URL);
-  const [customUrl, setCustomUrl] = useState("");
-  const [style, setStyle] = useState<ApiStyle>("openai");
-  const [key, setKey] = useState("");
   const [pick, setPick] = useState<PresetPick>("balanced");
-  // Each source keeps its own model id while the admin switches around.
-  const [models, setModels] = useState<Record<MemorySource, string>>({ provider: "", ollama: "", custom: "" });
-  const [listing, list] = useListing();
+  // Each source keeps its own model, and models added by hand, while the
+  // admin switches around (keys: `provider:<id>`, `ollama`).
+  const [models, setModels] = useState<Record<string, string>>({});
+  const [extra, setExtra] = useState<Record<string, ProviderModel[]>>({});
+  // The registration form stays as filled once opened.
+  const [registering, setRegistering] = useState(false);
+  const [listings, list] = useListings();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const given = useRef(props.providers);
 
   useEffect(() => {
-    Promise.all([
-      api.memoryCfg(),
-      api
-        .providers()
-        .then((s) => s.providers.filter((p) => p.kind !== "mock"))
-        .catch(() => [] as ProviderState[]),
-    ])
+    Promise.all([api.memoryCfg(), given.current ? Promise.resolve(given.current) : api.providers().catch(() => null)])
       .then(([c, ps]) => {
+        if (!given.current) setLoaded(ps);
+        const list = ps?.providers.filter((p) => p.kind !== "mock") ?? [];
         setCfg(c);
-        setProviders(ps);
         setRecall(c.recall);
-        const usable = c.source !== "provider" || ps.some((p) => p.id === c.provider_id);
-        setSource(c.recall === "meaning" && usable ? c.source : ps.length ? "provider" : "ollama");
-        setProviderId(ps.some((p) => p.id === c.provider_id) ? c.provider_id! : (ps[0]?.id ?? ""));
+        const meaning = c.recall === "meaning";
+        if (meaning && c.source === "provider" && list.some((p) => p.id === c.provider_id)) setFrom(`provider:${c.provider_id}`);
+        else if (meaning && c.source === "ollama") setFrom("ollama");
+        else if (meaning && c.source === "custom") setFrom("custom");
+        else setFrom(list[0] ? `provider:${list[0].id}` : "ollama");
         if (c.source === "ollama" && c.embeddings_url) setOllamaUrl(c.embeddings_url);
-        if (c.source === "custom") setCustomUrl(c.embeddings_url);
-        setStyle(c.api_style);
         setPick(c.source === "ollama" && c.embeddings_model ? "custom" : c.preset);
-        setModels((m) => ({ ...m, [c.source]: c.embeddings_model }));
+        if (c.source === "provider" && c.provider_id) setModels({ [`provider:${c.provider_id}`]: c.embeddings_model });
+        if (c.source === "ollama") setModels({ ollama: c.embeddings_model });
       })
       .catch((x) => setErr(errText(x)));
   }, []);
 
-  const provider = providers.find((p) => p.id === providerId);
   const meaning = recall === "meaning";
-  // The provider's listing and Ollama's come by themselves; a custom
-  // endpoint is listed on request (it may need a key first).
+  const providerId = from.startsWith("provider:") ? from.slice("provider:".length) : null;
+  const provider = providers.find((p) => p.id === providerId);
+  const tag = provider ? from : from === "ollama" ? `ollama:${ollamaUrl.trim()}` : null;
+  const listing = tag ? listings[tag] : undefined;
+  // A provider's cached listing loads when its tab is first shown; Ollama
+  // is asked once per URL, after typing stops. Never again by themselves.
   useEffect(() => {
-    if (!meaning || source !== "provider" || !provider) return;
-    void list(`provider:${provider.id}`, { preset: provider.preset, base_url: provider.base_url, provider_id: provider.id });
-  }, [meaning, source, provider, list]);
+    if (!meaning || !provider || listings[`provider:${provider.id}`]) return;
+    void list(`provider:${provider.id}`, providerList(provider.id, false));
+  }, [meaning, provider, listings, list]);
   useEffect(() => {
-    if (!meaning || source !== "ollama" || pick !== "custom" || !ollamaUrl.trim()) return;
-    const t = setTimeout(() => void list(`ollama:${ollamaUrl.trim()}`, { preset: "ollama", base_url: ollamaUrl.trim() }), 400);
+    const url = ollamaUrl.trim();
+    if (!meaning || from !== "ollama" || pick !== "custom" || !url || listings[`ollama:${url}`]) return;
+    const t = setTimeout(() => void list(`ollama:${url}`, ollamaList(url)), 400);
     return () => clearTimeout(t);
-  }, [meaning, source, pick, ollamaUrl, list]);
+  }, [meaning, from, pick, ollamaUrl, listings, list]);
+  useEffect(() => {
+    if (meaning && from === "custom") setRegistering(true);
+  }, [meaning, from]);
 
   // Nothing to set here; onboarding still needs a way on.
   const onward = props.onSaved && (
@@ -271,73 +303,93 @@ export function MemoryCfgForm(props: {
     );
   }
 
-  const model = models[source];
-  const setModel = (v: string) => setModels((m) => ({ ...m, [source]: v }));
+  const slot = provider ? from : "ollama";
+  const model = models[slot] ?? "";
+  const setModel = (v: string) => setModels((m) => ({ ...m, [slot]: v }));
   const preset = cfg.presets.find((p) => p.id === pick);
-  const tag =
-    source === "provider" ? `provider:${providerId}` : source === "ollama" ? `ollama:${ollamaUrl.trim()}` : `custom:${style}:${customUrl.trim()}`;
-  const shown = listing?.tag === tag ? listing : null;
-  const keyNote =
-    cfg.source === "custom" && cfg.key === "stored"
-      ? customUrl.trim() === cfg.embeddings_url
-        ? "· a key is stored; leave empty to keep"
-        : "· a new endpoint needs its key again"
-      : "· stored only on this server (0600)";
-  const needsModel = source !== "ollama" || pick === "custom";
-  const ready = !meaning || ((source !== "provider" || !!provider) && (source !== "custom" || !!customUrl.trim()) && (!needsModel || !!model.trim()));
+  const keep = pick === "custom" ? cfg.preset : pick;
+  const needsModel = from !== "ollama" || pick === "custom";
+  const ready = !meaning || (from !== "custom" && (from !== "ollama" || !!ollamaUrl.trim()) && (from === "ollama" || !!provider) && (!needsModel || !!model.trim()));
 
-  const picker = (
+  // The listing, models added by hand, and the saved model even when
+  // neither has it.
+  const added = extra[slot] ?? [];
+  const shown = [...added, ...(listing?.models ?? []).filter((m) => !added.some((x) => x.id === m.id))];
+  if (model && !shown.some((m) => m.id === model)) shown.unshift(byHand(model));
+  const target = provider
+    ? { provider_id: provider.id, preset: provider.preset, base_url: provider.base_url, kind: provider.kind, memory: true }
+    : { preset: "ollama", base_url: ollamaUrl.trim(), kind: "openai" as const, memory: true };
+  const picker = tag && (
     <>
-      {shown?.busy && <div className="muted small">Listing models…</div>}
-      {shown?.error && <div className="error-text small">{shown.error}</div>}
-      {!!shown?.models?.length && (
-        <ModelPicker
-          label="Embeddings model"
-          single
-          models={shown.models}
-          sort={embedFirst}
-          selected={model ? [model] : []}
-          onChange={(ids) => setModel(ids[0] ?? "")}
-        />
-      )}
-      {/* A listing may leave out embeddings models (many /models list chat
-          models only), so an id can always be typed. */}
-      <label>
-        {shown?.models?.length ? "Or type a model id" : "Embeddings model"}
-        <input
-          className="mono"
-          value={model}
-          placeholder={source === "ollama" ? "e.g. nomic-embed-text" : "e.g. text-embedding-3-small"}
-          onChange={(e) => setModel(e.target.value)}
-        />
-      </label>
+      {listing?.busy && !listing.models && <div className="muted small">Listing models…</div>}
+      {listing?.error && <div className="error-text small">{listing.error}</div>}
+      <ModelPicker
+        label="Embeddings model"
+        mode="single"
+        embeddings
+        models={shown}
+        sort={embedFirst}
+        selected={model ? [model] : []}
+        onChange={(ids) => setModel(ids[0] ?? "")}
+        onRefresh={() => void list(tag, provider ? providerList(provider.id, true) : ollamaList(ollamaUrl.trim()))}
+        refreshing={!!listing?.busy}
+        fetchedMs={provider ? listing?.fetched : null}
+        custom={{
+          test: () => target,
+          onSave: (m, was) => {
+            setExtra((x) => ({ ...x, [slot]: [...(x[slot] ?? []).filter((y) => y.id !== m.id && y.id !== was), m] }));
+            setModel(m.id);
+          },
+          onRemove: (id) => {
+            setExtra((x) => ({ ...x, [slot]: (x[slot] ?? []).filter((y) => y.id !== id) }));
+            if (model === id) setModel("");
+          },
+        }}
+      />
     </>
   );
+
+  // A provider registered for memory: memory then uses it.
+  const registered = async (s: ProvidersState, saved: { id: string; embeddings: string | null }) => {
+    if (!props.providers) setLoaded(s);
+    props.onProviders?.(s);
+    setErr(null);
+    setMsg(null);
+    try {
+      const c = await api.saveMemoryCfg({
+        recall: "meaning",
+        source: "provider",
+        provider_id: saved.id,
+        embeddings_model: saved.embeddings ?? "",
+        preset: keep,
+      });
+      setCfg(c);
+      setFrom(`provider:${saved.id}`);
+      setModels((m) => ({ ...m, [`provider:${saved.id}`]: saved.embeddings ?? "" }));
+      setMsg(c.active_model ? `Using ${c.active_model}.` : "Saved.");
+      props.onSaved?.();
+    } catch (x) {
+      setErr(errText(x));
+    }
+  };
 
   return (
     <form
       className="form stack"
       onSubmit={async (e) => {
         e.preventDefault();
+        // The registration form saves by its own button.
+        if (meaning && from === "custom") return;
         setBusy(true);
         setErr(null);
         setMsg(null);
         try {
-          const keep = pick === "custom" ? cfg.preset : pick;
-          const body: Parameters<typeof api.saveMemoryCfg>[0] = { recall, source, preset: keep };
-          if (meaning && source === "provider") Object.assign(body, { provider_id: providerId, embeddings_model: model.trim() });
-          if (meaning && source === "ollama")
+          const body: Parameters<typeof api.saveMemoryCfg>[0] = { recall, source: provider ? "provider" : from === "ollama" ? "ollama" : cfg.source, preset: keep };
+          if (meaning && provider) Object.assign(body, { provider_id: provider.id, embeddings_model: model.trim() });
+          if (meaning && from === "ollama")
             Object.assign(body, { embeddings_url: ollamaUrl.trim(), embeddings_model: pick === "custom" ? model.trim() : "" });
-          if (meaning && source === "custom")
-            Object.assign(body, {
-              embeddings_url: customUrl.trim(),
-              api_style: style,
-              embeddings_model: model.trim(),
-              ...(key ? { embeddings_key: key } : {}),
-            });
           const c = await api.saveMemoryCfg(body);
           setCfg(c);
-          setKey("");
           setMsg(c.active_model ? `Using ${c.active_model}.` : "Keyword recall only.");
           props.onSaved?.();
         } catch (x) {
@@ -370,41 +422,26 @@ export function MemoryCfgForm(props: {
             <span>Embeddings from</span>
             <Seg
               label="embeddings source"
-              value={source}
+              wrap={providers.length > 1}
+              value={from}
               options={[
-                ...(providers.length ? [{ value: "provider" as const, label: provider?.name ?? providers[0]!.name }] : []),
-                { value: "ollama", label: "Ollama" },
-                { value: "custom", label: "Custom" },
+                ...providers.map((p) => ({ value: `provider:${p.id}` as From, label: p.name })),
+                { value: "ollama" as const, label: "Ollama" },
+                { value: "custom" as const, label: "Custom" },
               ]}
-              onChange={setSource}
+              onChange={setFrom}
             />
           </div>
-          {source === "provider" && (
+          {provider && (
             <>
-              {providers.length > 1 && (
-                <label>
-                  Provider
-                  <select
-                    value={providerId}
-                    onChange={(e) => {
-                      // Another provider's model ids are not this one's.
-                      setProviderId(e.target.value);
-                      setModels((m) => ({ ...m, provider: "" }));
-                    }}
-                  >
-                    {providers.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              <span className="field-hint">Uses {provider?.name}'s endpoint and key. Many providers offer embeddings models.</span>
+              <span className="field-hint">
+                Uses {provider.name}'s endpoint and key. Many providers offer embeddings models; listings often leave them out, so
+                add one by hand when it is missing.
+              </span>
               {picker}
             </>
           )}
-          {source === "ollama" && (
+          {from === "ollama" && (
             <>
               <label>
                 Ollama endpoint
@@ -427,60 +464,42 @@ export function MemoryCfgForm(props: {
               {pick === "custom" && picker}
             </>
           )}
-          {source === "custom" && (
-            <>
-              <label>
-                Embeddings endpoint (OpenAI &amp; Anthropic compatible)
-                <input className="mono" value={customUrl} placeholder="https://…/v1" onChange={(e) => setCustomUrl(e.target.value)} />
-              </label>
-              <div className="field">
-                <span>API style</span>
-                <Seg
-                  label="API style"
-                  value={style}
-                  options={[
-                    { value: "openai", label: "OpenAI" },
-                    { value: "anthropic", label: "Anthropic" },
-                  ]}
-                  onChange={setStyle}
-                />
-              </div>
-              <label>
-                <span>
-                  API key <span className="muted">(optional) {keyNote}</span>
-                </span>
-                <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} />
-              </label>
-              <div className="row">
-                <button
-                  type="button"
-                  disabled={!customUrl.trim() || !!shown?.busy}
-                  onClick={() =>
-                    void list(tag, {
-                      preset: style === "anthropic" ? "custom_anthropic" : "custom_openai",
-                      base_url: customUrl.trim(),
-                      api_key: key || undefined,
-                      memory: true,
-                    })
-                  }
-                >
-                  List models
-                </button>
-              </div>
-              {picker}
-            </>
+          {from === "custom" && cfg.source === "custom" && cfg.embeddings_url && (
+            <span className="field-hint">
+              Now <span className="mono">{cfg.embeddings_model}</span> at <span className="mono">{cfg.embeddings_url}</span>. Register the
+              endpoint as a provider to change it.
+            </span>
           )}
         </>
       )}
+      {registering && (
+        <div hidden={!(meaning && from === "custom")}>
+          {pstate ? (
+            <ProviderForm
+              state={pstate}
+              agents={[]}
+              purpose="embeddings"
+              saveLabel={props.saveLabel ?? "Save"}
+              actions={meaning && from === "custom" ? props.actions : undefined}
+              onSaved={(s, saved) => void registered(s, saved)}
+            />
+          ) : (
+            <div className="muted">Loading…</div>
+          )}
+        </div>
+      )}
       {err && <div className="error-text">{err}</div>}
-      <div className={props.actions ? "row" : "row end"}>
-        {props.actions}
-        {props.actions && <span className="spacer" />}
-        {msg && <span className="muted">{msg}</span>}
-        <button className="primary" disabled={busy || !ready}>
-          {busy ? "Testing…" : (props.saveLabel ?? "Save")}
-        </button>
-      </div>
+      {!(meaning && from === "custom") && (
+        <div className={props.actions ? "row" : "row end"}>
+          {props.actions}
+          {props.actions && <span className="spacer" />}
+          {msg && <span className="muted">{msg}</span>}
+          <button className="primary" disabled={busy || !ready}>
+            {busy ? "Testing…" : (props.saveLabel ?? "Save")}
+          </button>
+        </div>
+      )}
+      {meaning && from === "custom" && msg && <div className="muted">{msg}</div>}
     </form>
   );
 }

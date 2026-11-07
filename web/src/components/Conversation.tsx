@@ -4,6 +4,7 @@ import { FileText, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
+import { fallbackNote } from "../lib/models";
 import {
   citeMaps,
   citeSignature,
@@ -18,9 +19,11 @@ import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import type { History } from "../bg/topics";
-import type { Agent, ModelInfo, NodeInfo, SessionRow } from "../types";
+import type { Agent, Item, ModelInfo, NodeInfo, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
+import { AgentMark, agentAlert } from "./AgentAvatar";
+import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
@@ -105,6 +108,33 @@ function BlockCtx(props: { slots: ProgressSlots; inputs: Inputs; children: React
   );
 }
 
+/** Each fallback note by the reply it belongs to (the turn's first reply
+ * after it); a note whose turn gave no reply stays where it is. */
+function fallbackNotes(items: Item[]): { byReply: Map<number, Extract<Item, { type: "fallback" }>>; attached: Set<number> } {
+  const byReply = new Map<number, Extract<Item, { type: "fallback" }>>();
+  const attached = new Set<number>();
+  let pending: number | null = null;
+  items.forEach((it, i) => {
+    if (it.type === "fallback") pending = i;
+    else if (it.type === "user" || it.type === "turn_end") pending = null;
+    else if (it.type === "assistant" && pending !== null) {
+      byReply.set(i, items[pending] as Extract<Item, { type: "fallback" }>);
+      attached.add(pending);
+      pending = null;
+    }
+  });
+  return { byReply, attached };
+}
+
+function FallbackNote(props: { note: Extract<Item, { type: "fallback" }> }) {
+  const { text, title } = fallbackNote(props.note);
+  return (
+    <div className="fallback-note" title={title || undefined}>
+      {text}
+    </div>
+  );
+}
+
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
 }
@@ -186,6 +216,13 @@ export default function Conversation(props: {
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
   const incognito = !!(meta?.incognito ?? props.row?.incognito);
+  // The face of whoever answers now; the header's agent shows it unless an
+  // @mention has another agent answering.
+  const face = useAvatarState(view);
+  const answering = view?.running_agent?.agent_id ?? activeAgent;
+  const facing = props.agents.find((a) => a.id === answering);
+  const sessionAgent = props.agents.find((a) => a.id === activeAgent);
+  const notes = fallbackNotes(items);
   const remove = async () => {
     if (!confirm(t("conv.deleteConfirm"))) return;
     await api.deleteSession(sessionId).catch(() => {});
@@ -203,7 +240,10 @@ export default function Conversation(props: {
         <div className="conv-title">
           <h1 className="ellipsis">{meta?.title ?? props.row?.title ?? "…"}</h1>
           <div className="conv-meta">
-            <span>{agentName(activeAgent)}</span>
+            <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
+              {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
+              {agentName(activeAgent)}
+            </span>
             <span className="muted">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <span className="mono muted ellipsis">{meta?.cwd}</span>}
@@ -343,7 +383,12 @@ export default function Conversation(props: {
                     return (
                       <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`}>
                         {it.author && it.author !== activeAgent && (
-                          <div className="author">{agentName(it.author)}</div>
+                          <div className="author">
+                            {props.agents.some((a) => a.id === it.author) && (
+                              <AgentMark agent={props.agents.find((a) => a.id === it.author)!} size={16} />
+                            )}
+                            {agentName(it.author)}
+                          </div>
                         )}
                         <MessageCtx.Provider value={infoAt(i)}>
                           <Markdown
@@ -355,10 +400,13 @@ export default function Conversation(props: {
                             messageId={it.message_id}
                           />
                         </MessageCtx.Provider>
+                        {notes.byReply.has(i) && <FallbackNote note={notes.byReply.get(i)!} />}
                         {final && <CopyMessage text={it.text} />}
                       </div>
                     );
                   }
+                  case "fallback":
+                    return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
                     return <ToolCard key={i} sessionId={sessionId} item={it} />;
                   case "error":
@@ -413,7 +461,11 @@ export default function Conversation(props: {
               })
             )}
             {running && view?.running_agent && (
-              <div className="thinking">{agentName(view.running_agent.agent_id)} is working…</div>
+              <div className="thinking">
+                {facing && <AgentMark agent={facing} state={face} size={22} />}
+                {agentName(view.running_agent.agent_id)}{" "}
+                {face === "unsure" ? "is waiting for you" : face === "working" ? "is working…" : "is thinking…"}
+              </div>
             )}
           </div>
         </BlockCtx>
@@ -428,6 +480,7 @@ export default function Conversation(props: {
             workers={[]}
             agentId={activeAgent}
             onAgentChange={(id) => void api.setAgent(sessionId, id)}
+            agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}
             running={running}

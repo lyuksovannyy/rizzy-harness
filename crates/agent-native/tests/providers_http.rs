@@ -88,6 +88,23 @@ async fn openai_compatible_stream() {
 }
 
 #[tokio::test]
+async fn keyless_endpoint_still_completes() {
+    let sse = [
+        r#"data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+        "data: [DONE]",
+    ]
+    .join("\n\n")
+        + "\n\n";
+    let (base, seen) = serve("/v1/chat/completions", sse).await;
+    let p = LlmProvider::new(ApiKind::Openai, &format!("{base}/v1"), None).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let c = p.complete(&request(), tx).await.unwrap();
+    assert_eq!(c.text, "ok");
+    let (headers, _) = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(headers["authorization"], "Bearer no-key");
+}
+
+#[tokio::test]
 async fn anthropic_stream() {
     let ev = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let sse = [

@@ -20,9 +20,13 @@ pub struct Config {
     /// `general`'s model, then the first listed model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-    /// Admin-assigned default model per agent id (prefixed).
+    /// Admin-assigned model per agent id, with its fallbacks (prefixed).
+    /// One model may serve many agents; an agent has one model.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_models: BTreeMap<String, String>,
+    pub agent_models: BTreeMap<String, AgentChain>,
+    /// How agents look; an agent missing here gets one derived from its id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_avatars: BTreeMap<String, crate::avatars::AgentAvatar>,
     pub chat: ChatConfig,
     pub web: WebConfig,
     pub memory: MemoryConfig,
@@ -37,6 +41,7 @@ impl Default for Config {
             providers: vec![ProviderConfig::demo(40)],
             default_model: Some(format!("{}::mock", crate::presets::DEMO)),
             agent_models: BTreeMap::new(),
+            agent_avatars: BTreeMap::new(),
             chat: Default::default(),
             web: Default::default(),
             memory: Default::default(),
@@ -54,7 +59,8 @@ struct RawConfig {
     models: Vec<ModelConfig>,
     providers: Vec<ProviderConfig>,
     default_model: Option<String>,
-    agent_models: BTreeMap<String, String>,
+    agent_models: BTreeMap<String, AgentChain>,
+    agent_avatars: BTreeMap<String, crate::avatars::AgentAvatar>,
     chat: ChatConfig,
     web: WebConfig,
     memory: MemoryConfig,
@@ -70,6 +76,7 @@ impl TryFrom<RawConfig> for Config {
             providers: r.providers,
             default_model: r.default_model,
             agent_models: r.agent_models,
+            agent_avatars: r.agent_avatars,
             chat: r.chat,
             web: r.web,
             memory: r.memory,
@@ -94,6 +101,51 @@ impl TryFrom<RawConfig> for Config {
         }
         c.normalize();
         Ok(c)
+    }
+}
+
+/// An agent's model and, in order, the models tried when it is unavailable
+/// or fails before answering. Files before fallbacks existed (up to commit
+/// 2a501fe) hold a bare model id: `general = "a::m1"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawChain")]
+pub struct AgentChain {
+    pub model: String,
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
+}
+
+impl AgentChain {
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            fallbacks: Vec::new(),
+        }
+    }
+
+    /// The main model, then the fallbacks.
+    pub fn models(&self) -> impl Iterator<Item = &String> {
+        std::iter::once(&self.model).chain(&self.fallbacks)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawChain {
+    Bare(String),
+    Full {
+        model: String,
+        #[serde(default)]
+        fallbacks: Vec<String>,
+    },
+}
+
+impl From<RawChain> for AgentChain {
+    fn from(r: RawChain) -> Self {
+        match r {
+            RawChain::Bare(model) => AgentChain::new(model),
+            RawChain::Full { model, fallbacks } => AgentChain { model, fallbacks },
+        }
     }
 }
 
@@ -328,8 +380,8 @@ impl ChatConfig {
     }
 }
 
-/// A model as the provider reported it. `None`: not reported (treated as
-/// unsupported at runtime).
+/// A model as the provider reported it, or as an admin described it
+/// (`custom`). `None`: not reported (treated as unsupported at runtime).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
@@ -347,6 +399,17 @@ pub struct ModelConfig {
     pub vision: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    /// Added by an admin with hand-set parameters: listings never change
+    /// it or mark it unavailable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
+    /// Missing from the provider's latest listing. Kept (sessions and
+    /// agents may still name it) until an admin removes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
+    /// When a listing first missed it (ms since the epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_since: Option<i64>,
 }
 
 impl From<harness_agent_native::models::ModelMeta> for ModelConfig {
@@ -359,6 +422,7 @@ impl From<harness_agent_native::models::ModelMeta> for ModelConfig {
             effort: m.effort,
             vision: m.vision,
             tools: m.tools,
+            ..Default::default()
         }
     }
 }
@@ -616,9 +680,7 @@ impl Config {
             if p.kind == ProviderKind::Mock {
                 continue;
             }
-            if p.models.is_empty() {
-                bail!("{at}: list at least one model");
-            }
+            // A provider may list no chat model (memory embeddings only).
             if p.kind == ProviderKind::Anthropic
                 && p.api_key_env.is_none()
                 && p.api_key_secret.is_none()
@@ -634,7 +696,12 @@ impl Config {
             .default_model
             .iter()
             .map(|m| ("default_model", m))
-            .chain(self.agent_models.values().map(|m| ("[agent_models]", m)))
+            .chain(
+                self.agent_models
+                    .values()
+                    .flat_map(AgentChain::models)
+                    .map(|m| ("[agent_models]", m)),
+            )
         {
             if self.resolve_model(m).is_none() {
                 bail!("{what}: unknown model {m:?}");
@@ -720,38 +787,76 @@ impl Config {
     }
 
     /// The model sessions get when nobody chose one: `default_model`, else
-    /// agent `general`'s, else the first listed model.
+    /// agent `general`'s, else the first listed model (an available one
+    /// first).
     pub fn effective_default(&self) -> Option<String> {
+        let first = |available: bool| {
+            self.providers.iter().find_map(|p| {
+                p.models
+                    .iter()
+                    .find(|m| !(available && m.unavailable))
+                    .map(|m| format!("{}::{}", p.id, m.id))
+            })
+        };
         self.default_model
             .iter()
-            .chain(self.agent_models.get(harness_agents::DEFAULT_AGENT))
+            .chain(
+                self.agent_models
+                    .get(harness_agents::DEFAULT_AGENT)
+                    .map(|c| &c.model),
+            )
             .find_map(|m| self.canonical_model(m))
-            .or_else(|| {
-                self.providers
-                    .iter()
-                    .find_map(|p| p.models.first().map(|m| format!("{}::{}", p.id, m.id)))
-            })
+            .or_else(|| first(true))
+            .or_else(|| first(false))
     }
 
     /// The admin's default for `agent`, falling back to the global default.
     pub fn agent_default(&self, agent: &str) -> Option<String> {
         self.agent_models
             .get(agent)
-            .and_then(|m| self.canonical_model(m))
+            .and_then(|c| self.canonical_model(&c.model))
             .or_else(|| self.effective_default())
     }
 
+    /// Whether `model` is saved but missing from its provider's latest
+    /// listing.
+    pub fn model_unavailable(&self, model: &str) -> bool {
+        self.resolve_model(model)
+            .is_some_and(|(_, m)| m.unavailable)
+    }
+
+    /// `chain` with canonical ids, without repeats and models that no
+    /// longer resolve. A main model that is gone gives way to the first
+    /// fallback left; `None` when nothing is left.
+    fn repair_chain(&self, chain: AgentChain) -> Option<AgentChain> {
+        let mut ids: Vec<String> = Vec::new();
+        for m in chain.models() {
+            if let Some(c) = self.canonical_model(m)
+                && !ids.contains(&c)
+            {
+                ids.push(c);
+            }
+        }
+        let mut ids = ids.into_iter();
+        Some(AgentChain {
+            model: ids.next()?,
+            fallbacks: ids.collect(),
+        })
+    }
+
     /// Repair references after providers or models changed: drop agent
-    /// defaults that no longer resolve, fall back for a stale global
+    /// models that no longer resolve (a fallback takes a main model's
+    /// place), fall back for a stale global
     /// default, and keep the demo provider when nothing else is left.
     pub fn normalize(&mut self) {
-        if self.providers.is_empty() {
+        // Without a chat model anywhere, the demo stays the one to chat with.
+        if !self.has_chat_model() && !self.providers.iter().any(|p| p.kind == ProviderKind::Mock) {
             self.providers.push(ProviderConfig::demo(40));
         }
         let agent_models = std::mem::take(&mut self.agent_models);
         self.agent_models = agent_models
             .into_iter()
-            .filter_map(|(a, m)| self.canonical_model(&m).map(|m| (a, m)))
+            .filter_map(|(a, c)| self.repair_chain(c).map(|c| (a, c)))
             .collect();
         if let Some(m) = &self.default_model {
             self.default_model = self.canonical_model(m);
@@ -782,9 +887,17 @@ impl Config {
             .is_some_and(|(p, m)| effort_allowed(p, m))
     }
 
-    /// At least one real (non-mock) provider.
+    /// At least one real (non-mock) provider with a chat model (one that
+    /// serves memory embeddings only is not enough).
     pub fn configured(&self) -> bool {
-        self.providers.iter().any(|p| p.kind != ProviderKind::Mock)
+        self.has_chat_model()
+    }
+
+    /// Whether a real (non-mock) provider has at least one chat model.
+    pub fn has_chat_model(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p.kind != ProviderKind::Mock && !p.models.is_empty())
     }
 }
 
@@ -952,6 +1065,63 @@ mod tests {
             "[provider]\nkind = \"mock\"\n\n[[providers]]\nid = \"demo\"\nname = \"D\"\npreset = \"demo\"\nkind = \"mock\"\n"
         )
         .is_err());
+    }
+
+    /// `[agent_models]` as commit 2a501fe wrote it (bare ids) loads as
+    /// chains without fallbacks; the new shape round-trips, and a main
+    /// model that is gone gives way to its first fallback.
+    #[test]
+    fn agent_chains_migrate_and_repair() {
+        let providers = concat!(
+            "[[providers]]\nid = \"a\"\nname = \"A\"\npreset = \"custom_openai\"\nkind = \"openai\"\n",
+            "base_url = \"http://localhost:8000/v1\"\nmodels = [{ id = \"m1\" }, { id = \"m2\" }, { id = \"m3\" }]\n",
+        );
+        let old: Config = toml::from_str(&format!(
+            "[agent_models]\ncoder = \"a::m2\"\ngeneral = \"m1\"\n\n{providers}"
+        ))
+        .unwrap();
+        assert_eq!(old.agent_models["general"], AgentChain::new("a::m1"));
+        assert_eq!(old.agent_models["coder"], AgentChain::new("a::m2"));
+
+        let mut c = old.clone();
+        c.agent_models.insert(
+            "writer".into(),
+            AgentChain {
+                model: "a::m3".into(),
+                fallbacks: vec![
+                    "a::m1".into(),
+                    "a::gone".into(),
+                    "a::m1".into(),
+                    "a::m2".into(),
+                ],
+            },
+        );
+        c.agent_avatars.insert(
+            "coder".into(),
+            crate::avatars::AgentAvatar::default_for("x"),
+        );
+        c.normalize();
+        assert_eq!(c.agent_models["writer"].fallbacks, ["a::m1", "a::m2"]);
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("[agent_models.writer]"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.agent_models, c.agent_models);
+        assert_eq!(back.agent_avatars, c.agent_avatars);
+
+        let mut gone = back;
+        gone.providers[0].models.retain(|m| m.id != "m3");
+        gone.normalize();
+        assert_eq!(
+            gone.agent_models["writer"],
+            AgentChain {
+                model: "a::m1".into(),
+                fallbacks: vec!["a::m2".into()],
+            }
+        );
+        // Validation checks fallbacks too.
+        let mut bad = gone.clone();
+        bad.agent_models.get_mut("coder").unwrap().fallbacks = vec!["a::nope".into()];
+        assert!(bad.validate().is_err());
     }
 
     #[test]

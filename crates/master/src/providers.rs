@@ -152,6 +152,7 @@ pub fn model_list(cfg: &Config) -> Vec<ModelInfo> {
                     effort: crate::config::effort_allowed(p, m),
                     vision: m.vision == Some(true),
                     tools: m.tools == Some(true),
+                    unavailable: m.unavailable,
                 }
             })
         })

@@ -273,6 +273,8 @@ async fn serve(
     let master = Master::new(mirror, auth);
     master.set_provider_runtime(runtime);
     master.start_incognito_purge(cfg.chat.incognito_ttl());
+    // Each provider's model listing: at start when older than a day, then daily.
+    master.start_model_refresh(harness_master::model_cache::REFRESH_EVERY);
     if let Some(mem) = memory {
         tracing::info!(backend = mem.name(), "memory");
         master.set_memory(mem);

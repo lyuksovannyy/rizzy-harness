@@ -15,10 +15,12 @@ export function Seg<T extends string>(props: {
   value: T;
   options: SegOption<T>[];
   onChange: (v: T) => void;
+  /** Lets many options wrap onto more lines. */
+  wrap?: boolean;
 }) {
   const any = props.options.some((o) => o.value === props.value);
   return (
-    <div className="seg" role="radiogroup" aria-label={props.label} onKeyDown={radioKeys}>
+    <div className={props.wrap ? "seg wrap" : "seg"} role="radiogroup" aria-label={props.label} onKeyDown={radioKeys}>
       {props.options.map((o, i) => {
         const on = o.value === props.value;
         return (

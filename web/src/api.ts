@@ -1,5 +1,7 @@
 import type {
   Agent,
+  AgentAvatar,
+  Notice,
   AttentionItem,
   Decision,
   NodeAttention,
@@ -19,6 +21,10 @@ import type {
   Profile,
   ApiStyle,
   MemorySource,
+  AgentChain,
+  ModelListing,
+  ModelTestResult,
+  ProviderKind,
   ProviderModel,
   ProvidersState,
   RawEvent,
@@ -153,6 +159,9 @@ export const api = {
   },
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
   agents: () => call<{ agents: Agent[]; default: string }>("GET", "/api/agents"),
+  saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
+    call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
+  notices: () => call<{ notices: Notice[] }>("GET", "/api/notices"),
   models: () => call<{ models: ModelInfo[] }>("GET", "/api/models"),
   search: (q: string, suggest = false, signal?: AbortSignal) =>
     call<{ results: SearchHit[] }>(
@@ -173,7 +182,27 @@ export const api = {
     b: { name: string; preset: string; base_url?: string; api_key?: string; models: ProviderModel[] },
   ) => call<ProvidersState>("PUT", `/api/admin/providers/${encodeURIComponent(id)}`, b),
   deleteProvider: (id: string) => call<ProvidersState>("DELETE", `/api/admin/providers/${encodeURIComponent(id)}`),
-  saveAgentModels: (b: { agent_models: Record<string, string | null>; default_model?: string | null }) =>
+  /** The server's cached listing; it lists once only if it has none. */
+  providerModels: (id: string) => call<ModelListing>("GET", `/api/admin/providers/${encodeURIComponent(id)}/models`),
+  refreshProviderModels: (id: string) =>
+    call<ModelListing>("POST", `/api/admin/providers/${encodeURIComponent(id)}/models/refresh`),
+  /** Drops a saved model (and its unavailable mark) from the provider and every agent. */
+  removeProviderModel: (id: string, raw: string) =>
+    call<ProvidersState>(
+      "DELETE",
+      `/api/admin/providers/${encodeURIComponent(id)}/models/${encodeURIComponent(raw)}`,
+    ),
+  /** Always resolves; one short request to `model` (raw), with the same key rules as testProvider. */
+  testModel: (b: {
+    model: string;
+    provider_id?: string;
+    preset?: string;
+    base_url?: string;
+    api_key?: string;
+    kind?: ProviderKind;
+    memory?: boolean;
+  }) => call<ModelTestResult>("POST", "/api/admin/providers/models/test", b),
+  saveAgentModels: (b: { agent_models: Record<string, AgentChain | null>; default_model?: string | null }) =>
     call<ProvidersState>("PUT", "/api/admin/agent-models", b),
   demoProvider: () => call<ProvidersState>("POST", "/api/admin/providers/demo"),
   settings: () => call<Prefs>("GET", "/api/me/settings"),

@@ -87,8 +87,14 @@ each request goes to the provider its prefix names.
 ```toml
 default_model = "openrouter::openai/gpt-4o"   # unset: agent general's, else the first model
 
-[agent_models]                       # per-agent defaults (Settings); a chat can still pick another
-coder = "deepseek::deepseek-chat"
+[agent_models.coder]                 # per-agent models (Settings); a chat can still pick another
+model = "deepseek::deepseek-chat"
+fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
+
+[agent_avatars.coder]                # how the agent looks; unset: derived from its id
+shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
+eyes = "wide"                        # round | long | short | wide | sleepy
+accent = "green"                     # blue | violet | green | orange | pink | gray
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
@@ -108,14 +114,41 @@ preset = "deepseek"
 kind = "openai"
 base_url = "https://api.deepseek.com/v1"
 api_key_secret = "provider-deepseek" # [keys] provider-deepseek = "..." in secrets.toml
-models = [{ id = "deepseek-chat" }]
+models = [
+  { id = "deepseek-chat" },
+  { id = "deepseek-old", unavailable = true, missing_since = 1767225600000 },  # set by the server
+  { id = "my-finetune", custom = true, context = 32000, tools = true },        # added by hand
+]
 ```
 
 The model parameters (`name`, `context`, `max_output`, `effort`, `vision`,
 `tools`) are what the provider's `/models` reports (Ollama: `/api/show`) when
 the provider is tested in the UI; a missing one counts as unsupported. A stored
 key is only ever sent to the base URL it was saved for: change the URL and the
-key must be entered again.
+key must be entered again. A provider may list no models (one used only for
+memory embeddings); while no provider has a chat model the built-in demo stays
+as the default, and onboarding still asks for a chat provider.
+
+The server keeps each provider's last listing (in the store) and fetches it
+again once a day, or when an admin refreshes it. A saved model the latest
+listing lacks gets `unavailable = true` and `missing_since` (ms): it is kept,
+and cleared when it is listed again, until an admin removes it in Settings.
+`custom = true` marks a model added by hand: its parameters are the admin's
+and listings never mark it. Testing a saved provider in the UI refreshes its
+listing too, but only with its saved key and preset: a test with a key typed
+into the form, not yet saved, changes neither the listing nor the marks.
+
+An agent has one model; one model may serve several agents. When a turn's
+model is unavailable, or its request fails before any output with a model
+problem (not found, rate limit, server error, no connection), the agent's
+fallbacks are tried in order, skipping unavailable ones, and the chat notes
+which model answered. An agent without an `[agent_models]` entry runs on
+the default (General's main model) with General's fallbacks; a sub-agent
+without a model of its own runs on its parent's model with the parent's
+fallbacks. A reasoning effort goes only to the models of the chain that take
+one. Older files with `coder = "<model id>"` still load (no fallbacks). Unavailable models in use show as notices on the home screen:
+admins see all of them, other users those behind an agent's main model, the
+global default or their own default.
 
 `effort = "low" | "medium" | "high" | "max"` on a provider is its default
 reasoning effort, only sent to its models with `effort = true`. Anthropic

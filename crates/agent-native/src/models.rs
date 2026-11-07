@@ -100,7 +100,17 @@ async fn get_json(
     kind: ApiKind,
     key: Option<&Secret<String>>,
 ) -> Result<Value, ProviderError> {
-    let mut rb = client.get(url);
+    send_json(client.get(url), kind, key, MAX_LIST_BODY).await
+}
+
+/// Send with the kind's auth headers; a non-2xx status is an error with the
+/// start of its body.
+async fn send_json(
+    mut rb: reqwest::RequestBuilder,
+    kind: ApiKind,
+    key: Option<&Secret<String>>,
+    cap: usize,
+) -> Result<Value, ProviderError> {
     match (kind, key) {
         (ApiKind::Anthropic, Some(k)) => {
             rb = rb
@@ -123,7 +133,7 @@ async fn get_json(
             body: String::from_utf8_lossy(&body).chars().take(300).collect(),
         });
     }
-    let body = read_capped(resp, MAX_LIST_BODY).await?;
+    let body = read_capped(resp, cap).await?;
     serde_json::from_slice(&body).map_err(|e| ProviderError::Stream(e.to_string()))
 }
 
@@ -345,6 +355,95 @@ async fn probe_ollama(base: &str, models: &mut [ModelMeta]) {
     }
 }
 
+/// The model test's prompt, and how much of an answer it allows.
+pub const TEST_PROMPT: &str = "Reply with OK.";
+const TEST_MAX_TOKENS: u64 = 16;
+const TEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_CHAT_BODY: usize = 1 << 20;
+/// Characters of the test answer kept.
+pub const MAX_REPLY: usize = 200;
+
+/// Ask `model` (raw id) [`TEST_PROMPT`] once, without streaming, and return
+/// the start of its answer (cleaned like a display name, possibly empty when
+/// a reasoning model spends the few tokens thinking). Fails the way a turn
+/// would: unknown model, bad key, rate limit, unreachable endpoint.
+pub async fn test_chat(
+    kind: ApiKind,
+    base_url: &str,
+    api_key: Option<&Secret<String>>,
+    model: &str,
+) -> Result<String, ProviderError> {
+    let client = client(TEST_TIMEOUT)?;
+    let base = normalize_base(base_url);
+    let messages = serde_json::json!([{ "role": "user", "content": TEST_PROMPT }]);
+    let v = match kind {
+        ApiKind::Anthropic => {
+            let body = serde_json::json!({
+                "model": model, "max_tokens": TEST_MAX_TOKENS, "messages": messages,
+            });
+            let rb = client.post(format!("{base}messages")).json(&body);
+            send_json(rb, kind, api_key, MAX_CHAT_BODY).await?
+        }
+        ApiKind::Openai => {
+            let url = format!("{base}chat/completions");
+            let body = |limit: &str| {
+                let mut b = serde_json::json!({
+                    "model": model, "messages": messages, "stream": false,
+                });
+                b[limit] = TEST_MAX_TOKENS.into();
+                b
+            };
+            let first = client.post(&url).json(&body("max_tokens"));
+            match send_json(first, kind, api_key, MAX_CHAT_BODY).await {
+                // Newer OpenAI reasoning models refuse `max_tokens`.
+                Err(ProviderError::Status {
+                    status: 400,
+                    body: b,
+                }) if b.contains("max_completion_tokens") => {
+                    let again = client.post(&url).json(&body("max_completion_tokens"));
+                    send_json(again, kind, api_key, MAX_CHAT_BODY).await?
+                }
+                r => r?,
+            }
+        }
+    };
+    Ok(reply_text(kind, &v))
+}
+
+/// The answer's text: OpenAI `choices[0].message.content` (a string or
+/// parts), Anthropic's `text` blocks.
+fn reply_text(kind: ApiKind, v: &Value) -> String {
+    let parts = |a: &Vec<Value>| {
+        a.iter()
+            .filter(|p| p["type"].as_str().is_none_or(|t| t == "text"))
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let raw = match kind {
+        ApiKind::Anthropic => v["content"].as_array().map(parts),
+        ApiKind::Openai => {
+            let c = v.pointer("/choices/0/message/content");
+            c.and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| c.and_then(Value::as_array).map(parts))
+        }
+    };
+    sanitize_reply(&raw.unwrap_or_default())
+}
+
+/// At most [`MAX_REPLY`] characters on one line, without control or bidi
+/// characters.
+pub fn sanitize_reply(s: &str) -> String {
+    let s: String = s
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'))
+        .take(MAX_REPLY)
+        .collect();
+    s.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +505,20 @@ mod tests {
         assert_eq!((m.context, m.max_output), (None, None));
         let long = parse_model(&json!({"id": "m", "name": "n".repeat(500)})).unwrap();
         assert_eq!(long.name.unwrap().len(), MAX_NAME);
+    }
+
+    #[test]
+    fn test_replies() {
+        let openai = json!({"choices": [{"message": {"content": "  OK\n\tthere\u{7}"}}]});
+        assert_eq!(reply_text(ApiKind::Openai, &openai), "OK  there");
+        let parts = json!({"choices": [{"message": {"content": [{"type": "text", "text": "O"}, {"text": "K"}]}}]});
+        assert_eq!(reply_text(ApiKind::Openai, &parts), "OK");
+        let anthropic = json!({"content": [
+            {"type": "thinking", "thinking": "hm"}, {"type": "text", "text": "OK."}
+        ]});
+        assert_eq!(reply_text(ApiKind::Anthropic, &anthropic), "OK.");
+        assert_eq!(reply_text(ApiKind::Openai, &json!({"choices": []})), "");
+        assert_eq!(sanitize_reply(&"x".repeat(500)).len(), MAX_REPLY);
     }
 
     #[test]

@@ -396,7 +396,7 @@ enum Step<T> {
 /// Drive `fut` while coalescing chunks from `rx` into flushed batches.
 async fn coalesce<T, F>(
     fut: F,
-    mut rx: mpsc::UnboundedReceiver<String>,
+    rx: mpsc::UnboundedReceiver<String>,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
     make: impl Fn(String) -> EventKind + Send + Sync,
@@ -404,10 +404,33 @@ async fn coalesce<T, F>(
 where
     F: std::future::Future<Output = T>,
 {
+    coalesce_led(fut, rx, cancel, host, &mut None, make).await.0
+}
+
+/// `coalesce`, emitting `lead` (taken) just before the first batch. Also
+/// says whether any batch was emitted.
+async fn coalesce_led<T, F>(
+    fut: F,
+    mut rx: mpsc::UnboundedReceiver<String>,
+    cancel: &tokio_util::sync::CancellationToken,
+    host: &dyn harness_core::backend::TurnHost,
+    lead: &mut Option<EventKind>,
+    make: impl Fn(String) -> EventKind + Send + Sync,
+) -> (Step<T>, bool)
+where
+    F: std::future::Future<Output = T>,
+{
     tokio::pin!(fut);
     let mut buf = String::new();
+    let mut emitted = false;
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let flush = async |buf: String, lead: &mut Option<EventKind>| {
+        if let Some(l) = lead.take() {
+            host.emit(l).await;
+        }
+        host.emit(make(buf)).await;
+    };
     let out = loop {
         tokio::select! {
             biased;
@@ -416,12 +439,14 @@ where
             Some(d) = rx.recv() => {
                 buf.push_str(&d);
                 if buf.len() >= FLUSH_BYTES {
-                    host.emit(make(std::mem::take(&mut buf))).await;
+                    flush(std::mem::take(&mut buf), lead).await;
+                    emitted = true;
                 }
             }
             _ = tick.tick() => {
                 if !buf.is_empty() {
-                    host.emit(make(std::mem::take(&mut buf))).await;
+                    flush(std::mem::take(&mut buf), lead).await;
+                    emitted = true;
                 }
             }
         }
@@ -430,9 +455,43 @@ where
         buf.push_str(&d);
     }
     if !buf.is_empty() {
-        host.emit(make(buf)).await;
+        flush(buf, lead).await;
+        emitted = true;
+    }
+    (out, emitted)
+}
+
+/// The models a turn may use, in order: its own, then the agent's
+/// fallbacks, leaving out repeats and the ones the master marked
+/// unavailable. When that leaves nothing, the turn's own model is tried.
+fn model_chain(model: &str, agent: Option<&harness_core::agent::AgentSpec>) -> Vec<String> {
+    let Some(a) = agent else {
+        return vec![model.to_string()];
+    };
+    let mut out: Vec<String> = Vec::new();
+    for m in std::iter::once(model).chain(a.fallbacks.iter().map(String::as_str)) {
+        if !a.unavailable.iter().any(|u| u == m) && !out.iter().any(|o| o == m) {
+            out.push(m.to_string());
+        }
+    }
+    if out.is_empty() {
+        out.push(model.to_string());
     }
     out
+}
+
+/// The note that `model` answers this turn instead of `from`.
+fn fallback_event(turn_id: &str, model: &str, from: &str, reason: String) -> EventKind {
+    let mut reason = reason;
+    if reason.chars().count() > 200 {
+        reason = reason.chars().take(199).collect::<String>() + "…";
+    }
+    EventKind::ModelFallback(ModelFallback {
+        turn_id: turn_id.to_string(),
+        model: model.to_string(),
+        from: from.to_string(),
+        reason: Some(reason),
+    })
 }
 
 #[async_trait::async_trait]
@@ -528,6 +587,19 @@ impl AgentBackend for NativeBackend {
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history))));
 
+        // The model answering this turn. Until the turn has any output, a
+        // model-level failure moves on to the next of the agent's fallbacks;
+        // the note saying so goes out just before the answer.
+        let mut chain = std::collections::VecDeque::from(model_chain(&ctx.model, agent));
+        let mut model = chain.pop_front().unwrap_or_else(|| ctx.model.clone());
+        // Why the turn's own model is not the one answering: it is
+        // unavailable, or the first error it gave; a later fallback's own
+        // failure only goes to the log.
+        let mut from_reason = (model != ctx.model).then(|| "unavailable".to_string());
+        let mut lead = from_reason
+            .clone()
+            .map(|r| fallback_event(&ctx.turn_id, &model, &ctx.model, r));
+        let mut started = false;
         for _ in 0..MAX_STEPS {
             let message_id = new_id();
             let mut sent = messages.clone();
@@ -535,20 +607,22 @@ impl AgentBackend for NativeBackend {
                 mask::mask_old_outputs(&mut sent, k);
             }
             let req = ChatRequest {
-                model: ctx.model.clone(),
+                model: model.clone(),
                 messages: sent,
                 tools: tools.clone(),
-                effort,
+                // Only for models that take one (a fallback may not).
+                effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
                 cache: sv.prompt_cache,
             };
             let (tx, rx) = mpsc::unbounded_channel();
             let turn_id = ctx.turn_id.clone();
             let mid = message_id.clone();
-            let step = coalesce(
+            let (step, emitted) = coalesce_led(
                 self.provider.complete(&req, tx),
                 rx,
                 &ctx.cancel,
                 host,
+                &mut lead,
                 |text| {
                     EventKind::AssistantDelta(AssistantDelta {
                         author: author.clone(),
@@ -560,6 +634,7 @@ impl AgentBackend for NativeBackend {
                 },
             )
             .await;
+            started |= emitted;
             let completion = match step {
                 Step::Cancelled => {
                     return TurnOutcome {
@@ -567,6 +642,15 @@ impl AgentBackend for NativeBackend {
                         usage: Some(usage),
                         error: None,
                     };
+                }
+                Step::Done(Err(e)) if !started && e.is_model_level() && !chain.is_empty() => {
+                    let next = chain.pop_front().unwrap_or_default();
+                    let why = self.config.secrets.scrub(&e.to_string());
+                    tracing::warn!(failed = %model, next = %next, error = %why, "model failed; trying a fallback");
+                    let reason = from_reason.get_or_insert(why).clone();
+                    lead = Some(fallback_event(&ctx.turn_id, &next, &ctx.model, reason));
+                    model = next;
+                    continue;
                 }
                 Step::Done(Err(e)) => {
                     return TurnOutcome {
@@ -577,6 +661,10 @@ impl AgentBackend for NativeBackend {
                 }
                 Step::Done(Ok(c)) => c,
             };
+            if let Some(l) = lead.take() {
+                host.emit(l).await;
+            }
+            started = true;
             if let Some(u) = &completion.usage {
                 usage.add(u);
                 usage.context_tokens = u.input_tokens;
@@ -1115,6 +1203,9 @@ mod tests {
             system_prompt: "read only".into(),
             tools: harness_core::agent::ToolSelection::List(vec!["read".into()]),
             model: None,
+            fallbacks: vec![],
+            unavailable: vec![],
+            no_effort: vec![],
             effort: None,
             budget: Default::default(),
             ui: Default::default(),

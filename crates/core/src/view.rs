@@ -56,6 +56,15 @@ pub enum Item {
     AgentChanged {
         agent: AgentRef,
     },
+    /// `model` answered this turn instead of `from` (`model_fallback`).
+    Fallback {
+        turn_id: String,
+        model: String,
+        from: Option<String>,
+        /// Why `from` was not used: "unavailable", or the provider's error.
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -310,6 +319,12 @@ impl SessionView {
             EventKind::HistorySummarized(h) => self.items.push(Item::Summary {
                 through_seq: h.through_seq,
                 text: h.text,
+            }),
+            EventKind::ModelFallback(f) => self.items.push(Item::Fallback {
+                turn_id: f.turn_id,
+                model: f.model,
+                from: Some(f.from),
+                reason: f.reason,
             }),
         }
     }

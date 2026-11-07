@@ -73,6 +73,7 @@ pub enum EventKind {
     AgentChanged(AgentChanged),
     VariantSelected(VariantSelected),
     HistorySummarized(HistorySummarized),
+    ModelFallback(ModelFallback),
 }
 
 impl EventKind {
@@ -112,6 +113,7 @@ impl EventKind {
             EventKind::AgentChanged(_) => "agent_changed",
             EventKind::VariantSelected(_) => "variant_selected",
             EventKind::HistorySummarized(_) => "history_summarized",
+            EventKind::ModelFallback(_) => "model_fallback",
         }
     }
 }
@@ -244,6 +246,20 @@ pub struct HistorySummarized {
     /// Every event with `seq <= through_seq` is covered by `text`.
     pub through_seq: u64,
     pub text: String,
+}
+
+/// The turn's model was unavailable or failed before any output, and one
+/// of the agent's fallbacks answers instead. Emitted before its answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelFallback {
+    pub turn_id: String,
+    /// The model that answers (prefixed).
+    pub model: String,
+    /// The turn's own model.
+    pub from: String,
+    /// Why `from` was not used: "unavailable", or the provider's error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -615,6 +631,12 @@ mod tests {
             EventKind::VariantSelected(VariantSelected {
                 group: "g".into(),
                 message_id: "m".into(),
+            }),
+            EventKind::ModelFallback(ModelFallback {
+                turn_id: "t".into(),
+                model: "b::m2".into(),
+                from: "a::m1".into(),
+                reason: Some("unavailable".into()),
             }),
         ];
         for k in kinds {

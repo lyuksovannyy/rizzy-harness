@@ -4,17 +4,20 @@ import { api } from "../api";
 import { t } from "../lib/i18n";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
-import { modelLabel, resolveModel, savablePrefs } from "../lib/models";
+import { modelLabel, offeredModels, resolveModel, savablePrefs } from "../lib/models";
+import { AgentMark, agentAlert } from "./AgentAvatar";
+import { AgentsSettings } from "./AgentsSettings";
 import { AppearanceFields } from "./Appearance";
 import { ProfileFields, SearchEngineFields } from "./forms";
 import { ProvidersSettings } from "./ProviderForm";
 import { enableNotify, notifyEnabled, notifySupported } from "../lib/notify";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Nodes } from "./Nodes";
+import { Select } from "./Select";
 import { SavingsSettings } from "./Savings";
 import { Users } from "./Users";
 
-export type Tab = "profile" | "preferences" | "memory" | "provider" | "savings" | "nodes" | "password" | "users";
+export type Tab = "profile" | "preferences" | "agents" | "memory" | "provider" | "savings" | "nodes" | "password" | "users";
 
 function NotifyToggle() {
   const [on, setOn] = useState(notifyEnabled());
@@ -72,6 +75,26 @@ function PrefsEditor(props: {
   );
 }
 
+/** The user's default model: listed models, plus the current one when the
+ * provider dropped it, marked, so a notice's "Change your default" shows
+ * what to change. */
+function DefaultModel(props: { models: ModelInfo[]; value: string | null; onChange: (v: string | null) => void }) {
+  const current = resolveModel(props.models, props.value)?.id ?? "";
+  return (
+    <label>
+      Default model
+      <select value={current} onChange={(e) => props.onChange(e.target.value || null)}>
+        <option value="">server default</option>
+        {offeredModels(props.models, current).map((m) => (
+          <option key={m.id} value={m.id} disabled={m.unavailable}>
+            {modelLabel(m, props.models)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export default function Settings(props: {
   me: Me;
   agents: Agent[];
@@ -79,6 +102,8 @@ export default function Settings(props: {
   prefs: Prefs | null;
   onPrefs: (p: Prefs) => void;
   onProviderChanged: () => void;
+  /** An agent's look changed: reload the agents. */
+  onAgentsChanged?: () => void;
   initialTab?: Tab;
   memoryVersion: number;
   nodes: NodeInfo[];
@@ -87,6 +112,7 @@ export default function Settings(props: {
   const tabs: Tab[] = [
     "profile",
     "preferences",
+    "agents",
     "memory",
     ...(admin ? (["provider", "savings", "nodes"] as Tab[]) : []),
     ...(props.me.user_id ? (["password"] as Tab[]) : []),
@@ -125,28 +151,24 @@ export default function Settings(props: {
                 <h3>Search engine</h3>
                 <SearchEngineFields prefs={p} onChange={set} />
                 <div className="form stack">
-                  <label>
+                  <div className="field">
                     Default agent
-                    <select value={p.default_agent ?? ""} onChange={(e) => set({ ...p, default_agent: e.target.value || null })}>
-                      <option value="">server default</option>
-                      {props.agents.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Default model
-                    <select value={resolveModel(props.models, p.default_model)?.id ?? ""} onChange={(e) => set({ ...p, default_model: e.target.value || null })}>
-                      <option value="">server default</option>
-                      {props.models.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {modelLabel(m, props.models)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                    <Select
+                      label="Default agent"
+                      value={p.default_agent ?? ""}
+                      options={[
+                        { value: "", label: "server default" },
+                        ...props.agents.map((a) => ({
+                          value: a.id,
+                          label: a.name,
+                          hint: agentAlert(a) ? "model unavailable" : undefined,
+                          icon: <AgentMark agent={a} size={18} />,
+                        })),
+                      ]}
+                      onChange={(v) => set({ ...p, default_agent: v || null })}
+                    />
+                  </div>
+                  <DefaultModel models={props.models} value={p.default_model} onChange={(v) => set({ ...p, default_model: v })} />
                 </div>
               </>
             )}
@@ -162,6 +184,9 @@ export default function Settings(props: {
               </div>
             )}
           </>
+        )}
+        {tab === "agents" && (
+          <AgentsSettings agents={props.agents} admin={admin} onChanged={props.onAgentsChanged ?? props.onProviderChanged} />
         )}
         {tab === "savings" && <SavingsSettings />}
         {tab === "nodes" && <Nodes nodes={props.nodes} />}

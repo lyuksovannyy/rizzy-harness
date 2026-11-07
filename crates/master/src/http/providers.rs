@@ -1,6 +1,7 @@
-//! Provider setup by admins: presets, test, save, delete, per-agent default
-//! models. Keys are stored per provider (`provider-<id>`) and only ever sent
-//! to the base URL they were saved for.
+//! Provider setup by admins: presets, test, save, delete, cached model
+//! listings, model tests, per-agent default models. Keys are stored per
+//! provider (`provider-<id>`) and only ever sent to the base URL they were
+//! saved for.
 
 use std::collections::BTreeMap;
 
@@ -13,12 +14,15 @@ use serde_json::json;
 
 use super::{ApiError, ApiResult, require_admin, runtime};
 use crate::Master;
-use crate::config::{Config, ModelConfig, ProviderConfig, ProviderKind};
+use crate::avatars::AgentAvatar;
+use crate::config::{AgentChain, Config, ModelConfig, ProviderConfig, ProviderKind};
 use crate::presets::{self, Preset};
 use crate::providers::{ProviderRuntime, secret_name};
 
 const MAX_NAME: usize = 64;
 const MAX_TOKENS: u64 = 100_000_000;
+/// Fallbacks per agent.
+const MAX_FALLBACKS: usize = 8;
 
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
@@ -37,6 +41,7 @@ fn model_json(m: &ModelConfig) -> serde_json::Value {
     json!({
         "id": m.id, "name": m.name, "context": m.context, "max_output": m.max_output,
         "effort": m.effort, "vision": m.vision, "tools": m.tools,
+        "custom": m.custom, "unavailable": m.unavailable, "missing_since": m.missing_since,
     })
 }
 
@@ -151,15 +156,41 @@ pub(super) async fn test_provider(
         Ok(v) => v,
         Err(ApiError(_, e)) => return Ok(Json(json!({ "ok": false, "error": e }))),
     };
-    let key = new_key(&b.api_key)
-        .or_else(|| stored_key(&rt, b.provider_id.as_deref(), &base))
-        .or_else(|| b.memory.then(|| memory_key(&rt, &base)).flatten());
+    let typed = new_key(&b.api_key);
+    let saved = typed
+        .is_none()
+        .then(|| stored_key(&rt, b.provider_id.as_deref(), &base))
+        .flatten();
+    // Only a listing made the way the saved provider lists (its preset, its
+    // own key or none) is its listing; a draft key's or preset's is not.
+    let own = typed.is_none()
+        && b.provider_id.as_deref().is_some_and(|id| {
+            rt.config().provider(id).is_some_and(|sp| {
+                sp.preset == p.id
+                    && (saved.is_some()
+                        || (sp.api_key_env.is_none() && sp.api_key_secret.is_none()))
+            })
+        });
+    let memory = (typed.is_none() && saved.is_none() && b.memory)
+        .then(|| memory_key(&rt, &base))
+        .flatten();
+    let own = own && memory.is_none();
+    let key = typed.or(saved).or(memory);
     let ollama = p.id == "ollama";
     match crate::providers::list_models(p.kind, &base, key.as_ref(), ollama).await {
-        Ok(models) => Ok(Json(json!({
-            "ok": true,
-            "models": models.iter().map(model_json).collect::<Vec<_>>(),
-        }))),
+        Ok(models) => {
+            // A saved provider at this URL keeps it as its listing.
+            if own
+                && let Some(id) = b.provider_id.as_deref()
+                && let Err(e) = m.record_listing(id, p.kind, &base, models.clone()).await
+            {
+                tracing::warn!(provider = %id, "keeping a model listing: {e:#}");
+            }
+            Ok(Json(json!({
+                "ok": true,
+                "models": models.iter().map(model_json).collect::<Vec<_>>(),
+            })))
+        }
         Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
     }
 }
@@ -180,6 +211,9 @@ pub(super) struct ModelBody {
     vision: Option<bool>,
     #[serde(default)]
     tools: Option<bool>,
+    /// Added by hand rather than picked from a listing.
+    #[serde(default)]
+    custom: bool,
 }
 
 #[derive(Deserialize)]
@@ -236,6 +270,10 @@ fn clean_models(models: Vec<ModelBody>, kind: ProviderKind) -> Vec<ModelConfig> 
             },
             vision: m.vision,
             tools: m.tools,
+            custom: m.custom,
+            // Availability is the server's to mark (see `put_provider`).
+            unavailable: false,
+            missing_since: None,
             id,
         });
     }
@@ -351,10 +389,19 @@ pub(super) async fn put_provider(
     if p.needs_key && api_key_env.is_none() && api_key_secret.is_none() {
         return Err(bad("an API key is required"));
     }
-    let models = clean_models(b.models, p.kind);
-    if models.is_empty() {
-        return Err(bad("choose at least one model"));
+    // No chat model is fine: a provider may serve memory embeddings only.
+    let mut models = clean_models(b.models, p.kind);
+    // Marks stay while the URL does; the next listing re-checks them.
+    let same_url = old
+        .as_ref()
+        .filter(|o| presets::same_url(&o.base_url, &base));
+    for x in models.iter_mut().filter(|x| !x.custom) {
+        if let Some(o) = same_url.and_then(|o| o.model(&x.id)) {
+            x.unavailable = o.unavailable;
+            x.missing_since = o.missing_since;
+        }
     }
+    let moved = old.is_some() && same_url.is_none();
     let entry = ProviderConfig {
         id: id.clone(),
         name,
@@ -371,14 +418,19 @@ pub(super) async fn put_provider(
         Some(slot) => *slot = entry,
         None => cfg.providers.push(entry),
     }
-    // A real provider replaces the demo one.
-    cfg.providers.retain(|x| x.kind != ProviderKind::Mock);
+    // A real provider with a chat model replaces the demo one.
+    if cfg.has_chat_model() {
+        cfg.providers.retain(|x| x.kind != ProviderKind::Mock);
+    }
     cfg.normalize();
     cfg.validate().map_err(|e| bad(format!("{e:#}")))?;
     with_secret(&secrets_path(&rt), &secret_name(&id), key.as_ref(), || {
         apply(&m, &rt, cfg)
     })?;
     forget_key(&rt, old.as_ref());
+    if moved {
+        m.forget_listing(&id).await;
+    }
     tracing::info!(provider = %id, preset = %p.id, "provider saved");
     Ok(Json(state_json(&rt.config())))
 }
@@ -399,6 +451,7 @@ pub(super) async fn delete_provider(
     cfg.providers.retain(|p| p.id != id);
     apply(&m, &rt, cfg)?;
     forget_key(&rt, old.as_ref());
+    m.forget_listing(&id).await;
     tracing::info!(provider = %id, "provider deleted");
     Ok(Json(state_json(&rt.config())))
 }
@@ -464,9 +517,10 @@ where
 
 #[derive(Deserialize)]
 pub(super) struct AgentModelsBody {
-    /// Agent id -> model id; `null` removes the agent's default.
+    /// Agent id -> its model and fallbacks (a bare model id: no
+    /// fallbacks); `null` removes the agent's assignment.
     #[serde(default)]
-    agent_models: BTreeMap<String, Option<String>>,
+    agent_models: BTreeMap<String, Option<AgentChain>>,
     /// Missing: unchanged. `null`: falls back (agent `general`, first model).
     #[serde(default, deserialize_with = "present")]
     default_model: Option<Option<String>>,
@@ -491,9 +545,28 @@ pub(super) async fn put_agent_models(
             return Err(bad(format!("unknown agent {agent:?}")));
         }
         match choice {
-            Some(id) => {
-                let id = model(&cfg, &id)?;
-                cfg.agent_models.insert(agent, id);
+            Some(c) => {
+                if c.fallbacks.len() > MAX_FALLBACKS {
+                    return Err(bad(format!("{agent}: at most {MAX_FALLBACKS} fallbacks")));
+                }
+                let main = model(&cfg, &c.model)?;
+                let mut fallbacks: Vec<String> = Vec::new();
+                for f in &c.fallbacks {
+                    let f = model(&cfg, f)?;
+                    if f == main || fallbacks.contains(&f) {
+                        return Err(bad(format!(
+                            "{agent}: fallbacks must not repeat the main model or each other ({f})"
+                        )));
+                    }
+                    fallbacks.push(f);
+                }
+                cfg.agent_models.insert(
+                    agent,
+                    AgentChain {
+                        model: main,
+                        fallbacks,
+                    },
+                );
             }
             None => {
                 cfg.agent_models.remove(&agent);
@@ -507,4 +580,243 @@ pub(super) async fn put_agent_models(
     }
     apply(&m, &rt, cfg)?;
     Ok(Json(state_json(&rt.config())))
+}
+
+/// Set how an agent looks. The body must name a shape, eyes and an accent
+/// from the fixed sets.
+pub(super) async fn put_agent_avatar(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let set = m.agents();
+    let agent = set
+        .get(&id)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("unknown agent {id:?}")))?;
+    let avatar: AgentAvatar =
+        serde_json::from_str(&body).map_err(|e| bad(format!("bad avatar: {e}")))?;
+    let rt = runtime(&m)?;
+    let _edits = rt.lock_edits().await;
+    let mut cfg = rt.config();
+    cfg.agent_avatars.insert(id, avatar);
+    apply(&m, &rt, cfg)?;
+    Ok(Json(super::agent_json(&m, agent)))
+}
+
+/// A listing for the picker: the listed models, then the provider's saved
+/// ones the listing lacks (custom and unavailable models), flagged.
+fn listing_json(cfg: &Config, id: &str, l: &crate::model_cache::Listing) -> serde_json::Value {
+    let saved = cfg
+        .provider(id)
+        .map(|p| p.models.as_slice())
+        .unwrap_or_default();
+    let extra = saved
+        .iter()
+        .filter(|s| !l.models.iter().any(|m| m.id == s.id));
+    json!({
+        "models": l.models.iter().chain(extra).map(model_json).collect::<Vec<_>>(),
+        "fetched_ms": l.fetched_ms,
+    })
+}
+
+fn unknown_provider() -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, "unknown provider".into())
+}
+
+/// The cached listing; fetched once when there is none yet.
+pub(super) async fn get_models(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let base = rt
+        .config()
+        .provider(&id)
+        .map(|p| p.base_url.clone())
+        .ok_or_else(unknown_provider)?;
+    let l = match m.cached_listing(&id, &base).await {
+        Some(l) => l,
+        None => m
+            .refresh_listing(&id)
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?,
+    };
+    Ok(Json(listing_json(&rt.config(), &id, &l)))
+}
+
+/// Fetch the listing now and re-mark the saved models.
+pub(super) async fn refresh_models(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    if rt.config().provider(&id).is_none() {
+        return Err(unknown_provider());
+    }
+    let l = m
+        .refresh_listing(&id)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(listing_json(&rt.config(), &id, &l)))
+}
+
+/// The admin's override for a model: remove it (and its mark) from the
+/// provider and from every agent that uses it.
+pub(super) async fn delete_model(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path((id, raw)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let _edits = rt.lock_edits().await;
+    let mut cfg = rt.config();
+    let p = cfg
+        .providers
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(unknown_provider)?;
+    let before = p.models.len();
+    p.models.retain(|x| x.id != raw);
+    if p.models.len() == before {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown model".into()));
+    }
+    // Agents and defaults that named it are repaired by `apply`: a fallback
+    // takes the place of a main model, a default falls back.
+    apply(&m, &rt, cfg)?;
+    tracing::info!(provider = %id, model = %raw, "model removed");
+    Ok(Json(state_json(&rt.config())))
+}
+
+/// `DELETE …/models/refresh`, which axum routes to the refresh action: the
+/// model whose raw id is `refresh`.
+pub(super) async fn delete_refresh(
+    s: State<Master>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    delete_model(s, h, Path((id, "refresh".into()))).await
+}
+
+#[derive(Deserialize)]
+pub(super) struct ModelTestBody {
+    /// The provider's raw id.
+    model: String,
+    /// A saved provider: its URL and kind unless a preset is given, and its
+    /// key (same URL only).
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    /// The API style of a bare `base_url` (custom memory endpoints).
+    #[serde(default)]
+    kind: Option<ProviderKind>,
+    /// An embeddings model: embed a word instead of chatting. Also reuses
+    /// the custom embeddings key `[memory]` keeps (same URL only).
+    #[serde(default)]
+    memory: bool,
+}
+
+/// Where a model test goes: the API kind and base URL.
+fn test_target(rt: &ProviderRuntime, b: &ModelTestBody) -> ApiResult<(ProviderKind, String)> {
+    if let Some(id) = b.preset.as_deref() {
+        let p = preset(id)?;
+        return Ok((p.kind, base_url(p, b.base_url.as_deref())?));
+    }
+    if let Some(id) = b.provider_id.as_deref() {
+        let p = rt
+            .config()
+            .provider(id)
+            .cloned()
+            .ok_or_else(unknown_provider)?;
+        return Ok((p.kind, p.base_url));
+    }
+    let url = b
+        .base_url
+        .as_deref()
+        .map(|u| u.trim().trim_end_matches('/'))
+        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+        .ok_or_else(|| bad("choose a provider or enter an http(s) base URL"))?;
+    Ok((b.kind.unwrap_or(ProviderKind::Openai), url.to_string()))
+}
+
+/// One short request to a model: a chat that should answer "OK", or for
+/// an embeddings model one embedding. Always 200, like `/providers/test`.
+pub(super) async fn test_model(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Json(b): Json<ModelTestBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&m, &headers).await?;
+    let rt = runtime(&m)?;
+    let fail = |e: String| Ok(Json(json!({ "ok": false, "error": e })));
+    let (kind, base) = match test_target(&rt, &b) {
+        Ok(t) => t,
+        Err(ApiError(_, e)) => return fail(e),
+    };
+    let mut model = b.model.trim();
+    if let Some(rest) = b
+        .provider_id
+        .as_deref()
+        .and_then(|p| model.strip_prefix(p)?.strip_prefix("::"))
+    {
+        model = rest;
+    }
+    if model.is_empty()
+        || model.len() > 256
+        || model.contains("::")
+        || model.chars().any(char::is_control)
+    {
+        return fail("enter the provider's own model id".into());
+    }
+    let key = new_key(&b.api_key)
+        .or_else(|| stored_key(&rt, b.provider_id.as_deref(), &base))
+        .or_else(|| b.memory.then(|| memory_key(&rt, &base)).flatten());
+    if key.is_some() && !crate::config::url_allowed(&base) {
+        return fail("a key goes to https:// only (plain http only for localhost)".into());
+    }
+    let scrub = |e: String| match &key {
+        Some(k) if !k.expose().is_empty() => e.replace(k.expose(), "[redacted]"),
+        _ => e,
+    };
+    let started = std::time::Instant::now();
+    let reply = match (crate::providers::api_kind(kind), b.memory) {
+        (None, _) => Ok("OK".to_string()),
+        (Some(k), false) => harness_agent_native::models::test_chat(k, &base, key.as_ref(), model)
+            .await
+            .map_err(|e| e.to_string()),
+        (Some(_), true) => {
+            let style = match kind {
+                ProviderKind::Anthropic => harness_memory::ApiStyle::Anthropic,
+                _ => harness_memory::ApiStyle::Openai,
+            };
+            harness_memory::Embedder::new(&base, model, key.clone())
+                .with_style(style)
+                .embed(&["test".to_string()])
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| match v.first() {
+                    Some(e) if !e.is_empty() => Ok(format!("{} dimensions", e.len())),
+                    _ => Err("the endpoint returned no embedding".to_string()),
+                })
+        }
+    };
+    match reply {
+        Ok(r) => Ok(Json(json!({
+            "ok": true,
+            "reply": harness_agent_native::models::sanitize_reply(&scrub(r)),
+            "ms": started.elapsed().as_millis() as u64,
+        }))),
+        Err(e) => fail(scrub(e)),
+    }
 }

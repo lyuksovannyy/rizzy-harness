@@ -1,16 +1,24 @@
 // @vitest-environment happy-dom
 // Adding a provider: a custom endpoint's name and prefix follow its URL
 // until edited, and a preset with a warning keeps Save locked for its wait
-// after a successful test, counting down.
+// after a successful test, counting down. A fixed URL is never focused;
+// the test is an icon on the key's row. A saved provider shows the server's
+// cached listing (listing again only on request), marks what the provider
+// dropped, and every chosen model must serve an agent before Save.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { ProviderPreset, ProvidersState } from "../types";
+import type { Agent, ProviderModel, ProviderPreset, ProvidersState } from "../types";
 
 const testProvider = vi.fn();
 const saveProvider = vi.fn();
 const saveAgentModels = vi.fn();
-vi.mock("../api", () => ({ api: { testProvider, saveProvider, saveAgentModels } }));
+const providerModels = vi.fn();
+const refreshProviderModels = vi.fn();
+const removeProviderModel = vi.fn();
+vi.mock("../api", () => ({
+  api: { testProvider, saveProvider, saveAgentModels, providerModels, refreshProviderModels, removeProviderModel },
+}));
 
 const { nameFromUrl, ProviderForm, useCountdown } = await import("./ProviderForm");
 
@@ -25,6 +33,20 @@ const preset = (id: string, more: Partial<ProviderPreset> = {}): ProviderPreset 
   needs_key: true,
   warning: null,
   custom: false,
+  group: more.custom ? "own" : "known",
+  ...more,
+});
+const m = (id: string, more: Partial<ProviderModel> = {}): ProviderModel => ({
+  id,
+  name: null,
+  context: null,
+  max_output: null,
+  effort: null,
+  vision: null,
+  tools: null,
+  custom: false,
+  unavailable: false,
+  missing_since: null,
   ...more,
 });
 const trusted = { kind: "trusted_source" as const, text: "Only connect endpoints you trust.", wait_secs: 0 };
@@ -37,15 +59,22 @@ const STATE: ProvidersState = {
     }),
     preset("openai", { label: "OpenAI (ChatGPT)" }),
     preset("custom_openai", { label: "OpenAI-compatible (custom)", base_url: null, url_editable: true, custom: true, warning: trusted }),
+    preset("ollama", { label: "Ollama", base_url: "http://localhost:11434/v1", url_editable: true, needs_key: false, group: "own" }),
   ],
   default_model: null,
   agent_models: {},
   configured: false,
 };
-const AGENTS = [
-  { id: "general", name: "General", description: "", builtin: true, default_model: null },
-  { id: "coder", name: "Coder", description: "", builtin: true, default_model: null },
-];
+const agent = (id: string, name: string): Agent => ({
+  id,
+  name,
+  description: "",
+  builtin: true,
+  default_model: null,
+  fallbacks: [],
+  unavailable: [],
+});
+const AGENTS = [agent("general", "General"), agent("coder", "Coder")];
 
 let host: HTMLElement;
 let root: Root;
@@ -56,6 +85,9 @@ beforeEach(() => {
   testProvider.mockReset();
   saveProvider.mockReset();
   saveAgentModels.mockReset();
+  providerModels.mockReset();
+  refreshProviderModels.mockReset();
+  removeProviderModel.mockReset();
   saved.mockReset();
   host = document.createElement("div");
   document.body.append(host);
@@ -68,7 +100,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === label)!;
+const button = (label: string) =>
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent!.trim() === label || b.getAttribute("aria-label") === label)!;
 const save = () => host.querySelector<HTMLButtonElement>("button.primary")!;
 const field = (label: string) =>
   [...host.querySelectorAll("label")].find((l) => l.textContent!.startsWith(label))!.querySelector("input")!;
@@ -122,7 +155,6 @@ describe("custom endpoint", () => {
 describe("wait after a test", () => {
   test("Save unlocks wait_secs after a successful test, counting down", async () => {
     expect(host.textContent).toContain("May train on your prompts.");
-    expect(field("API endpoint").readOnly).toBe(true);
     testProvider.mockResolvedValue({
       ok: true,
       models: [{ id: "meta/llama-3.1-70b-instruct", name: null, context: 131072, max_output: null, effort: null, vision: false, tools: true }],
@@ -148,13 +180,13 @@ describe("wait after a test", () => {
       preset: "nvidia_nim",
       base_url: undefined,
       api_key: "nvapi-test",
-      models: [{ id: "meta/llama-3.1-70b-instruct", name: null, context: 131072, max_output: null, effort: null, vision: false, tools: true }],
+      models: [m("meta/llama-3.1-70b-instruct", { context: 131072, vision: false, tools: true })],
     });
     expect(saveAgentModels).toHaveBeenCalledWith({
-      agent_models: { general: "nvidia_nim::meta/llama-3.1-70b-instruct" },
+      agent_models: { general: { model: "nvidia_nim::meta/llama-3.1-70b-instruct", fallbacks: [] } },
       default_model: "nvidia_nim::meta/llama-3.1-70b-instruct",
     });
-    expect(saved).toHaveBeenCalledWith(STATE);
+    expect(saved).toHaveBeenCalledWith(STATE, { id: "nvidia_nim", embeddings: null });
   });
 
   test("a failed test keeps Save locked; changing the key asks for a new test", async () => {
@@ -162,7 +194,7 @@ describe("wait after a test", () => {
     await act(async () => button("Test connection").click());
     expect(host.textContent).toContain("401 Unauthorized");
     expect(save().disabled).toBe(true);
-    testProvider.mockResolvedValue({ ok: true, models: [{ id: "m", name: null, context: null, max_output: null, effort: null, vision: null, tools: null }] });
+    testProvider.mockResolvedValue({ ok: true, models: [m("m")] });
     await act(async () => button("Test connection").click());
     act(() => host.querySelector<HTMLInputElement>('li input[type="checkbox"]')!.click());
     act(() => vi.advanceTimersByTime(10_000));
@@ -174,7 +206,7 @@ describe("wait after a test", () => {
 
   test("no wait without a warning", async () => {
     choose("openai");
-    testProvider.mockResolvedValue({ ok: true, models: [{ id: "gpt-4o", name: null, context: null, max_output: null, effort: null, vision: null, tools: null }] });
+    testProvider.mockResolvedValue({ ok: true, models: [m("gpt-4o")] });
     await act(async () => button("Test connection").click());
     act(() => host.querySelector<HTMLInputElement>('li input[type="checkbox"]')!.click());
     expect(save().textContent).toBe("Save provider");
@@ -184,7 +216,7 @@ describe("wait after a test", () => {
 
 const mount = (state: ProvidersState) =>
   act(() => root.render(<ProviderForm key={JSON.stringify(state)} state={state} agents={AGENTS} onSaved={saved} />));
-const listed = (id: string) => ({ ok: true, models: [{ id, name: null, context: null, max_output: null, effort: null, vision: null, tools: null }] });
+const listed = (...ids: string[]) => ({ ok: true, models: ids.map((id) => m(id)) });
 
 describe("the key stays with its endpoint", () => {
   test("switching the provider empties the key", async () => {
@@ -211,7 +243,7 @@ describe("ids shared with a built-in provider", () => {
   test("a custom endpoint on a preset's id is not that preset's, and blocks adding it", () => {
     mount({
       ...STATE,
-      providers: [{ id: "openai", name: "DeepSeek", preset: "custom_openai", kind: "openai", base_url: "https://api.deepseek.com", key: "stored", models: [{ id: "deepseek-chat", name: null, context: null, max_output: null, effort: null, vision: null, tools: null }] }],
+      providers: [{ id: "openai", name: "DeepSeek", preset: "custom_openai", kind: "openai", base_url: "https://api.deepseek.com", key: "stored", models: [m("deepseek-chat")] }],
     });
     choose("openai");
     // Not loaded as OpenAI's own models.
@@ -224,6 +256,9 @@ describe("ids shared with a built-in provider", () => {
     type(field("API endpoint"), "https://api.openai.example/v1");
     expect(field("Prefix").value).toBe("openai");
     expect(host.textContent).toContain("The prefix openai is reserved for a built-in provider.");
+    // As the server's presets::RESERVED_IDS has it.
+    type(field("Prefix"), "models");
+    expect(host.textContent).toContain("The prefix models is reserved for a built-in provider.");
   });
 });
 
@@ -234,10 +269,21 @@ describe("General's default", () => {
     testProvider.mockResolvedValue(listed("gpt-4o"));
     await act(async () => button("Test connection").click());
     act(() => host.querySelector<HTMLInputElement>('li input[type="checkbox"]')!.click());
+    // General keeps its model, so this one waits for an agent.
+    expect(save().disabled).toBe(true);
+    expect(host.textContent).toContain("Assign this model to an agent: gpt-4o.");
+    act(() => button("Assign to agents… (gpt-4o)").click());
+    act(() => host.querySelector<HTMLButtonElement>('.agent-menu button[aria-label="Coder: main model"]')!.click());
+    expect(save().disabled).toBe(false);
     saveProvider.mockResolvedValue({ ...STATE, default_model: "taken::deepseek-chat", agent_models: {} });
     saveAgentModels.mockResolvedValue(STATE);
     await act(async () => save().click());
-    expect(saveAgentModels).toHaveBeenCalledWith({ agent_models: { general: "taken::deepseek-chat" } });
+    expect(saveAgentModels).toHaveBeenCalledWith({
+      agent_models: {
+        general: { model: "taken::deepseek-chat", fallbacks: [] },
+        coder: { model: "openai::gpt-4o", fallbacks: [] },
+      },
+    });
   });
 
   test("the demo's default gives way to the new provider", async () => {
@@ -249,7 +295,185 @@ describe("General's default", () => {
     saveProvider.mockResolvedValue({ ...STATE, default_model: "demo::echo", agent_models: {} });
     saveAgentModels.mockResolvedValue(STATE);
     await act(async () => save().click());
-    expect(saveAgentModels).toHaveBeenCalledWith({ agent_models: { general: "openai::gpt-4o" }, default_model: "openai::gpt-4o" });
+    expect(saveAgentModels).toHaveBeenCalledWith({
+      agent_models: { general: { model: "openai::gpt-4o", fallbacks: [] } },
+      default_model: "openai::gpt-4o",
+    });
+  });
+});
+
+describe("the form", () => {
+  test("providers come in two groups: your own endpoints, then known ones", () => {
+    const groups = [...host.querySelectorAll("optgroup")].map((g) => [g.label, [...g.querySelectorAll("option")].map((o) => o.value)]);
+    expect(groups).toEqual([
+      ["Your own endpoint", ["custom_openai", "ollama"]],
+      ["Known providers", ["nvidia_nim", "openai"]],
+    ]);
+  });
+
+  test("a fixed URL is read, never focused", () => {
+    const url = field("API endpoint");
+    expect(url.value).toBe("https://nvidia_nim.example/v1");
+    expect(url.disabled).toBe(true);
+    expect(url.tabIndex).toBe(-1);
+    url.focus();
+    expect(document.activeElement).not.toBe(url);
+    choose("custom_openai");
+    expect(field("API endpoint").disabled).toBe(false);
+  });
+
+  test("the test sits by the key, even when no key is needed, and spins while listing", async () => {
+    const rowOf = (b: HTMLElement) => b.closest(".field-action")!.querySelector("input")!;
+    expect(rowOf(button("Test connection")).type).toBe("password");
+    choose("ollama");
+    expect(rowOf(button("Test connection")).type).toBe("password");
+    let done!: (v: unknown) => void;
+    testProvider.mockReturnValue(new Promise((r) => (done = r)));
+    act(() => button("Test connection").click());
+    expect(button("Test connection").querySelector("svg")!.getAttribute("class")).toContain("spin");
+    // Off while it lists, but still focusable: focus stays on it.
+    expect(button("Test connection").getAttribute("aria-disabled")).toBe("true");
+    expect(button("Test connection").disabled).toBe(false);
+    act(() => button("Test connection").click());
+    expect(testProvider).toHaveBeenCalledTimes(1);
+    await act(async () => done(listed("nomic-embed-text", "llama3")));
+    expect(button("Test connection").querySelector(".spin")).toBeNull();
+    expect(host.textContent).toContain("Connected. 2 models.");
+  });
+
+  test("Save waits until every chosen model serves an agent", async () => {
+    choose("openai");
+    testProvider.mockResolvedValue(listed("gpt-4o", "gpt-4o-mini"));
+    await act(async () => button("Test connection").click());
+    const boxes = () => host.querySelectorAll<HTMLInputElement>('.model-pick > ul > li input[type="checkbox"]');
+    act(() => boxes()[0]!.click());
+    act(() => boxes()[1]!.click());
+    expect(save().disabled).toBe(true);
+    expect(host.textContent).toContain("Assign this model to an agent: gpt-4o-mini.");
+    act(() => button("Assign to agents… (gpt-4o-mini)").click());
+    act(() => host.querySelector<HTMLButtonElement>('.agent-menu button[aria-label="General: fallback"]')!.click());
+    expect(save().disabled).toBe(false);
+    saveProvider.mockResolvedValue({ ...STATE, agent_models: {} });
+    saveAgentModels.mockResolvedValue(STATE);
+    await act(async () => save().click());
+    expect(saveAgentModels).toHaveBeenCalledWith({
+      agent_models: { general: { model: "openai::gpt-4o", fallbacks: ["openai::gpt-4o-mini"] } },
+      default_model: "openai::gpt-4o",
+    });
+  });
+});
+
+describe("a saved provider", () => {
+  const SAVED: ProvidersState = {
+    ...STATE,
+    providers: [
+      ...STATE.providers,
+      {
+        id: "openai",
+        name: "OpenAI (ChatGPT)",
+        preset: "openai",
+        kind: "openai",
+        base_url: "https://openai.example/v1",
+        key: "stored",
+        models: [m("gpt-4o"), m("gpt-3.5", { unavailable: true, missing_since: 1 }), m("mine", { custom: true, context: 8000 })],
+      },
+    ],
+    agent_models: { general: { model: "openai::gpt-4o", fallbacks: ["openai::gpt-3.5"] }, coder: { model: "openai::mine", fallbacks: [] } },
+    default_model: "openai::gpt-4o",
+  };
+  const edit = () =>
+    act(() =>
+      root.render(
+        <ProviderForm key="edit" state={SAVED} agents={AGENTS} edit={SAVED.providers[1]} onSaved={saved} onState={changed} />,
+      ),
+    );
+  const changed = vi.fn();
+  const ids = () => [...host.querySelectorAll(".model-pick > ul > li .mono")].map((e) => e.textContent);
+
+  test("lists from the server's cache, with no refresh, and marks what the provider dropped", async () => {
+    providerModels.mockResolvedValue({ models: [m("gpt-4o", { context: 128000 }), m("o3")], fetched_ms: Date.now() - 3 * 3_600_000 });
+    await act(async () => edit());
+    expect(providerModels).toHaveBeenCalledWith("openai");
+    expect(refreshProviderModels).not.toHaveBeenCalled();
+    expect(testProvider).not.toHaveBeenCalled();
+    expect(ids()).toEqual(["gpt-3.5", "mine", "gpt-4o", "o3"]);
+    expect(host.textContent).toContain("Listed 3 h ago");
+    const row = (id: string) => [...host.querySelectorAll(".model-pick > ul > li")].find((li) => li.querySelector(".mono")!.textContent === id)!;
+    expect(row("gpt-3.5").querySelector(".tag-unavailable")).not.toBeNull();
+    expect(row("mine").querySelector(".tag-custom")).not.toBeNull();
+    expect(row("mine").querySelector(".tag-unavailable")).toBeNull();
+    // The cache's parameters, not the saved ones.
+    expect(row("gpt-4o").querySelector(".tag-ctx")!.textContent).toBe("128k ctx");
+    // Unchanged: saving needs no new test.
+    expect(save().disabled).toBe(false);
+
+    refreshProviderModels.mockResolvedValue({ models: [m("gpt-4o"), m("gpt-3.5")], fetched_ms: Date.now() });
+    await act(async () => button("Refresh model list").click());
+    expect(refreshProviderModels).toHaveBeenCalledWith("openai");
+    expect(row("gpt-3.5").querySelector(".tag-unavailable")).toBeNull();
+    expect(host.textContent).toContain("Listed just now");
+  });
+
+  test("an empty cache lists once", async () => {
+    providerModels.mockResolvedValue({ models: [], fetched_ms: null });
+    refreshProviderModels.mockResolvedValue({ models: [m("gpt-4o")], fetched_ms: Date.now() });
+    await act(async () => edit());
+    expect(refreshProviderModels).toHaveBeenCalledTimes(1);
+  });
+
+  test("the admin removes a dropped model from the provider and its agents", async () => {
+    providerModels.mockResolvedValue({ models: [m("gpt-4o")], fetched_ms: Date.now() });
+    await act(async () => edit());
+    const after = { ...SAVED, agent_models: { general: { model: "openai::gpt-4o", fallbacks: [] } } };
+    removeProviderModel.mockResolvedValue(after);
+    await act(async () => button("Remove gpt-3.5 from this provider and its agents").click());
+    expect(removeProviderModel).toHaveBeenCalledWith("openai", "gpt-3.5");
+    expect(changed).toHaveBeenCalledWith(after);
+    expect(ids()).not.toContain("gpt-3.5");
+    expect([...host.querySelectorAll(".chain-fallbacks .chain-model")]).toHaveLength(0);
+  });
+
+  test("removing an agent's gone main model promotes its first fallback, as the server does", async () => {
+    const state = { ...SAVED, agent_models: { general: { model: "openai::gpt-3.5", fallbacks: ["openai::gpt-4o"] }, coder: { model: "openai::mine", fallbacks: [] } } };
+    providerModels.mockResolvedValue({ models: [m("gpt-4o")], fetched_ms: Date.now() });
+    await act(async () =>
+      root.render(<ProviderForm key="edit" state={state} agents={AGENTS} edit={state.providers[1]} onSaved={saved} onState={changed} />),
+    );
+    removeProviderModel.mockResolvedValue({ ...state, agent_models: { ...state.agent_models, general: { model: "openai::gpt-4o", fallbacks: [] } } });
+    await act(async () => button("Remove gpt-3.5 from this provider and its agents").click());
+    expect(host.textContent).not.toContain("General needs a main model");
+    expect(button("Remove gpt-4o as General's main model")).toBeDefined();
+    expect(save().disabled).toBe(false);
+  });
+
+  test("can be left with no chat models (kept for memory only)", async () => {
+    providerModels.mockResolvedValue({ models: [m("gpt-4o")], fetched_ms: Date.now() });
+    const bare = { ...SAVED, agent_models: { general: { model: "groq::llama", fallbacks: [] } }, default_model: "groq::llama" };
+    await act(async () =>
+      root.render(<ProviderForm key="edit" state={bare} agents={AGENTS} edit={bare.providers[1]} onSaved={saved} onState={changed} />),
+    );
+    act(() => button("Deselect all").click());
+    expect(host.textContent).toContain("0 of");
+    expect(save().disabled).toBe(false);
+    saveProvider.mockResolvedValue(bare);
+    await act(async () => save().click());
+    expect(saveProvider).toHaveBeenCalledWith("openai", expect.objectContaining({ models: [] }));
+  });
+
+  test("a refused plan still tells the parent the provider was saved", async () => {
+    changed.mockReset();
+    providerModels.mockResolvedValue({ models: [m("gpt-4o"), m("o3")], fetched_ms: Date.now() });
+    await act(async () => edit());
+    act(() => [...host.querySelectorAll<HTMLInputElement>('.model-pick > ul > li input[type="checkbox"]')].at(-1)!.click());
+    act(() => button("Assign to agents… (o3)").click());
+    act(() => host.querySelector<HTMLButtonElement>('.agent-menu button[aria-label="Coder: fallback"]')!.click());
+    const after = { ...SAVED, providers: [...SAVED.providers] };
+    saveProvider.mockResolvedValue(after);
+    saveAgentModels.mockRejectedValue(new Error("coder: at most 8 fallbacks"));
+    await act(async () => save().click());
+    expect(changed).toHaveBeenCalledWith(after);
+    expect(saved).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("coder: at most 8 fallbacks");
   });
 });
 

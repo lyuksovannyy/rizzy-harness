@@ -51,6 +51,7 @@ const en = {
   "settings.title": "Settings",
   "settings.profile": "Profile",
   "settings.preferences": "Preferences",
+  "settings.agents": "Agents",
   "settings.provider": "AI provider",
   "settings.password": "Password",
   "settings.users": "Users",

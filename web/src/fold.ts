@@ -38,6 +38,7 @@ const KNOWN = new Set([
   "agent_changed",
   "variant_selected",
   "history_summarized",
+  "model_fallback",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -218,6 +219,9 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "history_summarized":
       v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
+      break;
+    case "model_fallback":
+      v.items.push({ type: "fallback", turn_id: p.turn_id, model: p.model, from: p.from ?? null, reason: p.reason ?? null });
       break;
   }
 }

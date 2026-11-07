@@ -5,6 +5,7 @@ import { hits, inflate, type Zones } from "./geom";
 import { apportion, lineCount, NARROW, placeWall, tiersFor, WIDE, type Placed } from "./place";
 import { mulberry32 } from "./rng";
 import { fakeMeasure, generalDecks, homeZones } from "./testkit";
+import wallCss from "./wall.css?raw";
 
 const wall = (seed: number, z: Zones, n = lineCount(z)) =>
   placeWall({ rng: mulberry32(seed), zones: z, tiers: tiersFor(z.w), measure: fakeMeasure, n, next: generalDecks(seed) });
@@ -114,5 +115,17 @@ describe("placeWall", () => {
       expect(lines.length).toBeGreaterThan(55);
     }
     expect(best).toBeLessThan(5);
+  });
+});
+
+describe("no outlines", () => {
+  test("no wall query is boxed: a line is as tall as its text, and the CSS draws no border", () => {
+    const z = homeZones(1280, 800);
+    for (const l of wall(3, z)) {
+      expect(l.h).toBe(Math.ceil(1.3 * px(l, z.w)));
+      expect(Object.keys(l)).not.toContain("pill");
+    }
+    expect(wallCss).not.toMatch(/\b(border|outline|box-shadow)\s*:/);
+    expect(wallCss).not.toMatch(/\.pill\b/);
   });
 });

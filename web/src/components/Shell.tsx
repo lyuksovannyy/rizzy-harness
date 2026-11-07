@@ -10,7 +10,7 @@ import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
-import type { Agent, AttentionItem, Me, ModelInfo, NodeAttention, NodeInfo, Prefs, SessionRow } from "../types";
+import type { Agent, AttentionItem, Me, ModelInfo, NodeAttention, NodeInfo, Notice, Prefs, SessionRow } from "../types";
 import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import { Sidebar } from "./Sidebar";
@@ -24,11 +24,13 @@ const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
 /** A home visit's background seed (bg/rng.ts would bring the whole PRNG into the first load). */
 const newSeed = () => crypto.getRandomValues(new Uint32Array(1))[0]!;
 const COLLAPSED_KEY = "harness.sidebarCollapsed";
+/** Models can drop out of a provider's listing at any time (the server re-lists daily). */
+const NOTICES_MS = 5 * 60_000;
 
 type Route =
   | { kind: "home" }
   | { kind: "session"; id: string }
-  | { kind: "settings"; tab?: "memory" | "nodes" };
+  | { kind: "settings"; tab?: "memory" | "nodes" | "provider" | "preferences" };
 
 function parseRoute(): Route {
   const h = location.hash;
@@ -37,6 +39,8 @@ function parseRoute(): Route {
   if (h === "#/settings") return { kind: "settings" };
   if (h === "#/settings/memory") return { kind: "settings", tab: "memory" };
   if (h === "#/settings/nodes") return { kind: "settings", tab: "nodes" };
+  if (h === "#/settings/provider") return { kind: "settings", tab: "provider" };
+  if (h === "#/settings/preferences") return { kind: "settings", tab: "preferences" };
   return { kind: "home" };
 }
 
@@ -67,6 +71,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [voice, setVoice] = useState(false);
   const [attention, setAttention] = useState<AttentionItem[]>([]);
   const [nodeAttention, setNodeAttention] = useState<NodeAttention[]>([]);
+  const [notices, setNotices] = useState<Notice[]>([]);
   const waiting = useRef<string[] | null>(null);
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -133,9 +138,17 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     api.sessions().then((r) => setSessions(r.sessions)).catch(unauthorized);
     refreshAttention();
   }, [unauthorized, refreshAttention]);
-  // Agents too: their default models change with the provider settings.
+  const refreshNotices = useCallback(() => {
+    api
+      .notices()
+      .then((r) => setNotices(r.notices))
+      .catch(() => {});
+  }, []);
+  // Agents too: their default models change with the provider settings, and
+  // so do the notices about models gone from a provider.
   const refreshModels = useCallback(() => {
     api.models().then((r) => setModels(r.models)).catch(unauthorized);
+    refreshNotices();
     api
       .agents()
       .then((r) => {
@@ -143,7 +156,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
         setServerDefaultAgent(r.default);
       })
       .catch(unauthorized);
-  }, [unauthorized]);
+  }, [unauthorized, refreshNotices]);
   const refreshNodes = useCallback(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
   }, [unauthorized]);
@@ -168,6 +181,12 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       .catch(() => {});
     return () => live.close();
   }, [live, refreshSessions, refreshNodes, refreshModels, unauthorized]);
+
+  // With the agents, whose red marks follow the same listings.
+  useEffect(() => {
+    const id = setInterval(refreshModels, NOTICES_MS);
+    return () => clearInterval(id);
+  }, [refreshModels]);
 
   useEffect(() => {
     api
@@ -358,8 +377,13 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               agents={agents}
               models={models}
               prefs={prefs}
-              onPrefs={setPrefs}
+              onPrefs={(p) => {
+                setPrefs(p);
+                // Whether a notice is "your default" follows the saved prefs.
+                refreshNotices();
+              }}
               onProviderChanged={refreshModels}
+              onAgentsChanged={refreshModels}
               initialTab={route.tab}
               memoryVersion={memoryVersion}
               nodes={nodes}
@@ -382,6 +406,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               voice={voice}
               attention={attention}
               nodeAttention={nodeAttention}
+              notices={notices}
               seed={home.seed}
               history={history}
             />

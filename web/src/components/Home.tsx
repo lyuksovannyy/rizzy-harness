@@ -2,10 +2,11 @@ import { DEFAULT_IMAGE_SEARCH } from "../lib/engines";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
-import type { Agent, ModelInfo, NodeInfo, Prefs, AttentionItem, NodeAttention } from "../types";
+import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, NodeAttention } from "../types";
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
+import { Notices } from "./Notices";
 import { Similar, type SimilarHandle } from "./Similar";
 import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
@@ -34,6 +35,8 @@ export function Home(props: {
   voice?: boolean;
   attention?: AttentionItem[];
   nodeAttention?: NodeAttention[];
+  /** Lasting problems (a model gone from its provider): always shown, above the similar chats. */
+  notices?: Notice[];
   /** New per home visit: the background re-rolls with it. */
   seed: number;
   history: History;
@@ -110,6 +113,7 @@ export function Home(props: {
               : undefined
           }
         />
+        <Notices notices={props.notices ?? []} agents={props.agents} />
         <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} onCount={setSimilarCount} />
         {similarCount === 0 && <Attention items={props.attention ?? []} nodes={props.nodeAttention} onOpen={props.onOpen} />}
         {!!props.toReview && (

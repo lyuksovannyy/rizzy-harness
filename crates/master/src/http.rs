@@ -44,9 +44,30 @@ pub fn router(master: Master) -> Router {
             axum::routing::put(providers::put_provider).delete(providers::delete_provider),
         )
         .route(
+            "/api/admin/providers/models/test",
+            post(providers::test_model),
+        )
+        .route(
+            "/api/admin/providers/{id}/models",
+            get(providers::get_models),
+        )
+        .route(
+            "/api/admin/providers/{id}/models/refresh",
+            post(providers::refresh_models).delete(providers::delete_refresh),
+        )
+        .route(
+            "/api/admin/providers/{id}/models/{raw}",
+            axum::routing::delete(providers::delete_model),
+        )
+        .route(
             "/api/admin/agent-models",
             axum::routing::put(providers::put_agent_models),
         )
+        .route(
+            "/api/admin/agents/{id}/avatar",
+            axum::routing::put(providers::put_agent_avatar),
+        )
+        .route("/api/notices", get(notices))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{id}",
@@ -313,20 +334,52 @@ async fn models(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<s
     Ok(Json(json!({ "models": m.models() })))
 }
 
+/// An agent as the UI lists it: its definition, the admin's model, the
+/// model it runs on and the fallbacks it has there (its own chain's, else
+/// the ones it inherits with the default), which of those are unavailable,
+/// and its avatar.
+fn agent_json(m: &Master, a: &harness_agents::Agent) -> serde_json::Value {
+    let chain = m.agent_chain(&a.id);
+    let main = m.agent_main_model(a);
+    let fallbacks = m.agent_fallbacks(&a.id, main.as_deref());
+    let unavailable: Vec<String> = match m.provider_runtime() {
+        Some(rt) => {
+            let cfg = rt.config();
+            let mut out: Vec<String> = Vec::new();
+            for x in main.iter().chain(&fallbacks) {
+                if cfg.model_unavailable(x) && !out.contains(x) {
+                    out.push(x.clone());
+                }
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+    let mut v = json!(a);
+    v["default_model"] = json!(chain.map(|c| c.model));
+    v["main_model"] = json!(main);
+    v["fallbacks"] = json!(fallbacks);
+    v["unavailable"] = json!(unavailable);
+    v["avatar"] = json!(m.agent_avatar(&a.id));
+    v
+}
+
 async fn agents(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
     require(&m, &headers).await?;
     let set = m.agents();
-    let agents: Vec<serde_json::Value> = set
-        .list()
-        .iter()
-        .map(|a| {
-            let mut v = json!(a);
-            v["default_model"] = json!(m.agent_model(&a.id));
-            v
-        })
-        .collect();
+    let agents: Vec<serde_json::Value> = set.list().iter().map(|a| agent_json(&m, a)).collect();
     Ok(Json(
         json!({ "agents": agents, "default": set.default_id() }),
+    ))
+}
+
+async fn notices(
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    Ok(Json(
+        json!({ "notices": crate::notices::for_viewer(&m, &who).await }),
     ))
 }
 

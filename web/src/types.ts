@@ -182,7 +182,9 @@ export type Item =
   | { type: "error"; message: string }
   | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
   | { type: "agent_changed"; agent: AgentRef }
-  | { type: "summary"; through_seq: number; text: string };
+  | { type: "summary"; through_seq: number; text: string }
+  /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
+  | { type: "fallback"; turn_id: string; model: string; from: string | null; reason?: string | null };
 
 export interface SessionView {
   session_id: string | null;
@@ -232,8 +234,47 @@ export interface Agent {
   name: string;
   description: string;
   builtin: boolean;
-  /** The admin's default model for this agent (prefixed). */
+  /** The admin's default model for this agent (prefixed); null when it has no chain of its own. */
   default_model: string | null;
+  /** The model it runs on (prefixed): its own, else the server default. Missing from an older server. */
+  main_model?: string | null;
+  /** Tried in order when the default fails or is unavailable (prefixed). */
+  fallbacks: string[];
+  /** Its default and fallbacks that the provider no longer lists. */
+  unavailable: string[];
+  /** Missing only from an older server: derived from the id then. */
+  avatar?: AgentAvatar;
+}
+
+export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";
+export type AvatarEyes = "round" | "long" | "short" | "wide" | "sleepy";
+export type AvatarAccent = "blue" | "violet" | "green" | "orange" | "pink" | "gray";
+
+/** How an agent looks: a shape with eyes, in one of the accents. */
+export interface AgentAvatar {
+  shape: AvatarShape;
+  eyes: AvatarEyes;
+  accent: AvatarAccent;
+}
+
+/** What an avatar's face shows; the browser derives it from the session. */
+export type AvatarState = "idle" | "thinking" | "working" | "unsure" | "done" | "error";
+
+/** A problem that lasts until fixed: a model in use that the provider dropped. */
+export interface Notice {
+  id: string;
+  kind: "model_unavailable";
+  /** Prefixed. */
+  model: string;
+  /** The provider's display name. */
+  provider: string;
+  /** Agents using it as their main model or a fallback. */
+  agents: string[];
+  /** It is the viewer's own default model. */
+  your_default: boolean;
+  global_default: boolean;
+  /** The viewer is an admin and can fix it in Settings. */
+  can_fix: boolean;
 }
 
 /** A model offered to chats. `id` is `<provider_id>::<raw>`. */
@@ -250,6 +291,9 @@ export interface ModelInfo {
   vision: boolean;
   tools: boolean;
   default: boolean;
+  /** The provider no longer lists it: kept so sessions and agents naming it
+   * still resolve, but not offered for new picks. Missing from an older server. */
+  unavailable?: boolean;
 }
 
 export type BackdropPref = "animated" | "still" | "off";
@@ -294,6 +338,8 @@ export interface ProviderPreset {
   warning: ProviderWarning | null;
   /** The user names it and picks the prefix. */
   custom: boolean;
+  /** "own": an endpoint the admin runs or names; "known": a hosted service. */
+  group: "own" | "known";
 }
 
 /** A model as the provider reports it; null: not reported. */
@@ -306,7 +352,28 @@ export interface ProviderModel {
   effort: boolean | null;
   vision: boolean | null;
   tools: boolean | null;
+  /** Added by the admin with parameters set by hand; never unavailable. */
+  custom: boolean;
+  /** Saved, but missing from the provider's latest listing. */
+  unavailable: boolean;
+  /** When it went missing (ms). */
+  missing_since: number | null;
 }
+
+/** The server's last listing of a provider; fetched_ms null: never listed. */
+export interface ModelListing {
+  models: ProviderModel[];
+  fetched_ms: number | null;
+}
+
+/** An agent's model and, in order, its fallbacks (prefixed ids). */
+export interface AgentChain {
+  model: string;
+  fallbacks: string[];
+}
+
+/** What a one-line test request to a model gave. */
+export type ModelTestResult = { ok: true; reply: string; ms: number } | { ok: false; error: string };
 
 export interface ProviderState {
   /** The prefix of its model ids, unique. */
@@ -325,8 +392,8 @@ export interface ProvidersState {
   presets: ProviderPreset[];
   /** Prefixed. */
   default_model: string | null;
-  /** Agent id to prefixed model id. */
-  agent_models: Record<string, string>;
+  /** Agent id to its model and fallbacks. */
+  agent_models: Record<string, AgentChain>;
   /** At least one non-mock provider. */
   configured: boolean;
 }

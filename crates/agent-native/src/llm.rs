@@ -40,6 +40,9 @@ pub(crate) fn normalize_base(url: &str) -> String {
     u
 }
 
+/// The bearer sent to endpoints that take no key.
+pub const NO_KEY: &str = "no-key";
+
 impl LlmProvider {
     pub fn new(
         kind: ApiKind,
@@ -55,10 +58,13 @@ impl LlmProvider {
             move |t: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
                 Ok(ServiceTarget {
                     endpoint: Endpoint::from_owned(endpoint.clone()),
-                    auth: match &api_key {
-                        Some(k) => AuthData::from_single(k.expose().clone()),
-                        None => AuthData::None,
-                    },
+                    // genai refuses a request with no key at all, so a
+                    // key-less endpoint (Ollama, llama.cpp, vLLM, LM Studio)
+                    // gets the placeholder those servers ignore.
+                    auth: AuthData::from_single(match &api_key {
+                        Some(k) => k.expose().clone(),
+                        None => NO_KEY.to_string(),
+                    }),
                     model: ModelIden::new(adapter, t.model.model_name),
                 })
             },
@@ -143,6 +149,41 @@ fn effort(e: Effort) -> ReasoningEffort {
     }
 }
 
+/// A genai error as ours. An HTTP status (which a stream reports as its
+/// first event) becomes `Status`, a failed connection or a timeout `Http`,
+/// so the loop can tell a model-level failure from a broken stream.
+fn provider_error(e: genai::Error) -> ProviderError {
+    let inner = match &e {
+        genai::Error::WebStream { error, .. } => Some(error.as_ref()),
+        _ => None,
+    };
+    let status = |g: &genai::Error| match g {
+        genai::Error::HttpError { status, body, .. } => Some(ProviderError::Status {
+            status: status.as_u16(),
+            body: body.clone(),
+        }),
+        genai::Error::WebModelCall {
+            webc_error: genai::webc::Error::ResponseFailedStatus { status, body, .. },
+            ..
+        } => Some(ProviderError::Status {
+            status: status.as_u16(),
+            body: body.clone(),
+        }),
+        _ => g.status().map(|s| ProviderError::Status {
+            status: s.as_u16(),
+            body: String::new(),
+        }),
+    };
+    if let Some(p) = status(&e).or_else(|| inner?.downcast_ref::<genai::Error>().and_then(status)) {
+        return p;
+    }
+    match inner.and_then(|i| i.downcast_ref::<reqwest::Error>()) {
+        Some(r) if r.is_connect() || r.is_timeout() => ProviderError::Http(r.to_string()),
+        _ if inner.is_some() => ProviderError::Stream(e.to_string()),
+        _ => ProviderError::Http(e.to_string()),
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for LlmProvider {
     fn name(&self) -> &'static str {
@@ -168,12 +209,12 @@ impl Provider for LlmProvider {
             .client
             .exec_chat_stream(&req.model, to_genai(req), Some(&opts))
             .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?
+            .map_err(provider_error)?
             .stream;
         let mut text = String::new();
         let mut out = Completion::default();
         while let Some(ev) = stream.next().await {
-            match ev.map_err(|e| ProviderError::Stream(e.to_string()))? {
+            match ev.map_err(provider_error)? {
                 ChatStreamEvent::Chunk(c) => {
                     if !c.content.is_empty() {
                         text.push_str(&c.content);

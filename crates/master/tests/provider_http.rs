@@ -223,9 +223,38 @@ async fn admin_configures_provider_live() {
         .iter()
         .map(|x| x["id"].as_str().unwrap())
         .collect();
-    assert_eq!(presets[..2], ["openai", "anthropic"]);
-    assert_eq!(presets.last(), Some(&"custom_anthropic"));
-    let nim = &p["presets"][5];
+    // The admin's own endpoints first, then known platforms.
+    assert_eq!(
+        presets,
+        [
+            "custom_openai",
+            "custom_anthropic",
+            "ollama",
+            "openai",
+            "anthropic",
+            "gemini",
+            "mistral",
+            "deepseek",
+            "nvidia_nim",
+            "moonshot",
+            "zai",
+            "xai",
+            "groq",
+            "openrouter",
+            "together",
+            "fireworks",
+        ]
+    );
+    let groups: Vec<&str> = p["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["group"].as_str().unwrap())
+        .collect();
+    assert_eq!(groups[..4], ["own", "own", "own", "known"]);
+    assert!(groups[3..].iter().all(|g| *g == "known"));
+    assert_eq!(p["presets"][5]["label"], "Google AI Studio (Gemini)");
+    let nim = &p["presets"][8];
     assert_eq!(nim["id"], "nvidia_nim");
     assert_eq!(nim["warning"]["kind"], "training_data");
     assert_eq!(nim["warning"]["wait_secs"], 10);
@@ -483,8 +512,8 @@ async fn fixed_presets_pin_their_url() {
             json!({"preset": "custom_openai", "name": "X", "base_url": "http://example.com/v1", "models": [{"id": "m"}]}),
         ),
         (
-            "x",
-            json!({"preset": "custom_openai", "name": "X", "base_url": fake, "models": []}),
+            "models",
+            json!({"preset": "openai", "api_key": KEY, "models": [{"id": "m"}]}),
         ),
     ] {
         let (st, v) = put(id, body.clone()).await;
@@ -550,7 +579,8 @@ async fn several_providers_route_by_prefix() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
-        v["agent_models"]["writer"], "alpha::a-only",
+        v["agent_models"]["writer"],
+        json!({"model": "alpha::a-only", "fallbacks": []}),
         "stored prefixed"
     );
     assert_eq!(v["default_model"], "alpha::shared", "kept while valid");
@@ -578,7 +608,10 @@ async fn several_providers_route_by_prefix() {
     let (st, v) = admin(&t, Method::DELETE, "/api/admin/providers/beta", None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["providers"].as_array().unwrap().len(), 1);
-    assert_eq!(v["agent_models"], json!({"writer": "alpha::a-only"}));
+    assert_eq!(
+        v["agent_models"],
+        json!({"writer": {"model": "alpha::a-only", "fallbacks": []}})
+    );
     let secrets = std::fs::read_to_string(t.dir.path().join("secrets.toml")).unwrap();
     assert!(secrets.contains("provider-alpha") && !secrets.contains("provider-beta"));
     // That session follows the defaults, so its next turn gets the new one.

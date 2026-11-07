@@ -31,12 +31,6 @@
 .wall-line::before {
   content: attr(data-text);
 }
-/* A faint search-field outline around some of the near lines. */
-.wall-line.pill {
-  padding: 0.25em 0.8em;
-  border: 1px solid currentColor;
-  border-radius: var(--r-full);
-}
 
 .wall[data-motion="animated"] .wall-line {
   animation: wall-in var(--dur-6) var(--ease-out) calc(var(--d) + var(--delay)) both;
