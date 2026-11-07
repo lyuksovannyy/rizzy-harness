@@ -1,18 +1,30 @@
 // Code: fenced blocks get a header (language, Copy), long ones collapse, and
-// once the message is final known languages are highlighted in a lazy chunk.
-// Math arrives as code too (remark-math) and is routed to MathTeX here.
+// once the message is final known languages are highlighted in a worker
+// (highlighter.ts). Math arrives as code too (remark-math) and is routed to
+// MathTeX here.
 import { useContext, useEffect, useState, type ComponentProps } from "react";
 import type { ExtraProps } from "react-markdown";
 import { DoneCtx } from "./context";
 import { useCopy } from "./copy";
 import { classList, hastText, reactText, renderHast, type HastNode } from "./hast";
+import { highlightOffThread } from "./highlighter";
 import { grammarFor, type Grammar } from "./langs";
 import { MathTeX } from "./MathTeX";
 import { rt } from "./strings";
 
 const COLLAPSE_LINES = 60;
-const MAX_HIGHLIGHT_CHARS = 50_000;
-const MAX_HIGHLIGHT_LINES = 1_500;
+// Beyond these, highlighting is more work than it is worth, and a single
+// long line (minified or hostile code) is where Prism's grammars get slow.
+export const MAX_HIGHLIGHT_CHARS = 20_000;
+export const MAX_HIGHLIGHT_LINES = 1_000;
+export const MAX_HIGHLIGHT_LINE = 1_000;
+
+/** Is this code small enough to highlight? */
+export function highlightable(code: string): boolean {
+  if (code.length > MAX_HIGHLIGHT_CHARS) return false;
+  const lines = code.split("\n");
+  return lines.length <= MAX_HIGHLIGHT_LINES && lines.every((l) => l.length <= MAX_HIGHLIGHT_LINE);
+}
 
 type PreProps = ComponentProps<"pre"> & ExtraProps;
 
@@ -44,7 +56,7 @@ export function CodeBlock({ code, lang }: { code: string; lang: string }) {
   const lines = code.split("\n").length;
   const mermaid = lang.toLowerCase() === "mermaid";
   const grammar = mermaid ? null : grammarFor(lang);
-  const wanted = done && grammar !== null && code.length <= MAX_HIGHLIGHT_CHARS && lines <= MAX_HIGHLIGHT_LINES;
+  const wanted = done && grammar !== null && highlightable(code);
   const tree = useHighlight(code, wanted ? grammar : null);
   const long = lines > COLLAPSE_LINES;
   return (
@@ -72,16 +84,12 @@ function useHighlight(code: string, grammar: Grammar | null): HastNode | null {
   const [result, setResult] = useState<{ code: string; grammar: Grammar; tree: HastNode } | null>(null);
   useEffect(() => {
     if (!grammar) return;
-    let live = true;
-    import("./highlight")
-      .then((m) => m.highlight(code, grammar))
-      .then((tree) => {
-        if (live) setResult({ code, grammar, tree: tree as HastNode });
-      })
-      .catch(() => {}); // plain text is a fine fallback
-    return () => {
-      live = false;
-    };
+    const gone = new AbortController();
+    // null (over budget, or a grammar that failed to load) leaves plain text.
+    void highlightOffThread(code, grammar, gone.signal).then((tree) => {
+      if (tree && !gone.signal.aborted) setResult({ code, grammar, tree });
+    });
+    return () => gone.abort();
   }, [code, grammar]);
   return result && result.code === code && result.grammar === grammar ? result.tree : null;
 }

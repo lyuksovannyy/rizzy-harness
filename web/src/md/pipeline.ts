@@ -1,16 +1,8 @@
 // What happens to model text before Markdown parsing, and which URLs survive.
+import { stripHidden } from "./hidden";
 
-// Bidi controls, zero-width characters, the BOM, private-use and tag
-// characters. They hide or reorder text, so what the user reads (and what
-// Copy gives them) would differ from what is there; tag characters are the
-// usual carrier for invisible prompt-injection text.
-const HIDDEN = /[​-‏‪-‮⁠-⁤⁦-⁩﻿-\u{E0000}-\u{E007F}]/gu;
-
-export function stripHidden(text: string): string {
-  return text.replace(HIDDEN, "");
-}
-
-/** The Markdown we render and copy: hidden characters out, math normalised. */
+/** The Markdown we render and copy: hidden characters out, math normalised.
+ * (rehypeStripHidden repeats the strip after parsing, for entities.) */
 export function prepare(text: string): string {
   return normalizeMath(stripHidden(text));
 }
@@ -22,57 +14,120 @@ const FENCE = /^\s*(?:>\s*)*(`{3,}|~{3,})(.*)$/;
 const DISPLAY_OPEN = /^(\s*(?:>\s*)*)\\\[\s*$/;
 const DISPLAY_CLOSE = /^(\s*(?:>\s*)*)\\\]\s*$/;
 const DISPLAY_ONE_LINE = /^(\s*(?:>\s*)*)\\\[(.+)\\\]\s*$/;
+// `\[x^2\]` on one line is math only if it looks like TeX (a command, a
+// script or an equals sign): `\[1\]` is Markdown for a literal [1].
+const TEX_HINT = /\\[A-Za-z]|[\^_=]/;
 // \( … \) on one line, not preceded by another backslash (an escaped \\).
 const INLINE = /(?<!\\)\\\((.+?)\\\)/g;
+const QUOTE = /^(?:\s*>)+ ?/;
+const LIST_ITEM = /^( *)([-+*]|\d{1,9}[.)])( {1,4}|$)/;
+const HEADING = /^ {0,3}#{1,6}(\s|$)/;
 
 /**
- * Turn LaTeX delimiters into the `$$` syntax remark-math reads: `\(..\)`
- * becomes inline `$$..$$`, and a `\[` … `\]` pair on their own lines becomes
- * a `$$` block. Fenced code and code spans are left alone, and a single `$`
- * is never math, so prices and `$HOME` stay text.
+ * Turn LaTeX delimiters into the dollar syntax remark-math reads: `\(..\)`
+ * becomes inline math, and a `\[` … `\]` pair on their own lines becomes a
+ * `$$` block. Fenced and indented code and code spans (even across lines)
+ * are left alone, and a single `$` is never math, so prices and `$HOME`
+ * stay text. The block structure is tracked roughly; where it is unsure it
+ * skips, which only leaves some math as written.
  */
 export function normalizeMath(text: string): string {
   if (!text.includes("\\")) return text;
   const lines = text.split("\n");
+  const out: string[] = [];
+  let para: string[] = [];
+  const flush = () => {
+    if (para.length) out.push(inlineMath(para.join("\n")));
+    para = [];
+  };
   let fence: string | null = null;
+  // Could an indented line start indented code here? Not inside a paragraph.
+  let codeOk = true;
+  // The content column of the list item we are in, or -1.
+  let listIndent = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    const m = FENCE.exec(line);
-    // ```a``` on one line is a code span: a backtick info string has no backticks.
-    const f = m && !(m[1]![0] === "`" && m[2]!.includes("`")) ? m : null;
     if (fence) {
+      out.push(line);
+      const f = fenceOf(line);
       // A closer uses the same character, a run at least as long, nothing after.
-      if (f && f[1]![0] === fence[0] && f[1]!.length >= fence.length && f[2]!.trim() === "") fence = null;
+      if (f && f[1]![0] === fence[0] && f[1]!.length >= fence.length && f[2]!.trim() === "") {
+        fence = null;
+        codeOk = true;
+      }
       continue;
     }
+    const inner = line.replace(QUOTE, "");
+    if (inner.trim() === "") {
+      flush();
+      out.push(line);
+      codeOk = true;
+      continue;
+    }
+    const indent = columns(inner);
+    const item = LIST_ITEM.exec(inner);
+    // After a blank line, text left of the item's content ends the list.
+    if (codeOk && !item && listIndent >= 0 && indent < listIndent) listIndent = -1;
+    if (codeOk && indent >= Math.max(listIndent, 0) + 4) {
+      flush();
+      out.push(line); // indented code (it goes on until a dedent)
+      continue;
+    }
+    if (item) listIndent = item[1]!.length + item[2]!.length + Math.max(1, item[3]!.length);
+    const f = fenceOf(line);
     if (f) {
+      flush();
+      out.push(line);
       fence = f[1]!;
       continue;
     }
     const one = DISPLAY_ONE_LINE.exec(line);
-    if (one) {
+    if (one && TEX_HINT.test(one[2]!)) {
+      flush();
       const q = one[1]!;
-      lines[i] = `${q}$$\n${q}${one[2]!.trim()}\n${q}$$`;
+      out.push(`${q}$$\n${q}${one[2]!.trim()}\n${q}$$`);
+      codeOk = true;
       continue;
     }
     const open = DISPLAY_OPEN.exec(line);
-    if (open) {
-      // Only a block that closes becomes math; an unclosed `$$` would swallow
-      // the rest of the message.
-      const close = findDisplayClose(lines, i + 1);
-      if (close > 0) {
-        lines[i] = `${open[1]}$$`;
-        lines[close] = `${DISPLAY_CLOSE.exec(lines[close]!)![1]}$$`;
-        i = close;
-      }
+    // Only a block that closes becomes math; an unclosed `$$` would swallow
+    // the rest of the message.
+    const close = open ? findDisplayClose(lines, i + 1) : -1;
+    if (open && close > 0) {
+      flush();
+      out.push(`${open[1]}$$`, ...lines.slice(i + 1, close), `${DISPLAY_CLOSE.exec(lines[close]!)![1]}$$`);
+      i = close;
+      codeOk = true;
       continue;
     }
-    // Adjacent \(a\)\(b\) would give one `$$$$` run, so they get a space.
-    lines[i] = outsideCodeSpans(line, (s) =>
-      s.replace(INLINE, (_m, tex: string, at: number) => `${s.slice(at - 2, at) === "\\)" ? " " : ""}$$${tex}$$`),
-    );
+    if (HEADING.test(inner)) {
+      flush();
+      out.push(inlineMath(line));
+      codeOk = true;
+      continue;
+    }
+    para.push(line);
+    codeOk = false;
   }
-  return lines.join("\n");
+  flush();
+  return out.join("\n");
+}
+
+function fenceOf(line: string): RegExpExecArray | null {
+  const m = FENCE.exec(line);
+  // ```a``` on one line is a code span: a backtick info string has no backticks.
+  return m && !(m[1]![0] === "`" && m[2]!.includes("`")) ? m : null;
+}
+
+/** Leading indent in columns (a tab goes to the next multiple of 4). */
+function columns(line: string): number {
+  let n = 0;
+  for (const c of line) {
+    if (c === " ") n++;
+    else if (c === "\t") n += 4 - (n % 4);
+    else break;
+  }
+  return n;
 }
 
 function findDisplayClose(lines: string[], from: number): number {
@@ -83,41 +138,71 @@ function findDisplayClose(lines: string[], from: number): number {
   return -1;
 }
 
-/** Apply `fn` to the parts of a line that are not inside a code span. */
-function outsideCodeSpans(line: string, fn: (s: string) => string): string {
-  if (!line.includes("`")) return fn(line);
+/**
+ * `\(..\)` to inline math in one paragraph. The dollar run is one longer
+ * than any run already there, so a literal `$$` cannot pair with ours (a
+ * math span closes only on a run of the same length), and a `$` right next
+ * to ours gets a space so the runs do not merge.
+ */
+function inlineMath(par: string): string {
+  if (!par.includes("\\(")) return par;
+  const d = "$".repeat(Math.max(2, longestRun(par, "$") + 1));
+  return outsideCodeSpans(par, (s) =>
+    s.replace(INLINE, (m: string, tex: string, at: number) => {
+      // After another conversion (\(a\)\(b\)) or a literal `$`.
+      const before = s[at - 1] === "$" || s.slice(at - 2, at) === "\\)" ? " " : "";
+      const after = s[at + m.length] === "$" ? " " : "";
+      const body = tex.startsWith("$") || tex.endsWith("$") ? ` ${tex} ` : tex;
+      return `${before}${d}${body}${d}${after}`;
+    }),
+  );
+}
+
+function longestRun(s: string, ch: string): number {
+  let best = 0;
+  let run = 0;
+  for (const c of s) {
+    run = c === ch ? run + 1 : 0;
+    best = Math.max(best, run);
+  }
+  return best;
+}
+
+/** Apply `fn` to the parts of a text that are not inside a code span. */
+function outsideCodeSpans(text: string, fn: (s: string) => string): string {
+  if (!text.includes("`")) return fn(text);
   let out = "";
   let plain = 0;
   let i = 0;
-  while (i < line.length) {
-    if (line[i] !== "`") {
+  while (i < text.length) {
+    if (text[i] !== "`") {
       i++;
       continue;
     }
-    const run = runEnd(line, i) - i;
-    const close = findRun(line, i + run, run);
+    const run = runEnd(text, i) - i;
+    const close = findRun(text, i + run, run);
     if (close < 0) {
       i += run; // unmatched backticks are literal text
       continue;
     }
-    out += fn(line.slice(plain, i)) + line.slice(i, close + run);
+    out += fn(text.slice(plain, i)) + text.slice(i, close + run);
     i = plain = close + run;
   }
-  return out + fn(line.slice(plain));
+  return out + fn(text.slice(plain));
 }
 
-function runEnd(line: string, i: number): number {
-  while (line[i] === "`") i++;
+function runEnd(text: string, i: number): number {
+  while (text[i] === "`") i++;
   return i;
 }
 
-function findRun(line: string, from: number, len: number): number {
-  for (let k = from; k < line.length; ) {
-    if (line[k] !== "`") {
+function findRun(text: string, from: number, len: number): number {
+  for (let k = from; k < text.length; ) {
+    if (text[k] !== "`") {
       k++;
       continue;
     }
-    const end = runEnd(line, k);
+    const end = runEnd(text, k);
     if (end - k === len) return k;
     k = end;
   }

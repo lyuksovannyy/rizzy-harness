@@ -14,6 +14,12 @@ describe("hostOf", () => {
     expect(hostOf(u("https://bücher.example/x"))).toBe("xn--bcher-kva.example");
     expect(hostOf(u("https://user:pw@evil.example/"))).toBe("evil.example");
     expect(hostOf(u("mailto:a@b.example?subject=x"))).toBe("a@b.example");
+    expect(hostOf(u("mailto:J%C3%BCrgen@b.example"))).toBe("Jürgen@b.example");
+  });
+  test("a mail address that decodes to hidden or control characters stays encoded", () => {
+    expect(hostOf(u("mailto:%E2%80%AEelpmaxe.live@troppus"))).toBe("%E2%80%AEelpmaxe.live@troppus");
+    expect(hostOf(u("mailto:a%E2%80%8Bb@x.example"))).toBe("a%E2%80%8Bb@x.example");
+    expect(hostOf(u("mailto:a%0Ab@x.example"))).toBe("a%0Ab@x.example");
   });
 });
 
@@ -40,8 +46,16 @@ describe("urlKeysIn (the provenance_ok tokenizer)", () => {
 
 describe("needsConfirm", () => {
   test("plain short links open directly", () => {
-    expect(needsConfirm(u("https://docs.example/guide/intro"), none)).toBe(false);
-    expect(needsConfirm(u("mailto:a@b.example"), none)).toBe(false);
+    for (const s of [
+      "https://docs.example/guide/intro",
+      "https://www.docs.example.com/",
+      "https://github.com/rust-lang/rust",
+      "https://example.com/issues/123456789012",
+      `https://example.com/${"x".repeat(23)}`,
+      "mailto:a@b.example",
+    ]) {
+      expect(needsConfirm(u(s), none), s).toBe(false);
+    }
   });
   test("a query, fragment, long path, punycode host or credentials ask first", () => {
     for (const s of [
@@ -53,6 +67,25 @@ describe("needsConfirm", () => {
       "mailto:a@b.example?body=secret",
     ]) {
       expect(needsConfirm(u(s), none)).toBe(true);
+    }
+  });
+  test("data in a path, a ;param or a host label asks first", () => {
+    for (const s of [
+      // a path longer than 24 characters
+      `https://example.com/${"x".repeat(24)}`,
+      "https://evil.example/sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefgh",
+      // a short path with a token-like run
+      "https://evil.example/AbCd1234EfGh",
+      "https://evil.example/a;token=sk",
+      // a long, token-like or extra host label
+      "https://c2stYW50LWFwaTAzLUFiQ2RFZkdoSWpLbE1uT3BRclN0VXZXeFl6MDEyMzQ1Njc4.evil.example/",
+      "https://ab12cd34ef56.evil.example/",
+      "https://a.b.evil.example/",
+      // a mail address with hidden characters, or one that carries a token
+      "mailto:%E2%80%AEelpmaxe.live@troppus",
+      "mailto:AbCd1234EfGh5678@evil.example",
+    ]) {
+      expect(needsConfirm(u(s), none), s).toBe(true);
     }
   });
   test("a URL the user or a tool wrote needs no confirm", () => {

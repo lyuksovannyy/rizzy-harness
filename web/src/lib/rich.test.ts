@@ -11,11 +11,11 @@ const assistant = (text: string): Item => ({
   author: null,
   variant: null,
 });
-const tool = (output: string | null): Item => ({
+const tool = (output: string | null, name = "web_search"): Item => ({
   type: "tool",
   call_id: "c",
   author: null,
-  tool: "web_search",
+  tool: name,
   input: {},
   live_output: "",
   result: output === null ? null : { ok: true, output, exit_code: null },
@@ -45,7 +45,22 @@ describe("provenance", () => {
     expect(provenanceAt(first, 3).has("b.example/page?ref=2")).toBe(true);
   });
 
-  test("the signature counts user items and finished tools", () => {
+  test("the signature counts user items and finished web tools", () => {
     expect(provenanceSignature(items)).toBe(2);
+    expect(provenanceSignature([...items, tool("x", "bash")])).toBe(2);
+  });
+
+  test("only web tools count: the model steers other tool output", () => {
+    const steered = [
+      user("go"),
+      tool("https://evil.example/c?d=SECRET", "bash"),
+      tool("see https://evil.example/r?d=1", "read"),
+      tool("https://docs.example/p?x=1", "web_fetch"),
+      assistant("[x](https://evil.example/c?d=SECRET)"),
+    ];
+    const at = provenanceAt(provenanceIndex(steered), 4);
+    expect(at.has("evil.example/c?d=SECRET")).toBe(false);
+    expect(at.has("evil.example/r?d=1")).toBe(false);
+    expect(at.has("docs.example/p?x=1")).toBe(true);
   });
 });

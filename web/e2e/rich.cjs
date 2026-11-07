@@ -1,6 +1,7 @@
 // Rich messages end-to-end: the Markdown baseline (links, image chips,
-// callouts, tables, code, math, hidden characters, Copy) and lazy loading of
-// the highlighter and math chunks.
+// callouts, tables, code, math, hidden characters, Copy), lazy loading of
+// the highlighter worker and math chunks, and a hostile code block that
+// must not freeze the page.
 // Usage: node web/e2e/rich.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -15,6 +16,20 @@ const URL_ = 'http://127.0.0.1:7797/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };
+const HIDDEN = /[\u{061C}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{FEFF}\u{E000}-\u{F8FF}]/u;
+
+/** The characters of an element's first text node, in on-screen order. */
+const visualText = (loc) => loc.evaluate((el) => {
+  const t = el.firstChild;
+  const xs = [];
+  for (let i = 0; i < t.length; i++) {
+    const r = document.createRange();
+    r.setStart(t, i);
+    r.setEnd(t, i + 1);
+    xs.push([t.data[i], r.getBoundingClientRect().x]);
+  }
+  return xs.sort((a, b) => a[1] - b[1]).map((x) => x[0]).join('');
+});
 
 // A fake SearXNG on loopback (configured by the admin, so allowed).
 const searx = http.createServer((req, res) => {
@@ -68,14 +83,14 @@ async function skipOnboarding(page) {
     await p.keyboard.press('Enter');
     await p.waitForSelector('.msg.assistant >> text=You said: hello there');
     await idle();
-    for (const name of ['math', 'highlight', 'UiBlock']) check(chunks(name).length === 0, `${name} chunk loaded for an echo`);
+    for (const name of ['math', 'highlight\\.worker', 'UiBlock']) check(chunks(name).length === 0, `${name} chunk loaded for an echo`);
     log('echo turn: no math, highlight or ui chunks');
 
     // 1. The demo: while streaming, code and math are plain source.
     await p.fill('.composer textarea', 'rich: demo');
     await p.keyboard.press('Enter');
     await p.waitForSelector('.msg.assistant.streaming .md table');
-    check(chunks('highlight').length === 0 && chunks('math').length === 0, 'highlight/math must wait for the final message');
+    check(chunks('highlight\\.worker').length === 0 && chunks('math').length === 0, 'highlight/math must wait for the final message');
     check((await p.locator('.md .token').count()) === 0, 'no highlighting while streaming');
     await idle();
     const demo = p.locator('.msg.assistant').last();
@@ -83,19 +98,26 @@ async function skipOnboarding(page) {
     await demo.locator('.md math').first().waitFor();
     check((await demo.locator('.md math').count()) >= 2, 'inline and display math render');
     check((await demo.locator('.md .math-src:visible').count()) === 0, 'math source hidden once rendered');
-    check((await demo.locator('.md .math-out a, .md .math-out [href]').count()) === 0, 'no links inside math');
+    check((await demo.locator('.md .math-out [href]').count()) === 0, 'no links inside math (\\eqref makes one)');
+    check((await demo.locator('.md .math-out [id]').count()) === 0, 'no ids inside math (\\label makes one)');
+    check((await demo.locator('[id="user-content-fn-1"]').count()) === 1, 'the footnote keeps its id');
+    check(!HIDDEN.test(await demo.locator('.md .math-out').allInnerTexts().then((t) => t.join(''))), 'no hidden characters from \\char');
     check((await demo.locator('.callout-warning').count()) === 1, 'warning callout');
     check((await demo.locator('.callout-warning .callout-title').innerText()) === 'Check before you run', 'callout title');
     check((await demo.locator('.md img').count()) === 0, 'no <img> in messages');
     check((await demo.locator('.img-chip').innerText()).includes('img.example'), 'image chip names its host');
     const text = await demo.locator('.md').innerText();
     check(text.includes('Prices stay text: $5 and $10.'), 'single dollars stay text');
-    check(!text.includes('‮') && text.includes('abcdef'), 'bidi override stripped');
+    check(!HIDDEN.test(text) && text.includes('abcdef'), 'hidden characters stripped, also entity-encoded ones');
+    // [&#x202E;moc.knab](https://evil.example/): the host and the text after it read as written.
+    const reversed = demo.locator('p:has-text("Reversed:")');
+    check((await visualText(reversed.locator('.link-host'))) === 'evil.example', 'host label reads evil.example on screen');
+    check((await reversed.innerText()).includes('moc.knab') && (await reversed.innerText()).includes('and more.'), 'text after the link is not reordered');
     check((await demo.locator('.codeblock .lang').innerText()) === 'rust', 'code header names the language');
     log('demo: highlighted, math rendered, callout, image chip, prices as text');
-    check(chunks('highlight').length === 1 && chunks('rust').length === 1, 'highlighter and the rust grammar loaded once');
+    check(chunks('highlight\\.worker').length === 1 && chunks('rust').length === 1, 'highlighter worker and the rust grammar loaded once');
     check(chunks('math').length === 1, 'math chunk loaded');
-    log('chunks after the demo:', ['highlight', 'rust', 'math'].map((n) => chunks(n).map((u) => u.split('/').pop())).flat().join(', '));
+    log('chunks after the demo:', ['highlight\\.worker', 'rust', 'math'].map((n) => chunks(n).map((u) => u.split('/').pop())).flat().join(', '));
 
     // A link with a query the model made up asks first, showing the full URL.
     await demo.locator('a[href="https://evil.example/a?q=1"]').click();
@@ -112,6 +134,22 @@ async function skipOnboarding(page) {
     await p.keyboard.press('Escape');
     check(ctx.pages().length === 1, 'nothing opened');
 
+    // A confirm opened inside a scrolling table is not clipped by it.
+    await demo.locator('a[href="https://evil.example/t?q=2"]').click();
+    const inTable = demo.locator('.link-confirm');
+    await inTable.waitFor();
+    const clip = await inTable.evaluate((box) => {
+      const hits = (sel) => {
+        const r = box.querySelector(sel).getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        return !!hit && box.contains(hit);
+      };
+      return { note: hits('.link-confirm-note'), url: hits('.link-confirm-url'), open: hits('button.primary') };
+    });
+    check(clip.note && clip.url && clip.open, 'confirm in a table fully visible: ' + JSON.stringify(clip));
+    await p.screenshot({ path: `${S}/rich-1b-table-confirm.png` });
+    await p.keyboard.press('Escape');
+
     // Tables sort numerically by a header click.
     const release = demo.locator('th:has-text("release (s)") button');
     await release.click();
@@ -124,7 +162,7 @@ async function skipOnboarding(page) {
     await demo.locator('.msg-actions button').click();
     await p.waitForSelector('.msg-actions button:has-text("Copied")');
     const copied = await p.evaluate(() => navigator.clipboard.readText());
-    check(copied.includes('```rust') && copied.includes('$$a^2+b^2=c^2$$') && copied.includes('abcdef') && !copied.includes('‮'),
+    check(copied.includes('```rust') && copied.includes('$$a^2+b^2=c^2$$') && copied.includes('abcdef') && !HIDDEN.test(copied),
       'copied Markdown: ' + JSON.stringify(copied.slice(-120)));
     await p.screenshot({ path: `${S}/rich-2-demo.png`, fullPage: true });
     await p.emulateMedia({ colorScheme: 'dark' });
@@ -134,6 +172,32 @@ async function skipOnboarding(page) {
     const leaked = requests.filter((u) => /img\.example|evil\.example/.test(u));
     check(leaked.length === 0, 'requests to model-chosen hosts: ' + leaked.join(', '));
     log('link confirm, table sort, copy; no requests to img.example or evil.example');
+
+    // A hostile code block (Prism's grammars are super-linear on it) must
+    // not freeze the page: it highlights in a worker that is stopped after
+    // its budget, and the next block still highlights.
+    const pat = "a'b\"c`d/e*f<g>h{i}j(k)l[m]n\\o";
+    const line = pat.repeat(4).slice(0, 100);
+    const hostile = Array.from({ length: 180 }, () => line).join('\n'); // under the 20,000-char cap
+    await p.fill('.composer textarea', 'x\n\n```tsx\n' + hostile + '\n```\n\n```rust\nfn after() {}\n```\n');
+    await p.keyboard.press('Enter');
+    await p.waitForFunction(() => document.querySelectorAll('.msg.assistant').length >= 3);
+    await idle();
+    const last = p.locator('.msg.assistant').last();
+    let maxGap = 0;
+    let prev = Date.now();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000) {
+      await p.evaluate(() => 1);
+      const now = Date.now();
+      maxGap = Math.max(maxGap, now - prev);
+      prev = now;
+      if ((await last.locator('code.language-rust .token').count()) > 0) break;
+    }
+    check(maxGap < 500, `page stalled ${maxGap} ms`);
+    check((await last.locator('code.language-rust .token.keyword').count()) > 0, 'the block after the hostile one is highlighted');
+    const waited = Date.now() - t0;
+    log(`hostile code block: page answered within ${maxGap} ms; next block highlighted after ${waited} ms; tsx tokens: ${await last.locator('code.language-tsx .token').count()}`);
 
     // After a reload the same message renders the same way.
     await p.reload();

@@ -1113,6 +1113,10 @@ mod tests {
             "> [!WARNING] Check before you run",
             "![x](https://img.example/p.png?q=s)",
             "[x](https://evil.example/a?q=1)",
+            "\\label{user-content-fn-1}",
+            "\\(\\char\"202E x\\)",
+            "| query | [y](https://evil.example/t?q=2) |",
+            "[&#x202E;moc.knab](https://evil.example/)",
             "abc\u{202E}def",
         ] {
             assert!(m.text.contains(part), "missing {part:?}");

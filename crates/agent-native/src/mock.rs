@@ -54,6 +54,22 @@ Prices stay text: $5 and $10.
 
 ![x](https://img.example/p.png?q=s) and [x](https://evil.example/a?q=1)
 
+An equation that tries to take the footnote's id:
+
+$$
+E = mc^2 \tag{1}\label{user-content-fn-1}
+$$
+
+See \(\eqref{user-content-fn-1}\) and \(\char"202E x\), and a footnote[^1].
+
+| check | link |
+|---|---|
+| query | [y](https://evil.example/t?q=2) |
+
+Reversed: [&#x202E;moc.knab](https://evil.example/) and more.
+
+[^1]: The footnote.
+
 "#,
     "Hidden mark: abc\u{202E}def\n"
 );

@@ -12,11 +12,15 @@ import { DoneCtx } from "../md/context";
 import { ImageChip, Link } from "../md/Link";
 import { prepare, urlTransform } from "../md/pipeline";
 import remarkCallouts from "../md/remark-callouts";
+import rehypeStripHidden from "../md/hidden";
 import { Table } from "../md/Table";
 
 // Single-dollar math is off: "$5 and $10" and $HOME are text. prepare()
 // turns \( \) and \[ \] into the $$ forms.
 const remarkPlugins: Options["remarkPlugins"] = [remarkGfm, [remarkMath, { singleDollarTextMath: false }], remarkCallouts];
+// prepare() strips hidden characters from the raw text; this strips the ones
+// that character references (&#x202E;) decode to.
+const rehypePlugins: Options["rehypePlugins"] = [rehypeStripHidden];
 
 const components: Components = {
   a: Link,
@@ -32,7 +36,12 @@ export const Markdown = memo(function Markdown({ text, done }: { text: string; d
   return (
     <DoneCtx.Provider value={done}>
       <div className="md">
-        <ReactMarkdown remarkPlugins={remarkPlugins} components={components} urlTransform={urlTransform}>
+        <ReactMarkdown
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          components={components}
+          urlTransform={urlTransform}
+        >
           {md}
         </ReactMarkdown>
       </div>

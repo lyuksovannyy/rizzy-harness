@@ -1,7 +1,8 @@
 // Link rules for model-written URLs. The confirm they drive is UX only; the
 // server's web_fetch provenance check is separate and unchanged.
+import { hasHidden } from "./hidden";
 
-/** Answers "did this URL key appear in text the user or a tool produced?". */
+/** Answers "did this URL key appear in the user's text or a web result?". */
 export interface Provenance {
   has(key: string): boolean;
 }
@@ -15,11 +16,19 @@ export function parseUrl(href: string): URL | null {
 }
 
 /** The host the browser will contact (punycode ASCII), without a leading
- * www.; for mailto it is the address. */
+ * www.; for mailto it is the address, left percent-encoded when decoding it
+ * would give hidden or control characters (they could make it read as
+ * another address). */
 export function hostOf(u: URL): string {
-  if (u.protocol === "mailto:") return decodeSafe(u.pathname);
+  if (u.protocol === "mailto:") {
+    const addr = decodeSafe(u.pathname);
+    return oddChars(addr) ? u.pathname : addr;
+  }
   return u.hostname.replace(/^www\./, "");
 }
+
+const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
+const oddChars = (s: string) => hasHidden(s) || CONTROL.test(s);
 
 function decodeSafe(s: string): string {
   try {
@@ -55,20 +64,42 @@ export function urlKeysIn(text: string): string[] {
   return keys;
 }
 
+// Data rides in a path as easily as in a query, so all but short paths ask.
+const MAX_PATH = 24;
+const MAX_LABEL = 20;
+const MAX_LABELS = 3;
+const ALNUM_RUN = /[A-Za-z0-9]{12,}/g;
+
+/** A run of 12 or more letters and digits, mixed: an id, key or encoded
+ * value rather than a word. */
+function tokenLike(s: string): boolean {
+  return (s.match(ALNUM_RUN) ?? []).some((r) => /\d/.test(r) && /[A-Za-z]/.test(r));
+}
+
 /**
  * Should a click show the full URL first? Only for URLs that came from
  * nowhere but the model and that could carry data out (a query, a fragment,
- * a long path) or mislead (a punycode host, credentials before the host).
+ * a path that is long, holds a token-like run or a `;param`, a long or
+ * token-like host label, many labels) or mislead (a punycode host,
+ * credentials before the host, hidden characters in a mail address).
  */
 export function needsConfirm(u: URL, provenance: Provenance): boolean {
   if (provenance.has(urlKey(u))) return false;
+  if (u.search !== "" || u.hash !== "") return true;
+  if (u.protocol === "mailto:") {
+    const addr = decodeSafe(u.pathname);
+    return oddChars(addr) || addr.length > 64 || tokenLike(addr);
+  }
+  const labels = u.hostname.replace(/^www\./, "").split(".");
   return (
-    u.search !== "" ||
-    u.hash !== "" ||
-    u.pathname.length > 64 ||
-    u.hostname.includes("xn--") ||
     u.username !== "" ||
-    u.password !== ""
+    u.password !== "" ||
+    u.pathname.length > MAX_PATH ||
+    u.pathname.includes(";") ||
+    tokenLike(u.pathname) ||
+    u.hostname.includes("xn--") ||
+    labels.length > MAX_LABELS ||
+    labels.some((l) => l.length > MAX_LABEL || tokenLike(l))
   );
 }
 

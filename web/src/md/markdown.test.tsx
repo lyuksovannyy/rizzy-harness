@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 import { Markdown } from "../components/Markdown";
 import { MessageCtx, NONE } from "./context";
+import { hasHidden } from "./hidden";
 import type { Provenance } from "./links";
 
 const md = (text: string, sources: Provenance = NONE) =>
@@ -32,6 +33,14 @@ describe("callouts", () => {
     expect(md("> [!DANGER] x")).toContain("<blockquote>");
     expect(md("> just a quote")).toContain("<blockquote>");
   });
+  test("a title ended by a hard break is still the title", () => {
+    for (const src of ["> [!NOTE] Title  \n> body", "> [!NOTE] Title\\\n> body"]) {
+      const out = md(src);
+      expect(out).toContain('<span class="callout-title">Title</span>');
+      expect(out).toContain("<p>body</p>");
+      expect(out).not.toContain("<br/>");
+    }
+  });
   test("a title with formatting is kept as body text", () => {
     const out = md("> [!TIP] Use **bold** here");
     expect(out).toContain("callout-tip");
@@ -50,7 +59,7 @@ describe("safety", () => {
     const out = md("![chart](https://img.example/p.png?q=s) ![d](data:image/png;base64,AAAA) ![j](javascript:alert(1))");
     expect(out).not.toContain("<img");
     expect(out).toContain('class="img-chip"');
-    expect(out).toContain("Image: chart · img.example");
+    expect(out).toContain('Image: chart · <bdi dir="ltr" class="img-host">img.example</bdi>');
     expect(out).toContain("embedded image (not shown)");
     expect(out).not.toContain("AAAA");
     expect(out).not.toContain("javascript");
@@ -64,7 +73,7 @@ describe("safety", () => {
     const out = md("[paypal.com](https://paypal.com.evil.example/login) and <https://docs.example/a>");
     expect(out).toContain('rel="noopener noreferrer nofollow"');
     expect(out).toContain('target="_blank"');
-    expect(out).toContain('<span class="link-host">paypal.com.evil.example</span>');
+    expect(out).toContain('<bdi dir="ltr" class="link-host">paypal.com.evil.example</bdi>');
     // An autolink already shows its address.
     expect(out.match(/link-host/g)).toHaveLength(1);
   });
@@ -73,7 +82,30 @@ describe("safety", () => {
     expect(md("[docs](https://docs.example/a)", sources)).toContain('class="link-source"');
   });
   test("hidden characters are gone", () => {
-    expect(md("abc‮def​ghi")).toContain("abcdefghi");
+    expect(md("abc\u{202E}def\u{200B}ghi")).toContain("abcdefghi");
+  });
+  test("hidden characters written as character references are gone too", () => {
+    const refs = "&#x202E;&#8238;&rlm;&zwj;&ZeroWidthSpace;&#xFEFF;&#xE000;&#x2066;&#x061C;&#xE0041;&#xE0100;";
+    const cases: [string, string][] = [
+      [`abc${refs}def`, "<p>abcdef</p>"],
+      [`[${refs}moc.knab](https://evil.example/)`, '>moc.knab</a><bdi dir="ltr" class="link-host">evil.example</bdi>'],
+      [`![${refs}elpmaxe.doog](https://evil.example/x.png)`, 'Image: elpmaxe.doog · <bdi dir="ltr" class="img-host">evil.example</bdi>'],
+      [`> [!WARNING] ${refs}eltit\n> body`, '<span class="callout-title">eltit</span>'],
+      [`| a${refs}b | c |\n|---|---|\n| d${refs}e | f |`, "<td>de</td>"],
+      [`Note[^1].\n\n[^1]: ${refs}x`, "x"],
+    ];
+    for (const [src, want] of cases) {
+      const out = md(src);
+      expect(hasHidden(out), src).toBe(false);
+      expect(out).toContain(want);
+    }
+    // The table header (and so Copy CSV and the sort title) is clean as well.
+    expect(md(`| a${refs}b | c |\n|---|---|\n| d | f |`)).toContain('title="Sort by ab">ab</button>');
+  });
+  test("a mail address with hidden characters shows percent-encoded", () => {
+    const out = md("[support](mailto:%E2%80%AEelpmaxe.live@troppus)");
+    expect(hasHidden(out)).toBe(false);
+    expect(out).toContain('<bdi dir="ltr" class="link-host">%E2%80%AEelpmaxe.live@troppus</bdi>');
   });
   test("footnotes stay in-page links", () => {
     const out = md("Note[^1].\n\n[^1]: The note.");
@@ -107,6 +139,21 @@ describe("math", () => {
     const out = md("Pythagoras: \\(a^2+b^2=c^2\\)\n\n$$\n\\int_0^1 x\\,dx\n$$");
     expect(out).toContain('<span class="math math-inline"><code class="math-src">a^2+b^2=c^2</code>');
     expect(out).toContain('<div class="math math-display"><pre class="code math-src"><code>\\int_0^1 x\\,dx</code></pre>');
+  });
+  test("converted math survives a $ beside it and a literal $$ in the paragraph", () => {
+    let out = md("\\(a\\)$5");
+    expect(out).toContain('<code class="math-src">a</code>');
+    expect(out).toContain("</span> $5</p>");
+    out = md("costs $$ and \\(x\\)");
+    expect(out).toContain("<p>costs $$ and <span");
+    expect(out).toContain('<code class="math-src">x</code>');
+    // A converted span alone at the start of a line stays inline.
+    expect(md("\\(x\\) is small")).toContain('<p><span class="math math-inline">');
+  });
+  test("indented code and code spans across lines keep \\( \\) as written", () => {
+    expect(md("    indented \\(x\\) code")).toContain("<code>indented \\(x\\) code</code>");
+    expect(md("`multi\nline \\(x\\) span`")).toContain("<code>multi line \\(x\\) span</code>");
+    expect(md("\\[1\\]")).toBe('<div class="md"><p>[1]</p></div>');
   });
   test("single dollars stay text", () => {
     const out = md("Prices: $5 and $10, and $HOME/$PATH.");

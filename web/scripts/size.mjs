@@ -1,7 +1,7 @@
 // Bundle budget (PLAN.md Phase 3): the new-tab home screen must stay small.
 // Reads Vite's manifest; gzips every JS chunk; prints them; fails if over
 // budget or if heavy code lands where it must not (see the checks below).
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 
@@ -24,7 +24,11 @@ const walk = (key) => {
 };
 for (const [key, c] of Object.entries(manifest)) if (c.isEntry) walk(key);
 
-const allJs = [...new Set(Object.values(manifest).map((c) => c.file))].filter((f) => f.endsWith(".js"));
+// Every emitted chunk counts. The manifest lists the main build only, not
+// the highlighter worker or the grammar chunks it loads.
+const allJs = readdirSync(join(dist, "assets"))
+  .filter((f) => f.endsWith(".js"))
+  .map((f) => `assets/${f}`);
 const sizes = new Map(allJs.map((f) => [f, gz(f)]));
 const initialKb = [...initial].filter((f) => f.endsWith(".js")).reduce((a, f) => a + sizes.get(f), 0);
 const totalKb = allJs.reduce((a, f) => a + sizes.get(f), 0);
@@ -48,6 +52,10 @@ const eager = [...initial, ...allJs.filter((f) => /\/Conversation-/.test(f))];
 for (const f of eager) {
   if (has(f, /temml/i)) failures.push(`${f} contains Temml`);
   if (has(f, /Unknown language|languages\.extend/)) failures.push(`${f} contains the highlighter`);
+}
+// A worker has no DOM: a browser build that needs one breaks highlighting.
+for (const f of allJs.filter((f) => /\/highlight\.worker-/.test(f))) {
+  if (has(f, /\b(document|window)\./)) failures.push(`${f} uses the DOM, which a worker does not have`);
 }
 for (const msg of failures) console.error(msg);
 if (initialKb > INITIAL_KB || totalKb > TOTAL_KB) failures.push("bundle budget exceeded");

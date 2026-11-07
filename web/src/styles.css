@@ -589,9 +589,6 @@ select {
 }
 
 /* ---------- Rich message rendering (md/) ---------- */
-.link-wrap {
-  position: relative;
-}
 .link-host {
   margin-left: 4px;
   padding: 0 5px;
@@ -612,11 +609,12 @@ select {
 .link-off {
   text-decoration: underline dotted var(--fg-2);
 }
+/* A popover in the top layer; Link.tsx sets top and left from the link. */
 .link-confirm {
-  position: absolute;
-  left: 0;
-  top: calc(100% + 4px);
-  z-index: 20;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 8px;

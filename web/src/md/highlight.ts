@@ -1,12 +1,15 @@
-// Syntax highlighting (lazy chunk). refractor turns code into hast spans;
-// each grammar is its own chunk, fetched and registered on first use (the
-// grammar modules register what they build on, e.g. tsx pulls in jsx).
+// Syntax highlighting. refractor turns code into hast spans; each grammar
+// is its own chunk, fetched and registered on first use (the grammar
+// modules register what they build on, e.g. tsx pulls in jsx). It runs in
+// highlight.worker.ts, never on the page's thread: Prism's grammars can
+// take seconds on hostile input.
 //
 // Grammars that other grammars import (c, javascript, jsx, markup,
-// typescript) load through one-line re-exports in ./lang. If a module were
-// both a dynamic-import target and a static dependency, the bundler would
-// build its namespace with a runtime helper and split that runtime out of
-// the initial chunk, so the new-tab bundle would grow.
+// typescript) load through one-line re-exports in ./lang, so each grammar
+// stays a plain dynamic import: a module that is both a dynamic-import
+// target and a static dependency gets its namespace built by a runtime
+// helper that the bundler splits out (it once landed in the page's initial
+// chunk, when highlighting ran on the page).
 import { refractor, type Syntax } from "refractor/core";
 import type { Grammar } from "./langs";
 
@@ -34,7 +37,11 @@ export const LOADERS: Record<Grammar, Loader> = {
   yaml: () => import("refractor/yaml"),
 };
 
-export async function highlight(code: string, grammar: Grammar) {
+export async function loadGrammar(grammar: Grammar): Promise<void> {
   if (!refractor.registered(grammar)) refractor.register((await LOADERS[grammar]()).default);
+}
+
+export async function highlight(code: string, grammar: Grammar) {
+  await loadGrammar(grammar);
   return refractor.highlight(code, grammar);
 }

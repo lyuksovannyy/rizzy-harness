@@ -38,7 +38,9 @@ function callout(q: Blockquote) {
   if (nl >= 0) {
     title = rest.slice(0, nl).trim();
     first.value = rest.slice(nl + 1);
-  } else if (p.children.length === 1) {
+  } else if (p.children.length === 1 || p.children[1]?.type === "break") {
+    // The whole first line, ended by the paragraph or a hard break
+    // (`Title  ` or `Title\`); the break goes below.
     title = rest.trim();
     first.value = "";
   } else {

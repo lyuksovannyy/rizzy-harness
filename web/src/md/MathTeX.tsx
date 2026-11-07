@@ -4,7 +4,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { DoneCtx } from "./context";
 
-const MAX_TEX = 4_000;
+export const MAX_TEX = 4_000;
 
 export function MathTeX({ tex, display }: { tex: string; display: boolean }) {
   const done = useContext(DoneCtx);
