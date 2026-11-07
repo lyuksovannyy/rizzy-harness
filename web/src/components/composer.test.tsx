@@ -68,3 +68,52 @@ describe("mode changes", () => {
     c.unmount();
   });
 });
+
+describe("model for a mention", () => {
+  const info = (id: string) => ({
+    id,
+    raw: id.split("::")[1]!,
+    provider: id.split("::")[0]!,
+    provider_id: id.split("::")[0]!,
+    name: null,
+    context: null,
+    max_output: null,
+    effort: false,
+    vision: false,
+    tools: false,
+    default: id === "openai::gpt-4o",
+  });
+  test("a leading @agent sends with that agent's default", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer
+          where="home"
+          agents={[
+            { id: "general", name: "General", description: "", builtin: true, default_model: null },
+            { id: "coder", name: "Coder", description: "", builtin: true, default_model: "anthropic::claude-x" },
+          ]}
+          models={[info("openai::gpt-4o"), info("anthropic::claude-x")]}
+          workers={[]}
+          agentId="general"
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          onSubmit={async () => {}}
+          predict={() => "ask"}
+        />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const select = () => host.querySelector<HTMLSelectElement>('select[aria-label="model"]')!;
+    expect(select().value).toBe("openai::gpt-4o");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "@coder fix this");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(select().value).toBe("anthropic::claude-x");
+    act(() => root.unmount());
+    host.remove();
+  });
+});

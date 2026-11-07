@@ -1,4 +1,5 @@
-//! Provider setup by an admin: test, apply, persist, hot-swap, scrub.
+//! Provider setup by an admin: test, apply, persist, hot-swap, scrub,
+//! several providers routed by prefix, per-agent default models.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,9 +21,10 @@ use serde_json::{Value, json};
 
 const KEY: &str = "sk-fake-key-123456";
 
-/// A minimal OpenAI-compatible server that checks the key and echoes it back
-/// (to prove scrubbing).
-async fn fake_openai() -> String {
+/// A minimal OpenAI-compatible server that checks the key, lists `models`
+/// and answers `<tag> <model>, my key is <key>` (to prove routing and
+/// scrubbing).
+async fn fake_openai(tag: &'static str, models: &'static [&'static str]) -> String {
     let ok = |h: &HeaderMap| {
         h.get("authorization").and_then(|v| v.to_str().ok()) == Some(&format!("Bearer {KEY}"))
     };
@@ -31,11 +33,11 @@ async fn fake_openai() -> String {
             "/v1/models",
             get(move |h: HeaderMap| async move {
                 if ok(&h) {
-                    (
-                        StatusCode::OK,
-                        r#"{"data":[{"id":"fake-1"},{"id":"fake-2"}]}"#,
-                    )
-                        .into_response()
+                    let data: Vec<Value> = models
+                        .iter()
+                        .map(|m| json!({"id": m, "context_length": 4096}))
+                        .collect();
+                    axum::Json(json!({ "data": data })).into_response()
                 } else {
                     (StatusCode::UNAUTHORIZED, "bad key").into_response()
                 }
@@ -43,17 +45,19 @@ async fn fake_openai() -> String {
         )
         .route(
             "/v1/chat/completions",
-            post(move |h: HeaderMap| async move {
+            post(move |h: HeaderMap, body: String| async move {
                 if !ok(&h) {
                     return (StatusCode::UNAUTHORIZED, "bad key").into_response();
                 }
+                let req: Value = serde_json::from_str(&body).unwrap();
                 let chunk = |t: &str| {
                     format!(
                         "data: {}\n\n",
                         json!({"choices":[{"index":0,"delta":{"content":t}}]})
                     )
                 };
-                let body = chunk("Hello from fake, my key is ") + &chunk(KEY) + "data: [DONE]\n\n";
+                let head = format!("{tag} {}, my key is ", req["model"].as_str().unwrap());
+                let body = chunk(&head) + &chunk(KEY) + "data: [DONE]\n\n";
                 ([("content-type", "text/event-stream")], body).into_response()
             }),
         );
@@ -66,13 +70,16 @@ async fn fake_openai() -> String {
 struct T {
     base: String,
     dir: tempfile::TempDir,
+    admin: String,
 }
 
-async fn start() -> T {
+/// A server whose data dir is prepared by `setup` before the config loads.
+async fn start_with(setup: impl FnOnce(&std::path::Path)) -> T {
     let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let cfg = Config::load(&dir.path().join("harness.toml")).unwrap();
     let secrets = SecretSet::default();
-    let (rt, _env) =
-        ProviderRuntime::start(Config::default(), dir.path(), secrets.clone()).unwrap();
+    let (rt, _env) = ProviderRuntime::start(cfg, dir.path(), secrets.clone()).unwrap();
     let rt = Arc::new(rt);
     let chat = NodeRuntime::start(NodeConfig {
         node_id: "master".into(),
@@ -87,7 +94,7 @@ async fn start() -> T {
                 ..Default::default()
             },
         )),
-        default_model: "mock".into(),
+        default_model: "stale".into(),
         secrets,
         profile: Profile::Chat,
         incognito_ttl: None,
@@ -109,10 +116,25 @@ async fn start() -> T {
     master.set_provider_runtime(rt);
     master.add_link(chat.attach().await, true).await.unwrap();
     tokio::spawn(async move { axum::serve(l, router(master)).await.unwrap() });
-    T {
+    let mut t = T {
         base: format!("http://{addr}"),
         dir,
-    }
+        admin: String::new(),
+    };
+    let (_, admin, _) = req(
+        &t,
+        Method::POST,
+        "/api/setup",
+        Some(json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"})),
+        None,
+    )
+    .await;
+    t.admin = admin.unwrap();
+    t
+}
+
+async fn start() -> T {
+    start_with(|_| {}).await
 }
 
 async fn req(
@@ -138,66 +160,139 @@ async fn req(
     (st, c, r.json().await.unwrap_or(Value::Null))
 }
 
-#[tokio::test]
-async fn admin_configures_provider_live() {
-    let fake = fake_openai().await;
-    let t = start().await;
-    let (_, admin, _) = req(
-        &t,
+/// As the admin.
+async fn admin(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let (st, _, v) = req(t, method, path, body, Some(&t.admin)).await;
+    (st, v)
+}
+
+/// Start a chat (optionally with a model), send `text`, return the answer.
+async fn chat(t: &T, model: Option<&str>, text: &str) -> (String, String) {
+    let mut body = json!({"profile": "chat"});
+    if let Some(m) = model {
+        body["model"] = json!(m);
+    }
+    let (_, v) = admin(t, Method::POST, "/api/sessions", Some(body)).await;
+    let sid = v["session_id"]
+        .as_str()
+        .expect("session created")
+        .to_string();
+    admin(
+        t,
         Method::POST,
-        "/api/setup",
-        Some(json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"})),
-        None,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({ "text": text })),
     )
     .await;
-    let admin = admin.unwrap();
+    for _ in 0..200 {
+        let (_, v) = admin(t, Method::GET, &format!("/api/sessions/{sid}/events"), None).await;
+        let evs: Vec<RawEvent> = serde_json::from_value(v["events"].clone()).unwrap();
+        if let Some(e) = evs.iter().find(|e| e.kind == "assistant_message") {
+            assert!(
+                !serde_json::to_string(&evs).unwrap().contains(KEY),
+                "key in the event log"
+            );
+            return (sid, e.payload["text"].as_str().unwrap().to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no answer");
+}
 
-    let (_, _, p) = req(&t, Method::GET, "/api/admin/provider", None, Some(&admin)).await;
+fn ids(v: &Value) -> Vec<String> {
+    v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn admin_configures_provider_live() {
+    let fake = fake_openai("fake", &["fake-2", "fake-1"]).await;
+    let t = start().await;
+
+    let (_, p) = admin(&t, Method::GET, "/api/admin/providers", None).await;
     assert_eq!(p["configured"], false);
-    assert_eq!(p["kind"], "mock");
+    assert_eq!(p["providers"][0]["kind"], "mock");
+    assert_eq!(p["default_model"], "demo::mock");
+    let presets: Vec<&str> = p["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(presets[..2], ["openai", "anthropic"]);
+    assert_eq!(presets.last(), Some(&"custom_anthropic"));
+    let nim = &p["presets"][5];
+    assert_eq!(nim["id"], "nvidia_nim");
+    assert_eq!(nim["warning"]["kind"], "training_data");
+    assert_eq!(nim["warning"]["wait_secs"], 10);
+    assert_eq!(nim["url_editable"], false);
 
-    // Testing: wrong key fails without leaking it; right key lists models.
-    let (_, _, v) = req(
+    // Testing: wrong key fails without leaking it; right key lists models
+    // with what the provider reports, sorted by id.
+    let test = |key: Option<&str>, provider_id: Option<&str>, base: &str| {
+        let mut b = json!({"preset": "custom_openai", "base_url": base});
+        if let Some(k) = key {
+            b["api_key"] = json!(k);
+        }
+        if let Some(id) = provider_id {
+            b["provider_id"] = json!(id);
+        }
+        b
+    };
+    let (_, v) = admin(
         &t,
         Method::POST,
-        "/api/admin/provider/test",
-        Some(json!({"kind": "openai", "base_url": fake, "api_key": "sk-wrong-000000"})),
-        Some(&admin),
+        "/api/admin/providers/test",
+        Some(test(Some("sk-wrong-000000"), None, &fake)),
     )
     .await;
     assert_eq!(v["ok"], false);
     assert!(v["error"].as_str().unwrap().contains("401"));
     assert!(!v.to_string().contains("sk-wrong"));
-    let (_, _, v) = req(
+    let (_, v) = admin(
         &t,
         Method::POST,
-        "/api/admin/provider/test",
-        Some(json!({"kind": "openai", "base_url": fake, "api_key": KEY})),
-        Some(&admin),
+        "/api/admin/providers/test",
+        Some(test(Some(KEY), None, &fake)),
     )
     .await;
-    assert_eq!(v["models"], json!(["fake-1", "fake-2"]));
+    assert_eq!(ids(&v), ["fake-1", "fake-2"]);
+    assert_eq!(v["models"][0]["context"], 4096);
+    assert_eq!(
+        v["models"][0]["vision"],
+        Value::Null,
+        "unreported stays null"
+    );
 
     // Apply.
-    let (st, _, v) = req(
+    let (st, v) = admin(
         &t,
         Method::PUT,
-        "/api/admin/provider",
+        "/api/admin/providers/fake",
         Some(json!({
-            "kind": "openai", "base_url": fake, "api_key": KEY, "model": "fake-1",
-            "models": [{"id": "fake-1"}, {"id": "fake-2", "effort": true}]
+            "name": "Fake", "preset": "custom_openai", "base_url": fake, "api_key": KEY,
+            "models": [{"id": "fake-1", "context": 4096}, {"id": "fake-2", "effort": true}]
         })),
-        Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["key"], "stored");
+    assert_eq!(v["configured"], true);
+    assert_eq!(v["providers"].as_array().unwrap().len(), 1, "demo replaced");
+    assert_eq!(v["providers"][0]["key"], "stored");
+    assert_eq!(v["providers"][0]["name"], "Fake");
+    assert_eq!(v["default_model"], "fake::fake-1");
     assert!(!v.to_string().contains(KEY), "key never returned");
 
     // Files: config names the secret, the secret file holds it (0600).
     let toml = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
     assert!(
-        toml.contains("api_key_secret = \"openai\"") && toml.contains("fake-1"),
+        toml.contains("[[providers]]")
+            && toml.contains("api_key_secret = \"provider-fake\"")
+            && toml.contains("fake-1"),
         "{toml}"
     );
     assert!(!toml.contains(KEY));
@@ -212,80 +307,76 @@ async fn admin_configures_provider_live() {
         );
     }
     let reloaded = Config::load(&t.dir.path().join("harness.toml")).unwrap();
-    assert_eq!(reloaded.provider.model, "fake-1");
+    assert_eq!(reloaded.default_model.as_deref(), Some("fake::fake-1"));
+    assert_eq!(reloaded.providers[0].models[0].context, Some(4096));
 
-    // Models endpoint reflects it.
-    let (_, _, v) = req(&t, Method::GET, "/api/models", None, Some(&admin)).await;
-    let ids: Vec<&str> = v["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, ["fake-1", "fake-2"]);
+    // Models endpoint reflects it, prefixed, with the parameters.
+    let (_, v) = admin(&t, Method::GET, "/api/models", None).await;
+    assert_eq!(ids(&v), ["fake::fake-1", "fake::fake-2"]);
+    let m = &v["models"][1];
+    assert_eq!(
+        (&m["raw"], &m["provider"], &m["provider_id"]),
+        (&json!("fake-2"), &json!("Fake"), &json!("fake"))
+    );
+    assert_eq!(
+        (&m["effort"], &m["tools"], &m["default"]),
+        (&json!(true), &json!(false), &json!(false))
+    );
 
-    // A chat turn now goes to the fake server, and the echoed key is scrubbed.
-    let (_, _, v) = req(
+    // A chat turn now goes to the fake server (prefix stripped), and the
+    // echoed key is scrubbed.
+    let (_, text) = chat(&t, None, "hi").await;
+    assert_eq!(text, "fake fake-1, my key is [REDACTED]");
+
+    // Re-applying without a key keeps the stored one (same URL).
+    let (st, v) = admin(
         &t,
-        Method::POST,
-        "/api/sessions",
-        Some(json!({"profile": "chat"})),
-        Some(&admin),
+        Method::PUT,
+        "/api/admin/providers/fake",
+        Some(json!({"name": "Fake", "preset": "custom_openai", "base_url": fake, "models": [{"id": "fake-2"}]})),
     )
     .await;
-    let sid = v["session_id"].as_str().unwrap().to_string();
-    req(
-        &t,
-        Method::POST,
-        &format!("/api/sessions/{sid}/prompt"),
-        Some(json!({"text": "hi"})),
-        Some(&admin),
-    )
-    .await;
-    let mut text = String::new();
-    for _ in 0..200 {
-        let (_, _, v) = req(
-            &t,
-            Method::GET,
-            &format!("/api/sessions/{sid}/events"),
-            None,
-            Some(&admin),
-        )
-        .await;
-        let evs: Vec<RawEvent> = serde_json::from_value(v["events"].clone()).unwrap();
-        if let Some(e) = evs.iter().find(|e| e.kind == "assistant_message") {
-            text = e.payload["text"].as_str().unwrap().to_string();
-            assert!(
-                !serde_json::to_string(&evs).unwrap().contains(KEY),
-                "key in the event log"
-            );
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(text, "Hello from fake, my key is [REDACTED]");
-
-    // Re-applying without a key keeps the stored one.
-    let (st, _, v) = req(&t, Method::PUT, "/api/admin/provider", Some(json!({"kind": "openai", "base_url": fake, "model": "fake-2", "models": [{"id": "fake-2"}]})), Some(&admin)).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["key"], "stored");
-    let (_, _, v) = req(
+    assert_eq!(v["providers"][0]["key"], "stored");
+    let (_, v) = admin(
         &t,
         Method::POST,
-        "/api/admin/provider/test",
-        Some(json!({"kind": "openai", "base_url": fake})),
-        Some(&admin),
+        "/api/admin/providers/test",
+        Some(test(None, Some("fake"), &fake)),
     )
     .await;
-    assert_eq!(v["ok"], true, "stored key reused for tests: {v}");
+    assert_eq!(v["ok"], true, "stored key reused for the same URL: {v}");
 
-    // Members cannot see or change the provider.
+    // Another URL never gets the stored key: not in a test...
+    let other = fake_openai("other", &["o-1"]).await;
+    let (_, v) = admin(
+        &t,
+        Method::POST,
+        "/api/admin/providers/test",
+        Some(test(None, Some("fake"), &other)),
+    )
+    .await;
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("401"), "{v}");
+    // ...and not when the provider moves: it is dropped and deleted.
+    let (st, v) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/fake",
+        Some(json!({"name": "Fake", "preset": "custom_openai", "base_url": other, "models": [{"id": "o-1"}]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["providers"][0]["key"], "none");
+    assert!(!std::fs::read_to_string(&secrets).unwrap().contains(KEY));
+
+    // Members cannot see or change providers.
     req(
         &t,
         Method::POST,
         "/api/users",
         Some(json!({"username": "bob", "password": "temporary pw"})),
-        Some(&admin),
+        Some(&t.admin),
     )
     .await;
     let (_, bc, _) = req(
@@ -306,11 +397,418 @@ async fn admin_configures_provider_live() {
     .await;
     let bc = bc.unwrap();
     for (m, path) in [
-        (Method::GET, "/api/admin/provider"),
-        (Method::PUT, "/api/admin/provider"),
-        (Method::POST, "/api/admin/provider/test"),
+        (Method::GET, "/api/admin/providers"),
+        (Method::PUT, "/api/admin/providers/fake"),
+        (Method::DELETE, "/api/admin/providers/fake"),
+        (Method::POST, "/api/admin/providers/test"),
+        (Method::POST, "/api/admin/providers/demo"),
+        (Method::PUT, "/api/admin/agent-models"),
     ] {
-        let (st, _, _) = req(&t, m, path, Some(json!({"kind": "mock"})), Some(&bc)).await;
+        let body = json!({"preset": "openai", "name": "x", "agent_models": {}});
+        let (st, _, _) = req(&t, m, path, Some(body), Some(&bc)).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{path}");
     }
+    // The old single-provider routes are gone.
+    let (st, _) = admin(&t, Method::GET, "/api/admin/provider", None).await;
+    assert_ne!(st, StatusCode::OK);
+}
+
+/// Fixed presets keep their own URL and need a key; ids are checked.
+#[tokio::test]
+async fn fixed_presets_pin_their_url() {
+    let fake = fake_openai("fake", &["m"]).await;
+    let t = start().await;
+    let put = |id: &str, body: Value| {
+        let path = format!("/api/admin/providers/{id}");
+        let t = &t;
+        async move { admin(t, Method::PUT, &path, Some(body)).await }
+    };
+    let (st, v) = put(
+        "openrouter",
+        json!({"preset": "openrouter", "base_url": fake, "models": [{"id": "openai/gpt-4o"}]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a key is required: {v}");
+    let (st, v) = put(
+        "openrouter",
+        json!({"preset": "openrouter", "name": "Mine", "base_url": fake, "api_key": KEY,
+               "models": [{"id": "openai/gpt-4o"}]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let p = &v["providers"][0];
+    assert_eq!(
+        p["base_url"], "https://openrouter.ai/api/v1",
+        "client URL ignored"
+    );
+    assert_eq!(p["name"], "OpenRouter", "fixed presets keep their name");
+    assert_eq!(v["default_model"], "openrouter::openai/gpt-4o");
+
+    // Anthropic models never offer effort (PLAN.md R8).
+    let (st, v) = put(
+        "anthropic",
+        json!({"preset": "anthropic", "api_key": KEY, "models": [{"id": "claude-x", "effort": true}]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, m) = admin(&t, Method::GET, "/api/models", None).await;
+    let claude = m["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "anthropic::claude-x")
+        .unwrap();
+    assert_eq!(claude["effort"], false);
+
+    for (id, body) in [
+        (
+            "Bad Id",
+            json!({"preset": "openai", "api_key": KEY, "models": [{"id": "m"}]}),
+        ),
+        (
+            "demo",
+            json!({"preset": "openai", "api_key": KEY, "models": [{"id": "m"}]}),
+        ),
+        ("x", json!({"preset": "nope", "models": [{"id": "m"}]})),
+        (
+            "x",
+            json!({"preset": "custom_openai", "base_url": fake, "models": [{"id": "m"}]}),
+        ),
+        (
+            "x",
+            json!({"preset": "custom_openai", "name": "X", "models": [{"id": "m"}]}),
+        ),
+        (
+            "x",
+            json!({"preset": "custom_openai", "name": "X", "base_url": "http://example.com/v1", "models": [{"id": "m"}]}),
+        ),
+        (
+            "x",
+            json!({"preset": "custom_openai", "name": "X", "base_url": fake, "models": []}),
+        ),
+    ] {
+        let (st, v) = put(id, body.clone()).await;
+        assert!(st.is_client_error(), "{id} {body}: {v}");
+        assert!(!v.to_string().contains(KEY));
+    }
+}
+
+/// Two providers: prefixes route, legacy ids find their provider, agent
+/// defaults apply to new sessions, and deleting cleans up.
+#[tokio::test]
+async fn several_providers_route_by_prefix() {
+    let a = fake_openai("A", &["shared", "a-only"]).await;
+    let b = fake_openai("B", &["shared", "b-only"]).await;
+    let t = start().await;
+    for (id, base, models) in [
+        ("alpha", &a, json!([{"id": "shared"}, {"id": "a-only"}])),
+        ("beta", &b, json!([{"id": "shared"}, {"id": "b-only"}])),
+    ] {
+        let (st, v) = admin(
+            &t,
+            Method::PUT,
+            &format!("/api/admin/providers/{id}"),
+            Some(json!({"name": id, "preset": "custom_openai", "base_url": base, "api_key": KEY, "models": models})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let (_, v) = admin(&t, Method::GET, "/api/models", None).await;
+    assert_eq!(
+        ids(&v),
+        [
+            "alpha::shared",
+            "alpha::a-only",
+            "beta::shared",
+            "beta::b-only"
+        ]
+    );
+
+    let (_, text) = chat(&t, Some("beta::shared"), "hi").await;
+    assert_eq!(text, "B shared, my key is [REDACTED]");
+    // Legacy unprefixed ids: the first provider listing it.
+    let (_, text) = chat(&t, Some("b-only"), "hi").await;
+    assert_eq!(text, "B b-only, my key is [REDACTED]");
+    let (_, text) = chat(&t, Some("shared"), "hi").await;
+    assert_eq!(text, "A shared, my key is [REDACTED]");
+
+    // Per-agent defaults: unknown agents and models are refused.
+    for body in [
+        json!({"agent_models": {"nobody": "beta::b-only"}}),
+        json!({"agent_models": {"general": "beta::nope"}}),
+        json!({"agent_models": {}, "default_model": "gone::x"}),
+    ] {
+        let (st, _) = admin(&t, Method::PUT, "/api/admin/agent-models", Some(body)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+    let (st, v) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/agent-models",
+        Some(json!({"agent_models": {"general": "beta::b-only", "writer": "a-only"}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["agent_models"]["writer"], "alpha::a-only",
+        "stored prefixed"
+    );
+    assert_eq!(v["default_model"], "alpha::shared", "kept while valid");
+    let (_, agents) = admin(&t, Method::GET, "/api/agents", None).await;
+    let general = agents["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "general")
+        .unwrap();
+    assert_eq!(general["default_model"], "beta::b-only");
+
+    // A session created without a model gets its agent's default.
+    let (sid, text) = chat(&t, None, "hi").await;
+    assert_eq!(text, "B b-only, my key is [REDACTED]");
+    let (_, s) = admin(&t, Method::GET, &format!("/api/sessions/{sid}"), None).await;
+    assert_eq!(s["model"], "beta::b-only");
+    // An explicit choice wins over the agent default.
+    let (_, text) = chat(&t, Some("alpha::a-only"), "hi").await;
+    assert_eq!(text, "A a-only, my key is [REDACTED]");
+
+    // Deleting a provider drops its key and the defaults that named it.
+    let (st, _) = admin(&t, Method::DELETE, "/api/admin/providers/nope", None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, v) = admin(&t, Method::DELETE, "/api/admin/providers/beta", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["providers"].as_array().unwrap().len(), 1);
+    assert_eq!(v["agent_models"], json!({"writer": "alpha::a-only"}));
+    let secrets = std::fs::read_to_string(t.dir.path().join("secrets.toml")).unwrap();
+    assert!(secrets.contains("provider-alpha") && !secrets.contains("provider-beta"));
+    // That session follows the defaults, so its next turn gets the new one.
+    admin(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "again"})),
+    )
+    .await;
+    let mut answers = Vec::new();
+    for _ in 0..200 {
+        let (_, v) = admin(
+            &t,
+            Method::GET,
+            &format!("/api/sessions/{sid}/events"),
+            None,
+        )
+        .await;
+        let evs: Vec<RawEvent> = serde_json::from_value(v["events"].clone()).unwrap();
+        answers = evs
+            .iter()
+            .filter(|e| e.kind == "assistant_message")
+            .map(|e| e.payload["text"].as_str().unwrap().to_string())
+            .collect();
+        if answers.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(answers[1], "A shared, my key is [REDACTED]");
+
+    // Clearing the default falls back to the first model; deleting the
+    // last provider brings the demo back; "demo" switches to it.
+    let (_, v) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/agent-models",
+        Some(json!({"agent_models": {"writer": null}, "default_model": null})),
+    )
+    .await;
+    assert_eq!(v["default_model"], "alpha::shared");
+    assert_eq!(v["agent_models"], json!({}));
+    let (_, v) = admin(&t, Method::DELETE, "/api/admin/providers/alpha", None).await;
+    assert_eq!(v["configured"], false);
+    assert_eq!(v["default_model"], "demo::mock");
+    let (_, text) = chat(&t, None, "hello").await;
+    assert!(text.starts_with("You said"), "{text}");
+    let (st, v) = admin(&t, Method::POST, "/api/admin/providers/demo", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["default_model"], "demo::mock");
+}
+
+/// An older single-provider harness.toml keeps working: one provider, its
+/// key under the old secret name, ids answer both prefixed and bare.
+#[tokio::test]
+async fn legacy_config_keeps_working() {
+    let fake = fake_openai("old", &["fake-1"]).await;
+    let toml = format!(
+        "[provider]\nkind = \"openai\"\nbase_url = \"{fake}\"\nmodel = \"fake-1\"\napi_key_secret = \"openai\"\n\n[[models]]\nid = \"fake-1\"\nvision = true\n"
+    );
+    let t = start_with(|dir| {
+        std::fs::write(dir.join("harness.toml"), toml).unwrap();
+        harness_master::secrets::set(
+            &dir.join("secrets.toml"),
+            "openai",
+            Some(&Secret::new(KEY.into())),
+        )
+        .unwrap();
+    })
+    .await;
+    let (_, v) = admin(&t, Method::GET, "/api/admin/providers", None).await;
+    let p = &v["providers"][0];
+    // A custom endpoint gets an id from its host, never a preset's.
+    let port = reqwest::Url::parse(&fake).unwrap().port().unwrap();
+    let id = format!("127-0-0-1-{port}");
+    assert_eq!(
+        (&p["id"], &p["preset"], &p["key"]),
+        (&json!(id), &json!("custom_openai"), &json!("stored"))
+    );
+    assert_eq!(v["default_model"], format!("{id}::fake-1"));
+    let (_, m) = admin(&t, Method::GET, "/api/models", None).await;
+    assert_eq!(ids(&m), [format!("{id}::fake-1")]);
+    assert_eq!(m["models"][0]["vision"], true);
+    let (_, text) = chat(&t, Some("fake-1"), "hi").await;
+    assert_eq!(text, "old fake-1, my key is [REDACTED]");
+    // Settings that only read the config still work, and nothing is
+    // rewritten until something changes.
+    let (st, _) = admin(&t, Method::GET, "/api/admin/memory", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let file = std::fs::read_to_string(t.dir.path().join("harness.toml")).unwrap();
+    assert!(file.contains("[provider]"));
+}
+
+/// One prefix, one provider: action paths and other presets' ids are
+/// refused with a reason, the demo can be removed, and a failed save keeps
+/// the key that goes with the saved URL.
+#[tokio::test]
+async fn prefixes_conflicts_and_failed_saves() {
+    let fake = fake_openai("A", &["m"]).await;
+    let other = fake_openai("B", &["m"]).await;
+    let t = start().await;
+    let custom = |url: &str, key: &str| {
+        json!({"preset": "custom_openai", "name": "Local", "base_url": url, "api_key": key,
+               "models": [{"id": "m"}]})
+    };
+    for id in ["test", "demo"] {
+        let (st, v) = admin(
+            &t,
+            Method::PUT,
+            &format!("/api/admin/providers/{id}"),
+            Some(custom(&fake, KEY)),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{id}: {v}");
+        assert!(v.to_string().contains("reserved"), "{v}");
+    }
+    let (st, v) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/openai",
+        Some(custom(&fake, KEY)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The OpenAI preset does not silently take over the custom "openai".
+    let (st, v) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/openai",
+        Some(json!({"preset": "openai", "api_key": KEY, "models": [{"id": "gpt-x"}]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let (_, v) = admin(&t, Method::GET, "/api/admin/providers", None).await;
+    assert_eq!(v["providers"][0]["base_url"], json!(fake));
+
+    // The demo next to a real provider, then removed again.
+    let (st, _) = admin(&t, Method::POST, "/api/admin/providers/demo", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = admin(&t, Method::DELETE, "/api/admin/providers/demo", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["providers"].as_array().unwrap().len(), 1);
+    assert_eq!(v["configured"], true);
+
+    // harness.toml cannot be written: the save fails, and the stored key
+    // is still the one for the URL that stays saved.
+    let tmp = t.dir.path().join("harness.toml.tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let (st, v) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/openai",
+        Some(custom(&other, "sk-new-key-999")),
+    )
+    .await;
+    assert!(st.is_client_error() || st.is_server_error(), "{v}");
+    std::fs::remove_dir(&tmp).unwrap();
+    let secrets = std::fs::read_to_string(t.dir.path().join("secrets.toml")).unwrap();
+    assert!(
+        secrets.contains(KEY) && !secrets.contains("sk-new-key-999"),
+        "{secrets}"
+    );
+    let (_, text) = chat(&t, Some("openai::m"), "hi").await;
+    assert_eq!(text, "A m, my key is [REDACTED]");
+}
+
+/// A session started on the model the client showed by default still
+/// follows the defaults, like one started without a model.
+#[tokio::test]
+async fn default_model_sent_by_the_client_still_follows_defaults() {
+    let a = fake_openai("A", &["m1"]).await;
+    let b = fake_openai("B", &["m2"]).await;
+    let t = start().await;
+    for (id, url, model) in [("alpha", &a, "m1"), ("beta", &b, "m2")] {
+        let (st, v) = admin(
+            &t,
+            Method::PUT,
+            &format!("/api/admin/providers/{id}"),
+            Some(
+                json!({"preset": "custom_openai", "name": id, "base_url": url,
+                        "api_key": KEY, "models": [{"id": model}]}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let (_, v) = admin(&t, Method::GET, "/api/admin/providers", None).await;
+    assert_eq!(v["default_model"], "alpha::m1");
+    let (sid, text) = chat(&t, Some("alpha::m1"), "hi").await;
+    assert_eq!(text, "A m1, my key is [REDACTED]");
+    // The admin moves the default; the session's next turn follows.
+    let (st, _) = admin(
+        &t,
+        Method::PUT,
+        "/api/admin/agent-models",
+        Some(json!({"agent_models": {"general": "beta::m2"}, "default_model": "beta::m2"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    admin(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "again"})),
+    )
+    .await;
+    let mut answers = Vec::new();
+    for _ in 0..200 {
+        let (_, v) = admin(
+            &t,
+            Method::GET,
+            &format!("/api/sessions/{sid}/events"),
+            None,
+        )
+        .await;
+        let evs: Vec<RawEvent> = serde_json::from_value(v["events"].clone()).unwrap();
+        answers = evs
+            .iter()
+            .filter(|e| e.kind == "assistant_message")
+            .map(|e| e.payload["text"].as_str().unwrap().to_string())
+            .collect();
+        if answers.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(answers[1], "B m2, my key is [REDACTED]");
+    // A model the user picked over the default stays.
+    let (sid, _) = chat(&t, Some("alpha::m1"), "hi").await;
+    let (_, s) = admin(&t, Method::GET, &format!("/api/sessions/{sid}"), None).await;
+    assert_eq!(s["model"], "alpha::m1");
 }

@@ -17,9 +17,10 @@ import type {
   NodeInfo,
   Prefs,
   Profile,
-  ProviderKind,
+  ApiStyle,
+  MemorySource,
   ProviderModel,
-  ProviderState,
+  ProvidersState,
   RawEvent,
   RemoteNode,
   FormReply,
@@ -162,16 +163,19 @@ export const api = {
     ),
   classifier: () => call<unknown>("GET", "/api/me/classifier"),
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
-  provider: () => call<ProviderState>("GET", "/api/admin/provider"),
-  testProvider: (b: { kind: ProviderKind; base_url?: string; api_key?: string }) =>
-    call<{ ok: boolean; models?: string[]; error?: string }>("POST", "/api/admin/provider/test", b),
-  saveProvider: (b: {
-    kind: ProviderKind;
-    base_url?: string;
-    api_key?: string;
-    model?: string;
-    models: ProviderModel[];
-  }) => call<ProviderState>("PUT", "/api/admin/provider", b),
+  providers: () => call<ProvidersState>("GET", "/api/admin/providers"),
+  /** Always resolves; a failed connection is `{ok: false, error}`. */
+  /** `memory`: reuse the embeddings key saved in [memory] when the URL matches. */
+  testProvider: (b: { preset: string; base_url?: string; api_key?: string; provider_id?: string; memory?: boolean }) =>
+    call<{ ok: true; models: ProviderModel[] } | { ok: false; error: string }>("POST", "/api/admin/providers/test", b),
+  saveProvider: (
+    id: string,
+    b: { name: string; preset: string; base_url?: string; api_key?: string; models: ProviderModel[] },
+  ) => call<ProvidersState>("PUT", `/api/admin/providers/${encodeURIComponent(id)}`, b),
+  deleteProvider: (id: string) => call<ProvidersState>("DELETE", `/api/admin/providers/${encodeURIComponent(id)}`),
+  saveAgentModels: (b: { agent_models: Record<string, string | null>; default_model?: string | null }) =>
+    call<ProvidersState>("PUT", "/api/admin/agent-models", b),
+  demoProvider: () => call<ProvidersState>("POST", "/api/admin/providers/demo"),
   settings: () => call<Prefs>("GET", "/api/me/settings"),
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   memories: () => call<{ memories: MemoryFact[]; backend: string }>("GET", "/api/memory"),
@@ -181,7 +185,16 @@ export const api = {
     call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
   deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),
   memoryCfg: () => call<MemoryCfg>("GET", "/api/admin/memory"),
-  saveMemoryCfg: (b: { embeddings_url: string; embeddings_model: string; preset: Preset }) =>
+  saveMemoryCfg: (b: {
+    recall: MemoryCfg["recall"];
+    source: MemorySource;
+    provider_id?: string;
+    embeddings_url?: string;
+    embeddings_model?: string;
+    api_style?: ApiStyle;
+    embeddings_key?: string;
+    preset: Preset;
+  }) =>
     call<MemoryCfg>("PUT", "/api/admin/memory", b),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
   approve: (id: string, approvalId: string, decision: Decision) =>

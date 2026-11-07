@@ -393,8 +393,12 @@ login page.
   later, skill frontmatter; `serde_yaml` is deprecated and its forks idle.
 * **`cargo-deny`** in CI: permissive licences only; MPL-2.0 allowed solely for
   `option-ext` (via `dirs`, unmodified); internal crates are `publish = false`.
-* **Model registry** in `harness.toml` (`[[models]] id, effort, vision`);
-  effort is only sent to models listed with `effort = true`.
+* **Model registry** in `harness.toml`: `[[providers]]`, each with its
+  `models` and what the provider reported about them (context, max output,
+  effort, vision, tools; unreported = unsupported). Model ids are
+  `<provider id>::<raw id>` (`::` because raw ids contain `/`); one router
+  provider sends each request by prefix. Effort is only sent to models with
+  `effort = true`. Older single-`[provider]` files migrate on load.
 * **Process-group kill via `nix::sys::signal::killpg`** (safe API, no `unsafe`
   in our code); `tokio::process::Command::process_group(0)`.
 * **Approval modes:** `ask_all` (every tool), `ask` (default: mutating tools),
@@ -403,7 +407,7 @@ login page.
   `subscribe{session_id, after_seq}`; server subscribes to live broadcast
   *before* reading the DB backlog, then drops live events `<= last sent seq`, so
   there is no window where an event is missed or doubled.
-* **Mock provider** (`provider = "mock"`) ships in the binary: deterministic
+* **Mock provider** (the `demo` provider, `kind = "mock"`) ships in the binary: deterministic
   scripted replies with tool calls. Used by tests and for trying the UI without
   an API key.
 * **Frontend:** React 19 + Vite + TypeScript 5.9 (not TS 7 — boring choice),
@@ -1576,3 +1580,53 @@ each mode's art, aria-hidden, nothing under the column or composer, one fetch,
 the 700 ms debounce, a new wall per new chat, never the user's title, pause when
 hidden, contrast over every background in both themes, no light on touch,
 reduced motion, Off and Still, and the gutter only beside wide chats.
+
+### 2026-11-07 — Several providers, model parameters, per-agent defaults
+
+`harness.toml` holds `[[providers]]` (id = model prefix, preset, kind,
+base_url, key reference, models) plus `default_model` and `[agent_models]`.
+Old files (`[provider]` + `[[models]]`) load as one provider: the preset whose
+URL matches names it, else an id made from the host (never a preset's id, so
+adding that preset later cannot replace it); the next save writes the new
+shape. An old `[memory]` with a URL but no model gets the preset's model
+written out, as it was used before. The router (`agent-native/src/llm.rs`) resolves `<prefix>::<raw>`,
+strips the prefix, and sends legacy unprefixed ids to the first provider listing
+them, else to the default model's provider; it is swapped whole on any change.
+
+Presets live in `master/src/presets.rs`; fixed ones pin their URL (a client URL
+is ignored). Keys are stored per provider as `provider-<id>`, reused for a test
+or a re-save only when the base URL is unchanged, and deleted with the provider.
+`/models` metadata is parsed from what each provider reports (OpenRouter,
+Anthropic with paging, Mistral, Groq, Together, Gemini, vLLM field names), plus
+Ollama's `/api/show` (four at a time, 20 s in all); numbers are clamped and names
+cleaned (bodies capped at 8 MiB, `/api/show` at 256 KiB, 5,000 models), and
+redirects are followed only within the same origin, since reqwest keeps
+`x-api-key` on cross-origin hops. Anthropic models never get effort (R8): the
+model list and the effort check both enforce it, whatever the file says.
+Plain http is for `localhost`, `127.0.0.1` and `[::1]` only, checked on the
+parsed URL; a URL with userinfo is refused.
+
+Config changes (providers, agent defaults, memory, savings) take one edit lock
+from reading the config to saving it. The memory save tests its embedding
+first, then saves onto the config as it is now and answers 409 when the
+memory settings or the provider it relied on changed meanwhile. A new key is
+written to `secrets.toml` before the save that uses it and restored when that
+save fails. A preset never replaces another provider holding its id (409);
+custom entries may switch API kind.
+
+The admin's per-agent default applies when a session is created without a
+model, or with the model the defaults would give it anyway (clients always
+send the model they show); such a session is marked in the mirror
+(`session-model-auto:<sid>`) and follows the current defaults on every turn and
+agent switch, so the node's startup `default_model` is only a last resort. A provider's default `effort`
+now goes on the turn's spec from the master instead of the node's config.
+
+**Deviations.** `custom_openai` needs no key (local servers often take none).
+Deleting the last provider brings the demo provider back. The ids `demo` and
+`test` are reserved (their paths are actions); PUT on them answers 400 and
+DELETE removes a provider that has one. `POST /api/admin/providers/test` takes
+`memory: true` to reuse the custom embeddings key for the same URL.
+
+Favicons (`/api/favicon`): https on every hop, redirects included; one user
+runs at most two uncached fetches, a free slot is waited for at most 2 s (503,
+not cached), and misses never evict cached icons.

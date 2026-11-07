@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countries, countryCode, fold, isTimeZone, rank, suggestCities, suggestCountries, suggestTimeZones, utcOffset } from "./geo";
+import { countries, countryCode, countryFlag, fold, isTimeZone, rank, suggestCities, suggestCountries, suggestTimeZones, utcOffset } from "./geo";
 
 describe("geo suggestions", () => {
   it("lists real countries only", () => {
@@ -21,6 +21,15 @@ describe("geo suggestions", () => {
     expect(suggestCountries("unit").map((s) => s.value).slice(0, 3)).toEqual(
       expect.arrayContaining(["United Kingdom", "United States"]),
     );
+  });
+
+  it("countries carry their flag instead of a code hint", () => {
+    const lv = suggestCountries("latvia")[0]!;
+    expect(lv).toEqual({ value: "Latvia", label: "Latvia", icon: { src: "/flags/lv.svg", text: "LV" } });
+    expect(lv.hint).toBeUndefined();
+    expect(countryFlag("XK")).toEqual({ src: "/flags/xk.svg", text: "XK" });
+    // Every country gets one, from the code it was listed under.
+    for (const s of suggestCountries("")) expect(s.icon?.src).toMatch(/^\/flags\/[a-z]{2}\.svg$/);
   });
 
   it("finds time zones by city with spaces, and shows the offset", () => {

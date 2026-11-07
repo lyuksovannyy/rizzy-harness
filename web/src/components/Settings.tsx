@@ -4,8 +4,10 @@ import { api } from "../api";
 import { t } from "../lib/i18n";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
+import { modelLabel, resolveModel, savablePrefs } from "../lib/models";
 import { AppearanceFields } from "./Appearance";
-import { ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
+import { ProfileFields, SearchEngineFields } from "./forms";
+import { ProvidersSettings } from "./ProviderForm";
 import { enableNotify, notifyEnabled, notifySupported } from "../lib/notify";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Nodes } from "./Nodes";
@@ -33,6 +35,7 @@ function NotifyToggle() {
 
 function PrefsEditor(props: {
   initial: Prefs;
+  models: ModelInfo[];
   onSaved: (p: Prefs) => void;
   children: (p: Prefs, set: (p: Prefs) => void) => React.ReactNode;
 }) {
@@ -48,7 +51,7 @@ function PrefsEditor(props: {
         setErr(null);
         setMsg(null);
         try {
-          const saved = await api.saveSettings(p);
+          const saved = await api.saveSettings(savablePrefs(p, props.models));
           props.onSaved(saved);
           setMsg("Saved.");
         } catch (x) {
@@ -93,7 +96,6 @@ export default function Settings(props: {
   useEffect(() => {
     if (props.initialTab) setTab(props.initialTab);
   }, [props.initialTab]);
-  const [providerMsg, setProviderMsg] = useState<string | null>(null);
   const prefs = props.prefs;
 
   return (
@@ -109,12 +111,12 @@ export default function Settings(props: {
         </div>
         {!prefs && <div className="muted">Loading…</div>}
         {prefs && tab === "profile" && (
-          <PrefsEditor initial={prefs} onSaved={props.onPrefs}>
+          <PrefsEditor initial={prefs} models={props.models} onSaved={props.onPrefs}>
             {(p, set) => <ProfileFields prefs={p} onChange={set} username={props.me.username} />}
           </PrefsEditor>
         )}
         {prefs && tab === "preferences" && (
-          <PrefsEditor initial={prefs} onSaved={props.onPrefs}>
+          <PrefsEditor initial={prefs} models={props.models} onSaved={props.onPrefs}>
             {(p, set) => (
               <>
                 <AppearanceFields prefs={p} saved={prefs} onChange={set} />
@@ -136,11 +138,11 @@ export default function Settings(props: {
                   </label>
                   <label>
                     Default model
-                    <select value={p.default_model ?? ""} onChange={(e) => set({ ...p, default_model: e.target.value || null })}>
+                    <select value={resolveModel(props.models, p.default_model)?.id ?? ""} onChange={(e) => set({ ...p, default_model: e.target.value || null })}>
                       <option value="">server default</option>
                       {props.models.map((m) => (
                         <option key={m.id} value={m.id}>
-                          {m.id}
+                          {modelLabel(m, props.models)}
                         </option>
                       ))}
                     </select>
@@ -163,17 +165,7 @@ export default function Settings(props: {
         )}
         {tab === "savings" && <SavingsSettings />}
         {tab === "nodes" && <Nodes nodes={props.nodes} />}
-        {tab === "provider" && (
-          <div className="card stack">
-            <ProviderForm
-              onSaved={(s) => {
-                setProviderMsg(`Saved. New chats use ${s.model}.`);
-                props.onProviderChanged();
-              }}
-            />
-            {providerMsg && <div className="muted">{providerMsg}</div>}
-          </div>
-        )}
+        {tab === "provider" && <ProvidersSettings onChanged={props.onProviderChanged} />}
         {tab === "password" && <ChangePassword forced={false} onDone={() => setTab("profile")} />}
         {tab === "users" && <Users me={props.me} />}
       </div>

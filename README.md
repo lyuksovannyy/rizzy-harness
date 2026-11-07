@@ -77,32 +77,57 @@ still version beside chats when the window is wide enough.
 Everything lives in the data directory (`~/.local/share/harness`, or
 `--data-dir` / `HARNESS_DATA_DIR`).
 
-`harness.toml`: provider. API keys never go in this file: reference an
+`harness.toml`: model providers. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600
 `secrets.toml` (`api_key_secret`; onboarding and Settings → AI provider write
-it for you).
+it for you, as `provider-<id>`). Several providers can be connected at once;
+model ids are `<provider id>::<model id>` (`openrouter::openai/gpt-4o`), and
+each request goes to the provider its prefix names.
 
 ```toml
-[provider]
-kind = "openai"                      # any OpenAI-compatible endpoint
-base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-api_key_env = "DEEPSEEK_API_KEY"
+default_model = "openrouter::openai/gpt-4o"   # unset: agent general's, else the first model
+
+[agent_models]                       # per-agent defaults (Settings); a chat can still pick another
+coder = "deepseek::deepseek-chat"
+
+[[providers]]
+id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
+name = "OpenRouter"
+preset = "openrouter"                # fixed presets keep their own base_url
+kind = "openai"                      # openai (any OpenAI-compatible endpoint) | anthropic
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+models = [
+  { id = "openai/gpt-4o", context = 128000, max_output = 16384, vision = true, tools = true },
+]
+
+[[providers]]
+id = "deepseek"
+name = "DeepSeek"
+preset = "deepseek"
+kind = "openai"
+base_url = "https://api.deepseek.com/v1"
+api_key_secret = "provider-deepseek" # [keys] provider-deepseek = "..." in secrets.toml
+models = [{ id = "deepseek-chat" }]
 ```
 
-```toml
-[provider]
-kind = "anthropic"                   # Anthropic API key only (no subscription login)
-model = "<model id>"
-api_key_secret = "anthropic"         # [keys] anthropic = "..." in secrets.toml
-```
+The model parameters (`name`, `context`, `max_output`, `effort`, `vision`,
+`tools`) are what the provider's `/models` reports (Ollama: `/api/show`) when
+the provider is tested in the UI; a missing one counts as unsupported. A stored
+key is only ever sent to the base URL it was saved for: change the URL and the
+key must be entered again.
 
-`effort = "low" | "medium" | "high" | "max"` is only sent to models declared
-with `[[models]] id = "..."` and `effort = true`. Do not enable it for
-Anthropic models yet: extended thinking combined with tool calls is not
-supported until risk R8 in `PLAN.md` is fixed.
+`effort = "low" | "medium" | "high" | "max"` on a provider is its default
+reasoning effort, only sent to its models with `effort = true`. Anthropic
+models are always listed with `effort = false`: extended thinking combined
+with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
+not set it by hand either.
 
-Local Ollama: `base_url = "http://localhost:11434/v1"`, no key.
+Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
+Older files with a single `[provider]` and `[[models]]` still load (as one
+provider) and are rewritten in this shape on the next change. An endpoint no
+preset matches gets an id made from its host (for example `localhost-1234`),
+so its models are `localhost-1234::<model>`; unprefixed ids keep working.
 
 Chats and web tools (restart after changing):
 
@@ -119,8 +144,14 @@ fetch = true                         # web_fetch: public addresses only, URLs fr
 
 [memory]
 backend = "builtin"                  # builtin | mem0 | off (restart to switch)
-embeddings_url = "http://localhost:11434/v1"  # optional: recall by meaning (settable in the UI)
+recall = "meaning"                   # keywords | meaning (all of this is settable in the UI)
+source = "ollama"                    # provider | ollama | custom: where embeddings come from
+# provider_id = "mistral"            # for source = "provider": uses that provider's URL and key
+embeddings_url = "http://localhost:11434/v1"  # for ollama and custom
 preset = "balanced"                  # fast | balanced | best (Ollama model names)
+# embeddings_model = "nomic-embed-text"  # overrides the preset; required for provider and custom
+# api_style = "openai"               # custom only: openai (Bearer) | anthropic (x-api-key)
+# embeddings_key_secret = "embeddings"   # custom only ([keys] in secrets.toml)
 # mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
 
@@ -439,7 +470,7 @@ BENCH_BASE_URL=https://api.example/v1 BENCH_KEY=... BENCH_MODEL=some-model cargo
 ```
 
 The container (a running image published on `127.0.0.1:7781`, with a
-`[provider] kind = "mock"` harness.toml in its data volume):
+harness.toml without providers, i.e. the built-in demo one, in its data volume):
 
 ```bash
 node web/e2e/container.cjs http://127.0.0.1:7781/ "$(docker exec <container> harness claim-code)"

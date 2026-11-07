@@ -6,6 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e5-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -58,16 +59,16 @@ function fakeProvider() {
     const errors = [];
     p.on('pageerror', (e) => errors.push(e.message));
     await p.goto(URL_);
-    await p.fill('input[placeholder="claim code"]', code);
-    await p.fill('input[placeholder="username"]', 'alex');
-    await p.fill('input[type=password]', 'admin password');
-    await p.click('text=Create account');
+    await createOwner(p, code);
 
     // Step 1: provider.
     await p.waitForSelector('text=Connect an AI provider');
     log('steps:', await p.innerText('.steps'));
-    await p.selectOption('select', { label: 'Other OpenAI-compatible' });
+    await p.selectOption('select', { label: 'OpenAI-compatible (custom)' });
     await p.fill('input[placeholder="https://…/v1"]', fake.base);
+    // A custom endpoint is named and prefixed by the admin.
+    await p.fill('input[placeholder="My endpoint"]', 'Fake');
+    await p.fill('input[placeholder="my-endpoint"]', 'fake');
     await p.fill('input[type=password]', 'sk-wrong-key-999');
     await p.click('text=Test connection');
     await p.waitForSelector('.error-text');
@@ -76,14 +77,20 @@ function fakeProvider() {
     await p.click('text=Test connection');
     await p.waitForSelector('.model-pick');
     log('models:', (await p.innerText('.model-pick ul')).replace(/\s+/g, ' '));
-    await p.click('button[aria-label="make fake-large the default"]');
+    // Offer both models; fake-large is General's, so everyone's default.
+    await p.check('.model-pick li:has-text("fake-small") input[type=checkbox]');
+    await p.check('.model-pick li:has-text("fake-large") input[type=checkbox]');
+    await p.click('button[aria-label^="Default agents for fake-large:"]');
+    await p.click('[role=menu] [role=menuitemcheckbox]:has-text("General")');
+    await p.keyboard.press('Escape');
+    await p.waitForSelector('button[aria-label="Default agents for fake-large: General"]');
     await p.screenshot({ path: `${S}/p5-1-provider.png` });
     await p.click('text=Save and continue');
-    await p.click('text=Skip: keywords only');
+    await keywordsOnly(p);
 
     // Step 3: profile (time zone pre-filled from the browser).
     await p.waitForSelector('text=About you');
-    const tzBox = 'input[role=combobox][aria-label="Time zone"]';
+    const tzBox = 'role=combobox[name="Time zone"]';
     const tz = await p.inputValue(tzBox);
     log('prefilled tz:', tz);
     check(tz === 'Europe/Riga', 'timezone should be prefilled from the browser');
@@ -99,12 +106,12 @@ function fakeProvider() {
     check((await p.inputValue(tzBox)) === 'Europe/Riga', 'Enter picks the first suggestion');
     await p.fill('input[placeholder="alex"]', 'Alex');
     // Country: suggestions from the browser's country names.
-    const country = 'input[role=combobox][aria-label="Country"]';
+    const country = 'role=combobox[name="Country"]';
     await p.fill(country, 'latv');
     await p.click('[role=option]:has-text("Latvia")');
     check((await p.inputValue(country)) === 'Latvia', 'country picked');
     // City: suggestions limited to the chosen country (data loaded on focus).
-    const city = 'input[role=combobox][aria-label="City"]';
+    const city = 'role=combobox[name="City"]';
     await p.click(city);
     await p.fill(city, 'ri');
     await p.waitForSelector('[role=option]:has-text("Riga")');
@@ -232,6 +239,8 @@ function fakeProvider() {
     check((await bodyBg(p)) === darkBg && lightBg !== darkBg, 'the OS theme drives the page again');
     log('theme: preview, revert, saved, no flash, system');
     await p.click('.tabs >> text=AI provider');
+    await p.waitForSelector('.providers li:has-text("fake::")');
+    await p.click('button[aria-label="Edit Fake"]');
     await p.waitForSelector('text=a key is stored');
     await p.screenshot({ path: `${S}/p5-3-settings-provider.png` });
 

@@ -169,7 +169,7 @@ impl Prefs {
             return Err(format!("unknown agent {a:?}"));
         }
         if let Some(model) = &self.default_model
-            && !m.models().iter().any(|x| &x.id == model)
+            && m.find_model(model).is_none()
         {
             return Err(format!("unknown model {model:?}"));
         }

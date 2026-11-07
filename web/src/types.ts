@@ -232,13 +232,23 @@ export interface Agent {
   name: string;
   description: string;
   builtin: boolean;
+  /** The admin's default model for this agent (prefixed). */
+  default_model: string | null;
 }
 
+/** A model offered to chats. `id` is `<provider_id>::<raw>`. */
 export interface ModelInfo {
   id: string;
+  raw: string;
+  /** The provider's display name. */
   provider: string;
+  provider_id: string;
+  name: string | null;
+  context: number | null;
+  max_output: number | null;
   effort: boolean;
   vision: boolean;
+  tools: boolean;
   default: boolean;
 }
 
@@ -266,20 +276,59 @@ export interface Prefs {
 
 export type ProviderKind = "openai" | "anthropic" | "mock";
 
-export interface ProviderModel {
+export interface ProviderWarning {
+  kind: "trusted_source" | "training_data" | "data_collection";
+  text: string;
+  /** Save unlocks this many seconds after a successful test. */
+  wait_secs: number;
+}
+
+export interface ProviderPreset {
   id: string;
-  effort: boolean;
-  vision: boolean;
+  label: string;
+  kind: ProviderKind;
+  /** null: the user enters it. */
+  base_url: string | null;
+  url_editable: boolean;
+  needs_key: boolean;
+  warning: ProviderWarning | null;
+  /** The user names it and picks the prefix. */
+  custom: boolean;
+}
+
+/** A model as the provider reports it; null: not reported. */
+export interface ProviderModel {
+  /** The raw id, no prefix. */
+  id: string;
+  name: string | null;
+  context: number | null;
+  max_output: number | null;
+  effort: boolean | null;
+  vision: boolean | null;
+  tools: boolean | null;
 }
 
 export interface ProviderState {
+  /** The prefix of its model ids, unique. */
+  id: string;
+  name: string;
+  preset: string;
   kind: ProviderKind;
   base_url: string;
-  model: string;
   /** `stored`, `none`, or `env:NAME` — never the key itself. */
   key: string;
-  configured: boolean;
   models: ProviderModel[];
+}
+
+export interface ProvidersState {
+  providers: ProviderState[];
+  presets: ProviderPreset[];
+  /** Prefixed. */
+  default_model: string | null;
+  /** Agent id to prefixed model id. */
+  agent_models: Record<string, string>;
+  /** At least one non-mock provider. */
+  configured: boolean;
 }
 
 export interface SearchHit {
@@ -362,11 +411,20 @@ export interface MemoryFact {
 
 export type Preset = "fast" | "balanced" | "best";
 
+export type MemorySource = "provider" | "ollama" | "custom";
+export type ApiStyle = "openai" | "anthropic";
+
 export interface MemoryCfg {
   backend: "builtin" | "mem0" | "off";
+  recall: "keywords" | "meaning";
+  source: MemorySource;
+  provider_id: string | null;
   embeddings_url: string;
   embeddings_model: string;
+  api_style: ApiStyle;
+  key: "stored" | "none";
   preset: Preset;
+  /** Effective. */
   model: string;
   active_model: string | null;
   presets: { id: Preset; model: string; size: string }[];

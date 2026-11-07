@@ -62,6 +62,8 @@ pub enum ProviderError {
     Status { status: u16, body: String },
     #[error("bad stream: {0}")]
     Stream(String),
+    #[error("no provider serves model {0:?}")]
+    UnknownModel(String),
 }
 
 #[async_trait::async_trait]

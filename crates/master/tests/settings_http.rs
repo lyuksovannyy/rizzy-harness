@@ -59,6 +59,7 @@ async fn start() -> T {
             effort: false,
             vision: false,
             default: true,
+            ..Default::default()
         },
         ModelInfo {
             id: "thinker".into(),
@@ -66,6 +67,7 @@ async fn start() -> T {
             effort: true,
             vision: false,
             default: false,
+            ..Default::default()
         },
     ]);
     master.add_link(chat.attach().await, true).await.unwrap();

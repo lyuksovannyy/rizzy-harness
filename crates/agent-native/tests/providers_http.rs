@@ -177,26 +177,202 @@ async fn list_models_both_kinds_and_bad_key() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    use harness_agent_native::llm::list_models;
+    use harness_agent_native::models::list_models;
     let good = Secret::new("good".to_string());
     let bad = Secret::new("sk-wrong-123456".to_string());
+    let ids = |v: Vec<harness_agent_native::models::ModelMeta>| {
+        v.into_iter().map(|m| m.id).collect::<Vec<_>>()
+    };
     assert_eq!(
-        list_models(ApiKind::Openai, &base, Some(&good))
+        ids(list_models(ApiKind::Openai, &base, Some(&good), false)
             .await
-            .unwrap(),
+            .unwrap()),
         ["model-a", "model-b"]
     );
     assert_eq!(
-        list_models(ApiKind::Anthropic, &base, Some(&good))
+        ids(list_models(ApiKind::Anthropic, &base, Some(&good), false)
             .await
-            .unwrap(),
+            .unwrap()),
         ["model-a", "model-b"]
     );
-    let err = list_models(ApiKind::Openai, &base, Some(&bad))
+    let err = list_models(ApiKind::Openai, &base, Some(&bad), false)
         .await
         .unwrap_err()
         .to_string();
     assert!(err.contains("401") && !err.contains("sk-wrong"), "{err}");
+}
+
+/// OpenRouter-style metadata comes through; Anthropic pages are followed and
+/// its effort is never offered (PLAN.md R8).
+#[tokio::test]
+async fn list_models_metadata_and_anthropic_pages() {
+    use axum::extract::Query;
+    use axum::routing::get;
+    use harness_agent_native::models::list_models;
+    let app = Router::new()
+        .route(
+            "/or/v1/models",
+            get(|| async {
+                axum::Json(json!({"data": [{
+                    "id": "openai/gpt-4o", "name": "OpenAI: GPT-4o", "context_length": 128000,
+                    "architecture": {"input_modalities": ["text", "image"]},
+                    "top_provider": {"max_completion_tokens": 16384},
+                    "supported_parameters": ["tools", "reasoning"]
+                }]}))
+            }),
+        )
+        .route(
+            "/an/v1/models",
+            get(
+                |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                    axum::Json(match q.get("after_id").map(String::as_str) {
+                        None => json!({"data": [{
+                            "id": "claude-b", "display_name": "Claude B",
+                            "max_input_tokens": 200000, "max_tokens": 64000,
+                            "capabilities": {"image_input": {"supported": true},
+                                             "thinking": {"supported": true}}
+                        }], "has_more": true, "last_id": "claude-b"}),
+                        Some("claude-b") => {
+                            json!({"data": [{"id": "claude-a"}], "has_more": false, "last_id": "claude-a"})
+                        }
+                        Some(_) => json!({"data": [{"id": "wrong-page"}], "has_more": false}),
+                    })
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let or = list_models(ApiKind::Openai, &format!("{base}/or/v1"), None, false)
+        .await
+        .unwrap();
+    assert_eq!(or.len(), 1);
+    let m = &or[0];
+    assert_eq!((m.context, m.max_output), (Some(128000), Some(16384)));
+    assert_eq!(
+        (m.vision, m.tools, m.effort),
+        (Some(true), Some(true), Some(true))
+    );
+
+    let an = list_models(ApiKind::Anthropic, &format!("{base}/an/v1"), None, false)
+        .await
+        .unwrap();
+    let ids: Vec<&str> = an.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["claude-a", "claude-b"]);
+    let b = &an[1];
+    assert_eq!(b.name.as_deref(), Some("Claude B"));
+    assert_eq!(
+        (b.context, b.max_output, b.vision),
+        (Some(200000), Some(64000), Some(true))
+    );
+    assert!(an.iter().all(|m| m.effort == Some(false)));
+}
+
+/// A key never follows a redirect to another origin (reqwest keeps
+/// `x-api-key` on cross-origin hops), and an oversized listing is refused.
+#[tokio::test]
+async fn list_models_refuses_cross_origin_redirects_and_huge_bodies() {
+    use axum::routing::get;
+    use harness_agent_native::models::list_models;
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let other = {
+        let seen = seen.clone();
+        let app = Router::new().route(
+            "/v1/models",
+            get(move |h: HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    if let Some(k) = h.get("x-api-key") {
+                        seen.lock().unwrap().push(k.to_str().unwrap().to_string());
+                    }
+                    axum::Json(json!({"data": [{"id": "stolen"}]}))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        base
+    };
+    let to = format!("{other}/v1/models");
+    let app = Router::new()
+        .route(
+            "/r/v1/models",
+            get(move || {
+                let to = to.clone();
+                async move { axum::response::Redirect::temporary(&to) }
+            }),
+        )
+        .route(
+            "/big/v1/models",
+            get(|| async { format!("{{\"data\": [\"{}\"]}}", "x".repeat(9 << 20)) }),
+        );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+    let key = Secret::new("sk-ant-secret".to_string());
+    let r = list_models(
+        ApiKind::Anthropic,
+        &format!("{base}/r/v1"),
+        Some(&key),
+        false,
+    )
+    .await;
+    assert!(r.is_err(), "the redirect is not followed: {r:?}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the key went to another host"
+    );
+
+    let err = list_models(ApiKind::Openai, &format!("{base}/big/v1"), None, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("too large"), "{err}");
+}
+
+/// Ollama: `/api/show` fills in context and capabilities per model.
+#[tokio::test]
+async fn list_models_probes_ollama_show() {
+    use axum::routing::get;
+    use harness_agent_native::models::list_models;
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            get(|| async { axum::Json(json!({"data": [{"id": "llava"}, {"id": "missing"}]})) }),
+        )
+        .route(
+            "/api/show",
+            post(|axum::Json(b): axum::Json<Value>| async move {
+                match b["model"].as_str() {
+                    Some("llava") => axum::Json(json!({
+                        "model_info": {"llama.context_length": 32768},
+                        "capabilities": ["completion", "vision"]
+                    }))
+                    .into_response(),
+                    _ => (axum::http::StatusCode::NOT_FOUND, "no").into_response(),
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let ms = list_models(ApiKind::Openai, &base, None, true)
+        .await
+        .unwrap();
+    assert_eq!(ms[0].id, "llava");
+    assert_eq!(ms[0].context, Some(32768));
+    assert_eq!(
+        (ms[0].vision, ms[0].tools, ms[0].effort),
+        (Some(true), Some(false), Some(false))
+    );
+    assert_eq!(
+        (ms[1].context, ms[1].vision),
+        (None, None),
+        "unknown stays unknown"
+    );
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@
 pub mod llm;
 pub mod mask;
 pub mod mock;
+pub mod models;
 pub mod provider;
 pub mod style;
 

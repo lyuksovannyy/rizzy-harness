@@ -192,7 +192,11 @@ async fn serve(
     let runtime = Arc::new(runtime);
     // Both runtimes share one swappable provider: settings can change it live.
     let provider: Arc<dyn Provider> = runtime.provider.clone();
-    tracing::info!(provider = provider.name(), model = %cfg.provider.model, "provider");
+    tracing::info!(
+        provider = provider.name(),
+        model = cfg.effective_default().unwrap_or_default(),
+        "provider"
+    );
 
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
     let node = if no_local_node {
@@ -242,7 +246,7 @@ async fn serve(
         policy: NodePolicy::default(),
         store: Store::open(&dir.join("chat.db"), Durability::Full)?,
         backend: Arc::new(chat_backend),
-        default_model: cfg.provider.model.clone(),
+        default_model: fallback_model(&cfg),
         secrets: secrets.clone(),
         profile: Profile::Chat,
         incognito_ttl: Some(cfg.chat.incognito_ttl()),
@@ -358,6 +362,13 @@ async fn serve(
     Ok(())
 }
 
+/// The model a node uses when the master sends none (the master resolves
+/// the current default for every session it creates).
+fn fallback_model(cfg: &Config) -> String {
+    cfg.effective_default()
+        .unwrap_or_else(|| format!("{}::mock", harness_master::presets::DEMO))
+}
+
 /// The worker runtime (embedded `local` node, or a remote node).
 async fn agentic_node(
     dir: &Path,
@@ -382,10 +393,9 @@ async fn agentic_node(
             env_remove,
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
-            effort: cfg
-                .provider
-                .effort
-                .filter(|_| cfg.supports_effort(&cfg.provider.model)),
+            // The master puts the provider's default effort on each turn's
+            // spec, for models that take one.
+            effort: None,
             summarize_after_tokens: cfg.chat.summarize_after_tokens,
             ..Default::default()
         },
@@ -396,7 +406,7 @@ async fn agentic_node(
         policy,
         store: Store::open(&dir.join("node.db"), Durability::Full)?,
         backend: Arc::new(backend),
-        default_model: cfg.provider.model.clone(),
+        default_model: fallback_model(cfg),
         secrets: secrets.clone(),
         profile: Profile::Agentic,
         incognito_ttl: None,
@@ -503,7 +513,14 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
     check(
         "harness.toml",
         Config::load(&dir.join("harness.toml"))
-            .map(|c| format!("provider {:?}, model {}", c.provider.kind, c.provider.model))
+            .map(|c| {
+                let ids: Vec<&str> = c.providers.iter().map(|p| p.id.as_str()).collect();
+                format!(
+                    "providers {}, default model {}",
+                    ids.join(", "),
+                    c.effective_default().unwrap_or_default()
+                )
+            })
             .map_err(|e| format!("{e:#}")),
     );
     check(

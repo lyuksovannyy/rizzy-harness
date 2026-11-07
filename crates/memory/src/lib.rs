@@ -15,7 +15,7 @@ mod tool;
 use harness_core::SessionId;
 use serde::{Deserialize, Serialize};
 
-pub use embed::{Embedder, Preset};
+pub use embed::{ApiStyle, Embedder, Preset};
 pub use mem0::Mem0Memory;
 pub use sqlite::SqliteMemory;
 pub use tool::Remember;
@@ -71,6 +71,10 @@ pub enum MemoryError {
     Invalid(String),
     #[error("embeddings: {0}")]
     Embed(String),
+    /// The endpoint answered with an error status; `detail` is a short,
+    /// sanitised piece of its body (may be empty).
+    #[error("embeddings: endpoint answered {status}{}", if .detail.is_empty() { String::new() } else { format!(": {}", .detail) })]
+    EmbedHttp { status: u16, detail: String },
 }
 
 pub type Result<T> = std::result::Result<T, MemoryError>;

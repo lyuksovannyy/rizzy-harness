@@ -75,6 +75,22 @@ export function engineMention(text: string, engines: Engine[]): { engine: Engine
   return engine ? { engine, query: text.trimStart().slice(m[0].length) } : null;
 }
 
+/** The https origin of a URL template, for its favicon; null if it has none yet. */
+export function urlOrigin(template: string | null | undefined): string | null {
+  if (!template) return null;
+  try {
+    const u = new URL(template);
+    return u.protocol === "https:" && u.hostname ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Where an engine's favicon comes from: the origin of its text (else image) URL. */
+export function engineOrigin(e: Engine): string | null {
+  return urlOrigin(e.text ?? e.image);
+}
+
 export function searchUrl(template: string, query: string): string {
   return template.replaceAll("{q}", encodeURIComponent(query.trim()));
 }

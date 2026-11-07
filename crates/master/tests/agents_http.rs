@@ -66,6 +66,7 @@ async fn start(with_worker: bool) -> T {
         effort: false,
         vision: false,
         default: true,
+        ..Default::default()
     }]);
     let chat = runtime(dir.path(), "master", Profile::Chat).await;
     master.add_link(chat.attach().await, true).await.unwrap();
@@ -268,6 +269,7 @@ async fn agentic_needs_a_worker_and_effort_is_gated() {
         effort: true,
         vision: false,
         default: true,
+        ..Default::default()
     }]);
     assert_eq!(
         t.master

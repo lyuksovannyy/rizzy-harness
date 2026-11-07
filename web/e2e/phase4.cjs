@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e4-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -17,7 +18,7 @@ async function skipOnboarding(page, admin) {
   if (admin) {
     await page.waitForSelector('text=Connect an AI provider');
     await page.click('text=Skip: use the built-in demo');
-    await page.click('text=Skip: keywords only');
+    await keywordsOnly(page);
   }
   await page.waitForSelector('text=About you');
   await page.click('button:has-text("Continue")');
@@ -38,10 +39,7 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
     const errors = [];
     p.on('pageerror', (e) => errors.push(e.message));
     await p.goto(URL_);
-    await p.fill('input[placeholder="claim code"]', code);
-    await p.fill('input[placeholder="username"]', 'alex');
-    await p.fill('input[type=password]', 'admin password');
-    await p.click('text=Create account');
+    await createOwner(p, code);
     await skipOnboarding(p, true);
     await p.waitForSelector('h1.greeting');
 

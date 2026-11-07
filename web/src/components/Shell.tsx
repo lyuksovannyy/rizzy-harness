@@ -133,8 +133,16 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     api.sessions().then((r) => setSessions(r.sessions)).catch(unauthorized);
     refreshAttention();
   }, [unauthorized, refreshAttention]);
+  // Agents too: their default models change with the provider settings.
   const refreshModels = useCallback(() => {
     api.models().then((r) => setModels(r.models)).catch(unauthorized);
+    api
+      .agents()
+      .then((r) => {
+        setAgents(r.agents);
+        setServerDefaultAgent(r.default);
+      })
+      .catch(unauthorized);
   }, [unauthorized]);
   const refreshNodes = useCallback(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
@@ -146,13 +154,6 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     refreshSessions();
     refreshNodes();
-    api
-      .agents()
-      .then((r) => {
-        setAgents(r.agents);
-        setServerDefaultAgent(r.default);
-      })
-      .catch(unauthorized);
     refreshModels();
     api.settings().then(setPrefs).catch(unauthorized);
     api
