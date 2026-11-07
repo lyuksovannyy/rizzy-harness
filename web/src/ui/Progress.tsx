@@ -7,7 +7,7 @@ import { rt } from "../md/strings";
 import type { ProgressSpec, StepStatus } from "../types";
 import { currentStep, finishedSteps, progressStatus, progressValue, type ProgressSlot, type ProgressStatus } from "./blocks";
 
-/** A step as shown: an active step of an ended turn has stopped. */
+/** A step as shown: an active step of a job no longer running has stopped. */
 type Shown = StepStatus | "stopped";
 
 const STEP_ICON: Record<Shown, LucideIcon> = {
@@ -67,7 +67,10 @@ function Card({ spec, slot }: { spec: ProgressSpec; slot: ProgressSlot }) {
       </div>
       <ol className="ui-steps">
         {spec.steps.map((s, i) => {
-          const shown: Shown = s.status === "active" && slot.ended ? "stopped" : s.status;
+          // Only a running job moves a step on. A turn that ended, or a block
+          // the model already marked done or failed, leaves an active step
+          // where it stopped.
+          const shown: Shown = s.status === "active" && status !== "running" ? "stopped" : s.status;
           return (
             <li key={i} className={`ui-step ui-step-${shown}`}>
               <StatusIcon icon={STEP_ICON[shown]} label={rt(`ui.step.${shown}`)} spin={shown === "active"} />

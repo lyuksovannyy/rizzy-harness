@@ -66,12 +66,14 @@ describe("citation pills", () => {
     expect(pills(out)).toEqual(["a.example", "b.example", "a.example"]);
   });
 
-  test("a header cell's label stays text: the cell is a sort button", () => {
+  test("a header cell's label is a pill beside the cell's own sort button, not inside it", () => {
     const out = md("| a [S1] | b |\n|---|---|\n| x [S2] | y |\n");
     const head = out.slice(out.indexOf("<thead>"), out.indexOf("</thead>"));
-    expect(head).toContain(">a [S1]</button>");
-    expect(head).not.toContain("cite");
-    expect(pills(out)).toEqual(["b.example"]);
+    expect(pills(head)).toEqual(["a.example"]);
+    expect(head).toMatch(/<span class="th-label">a <span class="cite-wrap">.*<\/span><\/span><button type="button" class="th-sort-icon" title="Sort by a \[S1\]" aria-label="Sort by a \[S1\]">/);
+    expect(head).not.toMatch(/<button[^>]*>(?:(?!<\/button>).)*<a /);
+    expect(head).toContain('<button type="button" class="th-sort" title="Sort by b">b</button>');
+    expect(pills(out)).toEqual(["a.example", "b.example"]);
   });
 
   test("a callout title's label is a pill in the title", () => {

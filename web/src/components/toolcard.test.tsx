@@ -142,3 +142,31 @@ describe("what a web call sends", () => {
     host.remove();
   });
 });
+
+describe("memory proposals", () => {
+  const remember = (text: unknown, result: ToolResult | null) => web("remember", { text, kind: "fact" }, result);
+  const proposed = { ok: true, output: "Proposed. The user will confirm or discard it in Memory.", exit_code: null };
+  const card = (item: Tool) => renderToStaticMarkup(<ToolCard sessionId="s" item={item} />);
+
+  test("an accepted proposal is a note with the fact and a link to the Memory page", () => {
+    const html = card(remember("likes tea", proposed));
+    expect(html).toContain('<div class="tool tool-memory" role="note">');
+    expect(html).toContain('Suggested a memory: <span class="memory-fact">“likes tea”</span>');
+    expect(html).toContain("Not used until you keep it.");
+    expect(html).toContain('<a class="memory-review" href="#/settings/memory">Review in Memory</a>');
+    // Keeping or discarding happens on the Memory page only.
+    expect(html).not.toMatch(/<button/);
+  });
+
+  test("the fact shows as it would be stored: hidden characters as codes, markup as text", () => {
+    const html = card(remember("likes <b>tea</b>‮ and\u{E0041} more", proposed));
+    expect(html).toContain("“likes &lt;b&gt;tea&lt;/b&gt;&lt;U+202E&gt; and&lt;U+E0041&gt; more”");
+  });
+
+  test("a running or rejected call stays an ordinary tool card", () => {
+    expect(card(remember("likes tea", null))).not.toContain("tool-memory");
+    const rejected = card(remember("", { ok: false, output: "`text` must be a non-empty sentence", exit_code: null }));
+    expect(rejected).not.toContain("tool-memory");
+    expect(rejected).toContain("must be a non-empty sentence");
+  });
+});

@@ -38,6 +38,16 @@ describe("Progress", () => {
     expect(text(h)).toContain("Stopped · turn cancelled");
   });
 
+  test("a block marked done or failed leaves a forgotten active step still, even while the turn runs", () => {
+    for (const status of ["done", "failed"] as const) {
+      const h = html({ ...job, status });
+      expect(h).toContain(`class="ui-progress ui-progress-${status}"`);
+      expect(h).toContain('class="ui-step ui-step-stopped"');
+      expect(h).not.toMatch(/\bspin\b/);
+    }
+    expect(html({ ...job, status: "running" })).toMatch(/\bspin\b/);
+  });
+
   test("a turn that simply finished is not named", () => {
     const done: ProgressSpec = { ...job, steps: job.steps.map((s) => ({ ...s, status: "done" })) };
     const h = html(done, { mode: "full", ended: true, reason: "completed" });

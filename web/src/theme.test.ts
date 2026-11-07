@@ -40,6 +40,19 @@ describe("theme", () => {
     }
   });
 
+  // A bar or line is a graphical object: WCAG AA asks 3:1 against what it
+  // is drawn on, the card.
+  test.each([
+    ["dark", dark],
+    ["light", light],
+  ] as const)("%s: chart series colours stand out from the card", (_, theme) => {
+    for (let k = 1; k <= 6; k++) {
+      const c = theme[`--chart-${k}`]!;
+      expect(c, `--chart-${k}`).toBeDefined();
+      expect(contrast(c, theme["--bg-2"]!), `--chart-${k} ${c} on --bg-2`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
   test("the contrast formula", () => {
     expect(contrast("#000000", "#ffffff")).toBeCloseTo(21);
     expect(contrast("#e3b341", "#f4f4f4")).toBeCloseTo(1.77, 2);

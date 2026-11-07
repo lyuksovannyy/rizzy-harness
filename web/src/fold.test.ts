@@ -6,7 +6,9 @@ import type { RawEvent } from "./types";
 describe("fold", () => {
   it("matches the Rust reducer on the shared fixture", () => {
     const events = fixture.events as RawEvent[];
-    expect(fold(events)).toEqual(fixture.expected);
+    // Strict: a key set to undefined is not the same as a key serde omits
+    // (meta.parent_session, item.reply, result.sources, …).
+    expect(fold(events)).toStrictEqual(fixture.expected);
   });
 
   it("rejects duplicates and gaps", () => {

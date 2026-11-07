@@ -29,6 +29,14 @@
   --syn-add: #56d364;
   --syn-del: #f85149;
   --tone-important: #b392f0;
+  /* Chart series, in this order (validated together for colour-vision
+     deficiencies; each at least 3:1 on the card surface, theme.test.ts). */
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
   color-scheme: dark;
 }
 
@@ -61,6 +69,12 @@
     --syn-add: #1a7f37;
     --syn-del: #cf222e;
     --tone-important: #8250df;
+    --chart-1: #2a78d6;
+    --chart-2: #cc5220;
+    --chart-3: #13875f;
+    --chart-4: #9e6c00;
+    --chart-5: #c94a80;
+    --chart-6: #007a00;
     color-scheme: light;
   }
 }
@@ -791,6 +805,29 @@ select {
 }
 th[aria-sort="ascending"] .th-sort::after { content: " ▲"; font-size: 0.7em; }
 th[aria-sort="descending"] .th-sort::after { content: " ▼"; font-size: 0.7em; }
+/* A header cell with a link: the content as written, then its own small
+   sort button (a link cannot sit inside a button). */
+.th-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-weight: 600;
+}
+.th-label {
+  flex: 1;
+}
+.th-sort-icon {
+  display: inline-flex;
+  flex: none;
+  padding: 3px;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-2);
+}
+th:not([aria-sort="none"]) .th-sort-icon {
+  color: var(--fg);
+}
 .table-tools {
   display: flex;
   justify-content: flex-end;
@@ -1037,6 +1074,28 @@ pre.diff .del {
   flex: 1;
   min-width: 0;
 }
+/* A memory the model proposed: a note, not a tool card. */
+.tool-memory {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.memory-icon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--accent);
+}
+.memory-body {
+  min-width: 0;
+}
+.memory-fact {
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .web-results {
   margin: 0;
   padding: 0;
@@ -1274,6 +1333,149 @@ pre.term.web-output {
 .ui-progress-snapshot.ui-progress-failed .ui-icon { color: var(--bad); }
 @media (prefers-reduced-motion: reduce) {
   .ui-bar-fill { transition: none; }
+}
+
+/* ui:chart: thin marks in the series colours, hairline grid, text in the
+   text colours (never a series colour), the data a click away. */
+.ui-chart-c1 { --c: var(--chart-1); }
+.ui-chart-c2 { --c: var(--chart-2); }
+.ui-chart-c3 { --c: var(--chart-3); }
+.ui-chart-c4 { --c: var(--chart-4); }
+.ui-chart-c5 { --c: var(--chart-5); }
+.ui-chart-c6 { --c: var(--chart-6); }
+.ui-card .ui-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.ui-chart-legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-chart-key {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--c);
+}
+.ui-chart-key-line {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+}
+.ui-chart-axis-title {
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.ui-chart-axis-x {
+  text-align: center;
+}
+.ui-chart-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+}
+.ui-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.ui-chart text {
+  fill: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-chart-grid line {
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: crispEdges;
+}
+.ui-chart-grid .ui-chart-zero {
+  stroke: color-mix(in srgb, var(--fg-2) 60%, transparent);
+}
+.ui-chart-mark {
+  outline: none;
+}
+.ui-chart-bar {
+  fill: var(--c);
+}
+.ui-chart-bar:hover {
+  opacity: 0.8;
+}
+.ui-chart-bar:focus-visible {
+  stroke: var(--fg);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.ui-chart-line {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+/* The ring in the card's colour keeps a dot readable where lines cross. */
+.ui-chart-dot {
+  fill: var(--c);
+  stroke: var(--bg-2);
+  stroke-width: 2;
+}
+.ui-chart-hit {
+  fill: transparent;
+}
+.ui-chart-dense .ui-chart-dot {
+  opacity: 0;
+}
+.ui-chart-point:hover .ui-chart-dot,
+.ui-chart-point:focus-visible .ui-chart-dot {
+  opacity: 1;
+}
+.ui-chart-point:focus-visible .ui-chart-dot {
+  stroke: var(--fg);
+}
+.ui-chart-readout {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.ui-chart-readout strong {
+  color: var(--fg);
+}
+.ui-chart-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 4px;
+}
+.ui-chart-table {
+  max-height: 40vh;
+  margin-top: 6px;
+  overflow: auto;
+}
+.ui-chart-table th[scope="row"] {
+  font-weight: 400;
+  text-align: left;
+}
+.ui-chart-table td {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ui:choices and ui:form: the model's options and fields inside harness

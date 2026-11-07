@@ -6,6 +6,7 @@ import { showHidden, stripHidden } from "../md/hidden";
 import { hostOf, parseUrl } from "../md/links";
 import { rt } from "../md/strings";
 import type { Decision, Item, Source } from "../types";
+import { MemoryNotice } from "./MemoryNotice";
 
 type Tool = Extract<Item, { type: "tool" }>;
 type Status = "waiting" | "ok" | "failed" | "denied" | "running";
@@ -160,6 +161,10 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
       setBusy(false);
     }
   };
+
+  // A proposal the tool accepted: the notice says where it waits. A
+  // rejected one stays an ordinary card with the tool's error.
+  if (item.tool === "remember" && status === "ok") return <MemoryNotice text={asText(item.input?.text)} />;
 
   const output = item.result ? item.result.output : item.live_output;
   // A delegated sub-task runs in its own session: link to it.

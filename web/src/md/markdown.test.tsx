@@ -169,4 +169,16 @@ describe("tables", () => {
     expect(out).toContain('<th aria-sort="none"><button type="button" class="th-sort" title="Sort by crate">crate</button></th>');
     expect(out).toContain("Copy CSV");
   });
+  test("a header cell with a link keeps the link outside its sort button", () => {
+    const out = md("| [crate](https://crates.io/) | ![logo](https://img.example/x.png) | time |\n|---|---|---|\n| core | x | 1 |");
+    const head = out.slice(out.indexOf("<thead>"), out.indexOf("</thead>"));
+    // No link or image chip nests inside a button.
+    expect(head).not.toMatch(/<button[^>]*>(?:(?!<\/button>).)*<a /);
+    expect(head).toContain('<span class="th-label"><span class="link-wrap"><a href="https://crates.io/"');
+    expect(head).toContain('<button type="button" class="th-sort-icon" title="Sort by crate" aria-label="Sort by crate">');
+    // A cell with no text is named by its place.
+    expect(head).toContain('class="img-chip"');
+    expect(head).toContain('aria-label="Sort by column 2"');
+    expect(head).toContain('<button type="button" class="th-sort" title="Sort by time">time</button>');
+  });
 });

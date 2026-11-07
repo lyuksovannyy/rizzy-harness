@@ -66,9 +66,6 @@ function walk(node: MdNode, cited: string[]) {
   for (let i = 0; i < kids.length; i++) {
     const child = kids[i]!;
     if (SKIP.has(child.type)) continue;
-    // A table's first row is its header, whose cells are sort buttons: a
-    // pill there would be a link inside a button. The label stays text.
-    if (node.type === "table" && i === 0) continue;
     if (child.type !== "text") {
       walk(child, cited);
       continue;
