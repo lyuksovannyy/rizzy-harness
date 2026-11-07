@@ -23,6 +23,7 @@ export function Login({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [copied, copy] = useCopy();
   const userRef = useRef<HTMLInputElement>(null);
+  const againRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api
@@ -81,6 +82,14 @@ export function Login({ onDone }: { onDone: () => void }) {
           aria-describedby="pw-strength"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          // Tab and Enter go on to the confirmation, past the show button
+          // (Shift+Tab from there still reaches it).
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || (e.key === "Tab" && !e.shiftKey)) {
+              e.preventDefault();
+              againRef.current?.focus();
+            }
+          }}
         />
         <button
           type="button"
@@ -104,6 +113,7 @@ export function Login({ onDone }: { onDone: () => void }) {
       )}
       <input
         type={pwType}
+        ref={againRef}
         placeholder="confirm password"
         autoComplete="new-password"
         aria-invalid={mismatch}

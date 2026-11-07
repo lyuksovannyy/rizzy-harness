@@ -151,9 +151,12 @@ describe("onboarding", () => {
     expect(button("For: Coder (gpt-4o-mini)")).toBeDefined();
     // Saved, so edited from now on: its prefix is not "taken".
     expect(visible().textContent).not.toContain("is taken");
-    expect(button("Continue without saving")).toBeDefined();
-
-    act(() => button("Continue without saving").click());
+    // Saved once, it goes on through Save and continue as it stands: no
+    // separate way past it, and no demo skip.
+    expect(button("Continue without saving")).toBeUndefined();
+    expect(button("Skip: use the built-in demo (no real AI) for now")).toBeUndefined();
+    expect(button("Save and continue").disabled).toBe(false);
+    await act(async () => button("Save and continue").click());
     expect(visible().querySelector("h2")!.textContent).toBe("Memory");
     expect(button("Meaning").getAttribute("aria-checked")).toBe("true");
     expect(button("Ollama").getAttribute("aria-checked")).toBe("true");

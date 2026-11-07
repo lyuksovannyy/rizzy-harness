@@ -21,8 +21,8 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
     timezone: props.prefs.timezone ?? browserTimeZone(),
   }));
   const [err, setErr] = useState<string | null>(null);
-  // Steps saved in this run: coming Back to one, the admin can go on
-  // without saving (and testing) it again.
+  // Steps saved in this run: once the provider is saved, its demo skip
+  // goes; coming Back, Save and continue takes it as it stands.
   const [saved, setSaved] = useState<Step[]>([]);
   const [seen, setSeen] = useState<Step[]>([]);
   // One providers state for both steps that change it.
@@ -85,13 +85,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
             ) : (
               <div className="muted">Loading…</div>
             )}
-            {saved.includes("provider") ? (
-              <div className="row end">
-                <button type="button" onClick={next}>
-                  Continue without saving
-                </button>
-              </div>
-            ) : (
+            {!saved.includes("provider") && (
               <button
                 type="button"
                 className="link"
@@ -123,16 +117,9 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
               onSaved={() => savedNext("memory")}
               saveLabel="Save and continue"
               actions={
-                <>
-                  <button type="button" onClick={back}>
-                    Back
-                  </button>
-                  {saved.includes("memory") && (
-                    <button type="button" onClick={next}>
-                      Continue without saving
-                    </button>
-                  )}
-                </>
+                <button type="button" onClick={back}>
+                  Back
+                </button>
               }
             />
           </div>
