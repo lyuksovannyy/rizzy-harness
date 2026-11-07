@@ -58,6 +58,9 @@ pub struct Prefs {
     /// One of `ACCENTS`.
     #[serde(default)]
     pub accent: Option<String>,
+    /// One of `THEMES`; none follows the OS (the web sends none for "system").
+    #[serde(default)]
+    pub theme: Option<String>,
     /// Set when the user finished (or skipped) onboarding.
     #[serde(default)]
     pub onboarded: bool,
@@ -68,6 +71,7 @@ fn default_image_search() -> String {
 }
 
 pub const ACCENTS: &[&str] = &["blue", "violet", "green", "orange", "pink", "gray"];
+pub const THEMES: &[&str] = &["system", "light", "dark"];
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -82,6 +86,7 @@ impl Default for Prefs {
             country: None,
             city: None,
             accent: None,
+            theme: None,
             onboarded: false,
         }
     }
@@ -93,6 +98,16 @@ fn short_text(name: &str, v: &Option<String>) -> Result<(), String> {
             if t.trim().is_empty() || t.chars().count() > 64 || t.chars().any(char::is_control) =>
         {
             Err(format!("{name} must be 1-64 printable characters"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A choice from a fixed list, when one is given.
+fn one_of(name: &str, v: &Option<String>, allowed: &[&str]) -> Result<(), String> {
+    match v {
+        Some(x) if !allowed.contains(&x.as_str()) => {
+            Err(format!("{name} must be one of {}", allowed.join(", ")))
         }
         _ => Ok(()),
     }
@@ -134,11 +149,8 @@ impl Prefs {
         {
             return Err("timezone must be an IANA name such as Europe/Riga".into());
         }
-        if let Some(a) = &self.accent
-            && !ACCENTS.contains(&a.as_str())
-        {
-            return Err(format!("accent must be one of {}", ACCENTS.join(", ")));
-        }
+        one_of("accent", &self.accent, ACCENTS)?;
+        one_of("theme", &self.theme, THEMES)?;
         if let Some(a) = &self.default_agent
             && m.agents().get(a).is_none()
         {
@@ -248,6 +260,42 @@ mod context_tests {
             "{bare}"
         );
         assert!(!bare.contains("local time"), "{bare}");
+    }
+
+    #[test]
+    fn theme_and_accent_come_from_their_lists() {
+        for t in THEMES {
+            assert_eq!(one_of("theme", &Some((*t).into()), THEMES), Ok(()));
+        }
+        assert_eq!(one_of("theme", &None, THEMES), Ok(()));
+        assert_eq!(
+            one_of("theme", &Some("sepia".into()), THEMES),
+            Err("theme must be one of system, light, dark".into())
+        );
+        assert!(one_of("accent", &Some("teal".into()), ACCENTS).is_err());
+    }
+
+    #[test]
+    fn stored_prefs_without_a_theme_load_with_the_defaults() {
+        let p: Prefs =
+            serde_json::from_str(r#"{"search_url":"https://example.com/?q={q}","accent":"green"}"#)
+                .expect("old prefs load");
+        assert_eq!(p.theme, None);
+        assert_eq!(p.accent.as_deref(), Some("green"));
+        let back: Prefs = serde_json::from_str(
+            &serde_json::to_string(&Prefs {
+                theme: Some("dark".into()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(back.theme.as_deref(), Some("dark"));
+        // A misspelt field is still an error, not silently dropped.
+        let typo = serde_json::from_str::<Prefs>(
+            r#"{"search_url":"https://example.com/?q={q}","themes":"dark"}"#,
+        );
+        assert!(typo.is_err());
     }
 
     #[test]

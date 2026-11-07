@@ -8,6 +8,7 @@ import { type ClassifierState, decide, emptyState, parseState, record, serialize
 import { agenticBlockReason, type Mode } from "../lib/modes";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
+import { applyAppearance } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
 import type { Agent, AttentionItem, Me, ModelInfo, NodeAttention, NodeInfo, Prefs, SessionRow } from "../types";
 import type { Submission } from "./Composer";
@@ -187,11 +188,13 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
     return () => document.removeEventListener("visibilitychange", mark);
   }, [viewing, attention]);
 
-  // Accent colour from preferences.
+  // Theme and accent from preferences, once they are loaded: until then
+  // public/theme.js has applied the saved ones, and clearing them would
+  // flash the defaults.
+  const loaded = prefs !== null;
   useEffect(() => {
-    if (prefs?.accent) document.documentElement.dataset.accent = prefs.accent;
-    else delete document.documentElement.dataset.accent;
-  }, [prefs?.accent]);
+    if (loaded) applyAppearance(prefs?.theme, prefs?.accent);
+  }, [loaded, prefs?.theme, prefs?.accent]);
 
   useSyncExternalStore(
     (l) => live.subscribe(l),

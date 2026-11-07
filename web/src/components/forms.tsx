@@ -396,3 +396,5 @@ export function SearchEngineFields(props: { prefs: Prefs; onChange: (p: Prefs) =
 }
 
 export const ACCENTS = ["blue", "violet", "green", "orange", "pink", "gray"] as const;
+/** The theme choices; "system" is stored as null. */
+export const THEMES = ["system", "light", "dark"] as const;

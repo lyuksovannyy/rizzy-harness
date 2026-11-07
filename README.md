@@ -54,6 +54,12 @@ printed by `harness token`.
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
+Settings → Preferences → **Appearance** picks the theme (System follows the
+operating system; Light and Dark stay put) and the accent colour. A pick shows
+at once and is kept with Save; leaving without saving goes back. The browser
+remembers the saved choice, so a reload paints it straight away, before the
+preferences arrive from the server.
+
 ## Configuration
 
 Everything lives in the data directory (`~/.local/share/harness`, or

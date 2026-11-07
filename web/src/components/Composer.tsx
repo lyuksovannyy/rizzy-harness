@@ -70,6 +70,8 @@ export function Composer(props: {
   onLearn?: (text: string, mode: Mode) => void;
   /** Home: text/mode changes, for the similar-chats panel. */
   onTextChange?: (text: string, mode: Mode) => void;
+  /** Home: the mode changed, picked by the user (a click, Tab) or by the bar (the classifier, a reset). */
+  onModeChange?: (mode: Mode, by: "user" | "auto") => void;
   /** Home: ArrowDown at the end of the text; return true if handled. */
   onArrowDown?: () => boolean;
   /** The server can transcribe dictation. */
@@ -84,6 +86,14 @@ export function Composer(props: {
   const [mode, setMode] = useState<Mode>("ask");
   // Once the user picks a mode for this message, the classifier stays quiet.
   const [manual, setManual] = useState(false);
+  // Who caused the next mode change; read once by the effect that reports it.
+  const pickedBy = useRef<"user" | "auto">("auto");
+  const pickMode = (m: Mode) => {
+    setManual(true);
+    if (m === mode) return;
+    pickedBy.current = "user";
+    setMode(m);
+  };
   const [model, setModel] = useState(
     () => props.defaultModel ?? props.models.find((m) => m.default)?.id ?? props.models[0]?.id ?? "",
   );
@@ -148,6 +158,32 @@ export function Composer(props: {
     }
   }, [text]);
 
+  // The mode switch's thumb sits under the chosen button: its offset and
+  // width go into --x and --w. The suffix "· auto" and the phone layout
+  // change the widths, hence the observer. `.ready` (which turns the slide
+  // on) waits for the first placement, so the first paint does not slide.
+  const track = useRef<HTMLDivElement>(null);
+  const [thumbReady, setThumbReady] = useState(false);
+  const auto = !manual && !!text.trim();
+  const placeThumb = () => {
+    const on = track.current?.querySelector<HTMLElement>("button.on");
+    if (!track.current || !on) return false;
+    track.current.style.setProperty("--x", `${on.offsetLeft}px`);
+    track.current.style.setProperty("--w", `${on.offsetWidth}px`);
+    return true;
+  };
+  useLayoutEffect(() => {
+    // Reading a size applies the new position before .ready can animate it.
+    if (placeThumb() && !thumbReady && track.current!.offsetWidth) setThumbReady(true);
+  }, [home, mode, auto, thumbReady]);
+  useEffect(() => {
+    const el = track.current;
+    if (!el || typeof ResizeObserver !== "function") return;
+    const ro = new ResizeObserver(() => placeThumb());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [home]);
+
   // Keep selections valid as lists load.
   useEffect(() => {
     // Also resets when the provider changed and the old model is gone.
@@ -161,7 +197,7 @@ export function Composer(props: {
   useEffect(() => {
     if (mode === "agentic" && props.agenticBlocked) setMode("ask");
   }, [mode, props.agenticBlocked]);
-  const { predict, onTextChange } = props;
+  const { predict, onTextChange, onModeChange } = props;
   useEffect(() => {
     if (!home || manual || !predict) return;
     const guess = text.trim() ? predict(text) : "ask";
@@ -170,6 +206,10 @@ export function Composer(props: {
   useEffect(() => {
     onTextChange?.(text, mode);
   }, [onTextChange, text, mode]);
+  useEffect(() => {
+    onModeChange?.(mode, pickedBy.current);
+    pickedBy.current = "auto";
+  }, [onModeChange, mode]);
   useEffect(() => {
     if (!props.draftKey) return;
     try {
@@ -298,8 +338,7 @@ export function Composer(props: {
     }
     if (e.key === "Tab" && home) {
       e.preventDefault();
-      setManual(true);
-      setMode((m) => cycleMode(m, enabled, e.shiftKey ? -1 : 1));
+      pickMode(cycleMode(mode, enabled, e.shiftKey ? -1 : 1));
       return;
     }
     if (
@@ -534,11 +573,13 @@ export function Composer(props: {
           )}
           {home && (
             <div
-              className={`mode-switch ${!manual && text.trim() ? "auto" : ""}`}
+              ref={track}
+              className={`mode-switch ${auto ? "auto" : ""} ${thumbReady ? "ready" : ""}`}
               role="radiogroup"
               aria-label="mode"
               title={t("mode.hint")}
             >
+              <span className="mode-thumb" aria-hidden="true" />
               {MODES.map((m) => {
                 const disabled = !enabled.includes(m);
                 return (
@@ -551,8 +592,7 @@ export function Composer(props: {
                     disabled={disabled}
                     title={disabled ? (props.agenticBlocked ?? undefined) : undefined}
                     onClick={() => {
-                      setManual(true);
-                      setMode(m);
+                      pickMode(m);
                       ta.current?.focus();
                     }}
                   >

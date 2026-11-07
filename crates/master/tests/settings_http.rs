@@ -153,7 +153,7 @@ async fn settings_defaults_validation_and_isolation() {
     assert_eq!(v["onboarded"], false);
 
     // Profile fields: valid ones stick, bad ones are refused.
-    let profile = json!({"search_url": "https://e.com/?q={q}", "display_name": "Alex", "timezone": "Europe/Riga", "country": "Latvia", "city": "Riga", "accent": "green", "onboarded": true});
+    let profile = json!({"search_url": "https://e.com/?q={q}", "display_name": "Alex", "timezone": "Europe/Riga", "country": "Latvia", "city": "Riga", "accent": "green", "theme": "dark", "onboarded": true});
     let (st, _, _) = req(
         &t,
         Method::PUT,
@@ -165,7 +165,27 @@ async fn settings_defaults_validation_and_isolation() {
     assert_eq!(st, StatusCode::OK);
     let (_, _, v) = req(&t, Method::GET, "/api/me/settings", None, Some(&admin)).await;
     assert_eq!(v["timezone"], "Europe/Riga");
+    assert_eq!(v["theme"], "dark");
     assert_eq!(v["onboarded"], true);
+    // "system" is accepted too, though the web sends null for it.
+    let (st, _, v) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(json!({"search_url": "https://e.com/?q={q}", "theme": "system"})),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _, _) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(profile.clone()),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
     // Defaults for older saved settings: DuckDuckGo images, no custom engines.
     assert_eq!(
         v["image_search_url"],
@@ -195,6 +215,7 @@ async fn settings_defaults_validation_and_isolation() {
     for bad in [
         json!({"search_url": "https://e.com/?q={q}", "timezone": "Europe/Riga; DROP"}),
         json!({"search_url": "https://e.com/?q={q}", "accent": "neon"}),
+        json!({"search_url": "https://e.com/?q={q}", "theme": "sepia"}),
         json!({"search_url": "https://e.com/?q={q}", "display_name": "x".repeat(65)}),
         json!({"search_url": "https://e.com/?q={q}", "city": "  "}),
         // Image engine and custom engines are checked like the text one.

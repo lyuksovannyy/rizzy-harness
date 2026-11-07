@@ -57,6 +57,12 @@ const en = {
   "settings.memory": "Memory",
   "settings.nodes": "Nodes",
   "settings.savings": "Token savings",
+  "settings.appearance": "Appearance",
+  "settings.theme": "Theme",
+  "settings.accent": "Accent",
+  "theme.system": "System",
+  "theme.light": "Light",
+  "theme.dark": "Dark",
   "home.toReview": "{n} new memories to review",
   "home.toReviewOne": "1 new memory to review",
 } as const;

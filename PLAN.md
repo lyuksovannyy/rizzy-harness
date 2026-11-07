@@ -1448,3 +1448,63 @@ the highlight budget, the streaming skeleton, the lazy chart chunk, hidden-chara
 stripping before and after parsing, the `\eqref` fallback, the memory note, the
 refused field, the stale-answer check, the secret lexicon) made it fail. Open: R10
 (the Temml font's licence) and R11 (no real model run).
+
+### 2026-11-07 — Calm visual system: themes and the minimal restyle
+
+The first part of the motion pass (the "Calm" spec, sections 1 and 2): tokens, a
+theme preference, and the restyle. The per-mode home backgrounds come next and
+plug into the slot left for them.
+
+**What was built.** `styles.css` starts with the dark tokens (still the first
+`:root` block), then light from the OS unless dark is forced
+(`:root:not([data-theme="dark"])` inside the media query), then the same light
+block for a forced light theme, then the scales that do not change with the theme
+(type 11-30 px, a 4-based spacing scale, radii xs-2xl and full, durations and
+easings) and the accent selection: `data-accent` only points `--accent` at an entry
+of a per-theme ramp, so every accent has a light and a dark value. The theme
+preference (`theme`: `system`, `light`, `dark`; the web sends null for system) is
+validated in `prefs.rs` like the accent. `public/theme.js` (a file, since the CSP
+allows scripts from this origin only) applies the localStorage mirrors before the
+first paint; `lib/appearance.ts` sets `<html>`, the mirrors and the browser's
+theme colour, and cross-fades a theme change with a view transition unless motion
+is reduced. Settings → Preferences opens with Appearance: Theme (System, Light,
+Dark) and the accent swatches; a pick previews at once, Save keeps it, leaving the
+tab without saving goes back. The restyle keeps every class, label and ARIA
+attribute: one control height and radius, filled inputs with an accent focus
+border, a sidebar told apart by tone alone, an opaque composer with the only
+raised shadow, popovers on their own surface that rise in, a mode switch whose
+thumb slides to the chosen mode (measured in Composer; no slide on first paint),
+tabs with a growing bar, tables with horizontal rules in a framed scroller, and
+cards, code and tools as flat tone with a hairline. The greeting rises in; the
+composer does not move.
+
+**Slot for the backgrounds.** `bg/Backdrop.tsx` renders `.backdrop[data-mode]`
+behind the home column (`.home` is a stacking context; the column sits above).
+Composer reports each mode change with who made it (`onModeChange(mode, by)`), and
+Home follows a user's pick at once and the classifier's only after it has held for
+700 ms. The base `.backdrop` rules (contain, pause, hidden under forced colours,
+more contrast and print) and the art tokens (`--art-max`, `--art-peak`, `--glow`,
+`--mag-*`) are in place; theme.test.ts checks the art contrast budget.
+
+**Deviations.** Shell applies the theme only once the preferences have loaded (the
+spec's effect would clear the pre-painted theme for a moment). A preview does not
+write the mirrors, so a reload before Save comes back to what is saved. The legacy
+`--radius` alias is gone (nothing uses it). The reduced-motion overrides for the
+greeting and the running dot sit next to their rules, since an earlier rule of the
+same specificity would lose. `select.pill` sizes to the chosen option
+(`field-sizing: content`). The ETag for files outside `assets/` is left for the
+backgrounds step, where the wall data makes it matter.
+
+**Measured bundle sizes** (`npm run size`, gzip): initial JS 86.8 KB (86.1 before),
+total 269.2 KB (267.7 before); the main stylesheet is 10.3 KB.
+
+**Tests.** theme.test.ts: the two light blocks are equal declaration for
+declaration; `--fg`, `--fg-2` and the status colours on nine surfaces; each of the
+six accents as text on three surfaces and on its 9% and 16% tints, under
+`--accent-fg`, and as a focus ring; syntax, chart and callout pairs as before; the
+art budget. Vitest: `appearance` (attributes, mirrors, preview, theme colour), and
+Composer's mode attribution and thumb. Rust: the theme list, old stored prefs
+without a theme, typos still rejected, and the settings API accepting dark and
+system and refusing others. e2e (phase5): preview, revert on leaving, Save, the
+mirror, no flash (a new page in a light OS with the settings request held back is
+dark from the start) and System handing the theme back to the OS.

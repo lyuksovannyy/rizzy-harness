@@ -193,6 +193,44 @@ function fakeProvider() {
     await p.waitForSelector('text=Saved.');
     log('accent:', await p.evaluate(() => document.documentElement.dataset.accent));
     check((await p.evaluate(() => document.documentElement.dataset.accent)) === 'green', 'accent applied');
+
+    // Theme: a pick shows at once, leaving the tab unsaved goes back, Save
+    // keeps it on <html> and in the mirror public/theme.js reads.
+    const theme = () => p.evaluate(() => document.documentElement.dataset.theme ?? 'system');
+    // A theme change runs inside a view transition, a frame later.
+    const themeIs = (want) => p.waitForFunction((w) => (document.documentElement.dataset.theme ?? 'system') === w, want, { timeout: 2000 }).then(() => true, () => false);
+    const bodyBg = (page) => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    const themeButton = (label) => `[role=radiogroup][aria-label=theme] button:has-text("${label}")`;
+    await p.emulateMedia({ colorScheme: 'light' });
+    await p.click(themeButton('Dark'));
+    check(await themeIs('dark'), 'the theme previews');
+    await p.click('.tabs >> text=Profile');
+    check(await themeIs('system'), 'an unsaved theme is undone on leaving');
+    await p.click('.tabs >> text=Preferences');
+    await p.click(themeButton('Dark'));
+    await p.click('button:has-text("Save")');
+    await p.waitForSelector('text=Saved.');
+    check((await theme()) === 'dark', 'the theme is saved');
+    check((await p.evaluate(() => localStorage.getItem('harness.theme'))) === 'dark', 'the theme is mirrored');
+    const darkBg = await bodyBg(p);
+    log('dark page:', darkBg);
+    // No flash: with the settings request held back, a new page in a light
+    // OS is dark from the start, from the mirror alone.
+    const early = await ctx.newPage();
+    await early.emulateMedia({ colorScheme: 'light' });
+    await early.route('**/api/me/settings', () => {});
+    await early.goto(URL_, { waitUntil: 'domcontentloaded' });
+    check((await bodyBg(early)) === darkBg, 'the saved theme applies before the settings load: ' + (await bodyBg(early)));
+    await early.close();
+    // Back to System: the OS decides again.
+    await p.click(themeButton('System'));
+    await p.click('button:has-text("Save")');
+    await p.waitForSelector('text=Saved.');
+    check((await theme()) === 'system' && (await p.evaluate(() => localStorage.getItem('harness.theme'))) === null, 'system clears the theme');
+    const lightBg = await bodyBg(p);
+    await p.emulateMedia({ colorScheme: 'dark' });
+    check((await bodyBg(p)) === darkBg && lightBg !== darkBg, 'the OS theme drives the page again');
+    log('theme: preview, revert, saved, no flash, system');
     await p.click('.tabs >> text=AI provider');
     await p.waitForSelector('text=a key is stored');
     await p.screenshot({ path: `${S}/p5-3-settings-provider.png` });

@@ -7,6 +7,10 @@ import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
 import { Similar, type SimilarHandle } from "./Similar";
+import { Backdrop } from "../bg/Backdrop";
+
+/** How long a mode the bar picked must hold before the background follows. */
+const AUTO_SETTLE_MS = 700;
 
 export function Home(props: {
   username: string;
@@ -30,6 +34,20 @@ export function Home(props: {
   const [similarCount, setSimilarCount] = useState(0);
   const [typed, setTyped] = useState<{ text: string; mode: Mode }>({ text: "", mode: "ask" });
   const onTextChange = useCallback((text: string, mode: Mode) => setTyped({ text, mode }), []);
+  // The background follows a mode the user picked at once; one the
+  // classifier picked only once it has held, so it cannot flicker while
+  // they type.
+  const [bgMode, setBgMode] = useState<Mode>("ask");
+  const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onModeChange = useCallback((mode: Mode, by: "user" | "auto") => {
+    if (settle.current) clearTimeout(settle.current);
+    settle.current = null;
+    if (by === "user") setBgMode(mode);
+    else settle.current = setTimeout(() => setBgMode(mode), AUTO_SETTLE_MS);
+  }, []);
+  useEffect(() => () => {
+    if (settle.current) clearTimeout(settle.current);
+  }, []);
   const similar = useRef<SimilarHandle>(null);
   const [agentId, setAgentId] = useState(props.defaultAgent);
   useEffect(() => setAgentId(props.defaultAgent), [props.defaultAgent]);
@@ -42,6 +60,7 @@ export function Home(props: {
 
   return (
     <section className="home">
+      <Backdrop mode={bgMode} />
       <div className="column">
         <h1 className="greeting">{greeting(now, props.username, props.timeZone)}</h1>
         <p className="muted subtitle">{t("home.subtitle")}</p>
@@ -58,6 +77,7 @@ export function Home(props: {
           predict={props.predict}
           onLearn={props.onLearn}
           onTextChange={onTextChange}
+          onModeChange={onModeChange}
           onArrowDown={() => similar.current?.focusFirst() ?? false}
           voice={props.voice}
           search={

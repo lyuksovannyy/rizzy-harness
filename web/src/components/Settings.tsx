@@ -4,7 +4,8 @@ import { api } from "../api";
 import { t } from "../lib/i18n";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
-import { ACCENTS, ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
+import { AppearanceFields } from "./Appearance";
+import { ProfileFields, ProviderForm, SearchEngineFields } from "./forms";
 import { enableNotify, notifyEnabled, notifySupported } from "../lib/notify";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Nodes } from "./Nodes";
@@ -116,6 +117,7 @@ export default function Settings(props: {
           <PrefsEditor initial={prefs} onSaved={props.onPrefs}>
             {(p, set) => (
               <>
+                <AppearanceFields prefs={p} saved={prefs} onChange={set} />
                 <h3>Notifications</h3>
                 <NotifyToggle />
                 <h3>Search engine</h3>
@@ -143,22 +145,6 @@ export default function Settings(props: {
                       ))}
                     </select>
                   </label>
-                  <div>
-                    <div className="muted small">Accent</div>
-                    <div className="row swatches" role="radiogroup" aria-label="accent">
-                      {ACCENTS.map((a) => (
-                        <button
-                          key={a}
-                          type="button"
-                          role="radio"
-                          aria-checked={(p.accent ?? "blue") === a}
-                          aria-label={a}
-                          className={`swatch sw-${a} ${(p.accent ?? "blue") === a ? "on" : ""}`}
-                          onClick={() => set({ ...p, accent: a === "blue" ? null : a })}
-                        />
-                      ))}
-                    </div>
-                  </div>
                 </div>
               </>
             )}

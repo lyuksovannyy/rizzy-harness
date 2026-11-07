@@ -253,6 +253,8 @@ export interface Prefs {
   country?: string | null;
   city?: string | null;
   accent?: string | null;
+  /** A forced theme; null follows the OS. */
+  theme?: "light" | "dark" | null;
   onboarded?: boolean;
 }
 
