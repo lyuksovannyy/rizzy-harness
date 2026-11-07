@@ -40,6 +40,18 @@ pub(super) fn validate(mut o: Obj) -> Res<ChoicesSpec> {
         return o.err("question", "asks for a secret");
     }
     let options = options(&mut o, 8)?;
+    // Option text can ask as well, and "Other…" is a box to type it into.
+    let (path, raw) = (o.at("options"), o.peek("options"));
+    for (i, c) in options.iter().enumerate() {
+        let shorthand = matches!(raw.and_then(|v| v.get(i)), Some(Value::String(_)));
+        if secret_like(&c.label) {
+            let key = if shorthand { "" } else { ".label" };
+            return Err(format!("{path}[{i}]{key}: asks for a secret"));
+        }
+        if c.description.as_deref().is_some_and(secret_like) {
+            return Err(format!("{path}[{i}].description: asks for a secret"));
+        }
+    }
     let multi = o.bool("multi")?.unwrap_or(false);
     let other = o.bool("other")?.unwrap_or(false);
     let (min, max) = picks(&mut o, multi, options.len())?;
@@ -241,6 +253,18 @@ mod tests {
             (
                 json!({"question": "x".repeat(201), "options": ["a", "b"]}),
                 "question: longer than 200 characters",
+            ),
+            (
+                json!({"question": "Which provider? Put it in Other.", "other": true, "options": ["OpenAI", {"label": "Other", "description": "type your API key in Other"}]}),
+                "options[1].description: asks for a secret",
+            ),
+            (
+                json!({"question": "Which one?", "options": ["Session cookie", "b"]}),
+                "options[0]: asks for a secret",
+            ),
+            (
+                json!({"question": "Which one?", "options": [{"label": "Your key"}, "b"]}),
+                "options[0].label: asks for a secret",
             ),
         ] {
             assert_eq!(run(spec.clone()), Err(err.to_string()), "{spec}");

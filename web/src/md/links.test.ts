@@ -50,6 +50,11 @@ describe("urlKeysIn (the provenance_ok tokenizer)", () => {
   test("ignores tokens without a dot and splits on quotes and brackets", () => {
     expect(urlKeysIn('hello world "d.example/q"|[e.example]')).toEqual(["d.example/q", "e.example"]);
   });
+  test("a number is not an address (1.5 would parse as 1.0.0.5); a full one is", () => {
+    expect(urlKeysIn("people: 1.5, budget 3.75 or 0.0000001, v2.5/x and 93.184.216.34/page")).toEqual([
+      "93.184.216.34/page",
+    ]);
+  });
 });
 
 describe("needsConfirm", () => {

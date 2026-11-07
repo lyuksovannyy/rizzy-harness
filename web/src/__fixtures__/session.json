@@ -49,7 +49,7 @@
       "kind": "assistant_delta",
       "payload": {
         "message_id": "m1",
-        "text": "look.",
+        "text": "look.\n\n```ui:progress\n{\"id\": \"look\", \"title\": \"Looking\", \"steps\": [{\"label\": \"Test\", \"status\": \"active\"}]}\n```\n",
         "turn_id": "t1"
       },
       "seq": 5,
@@ -59,8 +59,25 @@
     {
       "kind": "assistant_message",
       "payload": {
+        "blocks": [
+          {
+            "hash": "279f8d41",
+            "id": "look",
+            "ordinal": 0,
+            "spec": {
+              "steps": [
+                {
+                  "label": "Test",
+                  "status": "active"
+                }
+              ],
+              "title": "Looking"
+            },
+            "type": "progress"
+          }
+        ],
         "message_id": "m1",
-        "text": "Let me look.",
+        "text": "Let me look.\n\n```ui:progress\n{\"id\": \"look\", \"title\": \"Looking\", \"steps\": [{\"label\": \"Test\", \"status\": \"active\"}]}\n```\n",
         "tool_calls": [
           {
             "call_id": "c1",
@@ -461,9 +478,26 @@
       },
       {
         "author": null,
+        "blocks": [
+          {
+            "hash": "279f8d41",
+            "id": "look",
+            "ordinal": 0,
+            "spec": {
+              "steps": [
+                {
+                  "label": "Test",
+                  "status": "active"
+                }
+              ],
+              "title": "Looking"
+            },
+            "type": "progress"
+          }
+        ],
         "done": true,
         "message_id": "m1",
-        "text": "Let me look.",
+        "text": "Let me look.\n\n```ui:progress\n{\"id\": \"look\", \"title\": \"Looking\", \"steps\": [{\"label\": \"Test\", \"status\": \"active\"}]}\n```\n",
         "type": "assistant",
         "variant": null
       },

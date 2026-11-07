@@ -458,7 +458,7 @@ impl AgentBackend for NativeBackend {
         // each message is recorded, not only asked for in the prompt.
         let ui = harness_core::ui::effective_level(
             agent.map(|a| a.ui).unwrap_or_default(),
-            &ctx.history,
+            ctx.parent_session.is_some(),
         );
         for part in [style::fragment(sv.style, ui), style::ui_fragment(ui)] {
             if !part.is_empty() {
@@ -774,7 +774,8 @@ impl NativeBackend {
 
     /// The event for a finished message: its text as it will be stored
     /// (the node scrubs every payload; doing it here first makes the
-    /// blocks' hashes match the stored text) and the blocks found in it.
+    /// blocks' hashes match the stored text) and the blocks found in it. A
+    /// message that calls tools does not end the turn, so it may not ask.
     fn assistant_message(
         &self,
         mut m: AssistantMessage,
@@ -782,6 +783,9 @@ impl NativeBackend {
     ) -> EventKind {
         m.text = self.config.secrets.scrub(&m.text);
         m.blocks = harness_core::ui::extract(&m.text, ui);
+        if !m.tool_calls.is_empty() {
+            harness_core::ui::calls_tools(&mut m.blocks);
+        }
         EventKind::AssistantMessage(m)
     }
 
@@ -1096,6 +1100,7 @@ mod tests {
             model: "mock".into(),
             agent: None,
             compare: vec![],
+            parent_session: None,
             extra: Default::default(),
             cancel: Default::default(),
             host,

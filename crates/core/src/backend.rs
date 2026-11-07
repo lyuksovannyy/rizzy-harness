@@ -63,6 +63,10 @@ pub struct TurnCtx<'a> {
     /// Parallel answers: run the turn once per model listed here (no tools)
     /// and record each answer as a variant. Empty = a normal turn.
     pub compare: Vec<String>,
+    /// Set when this session is a delegated sub-task: the session whose
+    /// turn delegated to it. Passed explicitly, not read from `history`, so
+    /// a failed history read cannot lift the sub-task's limits.
+    pub parent_session: Option<crate::SessionId>,
     pub extra: TurnExtra,
     pub cancel: CancellationToken,
     pub host: &'a dyn TurnHost,

@@ -21,7 +21,6 @@ mod secret;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::RawEvent;
 use crate::agent::UiLevel;
 use crate::event::{UiBlock, UiKind};
 
@@ -39,6 +38,7 @@ pub const MAX_BODY: usize = 16 * 1024;
 
 pub const OFF_FOR_AGENT: &str = "interactive blocks are off for this agent";
 pub const ONE_INPUT: &str = "only one choices or form block per message";
+pub const ENDS_REPLY: &str = "a question must end the reply";
 
 /// The blocks of an assistant message's text, as stored. `Off` finds none
 /// (the fences render as code); `Display` turns choices and forms into
@@ -64,6 +64,18 @@ pub fn extract(text: &str, level: UiLevel) -> Vec<UiBlock> {
         out.push(b);
     }
     out
+}
+
+/// For a message that also calls tools. A question ends the turn (the
+/// answer comes back as the next user message), but with tool calls the
+/// turn goes on, and each later step could ask another; so only a reply's
+/// last message may hold a valid choices or form block.
+pub fn calls_tools(blocks: &mut [UiBlock]) {
+    for b in blocks.iter_mut().filter(|b| b.kind.is_input()) {
+        if b.spec.take().is_some() {
+            b.error = Some(ENDS_REPLY.into());
+        }
+    }
 }
 
 /// The normalized spec of one fence; sets `id` once the body has a valid
@@ -107,13 +119,8 @@ fn to_value(spec: impl Serialize) -> Value {
 /// The level a turn runs at: the agent's, but at most `Display` in a
 /// delegated sub-task, whose answer goes to the parent agent and not to a
 /// person who could answer a question.
-pub fn effective_level(level: UiLevel, history: &[RawEvent]) -> UiLevel {
-    let child = history
-        .iter()
-        .find(|e| e.kind == "session_created")
-        .and_then(|e| e.payload.get("parent_session"))
-        .is_some_and(|p| !p.is_null());
-    if child {
+pub fn effective_level(level: UiLevel, sub_task: bool) -> UiLevel {
+    if sub_task {
         level.at_most(UiLevel::Display)
     } else {
         level
@@ -151,7 +158,6 @@ impl<'de> Deserialize<'de> for Num {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SessionId;
     use serde_json::json;
 
     fn fence(kind: &str, body: &str) -> String {
@@ -217,6 +223,25 @@ mod tests {
         let text = format!("{}{}", fence("choices", "{"), fence("form", FORM));
         let got = extract(&text, UiLevel::Rich);
         assert_eq!(got[1].error.as_deref(), Some(ONE_INPUT));
+    }
+
+    #[test]
+    fn a_message_that_calls_tools_asks_nothing() {
+        let text = format!(
+            "{}{}",
+            fence("choices", CHOICES),
+            fence("progress", PROGRESS)
+        );
+        let mut blocks = extract(&text, UiLevel::Rich);
+        calls_tools(&mut blocks);
+        assert_eq!(
+            summary(&blocks),
+            [("choices", "db", Some(ENDS_REPLY)), ("progress", "p", None)]
+        );
+        // An input block that was already an error keeps its reason.
+        let mut blocks = extract(&fence("form", FORM), UiLevel::Display);
+        calls_tools(&mut blocks);
+        assert_eq!(blocks[0].error.as_deref(), Some(OFF_FOR_AGENT));
     }
 
     #[test]
@@ -296,30 +321,10 @@ mod tests {
 
     #[test]
     fn sub_tasks_are_capped_at_display() {
-        let created = |parent: Option<SessionId>| RawEvent {
-            session_id: SessionId::new(),
-            seq: 1,
-            ts_ms: 0,
-            kind: "session_created".into(),
-            payload: match parent {
-                Some(p) => json!({"parent_session": p}),
-                None => json!({}),
-            },
-        };
-        let parent = Some(SessionId::new());
-        assert_eq!(
-            effective_level(UiLevel::Rich, &[created(None)]),
-            UiLevel::Rich
-        );
-        assert_eq!(
-            effective_level(UiLevel::Rich, &[created(parent)]),
-            UiLevel::Display
-        );
-        assert_eq!(
-            effective_level(UiLevel::Off, &[created(parent)]),
-            UiLevel::Off
-        );
-        assert_eq!(effective_level(UiLevel::Rich, &[]), UiLevel::Rich);
+        assert_eq!(effective_level(UiLevel::Rich, false), UiLevel::Rich);
+        assert_eq!(effective_level(UiLevel::Rich, true), UiLevel::Display);
+        assert_eq!(effective_level(UiLevel::Display, true), UiLevel::Display);
+        assert_eq!(effective_level(UiLevel::Off, true), UiLevel::Off);
     }
 
     #[test]

@@ -9,6 +9,12 @@ use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId};
 use serde_json::json;
 
+/// A streamed message: deltas first, then the final message with its block.
+const STREAMED: [&str; 2] = [
+    "Let me ",
+    "look.\n\n```ui:progress\n{\"id\": \"look\", \"title\": \"Looking\", \"steps\": [{\"label\": \"Test\", \"status\": \"active\"}]}\n```\n",
+];
+
 const BLOCKS_TEXT: &str = "Found it.\n\n```ui:progress\n{\"id\": \"fix\", \"title\": \"Fixing\", \"steps\": [{\"label\": \"Find\", \"status\": \"done\"}]}\n```\n\n```ui:choices\n{\"id\": \"next\"}\n```\n";
 
 fn events() -> Vec<RawEvent> {
@@ -41,27 +47,27 @@ fn events() -> Vec<RawEvent> {
             variant: None,
             turn_id: t(),
             message_id: "m1".into(),
-            text: "Let me ".into(),
+            text: STREAMED[0].into(),
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
             variant: None,
             turn_id: t(),
             message_id: "m1".into(),
-            text: "look.".into(),
+            text: STREAMED[1].into(),
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
             variant: None,
             turn_id: t(),
             message_id: "m1".into(),
-            text: "Let me look.".into(),
+            text: STREAMED.concat(),
             tool_calls: vec![ToolCallRef {
                 call_id: "c1".into(),
                 tool: "bash".into(),
                 input: json!({"command": "cargo test"}),
             }],
-            blocks: vec![],
+            blocks: harness_core::ui::extract(&STREAMED.concat(), UiLevel::Rich),
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -297,4 +303,20 @@ fn fixture_is_current() {
     // `preserve_order` feature, which other crates may enable workspace-wide.
     let on_disk: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
     assert_eq!(on_disk, doc, "fixture is stale; run with UPDATE_FIXTURES=1");
+}
+
+/// What the fixture must hold, so a regression cannot just be regenerated
+/// into it: the streamed message takes its blocks from the final event.
+#[test]
+fn a_streamed_message_gets_its_final_blocks() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let m1 = view["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["message_id"] == "m1")
+        .unwrap();
+    assert_eq!(m1["text"], STREAMED.concat());
+    assert_eq!(m1["blocks"][0]["id"], "look");
+    assert!(m1["blocks"][0]["spec"].is_object());
 }

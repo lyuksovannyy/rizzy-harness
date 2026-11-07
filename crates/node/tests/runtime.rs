@@ -444,6 +444,69 @@ async fn recovers_interrupted_turn_on_start() {
     }
 }
 
+/// A delegated sub-task's answer goes to its parent agent, so its turns may
+/// not ask the user anything; the cap comes from the session itself, here
+/// one the node loads from its log on start.
+#[tokio::test]
+async fn sub_task_sessions_ask_no_questions() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
+    let sid = SessionId::new();
+    let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        profile: harness_core::event::Profile::Agentic,
+        agent_id: None,
+        incognito: false,
+        parent_session: Some(SessionId::new()),
+        title: "t".into(),
+        cwd: ws.display().to_string(),
+        model: "mock".into(),
+        backend: "native".into(),
+        node_id: "local".into(),
+        approval_mode: Default::default(),
+    })
+    .into_parts();
+    let created = RawEvent {
+        session_id: sid,
+        seq: 1,
+        ts_ms: 0,
+        kind,
+        payload,
+    };
+    store.append("local", &created).unwrap();
+    let policy = NodePolicy {
+        workspace_roots: vec![dir.path().into()],
+        ..Default::default()
+    };
+    let node = NodeRuntime::start(config(store, policy)).await.unwrap();
+    let mut link = node.attach().await;
+    link.to_node
+        .send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text: "ui: choices".into(),
+        })
+        .unwrap();
+    let blocks = loop {
+        if let Some(NodeToMaster::Event { event }) = link.from_node.recv().await
+            && let Ok(EventKind::AssistantMessage(m)) = event.typed()
+        {
+            break m.blocks;
+        }
+    };
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(
+        blocks[0].error.as_deref(),
+        Some(harness_core::ui::OFF_FOR_AGENT)
+    );
+}
+
 /// Agentic turns in a git repo get before/after snapshots, and a turn's
 /// file changes can be undone over the protocol.
 #[tokio::test]

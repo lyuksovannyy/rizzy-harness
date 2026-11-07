@@ -117,11 +117,15 @@ const FIELD_KEYS: &[&str] = &[
 
 pub(super) fn validate(mut o: Obj) -> Res<FormSpec> {
     let title = o.req_text("title", 120)?;
-    // A form titled for a key would make an innocent "Value" field ask for one.
+    // A form titled or described for a key would make an innocent "Value"
+    // field ask for one, so these are errors, not one refused field.
     if secret_like(&title) {
         return o.err("title", "asks for a secret");
     }
     let description = o.text("description", 400, true)?;
+    if description.as_deref().is_some_and(secret_like) {
+        return o.err("description", "asks for a secret");
+    }
     let list = o.list("fields", 1, 12)?;
     let path = o.at("fields");
     let mut fields: Vec<Field> = Vec::with_capacity(list.len());
@@ -151,17 +155,7 @@ fn field(mut o: Obj) -> Res<Field> {
     };
     let help = o.text("help", 200, false)?;
     // Refused before anything else is checked: nothing else of it is shown.
-    let placeholder = o.peek_str("placeholder").map(|p| clean_text(p, false));
-    if [
-        Some(id.as_str()),
-        Some(&label),
-        help.as_deref(),
-        placeholder.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(secret_like)
-    {
+    if asks_for_secret(&o, &id, &label, help.as_deref()) {
         return Ok(Field {
             refused: true,
             ..Field::new(id, label, kind, None)
@@ -183,6 +177,28 @@ fn field(mut o: Obj) -> Res<Field> {
         &format!("not allowed for type {}", kind.as_str()),
     )?;
     Ok(f)
+}
+
+/// Does any of a field's text ask for a secret, alone or read together
+/// (a label "Seed" with the help "phrase")? Option text counts too: it can
+/// point at another field ("type your key in Notes").
+fn asks_for_secret(o: &Obj, id: &str, label: &str, help: Option<&str>) -> bool {
+    let mut texts = vec![id.to_string(), label.to_string()];
+    texts.extend(help.map(str::to_string));
+    let raw = |v: Option<&Value>| v.and_then(Value::as_str).map(|s| clean_text(s, false));
+    texts.extend(raw(o.peek("placeholder")));
+    if let Some(Value::Array(options)) = o.peek("options") {
+        for v in options {
+            match v {
+                Value::Object(m) => {
+                    texts.extend(raw(m.get("label")));
+                    texts.extend(raw(m.get("description")));
+                }
+                v => texts.extend(raw(Some(v))),
+            }
+        }
+    }
+    texts.iter().any(|t| secret_like(t)) || secret_like(&texts.join("\n"))
 }
 
 impl Field {
@@ -416,6 +432,19 @@ mod tests {
                 "only id, label, type, refused: {got}"
             );
         }
+        // Text that asks only once its parts are read together, and option
+        // text that points at another field.
+        for f in [
+            json!({"id": "x", "label": "API", "type": "text", "help": "key from your dashboard"}),
+            json!({"id": "github", "label": "Value", "type": "text", "help": "token from settings"}),
+            json!({"id": "x", "label": "Provider", "type": "choice", "options": ["GitHub", {"label": "Other", "description": "paste your API key in Notes"}]}),
+            json!({"id": "x", "label": "Provider", "type": "choice", "options": ["Pass\u{ad}word", "b"]}),
+            json!({"id": "x", "label": "Seed", "type": "text", "help": "Phrase (12 words)"}),
+            json!({"id": "x", "label": "Social", "type": "text", "placeholder": "security number"}),
+        ] {
+            let got = one(f.clone()).unwrap();
+            assert_eq!(got["refused"], true, "{f}");
+        }
         // The id and label still have to be valid.
         assert_eq!(
             one(json!({"id": "A", "label": "API key", "type": "text"})),
@@ -458,6 +487,10 @@ mod tests {
                 "fields[0].type: must be text, number, choice, toggle or date",
             ),
             (json!({}), "fields[0].type: missing"),
+            (
+                json!({"type": "text", "label": "x".repeat(121)}),
+                "fields[0].label: longer than 120 characters",
+            ),
             (
                 json!({"type": "text", "max_length": 0}),
                 "fields[0].max_length: must be 1 to 4000",
@@ -553,6 +586,10 @@ mod tests {
         for (spec, err) in [
             (json!({"fields": [field]}), "title: missing"),
             (
+                json!({"title": "x".repeat(121), "fields": [field]}),
+                "title: longer than 120 characters",
+            ),
+            (
                 json!({"title": "T", "fields": []}),
                 "fields: fewer than 1 entries",
             ),
@@ -575,6 +612,10 @@ mod tests {
             (
                 json!({"title": "Your API key", "fields": [field]}),
                 "title: asks for a secret",
+            ),
+            (
+                json!({"title": "Setup", "description": "Paste your API key below so I can finish the setup.", "fields": [field]}),
+                "description: asks for a secret",
             ),
             (
                 json!({"title": "T", "fields": [{"label": "A", "type": "text"}]}),

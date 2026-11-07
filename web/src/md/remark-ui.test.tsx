@@ -1,6 +1,8 @@
 // ui fences through the whole rendering path, as static markup, against the
-// texts and blocks Rust wrote to ui.json: every stored block must be found
-// at its ordinal, hash and type, and nothing else may become a card.
+// texts and blocks Rust wrote to ui.json and the counts each case records by
+// hand: how many fences the browser marks and how many cards and error
+// notes it shows. Where micromark and Rust disagree about a fence, nothing
+// may become a card.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 import fixture from "../__fixtures__/ui.json";
@@ -23,15 +25,14 @@ describe("ui.json parity", () => {
     // While streaming, every marked fence is a skeleton: as many as the
     // browser is expected to mark.
     expect(count(md(c.text, false), "ui-skeleton")).toBe(c.web_marks);
-    // Once final, each stored block shows: a card for a spec, the code and
-    // the reason for an error. A fence with no stored block stays code.
+    // Once final, each stored block the browser finds shows: a card for a
+    // spec, the code and the reason for an error. A marked fence with no
+    // matching block stays code.
     const html = unescape(md(c.text, true, c.blocks));
-    const specs = c.blocks.filter((b) => b.spec);
-    const errors = c.blocks.filter((b) => b.error);
-    expect(count(html, "ui-card")).toBe(specs.length);
-    expect(count(html, "ui-error")).toBe(errors.length);
-    for (const b of errors) expect(html).toContain(`: ${b.error}</div>`);
-    expect(count(html, "codeblock")).toBeGreaterThanOrEqual(c.web_marks - specs.length);
+    expect(count(html, "ui-card")).toBe(c.cards);
+    expect(count(html, "ui-error")).toBe(c.errors);
+    for (const b of c.blocks) if (b.error) expect(html).toContain(`: ${b.error}</div>`);
+    expect(count(html, "codeblock")).toBeGreaterThanOrEqual(c.web_marks - c.cards);
   });
 
   test("the browser hashes what Rust hashed", () => {

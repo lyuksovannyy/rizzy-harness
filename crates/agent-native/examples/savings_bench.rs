@@ -118,6 +118,7 @@ async fn one(provider: Arc<LlmProvider>, model: &str, savings: Savings) -> Run {
             model: model.into(),
             agent: None,
             compare: vec![],
+            parent_session: None,
             extra: TurnExtra {
                 savings,
                 ..Default::default()

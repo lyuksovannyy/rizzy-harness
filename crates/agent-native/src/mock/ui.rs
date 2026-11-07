@@ -5,7 +5,9 @@
 pub(super) fn canned(name: &str) -> Option<String> {
     let block = |kind: &str, body: &str| format!("```ui:{kind}\n{body}\n```\n");
     Some(match name {
-        "choices" => format!("Pick a colour:\n\n{}", block("choices", CHOICES)),
+        // The line after the fence lets a test see the body has streamed
+        // while the message is still streaming.
+        "choices" => format!("Pick a colour:\n\n{}\n{AFTER}", block("choices", CHOICES)),
         "form" => format!("A few details first:\n\n{}", block("form", FORM)),
         "progress" => format!("Working on it.\n\n{}", block("progress", PROGRESS)),
         "chart" => format!("Build times:\n\n{}", block("chart", CHART)),
@@ -23,6 +25,8 @@ pub(super) fn canned(name: &str) -> Option<String> {
         _ => return None,
     })
 }
+
+const AFTER: &str = "Tap the one you like best, or tell me another colour in your own words and I will use that one instead.";
 
 const CHOICES: &str = r#"{
   "id": "colour",

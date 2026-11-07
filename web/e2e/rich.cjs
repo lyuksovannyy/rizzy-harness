@@ -222,7 +222,14 @@ async function skipOnboarding(page) {
     await p.click('.mode-switch button:has-text("Ask")');
     await p.keyboard.press('Enter');
     await p.waitForSelector('.msg.assistant.streaming .ui-skeleton:has-text("Preparing question…")');
-    check(!(await p.locator('.msg.assistant .md').innerText()).includes('"options"'), 'no raw JSON while streaming');
+    // The reply goes on after the fence, so once that text shows (and the
+    // message still streams) the whole JSON body has arrived: one snapshot.
+    const streamed = await (await p.waitForFunction(() => {
+      const md = document.querySelector('.msg.assistant.streaming .md');
+      return md && md.innerText.includes('Tap the one') ? md.innerText : false;
+    })).jsonValue();
+    check(streamed.includes('Preparing question…'), 'skeleton while streaming: ' + streamed);
+    check(!streamed.includes('"options"') && !streamed.includes('colour"'), 'no raw JSON while streaming: ' + streamed);
     check(chunks('UiBlock').length === 0, 'the card chunk waits for the final message');
     await idle();
     const choices = p.locator('.msg.assistant').last();
@@ -261,11 +268,16 @@ async function skipOnboarding(page) {
     await two.locator('.ui-error').waitFor();
     check((await two.locator('.ui-card').count()) === 1 && (await two.locator('.codeblock').count()) === 1, 'one card, one code block');
     check((await two.locator('.ui-error').innerText()) === 'Could not show this question: only one choices or form block per message', 'second question rejected');
-    // A form field that asks for a key is never an input, only the warning.
+    // A form field that asks for a key shows only the warning; the other
+    // field of the form is an ordinary field.
     const secret = await send('ui: secret');
     await secret.locator('.ui-card .ui-secret').waitFor();
-    check((await secret.locator('.ui-secret').innerText()).startsWith('API key: This asks for a secret.'), 'secret note');
-    check((await secret.locator('input, textarea').count()) === 0, 'no input for the key');
+    const fields = secret.locator('.ui-fields > li');
+    check((await fields.count()) === 2, 'two fields');
+    check((await fields.nth(0).locator('.ui-secret').innerText()).startsWith('API key: This asks for a secret.'), 'secret note');
+    check((await fields.nth(1).locator('.ui-secret').count()) === 0, 'Name is not refused');
+    check((await fields.nth(1).locator('.ui-field-label').innerText()) === 'Name', 'Name is a field');
+    check((await secret.locator('.ui-secret').count()) === 1, 'only the key is refused');
     await p.screenshot({ path: `${S}/rich-5-ui.png`, fullPage: true });
     // The stored blocks render the same after a reload.
     await p.reload();

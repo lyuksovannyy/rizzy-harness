@@ -62,9 +62,9 @@ impl<'a> Obj<'a> {
         self.map.get(key).filter(|v| !v.is_null())
     }
 
-    /// The raw string under `key`, without marking it read.
-    pub fn peek_str(&self, key: &str) -> Option<&'a str> {
-        self.map.get(key).and_then(Value::as_str)
+    /// The raw value under `key`, without marking it read.
+    pub fn peek(&self, key: &str) -> Option<&'a Value> {
+        self.map.get(key)
     }
 
     /// A cleaned string of at most `max` characters; `None` when absent or

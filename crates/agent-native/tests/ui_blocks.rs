@@ -11,7 +11,7 @@ use harness_agent_native::{
 };
 use harness_core::agent::{AgentSpec, ToolSelection, UiLevel};
 use harness_core::backend::{AgentBackend, TurnCtx, TurnHost};
-use harness_core::event::{AssistantMessage, EventKind, SessionCreated, UiBlock};
+use harness_core::event::{AssistantMessage, EventKind, SessionCreated, ToolCallRef, UiBlock};
 use harness_core::policy::{Decision, ToolRisk};
 use harness_core::{RawEvent, Secret, SecretSet, SessionId};
 use serde_json::Value;
@@ -43,9 +43,11 @@ impl Host {
     }
 }
 
-/// Answers like the mock (or with fixed text) and keeps every request.
+/// Answers like the mock (or with fixed text, whose first answer may also
+/// call a tool) and keeps every request.
 struct Rec {
     fixed: Option<String>,
+    tool_first: bool,
     reqs: Mutex<Vec<ChatRequest>>,
 }
 
@@ -59,10 +61,23 @@ impl Provider for Rec {
         req: &ChatRequest,
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
-        self.reqs.lock().unwrap().push(req.clone());
+        let first = {
+            let mut reqs = self.reqs.lock().unwrap();
+            reqs.push(req.clone());
+            reqs.len() == 1
+        };
         match &self.fixed {
             Some(text) => Ok(Completion {
                 text: text.clone(),
+                tool_calls: if self.tool_first && first {
+                    vec![ToolCallRef {
+                        call_id: "c1".into(),
+                        tool: "read".into(),
+                        input: serde_json::json!({"path": "x"}),
+                    }]
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             }),
             None => {
@@ -119,8 +134,11 @@ struct Turn {
     text: &'static str,
     ui: UiLevel,
     parent: Option<SessionId>,
+    /// The log before the turn; `None` is the session's own creation.
+    history: Option<Vec<RawEvent>>,
     compare: Vec<String>,
     fixed: Option<String>,
+    tool_first: bool,
     secrets: SecretSet,
 }
 
@@ -130,8 +148,10 @@ impl Turn {
             text,
             ui,
             parent: None,
+            history: None,
             compare: vec![],
             fixed: None,
+            tool_first: false,
             secrets: SecretSet::default(),
         }
     }
@@ -140,6 +160,7 @@ impl Turn {
     async fn run(self) -> (Vec<AssistantMessage>, String) {
         let rec = Arc::new(Rec {
             fixed: self.fixed,
+            tool_first: self.tool_first,
             reqs: Mutex::new(vec![]),
         });
         let backend = NativeBackend::new(
@@ -154,12 +175,15 @@ impl Turn {
         backend
             .run_turn(TurnCtx {
                 turn_id: "t1".into(),
-                history: vec![session_created(self.parent)],
+                history: self
+                    .history
+                    .unwrap_or_else(|| vec![session_created(self.parent)]),
                 user_text: self.text.into(),
                 cwd: Default::default(),
                 model: "mock".into(),
                 agent: Some(agent(self.ui)),
                 compare: self.compare,
+                parent_session: self.parent,
                 extra: Default::default(),
                 cancel: Default::default(),
                 host: &host,
@@ -208,6 +232,34 @@ async fn a_sub_task_is_capped_at_display() {
         [("choices", Some(harness_core::ui::OFF_FOR_AGENT))]
     );
     assert!(system.contains("ui:progress") && !system.contains("ui:choices"));
+    // The cap comes from the session, not its log: a sub-task whose log
+    // could not be read is still capped.
+    let mut turn = Turn::new("ui: choices", UiLevel::Rich);
+    (turn.parent, turn.history) = (Some(SessionId::new()), Some(vec![]));
+    let (msgs, _) = turn.run().await;
+    assert_eq!(
+        summary(&msgs[0].blocks),
+        [("choices", Some(harness_core::ui::OFF_FOR_AGENT))]
+    );
+}
+
+/// A question ends the turn: one in a message that also calls tools is an
+/// error, and only the last message of the turn may ask.
+#[tokio::test]
+async fn a_message_that_calls_tools_asks_nothing() {
+    let mut turn = Turn::new("anything", UiLevel::Rich);
+    turn.fixed = Some(
+        "Which?\n\n```ui:choices\n{\"id\": \"q\", \"question\": \"Which?\", \"options\": [\"a\", \"b\"]}\n```\n"
+            .into(),
+    );
+    turn.tool_first = true;
+    let (msgs, _) = turn.run().await;
+    assert_eq!(msgs.len(), 2, "the tool call, then the final reply");
+    assert_eq!(
+        summary(&msgs[0].blocks),
+        [("choices", Some(harness_core::ui::ENDS_REPLY))]
+    );
+    assert_eq!(summary(&msgs[1].blocks), [("choices", None)]);
 }
 
 #[tokio::test]

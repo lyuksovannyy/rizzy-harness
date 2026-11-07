@@ -129,6 +129,14 @@ mod tests {
         for (spec, err) in [
             (json!({"steps": [step]}), "title: missing"),
             (
+                json!({"title": "x".repeat(121), "steps": [step]}),
+                "title: longer than 120 characters",
+            ),
+            (
+                json!({"title": "T", "steps": [{"label": "x".repeat(121), "status": "done"}]}),
+                "steps[0].label: longer than 120 characters",
+            ),
+            (
                 json!({"title": "T", "steps": []}),
                 "steps: fewer than 1 entries",
             ),

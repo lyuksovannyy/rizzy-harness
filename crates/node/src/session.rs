@@ -37,6 +37,8 @@ pub(crate) struct Session {
     mode: ApprovalMode,
     profile: Profile,
     incognito: bool,
+    /// Set on a delegated sub-task's session; limits what its turns may do.
+    parent_session: Option<SessionId>,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
 }
@@ -86,6 +88,7 @@ impl Session {
             mode,
             profile,
             incognito,
+            parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
         });
@@ -128,6 +131,7 @@ impl Session {
             mode,
             profile: meta.profile,
             incognito: meta.incognito,
+            parent_session: meta.parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
         }))
@@ -307,6 +311,7 @@ impl Session {
                         .unwrap_or_else(|| this.model.clone()),
                     agent,
                     compare,
+                    parent_session: this.parent_session,
                     extra,
                     cancel: c,
                     host: &*this,

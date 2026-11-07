@@ -74,9 +74,22 @@ export function urlKeysIn(text: string): string[] {
     const tok = raw.replace(/[.,;:!?]+$/, "");
     if (!tok.includes(".")) continue;
     const u = parseUrl(tok.startsWith("http://") || tok.startsWith("https://") ? tok : `https://${tok}`);
-    if (u) keys.push(...seenKeys(u));
+    if (u && !shorthandAddress(u, tok)) keys.push(...seenKeys(u));
   }
   return keys;
+}
+
+const IPV4 = /^\d+\.\d+\.\d+\.\d+$/;
+
+/** Is `tok` an IPv4 address in a shorthand the URL parser expands (`1.5`
+ * is 1.0.0.5)? Such a token is a number, not an address someone gave: a
+ * form answer carries numbers the model chose. Same rule as the server. */
+function shorthandAddress(u: URL, tok: string): boolean {
+  if (!IPV4.test(u.hostname)) return false;
+  const rest = tok.includes("://") ? tok.slice(tok.indexOf("://") + 3) : tok;
+  const authority = rest.split(/[/?#]/)[0] ?? "";
+  const host = authority.slice(authority.lastIndexOf("@") + 1).split(":")[0] ?? "";
+  return host !== u.hostname;
 }
 
 // Data rides in a path as easily as in a query, so all but short paths ask.

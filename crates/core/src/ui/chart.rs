@@ -202,6 +202,18 @@ mod tests {
         for (spec, err) in [
             (json!({"x": x, "series": s}), "kind: missing"),
             (
+                json!({"kind": "bar", "title": "x".repeat(121), "x": x, "series": s}),
+                "title: longer than 120 characters",
+            ),
+            (
+                json!({"kind": "bar", "x": {"label": "x".repeat(61), "values": ["a", "b"]}, "series": s}),
+                "x.label: longer than 60 characters",
+            ),
+            (
+                json!({"kind": "bar", "x": x, "y": {"label": "x".repeat(61)}, "series": s}),
+                "y.label: longer than 60 characters",
+            ),
+            (
                 json!({"kind": "pie", "x": x, "series": s}),
                 "kind: must be bar or line",
             ),

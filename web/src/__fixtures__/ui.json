@@ -118,6 +118,8 @@
           "type": "progress"
         }
       ],
+      "cards": 4,
+      "errors": 0,
       "level": "rich",
       "name": "every type",
       "text": "Intro.\n\n```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}\n```\n\nText between.\n\n```ui:progress\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:chart\n{\"kind\": \"bar\", \"x\": {\"values\": [\"core\", \"web\"]}, \"series\": [{\"name\": \"debug\", \"values\": [12.5, 8]}]}\n```\n```ui:progress\n{\n  \"id\": \"p\",\n\n  \"title\": \"Pretty\",\n\t\"steps\": [{\"label\": \"a\", \"status\": \"done\"}]\n}\n```\n",
@@ -158,6 +160,8 @@
           "type": "form"
         }
       ],
+      "cards": 1,
+      "errors": 0,
       "level": "rich",
       "name": "form with a refused field",
       "text": "```ui:form\n{\"id\": \"trip\", \"title\": \"Trip\", \"fields\": [\n  {\"id\": \"people\", \"label\": \"Travellers\", \"type\": \"number\", \"required\": true, \"min\": 1, \"max\": 12},\n  {\"id\": \"key\", \"label\": \"API key\", \"type\": \"text\"},\n  {\"id\": \"when\", \"label\": \"Start\", \"type\": \"date\", \"default\": \"2026-12-01\"}\n]}\n```\n",
@@ -187,6 +191,8 @@
           "type": "choices"
         }
       ],
+      "cards": 0,
+      "errors": 3,
       "level": "rich",
       "name": "errors",
       "text": "```ui:progress\n{\"id\": \"p\", \"title\": \"T\"}\n```\n```ui:chart\n{not json\n```\n```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}, \"SQLite\"]}\n```\n",
@@ -224,6 +230,8 @@
           "type": "form"
         }
       ],
+      "cards": 1,
+      "errors": 1,
       "level": "rich",
       "name": "two input blocks",
       "text": "```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}\n```\n```ui:form\n{\"id\": \"trip\", \"title\": \"Trip\", \"fields\": [\n  {\"id\": \"people\", \"label\": \"Travellers\", \"type\": \"number\", \"required\": true, \"min\": 1, \"max\": 12},\n  {\"id\": \"key\", \"label\": \"API key\", \"type\": \"text\"},\n  {\"id\": \"when\", \"label\": \"Start\", \"type\": \"date\", \"default\": \"2026-12-01\"}\n]}\n```\n",
@@ -258,6 +266,8 @@
           "type": "progress"
         }
       ],
+      "cards": 1,
+      "errors": 1,
       "level": "display",
       "name": "display level",
       "text": "```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}\n```\n```ui:progress\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
@@ -265,6 +275,8 @@
     },
     {
       "blocks": [],
+      "cards": 0,
+      "errors": 0,
       "level": "off",
       "name": "off level",
       "text": "```ui:progress\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
@@ -272,6 +284,8 @@
     },
     {
       "blocks": [],
+      "cards": 0,
+      "errors": 0,
       "level": "rich",
       "name": "not blocks",
       "text": "````md\n```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}\n```\n````\n\n```ui:widget\n{}\n```\n\n```ui:progress extra\n{}\n```\n\n  ```ui:progress\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n\n- item\n\n  ```ui:progress\n  {\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n  ```\n\n> ```ui:progress\n> {\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n> ```\n\nInline ```ui:progress``` code.\n",
@@ -324,6 +338,8 @@
           "type": "chart"
         }
       ],
+      "cards": 2,
+      "errors": 0,
       "level": "rich",
       "name": "fence forms",
       "text": "~~~~ ui:progress \n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n~~~~~~\n\n````ui:chart\n{\"kind\": \"bar\", \"x\": {\"values\": [\"core\", \"web\"]}, \"series\": [{\"name\": \"debug\", \"values\": [12.5, 8]}]}\n   ````\t\n",
@@ -351,6 +367,8 @@
           "type": "progress"
         }
       ],
+      "cards": 1,
+      "errors": 0,
       "level": "rich",
       "name": "crlf and hidden characters",
       "text": "Line\r\n\r\n```ui:progress​\r\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Re‮ad\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\r\n```\r\n",
@@ -378,6 +396,8 @@
           "type": "progress"
         }
       ],
+      "cards": 1,
+      "errors": 0,
       "level": "rich",
       "name": "unterminated at the end",
       "text": "```ui:progress\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}\n",
@@ -538,10 +558,207 @@
           "type": "progress"
         }
       ],
+      "cards": 8,
+      "errors": 0,
       "level": "rich",
       "name": "nine blocks",
       "text": "```ui:progress\n{\"id\": \"j0\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j1\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j2\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j3\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j4\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j5\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j6\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j7\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n```ui:progress\n{\"id\": \"j8\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
       "web_marks": 9
+    },
+    {
+      "blocks": [
+        {
+          "hash": "a9915623",
+          "id": "j1",
+          "ordinal": 0,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        },
+        {
+          "hash": "26f3abe6",
+          "id": "j2",
+          "ordinal": 1,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        }
+      ],
+      "cards": 0,
+      "errors": 0,
+      "level": "rich",
+      "name": "an html block swallows a fence",
+      "text": "<div>\n```ui:progress\n{\"id\": \"j1\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n\n```ui:progress\n{\"id\": \"j2\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
+      "web_marks": 1
+    },
+    {
+      "blocks": [
+        {
+          "hash": "a9915623",
+          "id": "j1",
+          "ordinal": 0,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        },
+        {
+          "hash": "26f3abe6",
+          "id": "j2",
+          "ordinal": 1,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        }
+      ],
+      "cards": 0,
+      "errors": 0,
+      "level": "rich",
+      "name": "a tag line swallows a fence",
+      "text": "<br>\n```ui:progress\n{\"id\": \"j1\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n\n```ui:progress\n{\"id\": \"j2\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
+      "web_marks": 1
+    },
+    {
+      "blocks": [
+        {
+          "hash": "a56ab32c",
+          "id": "db",
+          "ordinal": 0,
+          "spec": {
+            "multi": false,
+            "options": [
+              {
+                "description": "Best default",
+                "id": "pg",
+                "label": "PostgreSQL"
+              },
+              {
+                "id": "o2",
+                "label": "SQLite"
+              }
+            ],
+            "other": false,
+            "question": "Which database?"
+          },
+          "type": "choices"
+        },
+        {
+          "hash": "40d5ba9f",
+          "id": "job",
+          "ordinal": 1,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        }
+      ],
+      "cards": 0,
+      "errors": 0,
+      "level": "rich",
+      "name": "display math holds a fence",
+      "text": "$$\n```ui:choices\n{\"id\": \"db\", \"question\": \"Which database?\", \"options\": [{\"id\": \"pg\", \"label\": \"PostgreSQL\", \"description\": \"Best default\"}, \"SQLite\"]}\n```\n$$\n\n```ui:progress\n{\"id\": \"job\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
+      "web_marks": 1
+    },
+    {
+      "blocks": [
+        {
+          "hash": "a9915623",
+          "id": "j1",
+          "ordinal": 0,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        },
+        {
+          "hash": "26f3abe6",
+          "id": "j2",
+          "ordinal": 1,
+          "spec": {
+            "steps": [
+              {
+                "label": "Read",
+                "status": "done"
+              },
+              {
+                "label": "Write",
+                "status": "active"
+              }
+            ],
+            "title": "Migrating"
+          },
+          "type": "progress"
+        }
+      ],
+      "cards": 0,
+      "errors": 0,
+      "level": "rich",
+      "name": "a list fence closed at column 0",
+      "text": "- a\n  ```\n  code\n```\n```ui:progress\n{\"id\": \"j1\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n\n```ui:progress\n{\"id\": \"j2\", \"title\": \"Migrating\", \"steps\": [{\"label\": \"Read\", \"status\": \"done\"}, {\"label\": \"Write\", \"status\": \"active\"}]}\n```\n",
+      "web_marks": 1
     }
   ]
 }

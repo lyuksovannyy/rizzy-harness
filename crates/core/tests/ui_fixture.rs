@@ -3,9 +3,12 @@
 //! and `web/src/md/fnv.test.ts` checks the hashes.
 //! Regenerate with `UPDATE_FIXTURES=1 cargo test -p harness-core --test ui_fixture`.
 //!
-//! `web_marks` is how many ui fences the browser marks in the text: more
-//! than the blocks where it marks what Rust does not make a block (an
-//! unterminated fence, the ninth fence).
+//! Each case records, by hand, what the browser must do with it: how many
+//! ui fences it marks (`web_marks`), and how many cards and error notes it
+//! shows (`cards`, `errors`). Where micromark and the Rust scanner disagree
+//! about a fence (an HTML block or math swallowing it, a list fence closed
+//! at column 0), the browser's ordinals and hashes do not line up with the
+//! stored blocks, and it must show no card at all: plain code instead.
 
 use harness_core::agent::UiLevel;
 use harness_core::ui::{extract, fnv1a32};
@@ -19,23 +22,49 @@ fn fence(kind: &str, body: &str) -> String {
     format!("```ui:{kind}\n{body}\n```\n")
 }
 
-fn cases() -> Vec<(&'static str, String, UiLevel, usize)> {
+struct Case {
+    name: &'static str,
+    text: String,
+    level: UiLevel,
+    web_marks: usize,
+    cards: usize,
+    errors: usize,
+}
+
+fn case(
+    name: &'static str,
+    text: String,
+    level: UiLevel,
+    (web_marks, cards, errors): (usize, usize, usize),
+) -> Case {
+    Case {
+        name,
+        text,
+        level,
+        web_marks,
+        cards,
+        errors,
+    }
+}
+
+fn cases() -> Vec<Case> {
     let form = r#"{"id": "trip", "title": "Trip", "fields": [
   {"id": "people", "label": "Travellers", "type": "number", "required": true, "min": 1, "max": 12},
   {"id": "key", "label": "API key", "type": "text"},
   {"id": "when", "label": "Start", "type": "date", "default": "2026-12-01"}
 ]}"#;
     let pretty = "{\n  \"id\": \"p\",\n\n  \"title\": \"Pretty\",\n\t\"steps\": [{\"label\": \"a\", \"status\": \"done\"}]\n}";
-    let nine: String = (0..9)
-        .map(|i| {
-            fence(
-                "progress",
-                &PROGRESS.replace("\"job\"", &format!("\"j{i}\"")),
-            )
-        })
-        .collect();
+    let job = |i: usize| PROGRESS.replace("\"job\"", &format!("\"j{i}\""));
+    let nine: String = (0..9).map(|i| fence("progress", &job(i))).collect();
+    // Two different progress fences: if the browser matched by hash alone it
+    // would show the second, by ordinal and type alone the first.
+    let pair = format!(
+        "{}\n{}",
+        fence("progress", &job(1)),
+        fence("progress", &job(2))
+    );
     vec![
-        (
+        case(
             "every type",
             format!(
                 "Intro.\n\n{}\nText between.\n\n{}{}{}",
@@ -45,15 +74,15 @@ fn cases() -> Vec<(&'static str, String, UiLevel, usize)> {
                 fence("progress", pretty)
             ),
             UiLevel::Rich,
-            4,
+            (4, 4, 0),
         ),
-        (
+        case(
             "form with a refused field",
             fence("form", form),
             UiLevel::Rich,
-            1,
+            (1, 1, 0),
         ),
-        (
+        case(
             "errors",
             format!(
                 "{}{}{}",
@@ -65,15 +94,15 @@ fn cases() -> Vec<(&'static str, String, UiLevel, usize)> {
                 )
             ),
             UiLevel::Rich,
-            3,
+            (3, 0, 3),
         ),
-        (
+        case(
             "two input blocks",
             format!("{}{}", fence("choices", CHOICES), fence("form", form)),
             UiLevel::Rich,
-            2,
+            (2, 1, 1),
         ),
-        (
+        case(
             "display level",
             format!(
                 "{}{}",
@@ -81,10 +110,15 @@ fn cases() -> Vec<(&'static str, String, UiLevel, usize)> {
                 fence("progress", PROGRESS)
             ),
             UiLevel::Display,
-            2,
+            (2, 1, 1),
         ),
-        ("off level", fence("progress", PROGRESS), UiLevel::Off, 1),
-        (
+        case(
+            "off level",
+            fence("progress", PROGRESS),
+            UiLevel::Off,
+            (1, 0, 0),
+        ),
+        case(
             "not blocks",
             [
                 format!("````md\n{}````\n", fence("choices", CHOICES)),
@@ -97,40 +131,81 @@ fn cases() -> Vec<(&'static str, String, UiLevel, usize)> {
             ]
             .join("\n"),
             UiLevel::Rich,
-            0,
+            (0, 0, 0),
         ),
-        (
+        case(
             "fence forms",
             format!("~~~~ ui:progress \n{PROGRESS}\n~~~~~~\n\n````ui:chart\n{CHART}\n   ````\t\n"),
             UiLevel::Rich,
-            2,
+            (2, 2, 0),
         ),
-        (
+        case(
             "crlf and hidden characters",
             format!(
                 "Line\r\n\r\n```ui:progress\u{200B}\r\n{}\r\n```\r\n",
                 PROGRESS.replace("Read", "Re\u{202E}ad")
             ),
             UiLevel::Rich,
-            1,
+            (1, 1, 0),
         ),
-        (
+        // The browser marks an unterminated fence (code to the end); Rust
+        // makes no block of it.
+        case(
             "unterminated at the end",
             format!("{}```ui:choices\n{CHOICES}\n", fence("progress", PROGRESS)),
             UiLevel::Rich,
-            2,
+            (2, 1, 0),
         ),
-        ("nine blocks", nine, UiLevel::Rich, 9),
+        case("nine blocks", nine, UiLevel::Rich, (9, 8, 0)),
+        // Rust counts fences micromark does not: each case shows no card.
+        case(
+            "an html block swallows a fence",
+            format!("<div>\n{pair}"),
+            UiLevel::Rich,
+            (1, 0, 0),
+        ),
+        case(
+            "a tag line swallows a fence",
+            format!("<br>\n{pair}"),
+            UiLevel::Rich,
+            (1, 0, 0),
+        ),
+        case(
+            "display math holds a fence",
+            format!(
+                "$$\n{}$$\n\n{}",
+                fence("choices", CHOICES),
+                fence("progress", PROGRESS)
+            ),
+            UiLevel::Rich,
+            (1, 0, 0),
+        ),
+        case(
+            "a list fence closed at column 0",
+            format!("- a\n  ```\n  code\n```\n{pair}"),
+            UiLevel::Rich,
+            (1, 0, 0),
+        ),
     ]
 }
 
 fn doc() -> Value {
     let texts: Vec<Value> = cases()
         .into_iter()
-        .map(|(name, text, level, web_marks)| {
-            let blocks = extract(&text, level);
-            assert!(blocks.len() <= web_marks, "{name}: more blocks than marks");
-            json!({"name": name, "text": text, "level": level, "web_marks": web_marks, "blocks": blocks})
+        .map(|c| {
+            let blocks = extract(&c.text, c.level);
+            // Only a stored block can show, and only as what it is.
+            let specs = blocks.iter().filter(|b| b.spec.is_some()).count();
+            assert!(c.cards <= specs, "{}: more cards than valid blocks", c.name);
+            assert!(
+                c.errors <= blocks.len() - specs,
+                "{}: more errors than error blocks",
+                c.name
+            );
+            json!({
+                "name": c.name, "text": c.text, "level": c.level, "blocks": blocks,
+                "web_marks": c.web_marks, "cards": c.cards, "errors": c.errors,
+            })
         })
         .collect();
     let hashes: Vec<Value> = [
@@ -226,4 +301,16 @@ fn fixture_cases_say_what_they_mean() {
     );
     assert_eq!(case("unterminated at the end").len(), 1);
     assert_eq!(case("nine blocks").len(), 8);
+    // Where the parsers disagree, Rust does make valid blocks: no card is
+    // the browser declining them, not Rust rejecting them.
+    for name in [
+        "an html block swallows a fence",
+        "a tag line swallows a fence",
+        "display math holds a fence",
+        "a list fence closed at column 0",
+    ] {
+        let blocks = case(name);
+        assert_eq!(blocks.len(), 2, "{name}");
+        assert!(errs(&blocks).iter().all(Option::is_none), "{name}");
+    }
 }

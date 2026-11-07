@@ -170,9 +170,24 @@ pub fn provenance_ok(u: &url::Url, observed: &[String]) -> bool {
                 } else {
                     format!("https://{tok}")
                 };
-                url::Url::parse(&with_scheme).is_ok_and(|v| url_key(&v) == key)
+                url::Url::parse(&with_scheme)
+                    .is_ok_and(|v| !shorthand_address(&v, tok) && url_key(&v) == key)
             })
     })
+}
+
+/// Is `tok` an IPv4 address in a shorthand the url crate expands (`1.5`
+/// is 1.0.0.5, `0x7f.1` is 127.0.0.1)? Such a token is a number, not an
+/// address someone gave: a form answer carries numbers the model chose.
+fn shorthand_address(v: &url::Url, tok: &str) -> bool {
+    let Some(url::Host::Ipv4(ip)) = v.host() else {
+        return false;
+    };
+    let rest = tok.split_once("://").map_or(tok, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host.split(':').next().unwrap_or("");
+    host != ip.to_string()
 }
 
 /// The page's main content as Markdown (readability extraction) and its
@@ -612,5 +627,28 @@ mod tests {
         assert!(!ok("https://example.org/page?id=7&leak=secret"));
         assert!(!ok("https://evil.com/?q=example.org/page"));
         assert!(!ok("https://docs.rs/"));
+    }
+
+    /// The url crate reads a number as a shorthand IPv4 address (`1.5` is
+    /// 1.0.0.5), and a form answer the user sends carries numbers the model
+    /// picked (a fixed default, min == max), so a number must not vouch for
+    /// an address. One written out in full still does.
+    #[test]
+    fn numbers_are_not_addresses() {
+        let obs = vec![
+            "Form answer · trip\n- people: 1.5\n- budget: 3.75, 203.0113 or 0.0000001".to_string(),
+            "version 2.5/x, then fetch 93.184.216.34/page".to_string(),
+        ];
+        let ok = |s: &str| provenance_ok(&url::Url::parse(s).unwrap(), &obs);
+        for invented in [
+            "https://1.0.0.5/",
+            "https://3.0.0.75/",
+            "https://203.0.0.75/",
+            "https://0.0.0.1/",
+            "https://2.0.0.5/x",
+        ] {
+            assert!(!ok(invented), "{invented}");
+        }
+        assert!(ok("https://93.184.216.34/page"));
     }
 }
