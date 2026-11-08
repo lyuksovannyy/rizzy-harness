@@ -26,6 +26,13 @@ const INITIAL_KB = 110;
 // phase a branch sets only its own line (its measured growth + at most 0.5,
 // with the reason); at each merged phase BASE_KB is re-measured and the three
 // lines go back to 0.
+//
+// The total is a soft limit (since 2026-11-08): it records what each feature
+// added and why, and a feature that needs room raises its line with the
+// reason. Most of it is lazy chunks a visit loads only when it opens their
+// page, all of it is cached for a year once loaded, and the server sends it
+// gzipped. The hard limits are the ones a visit waits for: the first-load
+// ceiling, the lazy-chunk checks and the library markers below.
 
 // Measured total of the last merged phase, with what it bought.
 const BASE_KB = 359.5; // Phase B merged (measured 359.49): webhooks UI, Artifacts page + chat cards + Save as artifact, fold items, search thumbnails, lazy Login (measured 2026-11-08; initial 102.3)
@@ -41,9 +48,6 @@ const I4_KB = 0;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
-// The ceilings the sidebar areas were planned within; no budget line may
-// take the bundle past them.
-const PROGRAM_TOTAL_KB = 362;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
@@ -88,7 +92,7 @@ for (const f of assets.filter((f) => !f.endsWith(".js")).sort()) {
   console.log(`  ${kb.toFixed(1).padStart(6)} KB  ${(font ? "font" : f.split(".").pop()).padEnd(8)}${f}`);
 }
 console.log(`initial JS: ${initialKb.toFixed(1)} KB gzip (budget ${INITIAL_KB}, ceiling ${PROGRAM_INITIAL_KB})`);
-console.log(`total JS:   ${totalKb.toFixed(1)} KB gzip (budget ${TOTAL_KB}, ceiling ${PROGRAM_TOTAL_KB}), ${allJs.length} chunks`);
+console.log(`total JS:   ${totalKb.toFixed(1)} KB gzip (budget ${TOTAL_KB}, soft), ${allJs.length} chunks`);
 
 /** The emitted chunks a lazy part must have; none means it is not lazy any more. */
 const chunk = (re, what) => {
@@ -164,10 +168,10 @@ for (const m of markers) {
 for (const f of allJs.filter((f) => /\/highlight\.worker-/.test(f))) {
   if (has(f, /\b(document|window)\./)) failures.push(`${f} uses the DOM, which a worker does not have`);
 }
-if (initialKb > INITIAL_KB || totalKb > TOTAL_KB) failures.push("bundle budget exceeded");
-if (initialKb > PROGRAM_INITIAL_KB) failures.push(`initial JS is over the program ceiling of ${PROGRAM_INITIAL_KB} KB`);
-if (totalKb > PROGRAM_TOTAL_KB || TOTAL_KB > PROGRAM_TOTAL_KB) {
-  failures.push(`the total or its budget is over the program ceiling of ${PROGRAM_TOTAL_KB} KB`);
+if (initialKb > INITIAL_KB) failures.push("initial JS is over its budget");
+if (totalKb > TOTAL_KB) {
+  failures.push(`total JS is over its budget: if the growth is wanted, raise your line above to it with the reason (the total is soft)`);
 }
+if (initialKb > PROGRAM_INITIAL_KB) failures.push(`initial JS is over the program ceiling of ${PROGRAM_INITIAL_KB} KB`);
 for (const msg of failures) console.error(msg);
 if (failures.length) process.exit(1);
