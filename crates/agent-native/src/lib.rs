@@ -1086,6 +1086,8 @@ impl NativeBackend {
             savings: ctx.extra.savings.clone(),
             outputs: Some(self.outputs.clone()),
             refs: refs.clone(),
+            artifacts: host.artifacts(),
+            call_id: call.call_id.clone(),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both.

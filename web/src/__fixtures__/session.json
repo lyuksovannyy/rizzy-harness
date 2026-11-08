@@ -492,11 +492,85 @@
       "ts_ms": 1700000000032
     },
     {
+      "kind": "tool_call_started",
+      "payload": {
+        "call_id": "c-pub",
+        "input": {
+          "path": "target/release/app"
+        },
+        "tool": "publish",
+        "turn_id": "t3"
+      },
+      "seq": 34,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000033
+    },
+    {
+      "kind": "artifact_staged",
+      "payload": {
+        "by": "agent",
+        "call_id": "c-pub",
+        "filename": "app",
+        "meta": {
+          "git": {
+            "branch": "main",
+            "commit": "abc123",
+            "dirty": false
+          },
+          "target": "x86_64-linux"
+        },
+        "name": "app",
+        "notes": "release build",
+        "packed": null,
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 12,
+        "source_path": "/w/target/release/app",
+        "stage_id": "01a19bf2000070008000000000000a01"
+      },
+      "seq": 35,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000034
+    },
+    {
+      "kind": "artifact_staged",
+      "payload": {
+        "by": "user",
+        "filename": "app",
+        "meta": {
+          "git": {
+            "branch": "main",
+            "commit": "abc123",
+            "dirty": false
+          },
+          "target": "x86_64-linux"
+        },
+        "name": "app",
+        "packed": null,
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size": 12,
+        "source_path": "/w/target/release/app",
+        "stage_id": "01a19bf2000070008000000000000a01"
+      },
+      "seq": 36,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000035
+    },
+    {
+      "kind": "artifact_stage_failed",
+      "payload": {
+        "error": "out/missing.bin: no such file or folder",
+        "path": "out/missing.bin"
+      },
+      "seq": 37,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000036
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 34,
+      "seq": 38,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -512,7 +586,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 34,
+    "head_seq": 38,
     "items": [
       {
         "text": "fix the bug",
@@ -746,6 +820,65 @@
         "text": "Choice answer · next: o1",
         "turn_id": "t3",
         "type": "user"
+      },
+      {
+        "approval": null,
+        "author": null,
+        "call_id": "c-pub",
+        "input": {
+          "path": "target/release/app"
+        },
+        "live_output": "",
+        "result": null,
+        "staged": {
+          "by": "agent",
+          "call_id": "c-pub",
+          "filename": "app",
+          "meta": {
+            "git": {
+              "branch": "main",
+              "commit": "abc123",
+              "dirty": false
+            },
+            "target": "x86_64-linux"
+          },
+          "name": "app",
+          "notes": "release build",
+          "packed": null,
+          "sha256": "abababababababababababababababababababababababababababababababab",
+          "size": 12,
+          "source_path": "/w/target/release/app",
+          "stage_id": "01a19bf2000070008000000000000a01"
+        },
+        "tool": "publish",
+        "type": "tool"
+      },
+      {
+        "staged": {
+          "by": "user",
+          "filename": "app",
+          "meta": {
+            "git": {
+              "branch": "main",
+              "commit": "abc123",
+              "dirty": false
+            },
+            "target": "x86_64-linux"
+          },
+          "name": "app",
+          "packed": null,
+          "sha256": "abababababababababababababababababababababababababababababababab",
+          "size": 12,
+          "source_path": "/w/target/release/app",
+          "stage_id": "01a19bf2000070008000000000000a01"
+        },
+        "type": "artifact"
+      },
+      {
+        "error": "out/missing.bin: no such file or folder",
+        "name": null,
+        "path": "out/missing.bin",
+        "type": "artifact_failed"
       }
     ],
     "meta": {

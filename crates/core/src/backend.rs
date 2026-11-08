@@ -36,6 +36,12 @@ pub trait TurnHost: Send + Sync {
     ) -> Result<DelegateOutcome, String> {
         Err("delegation is not available here".into())
     }
+
+    /// Where this session's turns publish files (`publish`); `None` when
+    /// publishing is off here (chat sessions, nodes without staging).
+    fn artifacts(&self) -> Option<std::sync::Arc<dyn crate::artifacts::ArtifactSink>> {
+        None
+    }
 }
 
 /// How a delegated sub-task ended.

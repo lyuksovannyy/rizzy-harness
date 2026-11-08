@@ -1,5 +1,5 @@
 // Port of crates/core/src/view.rs. The shared fixture test keeps them equal.
-import type { Item, RawEvent, SessionView } from "./types";
+import type { Item, RawEvent, SessionView, StagedArtifact } from "./types";
 
 export function emptyView(): SessionView {
   return {
@@ -39,6 +39,8 @@ const KNOWN = new Set([
   "variant_selected",
   "history_summarized",
   "model_fallback",
+  "artifact_staged",
+  "artifact_stage_failed",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -58,6 +60,26 @@ function lastAssistant(
     if (it.type === "assistant" && it.message_id === messageId) return it;
   }
   return undefined;
+}
+
+/** The staged file as serde writes it: optional keys only when set. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function staged(p: any): StagedArtifact {
+  const s: StagedArtifact = {
+    stage_id: p.stage_id,
+    by: p.by,
+    name: p.name,
+    filename: p.filename,
+    packed: p.packed ?? null,
+    size: p.size,
+    sha256: p.sha256,
+    source_path: p.source_path,
+    meta: p.meta ?? {},
+  };
+  if (p.call_id != null) s.call_id = p.call_id;
+  if (p.kind_hint != null) s.kind_hint = p.kind_hint;
+  if (p.notes != null) s.notes = p.notes;
+  return s;
 }
 
 /** Apply one event in place. Throws on gaps, duplicates or wrong session. */
@@ -222,6 +244,16 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "model_fallback":
       v.items.push({ type: "fallback", turn_id: p.turn_id, model: p.model, from: p.from, reason: p.reason ?? null });
+      break;
+    case "artifact_staged": {
+      // An agent's file joins its `publish` card; the user's stands alone.
+      const card = p.by === "agent" && p.call_id != null ? lastTool(v, p.call_id) : undefined;
+      if (card) card.staged = staged(p);
+      else v.items.push({ type: "artifact", staged: staged(p) });
+      break;
+    }
+    case "artifact_stage_failed":
+      v.items.push({ type: "artifact_failed", path: p.path, name: p.name ?? null, error: p.error });
       break;
   }
 }

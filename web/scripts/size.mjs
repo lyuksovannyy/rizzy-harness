@@ -31,7 +31,7 @@ const INITIAL_KB = 110;
 const BASE_KB = 348.8; // Phase A merged (measured 348.7x, rounded up): routines P1, storage + media M1, sidebar/search panel/account menu, routines and media pages (measured 2026-11-08; initial 103.7)
 
 // I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I2_KB = 0;
+const I2_KB = 0.4; // Phase B: fold.ts artifact_staged / artifact_stage_failed items, all in the initial load (measured +0.2, 349.0 total / 103.9 initial, 2026-11-08) + 0.2
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I3_KB = 0;

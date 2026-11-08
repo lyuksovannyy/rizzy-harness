@@ -22,6 +22,39 @@ pub struct NodePolicy {
     /// Let agents query a graphify knowledge graph (runs the third-party
     /// `graphify` program here; install it with `rizzy-harness graphify install`).
     pub graphify: bool,
+    /// Publishing files as artifacts (`[artifacts]`).
+    pub artifacts: ArtifactsPolicy,
+}
+
+/// `[artifacts]` in node.toml: the node's own switch and limits for files
+/// published from it (docs/artifacts.md). Nothing the master sends can
+/// loosen them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArtifactsPolicy {
+    /// Off: no `publish` tool, no "Save as artifact", no capability.
+    pub enabled: bool,
+    /// One published file or folder (uncompressed), in MB.
+    pub max_mb: u64,
+    /// Every staged file together; the oldest go first beyond it.
+    pub stage_max_mb: u64,
+    /// A stage the master never fetched is deleted after this long.
+    pub stage_ttl_hours: u64,
+    /// More names never published (globs: `*`, `?`, `**`), on top of the
+    /// built-in secret-like names.
+    pub deny_globs: Vec<String>,
+}
+
+impl Default for ArtifactsPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_mb: 200,
+            stage_max_mb: 2048,
+            stage_ttl_hours: 24,
+            deny_globs: Vec::new(),
+        }
+    }
 }
 
 impl Default for NodePolicy {
@@ -33,6 +66,7 @@ impl Default for NodePolicy {
             allow_outside_workspace: false,
             checkpoints_keep: 10,
             graphify: false,
+            artifacts: ArtifactsPolicy::default(),
         }
     }
 }
@@ -140,6 +174,13 @@ mod tests {
         assert_eq!(p.max_approval_mode, ApprovalMode::Auto);
         assert_eq!(p.denied_tools, vec!["bash".to_string()]);
         std::fs::write(&f, "max_aproval_mode = \"auto\"\n").unwrap();
+        assert!(NodePolicy::load(&f).is_err());
+        std::fs::write(&f, "[artifacts]\nmax_mb = 5\ndeny_globs = [\"*.sqlite\"]\n").unwrap();
+        let p = NodePolicy::load(&f).unwrap();
+        assert!(p.artifacts.enabled, "unset keys keep their defaults");
+        assert_eq!(p.artifacts.max_mb, 5);
+        assert_eq!(p.artifacts.stage_ttl_hours, 24);
+        std::fs::write(&f, "[artifacts]\nmax_megabytes = 5\n").unwrap();
         assert!(NodePolicy::load(&f).is_err());
         assert!(NodePolicy::load(&dir.path().join("missing.toml")).is_ok());
     }

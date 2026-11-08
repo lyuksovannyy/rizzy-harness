@@ -25,6 +25,8 @@ struct RunningTurn {
     cancel: CancellationToken,
     /// Sub-agents started by this turn use the same token-saving methods.
     savings: harness_core::savings::Savings,
+    /// Files this turn published (`publish` is capped per turn).
+    publishes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub(crate) struct Session {
@@ -230,6 +232,20 @@ impl Session {
         }
     }
 
+    /// Append an event from outside a turn's own flow (a staged file).
+    pub(crate) async fn record(&self, kind: EventKind) -> Result<(), String> {
+        self.append(kind)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The folder this chat publishes from, when it may publish at all:
+    /// agentic chats only (never incognito ones).
+    pub(crate) fn publish_cwd(&self) -> Option<PathBuf> {
+        (self.profile == Profile::Agentic && !self.incognito).then(|| self.cwd.clone())
+    }
+
     /// Record a change of the session's active agent.
     pub(crate) async fn set_agent(&self, agent: AgentSpec) -> Result<(), String> {
         self.append(EventKind::AgentChanged(AgentChanged {
@@ -264,6 +280,7 @@ impl Session {
                 turn_id: turn_id.clone(),
                 cancel: cancel.clone(),
                 savings: extra.savings.clone(),
+                publishes: Arc::default(),
             });
         }
         let msg = match self.user_message(turn_id.clone(), input).await {
@@ -635,6 +652,7 @@ impl Session {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: savings.clone(),
+            publishes: Arc::default(),
         });
         let msg = UserMessage {
             turn_id,
@@ -807,6 +825,25 @@ impl TurnHost for Session {
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         self.run_child(agent, task, refs, cancel, started).await
+    }
+
+    fn artifacts(&self) -> Option<Arc<dyn harness_core::artifacts::ArtifactSink>> {
+        let stages = self.node.stages.clone()?;
+        let cwd = self.publish_cwd()?;
+        let count = self
+            .turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()?
+            .publishes
+            .clone();
+        Some(Arc::new(crate::artifacts::Sink {
+            node: self.node.clone(),
+            stages,
+            session: self.id,
+            cwd,
+            count,
+        }))
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {

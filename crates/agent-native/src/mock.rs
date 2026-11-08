@@ -7,6 +7,7 @@
 //! * `fetch: <url>`  -> one `web_fetch` tool call, then a summary
 //! * `cite: <q>`     -> one `web_search` call, then an answer citing the
 //!   first two labels of its result and one label that does not exist
+//! * `publish: <path>[ as <name>]` -> one `publish` tool call
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
 //! * `remember project: <t>` -> the same with `scope: "project"`
 //! * `memory?`       -> repeats the recalled-memory block (per-turn context)
@@ -323,6 +324,17 @@ impl Provider for Mock {
         }
         if let Some(t) = user.strip_prefix("remember:") {
             return Ok(call("remember", json!({"text": t.trim(), "kind": "fact"})));
+        }
+        if let Some(rest) = user.strip_prefix("publish:") {
+            let (path, name) = match rest.split_once(" as ") {
+                Some((p, n)) => (p.trim(), Some(n.trim())),
+                None => (rest.trim(), None),
+            };
+            let mut input = json!({ "path": path });
+            if let Some(n) = name {
+                input["name"] = json!(n);
+            }
+            return Ok(call("publish", input));
         }
         if let Some(u) = user.strip_prefix("fetch:") {
             return Ok(call("web_fetch", json!({"url": u.trim()})));

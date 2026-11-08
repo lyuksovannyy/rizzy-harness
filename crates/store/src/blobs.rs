@@ -38,9 +38,10 @@ CREATE TABLE IF NOT EXISTS blob_previews (
 );
 "#;
 
-/// A blob nothing references any more (the Phase B artifact versions add
-/// their own `NOT EXISTS` here). Needs `blobs b`.
-const UNREFERENCED: &str = "NOT EXISTS (SELECT 1 FROM media_items r WHERE r.blob_id = b.blob_id)";
+/// A blob nothing references any more: no Media item and no artifact
+/// version. Needs `blobs b`.
+const UNREFERENCED: &str = "NOT EXISTS (SELECT 1 FROM media_items r WHERE r.blob_id = b.blob_id)
+     AND NOT EXISTS (SELECT 1 FROM artifact_versions v WHERE v.blob_id = b.blob_id)";
 
 const BLOB_COLS: &str =
     "b.blob_id, b.owner_id, b.sha256, b.size, b.kind, b.format, b.mime, b.display, b.created_ms";
@@ -142,7 +143,7 @@ pub struct Usage {
     /// Blobs its Media items show, and how many items.
     pub media_bytes: u64,
     pub media_items: u64,
-    /// Blobs its artifact versions hold, and how many versions (Phase B).
+    /// Blobs its artifact versions hold, and how many ready versions.
     pub artifact_bytes: u64,
     pub artifact_versions: u64,
 }
@@ -248,7 +249,8 @@ pub(crate) fn release_unreferenced(tx: &Transaction, candidates: &[String]) -> R
 /// account's row goes: the FK cascade then removes its blob and item rows,
 /// and what a cascade cannot reach (FTS rows) must be deleted here first.
 pub(crate) fn on_user_deleted(tx: &rusqlite::Transaction, user_id: &str) -> crate::Result<()> {
-    crate::media::forget_owner(tx, user_id)
+    crate::media::forget_owner(tx, user_id)?;
+    crate::artifacts::forget_owner(tx, user_id)
 }
 
 impl Store {
@@ -278,22 +280,34 @@ impl Store {
     /// What `owner` (`None`: the API token) stores.
     pub fn blob_usage(&self, owner: Option<&str>) -> Result<Usage> {
         let conn = self.lock();
-        let (used, media_bytes, media_items): (i64, i64, i64) = conn.query_row(
+        let n: [i64; 5] = conn.query_row(
             "SELECT
                 (SELECT COALESCE(SUM(size), 0) FROM blobs WHERE owner_id IS ?1),
                 (SELECT COALESCE(SUM(b.size), 0) FROM blobs b
                  WHERE b.owner_id IS ?1
                    AND EXISTS (SELECT 1 FROM media_items mi WHERE mi.blob_id = b.blob_id)),
-                (SELECT COUNT(*) FROM media_items WHERE owner_id IS ?1)",
+                (SELECT COUNT(*) FROM media_items WHERE owner_id IS ?1),
+                (SELECT COALESCE(SUM(b.size), 0) FROM blobs b
+                 WHERE b.owner_id IS ?1
+                   AND EXISTS (SELECT 1 FROM artifact_versions v WHERE v.blob_id = b.blob_id)),
+                (SELECT COUNT(*) FROM artifact_versions v JOIN artifacts a ON a.artifact_id = v.artifact_id
+                 WHERE a.owner_id IS ?1 AND v.status = 'ready')",
             params![owner],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?]),
         )?;
+        let [
+            used,
+            media_bytes,
+            media_items,
+            artifact_bytes,
+            artifact_versions,
+        ] = n.map(|v| v.max(0) as u64);
         Ok(Usage {
-            used: used.max(0) as u64,
-            media_bytes: media_bytes.max(0) as u64,
-            media_items: media_items.max(0) as u64,
-            artifact_bytes: 0,
-            artifact_versions: 0,
+            used,
+            media_bytes,
+            media_items,
+            artifact_bytes,
+            artifact_versions,
         })
     }
 
@@ -312,7 +326,9 @@ impl Store {
         let mut st = conn.prepare(
             "SELECT u.user_id, u.username,
                     (SELECT COALESCE(SUM(size), 0) FROM blobs b WHERE b.owner_id = u.user_id),
-                    (SELECT COUNT(*) FROM media_items mi WHERE mi.owner_id = u.user_id)
+                    (SELECT COUNT(*) FROM media_items mi WHERE mi.owner_id = u.user_id),
+                    (SELECT COUNT(*) FROM artifact_versions v JOIN artifacts a ON a.artifact_id = v.artifact_id
+                     WHERE a.owner_id = u.user_id AND v.status = 'ready')
              FROM users u ORDER BY 3 DESC, u.username",
         )?;
         let rows = st
@@ -322,7 +338,7 @@ impl Store {
                     username: r.get(1)?,
                     used: r.get::<_, i64>(2)?.max(0) as u64,
                     media_items: r.get::<_, i64>(3)?.max(0) as u64,
-                    artifact_versions: 0,
+                    artifact_versions: r.get::<_, i64>(4)?.max(0) as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

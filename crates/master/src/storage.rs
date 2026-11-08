@@ -240,7 +240,25 @@ pub fn open(m: &Master, data_dir: &Path) -> std::io::Result<()> {
     if removed > 0 {
         tracing::info!(files = removed, "removed stored files without a row");
     }
+    fail_missing(m, &st).map_err(|e| std::io::Error::other(e.to_string()))?;
     let _ = m.inner.storage.set(st);
+    Ok(())
+}
+
+/// Ready artifact versions whose file is gone (a restored database without
+/// its `blobs/`) become failed instead of failing every download.
+fn fail_missing(m: &Master, st: &Storage) -> harness_store::Result<()> {
+    let missing: Vec<String> = m
+        .inner
+        .mirror
+        .artifact_ready_blobs()?
+        .into_iter()
+        .filter(|id| st.path(id).is_some_and(|p| !p.exists()))
+        .collect();
+    if !missing.is_empty() {
+        let n = m.inner.mirror.artifact_fail_missing(&missing)?;
+        tracing::warn!(versions = n, "artifact files are missing; marked failed");
+    }
     Ok(())
 }
 
@@ -316,6 +334,44 @@ fn disk_floor(m: &Master, cfg: &StorageConfig, more: u64) -> Result<(), Refusal>
     }
 }
 
+/// The free-disk floor for a write of `more` bytes, as a user message.
+pub(crate) fn disk_ok(m: &Master, more: u64) -> Result<(), String> {
+    disk_floor(m, &config(m), more).map_err(|(_, msg)| msg)
+}
+
+/// Whether `size` more bytes of `owner`'s fit: the file limit, the
+/// account's and the server's quota, the free-disk floor. Checked before a
+/// published file moves; the insert transaction checks the quotas again.
+pub async fn check_room(m: &Master, owner: Option<&str>, size: u64) -> Result<(), String> {
+    let cfg = config(m);
+    if size > cfg.max_file() {
+        return Err(format!(
+            "it is larger than the {} MB limit for one file",
+            cfg.max_file_mb
+        ));
+    }
+    let o = owner.map(str::to_string);
+    let (used, total) = m
+        .inner
+        .mirror
+        .call(move |s| {
+            Ok::<_, harness_store::StoreError>((s.blob_usage(o.as_deref())?.used, s.blob_total()?))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let limits = cfg.limits(owner);
+    for (used, limit, server) in [(used, limits.account, false), (total, limits.server, true)] {
+        if limit > 0 && used.saturating_add(size) > limit {
+            return Err(full_message(&OverQuota {
+                used,
+                limit,
+                server,
+            }));
+        }
+    }
+    disk_ok(m, size)
+}
+
 /// How a full quota reads to the user.
 pub fn full_message(q: &OverQuota) -> String {
     let gb = |b: u64| b as f64 / (1024.0 * MB as f64);
@@ -370,10 +426,58 @@ async fn room(m: &Master, cfg: &StorageConfig, owner: Option<&str>) -> Result<u6
 }
 
 /// Bytes handed to the writer thread; a closed channel without `End` is an
-/// abandoned upload.
+/// abandoned file.
 enum Chunk {
     Data(Bytes),
     End,
+}
+
+/// A new file in `tmp/`, hashed and sealed on a blocking thread as bytes
+/// arrive (an upload, or a file pulled from a node). Dropped or abandoned
+/// before `finish`, its file is deleted.
+pub(crate) struct TempWriter {
+    tx: mpsc::Sender<Chunk>,
+    handle: tokio::task::JoinHandle<std::io::Result<Option<Written>>>,
+}
+
+impl TempWriter {
+    pub(crate) fn start(st: &Storage) -> std::io::Result<Self> {
+        let blob_id = harness_core::new_id();
+        let mut w = Writer::create(&st.tmp(), &blob_id, crate::sniff::HEAD)?;
+        let (tx, mut rx) = mpsc::channel::<Chunk>(8);
+        let handle = tokio::task::spawn_blocking(move || -> std::io::Result<Option<Written>> {
+            loop {
+                match rx.blocking_recv() {
+                    Some(Chunk::Data(b)) => w.write(&b)?,
+                    Some(Chunk::End) => return w.finish().map(Some),
+                    // Abandoned: dropping the writer deletes its file.
+                    None => return Ok(None),
+                }
+            }
+        });
+        Ok(Self { tx, handle })
+    }
+
+    /// False when the writer stopped (a disk error).
+    pub(crate) async fn write(&self, b: Bytes) -> bool {
+        self.tx.send(Chunk::Data(b)).await.is_ok()
+    }
+
+    /// Seal the last segment and sync: the file, ready to commit.
+    pub(crate) async fn finish(self) -> std::io::Result<Written> {
+        let _ = self.tx.send(Chunk::End).await;
+        drop(self.tx);
+        match self.handle.await.map_err(std::io::Error::other)?? {
+            Some(w) => Ok(w),
+            None => Err(std::io::Error::other("the file was not finished")),
+        }
+    }
+
+    /// Stop and delete the file, waiting until it is gone.
+    pub(crate) async fn abandon(self) {
+        drop(self.tx);
+        let _ = self.handle.await;
+    }
 }
 
 /// Receive an upload body into a new temp file, with every limit checked
@@ -413,21 +517,13 @@ pub async fn receive(
     }
     disk_floor(m, &cfg, content_length.unwrap_or(0))?;
 
-    let blob_id = harness_core::new_id();
-    let (tx, mut rx) = mpsc::channel::<Chunk>(8);
-    let tmp = st.tmp();
-    let id = blob_id.clone();
-    let writer = tokio::task::spawn_blocking(move || -> std::io::Result<Option<Written>> {
-        let mut w = Writer::create(&tmp, &id, crate::sniff::HEAD)?;
-        loop {
-            match rx.blocking_recv() {
-                Some(Chunk::Data(b)) => w.write(&b)?,
-                Some(Chunk::End) => return w.finish().map(Some),
-                // Abandoned: dropping the writer deletes its file.
-                None => return Ok(None),
-            }
-        }
-    });
+    let writer = TempWriter::start(st).map_err(|e| {
+        tracing::warn!(error = %e, "cannot start a stored file");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not write the file".to_string(),
+        )
+    })?;
 
     let (idle, total) = st.timeouts();
     let deadline = Instant::now() + total;
@@ -468,35 +564,24 @@ pub async fn receive(
                 break Err(e);
             }
         }
-        if tx.send(Chunk::Data(bytes)).await.is_err() {
+        if !writer.write(bytes).await {
             break Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not write the file".into(),
             ));
         }
     };
-    if outcome.is_ok() {
-        let _ = tx.send(Chunk::End).await;
+    if let Err(e) = outcome {
+        writer.abandon().await;
+        return Err(e);
     }
-    drop(tx);
-    let written = writer
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    outcome?;
-    match written {
-        Ok(Some(w)) => Ok(w),
-        Ok(None) => Err((
+    writer.finish().await.map_err(|e| {
+        tracing::warn!(error = %e, "writing an upload failed");
+        (
             StatusCode::INTERNAL_SERVER_ERROR,
             "could not write the file".into(),
-        )),
-        Err(e) => {
-            tracing::warn!(error = %e, "writing an upload failed");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not write the file".into(),
-            ))
-        }
-    }
+        )
+    })
 }
 
 /// Move a written file into its shard and run `record` (the store
@@ -582,18 +667,20 @@ pub async fn on_user_deleted(m: &Master) {
     }
 }
 
-/// The hourly part of the blob store: unreferenced rows, then temp files
-/// and files without a row, each older than an hour.
+/// The hourly part of the blob store: Artifacts' retention, unreferenced
+/// rows, then temp files and files without a row, each older than an hour.
 pub async fn hourly(m: &Master) {
     let Some(st) = get(m) else { return };
     let _g = st.commit.lock().await;
+    let released = crate::artifacts::hourly(m).await;
     let before = harness_core::now_ms() - SWEEP_AGE.as_millis() as i64;
     let res = m
         .inner
         .mirror
         .call(move |s| {
             let stale = s.blobs_unreferenced(before)?;
-            let gone = s.blob_delete(&stale)?;
+            let mut gone = s.blob_delete(&stale)?;
+            gone.extend(released);
             if !gone.is_empty() {
                 s.checkpoint()?;
             }

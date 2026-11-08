@@ -1,9 +1,10 @@
 # Media and the blob store: design note
 
-Status: **Phase A built** (the blob store, Media uploads, serving, thumbnails, quotas, sweeps,
-storage settings). Artifacts (Phase B) and images in chats (Phase C) build on it and are
-marked **[B]** and **[C]**. The contract is the sidebar-areas design (v2), §5 and §6; this
-note says what the code does and why.
+Status: **Phases A and B built** (the blob store, Media uploads, serving, thumbnails, quotas,
+sweeps, storage settings; Artifacts and the agent items they add, marked **[B]**, see
+[artifacts.md](artifacts.md)). Images in chats (Phase C) build on it and are marked **[C]**.
+The contract is the sidebar-areas design (v2), §5 and §6; this note says what the code does
+and why.
 
 ## What Media is
 
