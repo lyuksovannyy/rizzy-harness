@@ -542,15 +542,6 @@ export interface SearchResponse {
   kinds: SearchKind[];
 }
 
-export interface SearchHit {
-  session_id: string;
-  title: string;
-  /** Matched terms wrapped in \u0002 … \u0003. */
-  snippet: string;
-  score: number;
-  updated_ms: number;
-}
-
 export interface SessionRow {
   session_id: string;
   node_id: string;

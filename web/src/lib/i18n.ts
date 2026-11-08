@@ -8,17 +8,13 @@ const en = {
   "home.subtitle": "How can I help?",
   "session.untitled": "New chat",
   "nav.newChat": "New chat",
-  "nav.search": "Search chats",
-  "nav.recents": "Recents",
-  "nav.settings": "Settings",
+  "nav.search": "Search",
+  "nav.recents": "Recent",
   "nav.agents": "Agents",
   "nav.logout": "Log out",
   "nav.collapse": "Collapse sidebar",
   "nav.expand": "Open sidebar",
   "nav.noChats": "No chats yet.",
-  "nav.noMatches": "No matching chats.",
-  "nav.serverAdmin": "server admin",
-  "workspace.label": "Workspace",
   "workspace.personal": "Personal",
   "workspace.new": "New workspace…",
   "workspace.newName": "Workspace name",
@@ -110,6 +106,23 @@ const en = {
   // Two blocks, one per owner, so parallel additions merge cleanly: each
   // adds lines only inside its own block.
   // ── shell (I3) ──
+  "nav.searchShortcut": "Search (Ctrl K)",
+  "nav.expandRail": "Expand sidebar",
+  "nav.routines": "Routines",
+  "nav.media": "Media",
+  "nav.artifacts": "Artifacts",
+  "nav.connections": "Connections",
+  "nav.later": "Later",
+  "nav.comingLater": "Coming later",
+  "nav.newResult": "{name}, 1 new result",
+  "nav.newResults": "{name}, {n} new results",
+  "nav.noProjects": "No projects yet",
+  "nav.showMore": "Show {n} more",
+  "nav.showFewer": "Show fewer",
+  "nav.account": "{name} (@{username}) — {tier}",
+  "nav.railAccount": "{name} — {tier}",
+  "account.serverAdmin": "Server admin",
+  "account.user": "User",
   // ── end shell ──
 
   // ── feature pages (I4) ──

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceSummary } from "../types";
-import { afterChange, can, followRoute, keepsRoute, workspaceName } from "./workspaces";
+import { accountLine, afterChange, can, followRoute, keepsRoute, switchRoute, workspaceName } from "./workspaces";
 
 describe("workspaceName", () => {
   it("names Personal from the catalog, whatever is stored", () => {
@@ -80,5 +80,39 @@ describe("afterChange", () => {
     expect(afterChange(ws("acme"), [personal], "acme")).toEqual({ fallBack: true, gone: null });
     // Leaving another one does not hide losing this one.
     expect(afterChange(ws("acme", { name: "Acme" }), [personal], "beta")).toEqual({ fallBack: true, gone: "Acme" });
+  });
+});
+
+describe("accountLine", () => {
+  const ws = (personal: boolean, role: WorkspaceSummary["role"]) => ({ name: "Acme", personal, role });
+
+  it("names the workspace and the role in a team", () => {
+    expect(accountLine({ role: "member" }, ws(false, "guest"))).toBe("Acme · Guest");
+    expect(accountLine({ role: "admin" }, ws(false, "owner"))).toBe("Acme · Owner");
+  });
+
+  it("says the server role in Personal, where the user is always owner", () => {
+    expect(accountLine({ role: "admin" }, ws(true, "owner"))).toBe("Personal · Server admin");
+    expect(accountLine({ role: "member" }, ws(true, "owner"))).toBe("Personal · User");
+  });
+
+  it("has only the server role without a workspace (the API token)", () => {
+    expect(accountLine({ role: "admin" }, null)).toBe("Server admin");
+  });
+});
+
+describe("switchRoute", () => {
+  it("takes an area's page to its list in the new workspace", () => {
+    expect(switchRoute({ kind: "agents", id: "writer" })).toEqual({ kind: "agents", id: null });
+    expect(switchRoute({ kind: "routines", id: "a".repeat(32), tab: "runs" })).toEqual({ kind: "routines", id: null });
+    expect(switchRoute({ kind: "media", filter: "images", id: "b".repeat(32) })).toEqual({ kind: "media", filter: "images", id: null });
+    expect(switchRoute({ kind: "artifacts", id: "c".repeat(32) })).toEqual({ kind: "artifacts", id: null });
+  });
+
+  it("leaves chats, projects and the rest to keepsRoute", () => {
+    expect(switchRoute({ kind: "session", id: "s" })).toBeNull();
+    expect(switchRoute({ kind: "project", id: "p" })).toBeNull();
+    expect(switchRoute({ kind: "home" })).toBeNull();
+    expect(switchRoute({ kind: "settings" })).toBeNull();
   });
 });

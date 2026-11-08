@@ -1,4 +1,4 @@
-import { Menu, SquarePen } from "lucide-react";
+import { Menu } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
@@ -7,7 +7,7 @@ import { t } from "../lib/i18n";
 import { type ClassifierState, decide, emptyState, parseState, record, serialize } from "../lib/classifier";
 import { agenticBlockReason, type Mode } from "../lib/modes";
 import { NODES_HASH, parseRoute, type Route, routeHash } from "../lib/routes";
-import { afterChange, followRoute, keepsRoute, workspaceName } from "../lib/workspaces";
+import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
@@ -43,6 +43,11 @@ const Project = lazy(() => import("./Project"));
 const Routines = lazy(() => import("./Routines"));
 const Media = lazy(() => import("./Media"));
 const Artifacts = lazy(() => import("./Artifacts"));
+// Imported on the first sign of intent (pointer or focus on Search, or a
+// shortcut), so the panel opens without waiting.
+const loadSearch = () => import("./SearchPanel");
+const SearchPanel = lazy(loadSearch);
+const preloadSearch = () => void loadSearch().catch(() => {});
 
 /** Until `/api/features` answers: no area shows. */
 const NO_FEATURES: Features = {
@@ -63,6 +68,31 @@ const NOTICES_MS = 5 * 60_000;
 
 function go(r: Route) {
   location.hash = routeHash(r);
+}
+
+/** Phones and narrow windows: the sidebar is a drawer over the page. */
+const NARROW = "(max-width: 760px)";
+const narrowQuery = () => window.matchMedia?.(NARROW);
+
+function useNarrow(): boolean {
+  return useSyncExternalStore(
+    (on) => {
+      const m = narrowQuery();
+      m?.addEventListener?.("change", on);
+      return () => m?.removeEventListener?.("change", on);
+    },
+    () => narrowQuery()?.matches ?? false,
+  );
+}
+
+/** Whether a key press opens search: Ctrl/Cmd+K anywhere (the composer
+ * too), "/" only outside text fields. */
+export function opensSearch(e: KeyboardEvent): boolean {
+  if (e.altKey) return false;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") return true;
+  if (e.key !== "/" || e.ctrlKey || e.metaKey) return false;
+  const el = e.target instanceof HTMLElement ? e.target : null;
+  return !(el && (el.isContentEditable || el.closest("input, textarea, select")));
 }
 
 function useRoute(): Route {
@@ -121,6 +151,10 @@ export function Shell(props: {
     }
   });
   const [drawer, setDrawer] = useState(false);
+  const narrow = useNarrow();
+  const [searching, setSearching] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const shellBox = useRef<HTMLDivElement>(null);
   const route = useRoute();
   // Each visit to the home screen re-rolls its background: arriving there,
   // or New chat while already there (Home stays mounted then).
@@ -470,6 +504,49 @@ export function Shell(props: {
     go(r);
   };
   const page: FeaturePageProps = { me, scope: workspaceId, navigate, live, features };
+  // On a phone the drawer closes first; the panel then covers the screen.
+  const openSearch = useCallback(() => {
+    preloadSearch();
+    setDrawer(false);
+    setSearching(true);
+  }, []);
+  // Routine results not seen yet, here (attention lists every workspace's).
+  const routineUnseen = useMemo(
+    () => routineAttention.filter((r) => r.workspace_id === workspaceId && r.kind !== "paused").reduce((n, r) => n + r.unseen, 0),
+    [routineAttention, workspaceId],
+  );
+  const drawerOpen = narrow && drawer;
+
+  // Ctrl/Cmd+K anywhere and "/" outside fields open search; the open panel
+  // takes Ctrl/Cmd+K itself. Esc closes the drawer, back to its Menu button.
+  const searchingRef = useRef(searching);
+  const drawerRef = useRef(drawerOpen);
+  const backToMenu = useRef(false);
+  useEffect(() => {
+    searchingRef.current = searching;
+    drawerRef.current = drawerOpen;
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (!searchingRef.current && opensSearch(e)) {
+        e.preventDefault();
+        openSearch();
+      } else if (e.key === "Escape" && drawerRef.current && !searchingRef.current) {
+        backToMenu.current = true;
+        setDrawer(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openSearch]);
+  // The open drawer takes focus on its first link; closed with Esc, focus
+  // goes back to Menu once the page is no longer inert.
+  useEffect(() => {
+    if (drawerOpen) shellBox.current?.querySelector<HTMLElement>(".sidebar nav a")?.focus();
+    else if (backToMenu.current) menuButton.current?.focus();
+    backToMenu.current = false;
+  }, [drawerOpen]);
 
   if (prefs && !prefs.onboarded) {
     return (
@@ -487,49 +564,39 @@ export function Shell(props: {
   }
 
   return (
-    <div className={`shell ${collapsed ? "collapsed" : ""} ${drawer ? "drawer-open" : ""}`}>
-      {!collapsed && (
-        <Sidebar
-          me={me}
-          sessions={listed}
-          nodes={nodes}
-          selected={selected}
-          conn={live.state}
-          workspaces={workspaces}
-          onSwitch={(id) => {
-            // On the agents pages a switch goes to the list, listed for the new workspace.
-            if (route.kind === "agents") go({ kind: "agents", id: null });
-            return switchTo(id, route.kind === "agents" || keepsRoute(openRow, id));
-          }}
-          onWorkspaceSettings={() => navigate({ kind: "settings", section: "workspace" })}
-          onSelect={(id) => navigate({ kind: "session", id })}
-          onNew={() => navigate({ kind: "home" })}
-          onAgents={() => navigate({ kind: "agents", id: null })}
-          agentsOpen={route.kind === "agents"}
-          onSettings={() => navigate({ kind: "settings" })}
-          onLogout={logout}
-          onCollapse={() => (drawer ? setDrawer(false) : toggleCollapsed())}
-          projects={projects}
-          canCreateProject={canCreateProject}
-          selectedProject={route.kind === "project" ? route.id : null}
-          onProject={(id) => navigate({ kind: "project", id })}
-        />
-      )}
-      {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
-      <main className="main">
+    <div ref={shellBox} className={`shell ${collapsed && !narrow ? "collapsed" : ""} ${drawerOpen ? "drawer-open" : ""}`}>
+      <Sidebar
+        route={route}
+        onNavigate={navigate}
+        me={me}
+        displayName={prefs?.display_name || me.username}
+        sessions={listed}
+        nodes={nodes}
+        conn={live.state}
+        workspaces={workspaces}
+        features={features}
+        routineUnseen={routineUnseen}
+        onSwitch={(id) => {
+          // An area's page goes to that area's list in the new workspace.
+          const list = switchRoute(route);
+          if (list) go(list);
+          return switchTo(id, !!list || keepsRoute(openRow, id));
+        }}
+        onLogout={logout}
+        onSearch={openSearch}
+        onSearchIntent={preloadSearch}
+        onCollapse={() => (narrow ? setDrawer(false) : toggleCollapsed())}
+        // The drawer always holds the whole sidebar, whatever the desktop chose.
+        rail={collapsed && !narrow}
+        projects={projects}
+        canCreateProject={canCreateProject}
+      />
+      {drawerOpen && <div className="scrim" onClick={() => setDrawer(false)} />}
+      <main className="main" inert={drawerOpen}>
         <div className="topbar">
-          <button
-            className="icon"
-            aria-label={t("nav.expand")}
-            onClick={() => (collapsed ? toggleCollapsed() : setDrawer(true))}
-          >
+          <button ref={menuButton} className="icon" aria-label={t("nav.expand")} onClick={() => setDrawer(true)}>
             <Menu size={18} />
           </button>
-          {collapsed && (
-            <button className="icon" aria-label={t("nav.newChat")} onClick={() => navigate({ kind: "home" })}>
-              <SquarePen size={18} />
-            </button>
-          )}
         </div>
         {props.gone && (
           <div className="workspace-gone small" role="status">
@@ -637,6 +704,21 @@ export function Shell(props: {
           )}
         </Suspense>
       </main>
+      {searching && (
+        <Suspense fallback={null}>
+          <SearchPanel
+            workspace={workspaceId}
+            kinds={features.search.kinds}
+            projects={projects}
+            timeZone={prefs?.timezone}
+            onOpen={(r) => {
+              setSearching(false);
+              navigate(r);
+            }}
+            onClose={() => setSearching(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

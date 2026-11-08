@@ -1,5 +1,5 @@
-//! Full-text index over chats: filled on append, incognito excluded,
-//! rebuildable from the log, filtered by owner.
+//! Full-text index over chats: filled on append, incognito and sub-agent
+//! chats excluded, rebuildable from the log, filtered by owner.
 
 use harness_core::{RawEvent, SessionId};
 use harness_store::{HIT_END, HIT_START, Store};
@@ -123,4 +123,45 @@ fn latest_message_texts_skip_empty_messages() {
     assert!(!got.contains_key(&none));
     assert!(!got.contains_key(&quiet));
     assert_eq!(got.len(), 2);
+}
+
+#[test]
+fn search_never_finds_sub_agent_or_incognito_chats() {
+    let s = Store::open_in_memory().unwrap();
+    let parent = chat(&s, "u1", "plan the garden", &["beans and kale"], false);
+    chat(&s, "u1", "secret garden", &["hidden beans"], true);
+    // A delegate's session, named after its parent (as the node writes it).
+    let sub = SessionId::new();
+    s.append(
+        "master",
+        &ev(
+            sub,
+            1,
+            "session_created",
+            json!({"title": "@scout: beans", "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "approval_mode": "ask", "parent_session": parent.to_string()}),
+        ),
+    )
+    .unwrap();
+    s.append(
+        "master",
+        &ev(
+            sub,
+            2,
+            "assistant_message",
+            json!({"turn_id": "t", "message_id": "m", "text": "beans grow fast"}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        s.session(sub).unwrap().unwrap().parent_id,
+        Some(parent.to_string())
+    );
+    // Indexed, but its parent chat is the hit; nothing else.
+    assert!(s.session_search_text(sub).unwrap().contains("grow fast"));
+    let hits = s.search("\"beans\"", Some("u1"), None, 10).unwrap();
+    assert_eq!(
+        hits.iter().map(|h| h.session_id).collect::<Vec<_>>(),
+        vec![parent]
+    );
+    assert!(s.search("\"grow\"", None, None, 10).unwrap().is_empty());
 }

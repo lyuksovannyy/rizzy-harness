@@ -1,43 +1,48 @@
-// The sidebar's Projects section and the mark a project's chats carry in
-// Recents (docs/projects.md). Self-contained, so the sidebar can move it.
-import { Plus } from "lucide-react";
+// The sidebar's project rows and the mark a project's chats carry in Recent
+// (docs/projects.md, docs/sidebar-search.md).
+import { useState } from "react";
 import { t } from "../lib/i18n";
 import { ProjectIcon } from "../lib/projectIcons";
 import type { ProjectSummary } from "../lib/projects";
+import type { Route } from "../lib/routes";
+import { NavLink } from "./NavLink";
 
-/** The workspace's projects with a + for a new one; nothing when there are
- * none and the viewer may not create one. */
-export function ProjectNav(props: {
+/** How many projects show before "Show N more". */
+const FIRST = 5;
+
+/** The workspace's projects, most recently changed first: the first five,
+ * then the rest on request. */
+export function ProjectRows(props: {
   projects: ProjectSummary[];
-  canCreate: boolean;
+  /** The open project's id, if one is open. */
   selected: string | null;
-  /** A project's id, or "new" for the create form. */
-  onOpen: (id: string) => void;
+  onNavigate: (r: Route) => void;
 }) {
-  if (props.projects.length === 0 && !props.canCreate) return null;
+  const [all, setAll] = useState(false);
+  if (props.projects.length === 0) return <div className="muted pad small">{t("nav.noProjects")}</div>;
+  const sorted = [...props.projects].sort((a, b) => b.updated_ms - a.updated_ms);
+  const shown = all ? sorted : sorted.slice(0, FIRST);
+  const more = sorted.length - FIRST;
   return (
     <>
-      <div className="section-label section-row">
-        <span className="grow">{t("nav.projects")}</span>
-        {props.canCreate && (
-          <button className="icon small" aria-label={t("nav.newProject")} title={t("nav.newProject")} onClick={() => props.onOpen("new")}>
-            <Plus size={14} />
-          </button>
-        )}
-      </div>
-      <nav className="project-list">
-        {props.projects.map((p) => (
-          <button
-            key={p.project_id}
-            className={`session-item ${p.project_id === props.selected ? "active" : ""}`}
-            onClick={() => props.onOpen(p.project_id)}
-            title={p.description || p.name}
-          >
-            <ProjectIcon icon={p.icon} accent={p.accent} />
-            <span className="ellipsis grow">{p.name}</span>
-          </button>
-        ))}
-      </nav>
+      {shown.map((p) => (
+        <NavLink
+          key={p.project_id}
+          to={{ kind: "project", id: p.project_id }}
+          current={p.project_id === props.selected}
+          onNavigate={props.onNavigate}
+          className="session-item"
+          title={p.description || p.name}
+        >
+          <ProjectIcon icon={p.icon} accent={p.accent} />
+          <span className="ellipsis grow">{p.name}</span>
+        </NavLink>
+      ))}
+      {more > 0 && (
+        <button type="button" className="link small show-more" onClick={() => setAll((v) => !v)}>
+          {all ? t("nav.showFewer") : t("nav.showMore", { n: String(more) })}
+        </button>
+      )}
     </>
   );
 }

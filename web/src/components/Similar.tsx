@@ -3,7 +3,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { api } from "../api";
 import type { Mode } from "../lib/modes";
-import type { SearchHit } from "../types";
+import { when } from "../lib/when";
+import type { SearchResult } from "../types";
 import { Highlight } from "./Highlight";
 import timeSensitive from "../lib/time-sensitive.json";
 
@@ -16,13 +17,6 @@ function looksTimeSensitive(text: string): boolean {
     timeSensitive.words.some((w) => words.includes(w)) ||
     timeSensitive.phrases.some((p) => lower.includes(p))
   );
-}
-
-function ago(ms: number): string {
-  const d = Math.max(0, Date.now() - ms) / 1000;
-  if (d < 3600) return `${Math.max(1, Math.round(d / 60))}m ago`;
-  if (d < 86400) return `${Math.round(d / 3600)}h ago`;
-  return `${Math.round(d / 86400)}d ago`;
 }
 
 export interface SimilarHandle {
@@ -41,7 +35,7 @@ export const Similar = forwardRef<
     onCount?: (n: number) => void;
   }
 >(function Similar({ text, mode, workspace, onOpen, onCount }, ref) {
-    const [hits, setHits] = useState<SearchHit[]>([]);
+    const [hits, setHits] = useState<SearchResult[]>([]);
     useEffect(() => onCount?.(hits.length), [hits.length, onCount]);
     const list = useRef<HTMLUListElement>(null);
     useImperativeHandle(ref, () => ({
@@ -63,7 +57,7 @@ export const Similar = forwardRef<
       const ctl = new AbortController();
       const timer = setTimeout(() => {
         api
-          .search(q, true, ctl.signal, workspace)
+          .search(q, { suggest: true, signal: ctl.signal, workspace })
           .then((r) => setHits(r.results))
           .catch(() => {});
       }, DEBOUNCE_MS);
@@ -80,10 +74,10 @@ export const Similar = forwardRef<
         <div className="similar-label muted">You may have asked this before</div>
         <ul ref={list}>
           {hits.map((h, i) => (
-            <li key={h.session_id}>
+            <li key={h.id}>
               <button
                 type="button"
-                onClick={() => onOpen(h.session_id)}
+                onClick={() => onOpen(h.id)}
                 onKeyDown={(e) => {
                   const items = list.current?.querySelectorAll("button");
                   if (e.key === "ArrowDown") {
@@ -99,11 +93,13 @@ export const Similar = forwardRef<
                   }
                 }}
               >
-                <span className="similar-title ellipsis">{h.title}</span>
-                <span className="similar-snippet ellipsis muted">
-                  <Highlight text={h.snippet} />
+                <span className="similar-title ellipsis">
+                  <Highlight text={h.title} />
                 </span>
-                <span className="muted similar-age">{ago(h.updated_ms)}</span>
+                <span className="similar-snippet ellipsis muted">
+                  <Highlight text={h.snippet ?? h.preview} />
+                </span>
+                <span className="muted similar-age">{when(h.time_ms, Date.now())}</span>
               </button>
             </li>
           ))}
