@@ -30,7 +30,8 @@ const mediaApi = {
 };
 const storageApi = { mine: vi.fn<() => Promise<MyStorage>>(), admin: vi.fn(), save: vi.fn() };
 const upload = vi.fn();
-vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi, storageApi, upload }));
+const deleteMedia = vi.fn<(items: MediaItem[], both: boolean) => Promise<string | null>>();
+vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi, storageApi, upload, deleteMedia }));
 const queueThumb = vi.fn();
 vi.mock("../lib/thumbs", async (original) => ({ ...(await original<typeof import("../lib/thumbs")>()), queueThumb }));
 const { default: Media } = await import("./Media");
@@ -76,7 +77,8 @@ let root: Root;
 const navigate = vi.fn<(r: Route) => void>();
 const live = { onTopic: vi.fn(() => () => {}) } as unknown as Live;
 beforeEach(() => {
-  for (const f of [...Object.values(mediaApi), ...Object.values(storageApi), upload, queueThumb, navigate]) f.mockReset();
+  for (const f of [...Object.values(mediaApi), ...Object.values(storageApi), upload, queueThumb, navigate, deleteMedia]) f.mockReset();
+  deleteMedia.mockResolvedValue(null);
   storageApi.mine.mockResolvedValue({ used: 1.5 * 1024 ** 3, quota: 4 * 1024 ** 3, media: { bytes: 0, items: 0 }, artifacts: { bytes: 0, versions: 0 } });
   vi.stubGlobal("confirm", () => true);
   history.replaceState(null, "", "#/media");
@@ -91,12 +93,15 @@ afterEach(() => {
 });
 
 const flush = () => act(() => new Promise((r) => setTimeout(r, 0)));
-async function show(p: { filter?: MediaFilter | null; id?: string | null } = {}) {
+async function show(p: { filter?: MediaFilter | null; id?: string | null; features?: Features } = {}) {
   await act(async () =>
-    root.render(<Media me={me} scope="w1" navigate={navigate} live={live} features={features} filter={p.filter ?? null} id={p.id ?? null} />),
+    root.render(
+      <Media me={me} scope="w1" navigate={navigate} live={live} features={p.features ?? features} filter={p.filter ?? null} id={p.id ?? null} />,
+    ),
   );
-  // The preview is its own chunk: give its import time on first use.
-  for (let i = 0; i < 20 && p.id && !host.querySelector("dialog"); i++) await flush();
+  // The preview is its own chunk: give its import time on first use (up to
+  // a few seconds, for a busy machine running every test file at once).
+  for (let i = 0; i < 300 && p.id && !host.querySelector("dialog"); i++) await act(() => new Promise((r) => setTimeout(r, 10)));
   await flush();
 }
 const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".media-tile")];
@@ -183,6 +188,23 @@ describe("grid", () => {
     expect(host.querySelector(".media-empty")!.textContent).toBe("Nothing matches “zebra”.");
   });
 
+  test("once Artifacts shows, the empty grid also names agents", async () => {
+    mediaApi.list.mockResolvedValue(page([]));
+    await show({ features: { ...features, artifacts: { enabled: true, show: true, why: null } } });
+    expect(host.querySelector(".media-empty")!.textContent).toBe(
+      "Nothing here yet. Upload images, video or music, or ask an agent to publish a file it made.",
+    );
+  });
+
+  test("an agent's item wears the agent mark and says so", async () => {
+    const art = { artifact_id: id(9), version_id: id(8), seq: 3, name: "chart" };
+    mediaApi.list.mockResolvedValue(page([item(1, { origin: "agent", artifact: art, name: "chart.png" }), item(2)]));
+    await show();
+    expect(tiles()[0]!.getAttribute("aria-label")).toMatch(/^chart\.png, Image, 2\.3 MB, added .*, published by an agent$/);
+    expect(tiles()[0]!.querySelector(".media-agent")).not.toBeNull();
+    expect(tiles()[1]!.querySelector(".media-agent")).toBeNull();
+  });
+
   test("a server with Media turned off answers 404", async () => {
     mediaApi.list.mockRejectedValue(new HttpError(404, "not found"));
     await show();
@@ -253,9 +275,32 @@ describe("selection", () => {
     expect(tiles().map((t) => t.getAttribute("aria-pressed"))).toEqual(["true", "false", "true"]);
     expect(host.querySelector(".media-selection")!.textContent).toContain("2 selected");
     expect(navigate).not.toHaveBeenCalled();
+    act(() => button("Delete")!.click());
+    // Asked in place; none came from an agent, so there is no "Delete from both".
+    expect(host.querySelector(".media-selection")!.textContent).toContain("Delete these 2 items from Media?");
+    expect(button("Delete from both")).toBeUndefined();
+    expect(deleteMedia).not.toHaveBeenCalled();
     await act(async () => button("Delete")!.click());
-    expect(mediaApi.remove).toHaveBeenCalledWith([id(1), id(3)]);
+    expect(deleteMedia).toHaveBeenCalledWith([item(1), item(3)].map((m) => expect.objectContaining({ media_id: m.media_id })), false);
     expect(host.querySelector(".media-selection")).toBeNull();
+  });
+
+  test("agent items in the selection stay in Artifacts unless deleted from both", async () => {
+    const art = { artifact_id: id(9), version_id: id(8), seq: 3, name: "chart" };
+    mediaApi.list.mockResolvedValue(page([item(1, { origin: "agent", artifact: art }), item(2)]));
+    deleteMedia.mockResolvedValue("Deleted from Media, but these stay in Artifacts: chart v3.");
+    await show();
+    act(() => button("Select")!.click());
+    act(() => tiles()[0]!.click());
+    act(() => tiles()[1]!.click());
+    act(() => button("Delete")!.click());
+    expect(host.querySelector(".media-selection")!.textContent).toContain("One came from an agent and stays in Artifacts");
+    act(() => button("Cancel")!.click());
+    expect(host.querySelector(".media-selection")!.textContent).toContain("2 selected");
+    act(() => button("Delete")!.click());
+    await act(async () => button("Delete from both")!.click());
+    expect(deleteMedia).toHaveBeenCalledWith([expect.objectContaining({ media_id: id(1) }), expect.objectContaining({ media_id: id(2) })], true);
+    expect(host.querySelector(".error-text")!.textContent).toBe("Deleted from Media, but these stay in Artifacts: chart v3.");
   });
 });
 
@@ -301,11 +346,26 @@ describe("preview", () => {
     await act(async () => button("Rename")!.click());
     expect(mediaApi.update).toHaveBeenCalledWith(id(1), { name: "beach.jpg" });
     expect(host.querySelector("dialog h2")!.textContent).toBe("beach.jpg");
-    const asked: string[] = [];
-    vi.stubGlobal("confirm", (q: string) => (asked.push(q), true));
-    await act(async () => host.querySelector<HTMLButtonElement>("dialog button.danger")!.click());
-    expect(asked).toEqual(["Delete beach.jpg from Media?"]);
-    expect(mediaApi.remove).toHaveBeenCalledWith([id(1)]);
+    act(() => host.querySelector<HTMLButtonElement>("dialog button.danger")!.click());
+    const ask = host.querySelector(".media-confirm")!;
+    expect(ask.textContent).toContain("Delete beach.jpg from Media?");
+    expect([...ask.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Cancel", "Delete"]);
+    await act(async () => [...ask.querySelectorAll("button")].find((b) => b.textContent === "Delete")!.click());
+    expect(deleteMedia).toHaveBeenCalledWith([expect.objectContaining({ media_id: id(1) })], false);
+  });
+
+  test("an agent's item: Also in Artifacts, and Delete from both", async () => {
+    const art = { artifact_id: id(9), version_id: id(8), seq: 3, name: "chart" };
+    mediaApi.list.mockResolvedValue(page([item(1, { origin: "agent", artifact: art, source: { session_id: "s1", title: "Plots" } })]));
+    await show({ id: id(1) });
+    const also = [...host.querySelectorAll<HTMLAnchorElement>("dialog a")].find((a) => a.textContent?.startsWith("Also in Artifacts"))!;
+    expect(also.textContent).toBe("Also in Artifacts: chart v3");
+    expect(also.getAttribute("href")).toBe(`#/artifacts/${id(9)}`);
+    act(() => host.querySelector<HTMLButtonElement>("dialog button.danger")!.click());
+    const ask = host.querySelector(".media-confirm")!;
+    expect(ask.textContent).toContain("The file stays in Artifacts (chart v3); delete it there to free space.");
+    await act(async () => [...ask.querySelectorAll("button")].find((b) => b.textContent === "Delete from both")!.click());
+    expect(deleteMedia).toHaveBeenCalledWith([expect.objectContaining({ media_id: id(1) })], true);
   });
 
   test("falls back to Download: too large to decode, a HEIC or MOV the browser cannot show", async () => {

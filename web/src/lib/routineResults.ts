@@ -9,9 +9,16 @@ import type { RoutineAttention } from "../types";
 import { notifyEnabled } from "./notify";
 import { type Route, routeHash, routineHash } from "./routes";
 
-/** The run is seen by its owner (idempotent on the server). */
-export const markRunSeen = (routineId: string, runId: string) =>
-  call<{ ok: boolean }>("POST", `/api/routines/${routineId}/runs/${runId}/seen`);
+/** Finished runs this page already marked: the attention row and the open
+ * chat both mark the same run, and a run stays seen. */
+const marked = new Set<string>();
+
+/** The finished run is seen by its owner (idempotent on the server). */
+export async function markRunSeen(routineId: string, runId: string): Promise<void> {
+  if (marked.has(runId)) return;
+  await call<{ ok: boolean }>("POST", `/api/routines/${routineId}/runs/${runId}/seen`);
+  marked.add(runId);
+}
 
 /** "Finished", "Failed" or "Paused", as the row and the notification say it. */
 export function resultLabel(r: Pick<RoutineAttention, "kind">): string {

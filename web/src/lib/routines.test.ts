@@ -1,16 +1,20 @@
 // The Routines page's own logic: the schedule builder writes cron or an
 // interval and reads back only what it writes (anything else is Custom),
 // the list's trigger line, the Runs tab's status, duration and tokens, and
-// what a draft saves.
+// what a draft saves; the webhook card's sample box, localhost warning and
+// curl line.
 import { describe, expect, test } from "vitest";
 import {
+  curlExample,
   describeShape,
   draftOf,
   draftSpec,
   draftTriggers,
   duration,
   fromConfig,
+  localOnly,
   newDraft,
+  parseSample,
   type Routine,
   type RoutineTrigger,
   type Shape,
@@ -136,5 +140,32 @@ describe("drafts", () => {
     expect(draftTriggers(hook)).toEqual([{ trigger_id: "hook", kind: "webhook", config: {} }]);
     // A new webhook routine sends one webhook and no schedules.
     expect(draftTriggers({ ...newDraft("general", TZ, 0), when: "webhook" })).toEqual([{ kind: "webhook", config: {} }]);
+  });
+});
+
+describe("webhooks", () => {
+  test("the sample box: empty, JSON, or not yet", () => {
+    expect(parseSample("  ")).toBeNull();
+    expect(parseSample('{"issue": {"number": 42}}')).toEqual({ value: { issue: { number: 42 } } });
+    expect(parseSample("{oops")).toEqual({ error: "Not valid JSON yet." });
+  });
+
+  test("hosts only this machine can reach", () => {
+    for (const h of ["localhost", "app.localhost", "127.0.0.1", "127.1.2.3", "[::1]", "::1"]) expect(localOnly(h)).toBe(true);
+    for (const h of ["harness.example.com", "10.0.0.5", "192.168.1.2"]) expect(localOnly(h)).toBe(false);
+  });
+
+  test("the curl line: the secret when shown, else a variable; quotes survive", () => {
+    const url = "https://h.example/api/hooks/abc";
+    expect(curlExample(url, "s3cret", { text: "it's on" })).toBe(
+      [
+        "curl -X POST 'https://h.example/api/hooks/abc'",
+        "-H 'Authorization: Bearer s3cret'",
+        "-H 'Content-Type: application/json'",
+        `-d '{"text":"it'\\''s on"}'`,
+      ].join(" \\\n  "),
+    );
+    expect(curlExample(url, null, undefined)).toContain(`-H "Authorization: Bearer $HOOK_SECRET"`);
+    expect(curlExample(url, null, undefined)).toContain(`-d '{"text":"hello"}'`);
   });
 });

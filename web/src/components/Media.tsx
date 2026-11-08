@@ -1,15 +1,16 @@
 // Sidebar → Media (docs/media.md): the account's own images, video and audio
 // in this workspace, as a grid. Upload (button or drop, with progress),
 // filter by kind (the route) and origin, search names, select several to
-// delete, and open one in the preview (MediaPreview, its own chunk, which
+// delete (an agent's items can go from Artifacts too), and open one in the preview (MediaPreview, its own chunk, which
 // chats use too). Thumbnails are made by this browser (lib/thumbs.ts) as
 // tiles scroll into view. A lazy chunk; the strings live here.
-import { File, Film, Image as ImageIcon, Music, Play, Upload } from "lucide-react";
+import { Bot, File, Film, Image as ImageIcon, Music, Play, Upload } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { HttpError } from "../api";
+import { bytes } from "../lib/bytes";
 import {
-  bytes,
   clockTime,
+  deleteMedia,
   FILTER_KIND,
   KIND_LABEL,
   type MediaItem,
@@ -58,8 +59,12 @@ interface Sending {
 /** What a tile says to a screen reader: "beach.jpg, Image, 2.3 MB, added 3 days ago". */
 export function tileLabel(m: MediaItem, now: number): string {
   const added = when(m.created_ms, now).replace(/^(Yesterday|Now)$/i, (w) => w.toLowerCase());
-  return `${m.name}, ${KIND_LABEL[m.kind]}, ${bytes(m.size)}, added ${added}`;
+  return `${m.name}, ${KIND_LABEL[m.kind]}, ${bytes(m.size)}, added ${added}${m.origin === "agent" ? ", published by an agent" : ""}`;
 }
+
+/** The empty grid names only sources that exist: agents publish once Artifacts shows. */
+export const emptyText = (artifacts: boolean) =>
+  artifacts ? "Nothing here yet. Upload images, video or music, or ask an agent to publish a file it made." : "Nothing here yet. Upload images, video or music.";
 
 export default function Media(props: MediaPageProps) {
   const { scope, filter, id, navigate, live } = props;
@@ -76,6 +81,9 @@ export default function Media(props: MediaPageProps) {
   const [sending, setSending] = useState<Sending[]>([]);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+  // What a "Delete from both" could not delete (kept apart from load errors, which a reload clears).
+  const [leftOver, setLeftOver] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   // An item a link opened that the loaded page does not hold.
   const [extra, setExtra] = useState<MediaItem | null>(null);
@@ -158,18 +166,18 @@ export default function Media(props: MediaPageProps) {
     load();
   };
 
-  const remove = async () => {
-    const ids = [...selected];
-    if (!ids.length || !confirm(`Delete ${ids.length === 1 ? "this item" : `these ${ids.length} items`} from Media?`)) return;
+  const chosen = (items ?? []).filter((m) => selected.has(m.media_id));
+  const fromAgents = chosen.filter((m) => m.artifact).length;
+  const remove = async (both: boolean) => {
+    setConfirming(false);
     try {
-      // The server takes at most 100 per call.
-      for (let i = 0; i < ids.length; i += 100) await mediaApi.remove(ids.slice(i, i + 100));
+      setLeftOver(await deleteMedia(chosen, both));
       setSelected(new Set());
       setSelecting(false);
-      load();
     } catch (e) {
       setError(message(e));
     }
+    load();
   };
 
   const shown = items ?? [];
@@ -266,6 +274,7 @@ export default function Media(props: MediaPageProps) {
             onClick={() => {
               setSelecting(!selecting);
               setSelected(new Set());
+              setConfirming(false);
             }}
           >
             {selecting ? "Done" : "Select"}
@@ -273,11 +282,36 @@ export default function Media(props: MediaPageProps) {
         )}
       </div>
       {selecting && (
-        <div className="row media-selection" role="status">
-          <span className="grow">{selected.size === 1 ? "1 selected" : `${selected.size} selected`}</span>
-          <button type="button" className="danger" disabled={selected.size === 0} onClick={() => void remove()}>
-            Delete
-          </button>
+        <div className="row media-selection">
+          {confirming ? (
+            <>
+              <span className="grow" role="status">
+                Delete {chosen.length === 1 ? "this item" : `these ${chosen.length} items`} from Media?
+                {fromAgents > 0 &&
+                  ` ${fromAgents === 1 ? "One came from an agent and stays" : `${fromAgents} came from agents and stay`} in Artifacts; delete there to free space.`}
+              </span>
+              <button type="button" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button type="button" className="danger" onClick={() => void remove(false)}>
+                Delete
+              </button>
+              {fromAgents > 0 && (
+                <button type="button" className="danger" onClick={() => void remove(true)}>
+                  Delete from both
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="grow" role="status">
+                {selected.size === 1 ? "1 selected" : `${selected.size} selected`}
+              </span>
+              <button type="button" className="danger" disabled={selected.size === 0} onClick={() => setConfirming(true)}>
+                Delete
+              </button>
+            </>
+          )}
         </div>
       )}
       {sending.length > 0 && (
@@ -302,10 +336,15 @@ export default function Media(props: MediaPageProps) {
         </ul>
       )}
       {error && <div className="error-text">{error}</div>}
+      {leftOver && (
+        <div className="error-text" role="status">
+          {leftOver}
+        </div>
+      )}
       {!items && !error && <div className="muted">Loading…</div>}
       {items && shown.length === 0 && (
         <div className="media-empty muted">
-          {q ? `Nothing matches “${q}”.` : filtered && filter ? EMPTY[filter] : filtered ? "Nothing here with that origin." : "Nothing here yet. Upload images, video or music."}
+          {q ? `Nothing matches “${q}”.` : filtered && filter ? EMPTY[filter] : filtered ? "Nothing here with that origin." : emptyText(props.features.artifacts.show)}
         </div>
       )}
       {shown.length > 0 && (
@@ -341,7 +380,8 @@ export default function Media(props: MediaPageProps) {
             onNext={at >= 0 && at < shown.length - 1 ? () => move(1) : undefined}
             onClose={close}
             onChanged={patch}
-            onDeleted={() => {
+            onDeleted={(_id, note) => {
+              setLeftOver(note);
               close();
               load();
             }}
@@ -436,9 +476,15 @@ export function Tile({ m }: { m: MediaItem }) {
   const [broken, setBroken] = useState(false);
   const pictured = m.has_thumb && !broken;
   const length = m.duration_ms ? clockTime(m.duration_ms) : null;
+  const agent = m.origin === "agent" && (
+    <span className="media-agent" aria-hidden="true" title="Published by an agent">
+      <Bot size={12} />
+    </span>
+  );
   if (m.kind === "image" || m.kind === "video") {
     return (
       <>
+        {agent}
         {pictured ? (
           <img src={thumbUrl(m.media_id)} alt="" loading="lazy" onError={() => setBroken(true)} />
         ) : (
@@ -456,6 +502,7 @@ export function Tile({ m }: { m: MediaItem }) {
   }
   return (
     <span className="media-icon" aria-hidden="true">
+      {agent}
       {m.kind === "audio" ? <Music size={28} /> : <File size={28} />}
       <span className="media-name small ellipsis">{m.name}</span>
       <span className="small muted">{m.kind === "audio" ? length : m.format.toUpperCase()}</span>

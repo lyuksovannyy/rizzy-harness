@@ -66,7 +66,8 @@ export function RoutineRuns(props: { routine: Routine; zone: string; navigate: R
   };
   const openChat = (run: Run) => {
     if (!run.session_id) return;
-    if (!run.seen) void markRunSeen(routine.routine_id, run.run_id).catch(() => {});
+    // A run still going is marked by its chat once it ends.
+    if (!run.seen && run.ended_ms !== null) void markRunSeen(routine.routine_id, run.run_id).catch(() => {});
     props.navigate({ kind: "session", id: run.session_id });
   };
 

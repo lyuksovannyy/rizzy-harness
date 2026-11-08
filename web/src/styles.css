@@ -4376,7 +4376,74 @@ a.button-like {
 }
 a.button-like:hover { background: var(--bg-3-hover); }
 .storage-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-4); }
+/* Media: an agent's item wears a small bot mark; deleting asks in place. */
+.media-agent {
+  position: absolute; top: 6px; left: 6px; display: inline-flex; padding: 3px; border-radius: var(--r-full);
+  background: rgb(0 0 0 / 0.6); color: #fff;
+}
+.media-confirm { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent); border-radius: var(--r-lg); gap: var(--space-2); }
+.media-confirm p { margin: 0; }
+.media-selection { flex-wrap: wrap; }
+/* Artifacts: one row per name, its versions below when opened. */
+.artifact-row { display: flex; flex-direction: column; gap: var(--space-2); }
+.artifact-main { display: flex; align-items: center; gap: var(--space-3); }
+.artifact-line { flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.artifact-line .agent-name { color: var(--fg); text-decoration: none; }
+.artifact-line .agent-name:hover { text-decoration: underline; }
+.artifact-icon, .artifact-thumb { flex: none; width: 36px; height: 36px; border-radius: var(--r-md); }
+.artifact-icon { display: inline-flex; align-items: center; justify-content: center; background: var(--bg); border: 1px solid var(--line); color: var(--fg-2); }
+.artifact-thumb { object-fit: cover; border: 1px solid var(--line); }
+.artifact-thumb.large { width: auto; height: auto; max-width: 320px; max-height: 320px; }
+.artifact-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
+.artifact-actions a.button-like { min-height: 30px; padding: 4px 12px; font-size: var(--text-sm); }
+.artifact-rename input { width: 14em; }
+.artifact-menu { position: relative; }
+.artifact-menu > summary { list-style: none; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: var(--r-sm); color: var(--fg-2); cursor: pointer; font-size: 18px; line-height: 1; }
+.artifact-menu > summary::-webkit-details-marker { display: none; }
+.artifact-menu > summary:hover { background: var(--bg-hover); }
+.artifact-menu-items {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px; display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface-pop); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-2);
+}
+.artifact-menu-items button { justify-content: flex-start; background: transparent; border: 0; text-align: left; font-weight: var(--w-regular); }
+.artifact-menu-items button:hover:not(:disabled) { background: var(--bg-hover); }
+.artifact-versions ul { list-style: none; margin: 0; padding: 0; }
+.artifact-row .artifact-versions { padding-left: 48px; }
+.artifact-version { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-top: 1px solid var(--line); font-size: var(--text-sm); }
+.artifact-version-main, .artifact-version-facts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
+.artifact-version progress { width: 96px; }
+button.danger-text { color: var(--bad); }
+.artifact-head { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-4); }
+.artifact-title { margin: 0; font-size: var(--text-2xl); font-weight: var(--w-semibold); line-height: var(--lh-tight); overflow-wrap: anywhere; }
+.artifact-sub { flex-wrap: wrap; gap: var(--space-1) var(--space-2); margin-top: var(--space-1); }
+.artifact-notes { white-space: pre-wrap; }
+.artifact-preview { display: block; max-width: 100%; max-height: 480px; margin: var(--space-3) 0; border-radius: var(--r-lg); }
+.artifact-facts { margin: var(--space-4) 0; }
+.artifact-fact { display: contents; }
+.artifact-entries ul { list-style: none; margin: var(--space-2) 0 0; padding: 0; max-height: 360px; overflow: auto; }
+.artifact-entries li { display: flex; justify-content: space-between; gap: var(--space-3); padding: 2px 0; }
+.artifact-entries summary { cursor: pointer; width: fit-content; }
+/* In a chat: a published or saved file, and saving one by hand. */
+.artifact-card {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-2);
+}
+.artifact-card > svg { color: var(--fg-2); flex: none; }
+.artifact-card-text { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: var(--space-1); }
+.artifact-card progress { width: 96px; }
+.save-artifact { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.save-artifact-form { flex: 1; flex-wrap: wrap; }
+.save-artifact-form input { flex: 1; min-width: 160px; }
+.save-file-bar { margin-top: var(--space-2); }
+.untrusted-banner { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
 @media (max-width: 760px) {
+  /* A row on two lines: the name and facts, then versions and actions under them. */
+  .artifact-main { flex-wrap: wrap; row-gap: var(--space-2); }
+  .artifact-main .agent-info { flex-basis: calc(100% - 48px); }
+  .artifact-main > button.link { margin-left: 48px; }
+  .artifact-main .artifact-actions { flex: 1; }
+  .media-filters input[type="search"] { flex-basis: 100%; }
+  .artifact-row .artifact-versions { padding-left: 0; }
   .routine-item { flex-wrap: wrap; }
   .routine-actions { width: 100%; justify-content: flex-start; }
   /* Three columns of about 112px on a phone, inside the 16px gutter. */

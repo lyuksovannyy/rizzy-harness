@@ -1,12 +1,26 @@
 // One Media item, large (docs/media.md §6.8): a modal dialog (focus kept
 // inside, Esc closes, ←/→ step through the grid) with the picture, player
 // or a Download, and beside it the name to rename, what the file is, where
-// it came from, and Delete. Its own lazy chunk, shared with chats. An image
+// it came from, the artifact an agent's item also lives in, and Delete (with
+// "Delete from both" for an agent's item). Its own lazy chunk, shared with
+// chats. An image
 // too large to decode safely, a HEIC the browser cannot show and a MOV it
 // cannot play all fall back to Download.
 import { ChevronLeft, ChevronRight, Download, File, Film, Image as ImageIcon, Music, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { bytes, clockTime, contentUrl, KIND_LABEL, type MediaItem, mediaApi, originLine, safeToDecode } from "../lib/media";
+import { bytes } from "../lib/bytes";
+import {
+  artifactName,
+  clockTime,
+  contentUrl,
+  deleteMedia,
+  KIND_LABEL,
+  type MediaItem,
+  mediaApi,
+  originLine,
+  safeToDecode,
+} from "../lib/media";
+import { artifactHash } from "../lib/routes";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -32,7 +46,8 @@ export default function MediaPreview(props: {
   onNext?: () => void;
   onClose: () => void;
   onChanged: (m: MediaItem) => void;
-  onDeleted: (id: string) => void;
+  /** `note`: the item went, but something it asked for did not (an artifact version that stayed). */
+  onDeleted: (id: string, note: string | null) => void;
 }) {
   const m = props.item;
   const dialog = useRef<HTMLDialogElement>(null);
@@ -40,12 +55,14 @@ export default function MediaPreview(props: {
   const [full, setFull] = useState(false);
   const [name, setName] = useState(m.name);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   useEffect(() => setName(m.name), [m.name]);
   // ←/→ swap the item under the same open dialog.
   useEffect(() => {
     setBroken(false);
     setFull(false);
     setError(null);
+    setConfirming(false);
   }, [m.media_id]);
 
   useEffect(() => {
@@ -81,11 +98,9 @@ export default function MediaPreview(props: {
       setError(message(e));
     }
   };
-  const remove = async () => {
-    if (!confirm(`Delete ${m.name} from Media?`)) return;
+  const remove = async (both: boolean) => {
     try {
-      await mediaApi.remove([m.media_id]);
-      props.onDeleted(m.media_id);
+      props.onDeleted(m.media_id, await deleteMedia([m], both));
     } catch (e) {
       setError(message(e));
     }
@@ -194,19 +209,49 @@ export default function MediaPreview(props: {
               originLine(m)
             )}
           </dd>
+          {m.artifact && (
+            <>
+              <dt>Artifacts</dt>
+              <dd>
+                <a href={artifactHash(m.artifact.artifact_id)}>Also in Artifacts: {artifactName(m.artifact)}</a>
+              </dd>
+            </>
+          )}
         </dl>
         {error && (
           <div className="error-text" role="alert">
             {error}
           </div>
         )}
-        <div className="row">
-          {download}
-          <span className="grow" />
-          <button type="button" className="danger" onClick={() => void remove()}>
-            Delete
-          </button>
-        </div>
+        {confirming ? (
+          <div className="media-confirm stack" role="group" aria-label="Delete">
+            <p>Delete {m.name} from Media?</p>
+            {m.artifact && (
+              <p className="small muted">The file stays in Artifacts ({artifactName(m.artifact)}); delete it there to free space.</p>
+            )}
+            <div className="row end">
+              <button type="button" autoFocus onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button type="button" className="danger" onClick={() => void remove(false)}>
+                Delete
+              </button>
+              {m.artifact && (
+                <button type="button" className="danger" onClick={() => void remove(true)}>
+                  Delete from both
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="row">
+            {download}
+            <span className="grow" />
+            <button type="button" className="danger" onClick={() => setConfirming(true)}>
+              Delete
+            </button>
+          </div>
+        )}
       </aside>
     </dialog>
   );

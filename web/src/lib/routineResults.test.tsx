@@ -13,7 +13,7 @@ const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 vi.mock("../api", () => ({ call: (...a: unknown[]) => call(...a) }));
 let enabled = true;
 vi.mock("./notify", () => ({ notifyEnabled: () => enabled }));
-const { notifies, openResult, resultHash, useRoutineResults } = await import("./routineResults");
+const { markRunSeen, notifies, openResult, resultHash, useRoutineResults } = await import("./routineResults");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -130,6 +130,12 @@ describe("seen", () => {
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     expect(call).toHaveBeenCalledWith("POST", "/api/routines/r1/runs/run1/seen");
     hidden.mockRestore();
+  });
+
+  test("a run is marked once per page, wherever it is seen from", async () => {
+    await markRunSeen("r9", "once");
+    await markRunSeen("r9", "once");
+    expect(call.mock.calls.filter((c) => c[1] === "/api/routines/r9/runs/once/seen")).toHaveLength(1);
   });
 
   test("another chat, or a pause, marks nothing", () => {

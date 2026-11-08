@@ -2,9 +2,15 @@
 // Media's own helpers: sizes and lengths as people read them, which images
 // are safe to decode (header dimensions, 40 MP, 16,384 px), the origin line,
 // and the upload: a raw body with the name in a header (never in the URL),
-// progress, a retry after the server's Retry-After, and its error text.
+// progress, a retry after the server's Retry-After, and its error text;
+// deleting several (100 per call) and "Delete from both".
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { bytes, clockTime, type MediaItem, originLine, safeToDecode, upload } from "./media";
+import { bytes } from "./bytes";
+import type { MediaItem } from "./media";
+
+const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
+vi.mock("../api", async (original) => ({ ...(await original<typeof import("../api")>()), call: (...a: unknown[]) => call(...a) }));
+const { clockTime, deleteMedia, originLine, safeToDecode, upload } = await import("./media");
 
 describe("helpers", () => {
   test("sizes and lengths", () => {
@@ -109,5 +115,36 @@ describe("upload", () => {
     expect(sent[1]!.url).toBe("/api/media?origin=upload");
     sent[1]!.answer(507, { error: "Your storage is full (4.0 of 4 GB)" });
     await expect(done).rejects.toMatchObject({ status: 507, message: "Your storage is full (4.0 of 4 GB)" });
+  });
+});
+
+describe("delete", () => {
+  const m = (n: number, artifact: MediaItem["artifact"] = null) => ({ media_id: `m${n}`, artifact }) as MediaItem;
+  afterEach(() => call.mockClear());
+
+  test("items go 100 per call; nothing else unless deleted from both", async () => {
+    const many = Array.from({ length: 101 }, (_, i) => m(i, { artifact_id: "a", version_id: "v", seq: 1, name: "x" }));
+    expect(await deleteMedia(many, false)).toBeNull();
+    expect(call.mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ["POST", "/api/media/delete"],
+      ["DELETE", "/api/media/m100"],
+    ]);
+    expect((call.mock.calls[0]![2] as { ids: string[] }).ids).toHaveLength(100);
+  });
+
+  test("from both: the items first, then each agent item's version; one that stays is named", async () => {
+    call.mockImplementation((method: unknown, path: unknown) =>
+      method === "DELETE" && path === "/api/artifacts/a2/versions/v2" ? Promise.reject(new Error("pinned")) : Promise.resolve({ ok: true }),
+    );
+    const note = await deleteMedia(
+      [m(1, { artifact_id: "a1", version_id: "v1", seq: 3, name: "chart" }), m(2, { artifact_id: "a2", version_id: "v2", seq: 1, name: "logo" }), m(3)],
+      true,
+    );
+    expect(call.mock.calls.map((c) => `${c[0]} ${c[1]}`)).toEqual([
+      "POST /api/media/delete",
+      "DELETE /api/artifacts/a1/versions/v1",
+      "DELETE /api/artifacts/a2/versions/v2",
+    ]);
+    expect(note).toBe("Deleted from Media, but these stay in Artifacts: logo v1.");
   });
 });

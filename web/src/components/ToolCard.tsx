@@ -6,10 +6,13 @@ import { showHidden, stripHidden } from "../md/hidden";
 import { hostOf, parseUrl } from "../md/links";
 import { rt } from "../md/strings";
 import type { Decision, Item, Source } from "../types";
+import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { MemoryNotice } from "./MemoryNotice";
 import { ProjectMemoryNotice } from "./ProjectChip";
 
 type Tool = Extract<Item, { type: "tool" }>;
+/** Cards that show a file (or ran a command that made one): "Save as artifact" sits on them. */
+const SAVEABLE = new Set(["write", "edit", "read", "bash"]);
 type Status = "waiting" | "ok" | "failed" | "denied" | "running";
 
 function statusOf(item: Tool): Status {
@@ -185,6 +188,9 @@ export function ToolCard({
     ) : (
       <MemoryNotice text={asText(item.input?.text)} />
     );
+  // A file the agent published: its card says where the upload stands. A
+  // refused or failed call stays an ordinary card with the tool's error.
+  if (item.tool === "publish" && status === "ok") return <PublishCard item={item} />;
 
   const output = item.result ? item.result.output : item.live_output;
   // A delegated sub-task runs in its own session: link to it.
@@ -266,6 +272,9 @@ export function ToolCard({
           )}
           {item.tool === "bash" && <pre className="term cmd">$ {item.input?.command}</pre>}
           {output && <pre className="term">{output}</pre>}
+          {status === "ok" && SAVEABLE.has(item.tool) && (
+            <SaveAsArtifact path={item.tool === "bash" ? undefined : asText(item.input?.path) || undefined} />
+          )}
         </div>
       )}
     </div>

@@ -3,11 +3,13 @@
 // next run, last status, the unseen dot, Not running with delete only, Run
 // now, the switch, Open latest result), the empty page and its templates,
 // the editor (what it saves, the schedule/webhook choice, the variable
-// picker, the preview's chats-per-day note) and the Runs tab's columns.
+// picker, the preview's chats-per-day note, the project, the webhook card
+// with its sample event) and the Runs tab's columns.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
+import type { ProjectSummary } from "../lib/projects";
 import type { Preview, Routine, RoutineList, Run, RunDetail } from "../lib/routines";
 import type { Route } from "../lib/routes";
 import type { Agent, Features, Me, NodeInfo } from "../types";
@@ -22,6 +24,7 @@ const routinesApi = {
   runs: vi.fn<(id: string, before?: string | null) => Promise<{ runs: Run[]; next: string | null }>>(),
   run_detail: vi.fn<(id: string, run: string) => Promise<RunDetail>>(),
   preview: vi.fn<(b: unknown) => Promise<Preview>>(),
+  rotate: vi.fn<(id: string, tid: string) => Promise<{ secret: string }>>(),
 };
 vi.mock("../lib/routines", async (original) => ({ ...(await original<typeof import("../lib/routines")>()), routinesApi }));
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
@@ -38,6 +41,7 @@ vi.mock("../api", () => ({
   },
 }));
 const { default: Routines } = await import("./Routines");
+const { localOnly } = await import("../lib/routines");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -149,7 +153,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function show(id: string | null, opts: { tab?: "runs"; webhooks?: boolean } = {}) {
+async function show(id: string | null, opts: { tab?: "runs"; webhooks?: boolean; projects?: ProjectSummary[] } = {}) {
   await act(async () =>
     root.render(
       <Routines
@@ -162,7 +166,7 @@ async function show(id: string | null, opts: { tab?: "runs"; webhooks?: boolean 
         tab={opts.tab}
         agents={AGENTS}
         nodes={NODES}
-        projects={[]}
+        projects={opts.projects ?? []}
       />,
     ),
   );
@@ -334,6 +338,68 @@ describe("editor", () => {
     await act(async () => button("Save")!.click());
     expect(routinesApi.update.mock.calls[0]![1].triggers).toEqual([{ trigger_id: "h1", kind: "webhook", config: {} }]);
     expect(host.textContent).toContain("s3cret");
+  });
+
+  test("the webhook card: a curl line, Rotate shows a new secret once, a warning on localhost", async () => {
+    const hooked = routine({
+      triggers: [{ trigger_id: "h1", kind: "webhook", config: {}, next_run_ms: null, last_fired_ms: null, url_path: "/api/hooks/h1", secret_set: true }],
+    });
+    routinesApi.list.mockResolvedValue(LIST({ routines: [hooked] }));
+    routinesApi.rotate.mockResolvedValue({ secret: "n3w-secret" });
+    vi.stubGlobal("confirm", () => true);
+    await show("r1", { webhooks: true });
+    const card = host.querySelector(".routine-hook")!;
+    expect(card.querySelector("pre")!.textContent).toContain(`curl -X POST '${location.origin}/api/hooks/h1'`);
+    expect(card.querySelector("pre")!.textContent).toContain('"Authorization: Bearer $HOOK_SECRET"');
+    expect(card.textContent).toContain("A secret is set. Rotate it to see a new one.");
+    expect(card.textContent!.includes("This address works only on this computer.")).toBe(localOnly(location.hostname));
+    await act(async () => button("Rotate")!.click());
+    expect(routinesApi.rotate).toHaveBeenCalledWith("r1", "h1");
+    expect(card.textContent).toContain("n3w-secret");
+    expect(card.querySelector("pre")!.textContent).toContain("'Authorization: Bearer n3w-secret'");
+  });
+
+  test("the sample event feeds the preview, the picker and Run now", async () => {
+    const hooked = routine({
+      triggers: [{ trigger_id: "h1", kind: "webhook", config: {}, next_run_ms: null, last_fired_ms: null, url_path: "/api/hooks/h1", secret_set: true }],
+      event_paths: ["event.body.repo", "issue.title"],
+    });
+    routinesApi.list.mockResolvedValue(LIST({ routines: [hooked] }));
+    routinesApi.preview.mockResolvedValue({ ...PREVIEW, event_paths: ["event.body.issue.title", "event.body.issue.number"], untrusted: true });
+    routinesApi.run.mockResolvedValue({ run_id: "x" });
+    await show("r1", { webhooks: true });
+    const box = host.querySelector<HTMLTextAreaElement>(".routine-hook textarea")!;
+    type(box, "{oops");
+    expect(host.querySelector(".routine-hook")!.textContent).toContain("Not valid JSON yet.");
+    type(box, '{"issue": {"title": "Login fails", "number": 42}}');
+    await settle();
+    expect(routinesApi.preview.mock.calls.at(-1)![0]).toMatchObject({ routine_id: "r1", sample_event: { issue: { title: "Login fails", number: 42 } } });
+    expect(host.textContent).toContain("With webhook data, the run is untrusted");
+    expect(host.querySelector(".routine-hook pre")!.textContent).toContain(`-d '{"issue":{"title":"Login fails","number":42}}'`);
+    // The sample's paths first, then the last call's, each once.
+    act(() => button("Insert a variable")!.click());
+    const hooks = [...host.querySelectorAll('[role="group"][aria-label="From the webhook"] [role="menuitem"] .mono')].map((e) => e.textContent);
+    expect(hooks).toEqual(["{{ event.text }}", "{{ event.body.issue.title }}", "{{ event.body.issue.number }}", "{{ event.body.repo }}"]);
+    await act(async () => button("Run now")!.click());
+    expect(routinesApi.run).toHaveBeenCalledWith("r1", { issue: { title: "Login fails", number: 42 } });
+  });
+
+  test("a run's chat can land in a project; preview errors not about the prompt carry no offset", async () => {
+    const project = { project_id: "p".repeat(32), workspace_id: "w1", name: "Website", description: "", icon: "", accent: "", chats: 0, updated_ms: 0 };
+    routinesApi.list.mockResolvedValue(LIST());
+    routinesApi.create.mockResolvedValue({ routine: routine(), secrets: {} });
+    routinesApi.preview.mockResolvedValue({ ...PREVIEW, errors: [{ offset: null, message: "unknown time zone Mars/Base" }] });
+    await show("new");
+    expect(host.textContent).not.toContain("No project");
+    await show("new", { projects: [project] });
+    await settle();
+    expect(host.textContent).toContain("unknown time zone Mars/Base");
+    expect(host.textContent).not.toContain("At character");
+    const select = [...host.querySelectorAll<HTMLSelectElement>("select")].find((s) => s.querySelector('option[value=""]')?.textContent === "No project")!;
+    choose(select, project.project_id);
+    type(host.querySelector<HTMLInputElement>("form input")!, "Site check");
+    await act(async () => button("Create routine")!.click());
+    expect(routinesApi.create.mock.calls[0]![0].spec.project_id).toBe(project.project_id);
   });
 
   test("the picker lists this routine's variables and inserts one at the cursor", async () => {
