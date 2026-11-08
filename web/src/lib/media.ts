@@ -4,6 +4,7 @@
 // out of api.ts and types.ts so the page's code stays in its lazy chunk; the
 // Storage settings tab shares the size and storage calls.
 import { call, HttpError } from "../api";
+import { artifactsApi } from "./artifacts";
 import type { MediaFilter } from "./routes";
 
 export type MediaKind = "image" | "video" | "audio" | "other";
@@ -105,6 +106,24 @@ export const mediaApi = {
   },
 };
 
+/** "myapp v3": the artifact version behind an agent's item. */
+export const artifactName = (a: NonNullable<MediaItem["artifact"]>) => `${a.name} v${a.seq}`;
+
+/** Deletes items (100 per call, the server's limit), then, for "Delete from
+ * both", the artifact versions behind the agent's ones. The items go first;
+ * versions that could not go are named in the answer, else it is null. */
+export async function deleteMedia(items: MediaItem[], both: boolean): Promise<string | null> {
+  const ids = items.map((m) => m.media_id);
+  for (let i = 0; i < ids.length; i += 100) await mediaApi.remove(ids.slice(i, i + 100));
+  if (!both) return null;
+  const stayed: string[] = [];
+  for (const m of items) {
+    if (!m.artifact) continue;
+    await artifactsApi.removeVersion(m.artifact.artifact_id, m.artifact.version_id).catch(() => stayed.push(artifactName(m.artifact!)));
+  }
+  return stayed.length ? `Deleted from Media, but these stay in Artifacts: ${stayed.join(", ")}.` : null;
+}
+
 export const storageApi = {
   mine: () => call<MyStorage>("GET", "/api/me/storage"),
   admin: () => call<AdminStorage>("GET", "/api/admin/storage"),
@@ -120,19 +139,6 @@ export const thumbUrl = (id: string) => `${item(id)}/thumb`;
 export const FILTER_KIND: Record<MediaFilter, MediaKind> = { images: "image", videos: "video", audio: "audio", other: "other" };
 
 export const KIND_LABEL: Record<MediaKind, string> = { image: "Image", video: "Video", audio: "Audio", other: "File" };
-
-/** 1536 → "1.5 KB": steps of 1024, as the quota counts. */
-export function bytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let u = 0;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u++;
-  }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[u]}`;
-}
 
 /** 83_000 → "1:23"; an hour or more → "1:02:03". */
 export function clockTime(ms: number): string {

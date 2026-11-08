@@ -1,10 +1,12 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
-import { FileText, Trash2 } from "lucide-react";
+import { FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
 import { fallbackNote } from "../lib/models";
+import { markRunSeen } from "../lib/routineResults";
+import { routineHash } from "../lib/routes";
 import {
   citeMaps,
   citeSignature,
@@ -19,10 +21,11 @@ import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import type { History } from "../bg/topics";
-import type { Agent, Item, ModelInfo, NodeInfo, SessionRow } from "../types";
+import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
+import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
@@ -140,6 +143,37 @@ function FallbackNote(props: { note: Extract<Item, { type: "fallback" }> }) {
   );
 }
 
+/** A routine run's chat on screen, in a visible page, is seen once the run
+ * has finished (marking a run still going changes nothing on the server). */
+function useRunSeen(mark: RoutineMark | null | undefined) {
+  const due = !!mark && !mark.seen && !["pending", "running", "waiting"].includes(mark.status);
+  const routineId = mark?.routine_id;
+  const runId = mark?.run_id;
+  useEffect(() => {
+    if (!due || !routineId || !runId) return;
+    const seen = () => {
+      if (document.visibilityState === "visible") void markRunSeen(routineId, runId).catch(() => {});
+    };
+    seen();
+    document.addEventListener("visibilitychange", seen);
+    return () => document.removeEventListener("visibilitychange", seen);
+  }, [due, routineId, runId]);
+}
+
+/** Whether the server keeps Artifacts at all; asked only for agentic chats
+ * the viewer drives, where "Save as artifact" could show. */
+function useArtifactsOn(ask: boolean, workspaceId: string | null | undefined): boolean {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    if (!ask) return;
+    api
+      .features(workspaceId ? { workspace: workspaceId } : null)
+      .then((f) => setOn(f.artifacts.enabled))
+      .catch(() => {});
+  }, [ask, workspaceId]);
+  return ask && on;
+}
+
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
 }
@@ -233,13 +267,18 @@ export default function Conversation(props: {
   const facing = props.agents.find((a) => a.id === answering);
   const sessionAgent = props.agents.find((a) => a.id === activeAgent);
   const notes = fallbackNotes(items);
+  const routine = props.row?.routine;
+  useRunSeen(routine);
+  const saveable = useArtifactsOn(agentic && !blocked && !incognito, props.row?.workspace_id);
+  const artifacts = useChatArtifacts(sessionId, live, stagedKeys(items), saveable);
+  const [savingFile, setSavingFile] = useState(false);
   const remove = async () => {
     if (!confirm(t("conv.deleteConfirm"))) return;
     await api.deleteSession(sessionId).catch(() => {});
     location.hash = "#/";
   };
 
-  return (
+  const page = (
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
       {props.gutter && (
         <Suspense fallback={null}>
@@ -273,10 +312,35 @@ export default function Conversation(props: {
           </div>
         </div>
         {props.row && canJoinProject(props.row) && <ProjectChip row={props.row} projects={props.projects ?? []} />}
+        {saveable && (
+          <button
+            type="button"
+            className="icon"
+            aria-label="Save a file as an artifact"
+            title="Save a file as an artifact"
+            aria-expanded={savingFile}
+            onClick={() => setSavingFile(!savingFile)}
+          >
+            <Package size={18} />
+          </button>
+        )}
         <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={() => void remove()}>
           <Trash2 size={18} />
         </button>
       </header>
+      {savingFile && (
+        <div className="incognito-banner save-file-bar">
+          <SaveAsArtifact autoFocus />
+        </div>
+      )}
+      {routine?.untrusted && (
+        <div className="incognito-banner untrusted-banner" role="note">
+          <span>Contains data from an external event, so memory and web tools stay off in this chat.</span>
+          <a className="link" href={routineHash(routine.routine_id)}>
+            {routine.name}
+          </a>
+        </div>
+      )}
       {props.row?.parent_id && (
         <div className="incognito-banner">
           <span>
@@ -423,6 +487,14 @@ export default function Conversation(props: {
                     return (
                       <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} />
                     );
+                  case "artifact":
+                    return <SavedItem key={i} staged={it.staged} />;
+                  case "artifact_failed":
+                    return (
+                      <div key={i} className="msg error">
+                        Couldn't save {it.path}: {it.error}
+                      </div>
+                    );
                   case "error":
                     return (
                       <div key={i} className="msg error">
@@ -516,4 +588,6 @@ export default function Conversation(props: {
       </div>
     </section>
   );
+  // The publish cards, saved-file items and "Save as artifact" share one lookup.
+  return <ChatArtifactsCtx.Provider value={artifacts}>{page}</ChatArtifactsCtx.Provider>;
 }

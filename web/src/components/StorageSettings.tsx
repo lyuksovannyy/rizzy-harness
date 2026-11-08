@@ -3,7 +3,8 @@
 // much each account stores in Media and Artifacts. Numbers only: no names
 // or contents of anyone's files. Server admins and the API token.
 import { useEffect, useState } from "react";
-import { type AdminStorage, bytes, type StorageLimits, storageApi } from "../lib/media";
+import { bytes } from "../lib/bytes";
+import { type AdminStorage, type StorageLimits, storageApi } from "../lib/media";
 import type { Me } from "../types";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));

@@ -120,6 +120,7 @@ export default function Routines(props: RoutinesPageProps) {
           seed={id === "new" ? seed : null}
           agents={props.agents}
           nodes={props.nodes}
+          projects={props.projects}
           scope={scope}
           zone={zone}
           webhooks={props.features.routines.webhooks}
@@ -158,7 +159,7 @@ export default function Routines(props: RoutinesPageProps) {
         )}
       </div>
       <p className="muted agents-intro">
-        Instructions that start a chat on a schedule. Each run is a new chat in this workspace, started as you; only you see your
+        Instructions that start a chat on a schedule{props.features.routines.webhooks ? " or when a webhook is called" : ""}. Each run is a new chat in this workspace, started as you; only you see your
         routines.
       </p>
       {error && <div className="error-text">{error}</div>}

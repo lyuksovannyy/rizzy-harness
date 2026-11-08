@@ -29,8 +29,8 @@ export function pickerGroups(list: Pick<RoutineList, "variables" | "sources">, w
   if (when !== "webhook") return groups;
   const source = list.sources.find((s) => s.kind === "webhook");
   const seen = new Set((source?.vars ?? []).map((v) => v.path));
-  const fromBody = eventPaths
-    .map((p) => (p.startsWith("event.") ? p : `${source?.free_prefix ?? "event.body"}.${p}`))
+  // The same path can come from the sample and from the last call: once.
+  const fromBody = [...new Set(eventPaths.map((p) => (p.startsWith("event.") ? p : `${source?.free_prefix ?? "event.body"}.${p}`)))]
     .filter((p) => !seen.has(p))
     .map((path) => ({ path, example: "" }));
   const vars = [...(source?.vars ?? []), ...fromBody];

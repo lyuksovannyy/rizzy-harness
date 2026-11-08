@@ -1,5 +1,7 @@
 // Chats waiting for the user: shown under the bar in yellow, replaced by
 // similar-chat results while typing, browser notification, cleared on open.
+// Then a routine's result: its own row under the bar, a notification as the
+// routine's `notify` asks, cleared once its chat is opened.
 // Usage: node web/e2e/attention.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -42,14 +44,18 @@ let PAGE = null;
     await createOwner(p, code);
     await p.click('text=Skip: use the built-in demo');
     await keywordsOnly(p);
-    await p.click('button:has-text("Continue")');
-    await p.click('button:has-text("Finish")');
+    await p.click('button:text-is("Continue")');
+    await p.click('button:text-is("Finish")');
     await p.waitForSelector('h1.greeting');
+    const home = async () => {
+      await p.click('aside.sidebar a:has-text("New chat")');
+      await p.waitForSelector('h1.greeting');
+    };
 
     // Turn notifications on.
     await p.goto(`${URL_}#/settings/account/preferences`);
     await p.check('text=Desktop notifications');
-    await p.click('.new-chat');
+    await home();
     await p.waitForSelector('h1.greeting');
 
     // A question arrives while the user is elsewhere.
@@ -57,7 +63,7 @@ let PAGE = null;
     await p.click('.mode-switch button:has-text("Ask")');
     await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation');
-    await p.click('.new-chat');
+    await home();
     await p.waitForSelector('.attention button:has-text("tokio conference")', { timeout: 15000 });
     log('waiting:', (await p.innerText('.attention')).replace(/\s+/g, ' '));
     await p.waitForFunction(() => window.__notes.length > 0);
@@ -78,11 +84,41 @@ let PAGE = null;
     // Opening the chat counts as seeing the question.
     await p.click('.attention button');
     await p.waitForSelector('.conversation');
-    await p.click('.new-chat');
+    await home();
     await p.waitForSelector('h1.greeting');
     await sleep(600);
     check((await p.locator('.attention').count()) === 0, 'seen question no longer waits');
     log('cleared after opening');
+
+    // A routine's result: a row of its own, a notification, cleared once seen.
+    const notesBefore = await p.evaluate(() => window.__notes.length);
+    const routineId = await p.evaluate(async () => {
+      const json = { 'content-type': 'application/json' };
+      const spec = {
+        profile: 'chat', agent_id: 'general', model: null, effort: null, prompt: 'good morning', project_id: null,
+        catch_up: 'skip', on_missing: 'empty', notify: 'always', max_runtime_min: 120,
+      };
+      const triggers = [{ kind: 'schedule', config: { type: 'cron', expr: '30 8 * * 1-5', tz: 'UTC' } }];
+      const made = await (await fetch('/api/routines', { method: 'POST', headers: json, body: JSON.stringify({ name: 'Morning check', enabled: true, spec, triggers }) })).json();
+      await fetch(`/api/routines/${made.routine.routine_id}/run`, { method: 'POST', headers: json, body: '{}' });
+      return made.routine.routine_id;
+    });
+    const result = '.routine-results button:has-text("Morning check · Finished")';
+    await p.waitForSelector(result, { timeout: 20000 });
+    log('routine result:', (await p.innerText('.routine-results')).replace(/\s+/g, ' '));
+    await p.waitForFunction((n) => window.__notes.length > n, notesBefore);
+    const note = await p.evaluate(() => window.__notes[window.__notes.length - 1]);
+    check(note.t === 'Morning check' && note.body === 'Finished', `routine notification (${JSON.stringify(note)})`);
+    await p.screenshot({ path: `${S}/a-2-routine.png` });
+    await p.click(result);
+    await p.waitForSelector('.conversation h1:has-text("Morning check")');
+    await sleep(600);
+    await home();
+    await sleep(600);
+    check((await p.locator('.routine-results').count()) === 0, 'the seen result leaves the list');
+    const run = await p.evaluate(async (id) => (await (await fetch(`/api/routines/${id}/runs`)).json()).runs[0], routineId);
+    check(run.seen === true, 'the run is marked seen on the server');
+    log('routine result cleared after opening; run seen');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

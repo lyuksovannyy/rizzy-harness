@@ -37,7 +37,7 @@ const I2_KB = 0;
 const I3_KB = 0;
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I4_KB = 0;
+const I4_KB = 9.8; // Phase B: Artifacts page + detail 4.9 and lib/artifacts + bytes 1.1 (lazy), publish card, Save as artifact, untrusted banner +2.0 (Conversation), webhook card, sample event, project +1.1 (Routines), Media agent items +0.6; measured 358.3 on 2026-11-08, initial unchanged
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;

@@ -115,7 +115,9 @@ export interface Preview {
   rendered: string | null;
   untrusted: boolean;
   warnings: string[];
-  errors: { offset: number; message: string }[];
+  /** `offset` (UTF-16 units into the prompt) is null for errors about something else. */
+  errors: { offset: number | null; message: string }[];
+  /** Paths in `sample_event`, for the variable picker. */
   event_paths: string[];
 }
 
@@ -137,7 +139,12 @@ export const routinesApi = {
   create: (b: RoutineBody) => call<Saved>("POST", "/api/routines", b),
   update: (id: string, b: Partial<Omit<RoutineBody, "workspace_id">>) => call<Saved>("PATCH", one(id), b),
   remove: (id: string) => call<{ ok: boolean }>("DELETE", one(id)),
-  run: (id: string) => call<{ run_id?: string; skipped?: string }>("POST", `${one(id)}/run`, {}),
+  /** `event`: a sample webhook body; the run it starts is untrusted. */
+  run: (id: string, event?: unknown) =>
+    call<{ run_id?: string; skipped?: string }>("POST", `${one(id)}/run`, event === undefined ? {} : { event }),
+  /** A new webhook secret, shown once; the old one stops working. */
+  rotate: (id: string, triggerId: string) =>
+    call<{ secret: string }>("POST", `${one(id)}/triggers/${encodeURIComponent(triggerId)}/secret`),
   runs: (id: string, before?: string | null) =>
     call<{ runs: Run[]; next: string | null }>("GET", `${one(id)}/runs?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`),
   run_detail: (id: string, runId: string) => call<RunDetail>("GET", `${one(id)}/runs/${encodeURIComponent(runId)}`),
@@ -152,6 +159,37 @@ export function ranNow(res: { run_id?: string; skipped?: string }): string {
   if (res.skipped === "overlap") return "Skipped: a run is still going.";
   if (res.skipped) return "Skipped: a limit was reached.";
   return "Started. Its chat appears in Recent.";
+}
+
+// ── Webhooks ──
+
+/** The "Sample event (JSON)" box: empty, a JSON value, or why it is not one. */
+export function parseSample(text: string): { value: unknown } | { error: string } | null {
+  if (!text.trim()) return null;
+  try {
+    return { value: JSON.parse(text) };
+  } catch {
+    return { error: "Not valid JSON yet." };
+  }
+}
+
+/** A hook URL on this machine only: callers elsewhere cannot reach it. */
+export function localOnly(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127\./.test(h);
+}
+
+/** A curl line that calls the hook: the secret when it is on screen, else a
+ * shell variable to fill in; the body is the sample event, compact. */
+export function curlExample(url: string, secret: string | null, body: unknown): string {
+  const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+  const auth = secret ? quote(`Authorization: Bearer ${secret}`) : '"Authorization: Bearer $HOOK_SECRET"';
+  return [
+    `curl -X POST ${quote(url)}`,
+    `-H ${auth}`,
+    "-H 'Content-Type: application/json'",
+    `-d ${quote(JSON.stringify(body ?? { text: "hello" }))}`,
+  ].join(" \\\n  ");
 }
 
 // ── The schedule builder's shapes ──

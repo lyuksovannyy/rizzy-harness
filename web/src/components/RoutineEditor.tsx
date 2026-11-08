@@ -1,6 +1,6 @@
 // One routine on one page (docs/routines.md): its name, what runs (agent,
-// model, chat or agentic with node and folder), when (schedules, or one
-// webhook where the server takes them), the prompt with its variables, and
+// model, chat or agentic with node and folder, project), when (schedules, or
+// one webhook where the server takes them), the prompt with its variables, and
 // the advanced choices. Next runs, the rendered prompt and template errors
 // come from the server's preview, so no cron or template code lives here.
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -10,6 +10,7 @@ import {
   draftSpec,
   draftTriggers,
   newDraft,
+  parseSample,
   type Draft,
   type Preview,
   type Routine,
@@ -18,6 +19,7 @@ import {
   routinesApi,
   ranNow,
 } from "../lib/routines";
+import type { ProjectSummary } from "../lib/projects";
 import type { Agent, ModelInfo, NodeInfo } from "../types";
 import { AgentMark } from "./AgentAvatar";
 import type { RoutinesPageProps } from "./pages";
@@ -25,6 +27,7 @@ import { ScheduleBuilder } from "./ScheduleBuilder";
 import { Seg } from "./Seg";
 import { Select } from "./Select";
 import { pickerGroups, VariablePicker } from "./VariablePicker";
+import { WebhookCard } from "./WebhookCard";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Typing settles before the server previews the prompt and schedules. */
@@ -46,6 +49,8 @@ export function RoutineEditor(props: {
   seed: Draft | null;
   agents: Agent[];
   nodes: NodeInfo[];
+  /** The workspace's projects: a run's chat can land in one. */
+  projects: ProjectSummary[];
   scope: string | null;
   zone: string;
   /** The server takes webhooks (`features.routines.webhooks`). */
@@ -66,6 +71,8 @@ export function RoutineEditor(props: {
   const [busy, setBusy] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
+  // The "Sample event (JSON)" box: the editor's own, never saved.
+  const [sample, setSample] = useState("");
   const prompt = useRef<HTMLTextAreaElement>(null);
   const workspaceId = list.workspace_id ?? props.scope ?? undefined;
 
@@ -79,9 +86,11 @@ export function RoutineEditor(props: {
   const spec = draft.spec;
   const setSpec = (s: Partial<RoutineSpec>) => setDraft((d) => ({ ...d, spec: { ...d.spec, ...s } }));
   const triggers = useMemo(() => draftTriggers(draft), [draft]);
+  const parsed = draft.when === "webhook" ? parseSample(sample) : null;
+  const event = parsed && "value" in parsed ? parsed.value : undefined;
 
   // The server's preview of what this draft would do, after typing settles.
-  const previewKey = JSON.stringify([spec.prompt, triggers]);
+  const previewKey = JSON.stringify([spec.prompt, triggers, event]);
   useEffect(() => {
     const ctl = new AbortController();
     const t = setTimeout(() => {
@@ -92,6 +101,7 @@ export function RoutineEditor(props: {
             ...(routine ? { routine_id: routine.routine_id } : {}),
             prompt: spec.prompt,
             triggers,
+            ...(event !== undefined ? { sample_event: event } : {}),
           },
           ctl.signal,
         )
@@ -108,7 +118,8 @@ export function RoutineEditor(props: {
   const workers = props.nodes.filter((n) => n.profile === "agentic");
   const agenticWhy = list.can_agentic ? null : "You can't run agentic chats in this workspace.";
   const choice = props.webhooks || draft.when === "webhook";
-  const groups = pickerGroups(list, draft.when, routine?.event_paths ?? []);
+  // The sample's paths first, then those of the last real call.
+  const groups = pickerGroups(list, draft.when, [...(preview?.event_paths ?? []), ...(routine?.event_paths ?? [])]);
   const hook = routine?.triggers.find((t) => t.kind === "webhook");
 
   const save = async () => {
@@ -152,7 +163,7 @@ export function RoutineEditor(props: {
             type="button"
             onClick={() =>
               void routinesApi
-                .run(routine.routine_id)
+                .run(routine.routine_id, event)
                 .then((res) => setNote(ranNow(res)))
                 .catch((e) => setError(message(e)))
             }
@@ -212,6 +223,23 @@ export function RoutineEditor(props: {
             />
             {agenticWhy && <span className="field-hint">{agenticWhy}</span>}
           </div>
+          {(props.projects.length > 0 || spec.project_id) && (
+            <label>
+              Project
+              <select value={spec.project_id ?? ""} onChange={(e) => setSpec({ project_id: e.target.value || null })}>
+                <option value="">No project</option>
+                {spec.project_id && !props.projects.some((p) => p.project_id === spec.project_id) && (
+                  <option value={spec.project_id}>A project you can't see here</option>
+                )}
+                {props.projects.map((p) => (
+                  <option key={p.project_id} value={p.project_id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">Each run's chat lands in this project, with its brief and board.</span>
+            </label>
+          )}
           {spec.profile === "agentic" && (
             <>
               <div className="field-row">
@@ -274,26 +302,13 @@ export function RoutineEditor(props: {
               chats={chatsNote(preview?.chats_per_day ?? null)}
             />
           ) : (
-            <div className="stack routine-hook">
-              <p className="muted small">
-                Each call of its URL with the secret starts a run. What the call sends fills the prompt's webhook variables; that data
-                is treated as untrusted.
-              </p>
-              {hook?.url_path ? (
-                <div className="field">
-                  URL
-                  <code className="routine-code">{`${location.origin}${hook.url_path}`}</code>
-                </div>
-              ) : (
-                <p className="muted small">The URL and its secret appear once you save.</p>
-              )}
-              {hook && props.secrets[hook.trigger_id] && (
-                <div className="field">
-                  Secret (shown once; send it as <code>Authorization: Bearer …</code>)
-                  <code className="routine-code">{props.secrets[hook.trigger_id]}</code>
-                </div>
-              )}
-            </div>
+            <WebhookCard
+              routineId={routine?.routine_id ?? null}
+              hook={hook}
+              secret={hook ? (props.secrets[hook.trigger_id] ?? null) : null}
+              sample={sample}
+              onSample={setSample}
+            />
           )}
         </fieldset>
 
@@ -319,7 +334,7 @@ export function RoutineEditor(props: {
           />
           {preview?.errors.map((x) => (
             <span key={`${x.offset}-${x.message}`} className="field-hint error-text">
-              At character {x.offset + 1}: {x.message}
+              {x.offset === null ? x.message : `At character ${x.offset + 1}: ${x.message}`}
             </span>
           ))}
           {preview?.warnings.map((w) => (
@@ -332,6 +347,9 @@ export function RoutineEditor(props: {
               <summary className="small muted">Preview of the next run's prompt</summary>
               <pre className="routine-code">{preview.rendered}</pre>
             </details>
+          )}
+          {preview?.untrusted && (
+            <span className="field-hint">With webhook data, the run is untrusted: memory and web tools stay off in its chat.</span>
           )}
         </div>
 
