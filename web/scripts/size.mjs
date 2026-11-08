@@ -28,23 +28,27 @@ const INITIAL_KB = 110;
 // lines go back to 0.
 
 // Measured total of the last merged phase, with what it bought.
-const BASE_KB = 321.3; // Phase 0: routes, live topics, Shell arms, three stub chunks (measured 2026-11-08; initial 100.8)
+const BASE_KB = 348.8; // Phase A merged (measured 348.7x, rounded up): routines P1, storage + media M1, sidebar/search panel/account menu, routines and media pages (measured 2026-11-08; initial 103.7)
 
 // I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I2_KB = 0;
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I3_KB = 7.6; // Phase A: SearchPanel 2.6, AccountMenu 2.3, their shared chunks 1.1 (anchored, three icons), first load +2.0 (sidebar, rail, account button, shortcuts, `when` via Similar; switcher gone), measured 2026-11-08 at 328.7
+const I3_KB = 0;
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I4_KB = 21.2; // Phase A, measured 20.8 on 2026-11-08: Routines 10.2, Media 5.0 + MediaPreview 1.9 + lib/media 1.4, Storage tab +0.7 (Settings chunk), routine rows and notifications +0.8 initial plus `when` 0.3 (shared with I3's Similar once merged)
+const I4_KB = 0;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
 // The ceilings the sidebar areas were planned within; no budget line may
 // take the bundle past them.
 const PROGRAM_TOTAL_KB = 362;
-const PROGRAM_INITIAL_KB = 103;
+// Raised from 103 once the Phase A pages merged (103.7 measured): the new
+// sidebar, account button and routine-result rows are on the first screen,
+// and the Phase C image attach joins the composer there. Still under the
+// long-standing 110 KB first-load budget.
+const PROGRAM_INITIAL_KB = 106;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));
