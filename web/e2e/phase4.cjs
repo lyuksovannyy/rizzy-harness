@@ -1,4 +1,6 @@
-// Phase 4 end-to-end: similar earlier chats, mode prediction, chat search.
+// Phase 4 end-to-end: similar earlier chats, mode prediction, and the search
+// panel (Ctrl+K and "/", rows, the kept tab, Enter), from the sidebar and
+// from its collapsed rail.
 // Usage: node web/e2e/phase4.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -105,13 +107,54 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
     check(cls && cls.labels >= 2, 'classifier state saved');
     check(!JSON.stringify(cls).includes('youtube'), 'no text stored');
 
-    // The search panel finds message text, not just titles (Ctrl+K opens it too).
-    await p.click('.sidebar button[aria-label="Search"]');
-    await p.fill('.search-panel input[role="combobox"]', 'worker thr');
+    // The search panel finds message text, not just titles. Ctrl+K opens it
+    // anywhere, the composer included, with focus in its input.
+    const panel = 'dialog.search-panel';
+    const input = `${panel} input[role="combobox"]`;
+    await p.focus('.composer textarea');
+    await p.keyboard.press('Control+k');
+    await p.waitForSelector(`${panel}[open]`);
+    check(await p.evaluate((sel) => document.activeElement === document.querySelector(sel), input), 'focus is in the search input');
+    await p.keyboard.type('worker thr');
     await p.waitForSelector('.search-row mark');
-    log('search hit:', (await p.innerText('.search-row')).replace(/\s+/g, ' ').slice(0, 70));
+    const row = (await p.innerText('.search-row')).replace(/\s+/g, ' ');
+    log('search hit:', row.slice(0, 70));
+    check(row.includes('· Chat'), 'a row names its type: ' + row);
     await p.screenshot({ path: `${S}/p4-3-search.png` });
+    // A tab is kept for the next opening; Enter opens the active row and
+    // closes the panel.
+    await p.click(`${panel} [role="tab"]:has-text("Chats")`);
+    await p.waitForSelector('.search-row mark');
+    await p.focus(input);
+    await p.keyboard.press('Enter');
+    await p.waitForSelector(panel, { state: 'detached' });
+    await p.waitForSelector('.conversation');
+    log('opened a chat from the panel');
+    // "/" opens it outside a text field, on the Chats tab; Esc closes it.
+    await p.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+    await p.keyboard.press('/');
+    await p.waitForSelector(`${panel}[open]`);
+    check((await p.innerText(`${panel} [role="tab"][aria-selected="true"]`)) === 'Chats', 'the panel opens on the last tab used');
     await p.keyboard.press('Escape');
+    await p.waitForSelector(panel, { state: 'detached' });
+    // "/" typed in the composer is just text.
+    await p.focus('.composer textarea');
+    await p.keyboard.type('/');
+    await sleep(200);
+    check((await p.locator(panel).count()) === 0, '"/" in a text field types');
+    await p.fill('.composer textarea', '');
+
+    // The collapsed rail: icons with names, Search among them.
+    await p.click('.sidebar button[aria-label="Collapse sidebar"]');
+    await p.waitForSelector('.sidebar.rail');
+    const rail = await p.$$eval('.sidebar.rail [aria-label]', (els) => els.map((e) => e.getAttribute('aria-label')));
+    log('rail:', rail.join(' | '));
+    check(['New chat', 'Search', 'Agents'].every((n) => rail.includes(n)), 'the rail names its icons');
+    await p.click('.sidebar.rail button[aria-label="Search"]');
+    await p.waitForSelector(`${panel}[open]`);
+    await p.keyboard.press('Escape');
+    await p.click('.sidebar.rail button[aria-label="Expand sidebar"]');
+    await p.waitForSelector('.sidebar:not(.rail) .nav-item.new-chat');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

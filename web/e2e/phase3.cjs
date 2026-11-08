@@ -104,8 +104,9 @@ const log = (...a) => console.log('•', ...a);
   await p.goto(URL);
   await p.waitForSelector('h1.greeting');
 
-  // Settings
-  await p.click('.nav-item.user');
+  // Settings, through the account menu in the sidebar's footer.
+  await p.click('.sidebar-foot .nav-item.account');
+  await p.getByRole('menuitem', { name: 'Settings', exact: true }).click();
   await p.waitForSelector('.tabs');
   await p.screenshot({ path: `${S}/p3-5-settings.png` });
   await p.click('.settings-sections >> text=Server');

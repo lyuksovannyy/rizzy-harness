@@ -87,7 +87,8 @@ describe("App", () => {
     await start(ws("p", { personal: true }));
     act(() => shell().onGone("Acme"));
     expect(shell().gone).toBe("Acme");
-    act(() => shell().onLogout());
+    // The login form is a lazy chunk: let it load.
+    await act(async () => shell().onLogout());
     expect(signIn).not.toBeNull();
     me.mockResolvedValue(answer(ws("q", { personal: true })));
     await act(async () => signIn!());

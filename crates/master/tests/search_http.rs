@@ -1,6 +1,7 @@
 //! The search panel's API (chats, projects, the All tab, paging, privacy),
-//! similar-chat suggestions, the per-viewer feature flags and the
-//! classifier store.
+//! with the rows other areas bring (routine run chats, Media items and
+//! their thumbnails), similar-chat suggestions, the per-viewer feature
+//! flags and the classifier store.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,9 @@ use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::Secret;
 use harness_core::event::Profile;
 use harness_master::auth::{Auth, Claim};
+use harness_master::config::Config;
+use harness_master::providers::ProviderRuntime;
+use harness_master::routines::{self, Clock};
 use harness_master::{Master, ModelInfo, router};
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::Store;
@@ -21,6 +25,16 @@ struct T {
 }
 
 async fn start() -> T {
+    serve(false).await
+}
+
+/// The same server with Media switched on: `[media] enabled` in a managed
+/// config and the blob store open, as `harness serve` does.
+async fn start_media() -> T {
+    serve(true).await
+}
+
+async fn serve(media: bool) -> T {
     let dir = tempfile::tempdir().unwrap();
     let chat = NodeRuntime::start(NodeConfig {
         node_id: "master".into(),
@@ -54,6 +68,16 @@ async fn start() -> T {
             path: claim_path,
         }),
     );
+    // The built-in agents, which routines name.
+    master.set_agents(harness_agents::AgentSet::load(&dir.path().join("none")).0);
+    if media {
+        let mut cfg = Config::default();
+        cfg.media.enabled = true;
+        let (rt, _) = ProviderRuntime::start(cfg, dir.path(), Default::default()).unwrap();
+        master.set_provider_runtime(Arc::new(rt));
+        harness_master::storage::open(&master, dir.path()).unwrap();
+    }
+    // After the runtime, whose (empty) model list would replace these.
     master.set_models(vec![
         ModelInfo {
             id: "mock".into(),
@@ -73,6 +97,8 @@ async fn start() -> T {
         },
     ]);
     master.add_link(chat.attach().await, true).await.unwrap();
+    // Run now works; the timed loops stay off, nothing here is scheduled.
+    routines::start_with(&master, Clock::wall(), false);
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
     T {
@@ -674,4 +700,311 @@ async fn features_follow_the_viewer() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+/// The caller's user id.
+async fn user_id(t: &T, cookie: &str) -> String {
+    let (_, _, me) = req(t, Method::GET, "/api/me", None, Some(cookie)).await;
+    me["user"]["user_id"].as_str().unwrap().to_string()
+}
+
+/// The ids of the chat list `path` answers.
+async fn listed(t: &T, cookie: &str, path: &str) -> Vec<String> {
+    let (st, _, v) = req(t, Method::GET, path, None, Some(cookie)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["session_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A daily routine of the caller's with `prompt`, in `ws` (`None`: the
+/// active workspace); its id.
+async fn routine(t: &T, cookie: &str, ws: Option<&str>, name: &str, prompt: &str) -> String {
+    let mut body = json!({
+        "name": name,
+        "spec": {"profile": "chat", "agent_id": "general", "prompt": prompt},
+        "triggers": [{"kind": "schedule", "config": {"type": "interval", "every_minutes": 1440}}],
+    });
+    if let Some(ws) = ws {
+        body["workspace_id"] = json!(ws);
+    }
+    let (st, _, v) = req(t, Method::POST, "/api/routines", Some(body), Some(cookie)).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    v["routine"]["routine_id"].as_str().unwrap().to_string()
+}
+
+/// Run routine `id` now and wait until the run finished; the run.
+async fn run_to_end(t: &T, cookie: &str, id: &str) -> Value {
+    let path = format!("/api/routines/{id}/run");
+    let (st, _, v) = req(t, Method::POST, &path, None, Some(cookie)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let run = format!("/api/routines/{id}/runs/{}", v["run_id"].as_str().unwrap());
+    for _ in 0..500 {
+        let (_, _, v) = req(t, Method::GET, &run, None, Some(cookie)).await;
+        if v["status"] == "completed" {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the run never finished");
+}
+
+/// A routine's run chat: a query finds it as a "routine" row, before and
+/// after its result is seen (when it leaves the chat list), but the empty
+/// search never lists one, in a tab or in All.
+#[tokio::test]
+async fn routine_run_chats_are_found_but_never_listed_empty() {
+    let t = start().await;
+    let alex = login_admin(&t).await;
+    let plain = chat(&t, &alex, "kiwi smoothie ideas").await;
+    let rid = routine(
+        &t,
+        &alex,
+        None,
+        "Harvest report",
+        "Write the weekly kiwi harvest report",
+    )
+    .await;
+    let run = run_to_end(&t, &alex, &rid).await;
+    let sid = run["session_id"].as_str().unwrap().to_string();
+    wait_replies(&t, &alex, &sid, 1).await;
+
+    let found = |v: &Value| {
+        let mut rows: Vec<(String, String)> = of_kind(v, "chat")
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["type"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let mut want = vec![
+        (plain.clone(), "chat".to_string()),
+        (sid.clone(), "routine".to_string()),
+    ];
+    want.sort();
+    for tab in ["chats", "all"] {
+        let (st, v) = panel(&t, Some(&alex), &format!("q=kiwi&in={tab}")).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(found(&v), want, "{tab}: {v}");
+    }
+    let (_, v) = panel(&t, Some(&alex), "q=harvest&in=chats").await;
+    assert_eq!(ids(&v), vec![sid.clone()]);
+    assert_eq!(
+        v["results"][0]["preview"],
+        format!("You said: Write the weekly kiwi {M}harvest{E} report")
+    );
+
+    // Unseen, the run chat is in Recent, yet the empty search leaves it out.
+    assert!(listed(&t, &alex, "/api/sessions").await.contains(&sid));
+    for tab in ["chats", "all"] {
+        let (_, v) = panel(&t, Some(&alex), &format!("in={tab}")).await;
+        assert_eq!(ids(&v), vec![plain.clone()], "{tab}: {v}");
+    }
+
+    // Seen: gone from the chat list (kept for the Runs tab), still found.
+    let seen = format!(
+        "/api/routines/{rid}/runs/{}/seen",
+        run["run_id"].as_str().unwrap()
+    );
+    let (st, _, _) = req(&t, Method::POST, &seen, None, Some(&alex)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!listed(&t, &alex, "/api/sessions").await.contains(&sid));
+    assert!(
+        listed(&t, &alex, "/api/sessions?routine_runs=1")
+            .await
+            .contains(&sid)
+    );
+    let (_, v) = panel(&t, Some(&alex), "q=kiwi&in=chats").await;
+    assert_eq!(found(&v), want);
+    let (_, v) = panel(&t, Some(&alex), "in=chats").await;
+    assert_eq!(ids(&v), [plain]);
+}
+
+/// Routines show where the viewer may run them, and also where they still
+/// own routines they may no longer run (so they can delete them), with why.
+#[tokio::test]
+async fn routines_show_while_orphaned_ones_remain() {
+    let t = start().await;
+    let alex = login_admin(&t).await;
+    let bob = new_user(&t, &alex, "bob").await;
+    let carol = new_user(&t, &alex, "carol").await;
+    let acme = team(&t, &bob, "Acme", &[("carol", "member")]).await;
+    let routines_of = |cookie: String| {
+        let t = &t;
+        let acme = acme.clone();
+        async move {
+            let path = format!("/api/features?workspace={acme}");
+            let (st, _, v) = req(t, Method::GET, &path, None, Some(&cookie)).await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+            v["routines"].clone()
+        }
+    };
+    let f = routines_of(carol.clone()).await;
+    assert_eq!((&f["show"], &f["why"]), (&json!(true), &Value::Null));
+    let rid = routine(
+        &t,
+        &carol,
+        Some(&acme),
+        "Standup notes",
+        "Notes for standup",
+    )
+    .await;
+
+    // Made a guest: no routines to run here, but hers still show, with why.
+    let carol_id = user_id(&t, &carol).await;
+    let (st, _, v) = req(
+        &t,
+        Method::PATCH,
+        &format!("/api/workspaces/{acme}/members/{carol_id}"),
+        Some(json!({"role": "guest"})),
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let f = routines_of(carol.clone()).await;
+    assert_eq!(f["show"], true, "{f}");
+    assert_eq!(f["why"], "Guests can't run routines in Acme");
+
+    // Once she deleted it, the area goes.
+    let (st, _, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/routines/{rid}"),
+        None,
+        Some(&carol),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let f = routines_of(carol).await;
+    assert_eq!(f["show"], false, "{f}");
+    assert_eq!(f["why"], "Guests can't run routines in Acme");
+}
+
+/// A PNG header of 2×2 (only ever sniffed, never decoded), then `tail`.
+fn png(tail: &[u8]) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    b.extend(2u32.to_be_bytes());
+    b.extend(2u32.to_be_bytes());
+    b.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b.extend(tail);
+    b
+}
+
+/// Upload `bytes` to the caller's Media as `name`; the new item's id.
+async fn upload(t: &T, cookie: &str, name: &str, bytes: Vec<u8>) -> String {
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/media", t.base))
+        .header("cookie", cookie)
+        .header("x-file-name", name.replace(' ', "%20"))
+        .body(bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let v: Value = r.json().await.unwrap();
+    v["media_id"].as_str().unwrap().to_string()
+}
+
+/// GET `path` as an `<img>` would, with the viewer's cookie.
+async fn image(t: &T, cookie: &str, path: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{}{path}", t.base))
+        .header("cookie", cookie)
+        .header("sec-fetch-dest", "image")
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Media rows in the panel: the Media tab and All (merged with chats), the
+/// thumbnail path the row's `<img>` loads (its owner's alone), and items
+/// that leave search once deleted.
+#[tokio::test]
+async fn media_rows_carry_thumbnails_their_owner_can_load() {
+    let t = start_media().await;
+    let alex = login_admin(&t).await;
+    let bob = new_user(&t, &alex, "bob").await;
+    let orchard = upload(&t, &alex, "kiwi orchard.png", png(b"o")).await;
+    // Rows of one tier order by time: keep the two apart.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let clip = upload(&t, &alex, "kiwi clip.mp4", {
+        let mut b = 20u32.to_be_bytes().to_vec();
+        b.extend(b"ftypisom\0\0\0\0isom");
+        b.extend([0; 16]);
+        b
+    })
+    .await;
+    let smoothie = chat(&t, &alex, "kiwi smoothie").await;
+
+    let (_, v) = panel(&t, Some(&alex), "q=kiwi&in=media").await;
+    assert_eq!(v["kinds"], json!(["chats", "projects", "media"]));
+    assert_eq!(ids(&v), [clip.clone(), orchard.clone()], "newest first");
+    let row = &v["results"][1];
+    assert_eq!(
+        (&row["kind"], &row["type"]),
+        (&json!("media"), &json!("image"))
+    );
+    assert_eq!(row["title"], format!("{M}kiwi{E} orchard.png"));
+    assert_eq!(row["preview"], "Uploaded");
+    assert!(row.get("thumb").is_none(), "no thumbnail yet: {row}");
+    assert_eq!(v["results"][0]["type"], "video");
+
+    // The owner's browser makes the thumbnail; the row then points at it.
+    let r = reqwest::Client::new()
+        .put(format!("{}/api/media/{orchard}/thumb", t.base))
+        .header("cookie", &alex)
+        .body(png(b"thumb"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let (_, v) = panel(&t, Some(&alex), "q=orchard&in=media").await;
+    let thumb = v["results"][0]["thumb"].as_str().unwrap().to_string();
+    assert_eq!(thumb, format!("/api/media/{orchard}/thumb"));
+    let r = image(&t, &alex, &thumb).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "image/png");
+    assert_eq!(r.headers()["cross-origin-resource-policy"], "same-origin");
+    assert_eq!(
+        image(&t, &bob, &thumb).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // All: media and chats together, the newest first in one tier.
+    let (_, v) = panel(&t, Some(&alex), "q=kiwi&in=all").await;
+    assert_eq!(ids(&v), [smoothie.clone(), clip.clone(), orchard.clone()]);
+    // Nothing typed: the newest items of each kind.
+    let (_, v) = panel(&t, Some(&alex), "in=media").await;
+    assert_eq!(ids(&v), [clip.clone(), orchard.clone()]);
+
+    // Bob has none of them, in any tab.
+    for q in ["q=kiwi&in=media", "q=kiwi&in=all", "in=media"] {
+        let (_, v) = panel(&t, Some(&bob), q).await;
+        assert!(of_kind(&v, "media").is_empty(), "{q}: {v}");
+    }
+
+    // A deleted item leaves search.
+    let (st, _, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/media/{orchard}"),
+        None,
+        Some(&alex),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = panel(&t, Some(&alex), "q=kiwi&in=media").await;
+    assert_eq!(ids(&v), [clip]);
+    assert_eq!(
+        image(&t, &alex, &thumb).await.status(),
+        StatusCode::NOT_FOUND
+    );
 }

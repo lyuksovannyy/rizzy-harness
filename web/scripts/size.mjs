@@ -34,7 +34,7 @@ const BASE_KB = 348.8; // Phase A merged (measured 348.7x, rounded up): routines
 const I2_KB = 0;
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I3_KB = 0;
+const I3_KB = 1.2; // Phase B: the login form is its own lazy chunk (first load 103.7 → 102.1; split costs +1.1 in total: Login 2.0, eye icon and copy helper 0.5 shared), search thumbnails +0.1 (measured 349.8 on 2026-11-08)
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I4_KB = 0;
@@ -109,8 +109,13 @@ lazyChunk(/\/WallBg-/, "Ask background");
 lazyChunk(/\/BinaryBg-/, "Agentic background");
 lazyChunk(/\/ChatGutter-/, "chat gutter");
 
-// I3: its lazy chunks (the search panel and the account menu).
-const lazyI3 = [...lazyChunk(/\/SearchPanel-/, "search panel"), ...lazyChunk(/\/AccountMenu-/, "account menu")];
+// I3: its lazy chunks (the search panel, the account menu, and the login
+// form, which signed-in visits never draw).
+const lazyI3 = [
+  ...lazyChunk(/\/SearchPanel-/, "search panel"),
+  ...lazyChunk(/\/AccountMenu-/, "account menu"),
+  ...lazyChunk(/\/Login-/, "login form"),
+];
 
 // I4: its lazy chunks (the area pages, then their previews).
 const lazyI4 = [

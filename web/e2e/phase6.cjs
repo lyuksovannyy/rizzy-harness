@@ -115,8 +115,13 @@ async function skipOnboarding(page) {
     await p.screenshot({ path: `${S}/p6-3-incognito.png` });
     const recents = await p.innerText('.sidebar');
     check(!recents.includes('okapi'), 'incognito chat must not be in recents');
-    const hits = await p.evaluate(() => fetch('/api/search?q=okapi').then((r) => r.json()));
+    const hits = await p.evaluate(() => fetch('/api/search?q=okapi&in=all').then((r) => r.json()));
     check(hits.results.length === 0, 'incognito chat must not be searchable');
+    // Nor through the panel, while it is on screen.
+    await p.click('.sidebar button[aria-label="Search"]');
+    await p.fill('dialog.search-panel input[role="combobox"]', 'okapi');
+    await p.waitForSelector('dialog.search-panel >> text=No results');
+    await p.keyboard.press('Escape');
     p.once('dialog', (d) => d.accept());
     await p.click('.incognito-banner button');
     await p.waitForSelector('h1.greeting');

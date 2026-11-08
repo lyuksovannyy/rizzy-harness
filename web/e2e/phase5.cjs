@@ -192,8 +192,10 @@ function fakeProvider() {
     await p.goto(URL_);
     await p.waitForSelector('h1.greeting');
 
-    // Settings: accent applies; provider tab is there for admins.
-    await p.click('.nav-item.user');
+    // Settings (the account menu opens them on Preferences): accent applies;
+    // provider tab is there for admins.
+    await p.click('.sidebar-foot .nav-item.account');
+    await p.getByRole('menuitem', { name: 'Settings', exact: true }).click();
     await p.click('.tabs >> text=Preferences');
     await p.click('button[aria-label="green"]');
     await p.click('button:has-text("Save")');
