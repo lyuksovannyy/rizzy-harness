@@ -38,6 +38,7 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        artifacts: None,
     }
 }
 

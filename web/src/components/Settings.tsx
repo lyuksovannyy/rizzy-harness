@@ -18,6 +18,7 @@ import { MemoryCfgForm, MemoryPage } from "./Memory";
 import { Nodes } from "./Nodes";
 import { Select } from "./Select";
 import { SavingsSettings } from "./Savings";
+import { StorageSettings } from "./StorageSettings";
 import { Users } from "./Users";
 import { ServerWorkspaces } from "./workspace/ServerWorkspaces";
 import { WorkspaceDelete } from "./workspace/WorkspaceDelete";
@@ -242,6 +243,7 @@ export default function Settings(props: {
         {tab === "nodes" && <Nodes nodes={props.nodes} />}
         {tab === "users" && <Users me={props.me} />}
         {tab === "workspaces" && <ServerWorkspaces me={props.me} onChanged={wsChanged} />}
+        {tab === "storage" && <StorageSettings me={props.me} />}
       </div>
     </section>
   );

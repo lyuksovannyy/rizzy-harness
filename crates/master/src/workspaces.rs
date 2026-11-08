@@ -25,6 +25,9 @@ pub enum Perm {
     Settings,
     /// Add and remove members and change their roles.
     Members,
+    /// Own routines here: chats started on a schedule or by a webhook, as
+    /// the routine's owner.
+    Routines,
 }
 
 impl Perm {
@@ -34,6 +37,7 @@ impl Perm {
             Perm::Agentic => "run agentic sessions",
             Perm::Settings => "change its settings",
             Perm::Members => "manage its members",
+            Perm::Routines => "run routines",
         }
     }
 }
@@ -66,11 +70,13 @@ impl Role {
         }
     }
 
-    /// In the wire order: agentic, settings, members.
+    /// In the wire order: agentic, settings, members, routines.
     pub fn perms(self) -> &'static [Perm] {
         match self {
-            Role::Owner | Role::Admin => &[Perm::Agentic, Perm::Settings, Perm::Members],
-            Role::Member => &[Perm::Agentic],
+            Role::Owner | Role::Admin => {
+                &[Perm::Agentic, Perm::Settings, Perm::Members, Perm::Routines]
+            }
+            Role::Member => &[Perm::Agentic, Perm::Routines],
             Role::Guest => &[],
         }
     }
@@ -493,10 +499,10 @@ mod tests {
     fn roles_and_permissions() {
         assert_eq!(
             Role::Owner.perms(),
-            [Perm::Agentic, Perm::Settings, Perm::Members]
+            [Perm::Agentic, Perm::Settings, Perm::Members, Perm::Routines]
         );
         assert_eq!(Role::Admin.perms(), Role::Owner.perms());
-        assert_eq!(Role::Member.perms(), [Perm::Agentic]);
+        assert_eq!(Role::Member.perms(), [Perm::Agentic, Perm::Routines]);
         assert!(Role::Guest.perms().is_empty());
         for r in Role::ALL {
             assert_eq!(Role::parse(r.id()), Some(r));
@@ -512,6 +518,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Perm::Members).unwrap(),
             serde_json::json!("members")
+        );
+        assert_eq!(
+            serde_json::to_value(Perm::Routines).unwrap(),
+            serde_json::json!("routines")
         );
     }
 

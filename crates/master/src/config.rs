@@ -35,6 +35,16 @@ pub struct Config {
     /// get) has no `[workspaces]` section until an admin sets one.
     #[serde(skip_serializing_if = "WorkspacesConfig::is_default")]
     pub workspaces: WorkspacesConfig,
+    // Each feature's section lives in its own module, written only when
+    // changed like `[workspaces]`.
+    #[serde(skip_serializing_if = "crate::routines::RoutinesConfig::is_default")]
+    pub routines: crate::routines::RoutinesConfig,
+    #[serde(skip_serializing_if = "crate::storage::StorageConfig::is_default")]
+    pub storage: crate::storage::StorageConfig,
+    #[serde(skip_serializing_if = "crate::media::MediaConfig::is_default")]
+    pub media: crate::media::MediaConfig,
+    #[serde(skip_serializing_if = "crate::artifacts::ArtifactsConfig::is_default")]
+    pub artifacts: crate::artifacts::ArtifactsConfig,
 }
 
 impl Default for Config {
@@ -50,6 +60,10 @@ impl Default for Config {
             voice: Default::default(),
             savings: Default::default(),
             workspaces: Default::default(),
+            routines: Default::default(),
+            storage: Default::default(),
+            media: Default::default(),
+            artifacts: Default::default(),
         }
     }
 }
@@ -68,6 +82,10 @@ struct RawConfig {
     voice: VoiceConfig,
     savings: harness_core::savings::TokenSavings,
     workspaces: WorkspacesConfig,
+    routines: crate::routines::RoutinesConfig,
+    storage: crate::storage::StorageConfig,
+    media: crate::media::MediaConfig,
+    artifacts: crate::artifacts::ArtifactsConfig,
 }
 
 impl From<RawConfig> for Config {
@@ -83,6 +101,10 @@ impl From<RawConfig> for Config {
             voice: r.voice,
             savings: r.savings,
             workspaces: r.workspaces,
+            routines: r.routines,
+            storage: r.storage,
+            media: r.media,
+            artifacts: r.artifacts,
         };
         c.normalize();
         c

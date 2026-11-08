@@ -56,6 +56,7 @@ async fn node(root: &std::path::Path, id: &str, profile: Profile) -> NodeRuntime
         profile,
         incognito_ttl: None,
         checkpoints_dir: None,
+        artifacts: None,
     })
     .await
     .unwrap()
@@ -253,7 +254,10 @@ async fn personal_workspace_for_every_account() {
     let p = &list[0];
     assert_eq!(p["personal"], true);
     assert_eq!(p["role"], "owner");
-    assert_eq!(p["permissions"], json!(["agentic", "settings", "members"]));
+    assert_eq!(
+        p["permissions"],
+        json!(["agentic", "settings", "members", "routines"])
+    );
     assert_eq!(p["members"], 1);
     assert_eq!(v["active"], p["workspace_id"]);
     assert_eq!(v["can_create"], true);
@@ -488,7 +492,7 @@ async fn adding_members_by_username() {
         (d["members"].as_u64(), d["role"].as_str()),
         (Some(2), Some("member"))
     );
-    assert_eq!(d["permissions"], json!(["agentic"]));
+    assert_eq!(d["permissions"], json!(["agentic", "routines"]));
 
     // A non-member gets 404 on every workspace route.
     let p = format!("/api/workspaces/{acme}");

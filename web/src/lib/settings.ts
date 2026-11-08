@@ -22,7 +22,8 @@ export type TabId =
   | "savings"
   | "nodes"
   | "users"
-  | "workspaces";
+  | "workspaces"
+  | "storage";
 
 type Viewer = Pick<Me, "user_id" | "role" | "workspace">;
 type Show = (v: Viewer) => boolean;

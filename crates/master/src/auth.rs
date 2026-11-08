@@ -564,13 +564,18 @@ pub async fn guard(State(master): State<Master>, req: Request, next: Next) -> Re
         }
     }
     let mut resp = next.run(req).await;
-    let h = resp.headers_mut();
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        ),
-    );
+    security_headers(resp.headers_mut());
+    resp
+}
+
+/// The app's CSP, for every response that does not bring its own.
+const APP_CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+/// Headers every response gets. A CSP the handler set stays: a stored file
+/// is served with its own stricter, sandboxed one.
+fn security_headers(h: &mut HeaderMap) {
+    h.entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(APP_CSP));
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -580,7 +585,6 @@ pub async fn guard(State(master): State<Master>, req: Request, next: Next) -> Re
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-    resp
 }
 
 #[cfg(test)]
@@ -688,6 +692,25 @@ mod tests {
         );
         assert!(!admin.can_see(None));
         assert!(Principal::api_token().can_see(Some("b")));
+    }
+
+    #[test]
+    fn guard_keeps_a_handlers_csp() {
+        let mut own = HeaderMap::new();
+        own.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+        security_headers(&mut own);
+        assert_eq!(
+            own[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; sandbox"
+        );
+        assert_eq!(own[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let mut plain = HeaderMap::new();
+        security_headers(&mut plain);
+        assert_eq!(plain[header::CONTENT_SECURITY_POLICY], APP_CSP);
+        assert_eq!(plain[header::X_FRAME_OPTIONS], "DENY");
     }
 
     #[test]

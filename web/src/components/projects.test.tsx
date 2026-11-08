@@ -33,7 +33,7 @@ const personal: WorkspaceSummary = {
   name: "Personal",
   personal: true,
   role: "owner",
-  permissions: ["agentic", "settings", "members"],
+  permissions: ["agentic", "settings", "members", "routines"],
   members: 1,
 };
 const me: Me = { user_id: "u1", username: "alex", role: "member", can_agentic: false, must_change_password: false, workspace: personal };

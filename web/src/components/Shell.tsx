@@ -13,21 +13,25 @@ import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
 import { projectsApi, type ProjectSummary } from "../lib/projects";
+import { useRoutineResults } from "../lib/routineResults";
 import type {
   Agent,
   AttentionItem,
+  Features,
   Me,
   ModelInfo,
   NodeAttention,
   NodeInfo,
   Notice,
   Prefs,
+  RoutineAttention,
   SessionRow,
   WorkspaceList,
   WorkspaceSummary,
 } from "../types";
 import type { Submission } from "./Composer";
 import { Home } from "./Home";
+import type { FeaturePageProps } from "./pages";
 import { Sidebar } from "./Sidebar";
 
 // Everything but the home screen loads on demand (new-tab speed budget).
@@ -36,6 +40,19 @@ const Settings = lazy(() => import("./Settings"));
 const Onboarding = lazy(() => import("./Onboarding"));
 const Agents = lazy(() => import("./Agents"));
 const Project = lazy(() => import("./Project"));
+const Routines = lazy(() => import("./Routines"));
+const Media = lazy(() => import("./Media"));
+const Artifacts = lazy(() => import("./Artifacts"));
+
+/** Until `/api/features` answers: no area shows. */
+const NO_FEATURES: Features = {
+  voice: false,
+  memory: false,
+  routines: { enabled: false, show: false, webhooks: false, why: null },
+  media: { enabled: false, show: false, max_file: 0, vision_images: false },
+  artifacts: { enabled: false, show: false, why: null },
+  search: { kinds: ["chats", "projects"] },
+};
 
 const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
 /** A home visit's background seed (bg/rng.ts would bring the whole PRNG into the first load). */
@@ -86,9 +103,11 @@ export function Shell(props: {
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [memoryVersion, setMemoryVersion] = useState(0);
   const [toReview, setToReview] = useState(0);
-  const [voice, setVoice] = useState(false);
+  const [features, setFeatures] = useState<Features>(NO_FEATURES);
+  const voice = features.voice;
   const [attention, setAttention] = useState<AttentionItem[]>([]);
   const [nodeAttention, setNodeAttention] = useState<NodeAttention[]>([]);
+  const [routineAttention, setRoutineAttention] = useState<RoutineAttention[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [canCreateProject, setCanCreateProject] = useState(false);
@@ -152,6 +171,7 @@ export function Shell(props: {
         waiting.current = ids;
         setAttention(r.items);
         setNodeAttention(nodes);
+        setRoutineAttention(r.routines ?? []);
       })
       .catch(() => {});
   }, []);
@@ -189,6 +209,13 @@ export function Shell(props: {
   const refreshNodes = useCallback(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
   }, [unauthorized]);
+  // What the viewer may use in this workspace: a role change can change it.
+  const refreshFeatures = useCallback(() => {
+    api
+      .features(scope)
+      .then(setFeatures)
+      .catch(() => {});
+  }, [scope]);
   // This workspace's projects; `version` tells an open project page to reload.
   const refreshProjects = useCallback(() => {
     setProjectsVersion((v) => v + 1);
@@ -215,8 +242,9 @@ export function Shell(props: {
   const workspacesChanged = useCallback(() => {
     refreshModels();
     refreshSessions();
-    // A role decides who may change projects.
+    // A role decides who may change projects, and which areas show.
     refreshProjects();
+    refreshFeatures();
     const here = meRef.current.workspace;
     if (!here) return;
     api
@@ -229,7 +257,7 @@ export function Shell(props: {
         return onMeChanged().then(() => next.gone && onGone(next.gone));
       })
       .catch(unauthorized);
-  }, [refreshModels, refreshSessions, refreshProjects, unauthorized, onGone, onMeChanged]);
+  }, [refreshModels, refreshSessions, refreshProjects, refreshFeatures, unauthorized, onGone, onMeChanged]);
   // Left or deleted from its settings: the same reload, without the line
   // saying the user is no longer in it.
   const workspaceLeft = useCallback(() => {
@@ -250,17 +278,16 @@ export function Shell(props: {
     // The switcher's list; the API token has no workspaces.
     if (meRef.current.workspace) api.workspaces().then(setWorkspaces).catch(unauthorized);
     api.settings().then(setPrefs).catch(unauthorized);
-    api
-      .features()
-      .then((f) => setVoice(f.voice))
-      .catch(() => {});
+    refreshFeatures();
     api
       .classifier()
       .then((v) => {
         classifier.current = parseState(v);
       })
       .catch(() => {});
-  }, [live, refreshSessions, refreshNodes, refreshModels, refreshProjects, workspacesChanged, unauthorized]);
+  }, [live, refreshSessions, refreshNodes, refreshModels, refreshProjects, refreshFeatures, workspacesChanged, unauthorized]);
+  // Routine results live in attention.
+  useEffect(() => live.onTopic("routines", refreshAttention), [live, refreshAttention]);
   // Closed only when this Shell goes (a switch remounts it): a closed Live
   // never reconnects, so it must not follow the data effect's dependencies.
   useEffect(() => () => live.close(), [live]);
@@ -312,6 +339,7 @@ export function Shell(props: {
     (l) => live.subscribe(l),
     () => live.version,
   );
+  useRoutineResults({ route, routines: routineAttention, workspaceId });
 
   const toggleCollapsed = () => {
     setCollapsed((c) => {
@@ -415,6 +443,7 @@ export function Shell(props: {
       ...(s.effort ? { effort: s.effort } : {}),
       ...(s.attachments.length ? { attachments: s.attachments } : {}),
       ...(s.compareWith ? { compare: [s.model, s.compareWith] } : {}),
+      ...(s.images?.length ? { images: s.images } : {}),
     });
   };
 
@@ -440,6 +469,7 @@ export function Shell(props: {
     if (r.kind === "home" && route.kind === "home") setHome({ kind: "home", seed: newSeed() });
     go(r);
   };
+  const page: FeaturePageProps = { me, scope: workspaceId, navigate, live, features };
 
   if (prefs && !prefs.onboarded) {
     return (
@@ -555,6 +585,12 @@ export function Shell(props: {
               onChanged={refreshModels}
               scope={scope}
             />
+          ) : route.kind === "routines" ? (
+            <Routines {...page} id={route.id} tab={route.tab} agents={agents} nodes={nodes} projects={projects} />
+          ) : route.kind === "media" ? (
+            <Media {...page} filter={route.filter} id={route.id} />
+          ) : route.kind === "artifacts" ? (
+            <Artifacts {...page} id={route.id} projects={projects} />
           ) : route.kind === "settings" ? (
             <Settings
               me={me}
@@ -593,6 +629,7 @@ export function Shell(props: {
               voice={voice}
               attention={attention}
               nodeAttention={nodeAttention}
+              routines={routineAttention}
               notices={notices}
               seed={home.seed}
               history={history}

@@ -58,7 +58,7 @@ describe("afterChange", () => {
     name: id,
     personal: false,
     role: "member",
-    permissions: ["agentic"],
+    permissions: ["agentic", "routines"],
     members: 2,
     ...more,
   });
@@ -66,7 +66,7 @@ describe("afterChange", () => {
 
   it("stays in this tab's workspace, refreshed, whatever another tab made active", () => {
     // Promoted, renamed and joined by someone since this tab loaded it.
-    const fresh = ws("acme", { name: "Acme Labs", role: "admin", permissions: ["agentic", "settings", "members"], members: 3 });
+    const fresh = ws("acme", { name: "Acme Labs", role: "admin", permissions: ["agentic", "settings", "members", "routines"], members: 3 });
     expect(afterChange(ws("acme"), [personal, fresh, ws("beta")], null)).toEqual({ keep: fresh });
     // The server's active workspace is not an input: two tabs cannot pull each other back and forth.
     expect(afterChange(personal, [personal, fresh], null)).toEqual({ keep: personal });

@@ -116,6 +116,7 @@ async fn start() -> Server {
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        artifacts: None,
     })
     .await
     .unwrap();

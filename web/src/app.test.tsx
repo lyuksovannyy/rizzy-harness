@@ -41,7 +41,7 @@ const ws = (id: string, more: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
   name: id,
   personal: false,
   role: "member",
-  permissions: ["agentic"],
+  permissions: ["agentic", "routines"],
   members: 2,
   ...more,
 });

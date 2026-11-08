@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { MEMORY_HASH, NODES_HASH, parseRoute, projectHash, routeHash, settingsHash } from "./routes";
+import {
+  artifactHash,
+  MEMORY_HASH,
+  mediaHash,
+  NODES_HASH,
+  parseRoute,
+  projectHash,
+  routeHash,
+  routineHash,
+  settingsHash,
+} from "./routes";
 
 const ID = "0195f3a2-7c1e-7b40-9a3e-1f2d3c4b5a69";
 
@@ -46,6 +56,38 @@ describe("parseRoute", () => {
     expect(parseRoute("#/settings/server/agents")).toEqual({ kind: "agents", id: null });
   });
 
+  it("reads routines: the list, a new one, one, its runs", () => {
+    const id = "0193f1c2a4b57d6e8f9012345678abcd";
+    expect(parseRoute("#/routines")).toEqual({ kind: "routines", id: null });
+    expect(parseRoute("#/routines/new")).toEqual({ kind: "routines", id: "new" });
+    expect(parseRoute(`#/routines/${id}`)).toEqual({ kind: "routines", id });
+    expect(parseRoute(`#/routines/${id}/runs`)).toEqual({ kind: "routines", id, tab: "runs" });
+    // A routine not saved yet has no runs; anything else malformed goes home.
+    for (const h of ["#/routines/new/runs", `#/routines/${id}/edit`, "#/routines/", `#/routines/${ID}`, "#/routines/ABC"]) {
+      expect(parseRoute(h)).toEqual({ kind: "home" });
+    }
+  });
+
+  it("reads media: the grid, a filter, a preview over either", () => {
+    const id = "0193f1c2a4b57d6e8f9012345678abcd";
+    expect(parseRoute("#/media")).toEqual({ kind: "media", filter: null, id: null });
+    expect(parseRoute("#/media/videos")).toEqual({ kind: "media", filter: "videos", id: null });
+    expect(parseRoute(`#/media/${id}`)).toEqual({ kind: "media", filter: null, id });
+    expect(parseRoute(`#/media/other/${id}`)).toEqual({ kind: "media", filter: "other", id });
+    for (const h of ["#/media/photos", `#/media/${id}/images`, "#/media/images/", `#/media/${ID}`]) {
+      expect(parseRoute(h)).toEqual({ kind: "home" });
+    }
+  });
+
+  it("reads artifacts: the list and one", () => {
+    const id = "0193f1c2a4b57d6e8f9012345678abcd";
+    expect(parseRoute("#/artifacts")).toEqual({ kind: "artifacts", id: null });
+    expect(parseRoute(`#/artifacts/${id}`)).toEqual({ kind: "artifacts", id });
+    for (const h of ["#/artifacts/new", `#/artifacts/${id}/versions`, "#/search", "#/search/x"]) {
+      expect(parseRoute(h)).toEqual({ kind: "home" });
+    }
+  });
+
   it("leaves checking a deep link to the registry", () => {
     // Unknown names parse; Settings falls back to what the viewer sees.
     expect(parseRoute("#/settings/server/nope")).toEqual({ kind: "settings", section: "server", tab: "nope" });
@@ -64,11 +106,35 @@ describe("routeHash", () => {
       "#/settings/server/users",
       "#/agents",
       "#/agents/coder",
+      "#/routines",
+      "#/routines/new",
+      "#/routines/0193f1c2a4b57d6e8f9012345678abcd",
+      "#/routines/0193f1c2a4b57d6e8f9012345678abcd/runs",
+      "#/media",
+      "#/media/audio",
+      "#/media/0193f1c2a4b57d6e8f9012345678abcd",
+      "#/media/images/0193f1c2a4b57d6e8f9012345678abcd",
+      "#/artifacts",
+      "#/artifacts/0193f1c2a4b57d6e8f9012345678abcd",
     ]) {
       expect(routeHash(parseRoute(h))).toBe(h);
     }
     // A tab without a section has nowhere to go.
     expect(routeHash({ kind: "settings", tab: "users" })).toBe("#/settings");
+  });
+
+  it("writes the area links", () => {
+    const id = "0193f1c2a4b57d6e8f9012345678abcd";
+    expect(routineHash(null)).toBe("#/routines");
+    expect(routineHash(id, "runs")).toBe(`#/routines/${id}/runs`);
+    // Never a runs tab for a routine not saved yet.
+    expect(routineHash("new", "runs")).toBe("#/routines/new");
+    expect(mediaHash(null)).toBe("#/media");
+    expect(mediaHash("images")).toBe("#/media/images");
+    expect(mediaHash("videos", id)).toBe(`#/media/videos/${id}`);
+    expect(mediaHash(null, id)).toBe(`#/media/${id}`);
+    expect(artifactHash(null)).toBe("#/artifacts");
+    expect(artifactHash(id)).toBe(`#/artifacts/${id}`);
   });
 
   it("gives the links other screens use", () => {

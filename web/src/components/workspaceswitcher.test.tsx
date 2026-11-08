@@ -18,7 +18,7 @@ const personal: WorkspaceSummary = {
   name: "stored name",
   personal: true,
   role: "owner",
-  permissions: ["agentic", "settings", "members"],
+  permissions: ["agentic", "settings", "members", "routines"],
   members: 1,
 };
 const acme: WorkspaceSummary = {

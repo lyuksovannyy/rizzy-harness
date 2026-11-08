@@ -2,7 +2,7 @@ import { DEFAULT_IMAGE_SEARCH } from "../lib/engines";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
-import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, NodeAttention } from "../types";
+import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, NodeAttention, RoutineAttention } from "../types";
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
@@ -38,6 +38,8 @@ export function Home(props: {
   voice?: boolean;
   attention?: AttentionItem[];
   nodeAttention?: NodeAttention[];
+  /** Routine results waiting for the user (shown with Attention once routines land). */
+  routines?: RoutineAttention[];
   /** Lasting problems (a model gone from its provider): always shown, above the similar chats. */
   notices?: Notice[];
   /** New per home visit: the background re-rolls with it. */

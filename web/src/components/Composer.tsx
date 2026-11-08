@@ -48,6 +48,8 @@ export interface Submission {
   compareWith: string | null;
   /** Search mode: the engine URL template and the query (an @engine removed). */
   search?: { url: string; query: string };
+  /** Media item ids of images sent with the message. */
+  images?: string[];
 }
 
 const MAX_ATTACHMENTS = 5;

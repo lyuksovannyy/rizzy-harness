@@ -9,10 +9,15 @@ export type ConnState = "connecting" | "live" | "offline";
 
 type Listener = () => void;
 
+/** The areas whose lists change without content on the wire (`<topic>_changed`). */
+export type LiveTopic = "routines" | "media" | "artifacts";
+const TOPICS: LiveTopic[] = ["routines", "media", "artifacts"];
+
 export class Live {
   private ws: WebSocket | null = null;
   private views = new Map<string, SessionView>();
   private listeners = new Set<Listener>();
+  private topics = new Map<LiveTopic, Set<Listener>>(TOPICS.map((t) => [t, new Set()]));
   private backoff = 500;
   private closed = false;
   private pending = false;
@@ -34,6 +39,21 @@ export class Live {
   subscribe(l: Listener): () => void {
     this.listeners.add(l);
     return () => this.listeners.delete(l);
+  }
+
+  /** Call `fn` whenever `topic`'s list changes, and after a reconnect (it
+   * may have changed meanwhile). Any number may listen: the shell and the
+   * page showing the list. Returns the unsubscribe. */
+  onTopic(topic: LiveTopic, fn: Listener): () => void {
+    const set = this.topics.get(topic)!;
+    set.add(fn);
+    return () => {
+      set.delete(fn);
+    };
+  }
+
+  private fire(topic: LiveTopic) {
+    this.topics.get(topic)!.forEach((fn) => fn());
   }
 
   private notify() {
@@ -92,7 +112,11 @@ export class Live {
       this.onSessionsChanged();
       this.onNodesChanged();
       // So may the workspaces; the first connect comes with a fresh /api/me.
-      if (this.opened) this.onWorkspacesChanged();
+      // Each topic's listeners loaded their list when they subscribed.
+      if (this.opened) {
+        this.onWorkspacesChanged();
+        TOPICS.forEach((t) => this.fire(t));
+      }
       this.opened = true;
     };
     ws.onmessage = (m) => this.onMessage(JSON.parse(m.data as string));
@@ -145,6 +169,11 @@ export class Live {
         break;
       case "projects_changed":
         this.onProjectsChanged();
+        break;
+      case "routines_changed":
+      case "media_changed":
+      case "artifacts_changed":
+        this.fire(msg.type.slice(0, -"_changed".length) as LiveTopic);
         break;
       case "replayed":
         this.notify();

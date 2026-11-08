@@ -5,9 +5,9 @@ import type {
   AgentFeatures,
   NewAgent,
   Notice,
-  AttentionItem,
+  AttentionResponse,
   Decision,
-  NodeAttention,
+  Features,
   SetupCommands,
   SetupRecord,
   TokenSavings,
@@ -125,9 +125,13 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/admin/provision/${id}/answer`, { step, choice }),
   setupRecheck: (id: string) => call<SetupState>("POST", `/api/admin/provision/${id}/recheck`),
   revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
-  /** The chats in a workspace (the API token: all, unless one is named). */
-  sessions: (workspace?: string | null) =>
-    call<{ sessions: SessionRow[] }>("GET", scoped("/api/sessions", workspace ? { workspace } : null)),
+  /** The chats in a workspace (the API token: all, unless one is named).
+   * `routineRuns` also lists the routine run chats left out once seen. */
+  sessions: (workspace?: string | null, opts: { routineRuns?: boolean } = {}) =>
+    call<{ sessions: SessionRow[] }>(
+      "GET",
+      scoped(`/api/sessions${opts.routineRuns ? "?routine_runs=1" : ""}`, workspace ? { workspace } : null),
+    ),
   /** One chat, in whichever workspace it is. */
   session: (id: string) => call<SessionRow>("GET", `/api/sessions/${id}`),
   events: (id: string, after = 0) =>
@@ -143,7 +147,7 @@ export const api = {
     workspace_id?: string;
     project_id?: string;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
-  attention: () => call<{ items: AttentionItem[]; nodes?: NodeAttention[] }>("GET", "/api/attention"),
+  attention: () => call<AttentionResponse>("GET", "/api/attention"),
   setups: () => call<{ setups: { setup: SetupRecord; commands: SetupCommands }[] }>("GET", "/api/admin/node-setups"),
   updateSetup: (id: string, b: { mode?: "auto" | "manual"; watch_ssh?: boolean; watch_firewall?: boolean }) =>
     call<SetupRecord>("PATCH", `/api/admin/node-setups/${id}`, b),
@@ -156,7 +160,8 @@ export const api = {
   allowGraphify: (allowed: boolean) => call<GraphifyStatus>("PUT", "/api/admin/graphify", { allowed }),
   installGraphify: () => call<GraphifyStatus>("POST", "/api/admin/graphify/install"),
   markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),
-  features: () => call<{ voice: boolean; memory: boolean }>("GET", "/api/features"),
+  /** What the viewer may use in the workspace (the sidebar's areas). */
+  features: (scope?: Scope | null) => call<Features>("GET", scoped("/api/features", scope)),
   transcribe: async (audio: Blob): Promise<string> => {
     const res = await fetch("/api/transcribe", {
       method: "POST",
@@ -172,11 +177,21 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
   restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
-  deleteSession: (id: string) => call<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
+  /** `media` also deletes the caller's Media items that came from the chat. */
+  deleteSession: (id: string, opts: { media?: boolean } = {}) =>
+    call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
   prompt: (
     id: string,
     text: string,
-    opts: { agent_id?: string; effort?: Effort; attachments?: string[]; compare?: string[]; reply?: FormReply } = {},
+    opts: {
+      agent_id?: string;
+      effort?: Effort;
+      attachments?: string[];
+      compare?: string[];
+      reply?: FormReply;
+      /** Media item ids. */
+      images?: string[];
+    } = {},
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
   upload: async (file: File): Promise<UploadedAttachment> => {
     const res = await fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {

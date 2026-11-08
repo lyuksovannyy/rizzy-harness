@@ -42,6 +42,7 @@ async fn setup() -> (Master, String, tempfile::TempDir) {
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        artifacts: None,
     })
     .await
     .unwrap();

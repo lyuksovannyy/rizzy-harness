@@ -88,6 +88,7 @@ const en = {
   "settings.nodes": "Nodes",
   "settings.users": "Users",
   "settings.workspaces": "Workspaces",
+  "settings.storage": "Storage",
   "settings.workspaceDefault": "Workspace default",
   "settings.defaultsHint": "Applies in every workspace; leave it on 'Workspace default' to follow each workspace.",
   "settings.appearance": "Appearance",
@@ -106,6 +107,13 @@ const en = {
   "settings.backdropChatsHint": "A quiet, still version beside chats on wide screens.",
   "home.toReview": "{n} new memories to review",
   "home.toReviewOne": "1 new memory to review",
+  // Two blocks, one per owner, so parallel additions merge cleanly: each
+  // adds lines only inside its own block.
+  // ── shell (I3) ──
+  // ── end shell ──
+
+  // ── feature pages (I4) ──
+  // ── end feature pages ──
 } as const;
 
 type Catalog = typeof en;

@@ -38,6 +38,7 @@ async fn rt(root: &std::path::Path, id: &str, profile: Profile) -> NodeRuntime {
         profile,
         incognito_ttl: None,
         checkpoints_dir: None,
+        artifacts: None,
     })
     .await
     .unwrap()

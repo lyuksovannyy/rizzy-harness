@@ -27,6 +27,12 @@ harness-memory.workspace = true
 harness-link.workspace = true
 harness-provision.workspace = true
 async-trait.workspace = true
+aws-lc-rs.workspace = true
+base64.workspace = true
+croner.workspace = true
+infer.workspace = true
+nix.workspace = true
+unicode-segmentation.workspace = true
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-util.workspace = true
 hex.workspace = true

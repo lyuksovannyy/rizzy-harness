@@ -7,13 +7,15 @@ import type { AgentChain, Perm, WorkspaceRole, WorkspaceSettings } from "../type
 import type { Plan } from "./models";
 
 export const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "guest"];
+/** The members panel's columns. `routines` joins them with the Routines
+ * page; until then the permission exists but has nothing to show. */
 export const PERMS: Perm[] = ["agentic", "settings", "members"];
 
 /** As fixed in the server (crates/master/src/workspaces.rs). */
 const ROLE_PERMS: Record<WorkspaceRole, Perm[]> = {
-  owner: ["agentic", "settings", "members"],
-  admin: ["agentic", "settings", "members"],
-  member: ["agentic"],
+  owner: ["agentic", "settings", "members", "routines"],
+  admin: ["agentic", "settings", "members", "routines"],
+  member: ["agentic", "routines"],
   guest: [],
 };
 const RANK: Record<WorkspaceRole, number> = { owner: 3, admin: 2, member: 1, guest: 0 };
@@ -25,6 +27,7 @@ export const PERM_LABEL: Record<Perm, string> = {
   agentic: "Agentic sessions",
   settings: "Change settings",
   members: "Manage members",
+  routines: "Run routines",
 };
 
 const SUMMARY: Record<WorkspaceRole, string> = {

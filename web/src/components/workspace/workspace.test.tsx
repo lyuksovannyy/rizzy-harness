@@ -52,7 +52,7 @@ const summary = (role: WorkspaceRole, more: Partial<WorkspaceSummary> = {}): Wor
   name: "Acme",
   personal: false,
   role,
-  permissions: role === "owner" || role === "admin" ? ["agentic", "settings", "members"] : role === "member" ? ["agentic"] : [],
+  permissions: role === "owner" || role === "admin" ? ["agentic", "settings", "members", "routines"] : role === "member" ? ["agentic", "routines"] : [],
   members: 4,
   ...more,
 });

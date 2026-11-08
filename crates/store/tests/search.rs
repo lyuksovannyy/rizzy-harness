@@ -105,3 +105,22 @@ fn rebuild_matches_live_index() {
     assert_eq!(before, after);
     assert_eq!(after.len(), 1);
 }
+
+#[test]
+fn latest_message_texts_skip_empty_messages() {
+    let s = Store::open_in_memory().unwrap();
+    let answered = chat(&s, "u1", "t", &["first question", "the answer"], false);
+    // A tool-only turn ends in an assistant message without text.
+    let tools = chat(&s, "u1", "t", &["run the build", "", "  "], false);
+    let none = chat(&s, "u1", "t", &[], false);
+    // Only the last four messages are read: older text is not looked for.
+    let quiet = chat(&s, "u1", "t", &["old words", "", "", "", ""], false);
+    let got = s
+        .latest_message_texts(&[answered, tools, none, quiet])
+        .unwrap();
+    assert_eq!(got.get(&answered).map(String::as_str), Some("the answer"));
+    assert_eq!(got.get(&tools).map(String::as_str), Some("run the build"));
+    assert!(!got.contains_key(&none));
+    assert!(!got.contains_key(&quiet));
+    assert_eq!(got.len(), 2);
+}

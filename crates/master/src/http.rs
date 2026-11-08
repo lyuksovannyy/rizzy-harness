@@ -12,8 +12,13 @@ use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth};
 
 mod agent_edits;
+mod artifacts;
+mod hooks;
+mod media;
 mod projects;
 mod providers;
+mod routines;
+mod storage;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
@@ -181,7 +186,12 @@ pub fn router(master: Master) -> Router {
         )
         .route("/api/sessions/{id}/approvals/{approval_id}", post(approval))
         .route("/api/ws", get(crate::ws::upgrade))
-        .merge(projects::routes());
+        .merge(projects::routes())
+        .merge(routines::routes())
+        .merge(hooks::routes())
+        .merge(media::routes())
+        .merge(artifacts::routes())
+        .merge(storage::routes());
     api.fallback(crate::assets::serve)
         .layer(axum::middleware::from_fn_with_state(
             master.clone(),
@@ -207,6 +217,7 @@ impl From<CommandError> for ApiError {
             CommandError::Rejected(_) => StatusCode::CONFLICT,
             CommandError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             CommandError::UnknownAgent(_) => StatusCode::BAD_REQUEST,
+            CommandError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
         };
         ApiError(code, e.to_string())
     }
@@ -878,6 +889,8 @@ async fn delete_user(
     // the workspaces that go with them go too, and their facts.
     let projects = crate::projects::ids(&m).await;
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
+    // Their stored files lost their rows with the account; unlink them.
+    crate::storage::on_user_deleted(&m).await;
     crate::projects::forget_gone(&m, projects).await;
     let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
     let _ = m.inner.live.send(crate::Live::SessionsChanged);
@@ -917,13 +930,31 @@ struct WorkspaceQuery {
     workspace: Option<String>,
 }
 
+/// A query flag: `1` or `true` (links and the web app send `=1`).
+fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    match String::deserialize(d)?.as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" | "" => Ok(false),
+        _ => Err(serde::de::Error::custom("expected 1 or 0")),
+    }
+}
+
+#[derive(Deserialize)]
+struct SessionsQuery {
+    #[serde(default)]
+    workspace: Option<String>,
+    /// Also the routine run chats the list leaves out once seen.
+    #[serde(default, deserialize_with = "query_flag")]
+    routine_runs: bool,
+}
+
 /// The caller's own chats in one workspace (the API token: every chat,
 /// optionally in one workspace). The workspace is an extra filter: other
 /// members' chats stay private (T10).
 async fn list_sessions(
     State(m): State<Master>,
     headers: HeaderMap,
-    Query(q): Query<WorkspaceQuery>,
+    Query(q): Query<SessionsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
@@ -935,18 +966,18 @@ async fn list_sessions(
     };
     let rows = m.inner.mirror.call(|s| s.sessions()).await?;
     let links = crate::projects::links(&m).await?;
-    Ok(Json(json!({
-        "sessions": rows
-            .iter()
-            .filter(|r| who.can_see(r.owner_id.as_deref()))
-            .filter(in_scope)
-            .map(|r| {
-                let mut v = session_json(r, blocked.as_deref());
-                v["project_id"] = json!(crate::projects::effective(&links, r));
-                v
-            })
-            .collect::<Vec<_>>()
-    })))
+    let mut list: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|r| who.can_see(r.owner_id.as_deref()))
+        .filter(in_scope)
+        .map(|r| {
+            let mut v = session_json(r, blocked.as_deref());
+            v["project_id"] = json!(crate::projects::effective(&links, r));
+            v
+        })
+        .collect();
+    crate::routines::annotate(&m, &mut list, q.routine_runs).await?;
+    Ok(Json(json!({ "sessions": list })))
 }
 
 /// Any of the caller's chats, whatever its workspace (the UI follows a
@@ -964,16 +995,29 @@ async fn get_session(
         &crate::projects::links(&m).await?,
         &row
     ));
+    crate::routines::annotate_one(&m, &mut v).await?;
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct DeleteSessionQuery {
+    /// Also delete the caller's Media items that came from this chat.
+    #[serde(default, deserialize_with = "query_flag")]
+    media: bool,
 }
 
 async fn delete_session(
     State(m): State<Master>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(q): Query<DeleteSessionQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
+    // Before the chat goes, while its items still name it.
+    if q.media {
+        crate::media::on_chat_deleted(&m, &who, sid).await?;
+    }
     m.delete_session(sid).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -1097,6 +1141,9 @@ struct PromptBody {
     /// note.
     #[serde(default)]
     reply: Option<harness_core::event::FormReply>,
+    /// Media item ids of images for this message (`media::prompt_images`).
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1155,6 +1202,12 @@ async fn prompt(
     let row = visible_session(&m, &who, &id).await?;
     // Before the uploads are taken, so a refusal leaves them for later.
     agentic_gate(&m, &who, &row).await?;
+    let images = crate::media::prompt_images(&m, &who, &row, &b.images)
+        .await
+        .map_err(|(c, e)| ApiError(c, e))?;
+    // A chat a routine started from an external event stays untrusted for
+    // every turn the owner sends there.
+    let flags = crate::routines::on_owner_prompt(&m, row.session_id).await;
     let sid = row.session_id;
     let attachments = if b.attachments.is_empty() {
         Vec::new()
@@ -1185,6 +1238,8 @@ async fn prompt(
             attachments,
             compare: b.compare,
             reply: b.reply,
+            untrusted: flags.untrusted,
+            images,
         },
     )
     .await?;
@@ -1200,6 +1255,9 @@ fn check_reply_body(r: &harness_core::event::FormReply, b: &PromptBody) -> ApiRe
     }
     if !b.compare.is_empty() {
         return bad("an answer cannot ask for parallel answers");
+    }
+    if !b.images.is_empty() {
+        return bad("an answer cannot carry images");
     }
     if harness_core::ui::too_large(r) {
         return bad(harness_core::ui::TOO_LARGE);
@@ -1647,6 +1705,7 @@ async fn revoke_node(
     if !m.revoke_node(&id).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "no such node".into()));
     }
+    crate::artifacts::on_node_revoked(&m, &id).await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1690,15 +1749,33 @@ async fn select_variant(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// What optional services this server has, for the UI.
+/// What optional services this server has, and what the caller may use in
+/// a workspace (the sidebar shows an entry only when its `show` is true).
 async fn features(
     State(m): State<Master>,
     headers: HeaderMap,
+    Query(q): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    Ok(Json(
-        json!({ "voice": m.transcriber().is_some(), "memory": m.memory().is_some() }),
-    ))
+    let who = require(&m, &headers).await?;
+    let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
+    let scope = scope.as_ref();
+    let routines = crate::routines::features(&m, &who, scope).await;
+    let media = crate::media::features(&m, &who, scope).await;
+    let artifacts = crate::artifacts::features(&m, &who, scope).await;
+    let mut kinds = vec!["chats", "projects"];
+    for (kind, block) in [("media", &media), ("artifacts", &artifacts)] {
+        if block["show"] == true {
+            kinds.push(kind);
+        }
+    }
+    Ok(Json(json!({
+        "voice": m.transcriber().is_some(),
+        "memory": m.memory().is_some(),
+        "routines": routines,
+        "media": media,
+        "artifacts": artifacts,
+        "search": { "kinds": kinds },
+    })))
 }
 
 async fn transcribe(
@@ -1748,7 +1825,10 @@ async fn attention(
     } else {
         vec![]
     };
-    Ok(Json(json!({ "items": items, "nodes": nodes })))
+    let routines = crate::routines::attention(&m, &who).await?;
+    Ok(Json(
+        json!({ "items": items, "nodes": nodes, "routines": routines }),
+    ))
 }
 
 #[derive(Deserialize)]

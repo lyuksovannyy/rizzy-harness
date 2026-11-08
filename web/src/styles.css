@@ -3954,3 +3954,11 @@ input.add-line {
 .templates > .stack {
   margin-top: var(--space-3);
 }
+
+/* Two blocks, one per owner, so parallel additions merge cleanly: each adds
+   rules only inside its own block. */
+/* ── shell (I3) ── */
+/* ── end shell ── */
+
+/* ── feature pages (I4) ── */
+/* ── end feature pages ── */

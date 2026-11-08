@@ -158,8 +158,48 @@ export interface ApprovalState {
   by: ResolvedBy | null;
 }
 
+/** An image a user message carries (`user_message.images`); its bytes stay in Media. */
+export interface ImageRef {
+  media_id: string;
+  sha256: string;
+  mime: string;
+  name: string;
+  width: number;
+  height: number;
+}
+
+/** What a node reports about a published file: display only, never trusted
+ * for anything else (docs/artifacts.md). */
+export interface ArtifactMeta {
+  toolchain?: string;
+  package?: { name: string; version: string };
+  git?: { commit: string; branch: string; dirty: boolean };
+  target?: string;
+  entries?: { path: string; size: number }[];
+  entries_total?: number;
+  skipped?: Record<string, number>;
+  source_path?: string;
+}
+
+/** A file staged for Artifacts (the `artifact_staged` event): on its tool
+ * card when an agent published it, a standalone item when the user saved it. */
+export interface StagedArtifact {
+  stage_id: string;
+  call_id?: string | null;
+  by: "agent" | "user";
+  name: string;
+  filename: string;
+  packed: "tar.gz" | null;
+  size: number;
+  sha256: string;
+  kind_hint?: string | null;
+  source_path: string;
+  notes?: string | null;
+  meta: ArtifactMeta;
+}
+
 export type Item =
-  | { type: "user"; turn_id: string; text: string; attachments?: string[]; reply?: FormReply }
+  | { type: "user"; turn_id: string; text: string; attachments?: string[]; reply?: FormReply; images?: ImageRef[] }
   | {
       type: "assistant";
       message_id: string;
@@ -178,13 +218,22 @@ export type Item =
       live_output: string;
       result: ToolResult | null;
       approval: ApprovalState | null;
+      /** A `publish` call's file, once the node staged it. */
+      staged?: StagedArtifact;
     }
   | { type: "error"; message: string }
   | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
   | { type: "agent_changed"; agent: AgentRef }
   | { type: "summary"; through_seq: number; text: string }
   /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
-  | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null };
+  | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null }
+  /** A file the user saved as an artifact ("Save as artifact"). */
+  | { type: "artifact"; staged: StagedArtifact }
+  /** Saving a file as an artifact failed on the node (`artifact_stage_failed`). */
+  | { type: "artifact_failed"; path: string; name: string | null; error: string };
+
+export type UserItem = Extract<Item, { type: "user" }>;
+export type ToolItem = Extract<Item, { type: "tool" }>;
 
 export interface SessionView {
   session_id: string | null;
@@ -451,6 +500,48 @@ export interface ProvidersState {
   configured: boolean;
 }
 
+export type SearchKind = "chats" | "projects" | "media" | "artifacts";
+
+/** One row of the search panel (`GET /api/search`). Title, preview and
+ * snippet mark matches with \u0002 … \u0003. */
+export interface SearchResult {
+  kind: "chat" | "project" | "media" | "artifact";
+  /** A chat's 36-character id; 32 hex characters for the rest. */
+  id: string;
+  title: string;
+  /** Localized by the client. */
+  type:
+    | "chat"
+    | "agentic"
+    | "routine"
+    | "project"
+    | "image"
+    | "video"
+    | "audio"
+    | "media_other"
+    | "binary"
+    | "package"
+    | "archive"
+    | "document"
+    | "other";
+  /** Line 2 of the row; "" when there is none. */
+  preview: string;
+  /** Line 3, only when title and preview do not show every term. */
+  snippet: string | null;
+  time_ms: number;
+  project_id: string | null;
+  running?: boolean;
+  /** Same-origin path only. */
+  thumb?: string | null;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+  next: string | null;
+  /** The tabs this viewer has, in order. */
+  kinds: SearchKind[];
+}
+
 export interface SearchHit {
   session_id: string;
   title: string;
@@ -482,6 +573,20 @@ export interface SessionRow {
   blocked?: string | null;
   /** The project the chat is in (docs/projects.md). */
   project_id?: string | null;
+  /** Set when a routine run started the chat. */
+  routine?: RoutineMark | null;
+}
+
+/** The routine run behind a chat (`SessionRow.routine`). */
+export interface RoutineMark {
+  routine_id: string;
+  name: string;
+  run_id: string;
+  status: string;
+  seen: boolean;
+  promoted: boolean;
+  /** The chat holds data from an external event. */
+  untrusted: boolean;
 }
 
 export interface RemoteNode {
@@ -516,7 +621,7 @@ export interface Me {
 }
 
 /** What a workspace role allows, in this order on the wire. */
-export type Perm = "agentic" | "settings" | "members";
+export type Perm = "agentic" | "settings" | "members" | "routines";
 export type WorkspaceRole = "owner" | "admin" | "member" | "guest";
 
 export interface WorkspaceSummary {
@@ -626,6 +731,41 @@ export interface AttentionItem {
   updated_ms: number;
   /** Attention lists the caller's chats in every workspace. */
   workspace_id?: string | null;
+}
+
+/** A routine's results waiting for its owner (`GET /api/attention`). */
+export interface RoutineAttention {
+  kind: "result" | "failed" | "paused";
+  routine_id: string;
+  name: string;
+  workspace_id: string;
+  run_id: string | null;
+  session_id: string | null;
+  status: string;
+  reason: string | null;
+  /** Finished runs not seen yet. */
+  unseen: number;
+  notify: "always" | "failures" | "never";
+  ts_ms: number;
+}
+
+export interface AttentionResponse {
+  items: AttentionItem[];
+  /** Server problems, for admins. */
+  nodes?: NodeAttention[];
+  routines?: RoutineAttention[];
+}
+
+/** What the server has, and what the viewer may use in one workspace
+ * (`GET /api/features?workspace=`): the sidebar shows an area only when its
+ * `show` is true; `why` explains an empty page. */
+export interface Features {
+  voice: boolean;
+  memory: boolean;
+  routines: { enabled: boolean; show: boolean; webhooks: boolean; why: string | null };
+  media: { enabled: boolean; show: boolean; max_file: number; vision_images: boolean };
+  artifacts: { enabled: boolean; show: boolean; why: string | null };
+  search: { kinds: SearchKind[] };
 }
 
 export interface SetupStep {

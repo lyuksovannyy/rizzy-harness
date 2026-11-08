@@ -23,6 +23,10 @@ use crate::{Live, Master, auth};
 
 const PAGE: usize = 1000;
 
+/// The `Live::Changed` topics; after a lag each is sent once, since any of
+/// them may have been dropped.
+const TOPICS: [&str; 3] = ["routines", "media", "artifacts"];
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
@@ -153,15 +157,28 @@ async fn run(m: Master, who: auth::Principal, socket: WebSocket) {
                     Ok(Live::MemoryChanged) => send(&mut sink, json!({"type": "memory_changed"})).await,
                     Ok(Live::WorkspacesChanged) => send(&mut sink, json!({"type": "workspaces_changed"})).await,
                     Ok(Live::ProjectsChanged) => send(&mut sink, json!({"type": "projects_changed"})).await,
+                    // Content-free and only for the owner (or everyone, for a
+                    // change to something shared).
+                    Ok(Live::Changed { topic, owner }) => {
+                        if owner.is_none() || who.can_see(owner.as_deref()) {
+                            send(&mut sink, json!({"type": format!("{topic}_changed")})).await
+                        } else {
+                            true
+                        }
+                    }
                     Err(RecvError::Lagged(_)) => {
                         let mut ok = true;
                         for (sid, last) in subs.iter_mut() {
                             ok &= catch_up(&m, &mut sink, *sid, last).await;
                         }
-                        // A dropped message may have been either.
-                        ok && send(&mut sink, json!({"type": "sessions_changed"})).await
+                        // A dropped message may have been any of them.
+                        ok = ok && send(&mut sink, json!({"type": "sessions_changed"})).await
                             && send(&mut sink, json!({"type": "workspaces_changed"})).await
-                            && send(&mut sink, json!({"type": "projects_changed"})).await
+                            && send(&mut sink, json!({"type": "projects_changed"})).await;
+                        for topic in TOPICS {
+                            ok = ok && send(&mut sink, json!({"type": format!("{topic}_changed")})).await;
+                        }
+                        ok
                     }
                     Err(RecvError::Closed) => false,
                 };

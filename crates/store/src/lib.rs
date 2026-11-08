@@ -1,13 +1,21 @@
 //! SQLite event log. The same schema serves the node's authoritative log and
 //! the master's mirror; only durability differs. See PLAN.md §2–3.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use harness_core::{RawEvent, SessionId};
 use rusqlite::{Connection, OptionalExtension, params};
 
+// Each feature keeps its tables in its own file; their types are reached by
+// module path (`routines::RoutineMark`), so no `pub use` lines are added.
+pub mod artifacts;
+pub mod blobs;
+pub mod media;
 mod projects;
+pub mod routines;
+pub mod session_images;
 pub use projects::{
     CardPatch, CardRow, ColumnRow, NewCard, NewColumn, NewProject, ProjectLink, ProjectPatch,
     ProjectRow, TemplateRow,
@@ -454,6 +462,12 @@ impl Store {
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(projects::SCHEMA)?;
+        // In this order: each one's tables reference the ones before.
+        conn.execute_batch(blobs::SCHEMA)?;
+        conn.execute_batch(media::SCHEMA)?;
+        conn.execute_batch(artifacts::SCHEMA)?;
+        conn.execute_batch(routines::SCHEMA)?;
+        conn.execute_batch(session_images::SCHEMA)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Deleted chats (incognito, user deletes) are overwritten, not just
         // unlinked, so their text does not linger in free pages.
@@ -784,6 +798,11 @@ impl Store {
                 params![id, harness_core::now_ms()],
             )?;
         }
+        // Rows that name the chat without a foreign key (it is deleted on
+        // its own) go in the same transaction.
+        routines::on_session_deleted(&tx, &id)?;
+        media::on_session_deleted(&tx, &id)?;
+        session_images::on_session_deleted(&tx, &id)?;
         tx.commit()?;
         Ok(n > 0)
     }
@@ -1108,6 +1127,31 @@ impl Store {
                 kind,
                 payload: serde_json::from_str(&payload)?,
             });
+        }
+        Ok(out)
+    }
+
+    /// The latest message with text in each of `sids`, the user's or the
+    /// assistant's, for search previews and routine results. Only a
+    /// session's last four messages are read (a backward scan of its key
+    /// range); a session whose last four have no text, or that has none, is
+    /// left out.
+    pub fn latest_message_texts(&self, sids: &[SessionId]) -> Result<HashMap<SessionId, String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT payload FROM events WHERE session_id = ?1 AND kind IN ('user_message', 'assistant_message') ORDER BY seq DESC LIMIT 4",
+        )?;
+        let mut out = HashMap::new();
+        for sid in sids {
+            let mut rows = stmt.query(params![sid.to_string()])?;
+            while let Some(row) = rows.next()? {
+                let payload: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
+                let text = payload.get("text").and_then(|v| v.as_str());
+                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                    out.insert(*sid, text.to_string());
+                    break;
+                }
+            }
         }
         Ok(out)
     }
@@ -1441,6 +1485,8 @@ impl Store {
              WHERE session_id IN (SELECT session_id FROM sessions WHERE owner_id = ?1)",
             params![user_id],
         )?;
+        // What the cascade below cannot reach (the account's FTS rows).
+        blobs::on_user_deleted(&tx, user_id)?;
         tx.execute("DELETE FROM users WHERE user_id = ?1", params![user_id])?;
         tx.commit()?;
         Ok(())

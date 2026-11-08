@@ -19,7 +19,32 @@ const INITIAL_KB = 110;
 // on top, 5.5 in its lazy page, 2.2 for the 20 icons the sidebar draws (in the
 // first load, which stays under its own budget at 100.1) and the rest in the
 // sidebar section, the shell and the chat header's picker.
-const TOTAL_KB = 321;
+//
+// From the sidebar areas on (routines, media, artifacts, search), the budget
+// is the last merged measurement plus each implementer's own growth, one line
+// each, so parallel branches merge without touching the same line. Inside a
+// phase a branch sets only its own line (its measured growth + at most 0.5,
+// with the reason); at each merged phase BASE_KB is re-measured and the three
+// lines go back to 0.
+
+// Measured total of the last merged phase, with what it bought.
+const BASE_KB = 321.3; // Phase 0: routes, live topics, Shell arms, three stub chunks (measured 2026-11-08; initial 100.8)
+
+// I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
+const I2_KB = 0;
+
+// I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
+const I3_KB = 0;
+
+// I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
+const I4_KB = 0;
+
+// Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
+// The ceilings the sidebar areas were planned within; no budget line may
+// take the bundle past them.
+const PROGRAM_TOTAL_KB = 362;
+const PROGRAM_INITIAL_KB = 103;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));
@@ -57,8 +82,8 @@ for (const f of assets.filter((f) => !f.endsWith(".js")).sort()) {
   const kb = font ? read(f).length / 1024 : gz(f);
   console.log(`  ${kb.toFixed(1).padStart(6)} KB  ${(font ? "font" : f.split(".").pop()).padEnd(8)}${f}`);
 }
-console.log(`initial JS: ${initialKb.toFixed(1)} KB gzip (budget ${INITIAL_KB})`);
-console.log(`total JS:   ${totalKb.toFixed(1)} KB gzip (budget ${TOTAL_KB}), ${allJs.length} chunks`);
+console.log(`initial JS: ${initialKb.toFixed(1)} KB gzip (budget ${INITIAL_KB}, ceiling ${PROGRAM_INITIAL_KB})`);
+console.log(`total JS:   ${totalKb.toFixed(1)} KB gzip (budget ${TOTAL_KB}, ceiling ${PROGRAM_TOTAL_KB}), ${allJs.length} chunks`);
 
 /** The emitted chunks a lazy part must have; none means it is not lazy any more. */
 const chunk = (re, what) => {
@@ -66,16 +91,31 @@ const chunk = (re, what) => {
   if (found.length === 0) failures.push(`no ${what} chunk in dist/assets`);
   return found;
 };
+/** A lazy part's chunks: they must exist and stay out of the initial load. */
+const lazyChunk = (re, what) => {
+  const found = chunk(re, what);
+  for (const f of found) if (initial.has(f)) failures.push(`${f} (${what}) is in the initial load`);
+  return found;
+};
 // The mode backgrounds and their host load only when one shows, and the
 // still copy beside chats only when it is turned on.
-const backgrounds = [
-  ...chunk(/\/Backdrop-/, "background host"),
-  ...chunk(/\/SearchBg-/, "Search background"),
-  ...chunk(/\/WallBg-/, "Ask background"),
-  ...chunk(/\/BinaryBg-/, "Agentic background"),
-  ...chunk(/\/ChatGutter-/, "chat gutter"),
+lazyChunk(/\/Backdrop-/, "background host");
+lazyChunk(/\/SearchBg-/, "Search background");
+lazyChunk(/\/WallBg-/, "Ask background");
+lazyChunk(/\/BinaryBg-/, "Agentic background");
+lazyChunk(/\/ChatGutter-/, "chat gutter");
+
+// I3: its lazy chunks (the search panel and the account menu).
+const lazyI3 = [];
+
+// I4: its lazy chunks (the area pages, then their previews).
+const lazyI4 = [
+  ...lazyChunk(/\/Routines-/, "Routines page"),
+  ...lazyChunk(/\/Media-/, "Media page"),
+  ...lazyChunk(/\/Artifacts-/, "Artifacts page"),
 ];
-for (const f of backgrounds) if (initial.has(f)) failures.push(`${f} is in the initial load`);
+
+console.log(`lazy chunks checked: ${lazyI3.length} (I3), ${lazyI4.length} (I4)`);
 // What the home screen and every chat load: math and highlighting must not.
 const eager = [...initial, ...chunk(/\/Conversation-/, "Conversation")];
 // An installed package's file, found the way the package that pulls it in
@@ -114,5 +154,9 @@ for (const f of allJs.filter((f) => /\/highlight\.worker-/.test(f))) {
   if (has(f, /\b(document|window)\./)) failures.push(`${f} uses the DOM, which a worker does not have`);
 }
 if (initialKb > INITIAL_KB || totalKb > TOTAL_KB) failures.push("bundle budget exceeded");
+if (initialKb > PROGRAM_INITIAL_KB) failures.push(`initial JS is over the program ceiling of ${PROGRAM_INITIAL_KB} KB`);
+if (totalKb > PROGRAM_TOTAL_KB || TOTAL_KB > PROGRAM_TOTAL_KB) {
+  failures.push(`the total or its budget is over the program ceiling of ${PROGRAM_TOTAL_KB} KB`);
+}
 for (const msg of failures) console.error(msg);
 if (failures.length) process.exit(1);

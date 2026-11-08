@@ -38,6 +38,7 @@ async fn start() -> T {
         profile: Profile::Chat,
         incognito_ttl: None,
         checkpoints_dir: None,
+        artifacts: None,
     })
     .await
     .unwrap();

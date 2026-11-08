@@ -1,6 +1,7 @@
 //! Node runtime: owns sessions, runs agent turns, is the single writer of each
 //! session's event log, and talks to the master over a `NodeLink`.
 
+pub mod artifacts;
 mod git;
 pub mod policy;
 mod session;
@@ -50,6 +51,9 @@ pub struct NodeConfig {
     /// Shadow git repositories for checkpoints of folders without git.
     /// `None`: only folders inside a repository get checkpoints.
     pub checkpoints_dir: Option<std::path::PathBuf>,
+    /// Publishing files as artifacts (worker nodes); `None` for the chat
+    /// runtime, which never publishes.
+    pub artifacts: Option<artifacts::StageConfig>,
 }
 
 /// Both ends of a link as seen from the master: commands in, messages out.

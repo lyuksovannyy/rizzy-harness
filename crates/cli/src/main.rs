@@ -257,6 +257,7 @@ async fn serve(
         profile: Profile::Chat,
         incognito_ttl: Some(cfg.chat.incognito_ttl()),
         checkpoints_dir: None,
+        artifacts: None,
     })
     .await?;
 
@@ -277,8 +278,12 @@ async fn serve(
         let _ = std::fs::remove_file(dir.join("claim-code"));
     }
     let master = Master::new(mirror, auth);
+    // Before the first node link and the node listener: a replayed publish
+    // must find the blob store.
+    harness_master::storage::open(&master, dir)?;
     master.set_provider_runtime(runtime);
     master.start_incognito_purge(cfg.chat.incognito_ttl());
+    master.start_maintenance();
     // Each provider's model listing: at start when older than a day, then daily.
     master.start_model_refresh(harness_master::model_cache::REFRESH_EVERY);
     if let Some(mem) = memory {
@@ -312,6 +317,8 @@ async fn serve(
         .add_link(chat.attach().await, true)
         .await
         .map_err(anyhow::Error::msg)?;
+    // After both links, so the chats routines start have somewhere to run.
+    master.start_routines();
 
     if let Some(addr) = node_listen {
         let cert = Arc::new(harness_link::MasterCert::load_or_create(dir)?);
@@ -420,6 +427,9 @@ async fn agentic_node(
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: Some(dir.join("checkpoints")),
+        // The data dir is passed as is: for the embedded node it is the
+        // master's, so its databases, keys and blobs are never published.
+        artifacts: Some(harness_node::artifacts::StageConfig::new(dir.to_path_buf())),
     })
     .await?;
     Ok((rt, graphify))

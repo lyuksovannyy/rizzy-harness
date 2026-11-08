@@ -17,6 +17,7 @@ vi.mock("../live", () => ({
     onNodesChanged = () => {};
     onMemoryChanged = () => {};
     onWorkspacesChanged = () => {};
+    onTopic = () => () => {};
     close = vi.fn();
     constructor() {
       lives.push(this);
@@ -47,7 +48,7 @@ const ws = (id: string, more: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
   name: id,
   personal: false,
   role: "member",
-  permissions: ["agentic"],
+  permissions: ["agentic", "routines"],
   members: 2,
   ...more,
 });
@@ -96,7 +97,7 @@ describe("Shell", () => {
     const p = props();
     await render(p);
     const before = stubs.sessions.mock.calls.length;
-    const promoted = ws("acme", { name: "Acme", role: "admin", permissions: ["agentic", "settings", "members"], members: 3 });
+    const promoted = ws("acme", { name: "Acme", role: "admin", permissions: ["agentic", "settings", "members", "routines"], members: 3 });
     stubs.workspaces.mockResolvedValue(list(personal, promoted));
     await act(async () => lives[0]!.onWorkspacesChanged());
     expect(stubs.sessions.mock.calls.length).toBe(before + 1);
