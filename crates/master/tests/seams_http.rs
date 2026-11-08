@@ -356,7 +356,9 @@ async fn hooks_change_nothing_users_see_yet() {
     let [(alex, _), _] = users(&t).await;
     let (st, f) = req(&t, Method::GET, "/api/features", None, &alex).await;
     assert_eq!(st, StatusCode::OK, "{f}");
-    for area in ["routines", "media", "artifacts"] {
+    // Routines landed (phase A): their entry shows for whoever may own them.
+    assert_eq!(f["routines"]["show"], true, "{f}");
+    for area in ["media", "artifacts"] {
         assert_eq!(f[area]["show"], false, "{f}");
     }
     assert_eq!(f["search"]["kinds"], json!(["chats", "projects"]));
