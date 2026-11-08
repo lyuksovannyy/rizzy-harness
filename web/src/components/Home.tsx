@@ -38,7 +38,7 @@ export function Home(props: {
   voice?: boolean;
   attention?: AttentionItem[];
   nodeAttention?: NodeAttention[];
-  /** Routine results waiting for the user (shown with Attention once routines land). */
+  /** Routine results not seen yet, shown below the chats waiting for the user. */
   routines?: RoutineAttention[];
   /** Lasting problems (a model gone from its provider): always shown, above the similar chats. */
   notices?: Notice[];
@@ -127,7 +127,15 @@ export function Home(props: {
           onOpen={props.onOpen}
           onCount={setSimilarCount}
         />
-        {similarCount === 0 && <Attention items={props.attention ?? []} nodes={props.nodeAttention} onOpen={props.onOpen} />}
+        {similarCount === 0 && (
+          <Attention
+            items={props.attention ?? []}
+            nodes={props.nodeAttention}
+            routines={props.routines}
+            onOpen={props.onOpen}
+            timeZone={props.timeZone}
+          />
+        )}
         {!!props.toReview && (
           <a className="review-link small" href={MEMORY_HASH}>
             {props.toReview === 1 ? t("home.toReviewOne") : t("home.toReview", { n: String(props.toReview) })}
