@@ -1823,6 +1823,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "croner",
+ "flate2",
  "futures",
  "getrandom 0.4.3",
  "harness-agent-native",
