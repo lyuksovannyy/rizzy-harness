@@ -11,7 +11,7 @@ vi.mock("../api", () => ({ call: vi.fn(), HttpError: class extends Error {} }));
 const storageApi = {
   mine: vi.fn(),
   admin: vi.fn<() => Promise<AdminStorage>>(),
-  save: vi.fn<(s: StorageLimits) => Promise<{ settings: StorageLimits }>>(),
+  save: vi.fn<(s: StorageLimits) => Promise<StorageLimits>>(),
 };
 vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), storageApi }));
 const { StorageSettings } = await import("./StorageSettings");
@@ -34,7 +34,7 @@ beforeEach(() => {
     total: 1.5 * GB + 2048,
     disk: { free: 50 * GB, total: 200 * GB },
   });
-  storageApi.save.mockImplementation((s) => Promise.resolve({ settings: s }));
+  storageApi.save.mockImplementation((s) => Promise.resolve(s));
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);

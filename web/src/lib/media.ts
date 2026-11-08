@@ -108,7 +108,8 @@ export const mediaApi = {
 export const storageApi = {
   mine: () => call<MyStorage>("GET", "/api/me/storage"),
   admin: () => call<AdminStorage>("GET", "/api/admin/storage"),
-  save: (settings: StorageLimits) => call<{ settings: StorageLimits }>("PUT", "/api/admin/storage", settings),
+  /** The limits in, the limits as saved back (§5.6: `settings` → `settings`). */
+  save: (settings: StorageLimits) => call<StorageLimits>("PUT", "/api/admin/storage", settings),
 };
 
 /** Where an item's bytes are; `download` asks for an attachment. */

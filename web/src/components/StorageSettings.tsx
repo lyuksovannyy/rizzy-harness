@@ -35,9 +35,9 @@ export function StorageSettings(_props: { me: Me }) {
     setError(null);
     setNote(null);
     try {
-      const r = await storageApi.save(form);
-      setForm(r.settings);
-      setData({ ...data, settings: r.settings });
+      const saved = await storageApi.save(form);
+      setForm(saved);
+      setData({ ...data, settings: saved });
       setNote("Saved.");
     } catch (e) {
       setError(message(e));
