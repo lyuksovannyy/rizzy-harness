@@ -28,27 +28,28 @@ const INITIAL_KB = 110;
 // lines go back to 0.
 
 // Measured total of the last merged phase, with what it bought.
-const BASE_KB = 348.8; // Phase A merged (measured 348.7x, rounded up): routines P1, storage + media M1, sidebar/search panel/account menu, routines and media pages (measured 2026-11-08; initial 103.7)
+const BASE_KB = 359.5; // Phase B merged (measured 359.49): webhooks UI, Artifacts page + chat cards + Save as artifact, fold items, search thumbnails, lazy Login (measured 2026-11-08; initial 102.3)
 
 // I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I2_KB = 0.4; // Phase B: fold.ts artifact_staged / artifact_stage_failed items, all in the initial load (measured +0.2, 349.0 total / 103.9 initial, 2026-11-08) + 0.2
+const I2_KB = 0;
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I3_KB = 1.2; // Phase B: the login form is its own lazy chunk (first load 103.7 → 102.1; split costs +1.1 in total: Login 2.0, eye icon and copy helper 0.5 shared), search thumbnails +0.1 (measured 349.8 on 2026-11-08)
+const I3_KB = 0;
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I4_KB = 9.8; // Phase B: Artifacts page + detail 4.9 and lib/artifacts + bytes 1.1 (lazy), publish card, Save as artifact, untrusted banner +2.0 (Conversation), webhook card, sample event, project +1.1 (Routines), Media agent items +0.6; measured 358.3 on 2026-11-08, initial unchanged
+const I4_KB = 0;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
 // The ceilings the sidebar areas were planned within; no budget line may
 // take the bundle past them.
 const PROGRAM_TOTAL_KB = 362;
-// Raised from 103 once the Phase A pages merged (103.7 measured): the new
-// sidebar, account button and routine-result rows are on the first screen,
-// and the Phase C image attach joins the composer there. Still under the
-// long-standing 110 KB first-load budget.
-const PROGRAM_INITIAL_KB = 106;
+// Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
+// new sidebar, account button and routine-result rows are on the first
+// screen), then lowered to 104 at Phase B (102.3 measured) once the login
+// form moved to its own chunk. The rest is for the Phase C image attach in
+// the composer (~0.4). Still under the long-standing 110 KB first-load budget.
+const PROGRAM_INITIAL_KB = 104;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));

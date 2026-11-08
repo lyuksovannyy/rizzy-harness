@@ -945,7 +945,11 @@ async fn media_rows_carry_thumbnails_their_owner_can_load() {
     let smoothie = chat(&t, &alex, "kiwi smoothie").await;
 
     let (_, v) = panel(&t, Some(&alex), "q=kiwi&in=media").await;
-    assert_eq!(v["kinds"], json!(["chats", "projects", "media"]));
+    // Artifacts too: alex is an admin and may publish here (§7.8 `show`).
+    assert_eq!(
+        v["kinds"],
+        json!(["chats", "projects", "media", "artifacts"])
+    );
     assert_eq!(ids(&v), [clip.clone(), orchard.clone()], "newest first");
     let row = &v["results"][1];
     assert_eq!(
