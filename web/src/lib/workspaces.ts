@@ -1,8 +1,9 @@
-// Workspaces in the browser: how one is named, what a role may do, when
-// opening a chat should switch to the workspace it is in, and where a tab
-// goes when the workspaces change.
-import type { Perm, WorkspaceSummary } from "../types";
+// Workspaces in the browser: how one is named, what a role may do, the
+// account's tier line, when opening a chat should switch to the workspace it
+// is in, and where a tab goes when the workspaces change.
+import type { Me, Perm, WorkspaceSummary } from "../types";
 import { t } from "./i18n";
+import type { Route } from "./routes";
 
 /** A Personal workspace's stored name is not shown: the catalog names it. */
 export function workspaceName(w: Pick<WorkspaceSummary, "name" | "personal">): string {
@@ -12,6 +13,20 @@ export function workspaceName(w: Pick<WorkspaceSummary, "name" | "personal">): s
 /** Whether the caller's role there holds `p` (no workspace: no). */
 export function can(w: Pick<WorkspaceSummary, "permissions"> | null | undefined, p: Perm): boolean {
   return !!w && w.permissions.includes(p);
+}
+
+/** The account's tier line, under its name in the sidebar: "Acme · Admin"
+ * in a team workspace; in Personal, which is always the user's own, the
+ * server role instead ("Personal · Server admin", "Personal · User"). The
+ * API token has no workspace: only the server role. */
+export function accountLine(
+  me: Pick<Me, "role">,
+  w: Pick<WorkspaceSummary, "name" | "personal" | "role"> | null | undefined,
+): string {
+  const server = t(me.role === "admin" ? "account.serverAdmin" : "account.user");
+  if (!w) return server;
+  if (w.personal) return `${t("workspace.personal")} · ${server}`;
+  return `${w.name} · ${t(`role.${w.role}`)}`;
 }
 
 export type FollowStep = { do: "nothing" } | { do: "lookup"; id: string } | { do: "switch"; to: string };
@@ -62,4 +77,21 @@ export function afterChange(here: WorkspaceSummary, list: WorkspaceSummary[], le
  * in the target workspace; otherwise it goes home. */
 export function keepsRoute(open: { workspace_id?: string | null } | null | undefined, target: string): boolean {
   return !!open?.workspace_id && open.workspace_id === target;
+}
+
+/** Where a switch made on `route` lands: an area's page goes to that area's
+ * list in the new workspace (an agent, routine, media item or artifact is
+ * the old workspace's); null for every other route, which stays on an open
+ * chat of the target workspace (`keepsRoute`) or goes home. */
+export function switchRoute(route: Route): Route | null {
+  switch (route.kind) {
+    case "agents":
+    case "routines":
+    case "artifacts":
+      return { kind: route.kind, id: null };
+    case "media":
+      return { kind: "media", filter: route.filter, id: null };
+    default:
+      return null;
+  }
 }

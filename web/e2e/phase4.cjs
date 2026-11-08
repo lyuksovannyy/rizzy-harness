@@ -105,12 +105,13 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
     check(cls && cls.labels >= 2, 'classifier state saved');
     check(!JSON.stringify(cls).includes('youtube'), 'no text stored');
 
-    // Sidebar full-text search finds message text, not just titles.
-    await p.click('.sidebar button[aria-label="Search chats"]');
-    await p.fill('.sidebar-search', 'worker thr');
-    await p.waitForSelector('.session-item.hit');
-    log('sidebar hit:', (await p.innerText('.session-item.hit')).replace(/\s+/g, ' ').slice(0, 70));
-    await p.screenshot({ path: `${S}/p4-3-sidebar.png` });
+    // The search panel finds message text, not just titles (Ctrl+K opens it too).
+    await p.click('.sidebar button[aria-label="Search"]');
+    await p.fill('.search-panel input[role="combobox"]', 'worker thr');
+    await p.waitForSelector('.search-row mark');
+    log('search hit:', (await p.innerText('.search-row')).replace(/\s+/g, ' ').slice(0, 70));
+    await p.screenshot({ path: `${S}/p4-3-search.png` });
+    await p.keyboard.press('Escape');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

@@ -1,15 +1,14 @@
 // @vitest-environment happy-dom
-// Projects in the shell: the sidebar section above the chats, the bar on a
-// project's page (no Search, no Incognito, the project's folder), and the
-// chat header's project picker.
+// Projects in the shell: the bar on a project's page (no Search, no
+// Incognito, the project's folder), the chat header's project picker and
+// the project page. The sidebar's Projects section is in sidebar.test.tsx.
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, test, vi } from "vitest";
 import type { ProjectDetail, ProjectSummary } from "../lib/projects";
-import type { Me, SessionRow, WorkspaceSummary } from "../types";
+import type { SessionRow } from "../types";
 import { Composer } from "./Composer";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
-import { Sidebar } from "./Sidebar";
 
 const get = vi.fn<(id: string) => Promise<ProjectDetail>>();
 vi.mock("../lib/projects", async (original) => {
@@ -27,16 +26,6 @@ function mount(node: ReactNode) {
   act(() => root.render(node));
   return { host, unmount: () => act(() => root.unmount()) };
 }
-
-const personal: WorkspaceSummary = {
-  workspace_id: "w1",
-  name: "Personal",
-  personal: true,
-  role: "owner",
-  permissions: ["agentic", "settings", "members", "routines"],
-  members: 1,
-};
-const me: Me = { user_id: "u1", username: "alex", role: "member", can_agentic: false, must_change_password: false, workspace: personal };
 
 const garden: ProjectSummary = {
   project_id: "p1",
@@ -65,69 +54,6 @@ const chat = (id: string, extra: Partial<SessionRow> = {}): SessionRow => ({
   incognito: false,
   parent_id: null,
   ...extra,
-});
-
-function sidebar(p: { projects: ProjectSummary[]; canCreate: boolean; sessions?: SessionRow[]; onProject?: (id: string) => void }) {
-  return mount(
-    <Sidebar
-      me={me}
-      sessions={p.sessions ?? []}
-      nodes={[]}
-      selected={null}
-      conn="live"
-      workspaces={{ workspaces: [personal], active: "w1", can_create: true }}
-      onSwitch={async () => {}}
-      onWorkspaceSettings={() => {}}
-      onSelect={() => {}}
-      onNew={() => {}}
-      onAgents={() => {}}
-      agentsOpen={false}
-      onSettings={() => {}}
-      onLogout={() => {}}
-      onCollapse={() => {}}
-      projects={p.projects}
-      canCreateProject={p.canCreate}
-      selectedProject="p1"
-      onProject={p.onProject}
-    />,
-  );
-}
-
-describe("sidebar", () => {
-  test("projects sit below the switcher and Agents, above the chats; + opens the create form", () => {
-    const opened: string[] = [];
-    const s = sidebar({
-      projects: [garden],
-      canCreate: true,
-      sessions: [chat("a", { project_id: "p1" }), chat("b")],
-      onProject: (id) => opened.push(id),
-    });
-    const labels = [...s.host.querySelectorAll(".section-label")].map((l) => l.textContent);
-    expect(labels).toEqual(["Projects", "Recents"]);
-    const order = [".workspace-switch", ".nav-item:not(.new-chat):not(.user)", ".project-list", ".session-list"].map(
-      (sel) => s.host.querySelector(sel)!,
-    );
-    expect(order[1]!.textContent?.trim()).toBe("Agents");
-    for (let i = 1; i < order.length; i++) {
-      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    }
-    const item = s.host.querySelector<HTMLButtonElement>(".project-list .session-item")!;
-    expect(item.textContent).toBe("Garden");
-    expect(item.className).toContain("active");
-    act(() => item.click());
-    act(() => s.host.querySelector<HTMLButtonElement>('[aria-label="New project"]')!.click());
-    expect(opened).toEqual(["p1", "new"]);
-    // A chat in a project carries its mark; one outside does not.
-    const marks = [...s.host.querySelectorAll(".session-list .session-item")].map((b) => !!b.querySelector(".chat-project"));
-    expect(marks).toEqual([true, false]);
-    s.unmount();
-  });
-
-  test("no projects and no right to create: no section at all", () => {
-    const s = sidebar({ projects: [], canCreate: false });
-    expect([...s.host.querySelectorAll(".section-label")].map((l) => l.textContent)).toEqual(["Recents"]);
-    s.unmount();
-  });
 });
 
 describe("the bar on a project's page", () => {

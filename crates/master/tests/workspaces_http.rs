@@ -782,7 +782,7 @@ async fn chats_follow_membership_and_stay_private() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|h| h["session_id"].as_str().unwrap().to_string())
+            .map(|h| h["id"].as_str().unwrap().to_string())
             .collect::<Vec<_>>()
     };
     let (_, v) = call(
@@ -1271,7 +1271,7 @@ async fn suggestions_follow_the_workspace() {
             .as_array()
             .unwrap_or_else(|| panic!("{v}"))
             .iter()
-            .map(|h| h["session_id"].as_str().unwrap().to_string())
+            .map(|h| h["id"].as_str().unwrap().to_string())
             .collect::<Vec<_>>()
     };
     let (st, v) = suggest(&bob, format!("&workspace={acme}")).await;

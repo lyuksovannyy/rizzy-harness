@@ -34,7 +34,7 @@ const BASE_KB = 321.3; // Phase 0: routes, live topics, Shell arms, three stub c
 const I2_KB = 0;
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I3_KB = 0;
+const I3_KB = 7.6; // Phase A: SearchPanel 2.6, AccountMenu 2.3, their shared chunks 1.1 (anchored, three icons), first load +2.0 (sidebar, rail, account button, shortcuts, `when` via Similar; switcher gone), measured 2026-11-08 at 328.7
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I4_KB = 0;
@@ -106,7 +106,7 @@ lazyChunk(/\/BinaryBg-/, "Agentic background");
 lazyChunk(/\/ChatGutter-/, "chat gutter");
 
 // I3: its lazy chunks (the search panel and the account menu).
-const lazyI3 = [];
+const lazyI3 = [...lazyChunk(/\/SearchPanel-/, "search panel"), ...lazyChunk(/\/AccountMenu-/, "account menu")];
 
 // I4: its lazy chunks (the area pages, then their previews).
 const lazyI4 = [

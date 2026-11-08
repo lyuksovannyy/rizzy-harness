@@ -4,9 +4,11 @@
 //! token is quoted, so query syntax (`"`, `*`, `NEAR`, `-`, `:`) in the input
 //! has no effect.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use harness_store::{SearchHit, Store};
+use harness_core::SessionId;
+use harness_store::{HIT_END, HIT_START, SearchHit, SessionRow, Store};
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -319,30 +321,333 @@ pub fn coverage(tokens: &[String], text: &str) -> f64 {
     found as f64 / n as f64
 }
 
-/// Sidebar search: every word must match (last as a prefix). `owner` and
-/// `workspace` filter as in `Store::search` (`None`: no filter, for the API
-/// token only).
-pub fn search(
-    store: &Store,
-    q: &str,
-    owner: Option<&str>,
-    workspace: Option<&str>,
-    limit: usize,
-) -> harness_store::Result<Vec<SearchHit>> {
-    match fts_query(&tokens(q), false) {
-        Some(fq) => store.search(&fq, owner, workspace, limit),
-        None => Ok(Vec::new()),
+/// What a search can ask for, in the panel's tab order. `in=all` asks for
+/// every kind the viewer has (`/api/features` → `search.kinds`).
+pub const KINDS: [&str; 4] = ["chats", "projects", "media", "artifacts"];
+
+/// The All tab: each kind's top results, merged to at most `ALL_CAP`. With
+/// no words it lists the newest `ALL_NEWEST` across kinds instead.
+const ALL_PER_KIND: usize = 10;
+const ALL_CAP: usize = 30;
+const ALL_NEWEST: usize = 20;
+/// A chat preview's length, in graphemes.
+const PREVIEW_LEN: usize = 140;
+
+/// Each kind's provider. Media and artifacts belong to the files backend.
+pub fn provider(kind: &str) -> Option<Provider> {
+    match kind {
+        "chats" => Some(chats),
+        "projects" => Some(projects),
+        "media" => Some(crate::media::search),
+        "artifacts" => Some(crate::artifacts::search),
+        _ => None,
     }
 }
 
-/// "You may have asked this before": strict, never for time-sensitive text.
-/// Filters like `search`.
+/// One search as the panel asks it, owned so it can move into
+/// `mirror.call`.
+pub struct Request {
+    /// The typed text, already capped.
+    pub q: String,
+    /// The kinds to ask: one tab, or for All every kind the viewer has.
+    pub kinds: Vec<&'static str>,
+    pub all: bool,
+    /// The caller's visibility (`None`: the API token).
+    pub owner: Option<String>,
+    pub workspace: Option<String>,
+    /// A tab's page size and offset (its cursor); All ignores both.
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// One page of results; `next` is the offset of the following page.
+pub struct Page {
+    pub results: Vec<SearchResult>,
+    pub next: Option<usize>,
+}
+
+/// Run `r`: a tab pages through its one provider, All merges every
+/// provider's best (or newest) results and has no next page.
+pub fn run(s: &Store, r: &Request) -> harness_store::Result<Page> {
+    let tokens = tokens(&r.q);
+    let fts = fts_query(&tokens, false);
+    let ctx = |limit, offset| SearchCtx {
+        tokens: &tokens,
+        fts: fts.clone(),
+        owner: r.owner.as_deref(),
+        workspace: r.workspace.as_deref(),
+        limit,
+        offset,
+    };
+    if r.all {
+        let (n, cap) = if tokens.is_empty() {
+            (ALL_NEWEST, ALL_NEWEST)
+        } else {
+            (ALL_PER_KIND, ALL_CAP)
+        };
+        let mut lists = Vec::new();
+        for p in r.kinds.iter().filter_map(|k| provider(k)) {
+            let mut list = p(s, &ctx(n, 0))?;
+            // Nothing typed: nothing to rank by, only how new it is.
+            if tokens.is_empty() {
+                list.iter_mut().for_each(|x| x.tier = 0);
+            }
+            lists.push(list);
+        }
+        return Ok(Page {
+            results: merge(lists, cap),
+            next: None,
+        });
+    }
+    let Some(p) = r.kinds.first().and_then(|k| provider(k)) else {
+        return Ok(Page {
+            results: Vec::new(),
+            next: None,
+        });
+    };
+    // One more than a page tells whether there is a next one.
+    let mut results = p(s, &ctx(r.limit.saturating_add(1), r.offset))?;
+    let next = (results.len() > r.limit).then(|| r.offset + r.limit);
+    results.truncate(r.limit);
+    Ok(Page { results, next })
+}
+
+/// The All tab's order: every result whose title holds all the words
+/// first (tier 0), then some (1), then body matches (2); newest first
+/// within a tier. At most `cap`.
+pub fn merge(lists: Vec<Vec<SearchResult>>, cap: usize) -> Vec<SearchResult> {
+    let mut all: Vec<SearchResult> = lists.into_iter().flatten().collect();
+    all.sort_by(|a, b| a.tier.cmp(&b.tier).then(b.time_ms.cmp(&a.time_ms)));
+    all.truncate(cap);
+    all
+}
+
+/// A result's tier from its title (or name): 0 when it holds every word,
+/// 1 some, 2 none (something else matched). Nothing typed: 0.
+pub fn tier(tokens: &[String], title: &str) -> u8 {
+    if tokens.is_empty() {
+        return 0;
+    }
+    match coverage(tokens, title) {
+        c if c >= 1.0 => 0,
+        c if c > 0.0 => 1,
+        _ => 2,
+    }
+}
+
+/// `text` with each whole word that matches a token wrapped in `HIT_START`
+/// and `HIT_END`: case-insensitive, the last token also as a prefix (it may
+/// still be typed), the same words `coverage` counts. `text` must be free
+/// of control characters, so no mark can come from it.
+pub fn mark(text: &str, tokens: &[String]) -> String {
+    let Some((last, rest)) = tokens.split_last() else {
+        return text.to_string();
+    };
+    let hit = |w: &str| {
+        let w = w.to_lowercase();
+        w.starts_with(last.as_str()) || rest.contains(&w)
+    };
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut left = text;
+    while let Some(start) = left.find(char::is_alphanumeric) {
+        out.push_str(&left[..start]);
+        let tail = &left[start..];
+        let end = tail
+            .find(|c: char| !c.is_alphanumeric())
+            .unwrap_or(tail.len());
+        let word = &tail[..end];
+        if hit(word) {
+            out.push(HIT_START);
+            out.push_str(word);
+            out.push(HIT_END);
+        } else {
+            out.push_str(word);
+        }
+        left = &tail[end..];
+    }
+    out.push_str(left);
+    out
+}
+
+/// An FTS excerpt on one line: line breaks read as spaces, other controls
+/// go, the hit marks stay.
+fn one_line(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            HIT_START | HIT_END => Some(c),
+            c if c.is_whitespace() && c.is_control() => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Whether the empty search lists chat `r` for `owner` in `workspace`: the
+/// chat list's rows (`list_sessions`: the caller's own, in the scope's
+/// workspace), less incognito and sub-agent chats. Routine run chats are
+/// left out by the caller.
+fn listed(r: &SessionRow, owner: Option<&str>, workspace: Option<&str>) -> bool {
+    owner.is_none_or(|o| r.owner_id.as_deref() == Some(o))
+        && workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w))
+        && !r.incognito
+        && r.parent_id.is_none()
+}
+
+/// Chats. With words: bm25 over titles and messages, every word required,
+/// paged through the deduped best-first window, routine run chats included.
+/// Without: the newest visible chats, never routine run chats (they would
+/// crowd out the rest).
+pub fn chats(s: &Store, ctx: &SearchCtx) -> harness_store::Result<Vec<SearchResult>> {
+    let mut found: Vec<(SessionRow, Option<String>)> = Vec::new();
+    match &ctx.fts {
+        Some(fq) => {
+            let want = ctx.offset.saturating_add(ctx.limit);
+            for h in s
+                .search(fq, ctx.owner, ctx.workspace, want)?
+                .into_iter()
+                .skip(ctx.offset)
+            {
+                if let Some(row) = s.session(h.session_id)? {
+                    found.push((row, Some(h.snippet)));
+                }
+            }
+        }
+        None => {
+            let rows: Vec<SessionRow> = s
+                .sessions()?
+                .into_iter()
+                .filter(|r| listed(r, ctx.owner, ctx.workspace))
+                .collect();
+            let ids: Vec<SessionId> = rows.iter().map(|r| r.session_id).collect();
+            let runs = s.routine_marks(&ids)?;
+            found.extend(
+                rows.into_iter()
+                    .filter(|r| !runs.contains_key(&r.session_id))
+                    .skip(ctx.offset)
+                    .take(ctx.limit)
+                    .map(|r| (r, None)),
+            );
+        }
+    }
+    chat_results(s, &found, ctx.tokens)
+}
+
+/// Rows for `found` chats (with their FTS excerpt): routine marks, latest
+/// messages and project links are read for these rows only.
+fn chat_results(
+    s: &Store,
+    found: &[(SessionRow, Option<String>)],
+    tokens: &[String],
+) -> harness_store::Result<Vec<SearchResult>> {
+    let ids: Vec<SessionId> = found.iter().map(|(r, _)| r.session_id).collect();
+    let runs = s.routine_marks(&ids)?;
+    let texts = s.latest_message_texts(&ids)?;
+    let mut links = HashMap::new();
+    for id in &ids {
+        links.extend(
+            s.project_links(Some(*id))?
+                .into_iter()
+                .map(|l| (l.session_id, l)),
+        );
+    }
+    Ok(found
+        .iter()
+        .map(|(row, snippet)| {
+            let id = row.session_id;
+            chat_result(
+                row,
+                runs.contains_key(&id),
+                texts.get(&id).map(String::as_str),
+                snippet.as_deref(),
+                crate::projects::effective(&links, row),
+                tokens,
+            )
+        })
+        .collect())
+}
+
+/// One chat's row. `preview` is the first sentence of its latest message;
+/// the excerpt is kept only when title and preview do not already show
+/// every word.
+fn chat_result(
+    row: &SessionRow,
+    routine_run: bool,
+    latest: Option<&str>,
+    excerpt: Option<&str>,
+    project: Option<&str>,
+    tokens: &[String],
+) -> SearchResult {
+    let title = strip_controls(&row.title).trim().to_string();
+    let preview = latest
+        .map(|t| first_sentence(t, PREVIEW_LEN))
+        .unwrap_or_default();
+    let shown = format!("{title} {preview}");
+    let snippet = excerpt
+        .filter(|_| !tokens.is_empty() && coverage(tokens, &shown) < 1.0)
+        .map(one_line);
+    let type_ = if routine_run {
+        "routine"
+    } else if row.profile.as_deref() == Some("agentic") {
+        "agentic"
+    } else {
+        "chat"
+    };
+    SearchResult {
+        kind: "chat",
+        id: row.session_id.to_string(),
+        tier: tier(tokens, &title),
+        title: mark(&title, tokens),
+        type_,
+        preview: mark(&preview, tokens),
+        snippet,
+        time_ms: row.updated_ms,
+        project_id: project.map(str::to_string),
+        running: Some(row.running),
+        thumb: None,
+    }
+}
+
+/// Projects of the workspace, which every member sees (guests too), as the
+/// project list does; the API token without a workspace sees them all.
+/// With words, every word must be in the name or description; best tier
+/// first, then the newest. Without, the newest.
+pub fn projects(s: &Store, ctx: &SearchCtx) -> harness_store::Result<Vec<SearchResult>> {
+    let tokens = ctx.tokens;
+    let mut found: Vec<SearchResult> = s
+        .projects(ctx.workspace)?
+        .iter()
+        .filter_map(|p| {
+            let name = strip_controls(&p.name).trim().to_string();
+            let about = strip_controls(&p.description).trim().to_string();
+            let all = tokens.is_empty() || coverage(tokens, &format!("{name} {about}")) >= 1.0;
+            all.then(|| SearchResult {
+                kind: "project",
+                id: p.project_id.clone(),
+                tier: tier(tokens, &name),
+                title: mark(&name, tokens),
+                type_: "project",
+                preview: mark(&about, tokens),
+                snippet: None,
+                time_ms: p.updated_ms,
+                project_id: None,
+                running: None,
+                thumb: None,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.tier.cmp(&b.tier).then(b.time_ms.cmp(&a.time_ms)));
+    Ok(found.into_iter().skip(ctx.offset).take(ctx.limit).collect())
+}
+
+/// "You may have asked this before": strict, never for time-sensitive
+/// text, chats only. `owner` and `workspace` filter as in `Store::search`
+/// (`None`: no filter, for the API token only).
 pub fn suggest(
     store: &Store,
     q: &str,
     owner: Option<&str>,
     workspace: Option<&str>,
-) -> harness_store::Result<Vec<SearchHit>> {
+) -> harness_store::Result<Vec<SearchResult>> {
     let toks = tokens(q);
     if toks.len() < MIN_SUGGEST_TOKENS || is_time_sensitive(q) {
         return Ok(Vec::new());
@@ -367,11 +672,13 @@ pub fn suggest(
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
     });
-    Ok(scored
-        .into_iter()
-        .take(MAX_SUGGESTIONS)
-        .map(|(_, h)| h)
-        .collect())
+    let mut found = Vec::new();
+    for (_, h) in scored.into_iter().take(MAX_SUGGESTIONS) {
+        if let Some(row) = store.session(h.session_id)? {
+            found.push((row, Some(h.snippet)));
+        }
+    }
+    chat_results(store, &found, &toks)
 }
 
 #[cfg(test)]
@@ -471,5 +778,156 @@ mod tests {
         let c = coverage(&t, "Tokio runtime config: how many worker threads");
         // tokio, runtime, thr* match; "configure" does not ("config").
         assert!((c - 0.75).abs() < 1e-9, "{c}");
+    }
+
+    const M: char = HIT_START;
+    const E: char = HIT_END;
+
+    #[test]
+    fn mark_wraps_whole_words_and_the_last_as_a_prefix() {
+        let t = tokens("tokio thr");
+        assert_eq!(
+            mark("Tokio runtime: worker threads, tokios (TOKIO)", &t),
+            format!("{M}Tokio{E} runtime: worker {M}threads{E}, tokios ({M}TOKIO{E})"),
+            "earlier words match whole, case-insensitively; the last as a prefix"
+        );
+        assert_eq!(
+            mark("Grüße aus Köln", &tokens("köl")),
+            format!("Grüße aus {M}Köln{E}")
+        );
+        assert_eq!(mark("nothing here", &t), "nothing here");
+        assert_eq!(mark("tokio", &[]), "tokio", "nothing typed, nothing marked");
+        assert_eq!(mark("", &t), "");
+    }
+
+    fn result(kind: &'static str, tier: u8, time_ms: i64) -> SearchResult {
+        SearchResult {
+            kind,
+            id: format!("{kind}{time_ms}"),
+            title: String::new(),
+            type_: "chat",
+            preview: String::new(),
+            snippet: None,
+            time_ms,
+            project_id: None,
+            running: None,
+            thumb: None,
+            tier,
+        }
+    }
+
+    #[test]
+    fn tiers_rank_titles_then_merge_newest_first() {
+        let t = tokens("tokio runtime");
+        assert_eq!(tier(&t, "Tokio runtime config"), 0);
+        assert_eq!(tier(&t, "Lunch with tokio"), 1);
+        assert_eq!(tier(&t, "Lunch"), 2);
+        assert_eq!(tier(&[], "anything"), 0);
+        let merged = merge(
+            vec![
+                vec![result("chat", 2, 300), result("chat", 0, 100)],
+                vec![result("project", 1, 500), result("project", 0, 200)],
+                vec![],
+            ],
+            3,
+        );
+        let ids: Vec<_> = merged.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["project200", "chat100", "project500"]);
+    }
+
+    fn row(profile: &str) -> SessionRow {
+        SessionRow {
+            session_id: SessionId::new(),
+            node_id: "master".into(),
+            title: "Tokio\u{7} runtime".into(),
+            cwd: String::new(),
+            model: "m".into(),
+            created_ms: 1,
+            updated_ms: 2,
+            head_seq: 3,
+            running: true,
+            owner_id: Some("u1".into()),
+            agent_id: None,
+            profile: Some(profile.into()),
+            incognito: false,
+            parent_id: None,
+            workspace_id: Some("w1".into()),
+        }
+    }
+
+    #[test]
+    fn chat_rows_say_what_they_are_and_keep_the_excerpt_only_when_needed() {
+        let t = tokens("tokio");
+        let r = chat_result(
+            &row("chat"),
+            false,
+            Some("Use tokio. Then go."),
+            Some("…a\ntokio…"),
+            Some("p1"),
+            &t,
+        );
+        assert_eq!(r.type_, "chat");
+        assert_eq!(
+            r.title,
+            format!("{M}Tokio{E} runtime"),
+            "controls never reach the row"
+        );
+        assert_eq!(r.preview, format!("Use {M}tokio{E}."));
+        assert_eq!(r.snippet, None, "the title already shows every word");
+        assert_eq!(r.project_id.as_deref(), Some("p1"));
+        assert_eq!((r.running, r.time_ms, r.tier), (Some(true), 2, 0));
+        assert_eq!(
+            chat_result(&row("agentic"), false, None, None, None, &t).type_,
+            "agentic"
+        );
+        // A routine's run chat says so, whatever its profile.
+        assert_eq!(
+            chat_result(&row("agentic"), true, None, None, None, &t).type_,
+            "routine"
+        );
+        let t = tokens("kale");
+        let r = chat_result(
+            &row("chat"),
+            false,
+            Some("Other words."),
+            Some(&format!("…a\n{M}kale{E}\u{7}…")),
+            None,
+            &t,
+        );
+        assert_eq!(
+            r.snippet.as_deref(),
+            Some(format!("…a {M}kale{E}…").as_str())
+        );
+        assert_eq!(r.tier, 2);
+        // Nothing typed: no excerpt, whatever the index said.
+        assert_eq!(
+            chat_result(&row("chat"), false, None, Some("x"), None, &[]).snippet,
+            None
+        );
+    }
+
+    #[test]
+    fn the_empty_search_lists_what_the_chat_list_does() {
+        let mine = row("chat");
+        assert!(listed(&mine, Some("u1"), Some("w1")));
+        assert!(listed(&mine, None, None), "the API token sees every chat");
+        assert!(
+            !listed(&mine, Some("u2"), Some("w1")),
+            "never another user's chat"
+        );
+        assert!(
+            !listed(&mine, Some("u1"), Some("w2")),
+            "only in the workspace asked for"
+        );
+        let incognito = SessionRow {
+            incognito: true,
+            ..row("chat")
+        };
+        assert!(!listed(&incognito, Some("u1"), Some("w1")));
+        let sub = SessionRow {
+            parent_id: Some("x".into()),
+            ..row("chat")
+        };
+        assert!(!listed(&sub, Some("u1"), Some("w1")));
     }
 }

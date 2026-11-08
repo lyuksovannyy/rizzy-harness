@@ -205,6 +205,7 @@ async fn deleting_a_chat_removes_it_everywhere() {
     let sid = chat(&t, &c, "remember the capybaramarker", false).await;
     let (_, v) = req(&t, Method::GET, "/api/search?q=capybaramarker", None, &c).await;
     assert_eq!(v["results"].as_array().unwrap().len(), 1);
+    assert_eq!(v["results"][0]["id"], sid.as_str());
     t.chat.store().checkpoint().unwrap();
     assert!(
         on_disk(t.dir.path(), "capybaramarker"),

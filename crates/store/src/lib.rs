@@ -399,6 +399,10 @@ fn no_owner_left(workspace: &str) -> StoreError {
 pub const HIT_START: char = '\u{2}';
 pub const HIT_END: char = '\u{3}';
 
+/// How many index rows a search ranks before keeping the best per chat:
+/// the deepest a search panel tab can page.
+pub const SEARCH_WINDOW: usize = 500;
+
 /// One chat matching a search.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
@@ -702,7 +706,9 @@ impl Store {
     /// `owner`: `Some(id)` limits to that user's sessions; `None` searches all.
     /// `workspace`: `Some(id)` also limits to sessions whose effective
     /// workspace is `id`; `None` does not filter (only the API token searches
-    /// across workspaces). Returns the best hit per session, best first.
+    /// across workspaces). Sub-agent sessions are never hits: no list shows
+    /// them, their parent chat does. Returns the best hit per session, best
+    /// first, from the best `SEARCH_WINDOW` matching rows.
     pub fn search(
         &self,
         fts_query: &str,
@@ -717,10 +723,10 @@ impl Store {
                     bm25(chat_fts, 0.0, 3.0, 1.0) AS score, s.updated_ms
              FROM chat_fts f JOIN sessions s ON s.session_id = f.session_id
              {WS_JOINS}
-             WHERE chat_fts MATCH ?1 AND s.incognito = 0
+             WHERE chat_fts MATCH ?1 AND s.incognito = 0 AND s.parent_id IS NULL
                AND (?2 IS NULL OR s.owner_id = ?2)
                AND (?3 IS NULL OR {EFFECTIVE_WS} = ?3)
-             ORDER BY score LIMIT 200"
+             ORDER BY score LIMIT {SEARCH_WINDOW}"
         ))?;
         let rows = stmt.query_map(params![fts_query, owner, workspace], |r| {
             Ok((

@@ -677,7 +677,7 @@ select {
   height: 100%;
 }
 .shell.collapsed {
-  grid-template-columns: 1fr;
+  grid-template-columns: 56px 1fr;
 }
 /* Tone alone separates the sidebar from the page. */
 .sidebar {
@@ -728,29 +728,11 @@ select {
 .session-item:hover:not(:disabled) {
   background: var(--bg-hover);
 }
-.sidebar-search {
-  margin: var(--space-1) 0;
-}
-input.sidebar-search {
-  background: var(--bg-hover);
-  border-color: transparent;
-}
-input.sidebar-search:focus-visible {
-  background: var(--bg);
-  border-color: var(--accent);
-}
 .section-label {
   font-size: var(--text-xs);
   font-weight: var(--w-medium);
   color: var(--fg-2);
   padding: 16px 10px 6px;
-}
-.session-list {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
 }
 .session-item {
   gap: var(--space-2);
@@ -766,11 +748,6 @@ input.sidebar-search:focus-visible {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-}
-.sidebar-foot .link {
-  font-size: var(--text-sm);
-  padding: 0 8px;
-  white-space: nowrap;
 }
 .avatar {
   width: 26px;
@@ -831,9 +808,6 @@ input.sidebar-search:focus-visible {
   display: none;
   gap: var(--space-1);
   z-index: 5;
-}
-.shell.collapsed .topbar {
-  display: flex;
 }
 .scrim {
   display: none;
@@ -1171,15 +1145,12 @@ select.pill {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  padding: 10px 16px 8px 56px;
+  padding: 10px 16px 8px;
   border-bottom: 1px solid var(--line);
 }
 .conv-title {
   flex: 1;
   min-width: 0;
-}
-.shell:not(.collapsed) .conv-head {
-  padding-left: 16px;
 }
 .conv-title h1 {
   font-size: var(--text-lg);
@@ -2498,8 +2469,9 @@ table.users select {
   .topbar {
     display: flex;
   }
+  /* Room for the drawer's Menu button. */
   .conv-head,
-  .shell:not(.collapsed) .conv-head {
+  .workspace-gone {
     padding-left: 52px;
   }
   .greeting {
@@ -3401,16 +3373,6 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .avatar-picks button.on { border-color: var(--accent); background: var(--accent-soft); }
 
 /* ---------- Workspaces ---------- */
-/* The sidebar's switcher reads as a nav item, not as a form field. */
-.workspace-switch { display: flex; flex-direction: column; gap: var(--space-1-5); padding: 0 0 var(--space-1); }
-.workspace-switch .select { display: block; }
-.workspace-switch .select-button {
-  width: 100%; min-height: 0; padding: 6px 10px; border-color: transparent; border-radius: var(--r-sm);
-  background: transparent; font-size: var(--text-md); font-weight: var(--w-medium);
-}
-.workspace-switch .select-button:hover:not(:disabled) { background: var(--bg-hover); border-color: transparent; }
-.workspace-switch .select-button > .ellipsis { flex: 1; text-align: left; }
-.workspace-switch .select-list { right: 0; min-width: 0; }
 .workspace-badge {
   width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: var(--r-sm);
   background: var(--accent); color: var(--accent-fg); font-size: var(--text-xs); font-weight: var(--w-semibold);
@@ -3420,7 +3382,7 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 /* Taken out of a workspace: one line, until dismissed or the next switch. */
 .workspace-gone {
   display: flex; gap: var(--space-3); align-items: center; justify-content: center;
-  padding: 8px 16px 8px 56px; color: var(--fg-2); border-bottom: 1px solid var(--line);
+  padding: 8px 16px; color: var(--fg-2); border-bottom: 1px solid var(--line);
 }
 /* Settings sections above the tabs: one tier each. */
 .settings-sections { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-3); }
@@ -3692,7 +3654,7 @@ input.switch[type="checkbox"]:checked::before {
 input.switch[type="checkbox"]:disabled { cursor: default; }
 .feature.planned input.switch { opacity: 0.5; }
 /* ---------- Projects (docs/projects.md) ---------- */
-/* Sidebar: the projects above the chats, capped so Recents keeps room. */
+/* Sidebar: a section's header row, its disclosure and its + button. */
 .section-row {
   display: flex;
   align-items: center;
@@ -3703,14 +3665,6 @@ input.switch[type="checkbox"]:disabled { cursor: default; }
 button.icon.small {
   width: 26px;
   height: 26px;
-}
-.project-list {
-  flex: none;
-  max-height: 30vh;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
 }
 .project-icon {
   flex: none;
@@ -3958,6 +3912,350 @@ input.add-line {
 /* Two blocks, one per owner, so parallel additions merge cleanly: each adds
    rules only inside its own block. */
 /* ── shell (I3) ── */
+/* The sidebar (docs/sidebar-search.md): the areas, then Projects and Recent
+   scrolling together, then the account button. Rows are links. */
+.sidebar a.nav-item,
+.sidebar a.session-item {
+  color: inherit;
+  text-decoration: none;
+}
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.nav-item.active {
+  background: var(--bg-3);
+  font-weight: var(--w-medium);
+}
+.nav-item.later {
+  color: var(--fg-2);
+  cursor: default;
+}
+.nav-item.later:hover {
+  background: transparent;
+}
+.later-tag {
+  font-size: var(--text-2xs);
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  background: var(--bg-hover);
+  color: var(--fg-2);
+}
+/* The unseen routine results. */
+.nav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  flex: none;
+}
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.section-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.section-toggle:hover:not(:disabled) {
+  color: var(--fg);
+  background: none;
+}
+.section-toggle svg {
+  transition: transform var(--dur-1) var(--ease-standard);
+}
+.section-toggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.show-more {
+  align-self: flex-start;
+  padding: 4px 10px;
+}
+/* The account button: the avatar, the name and the tier line. */
+.nav-item.account {
+  padding: 6px 8px;
+}
+.account-lines {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+  text-align: left;
+}
+/* Collapsed: a 56px column of icons. */
+.sidebar.rail {
+  align-items: center;
+  padding: 10px 0;
+}
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: var(--space-2);
+}
+.rail .nav-item.later {
+  width: 36px;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
+}
+a.icon.rail-item {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-sm);
+  color: var(--fg-2);
+}
+a.icon.rail-item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+a.icon.rail-item.active {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.rail-item .nav-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+.rail-avatar {
+  width: 40px;
+  height: 40px;
+}
+.avatar {
+  position: relative;
+}
+/* The team workspace's letter, at the rail avatar's lower right. */
+.avatar-badge {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 15px;
+  height: 15px;
+  font-size: 9px;
+  box-shadow: 0 0 0 2px var(--bg-side);
+}
+.small-avatar {
+  width: 20px;
+  height: 20px;
+  font-size: var(--text-xs);
+}
+/* The account menu and its Workspaces submenu: top-layer popovers placed by
+   md/anchored.ts. */
+.account-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: min(480px, calc(100vh - 16px));
+  overflow-y: auto;
+  background: var(--surface-pop);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  color: var(--fg);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 0;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font-weight: var(--w-regular);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.menu-item:hover,
+.menu-item:focus-visible,
+.menu-item[aria-expanded="true"] {
+  background: var(--bg-hover);
+}
+.menu-item[aria-checked="true"] {
+  font-weight: var(--w-semibold);
+}
+.menu-check {
+  width: 14px;
+  display: inline-flex;
+  color: var(--accent);
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+.menu-error {
+  padding: 4px 10px;
+}
+.workspace-dialog,
+.search-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-pop);
+  color: var(--fg);
+  box-shadow: var(--shadow-2);
+}
+.workspace-dialog {
+  width: min(360px, calc(100vw - 32px));
+  padding: var(--space-3);
+}
+.workspace-dialog::backdrop,
+.search-panel::backdrop {
+  background: var(--scrim);
+}
+/* The search panel: centred near the top, full-screen on a phone. */
+.search-panel {
+  width: min(640px, calc(100vw - 32px));
+  max-height: 70vh;
+  margin: 12vh auto auto;
+  padding: 0;
+  overflow: hidden;
+}
+.search-panel[open] {
+  display: flex;
+}
+.search-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+}
+.search-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 8px 8px 0;
+}
+input.search-input {
+  border-color: transparent;
+  background: transparent;
+  font-size: var(--text-md);
+}
+.search-close {
+  display: none;
+}
+.search-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.search-tabs button {
+  min-height: 0;
+  padding: 3px 10px;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
+.search-tabs button.on {
+  background: var(--bg-3);
+  color: var(--fg);
+  font-weight: var(--w-medium);
+}
+.search-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.search-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.search-row.on {
+  background: var(--bg-hover);
+}
+.search-icon {
+  flex: none;
+  width: 32px;
+  display: grid;
+  place-items: center;
+  min-height: 20px;
+  color: var(--fg-2);
+}
+.search-thumb {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: var(--r-xs);
+}
+.search-lines {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.search-line {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+.search-when {
+  flex: none;
+}
+.search-preview {
+  font-size: var(--text-sm);
+}
+.search-more {
+  height: 1px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .search-panel {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+  .search-close {
+    display: inline-flex;
+  }
+}
 /* ── end shell ── */
 
 /* ── feature pages (I4) ── */

@@ -34,7 +34,8 @@ import type {
   FormReply,
   Role,
   SetupState,
-  SearchHit,
+  SearchKind,
+  SearchResponse,
   SessionRow,
   UploadedAttachment,
   User,
@@ -223,13 +224,29 @@ export const api = {
   agentSummary: (b: { name: string; prompt: string }) => call<{ summary: string }>("POST", "/api/agent-summary", b),
   notices: (scope?: Scope | null) => call<{ notices: Notice[] }>("GET", scoped("/api/notices", scope)),
   models: (scope?: Scope | null) => call<{ models: ModelInfo[] }>("GET", scoped("/api/models", scope)),
-  search: (q: string, suggest = false, signal?: AbortSignal, workspace?: string | null) =>
-    call<{ results: SearchHit[] }>(
+  /** One page of the search panel (`in`: a tab, or "all"), in `workspace`;
+   * `suggest` asks for the bar's similar chats instead. */
+  search: (
+    q: string,
+    opts: {
+      in?: "all" | SearchKind;
+      cursor?: string | null;
+      suggest?: boolean;
+      workspace?: string | null;
+      signal?: AbortSignal;
+    } = {},
+  ) => {
+    const p = new URLSearchParams({ q });
+    if (opts.suggest) p.set("suggest", "1");
+    else p.set("in", opts.in ?? "chats");
+    if (opts.cursor) p.set("cursor", opts.cursor);
+    return call<SearchResponse>(
       "GET",
-      scoped(`/api/search?q=${encodeURIComponent(q)}${suggest ? "&suggest=true" : ""}`, workspace ? { workspace } : null),
+      scoped(`/api/search?${p}`, opts.workspace ? { workspace: opts.workspace } : null),
       undefined,
-      signal,
-    ),
+      opts.signal,
+    );
+  },
   classifier: () => call<unknown>("GET", "/api/me/classifier"),
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
   providers: () => call<ProvidersState>("GET", "/api/admin/providers"),
