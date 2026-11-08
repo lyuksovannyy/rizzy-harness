@@ -125,7 +125,11 @@ stops your running agentic work there and leaves its approvals deny-only.
 ## Configuration
 
 Everything lives in the data directory (`~/.local/share/rizzy-harness`, or
-`--data-dir` / `HARNESS_DATA_DIR`).
+`--data-dir` / `HARNESS_DATA_DIR`). Back it up as a whole: the files under
+`blobs/` (Media and Artifacts) are encrypted with keys kept only in `master.db`,
+so neither is any use without the other. Deleting a file removes its key from
+the live database, but old copies of `master.db` pages can survive on SSDs and
+copy-on-write filesystems ([docs/media.md](docs/media.md)).
 
 `config.toml`: model providers. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600

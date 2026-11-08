@@ -387,7 +387,7 @@ pub fn run(s: &Store, r: &Request) -> harness_store::Result<Page> {
         };
         let mut lists = Vec::new();
         for p in r.kinds.iter().filter_map(|k| provider(k)) {
-            let mut list = p(s, &ctx(n, 0))?;
+            let mut list = checked(p(s, &ctx(n, 0))?);
             // Nothing typed: nothing to rank by, only how new it is.
             if tokens.is_empty() {
                 list.iter_mut().for_each(|x| x.tier = 0);
@@ -406,10 +406,25 @@ pub fn run(s: &Store, r: &Request) -> harness_store::Result<Page> {
         });
     };
     // One more than a page tells whether there is a next one.
-    let mut results = p(s, &ctx(r.limit.saturating_add(1), r.offset))?;
+    let mut results = checked(p(s, &ctx(r.limit.saturating_add(1), r.offset))?);
     let next = (results.len() > r.limit).then(|| r.offset + r.limit);
     results.truncate(r.limit);
     Ok(Page { results, next })
+}
+
+/// A provider's rows with every thumbnail a path on this origin (T14). The
+/// files backend builds its own; one that names another site, or that a
+/// browser would read as one (`//host`, `/\host`), is dropped here, so a
+/// row can never make the panel load a foreign image.
+fn checked(mut rows: Vec<SearchResult>) -> Vec<SearchResult> {
+    for r in &mut rows {
+        r.thumb = r.thumb.take().filter(|t| same_origin(t));
+    }
+    rows
+}
+
+fn same_origin(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
 }
 
 /// The All tab's order: every result whose title holds all the words
@@ -833,6 +848,49 @@ mod tests {
         );
         let ids: Vec<_> = merged.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["project200", "chat100", "project500"]);
+    }
+
+    /// Rows as the files backend's providers make them: a thumbnail stays
+    /// only as a path on this origin, and media and artifact rows merge with
+    /// the rest by tier and time like any other kind.
+    #[test]
+    fn file_rows_keep_only_same_origin_thumbnails() {
+        let thumb = |kind, tier, time, t: &str| SearchResult {
+            thumb: Some(t.to_string()),
+            ..result(kind, tier, time)
+        };
+        let rows = checked(vec![
+            thumb("media", 0, 400, "/api/media/0193/thumb"),
+            thumb("artifact", 0, 300, "/api/artifacts/a1/versions/v1/thumb"),
+            thumb("media", 1, 200, "https://evil.example/x.png"),
+            thumb("artifact", 1, 100, "//evil.example/x.png"),
+            thumb("media", 2, 50, "/\\evil.example/x.png"),
+            thumb("artifact", 2, 40, "api/relative.png"),
+        ]);
+        let thumbs: Vec<_> = rows.iter().map(|r| r.thumb.as_deref()).collect();
+        assert_eq!(
+            thumbs,
+            [
+                Some("/api/media/0193/thumb"),
+                Some("/api/artifacts/a1/versions/v1/thumb"),
+                None,
+                None,
+                None,
+                None
+            ]
+        );
+        let merged = merge(vec![vec![result("chat", 1, 500)], rows], 4);
+        let ids: Vec<_> = merged.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["media400", "artifact300", "chat500", "media200"]);
+        // The JSON a row sends: `thumb` only when there is one.
+        let v = serde_json::to_value(&merged[1]).unwrap();
+        assert_eq!(v["thumb"], "/api/artifacts/a1/versions/v1/thumb");
+        assert!(
+            serde_json::to_value(&merged[3])
+                .unwrap()
+                .get("thumb")
+                .is_none()
+        );
     }
 
     fn row(profile: &str) -> SessionRow {

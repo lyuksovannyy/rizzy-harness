@@ -1,9 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { api, HttpError } from "./api";
 import type { Me, WorkspaceSummary } from "./types";
-import { Login } from "./components/Login";
 import { Shell } from "./components/Shell";
 
+// Signed-in visits, nearly all of them, never draw these: each is its own
+// chunk, so the first load carries only the shell.
+const Login = lazy(() => import("./components/Login").then((m) => ({ default: m.Login })));
 const ChangePassword = lazy(() =>
   import("./components/ChangePassword").then((m) => ({ default: m.ChangePassword })),
 );
@@ -44,7 +46,12 @@ export function App() {
     void load(true);
   }, [load]);
   if (me === undefined) return <div className="splash" />;
-  if (me === null) return <Login onDone={signedIn} />;
+  if (me === null)
+    return (
+      <Suspense fallback={<div className="splash" />}>
+        <Login onDone={signedIn} />
+      </Suspense>
+    );
   if (me.must_change_password)
     return (
       <Suspense fallback={<div className="splash" />}>

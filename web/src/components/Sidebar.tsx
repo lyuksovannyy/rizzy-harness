@@ -279,7 +279,8 @@ export function Sidebar(props: SidebarProps) {
       to={e.to}
       current={e.current}
       onNavigate={onNavigate}
-      className={props.rail ? "icon rail-item" : "nav-item"}
+      // `new-chat`: the end-to-end scripts start every fresh chat by it.
+      className={`${props.rail ? "icon rail-item" : "nav-item"}${e.key === "new" ? " new-chat" : ""}`}
       label={props.rail ? (e.name ?? e.label) : e.name}
       title={props.rail ? e.label : undefined}
     >

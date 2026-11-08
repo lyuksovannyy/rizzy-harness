@@ -128,6 +128,8 @@ describe("sidebar", () => {
       ["Media", "#/media"],
       ["Artifacts", "#/artifacts"],
     ]);
+    // The end-to-end scripts start fresh chats by this class.
+    expect(all(".new-chat").map((a) => a.textContent)).toEqual(["New chat"]);
     const later = q('nav[aria-label="Main"] button')!;
     expect(later.getAttribute("aria-disabled")).toBe("true");
     expect(later.textContent).toBe("ConnectionsLater");

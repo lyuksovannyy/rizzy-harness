@@ -100,7 +100,7 @@ full-screen with a Close button at 760px and below. A click on the backdrop clos
   no pages. ↑/↓/Home/End move the active row while focus stays in the input; Enter or a click
   opens it, closing the panel and the drawer. Everything but the tab resets on close.
 - **Rows**, at most three lines: a leading icon (a same-origin 32px thumbnail for media and image
-  artifacts, the project's icon for a project or a chat in one, CalendarClock for a routine run,
+  artifacts, until it fails to load, say the file was deleted since; the project's icon for a project or a chat in one, CalendarClock for a routine run,
   Terminal for agentic, MessageSquare for a chat, the kind's icon for the rest); line 1 the title
   and the type, with `when(time_ms)` on the right; line 2 the preview; line 3 the excerpt, only
   when the server sent one. Lines 1–3 mark the matched words with `Highlight`.
@@ -157,7 +157,9 @@ caption or metadata.
 Every provider has the `Provider` signature of the Phase 0 contract, queries its own index
 through `fts_query` (every word quoted, so FTS syntax in the input stays inert), applies its list
 endpoint's visibility, never returns incognito content and gives `thumb` only as a same-origin
-path. Titles and previews have their control characters removed before `mark` wraps whole words
+path. `search::run` holds every provider to that last rule (`checked`): a `thumb` that is a URL,
+or a path a browser reads as one (`//host`, `/\host`), is dropped from the row. Titles and
+previews have their control characters removed before `mark` wraps whole words
 (case-insensitive, the last word also as a prefix, the same words `coverage` counts).
 
 - **Chats** (`search::chats`): with words, bm25 over titles and messages through
@@ -185,7 +187,13 @@ render as text. There is no cross-workspace search and no `#/search` route.
 
 ## Bundle
 
-Measured 2026-11-08: SearchPanel 2.6 KB and AccountMenu 2.3 KB gzip, lazy (checked by
+Phase B, measured 2026-11-08: the login form became its own lazy chunk (`App.tsx`, as
+ChangePassword already was; signed-in visits never draw it), taking the first load from 103.7 KB
+(the merged Phase A) to 102.1 KB. The split costs 1.1 KB of total: Login is 2.0 KB, and the eye
+icon and the copy helper it shared with lazy pages became chunks of their own. `lazyChunk` keeps
+it out of the first load.
+
+Phase A, measured 2026-11-08: SearchPanel 2.6 KB and AccountMenu 2.3 KB gzip, lazy (checked by
 `lazyChunk` in `web/scripts/size.mjs`), plus 1.1 KB of chunks they share with others; the first
 load grew by 2.0 KB (the sidebar's areas, sections, rail and account button, the shortcuts and
 drawer handling, and `when` through Similar, less the switcher and the inline search), to
@@ -198,10 +206,19 @@ drawer handling, and `when` through Similar, less the switcher and the inline se
   `crates/master/tests/search_http.rs` (each `in`, paging and the cursor, excerpts only when
   needed, newest first, FTS syntax inert, T10 with the server admin, non-members 404, a guest
   finding projects, the API token, `kinds` and features per viewer).
-- Web: `sidebar.test.tsx`, `accountmenu.test.tsx`, `searchpanel.test.tsx`, `shell.test.tsx`
-  (shortcuts, the narrow drawer, the rail and the unseen count) and `lib/workspaces.test.ts`
-  (`accountLine`, `switchRoute`).
+- Rust, with the other areas merged: a routine run chat found by a query as `type: "routine"`
+  before and after its result is seen, never in the empty search
+  (`routine_run_chats_are_found_but_never_listed_empty`); Routines shown to a guest who still owns
+  a routine there, with why, until it is deleted (`routines_show_while_orphaned_ones_remain`);
+  Media rows in the Media tab and All, with the thumbnail path the row loads, which only the
+  owner can (`media_rows_carry_thumbnails_their_owner_can_load`); `checked` against artifact and
+  media rows with foreign thumbnails (`file_rows_keep_only_same_origin_thumbnails`).
+- Web: `sidebar.test.tsx`, `accountmenu.test.tsx`, `searchpanel.test.tsx` (including thumbnails,
+  same-origin only, falling back to the icon), `shell.test.tsx` (shortcuts, the narrow drawer,
+  the rail and the unseen count) and `lib/workspaces.test.ts` (`accountLine`, `switchRoute`).
+- End to end: `web/e2e/phase4.cjs` (Ctrl+K from the composer, rows, the kept tab, Enter, "/" and
+  Esc, the rail), `web/e2e/phase6.cjs` (an incognito chat is not found through the panel);
+  `phase3.cjs` and `phase5.cjs` reach Settings through the account menu.
 
-Waiting on the other areas' merge: a routine run chat found as `type: "routine"` and left out of
-the empty search over HTTP (needs `Store::routine_marks`), the features cases with an orphaned
-routine or a visible shared artifact, and search rows with real media and artifact thumbnails.
+Still waiting on Artifacts (files backend, Phase B): the features case with a visible shared
+artifact, and artifact rows from the real `artifacts::search`.

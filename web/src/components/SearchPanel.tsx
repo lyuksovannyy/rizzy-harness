@@ -83,12 +83,21 @@ const KIND_ICON: Partial<Record<SearchResult["type"], ReactNode>> = {
   archive: <Package size={16} />,
 };
 
-/** A result's leading icon: a thumbnail (same-origin paths only, T14), the
- * project's icon, or the type's. */
-function icon(r: SearchResult, projects: ProjectSummary[]): ReactNode {
-  if (r.thumb && r.thumb.startsWith("/") && !r.thumb.startsWith("//")) {
-    return <img className="search-thumb" src={r.thumb} alt="" width={32} height={32} loading="lazy" />;
+/** Whether a thumbnail is a path on this origin (T14): never a URL, never
+ * protocol-relative. */
+export const sameOrigin = (thumb: string) => thumb.startsWith("/") && !thumb.startsWith("//") && !thumb.startsWith("/\\");
+
+/** A result's leading icon: its thumbnail until that fails to load (the
+ * file was deleted since, say), else the project's icon or the type's. */
+function RowIcon({ r, projects }: { r: SearchResult; projects: ProjectSummary[] }) {
+  const [broken, setBroken] = useState(false);
+  if (r.thumb && sameOrigin(r.thumb) && !broken) {
+    return <img className="search-thumb" src={r.thumb} alt="" width={32} height={32} loading="lazy" onError={() => setBroken(true)} />;
   }
+  return icon(r, projects);
+}
+
+function icon(r: SearchResult, projects: ProjectSummary[]): ReactNode {
   const pid = r.kind === "project" ? r.id : r.project_id;
   const p = pid ? projects.find((x) => x.project_id === pid) : undefined;
   if (p) return <ProjectIcon icon={p.icon} accent={p.accent} />;
@@ -286,7 +295,9 @@ export default function SearchPanel(props: {
               onClick={() => open(r)}
               onPointerMove={() => i !== active && setActive(i)}
             >
-              <span className="search-icon">{icon(r, props.projects)}</span>
+              <span className="search-icon">
+                <RowIcon r={r} projects={props.projects} />
+              </span>
               <span className="search-lines">
                 <span className="search-line">
                   <span className="ellipsis grow">

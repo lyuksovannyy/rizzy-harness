@@ -3,7 +3,8 @@
 // names it, typing waits 150 ms and aborts the request before, tabs follow
 // the viewer's kinds and the arrow keys, rows have two or three lines,
 // ↑/↓ move the active row while focus stays in the input, Enter opens it,
-// the next page loads at the end of a tab, and Close closes.
+// the next page loads at the end of a tab, Close closes, and file rows show
+// their thumbnail (same-origin only) until it fails to load.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -11,7 +12,7 @@ import type { SearchKind, SearchResponse, SearchResult } from "../types";
 
 const search = vi.fn<(q: string, opts: { in?: string; cursor?: string | null; signal?: AbortSignal; workspace?: string | null }) => Promise<SearchResponse>>();
 vi.mock("../api", () => ({ api: { search: (q: string, o: never) => search(q, o) } }));
-const { default: SearchPanel, resultRoute } = await import("./SearchPanel");
+const { default: SearchPanel, resultRoute, sameOrigin } = await import("./SearchPanel");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -214,6 +215,42 @@ describe("search panel", () => {
     await render();
     await settle();
     expect(observed).toBeNull();
+  });
+
+  test("media and artifact rows show their same-origin thumbnail; a foreign or broken one gives way to the icon", async () => {
+    const all: SearchKind[] = ["chats", "projects", "media", "artifacts"];
+    search.mockResolvedValue(
+      answer(
+        [
+          hit("m1", { kind: "media", type: "image", title: "Orchard.png", thumb: "/api/media/m1/thumb" }),
+          hit("a1", { kind: "artifact", type: "binary", title: "harness", thumb: "/api/artifacts/a1/versions/v1/thumb" }),
+          hit("m2", { kind: "media", type: "image", thumb: "https://evil.example/x.png" }),
+          hit("m3", { kind: "media", type: "video", thumb: "//evil.example/x.png" }),
+          hit("a2", { kind: "artifact", type: "document", thumb: null }),
+        ],
+        null,
+        all,
+      ),
+    );
+    await render(all);
+    await settle();
+    const thumbs = () => rows().map((r) => r.querySelector("img.search-thumb")?.getAttribute("src") ?? null);
+    expect(thumbs()).toEqual(["/api/media/m1/thumb", "/api/artifacts/a1/versions/v1/thumb", null, null, null]);
+    expect(rows().map((r) => r.querySelector(".search-icon svg") !== null)).toEqual([false, false, true, true, true]);
+    expect(rows()[1]!.textContent).toContain("harness · Program");
+    expect(rows()[4]!.textContent).toContain("· Document");
+    // The file went away since: its row keeps an icon instead of a broken image.
+    await act(async () => void rows()[0]!.querySelector("img")!.dispatchEvent(new Event("error")));
+    expect(thumbs()[0]).toBeNull();
+    expect(rows()[0]!.querySelector(".search-icon svg")).not.toBeNull();
+    expect(tabs().map((t) => t.textContent)).toEqual(["All", "Chats", "Media", "Artifacts", "Projects"]);
+  });
+
+  test("a thumbnail is only ever a path on this origin", () => {
+    expect(sameOrigin("/api/media/m/thumb")).toBe(true);
+    for (const t of ["https://evil.example/x", "//evil.example/x", "/\\evil.example/x", "api/x", "data:image/png;base64,x"]) {
+      expect(sameOrigin(t)).toBe(false);
+    }
   });
 
   test("each kind opens its page", () => {
