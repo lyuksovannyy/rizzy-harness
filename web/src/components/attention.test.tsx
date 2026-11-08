@@ -9,7 +9,12 @@ import { describe, expect, test, vi } from "vitest";
 import type { RoutineAttention } from "../types";
 
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
-vi.mock("../api", () => ({ call: (...a: unknown[]) => call(...a), api: {}, HttpError: class extends Error {} }));
+vi.mock("../api", () => ({
+  call: (...a: unknown[]) => call(...a),
+  // Home asks whether the bar takes images.
+  api: { features: () => Promise.resolve({ media: { vision_images: false } }) },
+  HttpError: class extends Error {},
+}));
 // The home screen's heavy parts; only the lists under the bar are tested here.
 let similarCount = 0;
 vi.mock("./Composer", () => ({ Composer: () => null }));

@@ -65,6 +65,14 @@ describe("storage settings", () => {
     expect(host.querySelector('[role="status"]')!.textContent).toBe("Saved.");
   });
 
+  test("a disk the server could not measure is left out", async () => {
+    const answer = await storageApi.admin();
+    storageApi.admin.mockResolvedValue({ ...answer, disk: { free: null, total: null } });
+    await act(async () => root.render(<StorageSettings me={admin} />));
+    expect(host.textContent).toContain("stored in all.");
+    expect(host.textContent).not.toContain("The data disk has");
+  });
+
   test("a refusal shows", async () => {
     storageApi.admin.mockRejectedValue(new Error("not an admin"));
     await act(async () => root.render(<StorageSettings me={admin} />));

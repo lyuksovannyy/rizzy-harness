@@ -22,6 +22,9 @@ export interface ArtifactVersion {
   kind: string | null;
   format: string | null;
   display: "inline" | "img" | "download" | null;
+  /** An image's header size, read by the server (null when unknown; absent from older servers). */
+  width?: number | null;
+  height?: number | null;
   /** What the node reported: display only. */
   meta: ArtifactMeta;
   notes: string;
@@ -43,7 +46,7 @@ export interface Artifact {
   owner: { username: string } | null;
   project_id: string | null;
   versions: number;
-  /** The newest ready version. */
+  /** The newest ready version, else the newest of any status. */
   latest: ArtifactVersion | null;
   /** The lineage's Media item (images, video, audio). */
   media_id: string | null;
@@ -85,6 +88,8 @@ export const KIND_FILTERS: [KindFilter | "all", string][] = [
 
 export interface ArtifactQuery {
   workspace: string | null;
+  /** Only what this project's chats published. */
+  project?: string | null;
   kind?: KindFilter | null;
   mine?: boolean;
   q?: string;
@@ -94,6 +99,7 @@ export interface ArtifactQuery {
 function query(q: ArtifactQuery): string {
   const p = new URLSearchParams();
   if (q.workspace) p.set("workspace", q.workspace);
+  if (q.project) p.set("project", q.project);
   if (q.kind) p.set("kind", q.kind);
   if (q.mine) p.set("mine", "1");
   if (q.q?.trim()) p.set("q", q.q.trim());

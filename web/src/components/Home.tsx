@@ -10,6 +10,7 @@ import { Notices } from "./Notices";
 import { Similar, type SimilarHandle } from "./Similar";
 import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
+import { useFeatures } from "../lib/features";
 import { MEMORY_HASH } from "../lib/routes";
 
 // The mode backgrounds load on their own, and not at all when turned off.
@@ -65,6 +66,8 @@ export function Home(props: {
   }, []);
   // Until the preferences arrive, the choice the last load saved.
   const [mirror] = useState(readBackdropMirror);
+  // Images in chats: whether this server takes them here.
+  const vision = !!useFeatures(props.workspace)?.media.vision_images;
   const backdrop = props.prefs ? (props.prefs.backdrop ?? "animated") : mirror;
   const similar = useRef<SimilarHandle>(null);
   const [agentId, setAgentId] = useState(props.defaultAgent);
@@ -108,6 +111,7 @@ export function Home(props: {
           onModeChange={onModeChange}
           onArrowDown={() => similar.current?.focusFirst() ?? false}
           voice={props.voice}
+          images={vision ? { workspace: props.workspace, pending: true } : null}
           search={
             props.prefs
               ? {

@@ -10,6 +10,12 @@ import type { SessionRow } from "../types";
 import { Composer } from "./Composer";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
 
+// The page asks whether to show its Artifacts tab and take images on its bar
+// (projectartifacts.test.tsx).
+vi.mock("../api", async (original) => {
+  const m = await original<typeof import("../api")>();
+  return { ...m, api: { ...m.api, features: () => Promise.resolve({ artifacts: { show: false }, media: { vision_images: false } }) } };
+});
 const get = vi.fn<(id: string) => Promise<ProjectDetail>>();
 vi.mock("../lib/projects", async (original) => {
   const m = await original<typeof import("../lib/projects")>();

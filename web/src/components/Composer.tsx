@@ -7,6 +7,7 @@ import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
+import type { Picture } from "../lib/downscale";
 import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, engineOrigin, type SearchKind, supports } from "../lib/engines";
 import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
@@ -53,6 +54,9 @@ export interface Submission {
 }
 
 const MAX_ATTACHMENTS = 5;
+/** Images per message (docs/media.md §6.6). */
+const MAX_IMAGES = 4;
+const isImage = (f: File) => f.type.startsWith("image/") || /\.hei[cf]$/i.test(f.name);
 
 export function Composer(props: {
   /** `home` shows the mode switch and model picker; `session` is a reply box. */
@@ -92,6 +96,10 @@ export function Composer(props: {
   search?: { text: string; image: string; custom?: CustomEngine[] };
   /** Home bar on a project's page: no search or incognito; the project's node and folder first. */
   project?: { nodeId: string | null; cwd: string | null };
+  /** Images may go with the message (the server takes chat images): they
+   * upload to `workspace`'s Media. `pending`: pick up "Use in chat" (the
+   * home screen). `left`: how many more this chat takes. */
+  images?: { workspace: string | null; pending?: boolean; left?: number } | null;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() =>
@@ -147,6 +155,7 @@ export function Composer(props: {
   const [files, setFiles] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [pictures, setPictures] = useState<Picture[]>([]);
   const [rec, setRec] = useState<"idle" | "recording" | "transcribing">("idle");
   const recorder = useRef<MediaRecorder | null>(null);
 
@@ -286,6 +295,15 @@ export function Composer(props: {
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
   const effortModel = home ? model : props.sessionModel;
   const effortOk = resolveModel(props.models, effortModel)?.effort ?? false;
+  // Images: not in search or a temporary chat; every model answering must
+  // see them (one the list does not know is left to the server).
+  const tempChat = home && mode === "ask" && incognito;
+  const canImage = !!props.images && mode !== "search" && !tempChat;
+  const blind = canImage
+    ? [effortModel, home && mode === "ask" ? compareWith : null].map((m) => resolveModel(props.models, m)).find((m) => m && !m.vision)
+    : undefined;
+  const imageRoom = Math.min(MAX_IMAGES, props.images?.left ?? MAX_IMAGES) - pictures.length;
+  const sendingImages = pictures.some((x) => !x.media_id);
 
   const choose = (id: string) => {
     if (!mention) return;
@@ -298,9 +316,14 @@ export function Composer(props: {
 
   const submit = async () => {
     const body = text.trim();
-    if (!body || busy || uploading || props.running || props.readOnly) return;
+    if (!body || busy || uploading || sendingImages || props.running || props.readOnly) return;
     if (mode === "agentic" && (!cwd.trim() || !nodeId)) {
       setErr(t("composer.folder"));
+      return;
+    }
+    const images = pictures.map((x) => x.media_id!);
+    if (images.length && (blind || tempChat)) {
+      setErr(`${blind ? `${modelLabel(blind, props.models)} can't read images` : "A temporary chat takes no images"}; remove them to send.`);
       return;
     }
     setBusy(true);
@@ -318,11 +341,13 @@ export function Composer(props: {
         attachments: files.map((f) => f.attachment_id),
         compareWith: home && mode === "ask" && compareWith && compareWith !== model ? compareWith : null,
         search: searching ? { url: engineUrl, query: typedEngine ? typedEngine.query.trim() || body : body } : undefined,
+        ...(images.length ? { images } : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
       setText("");
       setFiles([]);
+      setPictures([]);
       setManual(false);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
@@ -331,9 +356,8 @@ export function Composer(props: {
     }
   };
 
-  const addFiles = async (list: FileList | null) => {
-    if (!list) return;
-    const picked = Array.from(list).slice(0, MAX_ATTACHMENTS - files.length);
+  const addFiles = async (list: File[]) => {
+    const picked = list.slice(0, MAX_ATTACHMENTS - files.length);
     setErr(null);
     for (const f of picked) {
       setUploading((n) => n + 1);
@@ -346,6 +370,28 @@ export function Composer(props: {
         setUploading((n) => n - 1);
       }
     }
+  };
+
+  // Images are made small in this browser and uploaded by lib/downscale,
+  // loaded on the first one; each chip waits for its Media id.
+  const addImages = (list: File[]) => {
+    const at = props.images;
+    if (!at || !list.length) return;
+    const bar = { pictures, set: setPictures, fail: setErr, workspace: at.workspace, room: imageRoom };
+    import("../lib/downscale").then((d) => d.addImages(list, bar), (x) => setErr(String(x)));
+  };
+  // The home bar takes what "Use in chat" left, once images are possible here.
+  const pickUp = !!props.images?.pending;
+  useEffect(() => {
+    if (pickUp) import("../lib/downscale").then((d) => d.pickUp(setPictures), () => {});
+  }, [pickUp]);
+  // Pasted or dropped pictures go with the message; anything else keeps
+  // what the browser does with it (pasted text stays text).
+  const takeImages = (e: { preventDefault(): void }, files: FileList) => {
+    const list = canImage ? [...files].filter(isImage) : [];
+    if (!list.length) return;
+    e.preventDefault();
+    addImages(list);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -419,7 +465,11 @@ export function Composer(props: {
           ))}
         </ul>
       )}
-      <div className={`composer ${mode === "search" && home ? "is-search" : ""}`}>
+      <div
+        className={`composer ${mode === "search" && home ? "is-search" : ""}`}
+        onDragOver={(e) => canImage && e.preventDefault()}
+        onDrop={(e) => takeImages(e, e.dataTransfer.files)}
+      >
         <textarea
           ref={ta}
           rows={lines}
@@ -435,9 +485,19 @@ export function Composer(props: {
           }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
           onKeyDown={onKeyDown}
+          onPaste={(e) => takeImages(e, e.clipboardData.files)}
         />
-        {files.length > 0 && (
+        {files.length + pictures.length > 0 && (
           <ul className="chips" aria-label={t("composer.attachments")}>
+            {pictures.map((x) => (
+              <li key={x.key} className="chip image-chip">
+                {x.media_id ? <img src={`/api/media/${x.media_id}/content`} alt="" /> : <Loader2 size={14} className="spin" />}
+                {x.name}
+                <button type="button" className="link" aria-label={`${t("composer.remove")} ${x.name}`} onClick={() => setPictures((p) => p.filter((y) => y !== x))}>
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
             {files.map((f) => (
               <li key={f.attachment_id} className="chip" title={`${f.chars.toLocaleString()} ${t("composer.chars")}`}>
                 <FileText size={14} /> {f.name}
@@ -461,7 +521,7 @@ export function Composer(props: {
                 type="button"
                 className="icon attach"
                 aria-label={t("composer.attach")}
-                title={t("composer.attachHint")}
+                title={canImage ? "Attach documents or images (images are kept in Media)" : t("composer.attachHint")}
                 disabled={files.length >= MAX_ATTACHMENTS || uploading > 0}
                 onClick={() => fileInput.current?.click()}
               >
@@ -472,9 +532,13 @@ export function Composer(props: {
                 type="file"
                 multiple
                 hidden
-                accept=".txt,.md,.markdown,.csv,.json,.xml,.yaml,.yml,.toml,.html,.log,.pdf,.rs,.ts,.tsx,.js,.py,.go,.java,.c,.h,.cpp,.sh,.sql,text/*,application/pdf"
+                accept={`.txt,.md,.markdown,.csv,.json,.xml,.yaml,.yml,.toml,.html,.log,.pdf,.rs,.ts,.tsx,.js,.py,.go,.java,.c,.h,.cpp,.sh,.sql,text/*,application/pdf${canImage ? ",image/*,.heic,.heif" : ""}`}
                 onChange={(e) => {
-                  void addFiles(e.target.files);
+                  // Images go with the message (lib/downscale); documents attach.
+                  const all = [...(e.target.files ?? [])];
+                  const images = canImage ? all.filter(isImage) : [];
+                  addImages(images);
+                  void addFiles(all.filter((f) => !images.includes(f)));
                   e.target.value = "";
                 }}
               />
@@ -664,7 +728,7 @@ export function Composer(props: {
               type="button"
               className="send"
               onClick={() => void submit()}
-              disabled={busy || uploading > 0 || !text.trim() || !!props.readOnly}
+              disabled={busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
               aria-label={t("composer.send")}
             >
               <ArrowUp size={18} />

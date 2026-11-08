@@ -62,7 +62,8 @@ export interface AdminStorage {
   settings: StorageLimits;
   usage: { user_id: string; username: string; used: number; media_items: number; artifact_versions: number }[];
   total: number;
-  disk: { free: number; total: number };
+  /** null when the server cannot measure its data disk. */
+  disk: { free: number | null; total: number | null };
 }
 
 export interface MediaQuery {
@@ -70,6 +71,8 @@ export interface MediaQuery {
   kind?: MediaKind | null;
   origin?: MediaItem["origin"] | null;
   q?: string;
+  /** Only the items that came from this chat (the chat-delete dialog). */
+  session?: string | null;
   before?: string | null;
 }
 
@@ -84,6 +87,7 @@ function query(q: MediaQuery): string {
   if (q.kind) p.set("kind", q.kind);
   if (q.origin) p.set("origin", q.origin);
   if (q.q?.trim()) p.set("q", q.q.trim());
+  if (q.session) p.set("session", q.session);
   if (q.before) p.set("before", q.before);
   p.set("limit", "60");
   return p.toString();
@@ -164,6 +168,19 @@ export function safeToDecode(m: Pick<MediaItem, "kind" | "display" | "format" | 
   return !!w && !!h && w * h <= MAX_PIXELS && Math.max(w, h) <= MAX_SIDE;
 }
 
+/** The most one message may carry (docs/media.md §6.6, checked again by the server). */
+export const CHAT_BYTES = 5 * 1024 * 1024;
+/** "Use in chat" leaves item ids under this sessionStorage key for the home bar (lib/downscale). */
+export const PENDING_IMAGES = "harness.pendingImages";
+
+/** Whether "Use in chat" can offer an item: an image the browser shows as
+ * it is, small enough for one message. */
+export const chatReady = (m: MediaItem) => m.display === "inline" && safeToDecode(m) && m.size <= CHAT_BYTES;
+
+/** Deleting from Media cannot reach the chats an image went into, nor the provider. */
+export const stillIn = (chats: number) =>
+  `Still in ${chats === 1 ? "1 chat" : `${chats} chats`}. Delete those chats to remove it there. Copies already sent to the model provider can't be recalled.`;
+
 /** "From chat ‘Trip notes’", "Uploaded", "Published by an agent". */
 export function originLine(m: Pick<MediaItem, "origin" | "source">): string {
   if (m.origin === "agent") return "Published by an agent";
@@ -178,16 +195,18 @@ export interface Uploaded {
 
 /** One file, streamed as the raw body with its name in a header (never in
  * the URL); `onProgress` gets the share sent, 0 to 1. XHR because fetch has
- * no upload progress. A busy server (429) is retried after its Retry-After. */
+ * no upload progress. A busy server (429) is retried after its Retry-After.
+ * `chat`: an image for a message, which the composer made small first. */
 export function upload(
   file: File,
   workspace: string | null,
   onProgress: (share: number) => void,
+  origin: "upload" | "chat" = "upload",
   tries = 3,
 ): Promise<Uploaded> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    const q = new URLSearchParams({ origin: "upload" });
+    const q = new URLSearchParams({ origin });
     if (workspace) q.set("workspace", workspace);
     xhr.open("POST", `/api/media?${q}`);
     xhr.withCredentials = true;
@@ -204,7 +223,7 @@ export function upload(
       }
       if (xhr.status === 429 && tries > 1) {
         const wait = Number(xhr.getResponseHeader("retry-after")) || 5;
-        setTimeout(() => upload(file, workspace, onProgress, tries - 1).then(resolve, reject), wait * 1000);
+        setTimeout(() => upload(file, workspace, onProgress, origin, tries - 1).then(resolve, reject), wait * 1000);
         return;
       }
       if (xhr.status < 200 || xhr.status >= 300 || !data) {

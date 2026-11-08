@@ -2,8 +2,9 @@
 // The Media page against a mocked API: tiles and what they say to a screen
 // reader, filters (the route), origin and name search, empty states, upload
 // with progress, selecting several to delete, and the preview: ←/→, Esc,
-// rename, delete, and the fallbacks to Download (an image too large to
-// decode, a HEIC or MOV the browser cannot show).
+// rename, delete (with what stays in chats), "Use in chat", and the
+// fallbacks to Download (an image too large to decode, a HEIC or MOV the
+// browser cannot show).
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -93,15 +94,24 @@ afterEach(() => {
 });
 
 const flush = () => act(() => new Promise((r) => setTimeout(r, 0)));
+/** Until `ok` holds, a render at a time: a lazy chunk's import takes real
+ * time, long on a machine running every test file at once. */
+const until = (ok: () => unknown) =>
+  vi.waitFor(
+    async () => {
+      await act(async () => {});
+      if (!ok()) throw new Error("not yet");
+    },
+    { timeout: 15_000, interval: 10 },
+  );
 async function show(p: { filter?: MediaFilter | null; id?: string | null; features?: Features } = {}) {
   await act(async () =>
     root.render(
       <Media me={me} scope="w1" navigate={navigate} live={live} features={p.features ?? features} filter={p.filter ?? null} id={p.id ?? null} />,
     ),
   );
-  // The preview is its own chunk: give its import time on first use (up to
-  // a few seconds, for a busy machine running every test file at once).
-  for (let i = 0; i < 300 && p.id && !host.querySelector("dialog"); i++) await act(() => new Promise((r) => setTimeout(r, 10)));
+  // The preview is its own chunk.
+  if (p.id) await until(() => host.querySelector("dialog"));
   await flush();
 }
 const tiles = () => [...host.querySelectorAll<HTMLButtonElement>(".media-tile")];
@@ -366,6 +376,42 @@ describe("preview", () => {
     expect(ask.textContent).toContain("The file stays in Artifacts (chart v3); delete it there to free space.");
     await act(async () => [...ask.querySelectorAll("button")].find((b) => b.textContent === "Delete from both")!.click());
     expect(deleteMedia).toHaveBeenCalledWith([expect.objectContaining({ media_id: id(1) })], true);
+  });
+
+  test("an image chats still carry says so before it goes, one at a time or several", async () => {
+    mediaApi.list.mockResolvedValue(page([item(1, { origin: "chat", chats: 2 }), item(2, { chats: 1 }), item(3)]));
+    await show({ id: id(1) });
+    act(() => host.querySelector<HTMLButtonElement>("dialog button.danger")!.click());
+    expect(host.querySelector(".media-confirm")!.textContent).toContain(
+      "Still in 2 chats. Delete those chats to remove it there. Copies already sent to the model provider can't be recalled.",
+    );
+    await show();
+    act(() => button("Select")!.click());
+    tiles().forEach((t) => act(() => t.click()));
+    act(() => button("Delete")!.click());
+    expect(host.querySelector(".media-selection")!.textContent).toContain(
+      "2 are still in chats; delete those chats to remove them there. Copies already sent to the model provider can't be recalled.",
+    );
+  });
+
+  test("Use in chat: an image a message can carry waits for the home bar", async () => {
+    const vision = { ...features, media: { ...features.media, vision_images: true } };
+    mediaApi.list.mockResolvedValue(
+      page([item(1), item(2, { kind: "video", format: "mp4" }), item(3, { size: 6 * 1024 * 1024 }), item(4, { width: 9000, height: 9000 })]),
+    );
+    sessionStorage.setItem("harness.pendingImages", JSON.stringify([id(9)]));
+    await show({ id: id(1), features: vision });
+    act(() => button("Use in chat")!.click());
+    expect(JSON.parse(sessionStorage.getItem("harness.pendingImages")!)).toEqual([id(9), id(1)]);
+    expect(navigate).toHaveBeenLastCalledWith({ kind: "home" });
+    // Not a video, nor over 5 MB, nor too large to decode; nor while the server takes no chat images.
+    for (const n of [2, 3, 4]) {
+      await show({ id: id(n), features: vision });
+      expect(button("Use in chat")).toBeUndefined();
+    }
+    await show({ id: id(1) });
+    expect(button("Use in chat")).toBeUndefined();
+    sessionStorage.clear();
   });
 
   test("falls back to Download: too large to decode, a HEIC or MOV the browser cannot show", async () => {
