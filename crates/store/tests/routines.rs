@@ -1,10 +1,13 @@
 //! Routines storage: routines and their triggers scoped by owner and
-//! workspace, the one-claim-per-occurrence rule, runs and how they fold,
-//! marks, attention, purges and what a deleted chat leaves behind.
+//! workspace, the one-claim-per-occurrence rule, webhook calls and their
+//! Idempotency-Keys, runs and how they fold, marks, attention, retention,
+//! purges, what a deleted chat leaves behind, and the untrusted mark that
+//! outlives its routine.
 
 use harness_core::{RawEvent, SessionId};
 use harness_store::routines::{
-    Claimed, NewRoutine, NewRun, NewTrigger, OVERLAP, RoutineCaps, RoutinePatch, RunPatch,
+    Claimed, DEDUPE_MS, HookClaim, NewRoutine, NewRun, NewTrigger, OVERLAP, RoutineCaps,
+    RoutinePatch, RunPatch,
 };
 use harness_store::{NewUser, Role, Store, StoreError};
 use serde_json::{Value, json};
@@ -68,6 +71,7 @@ fn run(id: &str, routine: &str, status: &str, at: i64) -> NewRun {
         status: status.into(),
         reason: None,
         repeats: 1,
+        event: None,
     }
 }
 
@@ -476,8 +480,8 @@ fn marks_promotion_and_child_sessions() {
     assert_eq!(s.pending_approvals_with_children(other).unwrap(), 0);
 
     // Prompting in the chat marks the run continued and says untrusted.
-    assert_eq!(s.run_promote(sid).unwrap(), Some(true));
-    assert_eq!(s.run_promote(other).unwrap(), None);
+    assert!(s.run_promote(sid).unwrap());
+    assert!(!s.run_promote(other).unwrap());
     assert!(s.routine_marks(&[sid]).unwrap()[&sid].promoted);
     assert!(s.first_event(sid, "session_created").unwrap().is_some());
     assert!(s.first_event(sid, "turn_ended").unwrap().is_none());
@@ -592,4 +596,181 @@ fn cascades_with_the_workspace_and_the_account() {
     assert!(s.trigger("t").unwrap().is_none());
     s.delete_user("u2").unwrap();
     assert!(s.routine("b").unwrap().is_none());
+}
+
+fn hook(id: &str) -> NewTrigger {
+    NewTrigger {
+        trigger_id: id.into(),
+        kind: "webhook".into(),
+        config: "{}".into(),
+        next_run_ms: None,
+        secret_hash: Some("h1".into()),
+    }
+}
+
+fn hook_run(id: &str, at: i64) -> NewRun {
+    NewRun {
+        trigger_id: Some("h".into()),
+        trigger_kind: "webhook".into(),
+        event: Some(r#"{"text":"hi"}"#.into()),
+        ..run(id, "a", "pending", at)
+    }
+}
+
+#[test]
+fn webhook_calls_dedupe_by_key_for_a_day() {
+    let (s, w) = store();
+    s.routine_create(&routine("a", "u1", &w, vec![hook("h")]), CAPS, 1)
+        .unwrap();
+    let (t, r) = s.hook_target("h").unwrap().unwrap();
+    assert_eq!((t.kind.as_str(), r.routine_id.as_str()), ("webhook", "a"));
+    assert!(s.hook_target("nope").unwrap().is_none());
+
+    let first = s
+        .webhook_claim("a", "h", Some("k"), &hook_run("r1", 10), 10)
+        .unwrap();
+    assert_eq!(first, HookClaim::Claimed(Claimed::Started, "r1".into()));
+    let r1 = s.run("r1").unwrap().unwrap();
+    assert_eq!(r1.event.as_deref(), Some(r#"{"text":"hi"}"#));
+    assert_eq!(s.trigger("h").unwrap().unwrap().last_fired_ms, Some(10));
+    s.run_finish("r1", "completed", None, 20).unwrap();
+
+    // The same key within 24 hours names the first run; nothing is added.
+    let again = s
+        .webhook_claim("a", "h", Some("k"), &hook_run("r2", 30), 30)
+        .unwrap();
+    assert_eq!(again, HookClaim::Duplicate("r1".into()));
+    assert!(s.run("r2").unwrap().is_none());
+    // Another key, or none, is a new call.
+    assert_eq!(
+        s.webhook_claim("a", "h", None, &hook_run("r3", 40), 40)
+            .unwrap(),
+        HookClaim::Claimed(Claimed::Started, "r3".into())
+    );
+    // While r3 goes, a call is skipped and its key is not remembered: a
+    // retry of a skipped call is a new call.
+    assert_eq!(
+        s.webhook_claim("a", "h", Some("busy"), &hook_run("r4", 50), 50)
+            .unwrap(),
+        HookClaim::Claimed(Claimed::Overlap, "r4".into())
+    );
+    s.run_finish("r3", "completed", None, 60).unwrap();
+    assert_eq!(
+        s.webhook_claim("a", "h", Some("busy"), &hook_run("r5", 70), 70)
+            .unwrap(),
+        HookClaim::Claimed(Claimed::Started, "r5".into())
+    );
+    s.run_finish("r5", "completed", None, 80).unwrap();
+
+    // After a day the key is forgotten (an expired row is replaced) ...
+    let later = 10 + DEDUPE_MS;
+    assert_eq!(
+        s.webhook_claim("a", "h", Some("k"), &hook_run("r6", later), later)
+            .unwrap(),
+        HookClaim::Claimed(Claimed::Started, "r6".into())
+    );
+    // ... and purged.
+    assert_eq!(s.dedupe_purge(70 + DEDUPE_MS).unwrap(), 1, "busy");
+    assert_eq!(s.dedupe_purge(later + DEDUPE_MS).unwrap(), 1, "k");
+}
+
+#[test]
+fn secrets_rotate_and_events_are_found() {
+    let (s, w) = store();
+    s.routine_create(&routine("a", "u1", &w, vec![hook("h")]), CAPS, 1)
+        .unwrap();
+    assert!(s.trigger_set_secret("h", "h2").unwrap());
+    assert!(!s.trigger_set_secret("nope", "h2").unwrap());
+    assert_eq!(
+        s.trigger("h").unwrap().unwrap().secret_hash.as_deref(),
+        Some("h2")
+    );
+    assert_eq!(s.latest_event("a").unwrap(), None);
+    s.webhook_claim("a", "h", None, &hook_run("r1", 10), 10)
+        .unwrap();
+    s.run_finish("r1", "completed", None, 20).unwrap();
+    finished_run(&s, "r2", "a", 30, None, "completed");
+    assert_eq!(
+        s.latest_event("a").unwrap().as_deref(),
+        Some(r#"{"text":"hi"}"#),
+        "the newest run that kept an event"
+    );
+}
+
+#[test]
+fn retention_lists_old_seen_uncontinued_run_chats() {
+    let (s, w) = store();
+    s.routine_create(&routine("a", "u1", &w, vec![]), CAPS, 1)
+        .unwrap();
+    s.routine_create(&routine("b", "u1", &w, vec![]), CAPS, 1)
+        .unwrap();
+    let mut chats = Vec::new();
+    for i in 0..5 {
+        let sid = chat(&s, None);
+        finished_run(&s, &format!("a{i}"), "a", 10 * i, Some(sid), "completed");
+        chats.push(sid);
+    }
+    // a0 seen but continued, a4 unseen: neither is ever listed.
+    for id in ["a0", "a1", "a2", "a3"] {
+        s.mark_run_seen("a", id).unwrap();
+    }
+    s.run_promote(chats[0]).unwrap();
+    s.run_start(&run("live", "a", "pending", 100)).unwrap();
+    let b = chat(&s, None);
+    finished_run(&s, "b0", "b", 0, Some(b), "completed");
+    s.mark_run_seen("b", "b0").unwrap();
+
+    // Per routine, newest first: a keeps a3 (and a2), b its one.
+    assert_eq!(s.run_chats_beyond(2, 100).unwrap(), [chats[1]]);
+    assert_eq!(s.run_chats_beyond(1, 100).unwrap(), [chats[1], chats[2]]);
+    assert_eq!(
+        s.run_chats_beyond(1, 1).unwrap(),
+        [chats[1]],
+        "at most limit"
+    );
+    assert_eq!(
+        s.run_chats_beyond(0, 100).unwrap(),
+        [b, chats[1], chats[2], chats[3]],
+        "oldest first"
+    );
+    // A deleted chat is no longer its run's.
+    s.delete_session(chats[1], true).unwrap();
+    assert_eq!(s.run_chats_beyond(1, 100).unwrap(), [chats[2]]);
+}
+
+#[test]
+fn an_untrusted_chat_stays_marked_after_its_routine_goes() {
+    let (s, w) = store();
+    s.add_member(&w, "u2", "member").unwrap();
+    s.routine_create(&routine("a", "u1", &w, vec![]), CAPS, 1)
+        .unwrap();
+    s.routine_create(&routine("b", "u2", &w, vec![]), CAPS, 1)
+        .unwrap();
+    let (sa, sb, plain) = (chat(&s, None), chat(&s, None), chat(&s, None));
+    for (id, routine, sid) in [("ra", "a", sa), ("rb", "b", sb)] {
+        s.run_start(&run(id, routine, "pending", 1)).unwrap();
+        let patch = RunPatch {
+            status: Some("running".into()),
+            session_id: Some(sid.to_string()),
+            untrusted: Some(true),
+            ..Default::default()
+        };
+        assert!(s.run_update(id, &patch).unwrap());
+    }
+    s.run_finish("ra", "completed", None, 2).unwrap();
+    finished_run(&s, "trusted", "a", 5, Some(plain), "completed");
+    assert!(!s.run_promote(plain).unwrap());
+
+    // Deleting the routine takes its runs, not the chat's mark.
+    assert!(s.routine_delete("a").unwrap());
+    assert!(s.run("ra").unwrap().is_none());
+    assert!(s.routine_marks(&[sa]).unwrap().is_empty());
+    assert!(s.run_promote(sa).unwrap(), "still untrusted");
+    // Nor does deleting the workspace (its routines cascade).
+    s.delete_workspace(&w).unwrap();
+    assert!(s.run("rb").unwrap().is_none());
+    assert!(s.run_promote(sb).unwrap());
+    // Deleting the chat takes the mark with it.
+    s.delete_session(sa, true).unwrap();
+    assert!(!s.run_promote(sa).unwrap());
 }

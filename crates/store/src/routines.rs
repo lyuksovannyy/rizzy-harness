@@ -73,7 +73,17 @@ CREATE TABLE IF NOT EXISTS routine_dedupe (
     expires_ms INTEGER NOT NULL,
     PRIMARY KEY (routine_id, key)
 );
+-- Added in phase B (a new table; the four above are frozen). Chats that hold
+-- data from an external event: written with the run that made them untrusted,
+-- so the flag outlives the run row when its routine or workspace is deleted
+-- (both cascade the runs), and removed only with the chat.
+CREATE TABLE IF NOT EXISTS routine_untrusted_chats (
+    session_id TEXT PRIMARY KEY
+) WITHOUT ROWID;
 "#;
+
+/// How long a webhook's `Idempotency-Key` is remembered.
+pub const DEDUPE_MS: i64 = 24 * 3600 * 1000;
 
 /// Runs that have not finished: the overlap rule, the watcher and the
 /// restart reconcile work on these.
@@ -212,6 +222,8 @@ pub struct NewRun {
     pub status: String,
     pub reason: Option<String>,
     pub repeats: i64,
+    /// The event that fired it (JSON, already cut to fit 16 KiB).
+    pub event: Option<String>,
 }
 
 /// What recording a fire did.
@@ -228,6 +240,16 @@ pub enum Claimed {
 
 /// The reason an overlapping fire is skipped with.
 pub const OVERLAP: &str = "the previous run had not finished";
+
+/// What recording a webhook call did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookClaim {
+    /// Recorded as `claimed`; the run id is the new run's.
+    Claimed(Claimed, String),
+    /// The `Idempotency-Key` came with an earlier call that started this
+    /// run, within the last 24 hours: nothing new was recorded.
+    Duplicate(String),
+}
 
 /// Changes to a run; `None` leaves a field as is.
 #[derive(Debug, Clone, Default)]
@@ -400,8 +422,8 @@ fn insert_run(tx: &Transaction<'_>, run: &NewRun) -> Result<()> {
     let ended = (run.status != "pending").then_some(run.started_ms);
     tx.execute(
         "INSERT INTO routine_runs (run_id, routine_id, trigger_id, trigger_kind, scheduled_ms,
-             started_ms, ended_ms, status, reason, repeats)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             started_ms, ended_ms, status, reason, repeats, event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             run.run_id,
             run.routine_id,
@@ -412,8 +434,21 @@ fn insert_run(tx: &Transaction<'_>, run: &NewRun) -> Result<()> {
             ended,
             run.status,
             run.reason,
-            run.repeats
+            run.repeats,
+            run.event
         ],
+    )?;
+    Ok(())
+}
+
+/// Mark the chat of untrusted run `run_id` as holding event data, for good:
+/// the mark stays when the run row goes with its routine.
+fn mark_untrusted_chat(tx: &Transaction<'_>, run_id: &str) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO routine_untrusted_chats (session_id)
+         SELECT session_id FROM routine_runs
+         WHERE run_id = ?1 AND untrusted = 1 AND session_id IS NOT NULL",
+        params![run_id],
     )?;
     Ok(())
 }
@@ -775,6 +810,79 @@ impl Store {
         Ok(Some(claimed))
     }
 
+    /// Record a webhook call as `run`, in one transaction. With a `key`
+    /// (the SHA-256 hex of its `Idempotency-Key`) that an earlier call of
+    /// the last 24 hours brought, nothing is recorded: `Duplicate` names
+    /// that call's run. A key is remembered once its call started a run;
+    /// a call skipped for overlap left nothing to repeat, so a retry of it
+    /// is a new call.
+    pub fn webhook_claim(
+        &self,
+        routine_id: &str,
+        trigger_id: &str,
+        key: Option<&str>,
+        run: &NewRun,
+        now: i64,
+    ) -> Result<HookClaim> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if let Some(key) = key {
+            let first: Option<String> = tx
+                .query_row(
+                    "SELECT run_id FROM routine_dedupe
+                     WHERE routine_id = ?1 AND key = ?2 AND expires_ms > ?3",
+                    params![routine_id, key, now],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(first) = first {
+                return Ok(HookClaim::Duplicate(first));
+            }
+        }
+        let claimed = start_or_record(&tx, run)?;
+        if claimed == Claimed::Started {
+            if let Some(key) = key {
+                // An expired row for the key is replaced.
+                tx.execute(
+                    "INSERT OR REPLACE INTO routine_dedupe (routine_id, key, run_id, expires_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![routine_id, key, run.run_id, now + DEDUPE_MS],
+                )?;
+            }
+            tx.execute(
+                "UPDATE routine_triggers SET last_fired_ms = ?2 WHERE trigger_id = ?1",
+                params![trigger_id, run.started_ms],
+            )?;
+        }
+        tx.commit()?;
+        Ok(HookClaim::Claimed(claimed, run.run_id.clone()))
+    }
+
+    /// Forget `Idempotency-Key`s whose 24 hours are over. Returns how many.
+    pub fn dedupe_purge(&self, now: i64) -> Result<usize> {
+        Ok(self.lock().execute(
+            "DELETE FROM routine_dedupe WHERE expires_ms <= ?1",
+            params![now],
+        )?)
+    }
+
+    /// The webhook trigger `id` with its routine, if there is one.
+    pub fn hook_target(&self, id: &str) -> Result<Option<(TriggerRow, RoutineRow)>> {
+        let Some(t) = self.trigger(id)?.filter(|t| t.kind == "webhook") else {
+            return Ok(None);
+        };
+        Ok(self.routine(&t.routine_id)?.map(|r| (t, r)))
+    }
+
+    /// Give trigger `id` a new secret (its SHA-256 hex). Returns whether
+    /// the trigger exists.
+    pub fn trigger_set_secret(&self, id: &str, secret_hash: &str) -> Result<bool> {
+        Ok(self.lock().execute(
+            "UPDATE routine_triggers SET secret_hash = ?2 WHERE trigger_id = ?1",
+            params![id, secret_hash],
+        )? > 0)
+    }
+
     // ---- runs ----
 
     /// Start a run that no trigger owns (Run now), unless the routine has
@@ -847,7 +955,16 @@ impl Store {
             "UPDATE routine_runs SET {} WHERE run_id = ?1{guard}",
             assignments.join(", ")
         );
-        Ok(self.lock().execute(&sql, params_from_iter(vals))? > 0)
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(&sql, params_from_iter(vals))? > 0;
+        // In the same transaction: no moment where the run is untrusted
+        // and its chat is not.
+        if changed && p.untrusted == Some(true) {
+            mark_untrusted_chat(&tx, run_id)?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// End a run that has not finished as `status` (`skipped` folds into
@@ -1034,21 +1151,20 @@ impl Store {
     }
 
     /// The owner prompted in chat `sid`: mark its run continued. Returns
-    /// the run's untrusted flag, or `None` when no run started the chat.
-    pub fn run_promote(&self, sid: SessionId) -> Result<Option<bool>> {
+    /// whether the chat holds data from an external event, which stays true
+    /// after its run is gone (its routine deleted).
+    pub fn run_promote(&self, sid: SessionId) -> Result<bool> {
         let conn = self.lock();
         let id = sid.to_string();
         conn.execute(
             "UPDATE routine_runs SET promoted = 1 WHERE session_id = ?1 AND promoted = 0",
             params![id],
         )?;
-        Ok(conn
-            .query_row(
-                "SELECT untrusted FROM routine_runs WHERE session_id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?)
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1)",
+            params![id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Unseen finished runs per routine of `owner`.
@@ -1178,15 +1294,73 @@ impl Store {
             params![keep as i64, before],
         )?)
     }
+
+    /// Chats of runs to delete for retention, at most `limit`, oldest
+    /// first: per routine, the run chats beyond the newest `keep` that the
+    /// owner has seen and never continued. Chats of runs still going,
+    /// unseen or continued are never among them.
+    pub fn run_chats_beyond(&self, keep: usize, limit: usize) -> Result<Vec<SessionId>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT session_id FROM (
+                 SELECT session_id, started_ms, run_id, ROW_NUMBER() OVER (
+                     PARTITION BY routine_id ORDER BY started_ms DESC, run_id DESC) AS n
+                 FROM routine_runs
+                 WHERE session_id IS NOT NULL AND seen = 1 AND promoted = 0
+                   AND status NOT IN {ACTIVE})
+             WHERE n > ?1 ORDER BY started_ms, run_id LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![keep as i64, limit as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for sid in rows {
+            // A run's chat id is always a session id; skip one that is not.
+            if let Ok(sid) = sid?.parse() {
+                out.push(sid);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The event of a routine's newest run that kept one (JSON).
+    pub fn latest_event(&self, routine: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT event FROM routine_runs WHERE routine_id = ?1 AND event IS NOT NULL
+                 ORDER BY started_ms DESC, run_id DESC LIMIT 1",
+                params![routine],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Audit lines of routines and their hooks, oldest first, as
+    /// `(kind, detail)`: tests check that none carries content.
+    pub fn routine_audit_lines(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT kind, detail FROM audit
+             WHERE kind LIKE 'routine.%' OR kind LIKE 'hook.%' ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 /// Called by `Store::delete_session` inside its transaction: the run keeps
-/// its status, times, trigger and usage, but no text of the deleted chat.
+/// its status, times, trigger and usage, but no text of the deleted chat;
+/// the chat's untrusted mark goes with it.
 pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
     tx.execute(
         "UPDATE routine_runs SET session_id = NULL, chat_deleted = 1, prompt = NULL,
              event = NULL, warnings = NULL
          WHERE session_id = ?1",
+        params![sid],
+    )?;
+    tx.execute(
+        "DELETE FROM routine_untrusted_chats WHERE session_id = ?1",
         params![sid],
     )?;
     Ok(())

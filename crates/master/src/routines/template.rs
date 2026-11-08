@@ -19,7 +19,8 @@ pub const MAX_VALUE: usize = 4_000;
 /// The longest rendered prompt.
 pub const MAX_PROMPT: usize = 32_000;
 const TRUNCATED: &str = "… [truncated]";
-const MAX_SEGMENTS: usize = 8;
+/// The most parts a variable's path has.
+pub(crate) const MAX_SEGMENTS: usize = 8;
 const MAX_SEGMENT: usize = 64;
 
 /// The fixed namespaces and their fields, with an example each.
@@ -110,7 +111,8 @@ fn utf16_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
 
-fn segment_ok(s: &str) -> bool {
+/// Whether `s` can be one part of a variable's path.
+pub(crate) fn segment_ok(s: &str) -> bool {
     if !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit()) {
         return true;
     }

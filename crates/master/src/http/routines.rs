@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use super::{ApiError, ApiResult, require};
 use crate::Master;
 use crate::auth::{self, Principal};
+use crate::routines::events::{self, Event, EventSource};
 use crate::routines::schedule::{self, Schedule, ScheduleConfig};
 use crate::routines::spec::{self as rspec, RoutineSpec};
 use crate::routines::template::{self, TemplateError, Vars};
@@ -41,6 +42,10 @@ pub(super) fn routes() -> Router<Master> {
         .route("/api/routines/{id}/runs", get(runs))
         .route("/api/routines/{id}/runs/{run_id}", get(run_detail))
         .route("/api/routines/{id}/runs/{run_id}/seen", post(seen))
+        .route(
+            "/api/routines/{id}/triggers/{tid}/secret",
+            post(rotate_secret),
+        )
 }
 
 /// An error answer: most are `ApiError`s; a template error also says
@@ -200,11 +205,19 @@ async fn default_zone(m: &Master, who: &Principal) -> String {
 struct Triggers {
     rows: Vec<NewTrigger>,
     schedules: Vec<Schedule>,
+    /// The event source of its one event trigger (the webhook), if any:
+    /// what `event.*` the prompt may use.
+    source: Option<&'static dyn EventSource>,
+}
+
+/// The event source of a stored trigger set.
+fn source_of(rows: &[TriggerRow]) -> Option<&'static dyn EventSource> {
+    rows.iter().find_map(|t| events::source(&t.kind))
 }
 
 /// Check a trigger set: 1 to `max_triggers` schedules, or exactly one
-/// event (webhooks come in a later version); ids the routine already has
-/// keep their trigger.
+/// event (the webhook). Ids the routine already has keep their trigger
+/// (a webhook its URL and secret); a trigger never changes kind.
 fn parse_triggers(
     cfg: &RoutinesConfig,
     zone: &str,
@@ -212,23 +225,69 @@ fn parse_triggers(
     existing: &[TriggerRow],
     now: i64,
 ) -> ApiResult<Triggers> {
-    let schedules = list.iter().filter(|t| t.kind == "schedule").count();
     if let Some(t) = list
         .iter()
-        .find(|t| t.kind != "schedule" && t.kind != "webhook")
+        .find(|t| t.kind != "schedule" && events::source(&t.kind).is_none())
     {
         return Err(bad(format!("unknown trigger kind {:?}", t.kind)));
     }
-    if schedules > 0 && schedules < list.len() {
+    check_set(cfg, list)?;
+    let mut out = Triggers {
+        rows: Vec::new(),
+        schedules: Vec::new(),
+        source: None,
+    };
+    for t in list {
+        let trigger_id = trigger_id(t, existing, &out.rows)?;
+        let (config, next_run_ms) = match events::source(&t.kind) {
+            Some(src) => {
+                out.source = Some(src);
+                (src.check_config(&t.config).map_err(bad)?.to_string(), None)
+            }
+            None => {
+                let config = ScheduleConfig::from_request(&t.config, zone, now).map_err(bad)?;
+                let schedule = config.compile(cfg.min_interval_minutes, now).map_err(bad)?;
+                let next = schedule.next_after_ms(now);
+                out.schedules.push(schedule);
+                let config = serde_json::to_string(&config).expect("config serializes");
+                (config, next)
+            }
+        };
+        out.rows.push(NewTrigger {
+            trigger_id,
+            kind: t.kind.clone(),
+            config,
+            next_run_ms,
+            secret_hash: None,
+        });
+    }
+    Ok(out)
+}
+
+/// What only a whole trigger set can break: none at all, schedules mixed
+/// with an event, more than one event, too many schedules, or webhooks
+/// turned off on this server.
+fn check_set(cfg: &RoutinesConfig, list: &[TriggerBody]) -> ApiResult<()> {
+    let schedules = list.iter().filter(|t| t.kind == "schedule").count();
+    let fired = list
+        .iter()
+        .filter(|t| events::source(&t.kind).is_some())
+        .count();
+    if schedules > 0 && fired > 0 {
         return Err(bad(
             "A routine runs on a schedule or on one event, not both",
         ));
     }
-    if schedules < list.len() {
-        return Err(bad("webhooks are not available yet"));
-    }
     if list.is_empty() {
-        return Err(bad("add a schedule: a routine runs on 1 to 8 schedules"));
+        return Err(bad(
+            "add a schedule or a webhook: a routine runs on 1 to 8 schedules or on one webhook",
+        ));
+    }
+    if fired > 1 {
+        return Err(bad("a routine runs on one webhook at most"));
+    }
+    if fired == 1 && !cfg.webhooks {
+        return Err(conflict("webhooks are turned off on this server"));
     }
     if schedules > cfg.max_triggers as usize {
         return Err(conflict(format!(
@@ -236,50 +295,88 @@ fn parse_triggers(
             cfg.max_triggers
         )));
     }
-    let mut out = Triggers {
-        rows: Vec::new(),
-        schedules: Vec::new(),
+    Ok(())
+}
+
+/// The id `t` is saved under: its own, if the routine has it, is not listed
+/// twice and keeps its kind; else a new one.
+fn trigger_id(t: &TriggerBody, existing: &[TriggerRow], taken: &[NewTrigger]) -> ApiResult<String> {
+    let Some(id) = &t.trigger_id else {
+        return Ok(auth::random_hex(16));
     };
-    for t in list {
-        let id = match &t.trigger_id {
-            Some(id) if !existing.iter().any(|e| &e.trigger_id == id) => {
-                return Err(bad(format!("unknown trigger {id:?}")));
-            }
-            Some(id) if out.rows.iter().any(|r| &r.trigger_id == id) => {
-                return Err(bad(format!("trigger {id:?} is listed twice")));
-            }
-            Some(id) => id.clone(),
-            None => auth::random_hex(16),
-        };
-        let config = ScheduleConfig::from_request(&t.config, zone, now).map_err(bad)?;
-        let schedule = config.compile(cfg.min_interval_minutes, now).map_err(bad)?;
-        out.rows.push(NewTrigger {
-            trigger_id: id,
-            kind: t.kind.clone(),
-            config: serde_json::to_string(&config).expect("config serializes"),
-            next_run_ms: schedule.next_after_ms(now),
-            secret_hash: None,
-        });
-        out.schedules.push(schedule);
+    match existing.iter().find(|e| &e.trigger_id == id) {
+        None => Err(bad(format!("unknown trigger {id:?}"))),
+        Some(_) if taken.iter().any(|r| &r.trigger_id == id) => {
+            Err(bad(format!("trigger {id:?} is listed twice")))
+        }
+        Some(e) if e.kind != t.kind => Err(bad(format!(
+            "trigger {id:?} is a {}; remove it and add a new one",
+            e.kind
+        ))),
+        Some(_) => Ok(id.clone()),
     }
-    Ok(out)
 }
 
-/// The prompt checked against the namespaces this routine has (a schedule
-/// routine has no `event.*`).
-fn check_prompt(spec: &RoutineSpec) -> Result<()> {
+/// Give each new webhook trigger in `rows` a secret: stored as its SHA-256,
+/// returned once by trigger id. A trigger the routine already has keeps its
+/// secret (rotation is its own call).
+fn new_secrets(rows: &mut [NewTrigger], existing: &[TriggerRow]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for t in rows.iter_mut() {
+        let new = !existing.iter().any(|e| e.trigger_id == t.trigger_id);
+        if new && events::source(&t.kind).is_some() {
+            let secret = auth::random_hex(32);
+            t.secret_hash = Some(auth::sha256_hex(&secret));
+            out.insert(t.trigger_id.clone(), secret);
+        }
+    }
+    out
+}
+
+/// Refuse (403) an event source `who` may not use in `a`.
+fn source_allowed(
+    who: &Principal,
+    a: &Access,
+    source: Option<&'static dyn EventSource>,
+) -> ApiResult<()> {
+    match source.map(|s| s.may_use(who, a)) {
+        Some(Err(why)) => Err(forbidden(why)),
+        _ => Ok(()),
+    }
+}
+
+/// The prompt checked against the namespaces this routine has: `event.*`
+/// only with an event source, and then only that source's.
+fn check_prompt(spec: &RoutineSpec, source: Option<&dyn EventSource>) -> Result<()> {
     let t = template::parse(&spec.prompt).map_err(Error::At)?;
-    t.check(None).map_err(Error::At)
+    t.check(source).map_err(Error::At)
 }
 
+/// What the variable picker offers from `src`.
+fn source_json(src: &dyn EventSource) -> Value {
+    let vars: Vec<Value> = src
+        .vars()
+        .iter()
+        .map(|v| json!({ "path": v.path, "example": v.example }))
+        .collect();
+    json!({ "kind": src.kind(), "vars": vars, "free_prefix": src.free_prefix() })
+}
+
+/// A trigger as the UI shows it; a webhook also says where it is called
+/// and whether it has a secret (never the secret).
 fn trigger_json(t: &TriggerRow) -> Value {
-    json!({
+    let mut v = json!({
         "trigger_id": t.trigger_id,
         "kind": t.kind,
         "config": serde_json::from_str::<Value>(&t.config).unwrap_or(Value::Null),
         "next_run_ms": t.next_run_ms,
         "last_fired_ms": t.last_fired_ms,
-    })
+    });
+    if events::source(&t.kind).is_some() {
+        v["url_path"] = json!(format!("/api/hooks/{}", t.trigger_id));
+        v["secret_set"] = json!(t.secret_hash.is_some());
+    }
+    v
 }
 
 /// A run as the UI shows it; `preview` is the first sentence of its chat's
@@ -338,18 +435,24 @@ async fn previews(m: &Master, runs: &[RunRow]) -> ApiResult<HashMap<String, Stri
 }
 
 /// A routine as the UI shows it. `blocked` is checked live: why its owner
-/// may not run it now.
-async fn routine_json(m: &Master, row: &RoutineRow, unseen: i64) -> ApiResult<Value> {
+/// may not run it now. `event_paths` (the paths in the last event a run
+/// kept) are for its `owner` only.
+async fn routine_json(m: &Master, row: &RoutineRow, unseen: i64, owner: bool) -> ApiResult<Value> {
     let id = row.routine_id.clone();
-    let (triggers, last) = m
+    let (triggers, last, event) = m
         .inner
         .mirror
         .call(move |s| {
             let triggers = s.triggers(&id)?;
             let last = s.runs_page(&id, None, 1)?.into_iter().next();
-            Ok::<_, harness_store::StoreError>((triggers, last))
+            let event = if owner { s.latest_event(&id)? } else { None };
+            Ok::<_, harness_store::StoreError>((triggers, last, event))
         })
         .await?;
+    let event_paths = event
+        .and_then(|e| serde_json::from_str::<Value>(&e).ok())
+        .map(|e| events::paths(&e))
+        .unwrap_or_default();
     let blocked = match runner::why_blocked(m, row).await {
         Ok(_) => None,
         Err(why) => why,
@@ -382,8 +485,7 @@ async fn routine_json(m: &Master, row: &RoutineRow, unseen: i64) -> ApiResult<Va
         "last_run": last_run,
         "unseen": unseen,
         "blocked": blocked,
-        // The paths of the last webhook body (webhooks come later).
-        "event_paths": [],
+        "event_paths": event_paths,
         "created_ms": row.created_ms,
         "updated_ms": row.updated_ms,
     }))
@@ -397,9 +499,11 @@ async fn unseen_of(m: &Master, owner: &str) -> ApiResult<HashMap<String, i64>> {
         .await?)
 }
 
-async fn one_json(m: &Master, row: &RoutineRow) -> ApiResult<Value> {
+async fn one_json(m: &Master, who: &Principal, row: &RoutineRow) -> ApiResult<Value> {
     let unseen = unseen_of(m, &row.owner_id).await?;
-    routine_json(m, row, unseen.get(&row.routine_id).copied().unwrap_or(0)).await
+    let n = unseen.get(&row.routine_id).copied().unwrap_or(0);
+    let owner = who.user_id.as_deref() == Some(row.owner_id.as_str());
+    routine_json(m, row, n, owner).await
 }
 
 fn limits(cfg: &RoutinesConfig) -> Value {
@@ -436,9 +540,11 @@ async fn list(
         .call(move |s| s.routine_unseen(owner.as_deref()))
         .await?;
     let mut routines = Vec::new();
+    // A user lists only their own routines.
+    let owner = who.user_id.is_some();
     for row in &rows {
         let n = unseen.get(&row.routine_id).copied().unwrap_or(0);
-        routines.push(routine_json(&m, row, n).await?);
+        routines.push(routine_json(&m, row, n, owner).await?);
     }
     let cfg = r::config(&m);
     let why = match &scope {
@@ -449,6 +555,11 @@ async fn list(
     let can_agentic = scope
         .as_ref()
         .is_some_and(|a| why.is_none() && ws::agentic_refusal(&who, Some(a)).is_none());
+    let sources: Vec<Value> = if cfg.enabled && cfg.webhooks {
+        vec![source_json(&events::Webhook)]
+    } else {
+        Vec::new()
+    };
     Ok(Json(json!({
         "routines": routines,
         "workspace_id": ws_id,
@@ -457,8 +568,7 @@ async fn list(
         "why": why,
         "limits": limits(&cfg),
         "variables": template::namespaces(None),
-        // Event sources the viewer can use (the webhook comes later).
-        "sources": [],
+        "sources": sources,
         "orphaned": why.is_some() && who.user_id.is_some() && !rows.is_empty(),
     })))
 }
@@ -486,11 +596,13 @@ async fn create(
     let spec = RoutineSpec::parse(b.spec).map_err(bad)?;
     agentic_allowed(&who, &a, &spec)?;
     rspec::check(&m, &a, &spec).await.map_err(bad)?;
-    check_prompt(&spec)?;
     let name = rspec::clean_name(&b.name).map_err(bad)?;
     let now = now(&m);
     let zone = default_zone(&m, &who).await;
-    let triggers = parse_triggers(&cfg, &zone, &b.triggers, &[], now)?;
+    let mut triggers = parse_triggers(&cfg, &zone, &b.triggers, &[], now)?;
+    source_allowed(&who, &a, triggers.source)?;
+    check_prompt(&spec, triggers.source)?;
+    let secrets = new_secrets(&mut triggers.rows, &[]);
     let new = NewRoutine {
         routine_id: harness_core::new_id(),
         workspace_id: a.id().to_string(),
@@ -519,10 +631,10 @@ async fn create(
     if let Some(h) = r::handle(&m) {
         h.wake();
     }
-    let routine = routine_json(&m, &row, 0).await?;
+    let routine = routine_json(&m, &row, 0, true).await?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "routine": routine, "secrets": {} })),
+        Json(json!({ "routine": routine, "secrets": secrets })),
     ))
 }
 
@@ -533,7 +645,7 @@ async fn detail(
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
-    Ok(Json(one_json(&m, &row).await?))
+    Ok(Json(one_json(&m, &who, &row).await?))
 }
 
 async fn update(
@@ -555,7 +667,6 @@ async fn update(
     if changed_spec {
         rspec::check(&m, &a, &spec).await.map_err(bad)?;
     }
-    check_prompt(&spec)?;
     let name = b
         .name
         .as_deref()
@@ -567,14 +678,22 @@ async fn update(
     let existing = m.inner.mirror.call(move |s| s.triggers(&rid)).await?;
     // Enabling clears a pause and starts the schedules from now.
     let resume = b.enabled == Some(true) && (!row.enabled || row.paused_reason.is_some());
-    let triggers = match &b.triggers {
+    let mut secrets = HashMap::new();
+    let (triggers, source) = match &b.triggers {
         Some(list) => {
             let zone = default_zone(&m, &who).await;
-            Some(parse_triggers(&cfg, &zone, list, &existing, now)?.rows)
+            let mut t = parse_triggers(&cfg, &zone, list, &existing, now)?;
+            source_allowed(&who, &a, t.source)?;
+            secrets = new_secrets(&mut t.rows, &existing);
+            (Some(t.rows), t.source)
         }
-        None if resume => Some(runner::restarted(&existing, now)),
-        None => None,
+        None if resume => (
+            Some(runner::restarted(&existing, now)),
+            source_of(&existing),
+        ),
+        None => (None, source_of(&existing)),
     };
+    check_prompt(&spec, source)?;
     let patch = RoutinePatch {
         name,
         enabled: b.enabled,
@@ -598,8 +717,8 @@ async fn update(
     if let Some(h) = r::handle(&m) {
         h.wake();
     }
-    let routine = one_json(&m, &row).await?;
-    Ok(Json(json!({ "routine": routine, "secrets": {} })))
+    let routine = one_json(&m, &who, &row).await?;
+    Ok(Json(json!({ "routine": routine, "secrets": secrets })))
 }
 
 async fn remove(
@@ -643,9 +762,10 @@ async fn run_now(
         _ => RunBody::default(),
     };
     let (row, a) = owned(&m, &who, &id).await?;
-    if b.event.is_some() {
-        return Err(bad("sample events are not available yet"));
-    }
+    let sample = match b.event {
+        Some(v) => Some(sample_event(&m, &row, v).await?),
+        None => None,
+    };
     let spec = RoutineSpec::read(&row.spec).unwrap_or_default();
     agentic_allowed(&who, &a, &spec)?;
     if !r::config(&m).enabled {
@@ -658,7 +778,7 @@ async fn run_now(
             "this routine is paused ({p}); turn it on again first"
         )));
     }
-    let answer = match runner::run_now(&m, &row).await {
+    let answer = match runner::run_now(&m, &row, sample).await {
         runner::Manual::Started(run_id) => json!({ "run_id": run_id }),
         runner::Manual::Skipped(why) => json!({ "skipped": why }),
         runner::Manual::Blocked(why) => return Err(conflict(why)),
@@ -760,6 +880,83 @@ async fn seen(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The routine's event source, from its stored triggers.
+async fn stored_source(
+    m: &Master,
+    row: &RoutineRow,
+) -> ApiResult<Option<&'static dyn EventSource>> {
+    let rid = row.routine_id.clone();
+    let triggers = m.inner.mirror.call(move |s| s.triggers(&rid)).await?;
+    Ok(source_of(&triggers))
+}
+
+/// A sample event in an event's place, checked like a webhook body: at
+/// most 64 KiB of JSON, nested at most 32 deep. Returns it as JSON text.
+fn check_sample(sample: &Value) -> ApiResult<String> {
+    let text = sample.to_string();
+    if text.len() > events::MAX_BODY {
+        return Err(bad("a sample event has at most 64 KiB"));
+    }
+    if events::depth(sample) > events::MAX_DEPTH {
+        return Err(bad(format!(
+            "a sample event is nested at most {} deep",
+            events::MAX_DEPTH
+        )));
+    }
+    Ok(text)
+}
+
+/// Run now's sample event for routine `row`, which must be one an event
+/// starts.
+async fn sample_event(m: &Master, row: &RoutineRow, sample: Value) -> ApiResult<Event> {
+    let Some(src) = stored_source(m, row).await? else {
+        return Err(bad("a sample event is for routines a webhook starts"));
+    };
+    let text = check_sample(&sample)?;
+    let received_at = runner::local_now(m, &row.owner_id).await;
+    Ok(Event {
+        kind: src.kind(),
+        data: Event::sample(sample, received_at),
+        dedupe_key: None,
+        size: text.len(),
+        sha256: auth::sha256_hex(&text),
+    })
+}
+
+/// A new secret for webhook trigger `tid`, shown once; the old one stops
+/// working at once.
+async fn rotate_secret(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path((id, tid)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let who = require(&m, &headers).await?;
+    let (row, a) = owned(&m, &who, &id).await?;
+    agentic_allowed(&who, &a, &RoutineSpec::read(&row.spec).unwrap_or_default())?;
+    let t = tid.clone();
+    let trigger = m.inner.mirror.call(move |s| s.trigger(&t)).await?;
+    let Some(trigger) = trigger.filter(|t| t.routine_id == row.routine_id) else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown trigger".into()));
+    };
+    if events::source(&trigger.kind).is_none() {
+        return Err(bad("only a webhook trigger has a secret"));
+    }
+    let secret = auth::random_hex(32);
+    let hash = auth::sha256_hex(&secret);
+    m.inner
+        .mirror
+        .call(move |s| s.trigger_set_secret(&tid, &hash))
+        .await?;
+    r::audit(
+        &m,
+        "hook.secret_rotated",
+        json!({ "routine_id": row.routine_id, "trigger_id": trigger.trigger_id, "owner": row.owner_id }),
+    )
+    .await;
+    r::changed(&m, &row.owner_id);
+    Ok(Json(json!({ "secret": secret })))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreviewBody {
@@ -771,16 +968,84 @@ struct PreviewBody {
     prompt: Option<String>,
     #[serde(default)]
     triggers: Option<Vec<TriggerBody>>,
-    /// For webhook routines, which come later; ignored until then.
+    /// What a webhook call might bring (`Event::sample`).
     #[serde(default)]
-    #[allow(dead_code)]
     sample_event: Option<Value>,
 }
 
+/// One problem for the editor, at `offset` in the prompt or about the
+/// routine as a whole.
+fn problem(offset: Option<usize>, message: impl Into<String>) -> Value {
+    json!({ "offset": offset, "message": message.into() })
+}
+
+/// The triggers a preview is about: the ones being edited, else the
+/// routine's own. Problems are collected, not returned.
+struct Previewed {
+    schedules: Vec<Schedule>,
+    source: Option<&'static dyn EventSource>,
+    /// The first schedule's zone, for `now.*`.
+    zone: Option<String>,
+}
+
+async fn previewed_triggers(
+    m: &Master,
+    cfg: &RoutinesConfig,
+    zone: &str,
+    b: &PreviewBody,
+    routine: Option<&RoutineRow>,
+    now: i64,
+    errors: &mut Vec<Value>,
+) -> ApiResult<Previewed> {
+    let mut out = Previewed {
+        schedules: Vec::new(),
+        source: None,
+        zone: None,
+    };
+    if let Some(list) = &b.triggers {
+        for (i, t) in list.iter().enumerate() {
+            // Checked one by one, so each problem names its trigger.
+            let one = [TriggerBody {
+                trigger_id: None,
+                kind: t.kind.clone(),
+                config: t.config.clone(),
+            }];
+            match parse_triggers(cfg, zone, &one, &[], now) {
+                Ok(mut p) => {
+                    out.zone = out.zone.or_else(|| tz_of(&p.rows[0].config));
+                    out.source = out.source.or(p.source);
+                    out.schedules.append(&mut p.schedules);
+                }
+                Err(ApiError(_, msg)) => {
+                    errors.push(problem(None, format!("{} {}: {msg}", t.kind, i + 1)))
+                }
+            }
+        }
+        if list.len() > 1
+            && let Err(ApiError(_, msg)) = check_set(cfg, list)
+        {
+            errors.push(problem(None, msg));
+        }
+        return Ok(out);
+    }
+    if let Some(r) = routine {
+        let rid = r.routine_id.clone();
+        let rows = m.inner.mirror.call(move |s| s.triggers(&rid)).await?;
+        out.source = source_of(&rows);
+        for t in &rows {
+            out.zone = out.zone.clone().or_else(|| tz_of(&t.config));
+            if let Some(s) = ScheduleConfig::read(&t.config).and_then(|c| c.schedule().ok()) {
+                out.schedules.push(s);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// What a routine being edited would do: its next runs, about how many
-/// chats a day, and its prompt rendered with this moment's values. Problems
-/// come back in `errors`, not as a failure, so the editor can show them as
-/// the user types.
+/// chats a day, and its prompt rendered with this moment's values (and a
+/// sample event's, for a webhook routine). Problems come back in `errors`,
+/// not as a failure, so the editor can show them as the user types.
 async fn preview(
     State(m): State<Master>,
     headers: HeaderMap,
@@ -801,52 +1066,31 @@ async fn preview(
     let now = now(&m);
     let zone = default_zone(&m, &who).await;
     let mut errors: Vec<Value> = Vec::new();
-    let mut schedules = Vec::new();
-    let mut first_zone: Option<String> = None;
-    match (&b.triggers, &routine) {
-        (Some(list), _) => {
-            let existing: Vec<TriggerRow> = Vec::new();
-            for (i, t) in list.iter().enumerate() {
-                // Checked one by one, so each problem names its trigger.
-                let one = [TriggerBody {
-                    trigger_id: None,
-                    kind: t.kind.clone(),
-                    config: t.config.clone(),
-                }];
-                match parse_triggers(&cfg, &zone, &one, &existing, now) {
-                    Ok(mut p) => {
-                        first_zone = first_zone.or_else(|| tz_of(&p.rows[0].config));
-                        schedules.append(&mut p.schedules);
-                    }
-                    Err(ApiError(_, msg)) => errors.push(
-                        json!({ "offset": null, "message": format!("schedule {}: {msg}", i + 1) }),
-                    ),
-                }
+    let p = previewed_triggers(&m, &cfg, &zone, &b, routine.as_ref(), now, &mut errors).await?;
+    let next_runs = schedule::next_runs(&p.schedules, now, 5);
+    let chats_per_day =
+        (!p.schedules.is_empty()).then(|| schedule::chats_per_day(&p.schedules, now));
+    let event = match (&b.sample_event, p.source) {
+        (Some(sample), Some(_)) => match check_sample(sample) {
+            Ok(_) => Some(Event::sample(
+                sample.clone(),
+                local(now, p.zone.as_deref().unwrap_or(&zone)),
+            )),
+            Err(ApiError(_, msg)) => {
+                errors.push(problem(None, msg));
+                None
             }
-            let kinds = list.iter().filter(|t| t.kind == "schedule").count();
-            if kinds > 0 && kinds < list.len() {
-                errors.push(json!({ "offset": null,
-                    "message": "A routine runs on a schedule or on one event, not both" }));
-            }
-            if kinds > cfg.max_triggers as usize {
-                errors.push(json!({ "offset": null,
-                    "message": format!("a routine has at most {} schedules", cfg.max_triggers) }));
-            }
+        },
+        (Some(_), None) => {
+            errors.push(problem(
+                None,
+                "a sample event is for routines a webhook starts",
+            ));
+            None
         }
-        (None, Some(r)) => {
-            let rid = r.routine_id.clone();
-            for t in m.inner.mirror.call(move |s| s.triggers(&rid)).await? {
-                let cfg = ScheduleConfig::read(&t.config);
-                first_zone = first_zone.or_else(|| tz_of(&t.config));
-                if let Some(s) = cfg.and_then(|c| c.schedule().ok()) {
-                    schedules.push(s);
-                }
-            }
-        }
-        (None, None) => {}
-    }
-    let next_runs = schedule::next_runs(&schedules, now, 5);
-    let chats_per_day = (!schedules.is_empty()).then(|| schedule::chats_per_day(&schedules, now));
+        (None, _) => None,
+    };
+    let event_paths = event.as_ref().map(events::paths).unwrap_or_default();
     let stored = routine.as_ref().and_then(|r| RoutineSpec::read(&r.spec));
     let prompt = b
         .prompt
@@ -855,26 +1099,27 @@ async fn preview(
         .unwrap_or_default();
     let mut warnings: Vec<String> = Vec::new();
     let mut rendered = None;
-    match template::parse(&prompt).and_then(|t| t.check(None).map(|_| t)) {
-        Err(e) => errors.push(json!({ "offset": e.offset, "message": e.message })),
+    let mut untrusted = false;
+    match template::parse(&prompt).and_then(|t| t.check(p.source).map(|_| t)) {
+        Err(e) => errors.push(problem(Some(e.offset), e.message)),
         Ok(t) => {
             let on_missing = stored.as_ref().map(|s| s.on_missing).unwrap_or_default();
-            let vars = sample_vars(
-                &m,
-                &who,
-                scope.as_ref(),
-                routine.as_ref(),
-                first_zone.as_deref().unwrap_or(&zone),
-                next_runs.first().copied(),
-                now,
-            )
-            .await?;
+            let ctx = SampleCtx {
+                scope: scope.as_ref(),
+                routine: routine.as_ref(),
+                zone: p.zone.as_deref().unwrap_or(&zone),
+                next_run: next_runs.first().copied(),
+                fired_by: p.source.map(|s| s.kind()),
+                event,
+            };
+            let vars = sample_vars(&m, &who, ctx, now).await?;
             match t.render(&vars, on_missing) {
                 Ok(r) => {
                     warnings = r.warnings;
+                    untrusted = r.untrusted;
                     rendered = Some(r.text);
                 }
-                Err(e) => errors.push(json!({ "offset": null, "message": e.to_string() })),
+                Err(e) => errors.push(problem(None, e.to_string())),
             }
         }
     }
@@ -882,10 +1127,10 @@ async fn preview(
         "next_runs": next_runs,
         "chats_per_day": chats_per_day,
         "rendered": rendered,
-        "untrusted": false,
+        "untrusted": untrusted,
         "warnings": warnings,
         "errors": errors,
-        "event_paths": [],
+        "event_paths": event_paths,
     })))
 }
 
@@ -893,24 +1138,38 @@ fn tz_of(config: &str) -> Option<String> {
     ScheduleConfig::read(config).and_then(|c| c.tz().map(str::to_string))
 }
 
-/// The values a preview renders with: this moment, and the routine's own
-/// (or a new routine's) names and last run.
-async fn sample_vars(
-    m: &Master,
-    who: &Principal,
-    scope: Option<&Access>,
-    routine: Option<&RoutineRow>,
-    zone: &str,
-    next_run: Option<i64>,
-    now: i64,
-) -> ApiResult<Vars> {
+/// "YYYY-MM-DD HH:MM" of `ms` in `zone` (UTC if unknown).
+fn local(ms: i64, zone: &str) -> String {
     let tz = jiff::tz::TimeZone::get(zone).unwrap_or(jiff::tz::TimeZone::UTC);
+    jiff::Timestamp::from_millisecond(ms)
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .to_zoned(tz)
+        .strftime("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+/// What a preview renders with besides this moment.
+struct SampleCtx<'a> {
+    scope: Option<&'a Access>,
+    routine: Option<&'a RoutineRow>,
+    zone: &'a str,
+    /// The next scheduled run, if the routine has schedules.
+    next_run: Option<i64>,
+    /// The kind of its event source, if an event starts it.
+    fired_by: Option<&'static str>,
+    event: Option<Value>,
+}
+
+/// The values a preview renders with: this moment, the routine's own (or
+/// a new routine's) names and last run, and the sample event.
+async fn sample_vars(m: &Master, who: &Principal, c: SampleCtx<'_>, now: i64) -> ApiResult<Vars> {
+    let tz = jiff::tz::TimeZone::get(c.zone).unwrap_or(jiff::tz::TimeZone::UTC);
     let zoned = |ms: i64| {
         jiff::Timestamp::from_millisecond(ms)
             .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
             .to_zoned(tz.clone())
     };
-    let (number, last) = match routine {
+    let (number, last) = match c.routine {
         Some(r) => {
             let rid = r.routine_id.clone();
             m.inner
@@ -926,25 +1185,30 @@ async fn sample_vars(
     };
     let prefs = crate::prefs::Prefs::load(m, who.user_id.as_deref()).await;
     let display = prefs.display_name.as_deref().map(str::trim).unwrap_or("");
+    let trigger = match (c.fired_by, c.next_run) {
+        (Some(kind), _) => kind,
+        (None, Some(_)) => "schedule",
+        (None, None) => "manual",
+    };
     Ok(Vars {
         now: zoned(now),
-        routine_name: routine.map_or_else(|| "New routine".into(), |r| r.name.clone()),
-        routine_id: routine.map(|r| r.routine_id.clone()).unwrap_or_default(),
-        run_trigger: if next_run.is_some() {
-            "schedule"
-        } else {
-            "manual"
-        }
-        .into(),
+        routine_name: c
+            .routine
+            .map_or_else(|| "New routine".into(), |r| r.name.clone()),
+        routine_id: c.routine.map(|r| r.routine_id.clone()).unwrap_or_default(),
+        run_trigger: trigger.into(),
         run_number: number,
-        run_scheduled: next_run.map(zoned),
+        run_scheduled: c.next_run.map(zoned),
         user_name: if display.is_empty() {
             who.username.clone()
         } else {
             display.to_string()
         },
-        workspace_name: scope.map(|a| a.workspace.name.clone()).unwrap_or_default(),
+        workspace_name: c
+            .scope
+            .map(|a| a.workspace.name.clone())
+            .unwrap_or_default(),
         last_run: last.map(|l| (l.status, zoned(l.started_ms))),
-        event: None,
+        event: c.event,
     })
 }
