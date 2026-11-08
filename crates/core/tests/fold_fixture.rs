@@ -3,6 +3,7 @@
 //! Regenerate with `UPDATE_FIXTURES=1 cargo test -p harness-core --test fold_fixture`.
 
 use harness_core::agent::UiLevel;
+use harness_core::artifacts::{ArtifactMeta, GitInfo, StagedBy};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::view::SessionView;
@@ -16,6 +17,31 @@ const STREAMED: [&str; 2] = [
 ];
 
 const BLOCKS_TEXT: &str = "Found it.\n\n```ui:progress\n{\"id\": \"fix\", \"title\": \"Fixing\", \"steps\": [{\"label\": \"Find\", \"status\": \"done\"}]}\n```\n\n```ui:choices\n{\"id\": \"next\"}\n```\n";
+
+fn staged(call_id: Option<&str>, by: StagedBy) -> ArtifactStaged {
+    ArtifactStaged {
+        stage_id: "01a19bf2000070008000000000000a01".into(),
+        call_id: call_id.map(str::to_string),
+        by,
+        name: "app".into(),
+        filename: "app".into(),
+        packed: None,
+        size: 12,
+        sha256: "ab".repeat(32),
+        kind_hint: None,
+        source_path: "/w/target/release/app".into(),
+        notes: (by == StagedBy::Agent).then(|| "release build".into()),
+        meta: ArtifactMeta {
+            target: Some("x86_64-linux".into()),
+            git: Some(GitInfo {
+                commit: "abc123".into(),
+                branch: "main".into(),
+                dirty: false,
+            }),
+            ..Default::default()
+        },
+    }
+}
 
 fn events() -> Vec<RawEvent> {
     let sid: SessionId = "01a19bf2-0000-7000-8000-00000000f1f0".parse().unwrap();
@@ -287,6 +313,22 @@ fn events() -> Vec<RawEvent> {
                 values: json!({"selected": ["o1"]}).as_object().unwrap().clone(),
             }),
         }),
+        // A `publish` call and the file the node staged for it, then a
+        // file the user saved, and one that could not be saved.
+        EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
+            turn_id: "t3".into(),
+            call_id: "c-pub".into(),
+            tool: "publish".into(),
+            input: json!({"path": "target/release/app"}),
+        }),
+        EventKind::ArtifactStaged(Box::new(staged(Some("c-pub"), StagedBy::Agent))),
+        EventKind::ArtifactStaged(Box::new(staged(None, StagedBy::User))),
+        EventKind::ArtifactStageFailed(ArtifactStageFailed {
+            path: "out/missing.bin".into(),
+            name: None,
+            error: "out/missing.bin: no such file or folder".into(),
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()
@@ -355,4 +397,30 @@ fn a_streamed_message_gets_its_final_blocks() {
     assert!(users[0].get("reply").is_none());
     assert_eq!(users[2]["reply"]["block_id"], "next");
     assert!(view["meta"]["parent_session"].is_string());
+}
+
+/// Staged files: the agent's joins its `publish` card, the user's and the
+/// failure stand alone.
+#[test]
+fn staged_files_join_their_card_or_stand_alone() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let items = view["items"].as_array().unwrap();
+    let card = items.iter().find(|i| i["call_id"] == "c-pub").unwrap();
+    assert_eq!(card["staged"]["name"], "app");
+    assert_eq!(card["staged"]["by"], "agent");
+    assert!(card["staged"]["packed"].is_null());
+    let alone: Vec<&serde_json::Value> = items.iter().filter(|i| i["type"] == "artifact").collect();
+    assert_eq!(alone.len(), 1);
+    assert_eq!(alone[0]["staged"]["by"], "user");
+    assert!(alone[0]["staged"].get("call_id").is_none());
+    let failed = items
+        .iter()
+        .find(|i| i["type"] == "artifact_failed")
+        .unwrap();
+    assert!(failed["name"].is_null());
+    assert_eq!(failed["path"], "out/missing.bin");
+    let other_tools = items
+        .iter()
+        .filter(|i| i["type"] == "tool" && i["call_id"] != "c-pub");
+    assert!(other_tools.into_iter().all(|t| t.get("staged").is_none()));
 }

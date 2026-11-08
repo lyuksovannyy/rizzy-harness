@@ -74,6 +74,9 @@ pub enum EventKind {
     VariantSelected(VariantSelected),
     HistorySummarized(HistorySummarized),
     ModelFallback(ModelFallback),
+    // Boxed: its metadata makes it many times larger than the rest.
+    ArtifactStaged(Box<ArtifactStaged>),
+    ArtifactStageFailed(ArtifactStageFailed),
 }
 
 impl EventKind {
@@ -114,6 +117,8 @@ impl EventKind {
             EventKind::VariantSelected(_) => "variant_selected",
             EventKind::HistorySummarized(_) => "history_summarized",
             EventKind::ModelFallback(_) => "model_fallback",
+            EventKind::ArtifactStaged(_) => "artifact_staged",
+            EventKind::ArtifactStageFailed(_) => "artifact_stage_failed",
         }
     }
 }
@@ -521,6 +526,45 @@ pub struct AgentChanged {
 pub struct VariantSelected {
     pub group: String,
     pub message_id: String,
+}
+
+/// A file was copied into the node's stage for the master to pull
+/// (docs/artifacts.md): by the `publish` tool (`call_id` names the call) or
+/// by "Save as artifact". The master validates it before anything moves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactStaged {
+    /// A uuid v7, the key of the node's stage index.
+    pub stage_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    pub by: crate::artifacts::StagedBy,
+    pub name: String,
+    /// The file name it is offered under (`<folder>.tar.gz` for a pack).
+    pub filename: String,
+    /// `null` | `"tar.gz"`.
+    #[serde(default)]
+    pub packed: Option<String>,
+    pub size: u64,
+    /// Lowercase hex SHA-256 of the staged bytes.
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind_hint: Option<String>,
+    /// Where it came from, as the node resolved it.
+    pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub meta: crate::artifacts::ArtifactMeta,
+}
+
+/// "Save as artifact" failed on the node after it accepted the path (a
+/// failing `publish` call returns a tool error instead).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactStageFailed {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

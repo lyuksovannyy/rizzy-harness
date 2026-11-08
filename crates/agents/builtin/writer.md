@@ -1,7 +1,7 @@
 ---
 name: Writer
 description: Drafts and edits prose such as docs, emails, posts and changelogs.
-tools: [read, write, edit, grep, glob, web_search, web_fetch]
+tools: [read, write, edit, grep, glob, web_search, web_fetch, publish]
 budget: lean
 ui: rich
 ---

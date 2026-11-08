@@ -1,7 +1,7 @@
 ---
 name: Coder
 description: Software engineer that reads, edits and tests code in the workspace.
-tools: [bash, read, write, edit, grep, glob]
+tools: [bash, read, write, edit, grep, glob, publish]
 budget: standard
 ui: rich
 ---

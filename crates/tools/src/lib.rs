@@ -9,6 +9,7 @@ mod fs;
 pub mod graphify;
 mod outline;
 pub mod outputs;
+mod publish;
 mod search;
 
 use std::path::{Component, Path, PathBuf};
@@ -26,6 +27,7 @@ pub use bash::Bash;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
 pub use outputs::{OutputStore, ToolOutput};
+pub use publish::Publish;
 pub use search::{Glob, Grep};
 
 /// Cap on what the model sees from one tool call.
@@ -50,6 +52,11 @@ pub struct ToolCtx {
     pub outputs: Option<Arc<OutputStore>>,
     /// Citation labels for web results, shared by every call of the turn.
     pub refs: SharedRefs,
+    /// Where `publish` stages files (the node session's stager); `None`
+    /// where publishing is off.
+    pub artifacts: Option<Arc<dyn harness_core::artifacts::ArtifactSink>>,
+    /// The call being run, for tools whose events must land on its card.
+    pub call_id: String,
 }
 
 impl ToolCtx {
@@ -65,6 +72,8 @@ impl ToolCtx {
             savings: Default::default(),
             outputs: None,
             refs: Arc::default(),
+            artifacts: None,
+            call_id: String::new(),
         }
     }
 
@@ -212,6 +221,7 @@ pub fn builtin() -> ToolSet {
         Arc::new(Glob),
         Arc::new(ToolOutput),
         Arc::new(Outline),
+        Arc::new(Publish),
     ]
 }
 

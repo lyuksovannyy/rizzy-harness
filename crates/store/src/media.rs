@@ -55,13 +55,18 @@ fn item_cols() -> String {
         "mi.media_id, mi.owner_id, {MEDIA_WS}, mi.name, mi.origin, mi.session_id, mi.artifact_id,
          mi.version_id, mi.created_ms, mi.updated_ms, s.title,
          b.blob_id, b.owner_id, b.sha256, b.size, b.kind, b.format, b.mime, b.display, b.created_ms,
-         p.width, p.height, p.duration_ms, p.thumb IS NOT NULL, p.no_thumb"
+         p.width, p.height, p.duration_ms, p.thumb IS NOT NULL, p.no_thumb, av.seq, aa.name"
     )
 }
 
+/// The marked name `media_search` adds after `item_cols`.
+const MARKED_AT: usize = 27;
+
 const ITEM_JOINS: &str = "JOIN blobs b ON b.blob_id = mi.blob_id
      LEFT JOIN blob_previews p ON p.blob_id = mi.blob_id
-     LEFT JOIN sessions s ON s.session_id = mi.session_id AND s.owner_id IS mi.owner_id";
+     LEFT JOIN sessions s ON s.session_id = mi.session_id AND s.owner_id IS mi.owner_id
+     LEFT JOIN artifact_versions av ON av.version_id = mi.version_id AND av.artifact_id = mi.artifact_id
+     LEFT JOIN artifacts aa ON aa.artifact_id = mi.artifact_id";
 
 /// One Media item with its blob and display hints.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +84,9 @@ pub struct MediaRow {
     pub session_title: Option<String>,
     pub artifact_id: Option<String>,
     pub version_id: Option<String>,
+    /// The version it shows and its lineage's name, while both exist.
+    pub artifact_seq: Option<u64>,
+    pub artifact_name: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
     pub blob: BlobRow,
@@ -101,6 +109,8 @@ impl MediaRow {
             session_title: r.get(10)?,
             blob: BlobRow::from_row(r, 11)?,
             preview: crate::blobs::preview_at(r, 20)?,
+            artifact_seq: r.get::<_, Option<i64>>(25)?.map(|v| v.max(0) as u64),
+            artifact_name: r.get(26)?,
         })
     }
 
@@ -253,6 +263,54 @@ fn insert_item(tx: &Transaction, item: &NewItem, blob_id: &str) -> Result<()> {
         params![item.media_id, item.name],
     )?;
     Ok(())
+}
+
+/// A ready artifact version of a media kind, for its lineage's item.
+pub(crate) struct AgentItem<'a> {
+    pub artifact_id: &'a str,
+    pub version_id: &'a str,
+    pub blob_id: &'a str,
+    pub session_id: Option<&'a str>,
+}
+
+/// Point the lineage's one Media item at `v` (origin `agent`), adding it
+/// when there is none (also after the owner deleted it). Returns the blob
+/// it showed before, now perhaps unreferenced.
+pub(crate) fn upsert_agent(tx: &Transaction, v: &AgentItem) -> Result<Option<String>> {
+    let found: Option<(String, String)> = tx
+        .query_row(
+            "SELECT media_id, blob_id FROM media_items WHERE artifact_id = ?1",
+            params![v.artifact_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let now = harness_core::now_ms();
+    if let Some((media_id, old)) = found {
+        tx.execute(
+            "UPDATE media_items SET blob_id = ?2, version_id = ?3, updated_ms = ?4 WHERE media_id = ?1",
+            params![media_id, v.blob_id, v.version_id, now],
+        )?;
+        return Ok((old != v.blob_id).then_some(old));
+    }
+    let (owner, ws, name): (Option<String>, Option<String>, String) = tx.query_row(
+        "SELECT owner_id, workspace_id, name FROM artifacts WHERE artifact_id = ?1",
+        params![v.artifact_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let item = NewItem {
+        media_id: harness_core::new_id(),
+        owner_id: owner,
+        workspace_id: ws,
+        name,
+        origin: "agent".into(),
+        session_id: v.session_id.map(str::to_string),
+    };
+    insert_item(tx, &item, v.blob_id)?;
+    tx.execute(
+        "UPDATE media_items SET artifact_id = ?2, version_id = ?3 WHERE media_id = ?1",
+        params![item.media_id, v.artifact_id, v.version_id],
+    )?;
+    Ok(None)
 }
 
 /// Drop `ids`' name index rows; FTS5 deletes only add tombstones, so a
@@ -425,7 +483,7 @@ impl Store {
         let mut st = conn.prepare(&text)?;
         let rows = st
             .query_map(params_from_iter(sql.args), |r| {
-                Ok((MediaRow::from_row(r)?, r.get::<_, String>(25)?))
+                Ok((MediaRow::from_row(r)?, r.get::<_, String>(MARKED_AT)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)

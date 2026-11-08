@@ -77,6 +77,23 @@ async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, 
     run(&Repo::project(dir), args, index).await
 }
 
+/// The commit, branch and whether tracked files changed, for the folder a
+/// published file came from (display only).
+pub async fn describe(dir: &Path) -> Option<(String, String, bool)> {
+    let commit = git(dir, &["rev-parse", "HEAD"], None).await.ok()?;
+    let branch = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"], None)
+        .await
+        .unwrap_or_default();
+    let status = git(
+        dir,
+        &["status", "--porcelain", "--untracked-files=no"],
+        None,
+    )
+    .await
+    .unwrap_or_default();
+    Some((commit, branch, !status.is_empty()))
+}
+
 /// The repository containing `cwd`, if any.
 pub async fn repo_root(cwd: &Path) -> Option<PathBuf> {
     git(cwd, &["rev-parse", "--show-toplevel"], None)

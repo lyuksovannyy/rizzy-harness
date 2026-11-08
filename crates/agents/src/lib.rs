@@ -136,6 +136,8 @@ const READ_TOOLS: &[&str] = &["read", "grep", "glob", "outline", "graph_query"];
 const EDIT_TOOLS: &[&str] = &["write", "edit"];
 const COMMAND_TOOLS: &[&str] = &["bash", "tool_output"];
 const MEMORY_TOOL: &str = "remember";
+/// Offered with either switch that builds things; no switch of its own.
+const PUBLISH_TOOL: &str = "publish";
 
 /// What an agent can do, as the Agents page shows it. A custom agent is
 /// made from these; for the others they are read off the definition.
@@ -175,6 +177,7 @@ impl Features {
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
             (self.commands, COMMAND_TOOLS),
+            (self.edit_files || self.commands, &[PUBLISH_TOOL][..]),
         ];
         groups
             .iter()

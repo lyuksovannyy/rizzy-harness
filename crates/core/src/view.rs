@@ -45,6 +45,20 @@ pub enum Item {
         live_output: String,
         result: Option<ToolResult>,
         approval: Option<ApprovalState>,
+        /// A `publish` call's file, once the node staged it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        staged: Option<Box<ArtifactStaged>>,
+    },
+    /// A file the user saved as an artifact ("Save as artifact"), or a
+    /// staged file whose tool call is not in the log.
+    Artifact {
+        staged: Box<ArtifactStaged>,
+    },
+    /// Saving a file as an artifact failed on the node.
+    ArtifactFailed {
+        path: String,
+        name: Option<String>,
+        error: String,
     },
     Error {
         message: String,
@@ -244,6 +258,7 @@ impl SessionView {
                 live_output: String::new(),
                 result: None,
                 approval: None,
+                staged: None,
             }),
             EventKind::ToolOutputDelta(d) => {
                 if let Some(Item::Tool { live_output, .. }) = self.tool_mut(&d.call_id) {
@@ -326,6 +341,25 @@ impl SessionView {
                 from: f.from,
                 reason: f.reason,
             }),
+            EventKind::ArtifactStaged(a) => self.stage(a),
+            EventKind::ArtifactStageFailed(f) => self.items.push(Item::ArtifactFailed {
+                path: f.path,
+                name: f.name,
+                error: f.error,
+            }),
+        }
+    }
+
+    /// An agent's staged file joins its `publish` card; the user's (or one
+    /// whose call is not in the log) stands alone.
+    fn stage(&mut self, a: Box<ArtifactStaged>) {
+        let card = match (&a.call_id, a.by) {
+            (Some(c), crate::artifacts::StagedBy::Agent) => self.tool_mut(c),
+            _ => None,
+        };
+        match card {
+            Some(Item::Tool { staged, .. }) => *staged = Some(a),
+            _ => self.items.push(Item::Artifact { staged: a }),
         }
     }
 }

@@ -2,6 +2,7 @@
 //! node, and serves the web UI. It never runs tools itself.
 
 pub mod agent_edits;
+pub mod artifact_pull;
 pub mod artifacts;
 mod assets;
 pub mod attachments;
@@ -154,6 +155,10 @@ pub struct MasterInner {
     /// The blob store, once `storage::open` ran (before any node links, so
     /// a replayed publish always finds it).
     storage: OnceLock<storage::Storage>,
+    /// Transfers of staged files from nodes.
+    pulls: artifact_pull::Pulls,
+    /// Staged-file events per node and hour.
+    artifact_throttle: artifacts::Throttle,
 }
 
 /// What the UI asks for when starting a session.
@@ -301,6 +306,8 @@ impl Master {
                 turn_memory: Mutex::new(HashMap::new()),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
+                pulls: Default::default(),
+                artifact_throttle: Default::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -451,6 +458,22 @@ impl Master {
     /// of them when `None` (see `Live::Changed`).
     pub fn changed(&self, topic: &'static str, owner: Option<String>) {
         let _ = self.inner.live.send(Live::Changed { topic, owner });
+    }
+
+    /// Whether `node_id` has a link right now.
+    pub fn is_connected(&self, node_id: &str) -> bool {
+        lock(&self.inner.nodes)
+            .get(node_id)
+            .is_some_and(|n| n.tx.is_some())
+    }
+
+    /// Send a message that is never acked (`artifact.fetch`); false when
+    /// the node has no link.
+    pub(crate) fn send_raw(&self, node_id: &str, msg: MasterToNode) -> bool {
+        lock(&self.inner.nodes)
+            .get(node_id)
+            .and_then(|n| n.tx.as_ref())
+            .is_some_and(|tx| tx.send(msg).is_ok())
     }
 
     /// Whether `node_id`'s latest hello announced `cap`.
@@ -650,6 +673,11 @@ impl Master {
             }
         }
 
+        // Pending pulls go on (or fail, from a node too old to send them).
+        let this = self.clone();
+        let nid = node_id.clone();
+        tokio::spawn(async move { artifacts::on_node_up(&this, &nid).await });
+
         let this = self.clone();
         let nid = node_id.clone();
         tokio::spawn(async move {
@@ -663,6 +691,8 @@ impl Master {
             {
                 n.info.connected = false;
                 n.tx = None;
+                // Its transfers stop; their versions wait for the next hello.
+                artifact_pull::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -730,6 +760,24 @@ impl Master {
                     self.forget(session_id).await;
                 }
             }
+            NodeToMaster::ArtifactChunk {
+                req_id,
+                offset,
+                data,
+                eof,
+                error,
+                ..
+            } => artifact_pull::on_chunk(
+                self,
+                node_id,
+                artifact_pull::Chunk {
+                    req_id,
+                    offset,
+                    data,
+                    eof,
+                    error,
+                },
+            ),
         }
     }
 
@@ -752,6 +800,9 @@ impl Master {
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
                 {
                     self.file_proposal(&e).await;
+                }
+                if matches!(e.kind.as_str(), "artifact_staged" | "artifact_stage_failed") {
+                    artifacts::on_applied(self, node_id, &e).await;
                 }
                 let _ = self.inner.live.send(Live::Event(e));
                 if structural {

@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// The most file bytes one `artifact.chunk` carries (the node clamps a
+/// larger `len`); with four in flight a transfer stays far below the link's
+/// frame limit.
+pub const MAX_CHUNK: u32 = 256 * 1024;
+
+/// The node capability that announces the `artifact.*` messages. The master
+/// sends them only to nodes whose hello listed it (an unknown message drops
+/// the link).
+pub const CAP_ARTIFACTS: &str = "artifacts";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionHead {
     pub session_id: SessionId,
@@ -47,6 +57,20 @@ pub enum NodeToMaster {
     Ack {
         req_id: String,
         ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Bytes of a staged file, answering `artifact.fetch` (pull only: a
+    /// node never sends one unasked). `error: "busy"` asks for a retry.
+    #[serde(rename = "artifact.chunk")]
+    ArtifactChunk {
+        req_id: String,
+        stage_id: String,
+        offset: u64,
+        /// Base64.
+        #[serde(default)]
+        data: String,
+        eof: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -156,6 +180,36 @@ pub enum MasterToNode {
         session_id: SessionId,
         last_seq: u64,
     },
+    /// Read part of a staged file. Answered by one `artifact.chunk`, never
+    /// by an ack (it is not in `req_id()`), and handled outside the node's
+    /// command loop so a transfer never holds up a prompt.
+    #[serde(rename = "artifact.fetch")]
+    ArtifactFetch {
+        req_id: String,
+        session_id: SessionId,
+        stage_id: String,
+        offset: u64,
+        /// At most `MAX_CHUNK`; the node clamps it.
+        len: u32,
+    },
+    /// The master has the file (or gave up): the node deletes the stage.
+    #[serde(rename = "artifact.release")]
+    ArtifactRelease {
+        req_id: String,
+        session_id: SessionId,
+        stage_id: String,
+    },
+    /// "Save as artifact": stage `path` of the session's folder. Acked once
+    /// the node checked the path; the copy ends in `artifact_staged` or
+    /// `artifact_stage_failed`.
+    #[serde(rename = "artifact.stage")]
+    ArtifactStage {
+        req_id: String,
+        session_id: SessionId,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 impl MasterToNode {
@@ -168,8 +222,13 @@ impl MasterToNode {
             | MasterToNode::Delete { req_id, .. }
             | MasterToNode::Restore { req_id, .. }
             | MasterToNode::SelectVariant { req_id, .. }
-            | MasterToNode::ApprovalRespond { req_id, .. } => Some(req_id),
-            MasterToNode::Welcome { .. } | MasterToNode::Resume { .. } => None,
+            | MasterToNode::ApprovalRespond { req_id, .. }
+            | MasterToNode::ArtifactRelease { req_id, .. }
+            | MasterToNode::ArtifactStage { req_id, .. } => Some(req_id),
+            // A fetch is answered by its chunk, never acked.
+            MasterToNode::Welcome { .. }
+            | MasterToNode::Resume { .. }
+            | MasterToNode::ArtifactFetch { .. } => None,
         }
     }
 }
@@ -209,6 +268,67 @@ mod tests {
         assert_eq!(v["type"], "approval.respond");
         assert_eq!(v["decision"], "allow_session");
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), d);
+    }
+
+    #[test]
+    fn artifact_messages_wire_shapes() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let fetch = MasterToNode::ArtifactFetch {
+            req_id: "r1".into(),
+            session_id: sid,
+            stage_id: "s".into(),
+            offset: 262_144,
+            len: MAX_CHUNK,
+        };
+        assert_eq!(
+            serde_json::to_value(&fetch).unwrap(),
+            json!({"type": "artifact.fetch", "req_id": "r1",
+                   "session_id": "0193f2a0-0000-7000-8000-000000000001",
+                   "stage_id": "s", "offset": 262_144, "len": 262_144})
+        );
+        // Answered by a chunk, never by an automatic ack.
+        assert_eq!(fetch.req_id(), None);
+        let release = MasterToNode::ArtifactRelease {
+            req_id: "r2".into(),
+            session_id: sid,
+            stage_id: "s".into(),
+        };
+        assert_eq!(release.req_id(), Some("r2"));
+        assert_eq!(
+            serde_json::to_value(&release).unwrap()["type"],
+            "artifact.release"
+        );
+        let stage = MasterToNode::ArtifactStage {
+            req_id: "r3".into(),
+            session_id: sid,
+            path: "target/release/app".into(),
+            name: None,
+        };
+        assert_eq!(stage.req_id(), Some("r3"));
+        let v = serde_json::to_value(&stage).unwrap();
+        assert_eq!(v["type"], "artifact.stage");
+        assert!(v.get("name").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), stage);
+        let chunk = NodeToMaster::ArtifactChunk {
+            req_id: "r1".into(),
+            stage_id: "s".into(),
+            offset: 0,
+            data: "aGk=".into(),
+            eof: true,
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&chunk).unwrap(),
+            json!({"type": "artifact.chunk", "req_id": "r1", "stage_id": "s",
+                   "offset": 0, "data": "aGk=", "eof": true})
+        );
+        let busy: NodeToMaster = serde_json::from_value(json!({"type": "artifact.chunk",
+            "req_id": "r", "stage_id": "s", "offset": 5, "eof": false, "error": "busy"}))
+        .unwrap();
+        assert!(
+            matches!(busy, NodeToMaster::ArtifactChunk { data, error: Some(e), .. }
+            if data.is_empty() && e == "busy")
+        );
     }
 
     #[test]

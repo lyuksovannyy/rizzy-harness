@@ -122,8 +122,13 @@ pub fn item_json(r: &MediaRow) -> Value {
         "no_thumb": r.preview.no_thumb,
         "origin": r.origin,
         "source": source,
-        // Agent items (one per artifact lineage) arrive with Artifacts.
-        "artifact": Value::Null,
+        // An agent item: the artifact version it shows, while it exists.
+        "artifact": match (&r.artifact_id, &r.version_id, r.artifact_seq, &r.artifact_name) {
+            (Some(a), Some(v), Some(seq), Some(name)) => {
+                json!({ "artifact_id": a, "version_id": v, "seq": seq, "name": name })
+            }
+            _ => Value::Null,
+        },
         // Chats still carrying the item arrive with images in chats.
         "chats": 0,
         "workspace_id": r.workspace_id,

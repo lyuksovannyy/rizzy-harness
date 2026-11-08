@@ -68,9 +68,20 @@ pub(crate) struct Inner {
     pub(crate) sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
     /// The current link to the master, if connected.
     link: Mutex<Option<mpsc::UnboundedSender<NodeToMaster>>>,
+    /// Where published files are staged; `None` when this runtime does not
+    /// publish (the chat runtime, or `[artifacts] enabled = false`).
+    pub(crate) stages: Option<Arc<artifacts::Stages>>,
 }
 
 impl Inner {
+    pub(crate) fn session(&self, sid: SessionId) -> Option<Arc<Session>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&sid)
+            .cloned()
+    }
+
     pub(crate) fn publish(&self, msg: NodeToMaster) {
         let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tx) = link.as_ref()
@@ -91,12 +102,16 @@ pub struct NodeRuntime {
 impl NodeRuntime {
     /// Open the runtime and recover any turns interrupted by a crash.
     pub async fn start(cfg: NodeConfig) -> Result<Self, harness_store::StoreError> {
+        let rows = cfg.store.call(|s| s.sessions()).await?;
+        let hosted: std::collections::HashSet<SessionId> =
+            rows.iter().map(|r| r.session_id).collect();
+        let stages = open_stages(&cfg, &hosted);
         let inner = Arc::new(Inner {
             cfg,
             sessions: Mutex::new(HashMap::new()),
             link: Mutex::new(None),
+            stages,
         });
-        let rows = inner.cfg.store.call(|s| s.sessions()).await?;
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
             s.recover_interrupted().await;
@@ -107,6 +122,15 @@ impl NodeRuntime {
                 .insert(row.session_id, s);
         }
         let this = Self { inner };
+        if let Some(stages) = this.inner.stages.clone() {
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(artifacts::EXPIRE_EVERY).await;
+                    let s = stages.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.expire()).await;
+                }
+            });
+        }
         if let Some(ttl) = this.inner.cfg.incognito_ttl {
             let rt = this.clone();
             // Check often enough that a chat never outlives its TTL by much.
@@ -146,18 +170,22 @@ impl NodeRuntime {
             .unwrap_or_default();
         {
             let mut link = self.inner.link.lock().unwrap_or_else(|p| p.into_inner());
+            let mut capabilities = vec![
+                "native".to_string(),
+                match self.inner.cfg.profile {
+                    harness_core::event::Profile::Chat => "profile:chat".into(),
+                    harness_core::event::Profile::Agentic => "profile:agentic".into(),
+                },
+            ];
+            if self.inner.stages.is_some() {
+                capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
+            }
             let _ = out_tx.send(NodeToMaster::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 node_id: self.inner.cfg.node_id.clone(),
                 hostname: self.inner.cfg.hostname.clone(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                capabilities: vec![
-                    "native".into(),
-                    match self.inner.cfg.profile {
-                        harness_core::event::Profile::Chat => "profile:chat".into(),
-                        harness_core::event::Profile::Agentic => "profile:agentic".into(),
-                    },
-                ],
+                capabilities,
                 sessions: heads
                     .into_iter()
                     .map(|(session_id, head_seq)| SessionHead {
@@ -171,7 +199,19 @@ impl NodeRuntime {
         let this = self.clone();
         tokio::spawn(async move {
             while let Some(msg) = in_rx.recv().await {
-                this.handle(msg).await;
+                // A fetch is answered from a task of its own, before the
+                // command loop: a transfer never waits behind a command,
+                // nor a command behind a disk read.
+                match msg {
+                    MasterToNode::ArtifactFetch {
+                        req_id,
+                        session_id,
+                        stage_id,
+                        offset,
+                        len,
+                    } => this.fetch(req_id, session_id, stage_id, offset, len),
+                    other => this.handle(other).await,
+                }
             }
         });
         NodeLink {
@@ -181,12 +221,81 @@ impl NodeRuntime {
     }
 
     fn session(&self, sid: SessionId) -> Option<Arc<Session>> {
+        self.inner.session(sid)
+    }
+
+    /// Answer `artifact.fetch` (never acked: the chunk is the answer).
+    fn fetch(&self, req_id: String, sid: SessionId, stage_id: String, offset: u64, len: u32) {
+        match &self.inner.stages {
+            Some(st) => {
+                let inner = self.inner.clone();
+                let out: artifacts::Reply = Arc::new(move |m| inner.publish(m));
+                st.fetch(out, req_id, sid, stage_id, offset, len)
+            }
+            None => self.inner.publish(NodeToMaster::ArtifactChunk {
+                req_id,
+                stage_id,
+                offset,
+                data: String::new(),
+                eof: false,
+                error: Some("publishing is off on this node".into()),
+            }),
+        }
+    }
+
+    /// "Save as artifact": check the path now (the ack carries a refusal),
+    /// copy it later, ending in `artifact_staged` or
+    /// `artifact_stage_failed` on the session's log.
+    async fn stage_for_user(
+        &self,
+        sid: SessionId,
+        path: String,
+        name: Option<String>,
+    ) -> Result<(), String> {
+        use harness_core::artifacts::StagedBy;
+        use harness_core::event::{ArtifactStageFailed, EventKind};
+        let stages = self
+            .inner
+            .stages
+            .clone()
+            .ok_or("publishing is off on this node")?;
+        let s = self.session(sid).ok_or("unknown session")?;
+        let cwd = s
+            .publish_cwd()
+            .ok_or("this chat cannot save files as artifacts")?;
+        let name = name
+            .map(|n| harness_core::artifacts::check_name(&n))
+            .transpose()?;
+        let src = stages.check(&cwd, &path, StagedBy::User)?;
+        tokio::spawn(async move {
+            let req = artifacts::Request {
+                session: sid,
+                by: StagedBy::User,
+                name: name.clone(),
+                notes: None,
+                kind_hint: None,
+                call_id: None,
+            };
+            let kind = match stages.stage(req, src, Default::default()).await {
+                Ok(staged) => EventKind::ArtifactStaged(Box::new(staged)),
+                Err(error) => {
+                    EventKind::ArtifactStageFailed(ArtifactStageFailed { path, name, error })
+                }
+            };
+            if let Err(e) = s.record(kind).await {
+                tracing::error!(session = %sid, error = %e, "could not record a staged file");
+            }
+        });
+        Ok(())
+    }
+
+    /// The master is done with a stage.
+    fn release(&self, sid: SessionId, stage_id: &str) -> Result<(), String> {
         self.inner
-            .sessions
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&sid)
-            .cloned()
+            .stages
+            .as_ref()
+            .ok_or("publishing is off on this node")?
+            .release(sid, stage_id)
     }
 
     async fn audit(&self, kind: &'static str, sid: SessionId) {
@@ -326,6 +435,30 @@ impl NodeRuntime {
                     None => Err("unknown session".into()),
                 }
             }
+            MasterToNode::ArtifactFetch {
+                req_id,
+                session_id,
+                stage_id,
+                offset,
+                len,
+            } => {
+                self.fetch(req_id, session_id, stage_id, offset, len);
+                Ok(())
+            }
+            MasterToNode::ArtifactStage {
+                session_id,
+                path,
+                name,
+                ..
+            } => {
+                self.audit("artifact.stage", session_id).await;
+                self.stage_for_user(session_id, path, name).await
+            }
+            MasterToNode::ArtifactRelease {
+                session_id,
+                stage_id,
+                ..
+            } => self.release(session_id, &stage_id),
         };
         if let Some(req_id) = req_id {
             self.inner.publish(NodeToMaster::Ack {
@@ -478,6 +611,26 @@ impl NodeRuntime {
                 Some(l) if !done => after = l,
                 _ => return,
             }
+        }
+    }
+}
+
+/// The stage, when this runtime publishes: a worker node with
+/// `NodeConfig.artifacts` and `[artifacts] enabled` in node.toml. A stage
+/// that cannot be opened turns publishing off rather than the node.
+fn open_stages(
+    cfg: &NodeConfig,
+    hosted: &std::collections::HashSet<SessionId>,
+) -> Option<Arc<artifacts::Stages>> {
+    let sc = cfg.artifacts.as_ref()?;
+    if !cfg.policy.artifacts.enabled || cfg.profile != harness_core::event::Profile::Agentic {
+        return None;
+    }
+    match artifacts::Stages::open(sc, &cfg.policy, hosted) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %sc.stage_dir.display(), "cannot open the artifact stage; publishing is off");
+            None
         }
     }
 }
