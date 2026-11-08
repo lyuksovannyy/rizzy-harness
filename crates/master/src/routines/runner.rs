@@ -13,13 +13,14 @@
 //!
 //! Every time comes from the handle's `Clock`, so tests drive it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, SessionId, new_id};
 use harness_store::UserRow;
 use harness_store::routines::{
-    Claimed, NewRun, NewTrigger, RoutinePatch, RoutineRow, RunPatch, RunRow, TriggerRow,
+    Claimed, HookClaim, NewRun, NewTrigger, RoutinePatch, RoutineRow, RunPatch, RunRow, TriggerRow,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -28,6 +29,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 
+use super::events::{self, Event};
 use super::schedule::ScheduleConfig;
 use super::spec::{CatchUp, RoutineSpec};
 use super::template::{self, RenderError, Vars};
@@ -69,6 +71,15 @@ pub(crate) struct Bound {
     max_runtime_ms: i64,
     /// Recorded as timed out; its end only adds usage.
     timed_out: bool,
+}
+
+/// A run waiting to try again after its node was offline: when, and the
+/// event it renders from (held here, whole, since the run keeps only a
+/// cut copy; a restart turns the run `interrupted` anyway).
+pub(crate) struct Retry {
+    run_id: String,
+    due: i64,
+    event: Option<Arc<Event>>,
 }
 
 /// The one place a run's approval mode is chosen: the spec's `ask` or
@@ -122,14 +133,14 @@ pub(super) async fn tick(h: &RoutinesHandle, m: &Master) {
     }
     let now = h.clock.now();
     lift_cap_pauses(m, cfg.max_runs_per_user_per_day, now).await;
-    let retries: Vec<String> = {
+    let retries: Vec<Retry> = {
         let mut list = lock(&h.retries);
-        let (due, later) = list.drain(..).partition(|(_, at)| *at <= now);
+        let (due, later) = list.drain(..).partition(|r| r.due <= now);
         *list = later;
-        due.into_iter().map(|(id, _)| id).collect()
+        due
     };
-    for run_id in retries {
-        spawn_execute(m, run_id);
+    for r in retries {
+        spawn_execute(m, r.run_id, r.event);
     }
     let due = m
         .inner
@@ -157,6 +168,7 @@ fn new_run(r: &RoutineRow, t: &TriggerRow, status: &str, scheduled: i64, now: i6
         status: status.into(),
         reason: None,
         repeats: 1,
+        event: None,
     }
 }
 
@@ -201,7 +213,7 @@ async fn fire(m: &Master, t: TriggerRow, r: RoutineRow, now: i64) {
     match res {
         Ok(Some(Claimed::Started)) => {
             changed(m, &r.owner_id);
-            spawn_execute(m, run.run_id);
+            spawn_execute(m, run.run_id, None);
         }
         Ok(Some(_)) => changed(m, &r.owner_id),
         // Someone else fired it.
@@ -280,7 +292,7 @@ async fn next_wait(m: &Master, h: &RoutinesHandle) -> Duration {
         .await
         .ok()
         .flatten();
-    let retry = lock(&h.retries).iter().map(|(_, at)| *at).min();
+    let retry = lock(&h.retries).iter().map(|r| r.due).min();
     match [next, retry].into_iter().flatten().min() {
         Some(at) => {
             let ms = (at - h.clock.now()).clamp(200, MAX_SLEEP.as_millis() as i64);
@@ -299,6 +311,8 @@ pub(crate) struct Admitted {
     spec: RoutineSpec,
     owner: UserRow,
     access: Access,
+    /// The event that fired it, whole.
+    event: Option<Arc<Event>>,
 }
 
 /// Why a run did not start (already recorded on the run).
@@ -313,10 +327,10 @@ pub(crate) enum Refused {
     Failed,
 }
 
-pub(crate) fn spawn_execute(m: &Master, run_id: String) {
+pub(crate) fn spawn_execute(m: &Master, run_id: String, event: Option<Arc<Event>>) {
     let m = m.clone();
     tokio::spawn(async move {
-        if let Ok(a) = admit(&m, &run_id).await {
+        if let Ok(a) = admit(&m, &run_id, event).await {
             launch(m, a).await;
         }
     });
@@ -373,8 +387,12 @@ pub(crate) async fn why_blocked(
 }
 
 /// Check a pending run against its owner's access and the caps, recording
-/// any refusal on it.
-pub(crate) async fn admit(m: &Master, run_id: &str) -> Result<Admitted, Refused> {
+/// any refusal on it. A run an event fired also needs its source's consent.
+pub(crate) async fn admit(
+    m: &Master,
+    run_id: &str,
+    event: Option<Arc<Event>>,
+) -> Result<Admitted, Refused> {
     let Some(h) = handle(m) else {
         return Err(Refused::Gone);
     };
@@ -409,6 +427,12 @@ pub(crate) async fn admit(m: &Master, run_id: &str) -> Result<Admitted, Refused>
             return Err(Refused::Failed);
         }
     };
+    if let Some(src) = event.as_ref().and_then(|e| events::source(e.kind))
+        && let Err(why) = src.may_use(&Principal::from_user(owner.clone()), &access)
+    {
+        block(m, &routine, Some(run_id), &why, h.clock.now()).await;
+        return Err(Refused::Blocked(why));
+    }
     let cfg = config(m);
     let now = h.clock.now();
     let uid = owner.user_id.clone();
@@ -467,6 +491,7 @@ pub(crate) async fn admit(m: &Master, run_id: &str) -> Result<Admitted, Refused>
         spec,
         owner,
         access,
+        event,
     })
 }
 
@@ -505,8 +530,19 @@ async fn vars_for(m: &Master, a: &Admitted, prefs: &Prefs, now: i64) -> Vars {
         },
         workspace_name: a.access.workspace.name.clone(),
         last_run: last.map(|l| (l.status, zoned(l.started_ms))),
-        event: None,
+        event: a.event.as_ref().map(|e| e.data.clone()),
     }
+}
+
+/// "YYYY-MM-DD HH:MM" at clock-now in `owner`'s time zone: an event's
+/// `received_at`.
+pub(crate) async fn local_now(m: &Master, owner: &str) -> String {
+    let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
+    let prefs = Prefs::load(m, Some(owner)).await;
+    ts(now)
+        .to_zoned(zone_of(&prefs))
+        .strftime("%Y-%m-%d %H:%M")
+        .to_string()
 }
 
 /// Render the prompt, take a place, start the chat and prompt it.
@@ -563,16 +599,16 @@ async fn launch(m: Master, a: Admitted) {
                     a.spec.node_id.as_deref(),
                 )),
                 agent_id: Some(a.spec.agent_id.clone()),
-                incognito: false,
                 owner_id: Some(a.owner.user_id.clone()),
                 workspace_id: Some(a.routine.workspace_id.clone()),
                 project_id: a.spec.project_id.clone(),
+                ..Default::default()
             };
             match m.create_session(spec).await {
                 Ok(sid) => sid,
                 Err(e) => {
                     drop(slot);
-                    launch_failed(&m, &a.run, &a.routine, e).await;
+                    launch_failed(&m, &a, &a.run, e).await;
                     return;
                 }
             }
@@ -614,11 +650,15 @@ async fn launch(m: Master, a: Admitted) {
         lock(&h.bound).remove(&sid);
         return;
     }
+    // The event by its size and hash only, never its content.
     audit(
         &m,
         "routine.run",
         json!({ "routine_id": a.routine.routine_id, "run_id": a.run.run_id,
-                "trigger": a.run.trigger_kind, "session_id": sid }),
+                "trigger": a.run.trigger_kind, "session_id": sid,
+                "untrusted": rendered.untrusted,
+                "event_bytes": a.event.as_ref().map(|e| e.size),
+                "event_sha256": a.event.as_ref().map(|e| &e.sha256) }),
     )
     .await;
     changed(&m, &a.owner.user_id);
@@ -665,17 +705,18 @@ async fn launch(m: Master, a: Admitted) {
             session_id: Some(sid.to_string()),
             ..a.run.clone()
         };
-        launch_failed(&m, &run, &a.routine, e).await;
+        launch_failed(&m, &a, &run, e).await;
     }
 }
 
-/// A run that could not start its turn: the node was away (retry), the
-/// routine names something gone (blocked), or it failed.
-async fn launch_failed(m: &Master, run: &RunRow, r: &RoutineRow, e: CommandError) {
+/// Run `a` (as `run` stands now) could not start its turn: the node was
+/// away (retry), the routine names something gone (blocked), or it failed.
+async fn launch_failed(m: &Master, a: &Admitted, run: &RunRow, e: CommandError) {
     let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
+    let r = &a.routine;
     match e {
         CommandError::NodeOffline(_) | CommandError::Timeout => {
-            retry_later(m, run, r, e.to_string()).await
+            retry_later(m, run, r, e.to_string(), a.event.clone()).await
         }
         CommandError::UnknownAgent(_) | CommandError::Rejected(_) => {
             block(m, r, Some(&run.run_id), &e.to_string(), now).await
@@ -686,7 +727,13 @@ async fn launch_failed(m: &Master, run: &RunRow, r: &RoutineRow, e: CommandError
 
 /// Try `run` again after the next retry delay, unless it used them all or
 /// its trigger's next occurrence comes first.
-async fn retry_later(m: &Master, run: &RunRow, r: &RoutineRow, why: String) {
+async fn retry_later(
+    m: &Master,
+    run: &RunRow,
+    r: &RoutineRow,
+    why: String,
+    event: Option<Arc<Event>>,
+) {
     let Some(h) = handle(m) else { return };
     let now = h.clock.now();
     let Some(delay) = RETRY_MIN.get((run.attempt - 1).max(0) as usize) else {
@@ -731,7 +778,11 @@ async fn retry_later(m: &Master, run: &RunRow, r: &RoutineRow, why: String) {
         .call(move |s| s.run_update(&id, &patch))
         .await
     {
-        lock(&h.retries).push((run.run_id.clone(), due));
+        lock(&h.retries).push(Retry {
+            run_id: run.run_id.clone(),
+            due,
+            event,
+        });
         h.wake();
         changed(m, &r.owner_id);
     }
@@ -842,7 +893,9 @@ pub(crate) enum Manual {
     Failed,
 }
 
-pub(crate) async fn run_now(m: &Master, r: &RoutineRow) -> Manual {
+/// Run `r` now, with a `sample` event in place of a webhook's (the run is
+/// then untrusted as soon as the prompt uses it).
+pub(crate) async fn run_now(m: &Master, r: &RoutineRow, sample: Option<Event>) -> Manual {
     let Some(h) = handle(m) else {
         return Manual::Failed;
     };
@@ -856,6 +909,7 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow) -> Manual {
         status: "pending".into(),
         reason: None,
         repeats: 1,
+        event: sample.as_ref().map(|e| events::stored(&e.data)),
     };
     let claim = run.clone();
     let started = m.inner.mirror.call(move |s| s.run_start(&claim)).await;
@@ -868,16 +922,86 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow) -> Manual {
             return Manual::Failed;
         }
     }
-    // Admitted here, not in the background, so the caller hears of a cap.
-    match admit(m, &run.run_id).await {
-        Ok(a) => {
-            let mm = m.clone();
-            tokio::spawn(launch(mm, a));
-            Manual::Started(run.run_id)
-        }
+    match admit_and_launch(m, &run.run_id, sample.map(Arc::new)).await {
+        Ok(()) => Manual::Started(run.run_id),
         Err(Refused::Cap) => Manual::Skipped("cap"),
         Err(Refused::Blocked(why)) => Manual::Blocked(why),
         Err(Refused::Gone | Refused::Failed) => Manual::Failed,
+    }
+}
+
+/// Admit a run just recorded as pending and launch it in the background.
+/// Admitted here, not in the background, so the caller hears of a cap or
+/// a block.
+async fn admit_and_launch(
+    m: &Master,
+    run_id: &str,
+    event: Option<Arc<Event>>,
+) -> Result<(), Refused> {
+    let a = admit(m, run_id, event).await?;
+    tokio::spawn(launch(m.clone(), a));
+    Ok(())
+}
+
+/// What a webhook call came to (`http/hooks.rs` answers from it).
+pub enum Fired {
+    Started(String),
+    /// Its `Idempotency-Key` came with the call that started this run.
+    Duplicate(String),
+    /// `overlap` or `cap`.
+    Skipped(&'static str),
+    /// Its owner may no longer run it: blocked, and the routine paused.
+    Paused,
+    Failed,
+}
+
+/// Fire webhook routine `r` from trigger `t` with `event`: record the run
+/// (once per `Idempotency-Key`), admit it and launch it.
+pub(crate) async fn fire_event(m: &Master, t: &TriggerRow, r: &RoutineRow, event: Event) -> Fired {
+    let Some(h) = handle(m) else {
+        return Fired::Failed;
+    };
+    let now = h.clock.now();
+    let claim = NewRun {
+        run_id: new_id(),
+        routine_id: r.routine_id.clone(),
+        trigger_id: Some(t.trigger_id.clone()),
+        trigger_kind: t.kind.clone(),
+        scheduled_ms: None,
+        started_ms: now,
+        status: "pending".into(),
+        reason: None,
+        repeats: 1,
+        event: Some(events::stored(&event.data)),
+    };
+    let (rid, tid, key) = (
+        r.routine_id.clone(),
+        t.trigger_id.clone(),
+        event.dedupe_key.clone(),
+    );
+    let res = m
+        .inner
+        .mirror
+        .call(move |s| s.webhook_claim(&rid, &tid, key.as_deref(), &claim, now))
+        .await;
+    let run_id = match res {
+        Ok(HookClaim::Duplicate(first)) => return Fired::Duplicate(first),
+        Ok(HookClaim::Claimed(Claimed::Started, id)) => id,
+        Ok(HookClaim::Claimed(..)) => {
+            changed(m, &r.owner_id);
+            return Fired::Skipped("overlap");
+        }
+        Err(e) => {
+            tracing::warn!(routine = %r.routine_id, error = %e, "routines: could not record a webhook call");
+            return Fired::Failed;
+        }
+    };
+    changed(m, &r.owner_id);
+    match admit_and_launch(m, &run_id, Some(Arc::new(event))).await {
+        Ok(()) => Fired::Started(run_id),
+        Err(Refused::Cap) => Fired::Skipped("cap"),
+        Err(Refused::Blocked(_)) => Fired::Paused,
+        Err(Refused::Gone | Refused::Failed) => Fired::Failed,
     }
 }
 

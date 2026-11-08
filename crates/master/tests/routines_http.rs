@@ -622,9 +622,9 @@ async fn saving_checks_triggers_specs_and_prompts() {
     assert_eq!(e, "A routine runs on a schedule or on one event, not both");
     let e = refused(
         StatusCode::BAD_REQUEST,
-        create(&t, &alex, None, "x", spec.clone(), json!([hook])).await,
+        create(&t, &alex, None, "x", spec.clone(), json!([hook, hook])).await,
     );
-    assert!(e.contains("webhooks"), "{e}");
+    assert!(e.contains("one webhook"), "{e}");
     refused(
         StatusCode::BAD_REQUEST,
         create(&t, &alex, None, "x", spec.clone(), json!([])).await,
@@ -792,7 +792,8 @@ async fn saving_checks_triggers_specs_and_prompts() {
     assert_eq!(l["can_create"], true);
     assert_eq!(l["can_agentic"], true);
     assert_eq!(l["why"], Value::Null);
-    assert_eq!(l["sources"], json!([]));
+    assert_eq!(l["sources"][0]["kind"], "webhook");
+    assert_eq!(l["sources"][0]["free_prefix"], "event.body");
     assert_eq!(l["orphaned"], false);
     assert_eq!(l["limits"]["max_triggers"], 8);
     assert_eq!(l["variables"][0]["namespace"], "now");
@@ -836,7 +837,7 @@ async fn routines_are_their_owners_alone() {
     .await;
     assert_eq!(
         f["routines"],
-        json!({"enabled": true, "show": true, "webhooks": false, "why": null})
+        json!({"enabled": true, "show": true, "webhooks": true, "why": null})
     );
     let agentic = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
                          "node_id": "local", "cwd": t.root});
@@ -999,6 +1000,7 @@ async fn an_interval_fires_across_a_restart_and_catches_up() {
         status: "pending".into(),
         reason: None,
         repeats: 1,
+        event: None,
     };
     t.master.inner_mirror().run_start(&pending).unwrap();
 

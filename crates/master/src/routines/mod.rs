@@ -7,11 +7,14 @@
 //!   checked;
 //! * `schedule`: cron, interval and one-off schedules (croner + jiff);
 //! * `template`: the prompt's `{{ variables }}`;
-//! * `events`: event sources (the webhook, Phase B);
+//! * `events`: event sources (the webhook) and what a run keeps of an event;
+//! * `buckets`: the webhook throttles;
 //! * `runner`: the scheduler, the executor and the watcher that follows a
 //!   run's chat to its end;
-//! * `results`: what the owner sees of runs (chat marks, attention, seen).
+//! * `results`: what the owner sees of runs (chat marks, attention, seen,
+//!   retention).
 
+pub(crate) mod buckets;
 pub mod events;
 pub mod results;
 pub mod runner;
@@ -123,8 +126,10 @@ pub struct RoutinesHandle {
     slots: Arc<Semaphore>,
     /// Chats of runs that have not finished, followed by the watcher.
     bound: Mutex<HashMap<SessionId, runner::Bound>>,
-    /// Runs waiting to try again after their node was offline, with when.
-    retries: Mutex<Vec<(String, i64)>>,
+    /// Runs waiting to try again after their node was offline.
+    retries: Mutex<Vec<runner::Retry>>,
+    /// The webhook throttles.
+    pub(crate) hooks: Mutex<buckets::HookLimits>,
     /// Set once the startup reconcile ran: nothing fires before it, so a
     /// run left pending by the last process is never mistaken for a new one.
     ready: watch::Receiver<bool>,
@@ -166,6 +171,7 @@ pub fn start_with(m: &Master, clock: Clock, spawn_loops: bool) {
         slots,
         bound: Mutex::new(HashMap::new()),
         retries: Mutex::new(Vec::new()),
+        hooks: Mutex::new(buckets::HookLimits::default()),
         ready,
     };
     if m.inner.routines.set(handle).is_err() {
@@ -206,8 +212,7 @@ pub(crate) fn may_not_own(who: &Principal, a: &Access) -> Option<String> {
 /// they no longer may run (so they can delete them).
 pub async fn features(m: &Master, who: &Principal, scope: Option<&Access>) -> Value {
     let cfg = config(m);
-    // Webhook triggers come with the hooks endpoint (Phase B).
-    let webhooks = false;
+    let webhooks = cfg.webhooks;
     if !cfg.enabled {
         return json!({ "enabled": false, "show": false, "webhooks": webhooks,
                        "why": "Routines are turned off on this server" });
@@ -263,6 +268,17 @@ pub struct PromptFlags {
     /// The chat holds data from an external event: every later turn there
     /// runs untrusted too (`PromptOpts::untrusted`).
     pub untrusted: bool,
+}
+
+/// Fire webhook routine `r` from its trigger `t` (`http/hooks.rs`, once the
+/// call proved its secret).
+pub async fn fire_event(
+    m: &Master,
+    t: &harness_store::routines::TriggerRow,
+    r: &harness_store::routines::RoutineRow,
+    event: events::Event,
+) -> runner::Fired {
+    runner::fire_event(m, t, r, event).await
 }
 
 /// The `routines` rows of `GET /api/attention` for `who`.
