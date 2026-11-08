@@ -42,7 +42,7 @@ cargo build --release
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
 (so nobody else can take over a fresh server), creates your **admin**
 account, and walks you through connecting an AI provider, your name and time
-zone, and a search engine. Admins add other people under **Users**; new accounts get a temporary
+zone, and a search engine. Admins add other people under Settings → Server → **Users**; new accounts get a temporary
 password and must change it at first login. Everyone sees only their own
 chats. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
@@ -57,7 +57,7 @@ printed by `rizzy-harness token`.
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
-Settings → Preferences → **Appearance** picks the theme (System follows the
+Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour. A pick shows
 at once and is kept with Save; leaving without saving goes back. The browser
 remembers the saved choice, so a reload paints it straight away, before the
@@ -75,6 +75,53 @@ own words never appear on the wall. **Home background** turns the motion off
 reduce-motion setting also keeps them still. **Also in chats** adds a quieter,
 still version beside chats when the window is wide enough.
 
+## Workspaces
+
+Every account has a **Personal** workspace. The switcher at the top of the
+sidebar picks the workspace you work in: new chats go there, and the chat list,
+search and the default agent and model follow it. Create more workspaces from
+the switcher (a server setting decides whether everyone may, or only server
+admins) and add other accounts by username.
+
+A chat stays private to the person who started it, in every workspace and for
+admins too: a workspace groups chats and decides what applies to them, not who
+can read them. Removing someone from a workspace, or deleting a workspace,
+puts their chats back in their Personal workspace; nothing is deleted.
+
+Roles in a workspace, each a fixed set of permissions:
+
+| Role | Can |
+|---|---|
+| Owner | everything an admin can, plus delete the workspace and make or remove owners |
+| Admin | change the workspace's settings, add and remove members, run agentic sessions |
+| Member | run agentic sessions |
+| Guest | chat only |
+
+Nobody can give someone a role above their own or change their own role. While
+a workspace has other members, its last owner (whose account is enabled) can
+neither leave nor lose the role; if every owner's account is disabled or
+deleted, a server admin makes another member owner (Settings → Server →
+Workspaces). The last member leaving a workspace deletes it.
+
+Settings has four sections:
+
+- **Account**: your profile, appearance, search engines, default agent and
+  model, your memories, your password.
+- **Workspace** (everyone in it): its name, your role, who is in it, the
+  defaults it gives, and whether your memories are used in its chats.
+- **Workspace admin** (admins and owners; not for Personal): its name, default
+  agent, the model each agent uses there (General's is the workspace's default
+  model), members and roles, deleting it.
+- **Server** (server admins): providers, agents' looks, memory recall, token
+  savings, nodes, accounts, and every workspace (owners, members, making
+  someone owner, deleting).
+
+A new chat's model: what you pick in the bar, else the agent's own model,
+else your default from Preferences, else the workspace's default, else the
+server's. Agentic sessions need both the server admin's agentic grant on your
+account and a role with agentic permission in the workspace; losing either
+stops your running agentic work there and leaves its approvals deny-only.
+
 ## Configuration
 
 Everything lives in the data directory (`~/.local/share/rizzy-harness`, or
@@ -82,7 +129,7 @@ Everything lives in the data directory (`~/.local/share/rizzy-harness`, or
 
 `config.toml`: model providers. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600
-`secrets.toml` (`api_key_secret`; onboarding and Settings → AI provider write
+`secrets.toml` (`api_key_secret`; onboarding and Settings → Server → AI providers write
 it for you, as `provider-<id>`). Several providers can be connected at once;
 model ids are `<provider id>::<model id>` (`openrouter::openai/gpt-4o`), and
 each request goes to the provider its prefix names.
@@ -186,7 +233,14 @@ preset = "balanced"                  # fast | balanced | best (Ollama model name
 ```
 
 Memories are proposed by the assistant during chats and used only after you
-confirm them under Settings → Memory.
+confirm them under Settings → Account → Memory.
+
+Who may create workspaces (also a switch under Settings → Server → Workspaces):
+
+```toml
+[workspaces]
+members_can_create = true            # false: only server admins create workspaces
+```
 
 Dictation (the mic button) needs a transcription service, for example a local
 Whisper server with an OpenAI-compatible API:
@@ -218,7 +272,7 @@ graphify = false                     # let agents query a graphify knowledge gra
 
 ### Token savings
 
-Settings → Token savings (admin) switches each method on or off; it is
+Settings → Server → Token savings switches each method on or off; it is
 stored as `[savings]` in `config.toml` and applies from the next message.
 
 | Method | Default | Applies to | What it does |
@@ -242,7 +296,7 @@ repo_map_tokens = 1024
 
 **graphify (optional).** A third-party Python program (Graphify-Labs/graphify,
 Apache-2.0) that builds a knowledge graph of the repository. On the built-in
-node: Settings → Token savings → *Install graphify*, then *Allow*. On another
+node: Settings → Server → Token savings → *Install graphify*, then *Allow*. On another
 node (each node decides for itself):
 
 ```bash
@@ -377,7 +431,7 @@ Agentic sessions can run on other machines. Start the master with a node port
 ./target/release/rizzy-harness serve --node-listen 0.0.0.0:7443
 ```
 
-The easy way: Settings → Nodes → **Set up a server over SSH**. Check the
+The easy way: Settings → Server → Nodes → **Set up a server over SSH**. Check the
 server's host key, log in once with a password or key (harness installs its
 own key and does not keep yours), and pick:
 
@@ -403,7 +457,7 @@ user joins the `docker` group, which is effectively root). Fully supported:
 Debian 13 and Ubuntu 26.04 LTS; other Debian-based systems work but are not
 tested. Test it on a throwaway VPS first.
 
-By hand: in Settings → Nodes choose **Create join command** and run the two printed
+By hand: in Settings → Server → Nodes choose **Create join command** and run the two printed
 commands on the other machine (same binary). That machine needs its own
 `config.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in

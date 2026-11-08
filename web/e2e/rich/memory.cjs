@@ -13,7 +13,7 @@ module.exports = async function memory(t) {
   check((await p.locator('.tool-head').count()) === 0, 'a note, not a tool card');
   check((await notice.locator('button').count()) === 0, 'no Keep or Discard in the chat');
   const review = notice.locator('a:has-text("Review in Memory")');
-  check((await review.getAttribute('href')) === '#/settings/memory', 'links to the Memory page');
+  check((await review.getAttribute('href')) === '#/settings/account/memory', 'links to the Memory page');
   await notice.screenshot({ path: `${S}/rich-8-memory.png` });
   await review.click();
   await p.waitForSelector('.fact.proposed:has-text("likes tea")');

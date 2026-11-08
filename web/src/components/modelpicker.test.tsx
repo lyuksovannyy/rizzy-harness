@@ -407,6 +407,39 @@ describe("agents", () => {
     expect(plan).toEqual({ general: { model: "::model-000", fallbacks: [] }, coder: { model: null, fallbacks: [] } });
   });
 
+  test("agents that may use the server's chain: listed with it, none given a model unasked, and back to it", () => {
+    function Inherit() {
+      const [sel, setSel] = useState<string[]>(["model-001"]);
+      const [pl, setPl] = useState<Plan>({ coder: { model: "::model-001", fallbacks: [] } });
+      plan = pl;
+      return (
+        <ModelPicker
+          label="Models"
+          models={MODELS.slice(0, 5)}
+          selected={sel}
+          onChange={setSel}
+          agents={{
+            agents: AGENTS,
+            plan: pl,
+            onPlan: setPl,
+            ref: (raw) => `::${raw}`,
+            label: (id) => id.replace(/^::/, ""),
+            inherit: { label: "Use server chain", note: (a) => `server's for ${a}` },
+          }}
+        />
+      );
+    }
+    act(() => root.render(<Inherit />));
+    // General has no chain here, and that is no problem.
+    expect(host.textContent).toContain("server's for general");
+    expect(host.querySelector('[role="status"]')).toBeNull();
+    act(() => box(0).click());
+    expect(plan.general).toBeUndefined();
+    act(() => button("Coder: Use server chain").click());
+    expect(plan).toEqual({});
+    expect(host.textContent).toContain("server's for coder");
+  });
+
   test("General without a main model is a problem", () => {
     act(() => root.render(<Assign initial={{ general: { model: "::model-000", fallbacks: [] } }} sel={["model-000"]} />));
     act(() => button("Remove model-000 as General's main model").click());

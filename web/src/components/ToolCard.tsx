@@ -137,7 +137,10 @@ function EditDiff({ input }: { input: { old_string?: string; new_string?: string
   );
 }
 
-export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool }) {
+/** `blocked`: the viewer may not drive this chat here (its workspace role,
+ * the account's grant), so an approval offers Deny only; the server refuses
+ * the rest anyway. */
+export function ToolCard({ sessionId, item, blocked }: { sessionId: string; item: Tool; blocked?: boolean }) {
   const pending = item.approval && item.approval.decision === null;
   const [open, setOpen] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -200,12 +203,16 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
           {web && <WebInput item={item} />}
           <div className="approval-reason">{item.approval.reason}</div>
           <div className="row">
-            <button className="primary" disabled={busy} onClick={() => decide("allow")}>
-              Allow
-            </button>
-            <button disabled={busy} onClick={() => decide("allow_session")}>
-              Allow {item.tool} for this session
-            </button>
+            {!blocked && (
+              <>
+                <button className="primary" disabled={busy} onClick={() => decide("allow")}>
+                  Allow
+                </button>
+                <button disabled={busy} onClick={() => decide("allow_session")}>
+                  Allow {item.tool} for this session
+                </button>
+              </>
+            )}
             <button className="danger" disabled={busy} onClick={() => decide("deny")}>
               Deny
             </button>
@@ -250,7 +257,17 @@ export function ToolCard({ sessionId, item }: { sessionId: string; item: Tool })
 
 /** Several web calls in a row: one "Researched · 2 searches, 3 pages" row
  * that opens to their cards. Open while one of them runs or failed. */
-export function WebGroupCard({ sessionId, group, tools }: { sessionId: string; group: WebGroup; tools: Tool[] }) {
+export function WebGroupCard({
+  sessionId,
+  group,
+  tools,
+  blocked,
+}: {
+  sessionId: string;
+  group: WebGroup;
+  tools: Tool[];
+  blocked?: boolean;
+}) {
   const [open, setOpen] = useState<boolean | null>(null);
   const statuses = tools.map(statusOf);
   const busy = statuses.some((s) => s === "running" || s === "waiting");
@@ -276,7 +293,7 @@ export function WebGroupCard({ sessionId, group, tools }: { sessionId: string; g
       {expanded && (
         <div className="tool-group-body">
           {tools.map((t) => (
-            <ToolCard key={t.call_id} sessionId={sessionId} item={t} />
+            <ToolCard key={t.call_id} sessionId={sessionId} item={t} blocked={blocked} />
           ))}
         </div>
       )}

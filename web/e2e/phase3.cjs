@@ -108,6 +108,7 @@ const log = (...a) => console.log('•', ...a);
   await p.click('.nav-item.user');
   await p.waitForSelector('.tabs');
   await p.screenshot({ path: `${S}/p3-5-settings.png` });
+  await p.click('.settings-sections >> text=Server');
   await p.click('.tabs >> text=Users');
   await p.fill('input[placeholder="username"]', 'bob');
   await p.fill('input[placeholder="temporary password (10+)"]', 'temporary pw');

@@ -75,9 +75,19 @@ describe("modes", () => {
     expect(cycleMode("ask", noAgentic, 1)).toBe("search");
   });
   it("explains why agentic is unavailable", () => {
-    expect(agenticBlockReason(false, 1)).toMatch(/not enabled/);
-    expect(agenticBlockReason(true, 0)).toMatch(/worker/);
-    expect(agenticBlockReason(true, 2)).toBeNull();
+    const member = { name: "Acme", personal: false, permissions: ["agentic" as const] };
+    const guest = { name: "Acme", personal: false, permissions: [] };
+    expect(agenticBlockReason(false, member, 1)).toMatch(/not enabled for your account/);
+    expect(agenticBlockReason(true, member, 0)).toMatch(/worker/);
+    expect(agenticBlockReason(true, member, 2)).toBeNull();
+    // The workspace role, after the account's grant and before the workers.
+    expect(agenticBlockReason(true, guest, 0)).toBe("Your role in Acme can't start agentic sessions.");
+    expect(agenticBlockReason(false, guest, 1)).toMatch(/not enabled for your account/);
+    expect(agenticBlockReason(true, { ...guest, name: "stored", personal: true }, 1)).toBe(
+      "Your role in Personal can't start agentic sessions.",
+    );
+    // No workspace (the API token): the account and the workers decide.
+    expect(agenticBlockReason(true, null, 1)).toBeNull();
   });
 });
 

@@ -108,6 +108,14 @@ describe("what a web call sends", () => {
     expect(html).toContain(">Allow</button>");
   });
 
+  test("a chat the viewer cannot drive here offers Deny only", () => {
+    const item = waiting("web_fetch", { url: "https://a.example/" });
+    const html = renderToStaticMarkup(<ToolCard sessionId="s" item={item} blocked />);
+    expect(html).toContain(">Deny</button>");
+    expect(html).not.toContain(">Allow</button>");
+    expect(html).not.toContain("for this session");
+  });
+
   test("a search waiting for approval shows the whole query, hidden characters as codes", () => {
     const q = `${"rust ".repeat(30)}tail-SECRETDATA a\u{E0041}\u{E0042}b`;
     const html = card(waiting("web_search", { query: q }));
@@ -153,7 +161,7 @@ describe("memory proposals", () => {
     expect(html).toContain('<div class="tool tool-memory" role="note">');
     expect(html).toContain('Suggested a memory: <span class="memory-fact">“likes tea”</span>');
     expect(html).toContain("Not used until you keep it.");
-    expect(html).toContain('<a class="memory-review" href="#/settings/memory">Review in Memory</a>');
+    expect(html).toContain('<a class="memory-review" href="#/settings/account/memory">Review in Memory</a>');
     // Keeping or discarding happens on the Memory page only.
     expect(html).not.toMatch(/<button/);
   });

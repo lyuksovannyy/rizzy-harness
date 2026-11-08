@@ -47,8 +47,7 @@ let PAGE = null;
     await p.waitForSelector('h1.greeting');
 
     // Turn notifications on.
-    await p.goto(`${URL_}#/settings`);
-    await p.click('.tabs button:has-text("Preferences")');
+    await p.goto(`${URL_}#/settings/account/preferences`);
     await p.check('text=Desktop notifications');
     await p.click('.new-chat');
     await p.waitForSelector('h1.greeting');

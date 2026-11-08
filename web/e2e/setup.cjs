@@ -41,8 +41,7 @@ let PAGE = null;
     await p.click('button:has-text("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
-    await p.goto(`${URL_}#/settings`);
-    await p.click('.tabs button:has-text("Nodes")');
+    await p.goto(`${URL_}#/settings/server/nodes`);
 
     await p.fill('input[placeholder="203.0.113.7"]', '127.0.0.1');
     await p.fill('input[type=number]', port);
@@ -103,7 +102,7 @@ let PAGE = null;
     await p.goto(URL_);
     await p.waitForSelector('.attention >> text=127.0.0.1');
     log('node problem shown under the bar');
-    await p.goto(`${URL_}#/settings/nodes`);
+    await p.goto(`${URL_}#/settings/server/nodes`);
     await p.waitForSelector(`${srvCard} select`);
     // Turning the SSH watch off clears the problem.
     await p.click(`${srvCard} label:has-text("Watch SSH") input`);  // controlled: flips after the save

@@ -31,6 +31,10 @@ pub struct Config {
     pub voice: VoiceConfig,
     /// Token-saving methods, each one switchable.
     pub savings: harness_core::savings::TokenSavings,
+    /// Written only when changed, so config.toml (and the copy remote nodes
+    /// get) has no `[workspaces]` section until an admin sets one.
+    #[serde(skip_serializing_if = "WorkspacesConfig::is_default")]
+    pub workspaces: WorkspacesConfig,
 }
 
 impl Default for Config {
@@ -45,6 +49,7 @@ impl Default for Config {
             memory: Default::default(),
             voice: Default::default(),
             savings: Default::default(),
+            workspaces: Default::default(),
         }
     }
 }
@@ -62,6 +67,7 @@ struct RawConfig {
     memory: MemoryConfig,
     voice: VoiceConfig,
     savings: harness_core::savings::TokenSavings,
+    workspaces: WorkspacesConfig,
 }
 
 impl From<RawConfig> for Config {
@@ -76,10 +82,70 @@ impl From<RawConfig> for Config {
             memory: r.memory,
             voice: r.voice,
             savings: r.savings,
+            workspaces: r.workspaces,
         };
         c.normalize();
         c
     }
+}
+
+/// `[workspaces]`: the server's policy for team workspaces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspacesConfig {
+    /// Accounts other than server admins may create team workspaces
+    /// (server admins always may).
+    pub members_can_create: bool,
+}
+
+impl Default for WorkspacesConfig {
+    fn default() -> Self {
+        Self {
+            members_can_create: true,
+        }
+    }
+}
+
+impl WorkspacesConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Fallbacks per agent.
+pub const MAX_FALLBACKS: usize = 8;
+
+/// Check an agent's chain before it is saved: a known agent, known models,
+/// at most `MAX_FALLBACKS` fallbacks, none repeating the main model or each
+/// other. The server's `[agent_models]` and workspace settings both use it,
+/// so the two never drift apart.
+pub fn check_chain(
+    agents: &harness_agents::AgentSet,
+    knows_model: &dyn Fn(&str) -> bool,
+    agent: &str,
+    chain: &AgentChain,
+) -> Result<(), String> {
+    if agents.get(agent).is_none() {
+        return Err(format!("unknown agent {agent:?}"));
+    }
+    if chain.fallbacks.len() > MAX_FALLBACKS {
+        return Err(format!("{agent}: at most {MAX_FALLBACKS} fallbacks"));
+    }
+    let known = |id: &String| {
+        knows_model(id)
+            .then_some(())
+            .ok_or_else(|| format!("unknown model {id:?}"))
+    };
+    known(&chain.model)?;
+    for (i, f) in chain.fallbacks.iter().enumerate() {
+        known(f)?;
+        if *f == chain.model || chain.fallbacks[..i].contains(f) {
+            return Err(format!(
+                "{agent}: fallbacks must not repeat the main model or each other ({f})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// An agent's model and, in order, the models tried when it is unavailable
@@ -839,6 +905,22 @@ mod tests {
             assert_eq!(valid_provider_id(id), ok, "{id}");
         }
         assert!(!valid_provider_id(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn workspaces_policy_is_written_only_when_changed() {
+        let c = Config::default();
+        assert!(c.workspaces.members_can_create);
+        assert!(!toml::to_string(&c).unwrap().contains("[workspaces]"));
+        let mut c: Config = toml::from_str("[workspaces]\nmembers_can_create = false\n").unwrap();
+        assert!(!c.workspaces.members_can_create);
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("[workspaces]"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.workspaces, c.workspaces);
+        c.workspaces.members_can_create = true;
+        assert!(!toml::to_string(&c).unwrap().contains("[workspaces]"));
+        assert!(toml::from_str::<Config>("[workspaces]\nnope = 1\n").is_err());
     }
 
     #[test]

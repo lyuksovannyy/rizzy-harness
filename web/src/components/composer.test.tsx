@@ -183,3 +183,36 @@ describe("models the provider dropped", () => {
     c.done();
   });
 });
+
+describe("a chat the viewer cannot drive here", () => {
+  test("the reply box is read-only and says why; Stop still works", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let stopped = false;
+    act(() =>
+      root.render(
+        <Composer
+          where="session"
+          agents={[]}
+          models={[]}
+          workers={[]}
+          agentId="general"
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          readOnly="your role in Acme cannot run agentic sessions"
+          running
+          onStop={() => {
+            stopped = true;
+          }}
+          onSubmit={async () => {}}
+        />,
+      ),
+    );
+    expect(host.querySelector("textarea")!.disabled).toBe(true);
+    expect(host.textContent).toContain("This chat is read-only: your role in Acme cannot run agentic sessions.");
+    act(() => host.querySelector<HTMLButtonElement>("button.stop")!.click());
+    expect(stopped).toBe(true);
+    act(() => root.unmount());
+  });
+});

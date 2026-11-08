@@ -6,11 +6,25 @@ import { Live } from "../live";
 import { t } from "../lib/i18n";
 import { type ClassifierState, decide, emptyState, parseState, record, serialize } from "../lib/classifier";
 import { agenticBlockReason, type Mode } from "../lib/modes";
+import { NODES_HASH, parseRoute, type Route, routeHash } from "../lib/routes";
+import { afterChange, followRoute, keepsRoute, workspaceName } from "../lib/workspaces";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
-import type { Agent, AttentionItem, Me, ModelInfo, NodeAttention, NodeInfo, Notice, Prefs, SessionRow } from "../types";
+import type {
+  Agent,
+  AttentionItem,
+  Me,
+  ModelInfo,
+  NodeAttention,
+  NodeInfo,
+  Notice,
+  Prefs,
+  SessionRow,
+  WorkspaceList,
+  WorkspaceSummary,
+} from "../types";
 import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import { Sidebar } from "./Sidebar";
@@ -27,43 +41,44 @@ const COLLAPSED_KEY = "harness.sidebarCollapsed";
 /** Models can drop out of a provider's listing at any time (the server re-lists daily). */
 const NOTICES_MS = 5 * 60_000;
 
-type Route =
-  | { kind: "home" }
-  | { kind: "session"; id: string }
-  | { kind: "settings"; tab?: "memory" | "nodes" | "provider" | "preferences" };
-
-function parseRoute(): Route {
-  const h = location.hash;
-  const m = h.match(/^#\/s\/([0-9a-f-]{36})$/);
-  if (m) return { kind: "session", id: m[1]! };
-  if (h === "#/settings") return { kind: "settings" };
-  if (h === "#/settings/memory") return { kind: "settings", tab: "memory" };
-  if (h === "#/settings/nodes") return { kind: "settings", tab: "nodes" };
-  if (h === "#/settings/provider") return { kind: "settings", tab: "provider" };
-  if (h === "#/settings/preferences") return { kind: "settings", tab: "preferences" };
-  return { kind: "home" };
-}
-
 function go(r: Route) {
-  location.hash = r.kind === "session" ? `#/s/${r.id}` : r.kind === "settings" ? "#/settings" : "#/";
+  location.hash = routeHash(r);
 }
 
 function useRoute(): Route {
-  const [r, setR] = useState(parseRoute);
+  const [r, setR] = useState(() => parseRoute(location.hash));
   useEffect(() => {
-    const on = () => setR(parseRoute());
+    const on = () => setR(parseRoute(location.hash));
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
   return r;
 }
 
-export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
+export function Shell(props: {
+  me: Me;
+  onLogout: () => void;
+  /** Reloads `me`, showing `keep` (refreshed) when given, else the server's
+   * active workspace; another workspace remounts Shell (App keys it). */
+  onMeChanged: (keep?: WorkspaceSummary) => Promise<void>;
+  /** The workspace the user was taken out of, to say so once; null when nothing to say. */
+  gone: string | null;
+  onGone: (name: string | null) => void;
+}) {
+  const { me, onLogout, onMeChanged, onGone } = props;
+  // Fixed for this Shell's life (App remounts it on a switch); every list and
+  // new chat names it, so nothing depends on the server's idea of "active".
+  const workspaceId = me.workspace?.workspace_id ?? null;
   const [live] = useState(() => new Live());
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  // null until the first load, so a chat the route opens is not taken for
+  // one from another workspace before this one's chats are known.
+  const [loadedSessions, setSessions] = useState<SessionRow[] | null>(null);
+  const sessions = useMemo(() => loadedSessions ?? [], [loadedSessions]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceList | null>(null);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [serverDefaultAgent, setServerDefaultAgent] = useState("general");
+  // The default agent where this Shell lists: the workspace's, else the server's.
+  const [scopeDefaultAgent, setScopeDefaultAgent] = useState("general");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [memoryVersion, setMemoryVersion] = useState(0);
@@ -109,7 +124,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               const note = new Notification(`Server ${n.host}`, { body: n.problems.map((p) => p.detail).join("; "), tag: id });
               note.onclick = () => {
                 window.focus();
-                location.hash = "#/settings/nodes";
+                location.hash = NODES_HASH;
                 note.close();
               };
               continue;
@@ -135,39 +150,84 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       .catch(() => {});
   }, []);
   const refreshSessions = useCallback(() => {
-    api.sessions().then((r) => setSessions(r.sessions)).catch(unauthorized);
+    api
+      .sessions(workspaceId)
+      .then((r) => setSessions(r.sessions))
+      .catch(unauthorized);
     refreshAttention();
-  }, [unauthorized, refreshAttention]);
+  }, [workspaceId, unauthorized, refreshAttention]);
+  // Models, agents and notices follow the workspace's defaults and chains.
+  const scope = useMemo(() => (workspaceId ? { workspace: workspaceId } : null), [workspaceId]);
   const refreshNotices = useCallback(() => {
     api
-      .notices()
+      .notices(scope)
       .then((r) => setNotices(r.notices))
       .catch(() => {});
-  }, []);
+  }, [scope]);
   // Agents too: their default models change with the provider settings, and
   // so do the notices about models gone from a provider.
   const refreshModels = useCallback(() => {
-    api.models().then((r) => setModels(r.models)).catch(unauthorized);
+    api
+      .models(scope)
+      .then((r) => setModels(r.models))
+      .catch(unauthorized);
     refreshNotices();
     api
-      .agents()
+      .agents(scope)
       .then((r) => {
         setAgents(r.agents);
-        setServerDefaultAgent(r.default);
+        setScopeDefaultAgent(r.default);
       })
       .catch(unauthorized);
-  }, [unauthorized, refreshNotices]);
+  }, [scope, unauthorized, refreshNotices]);
   const refreshNodes = useCallback(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
   }, [unauthorized]);
+  // The latest `me`, for handlers that outlive a render.
+  const meRef = useRef(me);
+  useEffect(() => {
+    meRef.current = me;
+  });
+  // The workspace the user just left or deleted here: its going is no news.
+  const left = useRef<string | null>(null);
+  // A workspace, member, role or policy changed somewhere (or the socket came
+  // back): reload the list, who the user is here (their role), what the
+  // workspace's settings decide, and the chats (a role decides which ones
+  // are read-only). The tab stays in its workspace while the user is in it
+  // (lib/workspaces.ts says why); taken out, it falls back to the server's.
+  const workspacesChanged = useCallback(() => {
+    refreshModels();
+    refreshSessions();
+    const here = meRef.current.workspace;
+    if (!here) return;
+    api
+      .workspaces()
+      .then((list) => {
+        setWorkspaces(list);
+        const next = afterChange(here, list.workspaces, left.current);
+        if ("keep" in next) return onMeChanged(next.keep);
+        // Said once the fallback shows, since the line names it.
+        return onMeChanged().then(() => next.gone && onGone(next.gone));
+      })
+      .catch(unauthorized);
+  }, [refreshModels, refreshSessions, unauthorized, onGone, onMeChanged]);
+  // Left or deleted from its settings: the same reload, without the line
+  // saying the user is no longer in it.
+  const workspaceLeft = useCallback(() => {
+    left.current = workspaceId;
+    workspacesChanged();
+  }, [workspaceId, workspacesChanged]);
 
   useEffect(() => {
     live.onSessionsChanged = refreshSessions;
     live.onNodesChanged = refreshNodes;
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
+    live.onWorkspacesChanged = workspacesChanged;
     refreshSessions();
     refreshNodes();
     refreshModels();
+    // The switcher's list; the API token has no workspaces.
+    if (meRef.current.workspace) api.workspaces().then(setWorkspaces).catch(unauthorized);
     api.settings().then(setPrefs).catch(unauthorized);
     api
       .features()
@@ -179,8 +239,10 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
         classifier.current = parseState(v);
       })
       .catch(() => {});
-    return () => live.close();
-  }, [live, refreshSessions, refreshNodes, refreshModels, unauthorized]);
+  }, [live, refreshSessions, refreshNodes, refreshModels, workspacesChanged, unauthorized]);
+  // Closed only when this Shell goes (a switch remounts it): a closed Live
+  // never reconnects, so it must not follow the data effect's dependencies.
+  useEffect(() => () => live.close(), [live]);
 
   // With the agents, whose red marks follow the same listings.
   useEffect(() => {
@@ -259,9 +321,54 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
   );
   const gutter = prefs?.backdrop_chats && prefs.backdrop !== "off" ? history : null;
   const workers = nodes.filter((n) => n.connected && n.profile === "agentic");
-  const agenticBlocked = agenticBlockReason(me.can_agentic, workers.length);
-  const defaultAgent = prefs?.default_agent ?? serverDefaultAgent;
+  const agenticBlocked = agenticBlockReason(me.can_agentic, me.workspace, workers.length);
+  const defaultAgent = prefs?.default_agent ?? scopeDefaultAgent;
   const selected = route.kind === "session" ? route.id : null;
+
+  // Makes another workspace the active one; App then remounts Shell there.
+  // Staying on the route is for a chat that belongs there; else home. The
+  // tab lands in the workspace it asked for, not in whatever /api/me says by
+  // then: another tab switching at the same moment must not bounce it.
+  const switchTo = useCallback(
+    async (id: string, keepRoute: boolean) => {
+      await api.switchWorkspace(id);
+      const known = (l: WorkspaceList | null) => l?.workspaces.find((w) => w.workspace_id === id);
+      // One just created is not in this tab's list yet.
+      const target = known(workspaces) ?? known(await api.workspaces());
+      onGone(null);
+      if (!keepRoute) go({ kind: "home" });
+      await onMeChanged(target);
+    },
+    [workspaces, onGone, onMeChanged],
+  );
+
+  // A chat opened from another workspace (a notification, Attention, a
+  // sub-task's parent link, back/forward) shows in its own: look it up, then
+  // switch there, staying on it (lib/workspaces.ts decides).
+  const [found, setFound] = useState<{ id: string; row: SessionRow | null } | null>(null);
+  const lookup = found && found.id === selected ? found : null;
+  const follow = followRoute({
+    id: selected,
+    active: workspaceId,
+    listed: loadedSessions ? loadedSessions.some((s) => s.session_id === selected) : null,
+    found: lookup ? (lookup.row?.workspace_id ?? null) : undefined,
+    memberOf: workspaces ? workspaces.workspaces.map((w) => w.workspace_id) : null,
+  });
+  const followKey = follow.do === "lookup" ? `lookup:${follow.id}` : follow.do === "switch" ? `switch:${follow.to}` : "";
+  useEffect(() => {
+    if (follow.do === "lookup") {
+      const id = follow.id;
+      api
+        .session(id)
+        .then((row) => setFound({ id, row }))
+        .catch(() => setFound({ id, row: null }));
+    } else if (follow.do === "switch") {
+      switchTo(follow.to, true).catch(unauthorized);
+    }
+    // Once per step: the key says everything the step depends on.
+  }, [followKey]);
+  // The open chat's row: from this workspace's list, else from the lookup.
+  const openRow = selected ? (sessions.find((s) => s.session_id === selected) ?? lookup?.row ?? null) : null;
 
   const submit = async (s: Submission) => {
     if (s.mode === "search") {
@@ -278,6 +385,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
       node_id: agentic ? s.nodeId : undefined,
       cwd: agentic ? s.cwd : undefined,
       ...(s.incognito ? { incognito: true } : {}),
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
     });
     refreshSessions();
     go({ kind: "session", id: session_id });
@@ -335,6 +443,9 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
           nodes={nodes}
           selected={selected}
           conn={live.state}
+          workspaces={workspaces}
+          onSwitch={(id) => switchTo(id, keepsRoute(openRow, id))}
+          onWorkspaceSettings={() => navigate({ kind: "settings", section: "workspace" })}
           onSelect={(id) => navigate({ kind: "session", id })}
           onNew={() => navigate({ kind: "home" })}
           onSettings={() => navigate({ kind: "settings" })}
@@ -358,13 +469,21 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
             </button>
           )}
         </div>
+        {props.gone && (
+          <div className="workspace-gone small" role="status">
+            <span>{t("workspace.gone", { name: props.gone, here: me.workspace ? workspaceName(me.workspace) : "" })}</span>
+            <button type="button" className="link" onClick={() => onGone(null)}>
+              {t("workspace.dismiss")}
+            </button>
+          </div>
+        )}
         <Suspense fallback={<div className="muted pad">Loading…</div>}>
           {route.kind === "session" ? (
             <Conversation
               key={route.id}
               live={live}
               sessionId={route.id}
-              row={sessions.find((s) => s.session_id === route.id) ?? null}
+              row={openRow}
               nodes={nodes}
               agents={agents}
               models={models}
@@ -376,6 +495,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               me={me}
               agents={agents}
               models={models}
+              defaultAgent={scopeDefaultAgent}
               prefs={prefs}
               onPrefs={(p) => {
                 setPrefs(p);
@@ -384,7 +504,9 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               }}
               onProviderChanged={refreshModels}
               onAgentsChanged={refreshModels}
-              initialTab={route.tab}
+              onWorkspaceChanged={workspacesChanged}
+              onWorkspaceLeft={workspaceLeft}
+              route={route}
               memoryVersion={memoryVersion}
               nodes={nodes}
             />
@@ -398,6 +520,7 @@ export function Shell({ me, onLogout }: { me: Me; onLogout: () => void }) {
               workers={workers}
               prefs={prefs}
               agenticBlocked={agenticBlocked}
+              workspace={workspaceId}
               onSubmit={submit}
               predict={predict}
               onLearn={learn}

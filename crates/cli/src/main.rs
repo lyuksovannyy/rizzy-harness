@@ -199,6 +199,12 @@ async fn serve(
     );
 
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
+    // Accounts older than workspaces get their Personal one here, so every
+    // user-owned chat has a workspace from the first request on.
+    let added = mirror.call(|s| s.ensure_personal_workspaces()).await?;
+    if added > 0 {
+        tracing::info!(added, "created missing Personal workspaces and memberships");
+    }
     let node = if no_local_node {
         tracing::info!("no local node: agentic sessions run on remote nodes");
         None

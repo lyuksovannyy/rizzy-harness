@@ -1,5 +1,6 @@
 // Chats waiting for the user (approvals, questions), shown under the bar
 // until there are search results to show instead.
+import { NODES_HASH } from "../lib/routes";
 import type { AttentionItem, NodeAttention } from "../types";
 
 export function Attention(props: { items: AttentionItem[]; nodes?: NodeAttention[]; onOpen: (id: string) => void }) {
@@ -11,7 +12,7 @@ export function Attention(props: { items: AttentionItem[]; nodes?: NodeAttention
       <ul>
         {nodes.map((n) => (
           <li key={`node-${n.setup_id}`}>
-            <button type="button" onClick={() => (location.hash = "#/settings/nodes")}>
+            <button type="button" onClick={() => (location.hash = NODES_HASH)}>
               <span className="similar-title ellipsis">Server {n.host}</span>
               <span className="similar-snippet ellipsis">{n.problems.map((p) => p.detail).join("; ")}</span>
             </button>

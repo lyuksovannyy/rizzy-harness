@@ -69,12 +69,13 @@ export function Users({ me }: { me: Me }) {
                 </td>
                 <td>
                   <select
+                    aria-label={`Server role of ${u.username}`}
                     value={u.role}
                     disabled={self}
                     onChange={(e) => run(() => api.updateUser(u.user_id, { role: e.target.value as Role }))}
                   >
-                    <option value="member">member</option>
-                    <option value="admin">admin</option>
+                    <option value="member">User</option>
+                    <option value="admin">Server admin</option>
                   </select>
                 </td>
                 <td>
@@ -132,9 +133,9 @@ export function Users({ me }: { me: Me }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
-            <option value="member">member</option>
-            <option value="admin">admin</option>
+          <select aria-label="Server role" value={role} onChange={(e) => setRole(e.target.value as Role)}>
+            <option value="member">User</option>
+            <option value="admin">Server admin</option>
           </select>
           <label className="check">
             <input

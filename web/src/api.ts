@@ -35,6 +35,14 @@ import type {
   SessionRow,
   UploadedAttachment,
   User,
+  AdminWorkspace,
+  AdminWorkspaceMember,
+  WorkspaceDetail,
+  WorkspaceList,
+  WorkspaceMember,
+  WorkspaceRole,
+  WorkspaceSettings,
+  WorkspaceSummary,
 } from "./types";
 
 export class HttpError extends Error {
@@ -67,8 +75,24 @@ async function call<T>(method: string, path: string, body?: unknown, signal?: Ab
   return data as T;
 }
 
+/** Whose settings a list follows: a workspace's (by id), or the server's own
+ * (`"server"`, for the Server settings). Left out, the server uses the
+ * caller's active workspace; the web always says which. */
+export type Scope = { workspace: string } | "server";
+
+function scoped(path: string, scope?: Scope | null): string {
+  if (!scope) return path;
+  const q = scope === "server" ? "scope=server" : `workspace=${encodeURIComponent(scope.workspace)}`;
+  return `${path}${path.includes("?") ? "&" : "?"}${q}`;
+}
+
+const ws = (id: string) => `/api/workspaces/${encodeURIComponent(id)}`;
+const adminWs = (id: string) => `/api/admin/workspaces/${encodeURIComponent(id)}`;
+
 export const api = {
-  me: () => call<{ ok: boolean; app: string; user: Me }>("GET", "/api/me"),
+  /** The signed-in principal; the active workspace comes beside it (null
+   * for the API token). */
+  me: () => call<{ ok: boolean; app: string; user: Me; workspace: WorkspaceSummary | null }>("GET", "/api/me"),
   changePassword: (current: string, next: string) =>
     call<{ ok: boolean }>("POST", "/api/me/password", { current, new: next }),
   users: () => call<{ users: User[] }>("GET", "/api/users"),
@@ -98,7 +122,11 @@ export const api = {
     call<{ ok: boolean }>("POST", `/api/admin/provision/${id}/answer`, { step, choice }),
   setupRecheck: (id: string) => call<SetupState>("POST", `/api/admin/provision/${id}/recheck`),
   revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
-  sessions: () => call<{ sessions: SessionRow[] }>("GET", "/api/sessions"),
+  /** The chats in a workspace (the API token: all, unless one is named). */
+  sessions: (workspace?: string | null) =>
+    call<{ sessions: SessionRow[] }>("GET", scoped("/api/sessions", workspace ? { workspace } : null)),
+  /** One chat, in whichever workspace it is. */
+  session: (id: string) => call<SessionRow>("GET", `/api/sessions/${id}`),
   events: (id: string, after = 0) =>
     call<{ events: RawEvent[] }>("GET", `/api/sessions/${id}/events?after=${after}`),
   createSession: (b: {
@@ -109,6 +137,7 @@ export const api = {
     agent_id?: string;
     model?: string;
     incognito?: boolean;
+    workspace_id?: string;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<{ items: AttentionItem[]; nodes?: NodeAttention[] }>("GET", "/api/attention"),
   setups: () => call<{ setups: { setup: SetupRecord; commands: SetupCommands }[] }>("GET", "/api/admin/node-setups"),
@@ -157,15 +186,15 @@ export const api = {
     return data;
   },
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
-  agents: () => call<{ agents: Agent[]; default: string }>("GET", "/api/agents"),
+  agents: (scope?: Scope | null) => call<{ agents: Agent[]; default: string }>("GET", scoped("/api/agents", scope)),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
     call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
-  notices: () => call<{ notices: Notice[] }>("GET", "/api/notices"),
-  models: () => call<{ models: ModelInfo[] }>("GET", "/api/models"),
-  search: (q: string, suggest = false, signal?: AbortSignal) =>
+  notices: (scope?: Scope | null) => call<{ notices: Notice[] }>("GET", scoped("/api/notices", scope)),
+  models: (scope?: Scope | null) => call<{ models: ModelInfo[] }>("GET", scoped("/api/models", scope)),
+  search: (q: string, suggest = false, signal?: AbortSignal, workspace?: string | null) =>
     call<{ results: SearchHit[] }>(
       "GET",
-      `/api/search?q=${encodeURIComponent(q)}${suggest ? "&suggest=true" : ""}`,
+      scoped(`/api/search?q=${encodeURIComponent(q)}${suggest ? "&suggest=true" : ""}`, workspace ? { workspace } : null),
       undefined,
       signal,
     ),
@@ -220,6 +249,33 @@ export const api = {
     preset: Preset;
   }) =>
     call<MemoryCfg>("PUT", "/api/admin/memory", b),
+  workspaces: () => call<WorkspaceList>("GET", "/api/workspaces"),
+  createWorkspace: (name: string) => call<WorkspaceSummary>("POST", "/api/workspaces", { name }),
+  /** Makes it the active workspace (lists, defaults and new chats follow it). */
+  switchWorkspace: (workspace_id: string) => call<{ active: string }>("PUT", "/api/me/workspace", { workspace_id }),
+  workspace: (id: string) => call<WorkspaceDetail>("GET", ws(id)),
+  /** `settings` is the whole document. */
+  updateWorkspace: (id: string, b: { name?: string; settings?: WorkspaceSettings }) =>
+    call<WorkspaceDetail>("PATCH", ws(id), b),
+  setWorkspaceMemory: (id: string, use_memory: boolean) =>
+    call<WorkspaceDetail>("PUT", `${ws(id)}/memory`, { use_memory }),
+  deleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", ws(id)),
+  workspaceMembers: (id: string) => call<{ members: WorkspaceMember[] }>("GET", `${ws(id)}/members`),
+  addWorkspaceMember: (id: string, username: string, role: WorkspaceRole) =>
+    call<WorkspaceMember>("POST", `${ws(id)}/members`, { username, role }),
+  setWorkspaceMemberRole: (id: string, userId: string, role: WorkspaceRole) =>
+    call<WorkspaceMember>("PATCH", `${ws(id)}/members/${encodeURIComponent(userId)}`, { role }),
+  /** Your own user id: leave the workspace. */
+  removeWorkspaceMember: (id: string, userId: string) =>
+    call<{ ok: boolean }>("DELETE", `${ws(id)}/members/${encodeURIComponent(userId)}`),
+  adminWorkspaces: () =>
+    call<{ workspaces: AdminWorkspace[]; members_can_create: boolean }>("GET", "/api/admin/workspaces"),
+  adminWorkspaceMembers: (id: string) => call<{ members: AdminWorkspaceMember[] }>("GET", `${adminWs(id)}/members`),
+  saveWorkspacePolicy: (members_can_create: boolean) =>
+    call<{ members_can_create: boolean }>("PUT", "/api/admin/workspaces/policy", { members_can_create }),
+  /** Owner recovery: `owner` is the user id of an enabled member. */
+  setWorkspaceOwner: (id: string, owner: string) => call<AdminWorkspace>("PATCH", adminWs(id), { owner }),
+  adminDeleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", adminWs(id)),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
   approve: (id: string, approvalId: string, decision: Decision) =>
     call("POST", `/api/sessions/${id}/approvals/${approvalId}`, { decision }),

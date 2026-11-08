@@ -42,8 +42,7 @@ let PAGE = null;
     await p.waitForSelector('h1.greeting');
 
     // Add a node from the UI.
-    await p.goto(`${URL_}#/settings`);
-    await p.click('.tabs button:has-text("Nodes")');
+    await p.goto(`${URL_}#/settings/server/nodes`);
     await p.click('text=Create join command');
     const cmd = await p.innerText('.join-cmd');
     await p.screenshot({ path: `${S}/p8-1-join.png` });
@@ -98,8 +97,7 @@ let PAGE = null;
     log('child session reachable from the tool card');
 
     // Revoke: the node is cut off and its process stops.
-    await p.goto(`${URL_}#/settings`);
-    await p.click('.tabs button:has-text("Nodes")');
+    await p.goto(`${URL_}#/settings/server/nodes`);
     p.once('dialog', (d) => d.accept());
     await p.click(`tr:has-text("${nodeId}") button:has-text("Revoke")`);
     await p.waitForSelector(`tr:has-text("${nodeId}") >> text=revoked`);

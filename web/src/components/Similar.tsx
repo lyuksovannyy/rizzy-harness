@@ -32,8 +32,15 @@ export interface SimilarHandle {
 
 export const Similar = forwardRef<
   SimilarHandle,
-  { text: string; mode: Mode; onOpen: (id: string) => void; onCount?: (n: number) => void }
->(function Similar({ text, mode, onOpen, onCount }, ref) {
+  {
+    text: string;
+    mode: Mode;
+    /** Matches come from this workspace's chats (null: the API token's, all). */
+    workspace: string | null;
+    onOpen: (id: string) => void;
+    onCount?: (n: number) => void;
+  }
+>(function Similar({ text, mode, workspace, onOpen, onCount }, ref) {
     const [hits, setHits] = useState<SearchHit[]>([]);
     useEffect(() => onCount?.(hits.length), [hits.length, onCount]);
     const list = useRef<HTMLUListElement>(null);
@@ -56,7 +63,7 @@ export const Similar = forwardRef<
       const ctl = new AbortController();
       const timer = setTimeout(() => {
         api
-          .search(q, true, ctl.signal)
+          .search(q, true, ctl.signal, workspace)
           .then((r) => setHits(r.results))
           .catch(() => {});
       }, DEBOUNCE_MS);
@@ -64,7 +71,7 @@ export const Similar = forwardRef<
         clearTimeout(timer);
         ctl.abort();
       };
-    }, [text, mode]);
+    }, [text, mode, workspace]);
 
     if (hits.length === 0) return null;
     const back = () => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();

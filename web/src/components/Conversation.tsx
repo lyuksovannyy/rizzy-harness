@@ -40,6 +40,9 @@ function Undo(props: {
   running: boolean;
   /** Later turns also changed files: offer to rewind them too. */
   laterChanges: boolean;
+  /** The viewer may not drive this chat here (row.blocked): the list of
+   * files stays, the server would refuse an undo. */
+  blocked: boolean;
 }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -68,12 +71,12 @@ function Undo(props: {
           ))}
         </ul>
       </details>
-      {!props.restored && (
+      {!props.restored && !props.blocked && (
         <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false, false)}>
           Undo file changes
         </button>
       )}
-      {props.laterChanges && (
+      {props.laterChanges && !props.blocked && (
         <button
           type="button"
           className="link"
@@ -216,6 +219,9 @@ export default function Conversation(props: {
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
   const incognito = !!(meta?.incognito ?? props.row?.incognito);
+  // Why the viewer cannot drive this agentic chat here: approvals offer Deny
+  // only and the reply box is read-only.
+  const blocked = props.row?.blocked ?? null;
   // The face of whoever answers now; the header's agent shows it unless an
   // @mention has another agent answering.
   const face = useAvatarState(view);
@@ -308,6 +314,7 @@ export default function Conversation(props: {
                       key={i}
                       sessionId={sessionId}
                       group={web}
+                      blocked={!!blocked}
                       tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
                     />
                   );
@@ -408,7 +415,7 @@ export default function Conversation(props: {
                   case "fallback":
                     return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
-                    return <ToolCard key={i} sessionId={sessionId} item={it} />;
+                    return <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} />;
                   case "error":
                     return (
                       <div key={i} className="msg error">
@@ -437,7 +444,8 @@ export default function Conversation(props: {
                       return !!c && c.files.length > 0 && !c.restored;
                     });
                     const undo =
-                      cp && cp.after && (cp.files.length > 0 || laterChanges) ? (
+                      // Only a rewind would show for a turn that changed nothing.
+                      cp && cp.after && (cp.files.length > 0 || (laterChanges && !blocked)) ? (
                         <Undo
                           key={`u${i}`}
                           sessionId={sessionId}
@@ -446,6 +454,7 @@ export default function Conversation(props: {
                           restored={cp.restored || cp.files.length === 0}
                           running={running}
                           laterChanges={laterChanges}
+                          blocked={!!blocked}
                         />
                       ) : null;
                     return it.reason === "completed" ? (
@@ -483,6 +492,7 @@ export default function Conversation(props: {
             agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}
+            readOnly={blocked}
             running={running}
             draftKey={`harness.draft.${sessionId}`}
             voice={props.voice}

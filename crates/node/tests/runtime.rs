@@ -305,7 +305,11 @@ async fn cwd_outside_roots_is_refused() {
     match h.link.from_node.recv().await.unwrap() {
         NodeToMaster::Ack { ok, error, .. } => {
             assert!(!ok);
-            assert!(error.unwrap().contains("workspace_roots"));
+            let error = error.unwrap();
+            assert!(
+                error.contains("outside the folders this node allows"),
+                "{error}"
+            );
         }
         other => panic!("{other:?}"),
     }

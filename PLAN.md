@@ -31,11 +31,14 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   `cargo-deny` in CI (licences, advisories, duplicates), APIs checked on docs.rs before use.
   Phase 1's hand-rolled SSE parser, markdown renderer and provider client get re-evaluated
   against maintained libraries (the renderer must sanitize).
-* **Multiple accounts, admin-gated; team workspaces later.** The first account is an
+* **Multiple accounts, admin-gated; workspaces group them.** The first account is an
   admin created with a one-time claim code. Only admins create accounts (temporary password,
-  changed at first login). Everyone sees only their own conversations. Agentic sessions (a
-  shell on a worker node) need a per-user grant. Localhost by default; remote only with an
-  explicit flag. Shared team workspaces are a later phase.
+  changed at first login). Everyone sees only their own conversations, in every workspace.
+  Each account has a Personal workspace and may join team workspaces with a fixed role
+  (owner, admin, member, guest); settings come in four tiers: account, workspace (what applies
+  inside it), workspace admin (members, defaults) and server. Agentic sessions (a shell on a
+  worker node) need a per-user grant, and the workspace role must allow them too. Localhost by
+  default; remote only with an explicit flag. Shared chats and shared memory are not built.
 * **No compatibility code before the first release.** Nothing has shipped, so the schema is
   created complete, with no migrations, aliases or renames; a dev data dir is simply wiped
   when the schema changes. Migrations start with the first tagged release.
@@ -356,9 +359,9 @@ login page.
 | T6 | Compromised master approves things on nodes | Accepted in v1: the master is the approval channel, so a compromised master can approve anything inside node policy. Bounded by T5. Future: approvals signed by a user device key verified on the node (R1). |
 | T7 | Rogue node / stolen node key | Node keys pinned after operator approval; revocation deletes the pin and drops the link. A node only writes its own sessions; the master rejects events for sessions owned by another node. |
 | T8 | MITM on the node link | WSS plus Ed25519 mutual challenge-response with pinned keys, so a mis-issued TLS cert alone is not enough. |
-| T10 | Another account reads or drives someone else's work | Every session carries `owner_id`; REST and WS show a session only to its owner, admins included (admins manage accounts, not chats). Only the API token, the machine owner's key on disk, sees all. |
-| T11 | A low-trust account gets a shell | Agentic sessions run bash on a node, so they need a per-user `can_agentic` grant (default off; admins always on). Chat sessions have no file or shell tools. |
-| T12 | Password guessing / account takeover | Login throttle (5 failures per username per 15 min → 429). Trade-off accepted: an attacker can lock out a known username for 15 minutes. No self-signup; admin-created accounts start with a temporary password that must be changed; disabling, deleting or resetting a password signs the user out everywhere. The last active admin cannot be removed or demoted, and admins cannot change their own access. |
+| T10 | Another account reads or drives someone else's work | Every session carries `owner_id`; REST and WS show a session only to its owner, admins included (server admins manage accounts, workspace admins and owners manage members and defaults; neither gets chats). A workspace only groups chats: its mapping is master-side (never asserted by a node, T7) and is ignored once the owner leaves, so a chat cannot be planted in or stranded outside its owner's workspaces. Only the API token, the machine owner's key on disk, sees all. |
+| T11 | A low-trust account gets a shell | Agentic sessions run bash on a node, so they need a per-user `can_agentic` grant (default off; admins always on) — the security boundary. A workspace role must also allow agentic work there (an extra AND, never a grant). Both are checked at create and again before every prompt, allowing approval and restore, so revoking either stops further work; running agentic turns of affected users are cancelled. Deny and cancel always stay possible. Chat sessions have no file or shell tools. |
+| T12 | Password guessing / account takeover | Login throttle (5 failures per username per 15 min → 429). Trade-off accepted: an attacker can lock out a known username for 15 minutes. No self-signup; admin-created accounts start with a temporary password that must be changed; disabling, deleting or resetting a password signs the user out everywhere. The last active admin cannot be removed or demoted, and admins cannot change their own access. Workspace managers add members by username, so the answer tells them whether a username exists: failed adds are throttled per caller (10 per 15 min → 429), accepted as a residual leak. |
 | T13 | Credentials sniffed on the network | Default bind is 127.0.0.1. `--insecure-bind` serves plain HTTP with a loud warning (VPN/tailnet only); real TLS arrives with the node link (Phase 8). |
 | T9 | Runaway processes | Bash runs in its own process group; cancel/timeout sends SIGTERM then SIGKILL to the group. Cancel propagates master → node as `session.cancel`. Output is capped. |
 | T14 | Model output (possibly steered by injected web or repo content) phishes, exfiltrates or poses as the harness through what the chat renders | No model HTML, scripts, iframes or remote images; links show their real host and odd ones need a confirm with the full URL; `ui:` blocks are validated in Rust and drawn from the stored spec in a "from <agent>" frame; secret-asking questions and fields are refused; answers carry ids, never model text; the node checks every answer against its log. Details: Status, "2026-11-07 — Rich messages". |
@@ -1634,3 +1637,81 @@ DELETE removes a provider that has one.
 Favicons (`/api/favicon`): https on every hop, redirects included; one user
 runs at most two uncached fetches, a free slot is waited for at most 2 s (503,
 not cached), and misses never evict cached icons.
+
+### 2026-11-08 — Workspaces, roles and four settings tiers; pnpm
+
+**Done**
+* Every account has a Personal workspace, created with the account; the master
+  also creates missing ones when it opens its store, so existing data dirs pick
+  them up (`ensure_personal_workspaces`). Team workspaces are created from the
+  sidebar switcher (`[workspaces] members_can_create`; server admins always) and
+  members are added by username.
+* Roles are fixed sets of permissions (`agentic`, `settings`, `members`): owner,
+  admin, member, guest. Code checks permissions; only owners delete a workspace or
+  make and remove owners. Nobody assigns a role above their own or changes their
+  own role. While a workspace has other members its last enabled owner stays,
+  checked inside the store transaction, and role writes only apply to the role
+  the guard saw. The last member leaving deletes the workspace.
+* Chats stay private to their owner in every workspace. A chat's workspace is a
+  master-side mapping (`session_workspaces`, a new table: the `sessions` schema
+  shared by master.db, chat.db and node.db is unchanged), ignored once the owner
+  is no longer a member, else the owner's Personal workspace. Leaving, removal and
+  deletion therefore return chats to Personal without touching them. Sub-agent
+  sessions inherit the mapping from the same node only (T7).
+* Settings in four sections, `#/settings/<section>/<tab>`: Account; Workspace
+  (everyone in it: role, members, effective defaults, "use my memory here",
+  leave); Workspace admin (name, default agent, per-agent model chains with
+  General's as the default model, members, delete); Server (everything
+  server-wide plus every workspace with owner recovery and deletion). A tab the
+  viewer may not see falls back to the first one; before, members could open
+  admin panels by URL.
+* One `Resolver` (server config plus the workspace overlay) drives create,
+  prompt, agent switches, `session-model-auto`, `/api/models`, `/api/agents` and
+  notices; `?scope=server` gives the server's own values.
+* Agentic work needs the account grant AND the workspace role, checked at
+  create and before every prompt, allowing approval and restore (this also closes
+  the gap where revoking the grant left existing agentic chats usable). Losing
+  either cancels the affected running agentic turns; Deny and cancel always work,
+  and the chat shows why it is read-only.
+* `remember` is denied on delegates too (incognito and memory-off workspaces).
+* pnpm 12 for `web/` (see §5).
+
+**Evidence**
+* `cargo test --workspace` 377 passed (store 13 new tests, master
+  `workspaces_http.rs` and `workspaces_resolve_http.rs`); clippy and rustfmt
+  clean. Vitest 553 passed (59 files). `pnpm size`: initial 96.1 KB gzip (≤ 110),
+  total 304.9 KB (budget raised 300 → 310 for the switcher and the workspace
+  panels).
+* Browser walkthrough on the real binary (scratch data dir, demo provider):
+  claim → alex creates Acme from the switcher → a chat in Acme stays out of
+  Personal; switching home and following the chat's link switches back → Members:
+  add bob, own row locked, bob as Guest → bob sees only his own chats, Agentic is
+  off with the role's reason, his agentic chat is read-only, his Settings has
+  only Account and Workspace, `#/settings/server/users` falls back to Profile;
+  API: bob gets 404 on alex's chat, no search hits, 403 on settings and admin
+  routes, 409 changing his own role. The default data dir started cleanly and
+  got its Personal workspace.
+* Bugs found by the walkthrough and fixed: the switcher never rendered (the web
+  read the active workspace inside `user`, `/api/me` sends it beside it); the
+  live connection died after a switch (an inline `onLogout` re-ran Shell's data
+  effect, whose cleanup closed `Live` for good).
+* Three design reviews (security, feasibility, product) before coding and a
+  four-lens review with adversarial verification after it (14 of 17 findings
+  confirmed, all fixed: atomic username-lookup throttle, role writes conditional
+  on the checked role, a tab keeping its own workspace when another tab switches,
+  stale `blocked` after a role change, panel saves re-reading the settings,
+  notice attribution, docs).
+
+**Deviations from the first design.** Custom and editable roles, per-workspace
+node access, a per-workspace token-savings override and moving chats between
+workspaces were dropped: node access and savings could be bypassed through
+Personal, and savings is the server owner's cost control.
+
+**Risks / gaps**
+* Workspace managers learn whether a username exists (throttled, T12); members
+  are added without an invitation step.
+* Owner and workspace mapping live only in master.db, like `owner_id` before.
+* The login throttle keeps its check-then-record pattern (pre-existing).
+
+**Next:** shared chats and shared memory inside a workspace; custom roles;
+per-user node access.

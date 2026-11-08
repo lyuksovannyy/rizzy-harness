@@ -8,9 +8,11 @@ use harness_core::policy::{ApprovalMode, Decision};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth};
 
 mod providers;
+mod workspaces;
 
 pub fn router(master: Master) -> Router {
     let api = Router::new()
@@ -19,6 +21,10 @@ pub fn router(master: Master) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
+        .route(
+            "/api/me/workspace",
+            axum::routing::put(workspaces::set_active),
+        )
         .route("/api/me/settings", get(get_settings).put(put_settings))
         .route(
             "/api/me/classifier",
@@ -68,6 +74,41 @@ pub fn router(master: Master) -> Router {
             axum::routing::put(providers::put_agent_avatar),
         )
         .route("/api/notices", get(notices))
+        .route(
+            "/api/workspaces",
+            get(workspaces::list).post(workspaces::create),
+        )
+        .route(
+            "/api/workspaces/{id}",
+            get(workspaces::get_one)
+                .patch(workspaces::patch)
+                .delete(workspaces::delete),
+        )
+        .route(
+            "/api/workspaces/{id}/memory",
+            axum::routing::put(workspaces::set_memory),
+        )
+        .route(
+            "/api/workspaces/{id}/members",
+            get(workspaces::members).post(workspaces::add_member),
+        )
+        .route(
+            "/api/workspaces/{id}/members/{user_id}",
+            axum::routing::patch(workspaces::set_role).delete(workspaces::remove_member),
+        )
+        .route("/api/admin/workspaces", get(workspaces::admin_list))
+        .route(
+            "/api/admin/workspaces/policy",
+            axum::routing::put(workspaces::admin_policy),
+        )
+        .route(
+            "/api/admin/workspaces/{id}",
+            axum::routing::patch(workspaces::admin_patch).delete(workspaces::admin_delete),
+        )
+        .route(
+            "/api/admin/workspaces/{id}/members",
+            get(workspaces::admin_members),
+        )
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{id}",
@@ -163,7 +204,24 @@ impl From<CommandError> for ApiError {
 
 impl From<harness_store::StoreError> for ApiError {
     fn from(e: harness_store::StoreError) -> Self {
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        use harness_store::StoreError;
+        let code = match &e {
+            // Refusals are written for users (a workspace left without an
+            // owner, ...); conflicts are uniqueness.
+            StoreError::Refused(_) | StoreError::Conflict(_) => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, e.to_string())
+    }
+}
+
+impl From<WsError> for ApiError {
+    fn from(e: WsError) -> Self {
+        match e {
+            WsError::NotFound => ApiError(StatusCode::NOT_FOUND, e.to_string()),
+            WsError::Forbidden(m) => ApiError(StatusCode::FORBIDDEN, m),
+            WsError::Store(e) => e.into(),
+        }
     }
 }
 
@@ -218,6 +276,21 @@ async fn visible_session(
     match m.inner.mirror.call(move |s| s.session(sid)).await? {
         Some(r) if who.can_see(r.owner_id.as_deref()) => Ok(r),
         _ => Err(ApiError(StatusCode::NOT_FOUND, "unknown session".into())),
+    }
+}
+
+/// Refuse (403) to make an agentic chat do work when its owner may no
+/// longer run agentic sessions there: the account's grant and the
+/// workspace's `agentic` permission, checked on every action that starts
+/// work, since either can be taken away after the chat was created.
+async fn agentic_gate(
+    m: &Master,
+    who: &auth::Principal,
+    row: &harness_store::SessionRow,
+) -> ApiResult<()> {
+    match ws::agentic_blocked(m, who, row).await {
+        Some(why) => Err(ApiError(StatusCode::FORBIDDEN, why)),
+        None => Ok(()),
     }
 }
 
@@ -319,8 +392,10 @@ async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
 
 async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
     let who = require_any(&m, &headers).await?;
+    // The active workspace comes along so the UI can key on it at once.
+    let workspace = workspaces::active_summary(&m, &who).await?;
     Ok(Json(
-        json!({ "ok": true, "app": harness_core::APP_NAME, "user": who }),
+        json!({ "ok": true, "app": harness_core::APP_NAME, "user": who, "workspace": workspace }),
     ))
 }
 
@@ -329,32 +404,74 @@ async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<se
     Ok(Json(json!({ "nodes": m.nodes() })))
 }
 
-async fn models(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    Ok(Json(json!({ "models": m.models() })))
+/// Which settings a read of models, agents or notices follows.
+#[derive(Deserialize)]
+struct ScopeQuery {
+    /// A workspace the caller is a member of (users: defaults to the
+    /// active one; the API token: the server's without it).
+    #[serde(default)]
+    workspace: Option<String>,
+    /// `server`: the server's own values, without any workspace's.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
-/// An agent as the UI lists it: its definition, the admin's model, the
-/// model it runs on and the fallbacks it has there (its own chain's, else
-/// the ones it inherits with the default), which of those are unavailable,
-/// and its avatar.
-fn agent_json(m: &Master, a: &harness_agents::Agent) -> serde_json::Value {
-    let chain = m.agent_chain(&a.id);
-    let main = m.agent_main_model(a);
-    let fallbacks = m.agent_fallbacks(&a.id, main.as_deref());
-    let unavailable: Vec<String> = match m.provider_runtime() {
-        Some(rt) => {
-            let cfg = rt.config();
-            let mut out: Vec<String> = Vec::new();
-            for x in main.iter().chain(&fallbacks) {
-                if cfg.model_unavailable(x) && !out.contains(x) {
-                    out.push(x.clone());
-                }
-            }
-            out
+/// The workspace whose settings apply, or `None` for the server's own.
+async fn settings_scope(
+    m: &Master,
+    who: &auth::Principal,
+    q: &ScopeQuery,
+) -> ApiResult<Option<ws::Access>> {
+    match q.scope.as_deref() {
+        None => Ok(ws::scope(m, who, q.workspace.as_deref()).await?),
+        Some("server") if q.workspace.is_none() => Ok(None),
+        Some("server") => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "ask for a workspace or for the server scope, not both".into(),
+        )),
+        Some(_) => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "scope must be server".into(),
+        )),
+    }
+}
+
+async fn scoped_resolver(
+    m: &Master,
+    who: &auth::Principal,
+    q: &ScopeQuery,
+) -> ApiResult<crate::Resolver> {
+    Ok(match settings_scope(m, who, q).await? {
+        Some(a) => a.resolver(m),
+        None => m.resolver(None),
+    })
+}
+
+/// The listed models; `default` is the scope's default model.
+async fn models(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Query(q): Query<ScopeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let r = scoped_resolver(&m, &who, &q).await?;
+    Ok(Json(json!({ "models": r.models() })))
+}
+
+/// An agent as the UI lists it in a scope: its definition, the model
+/// assigned to it there, the model it runs on and the fallbacks it has
+/// there (its own chain's, else the ones it inherits with the default),
+/// which of those are unavailable, and its avatar (server-wide).
+fn agent_json(m: &Master, r: &crate::Resolver, a: &harness_agents::Agent) -> serde_json::Value {
+    let chain = r.agent_chain(&a.id);
+    let main = r.agent_main_model(a);
+    let fallbacks = r.agent_fallbacks(&a.id, main.as_deref());
+    let mut unavailable: Vec<String> = Vec::new();
+    for x in main.iter().chain(&fallbacks) {
+        if r.model_unavailable(x) && !unavailable.contains(x) {
+            unavailable.push(x.clone());
         }
-        None => Vec::new(),
-    };
+    }
     let mut v = json!(a);
     v["default_model"] = json!(chain.map(|c| c.model));
     v["main_model"] = json!(main);
@@ -364,22 +481,33 @@ fn agent_json(m: &Master, a: &harness_agents::Agent) -> serde_json::Value {
     v
 }
 
-async fn agents(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    let set = m.agents();
-    let agents: Vec<serde_json::Value> = set.list().iter().map(|a| agent_json(&m, a)).collect();
+async fn agents(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Query(q): Query<ScopeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let who = require(&m, &headers).await?;
+    let r = scoped_resolver(&m, &who, &q).await?;
+    let agents: Vec<serde_json::Value> = r
+        .agents()
+        .list()
+        .iter()
+        .map(|a| agent_json(&m, &r, a))
+        .collect();
     Ok(Json(
-        json!({ "agents": agents, "default": set.default_id() }),
+        json!({ "agents": agents, "default": r.default_agent() }),
     ))
 }
 
 async fn notices(
     State(m): State<Master>,
     headers: HeaderMap,
+    Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
+    let scope = settings_scope(&m, &who, &q).await?;
     Ok(Json(
-        json!({ "notices": crate::notices::for_viewer(&m, &who).await }),
+        json!({ "notices": crate::notices::for_viewer(&m, &who, scope.as_ref()).await }),
     ))
 }
 
@@ -449,6 +577,9 @@ struct SearchQuery {
     /// Similar-chat suggestions for the bar (strict; may return nothing).
     #[serde(default)]
     suggest: bool,
+    /// Users: defaults to the active workspace. The API token: no filter.
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 async fn search(
@@ -458,16 +589,20 @@ async fn search(
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     let owner = who.user_id.clone();
+    let workspace = ws::scope(&m, &who, q.workspace.as_deref())
+        .await?
+        .map(|a| a.workspace.workspace_id);
     let limit = q.limit.unwrap_or(20).clamp(1, 50);
     let text = q.q.chars().take(500).collect::<String>();
     let hits = m
         .inner
         .mirror
         .call(move |s| {
+            let (owner, workspace) = (owner.as_deref(), workspace.as_deref());
             if q.suggest {
-                crate::search::suggest(s, &text, owner.as_deref())
+                crate::search::suggest(s, &text, owner, workspace)
             } else {
-                crate::search::search(s, &text, owner.as_deref(), limit)
+                crate::search::search(s, &text, owner, workspace, limit)
             }
         })
         .await?;
@@ -706,6 +841,12 @@ async fn update_user(
                 Ok::<_, harness_store::StoreError>(())
             })
             .await?;
+        // Disabled owners stop counting as owners, and whether the user may
+        // drive their agentic chats (`blocked`) may have changed: running
+        // ones that lost their access stop.
+        let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
+        let _ = m.inner.live.send(crate::Live::SessionsChanged);
+        ws::sweep_revoked(&m, vec![target.user_id.clone()]);
     }
     if let Some(pw) = b.password {
         auth::set_password(&m.inner.mirror, &target.user_id, pw, true).await?;
@@ -722,11 +863,20 @@ async fn delete_user(
     let target = load_user(&m, &id).await?;
     guard_admin_change(&m, &who, &target, true).await?;
     let uid = target.user_id.clone();
+    // Refused (409) while they are the only owner of a team workspace with
+    // other members; their chats leave every team workspace.
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
+    let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
+    let _ = m.inner.live.send(crate::Live::SessionsChanged);
+    // Their running agentic chats stop (the account is gone).
+    ws::sweep_revoked(&m, vec![target.user_id]);
     Ok(Json(json!({ "ok": true })))
 }
 
-fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
+/// A chat as the UI lists it. `blocked`: why the caller may not make this
+/// agentic chat do work (always `null` for chats).
+fn session_json(r: &harness_store::SessionRow, blocked: Option<&str>) -> serde_json::Value {
+    let blocked = blocked.filter(|_| r.profile.as_deref() != Some("chat"));
     json!({
         "session_id": r.session_id,
         "node_id": r.node_id,
@@ -742,31 +892,56 @@ fn session_json(r: &harness_store::SessionRow) -> serde_json::Value {
         "profile": r.profile,
         "incognito": r.incognito,
         "parent_id": r.parent_id,
+        "workspace_id": r.workspace_id,
+        "blocked": blocked,
     })
 }
 
+#[derive(Deserialize)]
+struct WorkspaceQuery {
+    /// Users: defaults to the active workspace. The API token: no filter.
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
+/// The caller's own chats in one workspace (the API token: every chat,
+/// optionally in one workspace). The workspace is an extra filter: other
+/// members' chats stay private (T10).
 async fn list_sessions(
     State(m): State<Master>,
     headers: HeaderMap,
+    Query(q): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
+    let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
+    // Every listed chat is in the scope's workspace, so one answer fits all.
+    let blocked = ws::agentic_refusal(&who, scope.as_ref());
+    let in_scope = |r: &&harness_store::SessionRow| match &scope {
+        Some(a) => r.workspace_id.as_deref() == Some(a.id()),
+        None => true,
+    };
     let rows = m.inner.mirror.call(|s| s.sessions()).await?;
     Ok(Json(json!({
         "sessions": rows
             .iter()
             .filter(|r| who.can_see(r.owner_id.as_deref()))
-            .map(session_json)
+            .filter(in_scope)
+            .map(|r| session_json(r, blocked.as_deref()))
             .collect::<Vec<_>>()
     })))
 }
 
+/// Any of the caller's chats, whatever its workspace (the UI follows a
+/// link to a chat into its workspace).
 async fn get_session(
     State(m): State<Master>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    Ok(Json(session_json(&visible_session(&m, &who, &id).await?)))
+    let row = visible_session(&m, &who, &id).await?;
+    let blocked = ws::agentic_blocked(&m, &who, &row).await;
+    Ok(Json(session_json(&row, blocked.as_deref())))
 }
 
 async fn delete_session(
@@ -824,6 +999,10 @@ struct CreateBody {
     approval_mode: Option<ApprovalMode>,
     #[serde(default)]
     incognito: bool,
+    /// Users: defaults to the active workspace; members only. The API
+    /// token: any existing workspace, or none.
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 
 async fn create_session(
@@ -838,20 +1017,20 @@ async fn create_session(
             "incognito is only available for chats".into(),
         ));
     }
-    // Agentic sessions run shell commands on a worker node.
+    let scope = ws::scope(&m, &who, b.workspace_id.as_deref()).await?;
+    // Agentic sessions run shell commands on a worker node: they need the
+    // account's grant and the workspace's permission.
     if b.profile.unwrap_or(harness_core::event::Profile::Agentic)
         == harness_core::event::Profile::Agentic
-        && !who.can_agentic
+        && let Some(why) = ws::agentic_refusal(&who, scope.as_ref())
     {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "agentic sessions are not enabled for this account; ask an admin".into(),
-        ));
+        return Err(ApiError(StatusCode::FORBIDDEN, why));
     }
     let title = b
         .title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".into());
+    // The master stamps owner and workspace once the node has the chat.
     let sid = m
         .create_session(crate::CreateSpec {
             profile: b.profile,
@@ -862,16 +1041,10 @@ async fn create_session(
             approval_mode: b.approval_mode,
             agent_id: b.agent_id,
             incognito: b.incognito,
+            owner_id: who.user_id.clone(),
+            workspace_id: scope.map(|a| a.workspace.workspace_id),
         })
         .await?;
-    if let Some(uid) = who.user_id {
-        // The node's session_created event is mirrored before the create ack
-        // arrives (same ordered link), so the row exists here.
-        m.inner
-            .mirror
-            .call(move |s| s.set_session_owner(sid, &uid))
-            .await?;
-    }
     Ok(Json(json!({ "session_id": sid })))
 }
 
@@ -950,7 +1123,10 @@ async fn prompt(
             ),
         ));
     }
-    let sid = visible_session(&m, &who, &id).await?.session_id;
+    let row = visible_session(&m, &who, &id).await?;
+    // Before the uploads are taken, so a refusal leaves them for later.
+    agentic_gate(&m, &who, &row).await?;
+    let sid = row.session_id;
     let attachments = if b.attachments.is_empty() {
         Vec::new()
     } else {
@@ -1042,8 +1218,14 @@ async fn approval(
     Json(b): Json<ApprovalBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.respond_approval(sid, approval_id, b.decision).await?;
+    let row = visible_session(&m, &who, &id).await?;
+    // Allowing makes the chat do work; denying stops it, like cancel, so a
+    // user who lost access can still refuse.
+    if b.decision.allows() {
+        agentic_gate(&m, &who, &row).await?;
+    }
+    m.respond_approval(row.session_id, approval_id, b.decision)
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1454,8 +1636,10 @@ async fn restore_turn(
     Json(b): Json<RestoreBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.restore_turn(sid, turn, b.force, b.rewind).await?;
+    let row = visible_session(&m, &who, &id).await?;
+    agentic_gate(&m, &who, &row).await?;
+    m.restore_turn(row.session_id, turn, b.force, b.rewind)
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 

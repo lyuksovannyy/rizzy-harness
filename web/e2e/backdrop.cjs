@@ -62,8 +62,7 @@ async function busy(cdp, ms, during = async () => sleep(ms)) {
   return ((b.TaskDuration - a.TaskDuration) * 1000) / (ms / 1000);
 }
 async function savePrefs(p, pick) {
-  await p.goto(`${URL_}#/settings`);
-  await p.click('.tabs button:has-text("Preferences")');
+  await p.goto(`${URL_}#/settings/account/preferences`);
   await pick();
   await p.click('button:has-text("Save")');
   await p.waitForSelector('text=Saved.');

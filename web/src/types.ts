@@ -271,9 +271,16 @@ export interface Notice {
   agents: string[];
   /** It is the viewer's own default model. */
   your_default: boolean;
+  /** It is the server default and applies where the notice was computed (no workspace default replaces it). */
   global_default: boolean;
-  /** The viewer is an admin and can fix it in Settings. */
+  /** It is the workspace's own default model (its General chain), in place of the server default. */
+  workspace_default: boolean;
+  /** The viewer is a server admin and can fix it in Settings. */
   can_fix: boolean;
+  /** The use comes from the workspace's own settings (its default or an agent's chain there). */
+  workspace: boolean;
+  /** The viewer may change the workspace's settings, where it can be fixed. */
+  can_fix_workspace: boolean;
 }
 
 /** A model offered to chats. `id` is `<provider_id>::<raw>`. */
@@ -422,6 +429,10 @@ export interface SessionRow {
   incognito: boolean;
   /** Set on a sub-agent's session. */
   parent_id: string | null;
+  /** The workspace it is in; null only for a chat without an owner (API token). */
+  workspace_id?: string | null;
+  /** Agentic chats only: why the viewer cannot drive it here (deny and stop still work). */
+  blocked?: string | null;
 }
 
 export interface RemoteNode {
@@ -442,6 +453,7 @@ export interface NodeInfo {
   profile: Profile;
 }
 
+/** A server-wide account role (Settings → Users), not a workspace role. */
 export type Role = "admin" | "member";
 
 export interface Me {
@@ -450,6 +462,69 @@ export interface Me {
   role: Role;
   can_agentic: boolean;
   must_change_password: boolean;
+  /** The active workspace; null for the API token. */
+  workspace?: WorkspaceSummary | null;
+}
+
+/** What a workspace role allows, in this order on the wire. */
+export type Perm = "agentic" | "settings" | "members";
+export type WorkspaceRole = "owner" | "admin" | "member" | "guest";
+
+export interface WorkspaceSummary {
+  workspace_id: string;
+  /** The stored name; a Personal workspace is shown as t("workspace.personal"). */
+  name: string;
+  personal: boolean;
+  role: WorkspaceRole;
+  permissions: Perm[];
+  members: number;
+}
+
+export interface WorkspaceList {
+  /** Personal first, then by name. */
+  workspaces: WorkspaceSummary[];
+  active: string | null;
+  can_create: boolean;
+}
+
+/** A team workspace's own defaults; `agent_models.general` is its default model. */
+export interface WorkspaceSettings {
+  default_agent: string | null;
+  agent_models: Record<string, AgentChain>;
+}
+
+export interface WorkspaceDetail extends WorkspaceSummary {
+  /** Unknown agents and models already dropped, so saving what was read validates. */
+  settings: WorkspaceSettings;
+  /** The caller's own "use my memory here" switch (always true for Personal). */
+  use_memory: boolean;
+  created_ms: number;
+}
+
+export interface WorkspaceMember {
+  user_id: string;
+  username: string;
+  display_name: string | null;
+  role: WorkspaceRole;
+  joined_ms: number;
+}
+
+/** Settings → Server → Workspaces: one row per workspace. */
+export interface AdminWorkspace {
+  workspace_id: string;
+  name: string;
+  personal: boolean;
+  /** Usernames. */
+  owners: string[];
+  members: number;
+  created_ms: number;
+}
+
+export interface AdminWorkspaceMember {
+  user_id: string;
+  username: string;
+  role: WorkspaceRole;
+  disabled: boolean;
 }
 
 export interface User {
@@ -500,6 +575,8 @@ export interface AttentionItem {
   seq: number;
   parent_id: string | null;
   updated_ms: number;
+  /** Attention lists the caller's chats in every workspace. */
+  workspace_id?: string | null;
 }
 
 export interface SetupStep {

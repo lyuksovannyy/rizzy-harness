@@ -10,6 +10,7 @@ import { Notices } from "./Notices";
 import { Similar, type SimilarHandle } from "./Similar";
 import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
+import { MEMORY_HASH } from "../lib/routes";
 
 // The mode backgrounds load on their own, and not at all when turned off.
 const Backdrop = lazy(() => import("../bg/Backdrop"));
@@ -26,6 +27,8 @@ export function Home(props: {
   workers: NodeInfo[];
   prefs: Prefs | null;
   agenticBlocked: string | null;
+  /** The active workspace, which the similar chats come from. */
+  workspace: string | null;
   onSubmit: (s: Submission) => Promise<void>;
   predict: (text: string) => Mode | null;
   onLearn: (text: string, mode: Mode) => void;
@@ -114,10 +117,17 @@ export function Home(props: {
           }
         />
         <Notices notices={props.notices ?? []} agents={props.agents} />
-        <Similar ref={similar} text={typed.text} mode={typed.mode} onOpen={props.onOpen} onCount={setSimilarCount} />
+        <Similar
+          ref={similar}
+          text={typed.text}
+          mode={typed.mode}
+          workspace={props.workspace}
+          onOpen={props.onOpen}
+          onCount={setSimilarCount}
+        />
         {similarCount === 0 && <Attention items={props.attention ?? []} nodes={props.nodeAttention} onOpen={props.onOpen} />}
         {!!props.toReview && (
-          <a className="review-link small" href="#/settings/memory">
+          <a className="review-link small" href={MEMORY_HASH}>
             {props.toReview === 1 ? t("home.toReviewOne") : t("home.toReview", { n: String(props.toReview) })}
           </a>
         )}

@@ -117,6 +117,11 @@ export interface AgentAssign {
   label: (id: string) => string;
   /** Plan ids their provider no longer lists. */
   unavailable?: (id: string) => boolean;
+  /** Agents may have no models in this plan and use a chain from elsewhere
+   * (a workspace's agents use the server's). Every agent is listed then,
+   * with what it uses (`note`) or a button (`label`) going back to it;
+   * General needs no main model, and none is given one unasked. */
+  inherit?: { label: string; note: (agent: string) => string };
 }
 
 export interface CustomModels {
@@ -188,7 +193,7 @@ export function ModelPicker(props: {
   };
   // The first model chosen starts as General's, the default for everyone.
   const general = (id: string | undefined) => {
-    if (id && assign && !assign.plan.general?.model && assign.agents.some((a) => a.id === "general"))
+    if (id && assign && !assign.inherit && !assign.plan.general?.model && assign.agents.some((a) => a.id === "general"))
       assign.onPlan(setMain(assign.plan, "general", assign.ref(id)));
   };
   const toggle = (id: string, on: boolean) => {
@@ -486,8 +491,9 @@ function AgentList(props: {
 function AgentPlan(props: { a: AgentAssign; selected: string[] }) {
   const { a } = props;
   const plan = a.plan;
-  const rows = a.agents.filter((x) => x.id === "general" || plan[x.id]?.model || plan[x.id]?.fallbacks.length);
-  const problems = planProblems(plan, props.selected.map(a.ref), a.agents, a.label);
+  const own = (agent: string) => !!(plan[agent]?.model || plan[agent]?.fallbacks.length);
+  const rows = a.inherit ? a.agents : a.agents.filter((x) => x.id === "general" || own(x.id));
+  const problems = planProblems(plan, props.selected.map(a.ref), a.agents, a.label, !!a.inherit);
   // A button that moves or takes its own model away would drop focus to the
   // page; each change names where focus goes next, first one there wins.
   const els = useRef(new Map<string, HTMLElement>());
@@ -519,6 +525,14 @@ function AgentPlan(props: { a: AgentAssign; selected: string[] }) {
         {rows.map((x) => {
           const c = plan[x.id] ?? { model: null, fallbacks: [] };
           const fb = c.fallbacks;
+          if (a.inherit && !own(x.id)) {
+            return (
+              <li key={x.id} tabIndex={-1} ref={reg(x.id)}>
+                <span className="agent-chain-name">{x.name}</span>
+                <span className="muted small">{a.inherit.note(x.id)}</span>
+              </li>
+            );
+          }
           return (
             <li key={x.id} tabIndex={-1} ref={reg(x.id)}>
               <span className="agent-chain-name">{x.name}</span>
@@ -585,6 +599,16 @@ function AgentPlan(props: { a: AgentAssign; selected: string[] }) {
                     </li>
                   ))}
                 </ol>
+              )}
+              {a.inherit && (
+                <button
+                  type="button"
+                  className="link small chain-inherit"
+                  aria-label={`${x.name}: ${a.inherit.label}`}
+                  onClick={() => change(Object.fromEntries(Object.entries(plan).filter(([id]) => id !== x.id)), [x.id])}
+                >
+                  {a.inherit.label}
+                </button>
               )}
             </li>
           );

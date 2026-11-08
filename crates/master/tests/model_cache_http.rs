@@ -849,7 +849,8 @@ async fn fallbacks_and_notices() {
         n["notices"][0],
         json!({"id": "model_unavailable:loc::b", "kind": "model_unavailable",
                "model": "loc::b", "provider": "Local", "agents": ["general"],
-               "your_default": false, "global_default": false, "can_fix": true})
+               "your_default": false, "global_default": false, "workspace_default": false,
+               "can_fix": true, "workspace": false, "can_fix_workspace": false})
     );
     assert_eq!(n["notices"][3]["your_default"], true);
 
@@ -871,6 +872,7 @@ async fn fallbacks_and_notices() {
     .await;
     let (_, n) = call_as(&t, &bob, Method::GET, "/api/notices", None).await;
     assert_eq!(n["notices"][0]["global_default"], true, "{n}");
+    assert_eq!(n["notices"][0]["workspace_default"], false, "{n}");
     // Agents without a model of their own run on it.
     assert!(
         n["notices"][0]["agents"]

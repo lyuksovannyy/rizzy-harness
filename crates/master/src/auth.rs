@@ -53,12 +53,37 @@ pub struct Auth {
     secure_cookie: bool,
     claim: Arc<tokio::sync::Mutex<Option<Claim>>>,
     /// Lowercase username -> recent failure times (ms).
-    failures: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>,
+    failures: Failures,
+    /// Caller (user id, or `api-token`) -> recent failed lookups by
+    /// username (adding a workspace member).
+    lookups: Failures,
 }
+
+type Failures = Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>;
 
 /// Failed logins allowed per username within `THROTTLE_WINDOW_MS`.
 pub const THROTTLE_MAX_FAILURES: usize = 5;
 pub const THROTTLE_WINDOW_MS: i64 = 15 * 60 * 1000;
+/// Failed member adds allowed per caller within `THROTTLE_WINDOW_MS`: the
+/// "no such user" answer tells whether a username exists (PLAN.md T12).
+pub const LOOKUP_MAX_FAILURES: usize = 10;
+
+/// How many of `key`'s failures are still inside the window (older ones
+/// are dropped).
+fn recent_failures(map: &Failures, key: &str, now_ms: i64) -> usize {
+    let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
+    let list = map.entry(key.to_string()).or_default();
+    list.retain(|t| now_ms - *t < THROTTLE_WINDOW_MS);
+    list.len()
+}
+
+fn record_failure(map: &Failures, key: &str, now_ms: i64) {
+    map.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(key.to_string())
+        .or_default()
+        .push(now_ms);
+}
 
 /// The one-time code that creates the first admin account.
 pub struct Claim {
@@ -80,7 +105,7 @@ pub struct Principal {
 }
 
 impl Principal {
-    fn from_user(u: UserRow) -> Self {
+    pub fn from_user(u: UserRow) -> Self {
         Self {
             can_agentic: u.role == Role::Admin || u.can_agentic,
             must_change_password: u.must_change_password,
@@ -311,32 +336,52 @@ impl Auth {
             secure_cookie,
             claim: Arc::new(tokio::sync::Mutex::new(None)),
             failures: Arc::default(),
+            lookups: Arc::default(),
         }
-    }
-
-    fn failures_lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<i64>>> {
-        self.failures.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Is this username currently locked out by repeated failures?
     pub fn login_throttled(&self, username: &str, now_ms: i64) -> bool {
-        let mut map = self.failures_lock();
-        let list = map.entry(username.to_ascii_lowercase()).or_default();
-        list.retain(|t| now_ms - *t < THROTTLE_WINDOW_MS);
-        list.len() >= THROTTLE_MAX_FAILURES
+        recent_failures(&self.failures, &username.to_ascii_lowercase(), now_ms)
+            >= THROTTLE_MAX_FAILURES
     }
 
     pub fn record_login_failure(&self, username: &str, now_ms: i64) {
-        self.failures_lock()
-            .entry(username.to_ascii_lowercase())
-            .or_default()
-            .push(now_ms);
+        record_failure(&self.failures, &username.to_ascii_lowercase(), now_ms);
     }
 
     pub fn clear_login_failures(&self, username: &str) {
-        self.failures_lock().remove(&username.to_ascii_lowercase());
+        self.failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&username.to_ascii_lowercase());
+    }
+
+    /// Take one of `caller`'s username lookups, or `false` when they have
+    /// used up their failures. Checking and counting happen under one lock,
+    /// so a burst of parallel adds cannot all pass before the first failure
+    /// is recorded: the taken slot counts as a failure until
+    /// `release_lookup` gives it back.
+    pub fn try_reserve_lookup(&self, caller: &str, now_ms: i64) -> bool {
+        let mut map = self.lookups.lock().unwrap_or_else(|p| p.into_inner());
+        let list = map.entry(caller.to_string()).or_default();
+        list.retain(|t| now_ms - *t < THROTTLE_WINDOW_MS);
+        if list.len() >= LOOKUP_MAX_FAILURES {
+            return false;
+        }
+        list.push(now_ms);
+        true
+    }
+
+    /// Give back the slot `try_reserve_lookup` took at `now_ms`: the
+    /// username existed, or the store could not tell.
+    pub fn release_lookup(&self, caller: &str, now_ms: i64) {
+        let mut map = self.lookups.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(list) = map.get_mut(caller)
+            && let Some(i) = list.iter().position(|t| *t == now_ms)
+        {
+            list.swap_remove(i);
+        }
     }
 
     /// Enable first-run claiming with this code.
@@ -611,6 +656,20 @@ mod tests {
         a.record_login_failure("carol", 0);
         a.clear_login_failures("Carol");
         assert!(!a.login_throttled("carol", 1));
+        // Username lookups count per caller, separately from logins.
+        for i in 0..LOOKUP_MAX_FAILURES as i64 {
+            assert!(a.try_reserve_lookup("u1", i));
+        }
+        assert!(!a.try_reserve_lookup("u1", 20));
+        assert!(!a.login_throttled("u1", 20));
+        assert!(a.try_reserve_lookup("u2", 20));
+        // A slot given back (the username existed) is free again.
+        a.release_lookup("u1", 3);
+        assert!(a.try_reserve_lookup("u1", 21));
+        assert!(!a.try_reserve_lookup("u1", 22));
+        a.release_lookup("u1", 99);
+        assert!(!a.try_reserve_lookup("u1", 23), "only taken slots go back");
+        assert!(a.try_reserve_lookup("u1", THROTTLE_WINDOW_MS + 30));
     }
 
     #[test]

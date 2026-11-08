@@ -66,6 +66,9 @@ export function Composer(props: {
   sessionModel?: string;
   defaultModel?: string | null;
   agenticBlocked: string | null;
+  /** Session: why this chat cannot be driven here (its workspace role, the
+   * account's grant); the box is read-only and says so. Stop still works. */
+  readOnly?: string | null;
   running?: boolean;
   draftKey?: string;
   onSubmit: (s: Submission) => Promise<void>;
@@ -286,7 +289,7 @@ export function Composer(props: {
 
   const submit = async () => {
     const body = text.trim();
-    if (!body || busy || uploading || props.running) return;
+    if (!body || busy || uploading || props.running || props.readOnly) return;
     if (mode === "agentic" && (!cwd.trim() || !nodeId)) {
       setErr(t("composer.folder"));
       return;
@@ -378,9 +381,11 @@ export function Composer(props: {
 
   const placeholder = props.running
     ? t("composer.running")
-    : !home
-      ? t("composer.placeholder.session")
-      : t(`composer.placeholder.${mode}`);
+    : props.readOnly
+      ? t("composer.readOnly")
+      : !home
+        ? t("composer.placeholder.session")
+        : t(`composer.placeholder.${mode}`);
   const lines = Math.min(10, Math.max(1, text.split("\n").length));
 
   return (
@@ -412,6 +417,7 @@ export function Composer(props: {
           value={text}
           placeholder={placeholder}
           aria-label={placeholder}
+          disabled={!!props.readOnly}
           onChange={(e) => {
             setText(e.target.value);
             setCaret(e.target.selectionStart);
@@ -649,7 +655,7 @@ export function Composer(props: {
               type="button"
               className="send"
               onClick={() => void submit()}
-              disabled={busy || uploading > 0 || !text.trim()}
+              disabled={busy || uploading > 0 || !text.trim() || !!props.readOnly}
               aria-label={t("composer.send")}
             >
               <ArrowUp size={18} />
@@ -687,6 +693,7 @@ export function Composer(props: {
         )}
       </div>
       {home && props.agenticBlocked && <div className="hint muted">{props.agenticBlocked}</div>}
+      {props.readOnly && <div className="hint muted">{t("conv.readOnly", { reason: props.readOnly })}</div>}
       {err && <div className="error-text">{err}</div>}
     </div>
   );

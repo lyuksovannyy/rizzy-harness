@@ -1,11 +1,23 @@
+import type { WorkspaceSummary } from "../types";
 import { t } from "./i18n";
+import { workspaceName } from "./workspaces";
 
 export type Mode = "search" | "ask" | "agentic";
 export const MODES: Mode[] = ["search", "ask", "agentic"];
 
-/** Why agentic is unavailable, or null. */
-export function agenticBlockReason(canAgentic: boolean, workersOnline: number): string | null {
+/** Why agentic is unavailable, or null. The account's server grant comes
+ * first (the security boundary), then the workspace role's `agentic`
+ * permission (the team's rule; no workspace, as for the API token, adds
+ * none), then a worker to run on. */
+export function agenticBlockReason(
+  canAgentic: boolean,
+  workspace: Pick<WorkspaceSummary, "name" | "personal" | "permissions"> | null | undefined,
+  workersOnline: number,
+): string | null {
   if (!canAgentic) return t("agentic.noGrant");
+  if (workspace && !workspace.permissions.includes("agentic")) {
+    return t("agentic.noRole", { workspace: workspaceName(workspace) });
+  }
   if (workersOnline === 0) return t("agentic.noWorker");
   return null;
 }

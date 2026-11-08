@@ -238,7 +238,8 @@ function fakeProvider() {
     await p.emulateMedia({ colorScheme: 'dark' });
     check((await bodyBg(p)) === darkBg && lightBg !== darkBg, 'the OS theme drives the page again');
     log('theme: preview, revert, saved, no flash, system');
-    await p.click('.tabs >> text=AI provider');
+    await p.click('.settings-sections >> text=Server');
+    await p.click('.tabs >> text=AI providers');
     await p.waitForSelector('.providers li:has-text("fake::")');
     await p.click('button[aria-label="Edit Fake"]');
     await p.waitForSelector('text=a key is stored');

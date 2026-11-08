@@ -89,6 +89,13 @@ describe("agent plans", () => {
     expect(planProblems({ general: { model: "x", fallbacks: [] }, gone: { model: "a", fallbacks: [] } }, ["a"], AGENTS)).toHaveLength(1);
   });
 
+  test("problems when agents may inherit a chain: General may have none, fallbacks still need a main", () => {
+    expect(planProblems({}, [], AGENTS, undefined, true)).toEqual([]);
+    expect(planProblems({ general: { model: null, fallbacks: ["b"] } }, ["b"], AGENTS, undefined, true)).toEqual([
+      "General has fallbacks but no main model.",
+    ]);
+  });
+
   test("a plan starts from the saved agents, this provider's models local, the demo's dropped", () => {
     const saved = {
       general: { model: "openai::gpt-4o", fallbacks: ["groq::llama", "demo::echo"] },

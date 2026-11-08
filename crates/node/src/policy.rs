@@ -72,7 +72,7 @@ impl NodePolicy {
             Ok(p)
         } else {
             Err(format!(
-                "cwd {} is outside this node's workspace_roots",
+                "cwd {} is outside the folders this node allows (workspace_roots in node.toml)",
                 p.display()
             ))
         }

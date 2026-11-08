@@ -4,6 +4,7 @@
 // and is stored as written, so hidden characters show as codes here: the
 // user should see what would go into future chats.
 import { BookmarkPlus } from "lucide-react";
+import { MEMORY_HASH } from "../lib/routes";
 import { showHidden } from "../md/hidden";
 import { rt } from "../md/strings";
 
@@ -17,7 +18,7 @@ export function MemoryNotice({ text }: { text: string }) {
         </div>
         <div className="muted small">
           {rt("memory.pending")}{" "}
-          <a className="memory-review" href="#/settings/memory">
+          <a className="memory-review" href={MEMORY_HASH}>
             {rt("memory.review")}
           </a>
         </div>

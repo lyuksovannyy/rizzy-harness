@@ -61,7 +61,9 @@ async fn session(m: &Master, ws: &str, agent: &str) -> SessionId {
         })
         .await
         .unwrap();
-    m.inner_mirror().set_session_owner(sid, "alex").unwrap();
+    m.inner_mirror()
+        .claim_session(sid, Some("alex"), None)
+        .unwrap();
     sid
 }
 
@@ -255,7 +257,7 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
     let outs: Vec<String> = outputs(&evs).into_iter().skip(2).collect();
     assert_eq!(
         outs.iter()
-            .filter(|o| o.contains("applied to the workspace"))
+            .filter(|o| o.contains("applied to the folder"))
             .count(),
         1,
         "{outs:#?}"

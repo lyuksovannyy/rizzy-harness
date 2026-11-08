@@ -15,14 +15,12 @@ use serde_json::json;
 use super::{ApiError, ApiResult, require_admin, runtime};
 use crate::Master;
 use crate::avatars::AgentAvatar;
-use crate::config::{AgentChain, Config, ModelConfig, ProviderConfig, ProviderKind};
+use crate::config::{AgentChain, Config, ModelConfig, ProviderConfig, ProviderKind, check_chain};
 use crate::presets::{self, Preset};
 use crate::providers::{ProviderRuntime, secret_name};
 
 const MAX_NAME: usize = 64;
 const MAX_TOKENS: u64 = 100_000_000;
-/// Fallbacks per agent.
-const MAX_FALLBACKS: usize = 8;
 
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
@@ -520,32 +518,13 @@ pub(super) async fn put_agent_models(
             .ok_or_else(|| bad(format!("unknown model {id:?}")))
     };
     for (agent, choice) in b.agent_models {
-        if agents.get(&agent).is_none() {
-            return Err(bad(format!("unknown agent {agent:?}")));
-        }
         match choice {
             Some(c) => {
-                if c.fallbacks.len() > MAX_FALLBACKS {
-                    return Err(bad(format!("{agent}: at most {MAX_FALLBACKS} fallbacks")));
-                }
-                let main = model(&cfg, &c.model)?;
-                let mut fallbacks: Vec<String> = Vec::new();
-                for f in &c.fallbacks {
-                    let f = model(&cfg, f)?;
-                    if f == main || fallbacks.contains(&f) {
-                        return Err(bad(format!(
-                            "{agent}: fallbacks must not repeat the main model or each other ({f})"
-                        )));
-                    }
-                    fallbacks.push(f);
-                }
-                cfg.agent_models.insert(
-                    agent,
-                    AgentChain {
-                        model: main,
-                        fallbacks,
-                    },
-                );
+                check_chain(&agents, &|id| cfg.knows_model(id), &agent, &c).map_err(bad)?;
+                cfg.agent_models.insert(agent, c);
+            }
+            None if agents.get(&agent).is_none() => {
+                return Err(bad(format!("unknown agent {agent:?}")));
             }
             None => {
                 cfg.agent_models.remove(&agent);
@@ -581,7 +560,8 @@ pub(super) async fn put_agent_avatar(
     let mut cfg = rt.config();
     cfg.agent_avatars.insert(id, avatar);
     apply(&m, &rt, cfg)?;
-    Ok(Json(super::agent_json(&m, agent)))
+    // Server settings show the server's own chains.
+    Ok(Json(super::agent_json(&m, &m.resolver(None), agent)))
 }
 
 /// A listing for the picker: the listed models, then the provider's saved

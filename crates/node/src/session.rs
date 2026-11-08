@@ -747,9 +747,9 @@ impl Session {
             Err(e) => format!("its changes could not be collected: {e}"),
             Ok(result) => match crate::git::apply(&iso.root, &iso.base, &result).await {
                 Ok(0) => "no file changes".to_string(),
-                Ok(n) => format!("{n} changed file(s) applied to the workspace"),
+                Ok(n) => format!("{n} changed file(s) applied to the folder"),
                 Err(e) => format!(
-                    "its changes conflict with the workspace and were NOT applied ({e}); \
+                    "its changes conflict with the folder and were NOT applied ({e}); \
                      to apply by hand: git diff {} {} | git apply",
                     iso.base, result
                 ),

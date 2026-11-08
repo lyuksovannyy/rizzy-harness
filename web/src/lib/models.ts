@@ -125,8 +125,15 @@ export function rolesOf(p: Plan, id: string): { agent: string; role: "main" | "f
 }
 
 /** Why a plan cannot be saved yet, as sentences; none: it can. `ids` are
- * the chosen models, each of which must serve some agent. */
-export function planProblems(p: Plan, ids: string[], agents: { id: string; name: string }[], label: (id: string) => string = (x) => x): string[] {
+ * the chosen models, each of which must serve some agent. With `inherit`,
+ * an agent may have no models here (it uses the server's), General too. */
+export function planProblems(
+  p: Plan,
+  ids: string[],
+  agents: { id: string; name: string }[],
+  label: (id: string) => string = (x) => x,
+  inherit = false,
+): string[] {
   const out: string[] = [];
   const used = new Set(agents.flatMap((a) => [chain(p, a.id).model, ...chain(p, a.id).fallbacks]));
   const loose = ids.filter((id) => !used.has(id));
@@ -135,7 +142,7 @@ export function planProblems(p: Plan, ids: string[], agents: { id: string; name:
     const c = chain(p, a.id);
     if (c.fallbacks.length > MAX_FALLBACKS) out.push(`${a.name} has more than ${MAX_FALLBACKS} fallbacks.`);
     if (c.model) continue;
-    if (a.id === "general") out.push("General needs a main model: it is the default for everyone.");
+    if (a.id === "general" && !inherit) out.push("General needs a main model: it is the default for everyone.");
     else if (c.fallbacks.length) out.push(`${a.name} has fallbacks but no main model.`);
   }
   return out;

@@ -63,7 +63,7 @@ fn session_owner_is_recorded() {
     )
     .unwrap();
     assert_eq!(s.sessions().unwrap()[0].owner_id, None);
-    s.set_session_owner(sid, "u1").unwrap();
+    s.claim_session(sid, Some("u1"), None).unwrap();
     assert_eq!(s.sessions().unwrap()[0].owner_id.as_deref(), Some("u1"));
 }
 

@@ -560,7 +560,8 @@ export function ProviderForm(props: {
   );
 }
 
-/** Loads the providers and agents for a form (admins only: `enabled`). */
+/** Loads the providers and agents for a form (admins only: `enabled`). The
+ * agents are the server's: the chains a provider's models are placed in. */
 export function useProviders(enabled = true) {
   const [state, setState] = useState<ProvidersState | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -572,7 +573,7 @@ export function useProviders(enabled = true) {
       .then(setState)
       .catch((x) => setErr(x instanceof Error ? x.message : String(x)));
     api
-      .agents()
+      .agents("server")
       .then((r) => setAgents(r.agents))
       .catch(() => {});
   }, [enabled]);

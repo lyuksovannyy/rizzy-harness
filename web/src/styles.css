@@ -3400,3 +3400,53 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg);
 }
 .avatar-picks button.on { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---------- Workspaces ---------- */
+/* The sidebar's switcher reads as a nav item, not as a form field. */
+.workspace-switch { display: flex; flex-direction: column; gap: var(--space-1-5); padding: 0 0 var(--space-1); }
+.workspace-switch .select { display: block; }
+.workspace-switch .select-button {
+  width: 100%; min-height: 0; padding: 6px 10px; border-color: transparent; border-radius: var(--r-sm);
+  background: transparent; font-size: var(--text-md); font-weight: var(--w-medium);
+}
+.workspace-switch .select-button:hover:not(:disabled) { background: var(--bg-hover); border-color: transparent; }
+.workspace-switch .select-button > .ellipsis { flex: 1; text-align: left; }
+.workspace-switch .select-list { right: 0; min-width: 0; }
+.workspace-badge {
+  width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: var(--r-sm);
+  background: var(--accent); color: var(--accent-fg); font-size: var(--text-xs); font-weight: var(--w-semibold);
+}
+.workspace-new { display: flex; flex-direction: column; gap: var(--space-1-5); padding: 0 6px; }
+.workspace-new .row button { min-height: 0; padding: 4px 12px; font-size: var(--text-sm); }
+/* Taken out of a workspace: one line, until dismissed or the next switch. */
+.workspace-gone {
+  display: flex; gap: var(--space-3); align-items: center; justify-content: center;
+  padding: 8px 16px 8px 56px; color: var(--fg-2); border-bottom: 1px solid var(--line);
+}
+/* Settings sections above the tabs: one tier each. */
+.settings-sections { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-3); }
+.settings-sections button {
+  min-height: 0; padding: 4px 12px; border-radius: var(--r-full); background: transparent;
+  color: var(--fg-2); font-size: var(--text-sm);
+}
+.settings-sections button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.settings-sections button.on { background: var(--bg-3); color: var(--fg); font-weight: var(--w-medium); }
+/* Workspace panels: the viewer's role, the defaults new chats get, and
+   member lists (read-only in Overview, with owner recovery for server admins). */
+.ws-role { display: flex; flex-direction: column; gap: var(--space-1); }
+.ws-role-name { font-weight: var(--w-semibold); color: var(--fg); }
+.ws-facts { display: grid; gap: var(--space-2); margin: 0; }
+.ws-facts > div { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); align-items: baseline; }
+.ws-facts dt { min-width: 8rem; color: var(--fg-2); font-size: var(--text-sm); }
+.ws-facts dd { margin: 0; color: var(--fg); }
+.ws-members { list-style: none; margin: 0; padding: 0; }
+.ws-members > li {
+  display: flex; align-items: center; gap: var(--space-2); padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.ws-members > li:last-child { border-bottom: none; }
+.ws-admin-members { padding: 0 var(--space-2); }
+table.users.ws-roles td:not(:first-child),
+table.users.ws-roles th:not(:first-child) { text-align: center; }
+table.users.ws-roles svg { color: var(--ok); vertical-align: middle; }
+/* A chain set here, and the way back to the server's. */
+.chain-inherit { margin-left: auto; }

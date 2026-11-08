@@ -4,9 +4,10 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { ConnState } from "../live";
 import { t } from "../lib/i18n";
-import type { Me, NodeInfo, SearchHit, SessionRow } from "../types";
+import type { Me, NodeInfo, SearchHit, SessionRow, WorkspaceList } from "../types";
 import { Highlight } from "./Highlight";
 import { NodeBadge } from "./NodeBadge";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 export function Sidebar(props: {
   me: Me;
@@ -14,6 +15,10 @@ export function Sidebar(props: {
   nodes: NodeInfo[];
   selected: string | null;
   conn: ConnState;
+  /** For the switcher; null until loaded. */
+  workspaces: WorkspaceList | null;
+  onSwitch: (id: string) => Promise<void>;
+  onWorkspaceSettings: () => void;
   onSelect: (id: string) => void;
   onNew: () => void;
   onSettings: () => void;
@@ -25,6 +30,7 @@ export function Sidebar(props: {
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const nodeById = new Map(props.nodes.map((n) => [n.node_id, n]));
   const q = query.trim();
+  const workspaceId = props.me.workspace?.workspace_id ?? null;
   useEffect(() => {
     if (!q) {
       setHits(null);
@@ -33,7 +39,7 @@ export function Sidebar(props: {
     const ctl = new AbortController();
     const timer = setTimeout(() => {
       api
-        .search(q, false, ctl.signal)
+        .search(q, false, ctl.signal, workspaceId)
         .then((r) => setHits(r.results))
         .catch(() => {});
     }, 150);
@@ -41,7 +47,7 @@ export function Sidebar(props: {
       clearTimeout(timer);
       ctl.abort();
     };
-  }, [q]);
+  }, [q, workspaceId]);
   const shown = hits === null ? props.sessions : [];
 
   return (
@@ -67,6 +73,14 @@ export function Sidebar(props: {
           <PanelLeftClose size={18} />
         </button>
       </div>
+      {props.me.workspace && (
+        <WorkspaceSwitcher
+          active={props.me.workspace}
+          list={props.workspaces}
+          onSwitch={props.onSwitch}
+          onSettings={props.onWorkspaceSettings}
+        />
+      )}
       <button className="nav-item new-chat" onClick={props.onNew}>
         <SquarePen size={16} /> {t("nav.newChat")}
       </button>
@@ -115,7 +129,7 @@ export function Sidebar(props: {
           <span className="avatar">{props.me.username.slice(0, 1).toUpperCase()}</span>
           <span className="ellipsis grow">
             {props.me.username}
-            {props.me.role === "admin" && <span className="muted"> · admin</span>}
+            {props.me.role === "admin" && <span className="muted"> · {t("nav.serverAdmin")}</span>}
           </span>
           <Settings size={16} className="muted" />
         </button>

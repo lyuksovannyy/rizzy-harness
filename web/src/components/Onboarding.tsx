@@ -109,7 +109,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
             <p className="muted">
               The assistant can remember facts you confirm. Recall works by keywords out of the box; an
               embeddings model, from your AI provider, Ollama or another endpoint, lets it match by
-              meaning. You can change this later in Settings → Memory.
+              meaning. You can change this later in Settings → Server → Memory recall.
             </p>
             <MemoryCfgForm
               providers={providers}

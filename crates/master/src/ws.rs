@@ -151,12 +151,15 @@ async fn run(m: Master, who: auth::Principal, socket: WebSocket) {
                     Ok(Live::NodesChanged) => send(&mut sink, json!({"type": "nodes_changed"})).await,
                     // No content: each client refetches its own memories.
                     Ok(Live::MemoryChanged) => send(&mut sink, json!({"type": "memory_changed"})).await,
+                    Ok(Live::WorkspacesChanged) => send(&mut sink, json!({"type": "workspaces_changed"})).await,
                     Err(RecvError::Lagged(_)) => {
                         let mut ok = true;
                         for (sid, last) in subs.iter_mut() {
                             ok &= catch_up(&m, &mut sink, *sid, last).await;
                         }
+                        // A dropped message may have been either.
                         ok && send(&mut sink, json!({"type": "sessions_changed"})).await
+                            && send(&mut sink, json!({"type": "workspaces_changed"})).await
                     }
                     Err(RecvError::Closed) => false,
                 };

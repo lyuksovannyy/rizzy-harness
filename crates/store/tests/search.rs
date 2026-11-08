@@ -40,7 +40,7 @@ fn chat(s: &Store, owner: &str, title: &str, msgs: &[&str], incognito: bool) -> 
         )
         .unwrap();
     }
-    s.set_session_owner(sid, owner).unwrap();
+    s.claim_session(sid, Some(owner), None).unwrap();
     sid
 }
 
@@ -61,13 +61,13 @@ fn indexes_on_append_and_ranks_titles_higher() {
         &["something with tokio mentioned in passing"],
         false,
     );
-    let hits = s.search("\"tokio\"", None, 10).unwrap();
+    let hits = s.search("\"tokio\"", None, None, 10).unwrap();
     assert_eq!(hits.len(), 2);
     assert_eq!(hits[0].session_id, a, "title match ranks first");
     assert_eq!(hits[1].session_id, b);
     assert!(hits[0].snippet.contains(HIT_START) && hits[0].snippet.contains(HIT_END));
     // Assistant text is indexed too.
-    let hits = s.search("\"builder\"", None, 10).unwrap();
+    let hits = s.search("\"builder\"", None, None, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].session_id, a);
     assert!(s.session_search_text(a).unwrap().contains("worker threads"));
@@ -79,13 +79,13 @@ fn incognito_never_indexed_and_owner_filter() {
     chat(&s, "u1", "secret plan", &["the secret plan is here"], true);
     let mine = chat(&s, "u1", "public plan", &["nothing to hide"], false);
     chat(&s, "u2", "another plan", &["bob's plan"], false);
-    assert!(s.search("\"secret\"", None, 10).unwrap().is_empty());
-    let hits = s.search("\"plan\"", Some("u1"), 10).unwrap();
+    assert!(s.search("\"secret\"", None, None, 10).unwrap().is_empty());
+    let hits = s.search("\"plan\"", Some("u1"), None, 10).unwrap();
     assert_eq!(
         hits.iter().map(|h| h.session_id).collect::<Vec<_>>(),
         vec![mine]
     );
-    assert_eq!(s.search("\"plan\"", None, 10).unwrap().len(), 2);
+    assert_eq!(s.search("\"plan\"", None, None, 10).unwrap().len(), 2);
 }
 
 #[test]
@@ -99,9 +99,9 @@ fn rebuild_matches_live_index() {
         false,
     );
     chat(&s, "u1", "hidden", &["lifetimes secret"], true);
-    let before = s.search("\"lifetimes\"", None, 10).unwrap();
+    let before = s.search("\"lifetimes\"", None, None, 10).unwrap();
     s.rebuild_search_index().unwrap();
-    let after = s.search("\"lifetimes\"", None, 10).unwrap();
+    let after = s.search("\"lifetimes\"", None, None, 10).unwrap();
     assert_eq!(before, after);
     assert_eq!(after.len(), 1);
 }

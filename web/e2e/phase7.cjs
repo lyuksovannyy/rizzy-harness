@@ -96,7 +96,7 @@ const emb = http.createServer((req, res) => {
     log('unconfirmed proposal not recalled');
 
     // Confirm; now "puppy" recalls the dog fact by meaning.
-    await p.goto(`${URL_}#/settings/memory`);
+    await p.goto(`${URL_}#/settings/account/memory`);
     await p.click('.fact.proposed button:has-text("Remember")');
     await p.waitForSelector('.fact.active:has-text("Pixel")');
     await p.click('.new-chat');
@@ -107,7 +107,7 @@ const emb = http.createServer((req, res) => {
     log('recalled by meaning; embedding calls:', embedCalls);
 
     // Forget removes it.
-    await p.goto(`${URL_}#/settings/memory`);
+    await p.goto(`${URL_}#/settings/account/memory`);
     await p.click('.fact.active button:has-text("Forget")');
     await p.waitForSelector('text=Nothing yet.');
     await p.screenshot({ path: `${S}/p7-3-memory.png` });

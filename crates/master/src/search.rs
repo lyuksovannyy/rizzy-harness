@@ -109,24 +109,29 @@ pub fn coverage(tokens: &[String], text: &str) -> f64 {
     found as f64 / n as f64
 }
 
-/// Sidebar search: every word must match (last as a prefix).
+/// Sidebar search: every word must match (last as a prefix). `owner` and
+/// `workspace` filter as in `Store::search` (`None`: no filter, for the API
+/// token only).
 pub fn search(
     store: &Store,
     q: &str,
     owner: Option<&str>,
+    workspace: Option<&str>,
     limit: usize,
 ) -> harness_store::Result<Vec<SearchHit>> {
     match fts_query(&tokens(q), false) {
-        Some(fq) => store.search(&fq, owner, limit),
+        Some(fq) => store.search(&fq, owner, workspace, limit),
         None => Ok(Vec::new()),
     }
 }
 
 /// "You may have asked this before": strict, never for time-sensitive text.
+/// Filters like `search`.
 pub fn suggest(
     store: &Store,
     q: &str,
     owner: Option<&str>,
+    workspace: Option<&str>,
 ) -> harness_store::Result<Vec<SearchHit>> {
     let toks = tokens(q);
     if toks.len() < MIN_SUGGEST_TOKENS || is_time_sensitive(q) {
@@ -136,7 +141,7 @@ pub fn suggest(
         return Ok(Vec::new());
     };
     let mut scored: Vec<(f64, SearchHit)> = Vec::new();
-    for hit in store.search(&fq, owner, 20)? {
+    for hit in store.search(&fq, owner, workspace, 20)? {
         let text = store.session_search_text(hit.session_id)?;
         let c = coverage(&toks, &text);
         if c >= MIN_COVERAGE {

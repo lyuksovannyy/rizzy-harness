@@ -34,7 +34,7 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     check(await p.locator('.mode-switch button:has-text("Agentic")').isDisabled(), 'agentic disabled');
     await p.waitForSelector('text=No worker node is online');
     log('agentic disabled: no worker node (none in the container, by design)');
-    await p.goto(`${URL_}#/settings/nodes`);
+    await p.goto(`${URL_}#/settings/server/nodes`);
     await p.waitForSelector('table.users td:text-is("master")');
     const rows = await p.$$eval('table.users tbody tr td:first-child', (t) => t.map((x) => x.textContent));
     check(!rows.includes('local'), 'no local node in the container: ' + rows.join(','));

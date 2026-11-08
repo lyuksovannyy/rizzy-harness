@@ -9,7 +9,11 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 
 const INITIAL_KB = 110;
-const TOTAL_KB = 300;
+// 300 before workspaces: the switcher, the Settings sections and the workspace
+// panels brought the total to 304.9 KB, almost all of it in the lazy Settings
+// chunk (the initial load stayed at 96.1 KB). 310, the ceiling the workspaces
+// design allows, leaves room for its follow-up fixes without a raise each time.
+const TOTAL_KB = 310;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));

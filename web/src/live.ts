@@ -16,12 +16,15 @@ export class Live {
   private backoff = 500;
   private closed = false;
   private pending = false;
+  private opened = false;
   state: ConnState = "connecting";
   /** Bumped on every change so React can cheaply detect updates. */
   version = 0;
   onSessionsChanged: () => void = () => {};
   onNodesChanged: () => void = () => {};
   onMemoryChanged: () => void = () => {};
+  /** Workspaces, members, roles or the policy changed (content-free). */
+  onWorkspacesChanged: () => void = () => {};
 
   constructor() {
     this.connect();
@@ -87,6 +90,9 @@ export class Live {
       // The list may have changed while we were away.
       this.onSessionsChanged();
       this.onNodesChanged();
+      // So may the workspaces; the first connect comes with a fresh /api/me.
+      if (this.opened) this.onWorkspacesChanged();
+      this.opened = true;
     };
     ws.onmessage = (m) => this.onMessage(JSON.parse(m.data as string));
     ws.onclose = () => {
@@ -132,6 +138,9 @@ export class Live {
         break;
       case "memory_changed":
         this.onMemoryChanged();
+        break;
+      case "workspaces_changed":
+        this.onWorkspacesChanged();
         break;
       case "replayed":
         this.notify();
