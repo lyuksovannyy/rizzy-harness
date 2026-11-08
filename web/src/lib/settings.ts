@@ -64,7 +64,8 @@ const SECTIONS: { id: SectionId; show: Show; tabs: { id: TabId; show: Show }[] }
   {
     id: "server",
     show: (v) => v.role === "admin",
-    tabs: ["providers", "recall", "savings", "nodes", "users", "workspaces"].map((id) => ({
+    // Storage: the limits on stored files and each account's usage (docs/media.md).
+    tabs: ["providers", "recall", "savings", "nodes", "users", "workspaces", "storage"].map((id) => ({
       id: id as TabId,
       show: always,
     })),

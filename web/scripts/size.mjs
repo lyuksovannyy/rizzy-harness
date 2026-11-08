@@ -37,7 +37,7 @@ const I2_KB = 0;
 const I3_KB = 0;
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I4_KB = 0;
+const I4_KB = 21.2; // Phase A, measured 20.8 on 2026-11-08: Routines 10.2, Media 5.0 + MediaPreview 1.9 + lib/media 1.4, Storage tab +0.7 (Settings chunk), routine rows and notifications +0.8 initial plus `when` 0.3 (shared with I3's Similar once merged)
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
@@ -113,6 +113,7 @@ const lazyI4 = [
   ...lazyChunk(/\/Routines-/, "Routines page"),
   ...lazyChunk(/\/Media-/, "Media page"),
   ...lazyChunk(/\/Artifacts-/, "Artifacts page"),
+  ...lazyChunk(/\/MediaPreview-/, "Media preview"),
 ];
 
 console.log(`lazy chunks checked: ${lazyI3.length} (I3), ${lazyI4.length} (I4)`);

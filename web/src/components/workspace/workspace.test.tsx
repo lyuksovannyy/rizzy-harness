@@ -236,7 +236,7 @@ describe("Members", () => {
     expect(pick.value).toBe("member");
     expect(off(pick)).toEqual(["owner"]);
     // What each role may do.
-    expect([...host.querySelectorAll(".ws-roles tbody tr")].map((tr) => tr.querySelectorAll("svg").length)).toEqual([3, 3, 1, 0]);
+    expect([...host.querySelectorAll(".ws-roles tbody tr")].map((tr) => tr.querySelectorAll("svg").length)).toEqual([4, 4, 2, 0]);
   });
 
   test("an owner may make owners and manage other owners", async () => {
