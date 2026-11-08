@@ -35,16 +35,20 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+      # The version web/package.json pins (packageManager).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - run: npm run size
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm size
 
   image:
     runs-on: ubuntu-latest

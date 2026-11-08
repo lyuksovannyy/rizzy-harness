@@ -1,0 +1,5 @@
+# pnpm settings for web/ (a single package, not a monorepo).
+overrides:
+  # The version THIRD_PARTY_NOTICES.md lists; the highlighter worker swaps
+  # hastscript's `h` for src/md/hast-h.ts (vite.config.ts).
+  hastscript: 9.0.1

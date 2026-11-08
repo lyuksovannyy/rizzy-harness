@@ -6,6 +6,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 
 const INITIAL_KB = 110;
 const TOTAL_KB = 300;
@@ -67,7 +68,16 @@ const backgrounds = [
 for (const f of backgrounds) if (initial.has(f)) failures.push(`${f} is in the initial load`);
 // What the home screen and every chat load: math and highlighting must not.
 const eager = [...initial, ...chunk(/\/Conversation-/, "Conversation")];
-const installed = (file) => [join(web, "node_modules", file)].filter(existsSync);
+// An installed package's file, found the way the package that pulls it in
+// finds it (pnpm keeps transitive dependencies out of web/node_modules).
+const installed = (via, file) => {
+  try {
+    const from = via.reduce((at, dep) => createRequire(at).resolve(dep), join(web, "package.json"));
+    return [createRequire(from).resolve(file)].filter(existsSync);
+  } catch {
+    return [];
+  }
+};
 
 // Each library is found by a string only it contains, one that survives
 // minification. A marker must also match where the library does live (its
@@ -75,7 +85,7 @@ const installed = (file) => [join(web, "node_modules", file)].filter(existsSync)
 // otherwise a check against it would pass without testing anything.
 const markers = [
   // micromark-extension-math's HTML half imports KaTeX; it must tree-shake out.
-  { lib: "KaTeX", re: /KaTeX parse error/, banned: allJs, home: installed("katex/dist/katex.mjs") },
+  { lib: "KaTeX", re: /KaTeX parse error/, banned: allJs, home: installed(["remark-math", "micromark-extension-math"], "katex/dist/katex.mjs") },
   // Our own code names mermaid fences, so the marker is the library's API
   // object. Mermaid is not installed, so there is nothing to hold it to.
   { lib: "mermaid", re: /mermaidAPI/, banned: allJs, home: [] },

@@ -24,8 +24,11 @@ See PLAN.md for what is left out and why.
 
 ## Quick start
 
+The web UI builds with pnpm 12.17.0, the version `web/package.json` pins
+(`npm install --global pnpm@12.17.0` if you do not have it).
+
 ```bash
-cd web && npm ci && npm run build && cd ..
+cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
 ```
 
 ```bash
@@ -417,7 +420,7 @@ cargo test --workspace
 ```
 
 ```bash
-cd web && npm test && npm run typecheck
+cd web && pnpm test && pnpm typecheck
 ```
 
 UI dev server with hot reload (proxies `/api` to a running `rizzy-harness serve`):
@@ -427,13 +430,13 @@ UI dev server with hot reload (proxies `/api` to a running `rizzy-harness serve`
 ```
 
 ```bash
-cd web && npm run dev
+cd web && pnpm dev
 ```
 
 Web bundle budget (also in CI):
 
 ```bash
-cd web && npm run build && npm run size
+cd web && pnpm build && pnpm size
 ```
 
 End-to-end UI flows against the real binary (needs Playwright + Chromium):

@@ -81,7 +81,7 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
             .into_response(),
         None => Html(format!(
             "<!doctype html><title>{0}</title><body style=\"font-family:sans-serif\"><h1>{0}</h1>\
-             <p>The web UI is not built. Run <code>npm ci &amp;&amp; npm run build</code> in <code>web/</code> and rebuild.</p>\
+             <p>The web UI is not built. Run <code>pnpm install &amp;&amp; pnpm build</code> in <code>web/</code> and rebuild.</p>\
              <p>The API is available under <code>/api</code>.</p></body>",
             harness_core::APP_NAME
         ))

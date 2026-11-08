@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@12.17.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc -p . && vite build",
@@ -31,8 +32,5 @@
     "typescript": "5.9.3",
     "vite": "8.3.5",
     "vitest": "5.0.5"
-  },
-  "overrides": {
-    "hastscript": "9.0.1"
   }
 }

@@ -414,6 +414,16 @@ login page.
   no UI framework, hand-written CSS. `web/dist` is embedded via `rust-embed`;
   a `build.rs` creates an empty `web/dist` if missing so `cargo test` works
   without Node; the server then serves a "UI not built" page.
+* **pnpm 12 for `web/`** (2026-11-08; npm before). `packageManager` pins
+  pnpm@12.17.0 and pnpm records it, with integrity, in `pnpm-lock.yaml`. pnpm 12
+  ignores both npm's `overrides` and the `pnpm` field in package.json, so
+  overrides live in `web/pnpm-workspace.yaml` (the hastscript pin THIRD_PARTY_NOTICES
+  lists). CI uses `pnpm/action-setup` reading `packageManager`; the image installs
+  that version with `npm install --global` (no corepack, which Node 25+ no
+  longer ships). The isolated layout keeps transitive packages out of
+  `web/node_modules`, so `scripts/size.mjs` finds KaTeX through
+  `remark-math` → `micromark-extension-math` instead of a fixed path.
+  `package-lock.json` is gone; it had also fallen behind `package.json`.
 * **Phase 1 binds loopback only**; TLS arrives with the node link in Phase 2.
 * **MCP:** use the official `rmcp` crate (verified: crates.io `rmcp`, repo
   `modelcontextprotocol/rust-sdk`, 3.8.0 as of 2026-10-26). Pin at Phase 4 start.

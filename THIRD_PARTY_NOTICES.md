@@ -15,7 +15,7 @@ affiliated with or endorsed by it.
 These packages were added for rich messages (PLAN.md, "Rich messages") and
 are part of `web/dist`, which the binary embeds. Each is under the MIT
 licence printed at the end of this section, with the copyright line given
-here. Versions are pinned in `web/package.json` and `web/package-lock.json`.
+here. Versions are pinned in `web/package.json` and `web/pnpm-lock.yaml`.
 
 | Package | Copyright | Where it runs |
 |---|---|---|
@@ -63,13 +63,13 @@ MIT licence (for every package in the table above):
 
 ## Rich messages: installed, not shipped
 
-npm installs these with the packages above, or for tests. None of them is
+pnpm installs these with the packages above, or for tests. None of them is
 in `web/dist`.
 
 - katex 0.16.47 (MIT, Copyright (c) 2013-2020 Khan Academy and other
   contributors) and its CLI's commander 8.3.0 (MIT, Copyright (c) 2011 TJ
   Holowaychuk): dependencies of micromark-extension-math's HTML half, which
-  we do not use. `npm run size` fails if KaTeX reaches any chunk.
+  we do not use. `pnpm size` fails if KaTeX reaches any chunk.
 - unist-util-remove-position 5.0.0 (MIT, Copyright (c) 2016 Titus Wormer):
   declared by mdast-util-math 3.0.0, which does not import it.
 - @types/katex 0.16.8 and @types/prismjs 1.26.6 (MIT, Copyright (c)
@@ -77,11 +77,11 @@ in `web/dist`.
 - Dev only, the DOM for `web/src/md/math.test.ts`: happy-dom 21.0.4 (MIT,
   Copyright (c) 2019 David Ortner), with entities 7.0.1 (BSD-2-Clause,
   Copyright (c) Felix Böhm), whatwg-mimetype 3.0.0 (MIT, Copyright (c)
-  Domenic Denicola), ws 8.22.0 (MIT, Copyright (c) 2011 Einar Otto Stangvik,
+  Domenic Denicola), ws 8.22.1 (MIT, Copyright (c) 2011 Einar Otto Stangvik,
   Copyright (c) 2013 Arnout Kazemier and contributors), buffer-image-size
   0.6.4 (MIT, Copyright (c) 2017 Aditya Yadav), undici-types 8.9.0 (MIT,
   Copyright (c) Matteo Collina and Undici contributors), and @types/node
-  26.6.5, @types/ws 8.18.2, @types/whatwg-mimetype 3.0.2 (MIT, Copyright (c)
+  26.6.6, @types/ws 8.18.2, @types/whatwg-mimetype 3.0.2 (MIT, Copyright (c)
   Microsoft Corporation).
 
 Rich messages added no Rust crates: the ui-block scanner, FNV hash, date and

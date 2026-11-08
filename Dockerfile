@@ -8,10 +8,12 @@
 ARG REGISTRY=docker.io/library
 FROM ${REGISTRY}/node:22-trixie-slim AS web
 WORKDIR /src/web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+# pnpm at the version package.json pins (packageManager).
+RUN npm install --global --no-audit --no-fund "$(node -p 'require("./package.json").packageManager')" \
+ && pnpm install --frozen-lockfile
 COPY web/ ./
-RUN npm run build
+RUN pnpm build
 
 FROM ${REGISTRY}/rust:1.99-slim-trixie AS build
 WORKDIR /src
