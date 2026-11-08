@@ -1,6 +1,7 @@
 //! The master: mirrors every node's sessions, routes commands to the owning
 //! node, and serves the web UI. It never runs tools itself.
 
+pub mod agent_edits;
 mod assets;
 pub mod attachments;
 pub mod auth;
@@ -101,7 +102,7 @@ pub struct MasterInner {
     acks: Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
-    agents: Mutex<harness_agents::AgentSet>,
+    agents: Mutex<agent_edits::Agents>,
     providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
     /// The built-in node's graphify switch and its node.toml.
     graphify: Mutex<
@@ -228,9 +229,11 @@ impl Master {
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
                 provision: Mutex::new(HashMap::new()),
-                agents: Mutex::new(harness_agents::AgentSet::from_agents(
-                    harness_agents::builtins(),
-                    harness_agents::DEFAULT_AGENT,
+                agents: Mutex::new(agent_edits::Agents::new(
+                    harness_agents::AgentSet::from_agents(
+                        harness_agents::builtins(),
+                        harness_agents::DEFAULT_AGENT,
+                    ),
                 )),
             }),
         }
@@ -385,14 +388,6 @@ impl Master {
             .find(|n| n.embedded)
             .or(nodes.first())
             .map(|n| n.node_id.clone())
-    }
-
-    pub fn set_agents(&self, agents: harness_agents::AgentSet) {
-        *lock(&self.inner.agents) = agents;
-    }
-
-    pub fn agents(&self) -> harness_agents::AgentSet {
-        lock(&self.inner.agents).clone()
     }
 
     /// A listed model by its `<provider>::<raw>` id.
@@ -800,7 +795,12 @@ impl Master {
         let mention = leading_mention(&text)
             .filter(|id| reply.is_none() && r.agents().get(id).is_some())
             .map(str::to_string);
-        let chosen = asker.or(agent_id).or(mention).or(row.agent_id.clone());
+        // A chat whose agent was deleted goes on with the default one.
+        let kept = row
+            .agent_id
+            .clone()
+            .filter(|id| r.agents().get(id).is_some());
+        let chosen = asker.or(agent_id).or(mention).or(kept);
         let session_model = self.session_model(&row).await;
         let mut agent = r.agent_spec_with(
             chosen.as_deref(),
@@ -811,9 +811,15 @@ impl Master {
         // prompt: a system prompt that changes every turn would make the
         // provider re-read (and bill) the whole conversation each time.
         let mut turn_context: Vec<String> = context.into_iter().collect();
-        if row.incognito || !workspaces::uses_memory(self, &row).await {
-            // Incognito chats, and chats in a team workspace where the owner
-            // keeps their memory out, neither write nor read memory.
+        // Agents with memory off (on the Agents page) skip it like incognito.
+        let agent_memory = r
+            .agents()
+            .get(&agent.agent_id)
+            .is_none_or(|a| a.features.memory);
+        if row.incognito || !agent_memory || !workspaces::uses_memory(self, &row).await {
+            // Incognito chats, chats with an agent whose memory is off, and
+            // chats in a team workspace where the owner keeps their memory
+            // out neither write nor read memory.
             deny_remember(&mut agent);
         } else if let Some(mem) = self.memory().filter(|_| !text.trim().is_empty()) {
             // An answer with no note has nothing to recall by: the answer

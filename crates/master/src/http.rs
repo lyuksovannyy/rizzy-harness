@@ -11,6 +11,7 @@ use serde_json::json;
 use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth};
 
+mod agent_edits;
 mod providers;
 mod workspaces;
 
@@ -131,7 +132,14 @@ pub fn router(master: Master) -> Router {
         .route("/api/admin/provision/{id}/recheck", post(provision_recheck))
         .route("/api/admin/nodes/{id}", axum::routing::delete(revoke_node))
         .route("/api/models", get(models))
-        .route("/api/agents", get(agents))
+        .route("/api/agents", get(agents).post(agent_edits::create_agent))
+        .route(
+            "/api/agents/{id}",
+            get(agent_edits::get_agent)
+                .patch(agent_edits::update_agent)
+                .delete(agent_edits::delete_agent),
+        )
+        .route("/api/agent-summary", post(agent_edits::generate_summary))
         .route(
             "/api/attachments",
             post(upload).layer(axum::extract::DefaultBodyLimit::max(

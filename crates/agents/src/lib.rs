@@ -14,6 +14,8 @@
 //! delegates: [coder, scout]                       # may hand sub-tasks to these
 //! max_subagents: 4                                # per turn (default 4)
 //! max_subagent_tokens: 200000                     # per turn, all sub-agents
+//! memory: true                                    # recall and `remember` (default true)
+//! available_as: [agent, subagent]                 # default both
 //! ---
 //! System prompt in markdown...
 //! ```
@@ -22,6 +24,16 @@
 //! `rich` also allows questions and forms the user answers, `display` only
 //! progress and charts, `off` none (fences stay code). A delegated sub-task
 //! runs at `display` at most.
+//!
+//! `available_as` says where the agent may be used: `agent` puts it in the
+//! picker and `@mentions`, `subagent` lets agents that delegate hand it
+//! sub-tasks (one that is not is dropped from every `delegates`).
+//!
+//! Agents made on the Agents page live in the master's database, not here:
+//! see [`edits`], which also applies the summary and additional
+//! instructions people give built-in and file agents.
+
+pub mod edits;
 
 use std::path::Path;
 
@@ -53,6 +65,10 @@ pub enum AgentError {
     BadEffort { id: String, got: String },
     #[error("{0}: {1}")]
     Io(String, std::io::Error),
+    #[error("{0}: available_as must name agent, subagent or both")]
+    Unavailable(String),
+    #[error("{0}: a built-in or file agent has this id")]
+    Shadowed(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +92,96 @@ struct Frontmatter {
     max_subagents: Option<u32>,
     #[serde(default)]
     max_subagent_tokens: Option<u64>,
+    #[serde(default = "yes")]
+    memory: bool,
+    #[serde(default = "both")]
+    available_as: Vec<Use>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn both() -> Vec<Use> {
+    vec![Use::Agent, Use::Subagent]
+}
+
+/// Where an agent may be used (`available_as`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Use {
+    Agent,
+    Subagent,
+}
+
+/// Where a definition comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// Ships in the binary.
+    Builtin,
+    /// `<data>/agents/<id>.md`, written by whoever runs the server.
+    File,
+    /// Made on the Agents page (stored by the master).
+    Custom,
+}
+
+// Tools each feature switch stands for. A built-in or file agent has a
+// feature when its tool list allows any of them.
+const WEB_TOOLS: &[&str] = &["web_search", "web_fetch"];
+const READ_TOOLS: &[&str] = &["read", "grep", "glob", "outline", "graph_query"];
+const EDIT_TOOLS: &[&str] = &["write", "edit"];
+const COMMAND_TOOLS: &[&str] = &["bash", "tool_output"];
+const MEMORY_TOOL: &str = "remember";
+
+/// What an agent can do, as the Agents page shows it. A custom agent is
+/// made from these; for the others they are read off the definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Features {
+    /// The user's memory: facts recalled into its turns, `remember`.
+    pub memory: bool,
+    /// `web_search` and `web_fetch`.
+    pub web: bool,
+    /// Read and search files.
+    pub read_files: bool,
+    /// Write and edit files.
+    pub edit_files: bool,
+    /// Run shell commands.
+    pub commands: bool,
+    /// Hand sub-tasks to the agents available as sub-agents.
+    pub delegate: bool,
+    /// In the agent picker and `@mentions`.
+    pub as_agent: bool,
+    /// May be handed sub-tasks.
+    pub as_subagent: bool,
+}
+
+impl Features {
+    /// The tools a custom agent with these features asks for.
+    pub fn tools(&self) -> Vec<String> {
+        let groups = [
+            (self.memory, &[MEMORY_TOOL][..]),
+            (self.web, WEB_TOOLS),
+            (self.read_files, READ_TOOLS),
+            (self.edit_files, EDIT_TOOLS),
+            (self.commands, COMMAND_TOOLS),
+        ];
+        groups
+            .iter()
+            .filter(|(on, _)| *on)
+            .flat_map(|(_, tools)| tools.iter().map(|t| t.to_string()))
+            .collect()
+    }
+
+    /// Work that runs long gets the standard budget; the rest stays lean.
+    fn budget(&self) -> Budget {
+        if self.edit_files || self.commands || self.delegate {
+            Budget::Standard
+        } else {
+            Budget::Lean
+        }
+    }
 }
 
 /// An agent as listed in the UI.
@@ -83,15 +189,19 @@ struct Frontmatter {
 pub struct Agent {
     pub id: String,
     pub name: String,
+    /// The summary under its name (one or two sentences).
     pub description: String,
     pub builtin: bool,
+    pub origin: Origin,
+    pub features: Features,
     /// Agent ids this one may delegate to (resolved by the master).
     pub delegates: Vec<String>,
     #[serde(skip)]
     pub spec: AgentSpec,
 }
 
-fn valid_id(id: &str) -> bool {
+/// 1-32 characters: a-z, 0-9, `-`.
+pub fn valid_id(id: &str) -> bool {
     (1..=32).contains(&id.len())
         && id
             .bytes()
@@ -118,6 +228,57 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
         id: id.into(),
         msg: e.to_string(),
     })?;
+    let origin = if builtin {
+        Origin::Builtin
+    } else {
+        Origin::File
+    };
+    build(id, fm, body, origin)
+}
+
+/// An agent made on the Agents page, from its features. `delegates` are
+/// the agents it may hand sub-tasks to (the master works them out: every
+/// agent available as a sub-agent but this one, when `delegate` is on).
+pub fn custom(
+    id: &str,
+    name: &str,
+    summary: &str,
+    prompt: &str,
+    features: Features,
+    delegates: Vec<String>,
+) -> Result<Agent, AgentError> {
+    if !valid_id(id) {
+        return Err(AgentError::BadId(id.into()));
+    }
+    let available_as = [
+        (features.as_agent, Use::Agent),
+        (features.as_subagent, Use::Subagent),
+    ]
+    .into_iter()
+    .filter_map(|(on, u)| on.then_some(u))
+    .collect();
+    let fm = Frontmatter {
+        name: name.into(),
+        description: summary.into(),
+        tools: ToolSelection::List(features.tools()),
+        model: None,
+        effort: None,
+        budget: features.budget(),
+        ui: UiLevel::Rich,
+        delegates: if features.delegate { delegates } else { vec![] },
+        max_subagents: None,
+        max_subagent_tokens: None,
+        memory: features.memory,
+        available_as,
+    };
+    let mut agent = build(id, fm, prompt, Origin::Custom)?;
+    // Kept as chosen: with no sub-agent to call it has no `delegate` tool,
+    // but the switch stays on.
+    agent.features.delegate = features.delegate;
+    Ok(agent)
+}
+
+fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent, AgentError> {
     if let Some(e) = &fm.effort
         && !matches!(e.as_str(), "low" | "medium" | "high" | "max")
     {
@@ -125,6 +286,9 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
             id: id.into(),
             got: e.clone(),
         });
+    }
+    if fm.available_as.is_empty() {
+        return Err(AgentError::Unavailable(id.into()));
     }
     let system_prompt = body.trim().to_string();
     if system_prompt.is_empty() {
@@ -139,6 +303,7 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
         &fm.delegates.join(","),
         &format!("{:?}/{:?}", fm.max_subagents, fm.max_subagent_tokens),
         fm.ui.as_str(),
+        if fm.memory { "" } else { "no-memory" },
     ] {
         h.update(part.as_bytes());
         h.update([0u8]);
@@ -159,11 +324,24 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
             max_tokens: fm.max_subagent_tokens.unwrap_or(d.max_tokens),
         }
     });
+    let any = |tools: &[&str]| tools.iter().any(|t| fm.tools.allows(t));
+    let features = Features {
+        memory: fm.memory,
+        web: any(WEB_TOOLS),
+        read_files: any(READ_TOOLS),
+        edit_files: any(EDIT_TOOLS),
+        commands: any(COMMAND_TOOLS),
+        delegate: !fm.delegates.is_empty(),
+        as_agent: fm.available_as.contains(&Use::Agent),
+        as_subagent: fm.available_as.contains(&Use::Subagent),
+    };
     Ok(Agent {
         id: id.into(),
         name: fm.name.clone(),
         description: fm.description,
-        builtin,
+        builtin: origin == Origin::Builtin,
+        origin,
+        features,
         delegates: fm.delegates,
         spec: AgentSpec {
             agent_id: id.into(),

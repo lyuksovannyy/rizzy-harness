@@ -25,6 +25,15 @@ describe("parseRoute", () => {
     expect(parseRoute("#/settings/nodes")).toEqual({ kind: "settings", section: "server", tab: "nodes" });
   });
 
+  it("reads the agents list, a new agent and an agent", () => {
+    expect(parseRoute("#/agents")).toEqual({ kind: "agents", id: null });
+    expect(parseRoute("#/agents/new")).toEqual({ kind: "agents", id: "new" });
+    expect(parseRoute("#/agents/code-reviewer")).toEqual({ kind: "agents", id: "code-reviewer" });
+    expect(parseRoute("#/agents/Bad")).toEqual({ kind: "home" });
+    // The old Server → Agents tab is the sidebar's page now.
+    expect(parseRoute("#/settings/server/agents")).toEqual({ kind: "agents", id: null });
+  });
+
   it("leaves checking a deep link to the registry", () => {
     // Unknown names parse; Settings falls back to what the viewer sees.
     expect(parseRoute("#/settings/server/nope")).toEqual({ kind: "settings", section: "server", tab: "nope" });
@@ -35,7 +44,15 @@ describe("parseRoute", () => {
 
 describe("routeHash", () => {
   it("writes what parseRoute reads", () => {
-    for (const h of ["#/", `#/s/${ID}`, "#/settings", "#/settings/account", "#/settings/server/users"]) {
+    for (const h of [
+      "#/",
+      `#/s/${ID}`,
+      "#/settings",
+      "#/settings/account",
+      "#/settings/server/users",
+      "#/agents",
+      "#/agents/coder",
+    ]) {
       expect(routeHash(parseRoute(h))).toBe(h);
     }
     // A tab without a section has nowhere to go.

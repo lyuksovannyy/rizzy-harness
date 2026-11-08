@@ -1,7 +1,7 @@
 // Settings, loaded lazily: four sections, one per tier (lib/settings.ts
 // decides who sees which tab). One panel is mounted at a time, so leaving a
 // tab drops what it did not save (AppearanceFields reverts its preview).
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { t } from "../lib/i18n";
 import { routeHash, settingsHash } from "../lib/routes";
@@ -10,7 +10,6 @@ import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
 import { modelLabel, offeredModels, resolveModel, savablePrefs } from "../lib/models";
 import { AgentMark, agentAlert } from "./AgentAvatar";
-import { AgentsSettings } from "./AgentsSettings";
 import { AppearanceFields } from "./Appearance";
 import { ProfileFields, SearchEngineFields } from "./forms";
 import { ProvidersSettings } from "./ProviderForm";
@@ -41,30 +40,6 @@ function NotifyToggle() {
       <input type="checkbox" checked={on} onChange={async (e) => setOn(await enableNotify(e.target.checked))} />
       Desktop notifications when a chat needs you (while a tab is open)
     </label>
-  );
-}
-
-/** Server → Agents: the server's own chains, not the active workspace's. */
-function ServerAgents(props: { onChanged: () => void }) {
-  const [agents, setAgents] = useState<Agent[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const load = useCallback(() => {
-    api
-      .agents("server")
-      .then((r) => setAgents(r.agents))
-      .catch((x) => setErr(x instanceof Error ? x.message : String(x)));
-  }, []);
-  useEffect(load, [load]);
-  if (!agents) return err ? <div className="error-text">{err}</div> : <div className="muted">Loading…</div>;
-  return (
-    <AgentsSettings
-      agents={agents}
-      admin
-      onChanged={() => {
-        load();
-        props.onChanged();
-      }}
-    />
   );
 }
 
@@ -137,8 +112,6 @@ export default function Settings(props: {
   prefs: Prefs | null;
   onPrefs: (p: Prefs) => void;
   onProviderChanged: () => void;
-  /** An agent's look changed: reload the agents. */
-  onAgentsChanged?: () => void;
   /** The active workspace changed from a workspace panel. */
   onWorkspaceChanged?: () => void;
   /** The viewer left or deleted the active workspace here. */
@@ -259,7 +232,6 @@ export default function Settings(props: {
         {wsProps && tab === "members" && <WorkspaceMembers {...wsProps} />}
         {wsProps && tab === "delete" && <WorkspaceDelete {...wsProps} />}
         {tab === "providers" && <ProvidersSettings onChanged={props.onProviderChanged} />}
-        {tab === "agents" && <ServerAgents onChanged={props.onAgentsChanged ?? props.onProviderChanged} />}
         {tab === "recall" && (
           <div className="card stack">
             <h3>Recall (server-wide)</h3>

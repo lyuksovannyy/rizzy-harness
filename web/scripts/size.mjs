@@ -13,6 +13,8 @@ const INITIAL_KB = 110;
 // panels brought the total to 304.9 KB, almost all of it in the lazy Settings
 // chunk (the initial load stayed at 96.1 KB). 310, the ceiling the workspaces
 // design allows, leaves room for its follow-up fixes without a raise each time.
+// The Agents page (a lazy chunk of about 5 KB, with Settings → Agents removed)
+// then took it to 309.9 KB on 2026-11-08.
 const TOTAL_KB = 310;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");

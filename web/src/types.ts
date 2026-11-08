@@ -243,6 +243,51 @@ export interface Agent {
   /** Its default and fallbacks that the provider no longer lists. */
   unavailable: string[];
   avatar: AgentAvatar;
+  /** Where its definition comes from (absent in older fixtures: built in). */
+  origin?: AgentOrigin;
+  /** What it can do; for built-in and file agents read off the definition. */
+  features?: AgentFeatures;
+}
+
+/** Built into the server, a file on the server (`agents/<id>.md`), or made on the Agents page. */
+export type AgentOrigin = "builtin" | "file" | "custom";
+
+/** The Agents page's switches (see `harness_agents::Features`). */
+export interface AgentFeatures {
+  /** Your memory: facts recalled into its turns, and proposing new ones. */
+  memory: boolean;
+  web: boolean;
+  read_files: boolean;
+  edit_files: boolean;
+  commands: boolean;
+  /** Hands sub-tasks to the agents available as sub-agents. */
+  delegate: boolean;
+  /** In the agent picker and @mentions. */
+  as_agent: boolean;
+  /** May be handed sub-tasks. */
+  as_subagent: boolean;
+}
+
+/** One agent as its page shows it (`GET /api/agents/{id}`). */
+export interface AgentDetail extends Agent {
+  origin: AgentOrigin;
+  features: AgentFeatures;
+  /** Its instructions as written: a built-in's own prompt, without the additional instructions. */
+  prompt: string;
+  /** The saved summary; empty means `description_default` (built-in and file agents). */
+  summary: string;
+  /** Built-in and file agents: text added after their prompt. */
+  instructions: string;
+  description_default: string;
+}
+
+/** A new agent made on the Agents page. */
+export interface NewAgent {
+  id: string;
+  name: string;
+  summary: string;
+  prompt: string;
+  features: AgentFeatures;
 }
 
 export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";

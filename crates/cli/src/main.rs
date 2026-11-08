@@ -298,6 +298,7 @@ async fn serve(
         tracing::warn!(error = %e, "skipping agent definition");
     }
     master.set_agents(agents);
+    master.load_agent_edits().await?;
     if let Some((node, graphify)) = &node {
         master
             .add_link(node.attach().await, true)

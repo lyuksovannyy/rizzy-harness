@@ -1,4 +1,4 @@
-import { Loader2, PanelLeftClose, Search, Settings, SquarePen, WifiOff } from "lucide-react";
+import { Bot, Loader2, PanelLeftClose, Search, Settings, SquarePen, WifiOff } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
 import { useEffect, useState } from "react";
 import { api } from "../api";
@@ -21,6 +21,9 @@ export function Sidebar(props: {
   onWorkspaceSettings: () => void;
   onSelect: (id: string) => void;
   onNew: () => void;
+  /** The Agents page; `agentsOpen` while it shows. */
+  onAgents: () => void;
+  agentsOpen: boolean;
   onSettings: () => void;
   onLogout: () => void;
   onCollapse: () => void;
@@ -83,6 +86,9 @@ export function Sidebar(props: {
       )}
       <button className="nav-item new-chat" onClick={props.onNew}>
         <SquarePen size={16} /> {t("nav.newChat")}
+      </button>
+      <button className={`nav-item ${props.agentsOpen ? "active" : ""}`} aria-current={props.agentsOpen ? "page" : undefined} onClick={props.onAgents}>
+        <Bot size={16} /> {t("nav.agents")}
       </button>
       {searching && (
         <input

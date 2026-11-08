@@ -33,6 +33,7 @@ import { Sidebar } from "./Sidebar";
 const Conversation = lazy(() => import("./Conversation"));
 const Settings = lazy(() => import("./Settings"));
 const Onboarding = lazy(() => import("./Onboarding"));
+const Agents = lazy(() => import("./Agents"));
 
 const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
 /** A home visit's background seed (bg/rng.ts would bring the whole PRNG into the first load). */
@@ -444,10 +445,16 @@ export function Shell(props: {
           selected={selected}
           conn={live.state}
           workspaces={workspaces}
-          onSwitch={(id) => switchTo(id, keepsRoute(openRow, id))}
+          onSwitch={(id) => {
+            // On the agents pages a switch goes to the list, listed for the new workspace.
+            if (route.kind === "agents") go({ kind: "agents", id: null });
+            return switchTo(id, route.kind === "agents" || keepsRoute(openRow, id));
+          }}
           onWorkspaceSettings={() => navigate({ kind: "settings", section: "workspace" })}
           onSelect={(id) => navigate({ kind: "session", id })}
           onNew={() => navigate({ kind: "home" })}
+          onAgents={() => navigate({ kind: "agents", id: null })}
+          agentsOpen={route.kind === "agents"}
           onSettings={() => navigate({ kind: "settings" })}
           onLogout={logout}
           onCollapse={() => (drawer ? setDrawer(false) : toggleCollapsed())}
@@ -490,6 +497,15 @@ export function Shell(props: {
               voice={voice}
               gutter={gutter}
             />
+          ) : route.kind === "agents" ? (
+            <Agents
+              me={me}
+              agents={agents}
+              id={route.id}
+              onOpen={(id) => navigate({ kind: "agents", id })}
+              onChanged={refreshModels}
+              scope={scope}
+            />
           ) : route.kind === "settings" ? (
             <Settings
               me={me}
@@ -503,7 +519,6 @@ export function Shell(props: {
                 refreshNotices();
               }}
               onProviderChanged={refreshModels}
-              onAgentsChanged={refreshModels}
               onWorkspaceChanged={workspacesChanged}
               onWorkspaceLeft={workspaceLeft}
               route={route}

@@ -112,9 +112,9 @@ Settings has four sections:
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agent, the model each agent uses there (General's is the workspace's default
   model), members and roles, deleting it.
-- **Server** (server admins): providers, agents' looks, memory recall, token
-  savings, nodes, accounts, and every workspace (owners, members, making
-  someone owner, deleting).
+- **Server** (server admins): providers, memory recall, token savings, nodes,
+  accounts, and every workspace (owners, members, making someone owner,
+  deleting). Agents have their own page in the sidebar (below).
 
 A new chat's model: what you pick in the bar, else the agent's own model,
 else your default from Preferences, else the workspace's default, else the
@@ -466,6 +466,18 @@ the same place.
 The **Ultracode** agent splits big jobs into parallel sub-tasks for Coder,
 Scout and Writer (at most 4 per turn and 200k tokens by default; set
 `delegates`, `max_subagents` and `max_subagent_tokens` in an agent file).
+
+**Agents** in the sidebar lists every agent. Server admins can make agents there
+(name, handle, summary, instructions and feature switches: memory, web
+search, files, commands, sub-agents, and whether it is offered as an agent,
+a sub-agent or both), change them, delete them, and change any agent's look.
+Built-in agents and agent files keep their name, handle, instructions and
+features: only their summary and **additional instructions** (added after
+their own) change there, and **Duplicate** makes an editable copy. **Write
+from instructions** asks the default model for a summary. An agent file can
+set `memory: false` (no recall, no `remember`) and `available_as: [agent]` or
+`[subagent]` (default both). Deleting an agent leaves its chats to the
+default agent. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
 ## Development
 

@@ -18,7 +18,6 @@ export type TabId =
   | "members"
   | "delete"
   | "providers"
-  | "agents"
   | "recall"
   | "savings"
   | "nodes"
@@ -64,7 +63,7 @@ const SECTIONS: { id: SectionId; show: Show; tabs: { id: TabId; show: Show }[] }
   {
     id: "server",
     show: (v) => v.role === "admin",
-    tabs: ["providers", "agents", "recall", "savings", "nodes", "users", "workspaces"].map((id) => ({
+    tabs: ["providers", "recall", "savings", "nodes", "users", "workspaces"].map((id) => ({
       id: id as TabId,
       show: always,
     })),

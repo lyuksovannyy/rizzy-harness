@@ -1,6 +1,9 @@
 import type {
   Agent,
   AgentAvatar,
+  AgentDetail,
+  AgentFeatures,
+  NewAgent,
   Notice,
   AttentionItem,
   Decision,
@@ -189,6 +192,19 @@ export const api = {
   agents: (scope?: Scope | null) => call<{ agents: Agent[]; default: string }>("GET", scoped("/api/agents", scope)),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
     call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
+  /** One agent with its instructions; the model line follows `scope` like `agents`. */
+  agent: (id: string, scope?: Scope | null) =>
+    call<AgentDetail>("GET", scoped(`/api/agents/${encodeURIComponent(id)}`, scope)),
+  createAgent: (b: NewAgent, scope?: Scope | null) => call<AgentDetail>("POST", scoped("/api/agents", scope), b),
+  /** Built-in and file agents take `summary` and `instructions` only. */
+  updateAgent: (
+    id: string,
+    b: { name?: string; summary?: string; prompt?: string; instructions?: string; features?: AgentFeatures },
+    scope?: Scope | null,
+  ) => call<AgentDetail>("PATCH", scoped(`/api/agents/${encodeURIComponent(id)}`, scope), b),
+  deleteAgent: (id: string) => call<{ ok: boolean }>("DELETE", `/api/agents/${encodeURIComponent(id)}`),
+  /** A summary written by the default model from these instructions; nothing is saved. */
+  agentSummary: (b: { name: string; prompt: string }) => call<{ summary: string }>("POST", "/api/agent-summary", b),
   notices: (scope?: Scope | null) => call<{ notices: Notice[] }>("GET", scoped("/api/notices", scope)),
   models: (scope?: Scope | null) => call<{ models: ModelInfo[] }>("GET", scoped("/api/models", scope)),
   search: (q: string, suggest = false, signal?: AbortSignal, workspace?: string | null) =>

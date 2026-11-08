@@ -9,7 +9,6 @@ import { emptyView } from "../fold";
 import type { Agent, AgentAvatar as Avatar, Item, SessionView } from "../types";
 import { AgentAvatar, AgentMark, agentAlert, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
 import { DONE_MS, sessionFace, useAvatarState } from "./avatarState";
-import { AgentsSettings } from "./AgentsSettings";
 import { Composer } from "./Composer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -231,25 +230,5 @@ describe("in the composer", () => {
     expect(rows.map((r) => r.classList.contains("bad"))).toEqual([false, true]);
     expect(rows[0]!.querySelector("svg.agent-avatar")).not.toBeNull();
     expect(rows[1]!.querySelector(".agent-alert")).not.toBeNull();
-  });
-});
-
-describe("in Settings, Agents", () => {
-  test("an agent on a gone server default is red and names the model", () => {
-    render(<AgentsSettings agents={[agent({ default_model: null, unavailable: ["openai::gpt-x"] })]} admin={false} onChanged={() => {}} />);
-    const row = host.querySelector("li")!;
-    expect(row.classList.contains("bad")).toBe(true);
-    expect(row.querySelector(".agent-alert")).not.toBeNull();
-    expect(row.querySelector(".agent-models")!.textContent).toBe("server default model (gpt-x, unavailable)");
-  });
-
-  test("the look editor takes focus, and gives it back when it closes", () => {
-    render(<AgentsSettings agents={[agent()]} admin onChanged={() => {}} />);
-    const open = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Edit look")!;
-    act(() => open.click());
-    expect(document.activeElement?.getAttribute("role")).toBe("radio");
-    expect(host.querySelector(".avatar-editor")!.contains(document.activeElement)).toBe(true);
-    act(() => [...host.querySelectorAll<HTMLButtonElement>(".avatar-editor button")].find((b) => b.textContent === "Cancel")!.click());
-    expect(document.activeElement?.textContent).toBe("Edit look");
   });
 });

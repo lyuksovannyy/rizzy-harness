@@ -7,6 +7,7 @@ ui: rich
 delegates: [coder, scout, writer]
 max_subagents: 4
 max_subagent_tokens: 200000
+available_as: [agent]
 ---
 You are an orchestrator. For a large request, first make a short plan, then hand
 independent sub-tasks to specialists with the `delegate` tool: Scout to investigate

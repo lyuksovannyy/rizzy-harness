@@ -286,7 +286,7 @@ pub(super) fn with_secret<T>(
 
 /// Validate, persist, switch, and refresh the model list and the memory
 /// embedder.
-fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiResult<()> {
+pub(super) fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiResult<()> {
     cfg.normalize();
     rt.apply(cfg).map_err(|e| bad(format!("{e:#}")))?;
     m.set_models(rt.models());
