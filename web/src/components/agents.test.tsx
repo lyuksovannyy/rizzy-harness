@@ -198,6 +198,8 @@ describe("an agent's page", () => {
     expect(sw("Agent").disabled).toBe(true);
     expect(sw("Web search").disabled).toBe(false);
     expect(sw("Workspace memory").disabled).toBe(true);
+    expect(sw("Project memory").checked).toBe(true);
+    act(() => sw("Project memory").click());
     act(() => sw("Run commands").click());
     type(name, "Code reviewer");
     api.updateAgent.mockResolvedValue(detail(reviewer));
@@ -208,7 +210,7 @@ describe("an agent's page", () => {
         name: "Code reviewer",
         summary: "",
         prompt: "Review it.",
-        features: { ...NEW_FEATURES, as_subagent: false, commands: true },
+        features: { ...NEW_FEATURES, as_subagent: false, commands: true, project_memory: false },
       },
       undefined,
     );

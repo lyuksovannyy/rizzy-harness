@@ -15,6 +15,7 @@ pub mod nodes;
 pub mod notices;
 pub mod prefs;
 pub mod presets;
+pub mod projects;
 pub mod providers;
 pub mod provision;
 pub mod resolver;
@@ -51,6 +52,8 @@ pub enum Live {
     /// A workspace, its members, their roles or the server's workspace
     /// policy changed (content-free: each client refetches its own view).
     WorkspacesChanged,
+    /// Projects, their boards or which chats they hold changed.
+    ProjectsChanged,
 }
 
 /// A model the UI may offer, with what it supports (PLAN.md §0: capabilities
@@ -122,6 +125,9 @@ pub struct MasterInner {
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
     provision: provision::Jobs,
+    /// What each chat's latest turn may write to memory, for its `remember`
+    /// calls (`projects::TurnMemory`).
+    turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -141,6 +147,9 @@ pub struct CreateSpec {
     /// The workspace to put it in. Membership is checked again when the
     /// chat is stamped; a Personal workspace needs no mapping.
     pub workspace_id: Option<String>,
+    /// The project to put it in (checked by the caller); linked only when
+    /// the chat lands in the project's workspace.
+    pub project_id: Option<String>,
 }
 
 /// Per-message choices on a prompt.
@@ -229,6 +238,7 @@ impl Master {
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
                 provision: Mutex::new(HashMap::new()),
+                turn_memory: Mutex::new(HashMap::new()),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -324,9 +334,19 @@ impl Master {
         let Ok(Some(row)) = self.inner.mirror.call(move |s| s.session(sid)).await else {
             return;
         };
-        // The calling row's own workspace and owner: a sub-agent's session
-        // inherits its parent's.
-        if row.incognito || !workspaces::uses_memory(self, &row).await {
+        if row.incognito {
+            return;
+        }
+        // What the turn that made the call may write (`Master::prompt`
+        // decided it). A project fact goes to the chat's project, if it has
+        // one and project memory is on; otherwise it is the owner's to
+        // review, if personal memory is.
+        let allowed = projects::turn_memory(self, &row).await;
+        let project = match e.payload.pointer("/input/scope").and_then(|v| v.as_str()) {
+            Some("project") if allowed.project => projects::proposal_owner(self, &row).await,
+            _ => None,
+        };
+        if project.is_none() && !allowed.personal {
             return;
         }
         let kind = match e.payload.pointer("/input/kind").and_then(|v| v.as_str()) {
@@ -336,7 +356,7 @@ impl Master {
         };
         let res = mem
             .add(harness_memory::NewFact {
-                owner_id: row.owner_id,
+                owner_id: project.or(row.owner_id),
                 text: text.to_string(),
                 kind,
                 status: harness_memory::Status::Proposed,
@@ -689,6 +709,7 @@ impl Master {
 
     pub async fn create_session(&self, spec: CreateSpec) -> Result<SessionId, CommandError> {
         let (owner, workspace) = (spec.owner_id.clone(), spec.workspace_id.clone());
+        let project = spec.project_id.clone();
         let profile = spec.profile.unwrap_or(Profile::Agentic);
         let node_id = spec
             .node_id
@@ -733,7 +754,8 @@ impl Master {
         // transaction, then tell the UIs (the first SessionsChanged went out
         // before the chat had an owner).
         let auto = chosen.is_none().then(|| auto_model_key(sid));
-        self.inner
+        let linked = self
+            .inner
             .mirror
             .call(move |s| {
                 if let Some(key) = auto {
@@ -742,10 +764,19 @@ impl Master {
                 if owner.is_some() || workspace.is_some() {
                     s.claim_session(sid, owner.as_deref(), workspace.as_deref())?;
                 }
-                Ok::<_, harness_store::StoreError>(())
+                // Into its project only where the chat landed: a removal
+                // racing the create leaves it in Personal, outside the
+                // team's project.
+                match project {
+                    Some(p) => s.link_new_session(sid, &p),
+                    None => Ok(false),
+                }
             })
             .await?;
         let _ = self.inner.live.send(Live::SessionsChanged);
+        if linked {
+            let _ = self.inner.live.send(Live::ProjectsChanged);
+        }
         Ok(sid)
     }
 
@@ -811,23 +842,42 @@ impl Master {
         // prompt: a system prompt that changes every turn would make the
         // provider re-read (and bill) the whole conversation each time.
         let mut turn_context: Vec<String> = context.into_iter().collect();
-        // Agents with memory off (on the Agents page) skip it like incognito.
-        let agent_memory = r
-            .agents()
-            .get(&agent.agent_id)
-            .is_none_or(|a| a.features.memory);
-        if row.incognito || !agent_memory || !workspaces::uses_memory(self, &row).await {
-            // Incognito chats, chats with an agent whose memory is off, and
-            // chats in a team workspace where the owner keeps their memory
-            // out neither write nor read memory.
-            deny_remember(&mut agent);
-        } else if let Some(mem) = self.memory().filter(|_| !text.trim().is_empty()) {
+        // The agent's memory switches (on the Agents page).
+        let features = r.agents().get(&agent.agent_id).map(|a| a.features);
+        // Incognito chats, chats with an agent whose memory is off, and chats
+        // in a team workspace where the owner keeps their memory out neither
+        // write nor read personal memory.
+        let personal = !row.incognito
+            && features.is_none_or(|f| f.memory)
+            && workspaces::uses_memory(self, &row).await;
+        // A project chat always gets the project's brief and board; its
+        // facts, and `remember` for them, unless the agent's project memory
+        // is off. The owner's personal-memory switch leaves them in.
+        let project = if row.incognito {
+            None
+        } else {
+            projects::project_of(self, &row).await
+        };
+        let allowed = projects::TurnMemory {
+            personal,
+            project: project.is_some() && features.is_none_or(|f| f.project_memory),
+        };
+        lock(&self.inner.turn_memory).insert(sid, allowed);
+        projects::offer_remember(r.agents(), &mut agent, allowed);
+        if let Some(mem) = self
+            .memory()
+            .filter(|_| personal && !text.trim().is_empty())
+        {
             // An answer with no note has nothing to recall by: the answer
             // itself is ids and values, written on the node.
             match mem.recall(row.owner_id.as_deref(), &text, 6).await {
                 Ok(facts) => turn_context.extend(harness_memory::context_block(&facts)),
                 Err(err) => tracing::warn!(error = %err, "memory recall failed"),
             }
+        }
+        if let Some(p) = &project {
+            let remember = allowed.project && agent.allows_tool("remember");
+            turn_context.push(projects::turn_context(self, p, &text, allowed, remember).await);
         }
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));

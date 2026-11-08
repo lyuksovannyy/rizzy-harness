@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MEMORY_HASH, NODES_HASH, parseRoute, routeHash, settingsHash } from "./routes";
+import { MEMORY_HASH, NODES_HASH, parseRoute, projectHash, routeHash, settingsHash } from "./routes";
 
 const ID = "0195f3a2-7c1e-7b40-9a3e-1f2d3c4b5a69";
 
@@ -16,6 +16,18 @@ describe("parseRoute", () => {
       section: "workspace-admin",
       tab: "members",
     });
+  });
+
+  it("reads a project, its tab, or the create form; nothing else under #/p/", () => {
+    const id = "0193f1c2a4b57d6e8f9012345678abcd";
+    expect(parseRoute(`#/p/${id}`)).toEqual({ kind: "project", id });
+    expect(parseRoute("#/p/new")).toEqual({ kind: "project", id: "new" });
+    expect(parseRoute(`#/p/${id}/memory`)).toEqual({ kind: "project", id, tab: "memory" });
+    for (const h of ["#/p/NEW", `#/p/${id}/files`, "#/p/new/board", `#/p/${ID}`]) {
+      expect(parseRoute(h)).toEqual({ kind: "home" });
+    }
+    expect(routeHash(parseRoute(`#/p/${id}/board`))).toBe(`#/p/${id}/board`);
+    expect(projectHash(id, "memory")).toBe(`#/p/${id}/memory`);
   });
 
   it("keeps accepting the paths from before the sections", () => {

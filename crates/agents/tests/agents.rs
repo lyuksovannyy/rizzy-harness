@@ -134,6 +134,7 @@ fn user_dir_overrides_and_extends_and_skips_bad_files() {
 fn features() -> harness_agents::Features {
     harness_agents::Features {
         memory: true,
+        project_memory: true,
         web: true,
         read_files: true,
         edit_files: false,
@@ -176,6 +177,25 @@ fn features_are_read_off_the_definitions() {
     )
     .unwrap();
     assert_ne!(file.spec.prompt_hash, with_memory.spec.prompt_hash);
+
+    // Project memory: on unless the file says otherwise; saying "on" changes
+    // nothing, so agents from before the switch keep their hash.
+    let defined = |extra: &str| {
+        parse(
+            "notes",
+            &format!("---\nname: N\ntools: [read, remember]\n{extra}---\nhi\n"),
+            false,
+        )
+        .unwrap()
+    };
+    let (plain, on, off) = (
+        defined(""),
+        defined("project_memory: true\n"),
+        defined("project_memory: false\n"),
+    );
+    assert!(plain.features.project_memory && !off.features.project_memory);
+    assert_eq!(plain.spec.prompt_hash, on.spec.prompt_hash);
+    assert_ne!(plain.spec.prompt_hash, off.spec.prompt_hash);
     assert!(matches!(
         parse(
             "x",
@@ -228,6 +248,21 @@ fn custom_agents_get_tools_and_budget_from_their_features() {
     assert_eq!(b.spec.budget, Budget::Standard);
     assert_eq!(b.delegates, ["coder"]);
     assert!(b.spec.caps.is_some());
+
+    // `remember` comes with either memory; the master offers it per turn.
+    let tools = |f: harness_agents::Features| {
+        let a = harness_agents::custom("m", "M", "", "m", f, vec![]).unwrap();
+        a.spec.tools.allows("remember")
+    };
+    let project_only = harness_agents::Features {
+        memory: false,
+        ..features()
+    };
+    assert!(tools(project_only));
+    assert!(!tools(harness_agents::Features {
+        project_memory: false,
+        ..project_only
+    }));
 
     let none = harness_agents::Features {
         as_agent: false,

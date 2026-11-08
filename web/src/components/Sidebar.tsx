@@ -5,8 +5,10 @@ import { api } from "../api";
 import type { ConnState } from "../live";
 import { t } from "../lib/i18n";
 import type { Me, NodeInfo, SearchHit, SessionRow, WorkspaceList } from "../types";
+import type { ProjectSummary } from "../lib/projects";
 import { Highlight } from "./Highlight";
 import { NodeBadge } from "./NodeBadge";
+import { ChatProjectMark, ProjectNav } from "./ProjectNav";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 export function Sidebar(props: {
@@ -27,11 +29,18 @@ export function Sidebar(props: {
   onSettings: () => void;
   onLogout: () => void;
   onCollapse: () => void;
+  /** Projects of the current workspace (docs/projects.md), listed above the chats. */
+  projects?: ProjectSummary[];
+  canCreateProject?: boolean;
+  selectedProject?: string | null;
+  /** A project's id, or "new" for the create form. */
+  onProject?: (id: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const nodeById = new Map(props.nodes.map((n) => [n.node_id, n]));
+  const projects = props.projects ?? [];
   const q = query.trim();
   const workspaceId = props.me.workspace?.workspace_id ?? null;
   useEffect(() => {
@@ -100,6 +109,14 @@ export function Sidebar(props: {
           onKeyDown={(e) => e.key === "Escape" && (setQuery(""), setSearching(false))}
         />
       )}
+      {hits === null && (
+        <ProjectNav
+          projects={projects}
+          canCreate={!!props.canCreateProject}
+          selected={props.selectedProject ?? null}
+          onOpen={(id) => props.onProject?.(id)}
+        />
+      )}
       <div className="section-label">{hits === null ? t("nav.recents") : t("nav.search")}</div>
       <nav className="session-list">
         {hits !== null && hits.length === 0 && <div className="muted pad">{t("nav.noMatches")}</div>}
@@ -126,6 +143,7 @@ export function Sidebar(props: {
           >
             {s.running && <span className="dot running" title="running" />}
             <span className="ellipsis grow">{s.title || t("session.untitled")}</span>
+            <ChatProjectMark id={s.project_id} projects={projects} />
             {s.profile === "agentic" && <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />}
           </button>
         ))}

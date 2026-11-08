@@ -12,6 +12,7 @@ import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
+import { projectsApi, type ProjectSummary } from "../lib/projects";
 import type {
   Agent,
   AttentionItem,
@@ -34,6 +35,7 @@ const Conversation = lazy(() => import("./Conversation"));
 const Settings = lazy(() => import("./Settings"));
 const Onboarding = lazy(() => import("./Onboarding"));
 const Agents = lazy(() => import("./Agents"));
+const Project = lazy(() => import("./Project"));
 
 const DEFAULT_SEARCH = "https://duckduckgo.com/?q={q}";
 /** A home visit's background seed (bg/rng.ts would bring the whole PRNG into the first load). */
@@ -88,6 +90,9 @@ export function Shell(props: {
   const [attention, setAttention] = useState<AttentionItem[]>([]);
   const [nodeAttention, setNodeAttention] = useState<NodeAttention[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [canCreateProject, setCanCreateProject] = useState(false);
+  const [projectsVersion, setProjectsVersion] = useState(0);
   const waiting = useRef<string[] | null>(null);
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -184,6 +189,17 @@ export function Shell(props: {
   const refreshNodes = useCallback(() => {
     api.nodes().then((r) => setNodes(r.nodes)).catch(unauthorized);
   }, [unauthorized]);
+  // This workspace's projects; `version` tells an open project page to reload.
+  const refreshProjects = useCallback(() => {
+    setProjectsVersion((v) => v + 1);
+    projectsApi
+      .list(workspaceId)
+      .then((r) => {
+        setProjects(r.projects);
+        setCanCreateProject(r.can_create);
+      })
+      .catch(unauthorized);
+  }, [workspaceId, unauthorized]);
   // The latest `me`, for handlers that outlive a render.
   const meRef = useRef(me);
   useEffect(() => {
@@ -199,6 +215,8 @@ export function Shell(props: {
   const workspacesChanged = useCallback(() => {
     refreshModels();
     refreshSessions();
+    // A role decides who may change projects.
+    refreshProjects();
     const here = meRef.current.workspace;
     if (!here) return;
     api
@@ -211,7 +229,7 @@ export function Shell(props: {
         return onMeChanged().then(() => next.gone && onGone(next.gone));
       })
       .catch(unauthorized);
-  }, [refreshModels, refreshSessions, unauthorized, onGone, onMeChanged]);
+  }, [refreshModels, refreshSessions, refreshProjects, unauthorized, onGone, onMeChanged]);
   // Left or deleted from its settings: the same reload, without the line
   // saying the user is no longer in it.
   const workspaceLeft = useCallback(() => {
@@ -224,6 +242,8 @@ export function Shell(props: {
     live.onNodesChanged = refreshNodes;
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     live.onWorkspacesChanged = workspacesChanged;
+    live.onProjectsChanged = refreshProjects;
+    refreshProjects();
     refreshSessions();
     refreshNodes();
     refreshModels();
@@ -240,7 +260,7 @@ export function Shell(props: {
         classifier.current = parseState(v);
       })
       .catch(() => {});
-  }, [live, refreshSessions, refreshNodes, refreshModels, workspacesChanged, unauthorized]);
+  }, [live, refreshSessions, refreshNodes, refreshModels, refreshProjects, workspacesChanged, unauthorized]);
   // Closed only when this Shell goes (a switch remounts it): a closed Live
   // never reconnects, so it must not follow the data effect's dependencies.
   useEffect(() => () => live.close(), [live]);
@@ -371,7 +391,7 @@ export function Shell(props: {
   // The open chat's row: from this workspace's list, else from the lookup.
   const openRow = selected ? (sessions.find((s) => s.session_id === selected) ?? lookup?.row ?? null) : null;
 
-  const submit = async (s: Submission) => {
+  const submit = async (s: Submission, projectId?: string) => {
     if (s.mode === "search") {
       const q = s.search ?? { url: prefs?.search_url ?? DEFAULT_SEARCH, query: s.text };
       location.href = buildSearchUrl(q.url, q.query);
@@ -387,6 +407,7 @@ export function Shell(props: {
       cwd: agentic ? s.cwd : undefined,
       ...(s.incognito ? { incognito: true } : {}),
       ...(workspaceId ? { workspace_id: workspaceId } : {}),
+      ...(projectId ? { project_id: projectId } : {}),
     });
     refreshSessions();
     go({ kind: "session", id: session_id });
@@ -458,6 +479,10 @@ export function Shell(props: {
           onSettings={() => navigate({ kind: "settings" })}
           onLogout={logout}
           onCollapse={() => (drawer ? setDrawer(false) : toggleCollapsed())}
+          projects={projects}
+          canCreateProject={canCreateProject}
+          selectedProject={route.kind === "project" ? route.id : null}
+          onProject={(id) => navigate({ kind: "project", id })}
         />
       )}
       {drawer && <div className="scrim" onClick={() => setDrawer(false)} />}
@@ -496,6 +521,30 @@ export function Shell(props: {
               models={models}
               voice={voice}
               gutter={gutter}
+              projects={projects}
+            />
+          ) : route.kind === "project" ? (
+            <Project
+              key={route.id}
+              id={route.id}
+              tab={route.tab}
+              version={projectsVersion}
+              memoryVersion={memoryVersion}
+              chats={listed}
+              agents={agents}
+              defaultAgent={defaultAgent}
+              models={models}
+              workers={workers}
+              nodes={nodes}
+              prefs={prefs}
+              agenticBlocked={agenticBlocked}
+              voice={voice}
+              onSubmit={submit}
+              onOpenChat={(id) => navigate({ kind: "session", id })}
+              onOpenProject={(id) => navigate({ kind: "project", id })}
+              onDeleted={() => navigate({ kind: "home" })}
+              workspaceId={workspaceId}
+              onForeign={(ws) => void switchTo(ws, true).catch(unauthorized)}
             />
           ) : route.kind === "agents" ? (
             <Agents

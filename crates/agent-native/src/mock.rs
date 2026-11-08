@@ -8,6 +8,7 @@
 //! * `cite: <q>`     -> one `web_search` call, then an answer citing the
 //!   first two labels of its result and one label that does not exist
 //! * `remember: <t>` -> one `remember` tool call (a memory proposal)
+//! * `remember project: <t>` -> the same with `scope: "project"`
 //! * `memory?`       -> repeats the recalled-memory block (per-turn context)
 //! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel),
 //!   then passes on the first line of the (last) sub-agent's answer
@@ -313,6 +314,12 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
             });
+        }
+        if let Some(t) = user.strip_prefix("remember project:") {
+            return Ok(call(
+                "remember",
+                json!({"text": t.trim(), "kind": "fact", "scope": "project"}),
+            ));
         }
         if let Some(t) = user.strip_prefix("remember:") {
             return Ok(call("remember", json!({"text": t.trim(), "kind": "fact"})));

@@ -43,7 +43,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
     items: [
       { key: "memory", label: "Own memory", hint: "Your facts from Settings → Memory: recalled into its answers, new ones proposed" },
       { key: null, label: "Workspace memory", hint: "Facts the whole workspace shares" },
-      { key: null, label: "Project memory", hint: "Facts about one project" },
+      { key: "project_memory", label: "Project memory", hint: "In a project's chats: the project's facts recalled, new ones proposed" },
     ],
   },
   {
@@ -72,6 +72,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
 /** A new agent's switches: a helper that remembers and searches the web. */
 export const NEW_FEATURES: AgentFeatures = {
   memory: true,
+  project_memory: true,
   web: true,
   read_files: false,
   edit_files: false,

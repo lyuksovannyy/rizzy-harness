@@ -256,6 +256,8 @@ export type AgentOrigin = "builtin" | "file" | "custom";
 export interface AgentFeatures {
   /** Your memory: facts recalled into its turns, and proposing new ones. */
   memory: boolean;
+  /** In a project's chats, the project's facts the same way (docs/projects.md). */
+  project_memory: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;
@@ -478,6 +480,8 @@ export interface SessionRow {
   workspace_id?: string | null;
   /** Agentic chats only: why the viewer cannot drive it here (deny and stop still work). */
   blocked?: string | null;
+  /** The project the chat is in (docs/projects.md). */
+  project_id?: string | null;
 }
 
 export interface RemoteNode {

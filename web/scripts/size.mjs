@@ -15,7 +15,11 @@ const INITIAL_KB = 110;
 // design allows, leaves room for its follow-up fixes without a raise each time.
 // The Agents page (a lazy chunk of about 5 KB, with Settings → Agents removed)
 // then took it to 309.9 KB on 2026-11-08.
-const TOTAL_KB = 310;
+// 321 for Projects (docs/projects.md), measured 320.2 KB the same day: 10.3 KB
+// on top, 5.5 in its lazy page, 2.2 for the 20 icons the sidebar draws (in the
+// first load, which stays under its own budget at 100.1) and the rest in the
+// sidebar section, the shell and the chat header's picker.
+const TOTAL_KB = 321;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));

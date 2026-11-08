@@ -309,6 +309,23 @@ graphify gets no API keys.
 
 `rizzy-harness doctor` checks the setup.
 
+## Projects
+
+A project groups chats around one piece of work inside a workspace:
+**Projects** in the sidebar (under the workspace switcher) → **+**, then pick a
+name, an icon, an accent and a board template. In a team workspace owners and
+admins manage projects; every member sees them and works in them with their
+own chats. Start chats from the project's page, or add a chat from its header's
+project picker. Every message in a project's chats gets, after the history:
+the project's **instructions** (Settings tab, up to 4,000 characters), the
+project **memory** recalled for that message, and the open cards of its
+**board**. The model proposes project facts with `remember` (scope
+`project`); a proposal shows only to the owner of the chat it came from until
+they keep it on the project's Memory tab. Keeping your personal memory out of
+a team workspace leaves its projects' memory in. Agentic chats started in a project
+take its default node and folder. Temporary chats cannot join a project.
+Design and open questions: [docs/projects.md](docs/projects.md).
+
 ## Rich messages
 
 Replies render as Markdown: headings, lists, GFM tables (click a header to
@@ -468,14 +485,15 @@ Scout and Writer (at most 4 per turn and 200k tokens by default; set
 `delegates`, `max_subagents` and `max_subagent_tokens` in an agent file).
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
-(name, handle, summary, instructions and feature switches: memory, web
-search, files, commands, sub-agents, and whether it is offered as an agent,
+(name, handle, summary, instructions and feature switches: memory, project
+memory, web search, files, commands, sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after
 their own) change there, and **Duplicate** makes an editable copy. **Write
 from instructions** asks the default model for a summary. An agent file can
-set `memory: false` (no recall, no `remember`) and `available_as: [agent]` or
+set `memory: false` (no recall, no `remember`), `project_memory: false` (no
+project facts in project chats) and `available_as: [agent]` or
 `[subagent]` (default both). Deleting an agent leaves its chats to the
 default agent. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 

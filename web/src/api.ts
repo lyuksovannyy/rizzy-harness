@@ -57,7 +57,7 @@ export class HttpError extends Error {
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+export async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method,
     signal,
@@ -141,6 +141,7 @@ export const api = {
     model?: string;
     incognito?: boolean;
     workspace_id?: string;
+    project_id?: string;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<{ items: AttentionItem[]; nodes?: NodeAttention[] }>("GET", "/api/attention"),
   setups: () => call<{ setups: { setup: SetupRecord; commands: SetupCommands }[] }>("GET", "/api/admin/node-setups"),

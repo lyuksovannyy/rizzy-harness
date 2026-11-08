@@ -7,6 +7,7 @@ import { hostOf, parseUrl } from "../md/links";
 import { rt } from "../md/strings";
 import type { Decision, Item, Source } from "../types";
 import { MemoryNotice } from "./MemoryNotice";
+import { ProjectMemoryNotice } from "./ProjectChip";
 
 type Tool = Extract<Item, { type: "tool" }>;
 type Status = "waiting" | "ok" | "failed" | "denied" | "running";
@@ -139,8 +140,19 @@ function EditDiff({ input }: { input: { old_string?: string; new_string?: string
 
 /** `blocked`: the viewer may not drive this chat here (its workspace role,
  * the account's grant), so an approval offers Deny only; the server refuses
- * the rest anyway. */
-export function ToolCard({ sessionId, item, blocked }: { sessionId: string; item: Tool; blocked?: boolean }) {
+ * the rest anyway. `projectId`: the chat's project, where a project-scoped
+ * `remember` waits. */
+export function ToolCard({
+  sessionId,
+  item,
+  blocked,
+  projectId,
+}: {
+  sessionId: string;
+  item: Tool;
+  blocked?: boolean;
+  projectId?: string | null;
+}) {
   const pending = item.approval && item.approval.decision === null;
   const [open, setOpen] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -167,7 +179,12 @@ export function ToolCard({ sessionId, item, blocked }: { sessionId: string; item
 
   // A proposal the tool accepted: the notice says where it waits. A
   // rejected one stays an ordinary card with the tool's error.
-  if (item.tool === "remember" && status === "ok") return <MemoryNotice text={asText(item.input?.text)} />;
+  if (item.tool === "remember" && status === "ok")
+    return item.input?.scope === "project" ? (
+      <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
+    ) : (
+      <MemoryNotice text={asText(item.input?.text)} />
+    );
 
   const output = item.result ? item.result.output : item.live_output;
   // A delegated sub-task runs in its own session: link to it.

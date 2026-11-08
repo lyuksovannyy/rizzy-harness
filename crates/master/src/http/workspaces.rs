@@ -335,15 +335,20 @@ pub(super) async fn delete(
 }
 
 /// Delete workspace `ws`; returns who was in it (for the revocation
-/// sweep), or `None` when it did not exist.
+/// sweep), or `None` when it did not exist. Its projects go with it, and
+/// their facts.
 async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String>>> {
-    Ok(m.inner
+    let projects = crate::projects::ids(m).await;
+    let members = m
+        .inner
         .mirror
         .call(move |s| {
             let members: Vec<String> = s.members(&ws)?.into_iter().map(|r| r.user_id).collect();
             Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some(members))
         })
-        .await?)
+        .await?;
+    crate::projects::forget_gone(m, projects).await;
+    Ok(members)
 }
 
 pub(super) async fn members(

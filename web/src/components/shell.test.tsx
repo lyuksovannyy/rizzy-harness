@@ -33,6 +33,8 @@ vi.mock("../api", () => ({
     get: (o, k: string) => (o as Record<string, unknown>)[k] ?? (() => new Promise(() => {})),
   }),
   HttpError: class extends Error {},
+  // lib/projects.ts calls the API through `call`.
+  call: () => new Promise(() => {}),
 }));
 vi.mock("./Home", () => ({ Home: () => null }));
 vi.mock("./Sidebar", () => ({ Sidebar: () => null }));

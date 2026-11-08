@@ -28,6 +28,8 @@ import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
+import { canJoinProject, ProjectChip } from "./ProjectChip";
+import type { ProjectSummary } from "../lib/projects";
 
 // Opt-in, and only its own small chunk: most people never load it.
 const ChatGutter = lazy(() => import("../bg/ChatGutter"));
@@ -152,6 +154,8 @@ export default function Conversation(props: {
   voice?: boolean;
   /** "Also in chats" is on: the history the gutter's wall mixes by. */
   gutter?: History | null;
+  /** The workspace's projects, for the header's project picker. */
+  projects?: ProjectSummary[];
 }) {
   const { live, sessionId } = props;
   useEffect(() => {
@@ -268,6 +272,7 @@ export default function Conversation(props: {
             )}
           </div>
         </div>
+        {props.row && canJoinProject(props.row) && <ProjectChip row={props.row} projects={props.projects ?? []} />}
         <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={() => void remove()}>
           <Trash2 size={18} />
         </button>
@@ -415,7 +420,9 @@ export default function Conversation(props: {
                   case "fallback":
                     return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
-                    return <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} />;
+                    return (
+                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} />
+                    );
                   case "error":
                     return (
                       <div key={i} className="msg error">

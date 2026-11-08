@@ -57,7 +57,7 @@ in the database).
 |---|---|---|
 | Own memory | Per-user facts (`crates/memory`): recalled into every turn, the `remember` tool proposes new ones | Works. Off: no recall for that agent's turns and no `remember` tool |
 | Workspace memory | Doesn't exist (a non-goal of workspaces v1) | Shown, disabled, "planned" |
-| Project memory | Doesn't exist (no "project" concept yet) | Shown, disabled, "planned" |
+| Project memory | A project's facts (docs/projects.md): recalled into its chats' turns, `remember` with `scope: "project"` proposes new ones | Works (added with Projects). Off: no project facts and no project proposals in that agent's turns; the project's instructions and board still come |
 | Web search | `web_search` + `web_fetch` tools (chat runtime, from `[web]`) | Works (tool list) |
 | Available as Agent | Every agent is in the picker and `@mentions` | Works in the web (hidden from picker and mentions). The server doesn't refuse it yet |
 | Available as Sub-agent | An agent is a sub-agent only if another lists it in `delegates` | Works: off removes it from every agent's `delegates` |
@@ -92,10 +92,10 @@ read-only.
   (who approves a proposed team fact: the `settings` permission?), and recall that merges personal
   and workspace facts. The member's "Use my memory in this workspace" switch stays separate: it is
   the person's choice, the agent switch is the agent's.
-- **Project memory**: there is no "project" yet. Two candidates: (a) a folder on a node (the
-  agentic `cwd`), like CLAUDE.md, with facts keyed by node + repository root, which fits coding
-  agents; (b) a future **Projects** sidebar item (PLAN.md lists "Projects later"): a group of chats
-  with shared files and instructions, as in ChatGPT. → open question 2.
+- **Project memory**: answered by Projects (docs/projects.md): a group of chats in the sidebar with
+  instructions, a board and its own facts. The switch is `Features.project_memory` (frontmatter
+  `project_memory`, default true). `remember` comes with either memory switch; the master offers
+  it per turn only for what the turn may write and checks each call's scope when it files it.
 
 ## Storage
 
@@ -167,8 +167,7 @@ fills the field; nothing is saved until the user presses Save.
 
 1. **"Own memory"**: your personal memory (my reading, and what exists), or the agent's own
    notebook shared across users?
-2. **"Project memory"**: a folder/repository on a node, or a future Projects feature (a group of
-   chats with shared files)?
+2. **"Project memory"**: settled by Projects (a group of chats with its own facts).
 3. **Can members read agent instructions?** I said yes. The alternative is that only editors see
    them, as with the GPT store.
 4. **A utility model** for summaries, titles and memory extraction, or keep using the default
@@ -201,8 +200,8 @@ fills the field; nothing is saved until the user presses Save.
   neither recall nor `remember`, in the same condition as incognito and the workspace's "use my
   memory" rule.
 - Switching workspace while on an agents page goes to the agents list.
-- Stubs: Workspace memory, Project memory and Manage workspace are shown disabled, marked
-  "planned". The server doesn't enforce "Available as Agent: off" yet (only the pickers hide it).
+- Stubs: Workspace memory and Manage workspace are shown disabled, marked "planned" (Project
+  memory works since Projects). The server doesn't enforce "Available as Agent: off" yet (only the pickers hide it).
 - Bundle: the page's lazy chunk is about 5 KB; after the rebase the total is 309.9 of 310 KB and
   the initial load 96.5 of 110 KB (main: 304.9 and 96.1).
 

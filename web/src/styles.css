@@ -3691,3 +3691,266 @@ input.switch[type="checkbox"]:checked::before {
 }
 input.switch[type="checkbox"]:disabled { cursor: default; }
 .feature.planned input.switch { opacity: 0.5; }
+/* ---------- Projects (docs/projects.md) ---------- */
+/* Sidebar: the projects above the chats, capped so Recents keeps room. */
+.section-row {
+  display: flex;
+  align-items: center;
+  padding-top: 10px;
+  padding-bottom: 2px;
+  padding-right: 2px;
+}
+button.icon.small {
+  width: 26px;
+  height: 26px;
+}
+.project-list {
+  flex: none;
+  max-height: 30vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.project-icon {
+  flex: none;
+}
+.chat-project {
+  display: inline-flex;
+  flex: none;
+}
+/* The chat header's picker: a pill with an invisible native select on top. */
+.project-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  flex: none;
+}
+.project-chip.on {
+  color: var(--fg);
+}
+.project-chip:hover {
+  background: var(--bg-hover);
+}
+.project-chip:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.project-chip select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  min-height: 0;
+}
+/* The page: the project's accent tints its badge only. */
+.project-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+.project-head h1 {
+  margin: 0;
+}
+.project-head p {
+  margin: 2px 0 0;
+}
+.project-badge {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--project, var(--accent)) 16%, transparent);
+}
+.project-page .tabs {
+  margin-top: var(--space-6);
+}
+.narrow-form {
+  max-width: 560px;
+}
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+  gap: 6px;
+  max-width: 440px;
+}
+.icon-grid button {
+  height: 38px;
+  min-height: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+.icon-grid button.on {
+  border-color: var(--fg);
+  background: var(--bg-3);
+}
+.project-chats {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.project-chats li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.field-inline select {
+  max-width: 340px;
+}
+/* The board scrolls sideways; columns keep one width. */
+.board {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  overflow-x: auto;
+  padding-bottom: var(--space-2);
+}
+.board-col {
+  flex: 0 0 248px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+.board-col.add {
+  background: transparent;
+  border-style: dashed;
+}
+.board-col.done .board-card:not(.editing) {
+  opacity: 0.7;
+}
+.board-col-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 26px;
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--w-medium);
+}
+.board-col-head button.link {
+  color: var(--fg);
+  text-align: left;
+  padding: 2px 4px;
+}
+.col-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+/* With a pointer, a column's tools show on hover or focus only. */
+@media (hover: hover) {
+  .board-col .col-tools {
+    opacity: 0;
+    transition: opacity var(--dur-2) var(--ease-standard);
+  }
+  .board-col:hover .col-tools,
+  .board-col-head:focus-within .col-tools {
+    opacity: 1;
+  }
+}
+.board-col-head input {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px 6px;
+}
+.board-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 6px;
+}
+.board-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.board-card[draggable="true"] {
+  cursor: grab;
+}
+.board-card.dragging {
+  opacity: 0.4;
+}
+.board-card .card-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  font-weight: var(--w-regular);
+}
+.board-card .card-open:disabled {
+  opacity: 1;
+  cursor: inherit;
+}
+.board-card .card-open > span {
+  max-width: 100%;
+}
+.card-title {
+  overflow-wrap: anywhere;
+}
+.board-card button.link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  text-align: left;
+}
+.board-card.editing .row {
+  gap: var(--space-1-5);
+}
+.board-card.editing .row button {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+}
+input.add-line {
+  min-height: 0;
+  padding: 6px 10px;
+  background: transparent;
+  border-color: transparent;
+}
+.templates summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.templates > .stack {
+  margin-top: var(--space-3);
+}

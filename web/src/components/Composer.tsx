@@ -88,6 +88,8 @@ export function Composer(props: {
   voice?: boolean;
   /** Search mode: the user's default engines and their own engines. */
   search?: { text: string; image: string; custom?: CustomEngine[] };
+  /** Home bar on a project's page: no search or incognito; the project's node and folder first. */
+  project?: { nodeId: string | null; cwd: string | null };
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() =>
@@ -130,8 +132,8 @@ export function Composer(props: {
     "";
   const setModel = (m: string) => setPicked({ agent: answering, model: m });
   const [effort, setEffort] = useState<Effort | null>(null);
-  const [nodeId, setNodeId] = useState(props.workers[0]?.node_id ?? "");
-  const [cwd, setCwd] = useState(() => recentFolders()[0] ?? "");
+  const [nodeId, setNodeId] = useState(props.project?.nodeId ?? props.workers[0]?.node_id ?? "");
+  const [cwd, setCwd] = useState(() => props.project?.cwd ?? recentFolders()[0] ?? "");
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
   const [popupClosed, setPopupClosed] = useState(false);
@@ -249,7 +251,11 @@ export function Composer(props: {
     ta.current?.focus();
   }, []);
 
-  const enabled = useMemo(() => enabledModes(props.agenticBlocked), [props.agenticBlocked]);
+  const inProject = !!props.project;
+  const enabled = useMemo(
+    () => enabledModes(props.agenticBlocked).filter((m) => !inProject || m !== "search"),
+    [props.agenticBlocked, inProject],
+  );
   // Search mode: which engine runs. A leading @engine wins (and switches to
   // the kind it can do), then the selector, then the user's default.
   const engines = useMemo(() => allEngines(props.search?.custom), [props.search?.custom]);
@@ -603,7 +609,7 @@ export function Composer(props: {
               />
             </>
           )}
-          {home && mode === "ask" && (
+          {home && mode === "ask" && !inProject && (
             <button
               type="button"
               className={`pill incognito ${incognito ? "on" : ""}`}
@@ -624,7 +630,7 @@ export function Composer(props: {
               onKeyDown={radioKeys}
             >
               <span className="mode-thumb" aria-hidden="true" />
-              {MODES.map((m) => {
+              {MODES.filter((m) => !inProject || m !== "search").map((m) => {
                 const disabled = !enabled.includes(m);
                 return (
                   <button

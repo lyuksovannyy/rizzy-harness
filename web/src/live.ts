@@ -25,6 +25,7 @@ export class Live {
   onMemoryChanged: () => void = () => {};
   /** Workspaces, members, roles or the policy changed (content-free). */
   onWorkspacesChanged: () => void = () => {};
+  onProjectsChanged: () => void = () => {};
 
   constructor() {
     this.connect();
@@ -141,6 +142,9 @@ export class Live {
         break;
       case "workspaces_changed":
         this.onWorkspacesChanged();
+        break;
+      case "projects_changed":
+        this.onProjectsChanged();
         break;
       case "replayed":
         this.notify();

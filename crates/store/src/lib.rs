@@ -7,6 +7,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use harness_core::{RawEvent, SessionId};
 use rusqlite::{Connection, OptionalExtension, params};
 
+mod projects;
+pub use projects::{
+    CardPatch, CardRow, ColumnRow, NewCard, NewColumn, NewProject, ProjectLink, ProjectPatch,
+    ProjectRow, TemplateRow,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite: {0}")]
@@ -447,6 +453,7 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(projects::SCHEMA)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Deleted chats (incognito, user deletes) are overwritten, not just
         // unlinked, so their text does not linger in free pages.
@@ -761,6 +768,14 @@ impl Store {
         let n = tx.execute("DELETE FROM sessions WHERE session_id = ?1", params![id])?;
         tx.execute(
             "DELETE FROM session_workspaces WHERE session_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM session_projects WHERE session_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "UPDATE board_cards SET session_id = NULL WHERE session_id = ?1",
             params![id],
         )?;
         if tombstone {

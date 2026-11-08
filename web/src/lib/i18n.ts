@@ -31,6 +31,8 @@ const en = {
   "role.admin": "Admin",
   "role.member": "Member",
   "role.guest": "Guest",
+  "nav.projects": "Projects",
+  "nav.newProject": "New project",
   "mode.search": "Search",
   "mode.ask": "Ask",
   "mode.agentic": "Agentic",

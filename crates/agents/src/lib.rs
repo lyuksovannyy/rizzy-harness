@@ -15,6 +15,7 @@
 //! max_subagents: 4                                # per turn (default 4)
 //! max_subagent_tokens: 200000                     # per turn, all sub-agents
 //! memory: true                                    # recall and `remember` (default true)
+//! project_memory: true                            # a project's facts, the same (default true)
 //! available_as: [agent, subagent]                 # default both
 //! ---
 //! System prompt in markdown...
@@ -94,6 +95,8 @@ struct Frontmatter {
     max_subagent_tokens: Option<u64>,
     #[serde(default = "yes")]
     memory: bool,
+    #[serde(default = "yes")]
+    project_memory: bool,
     #[serde(default = "both")]
     available_as: Vec<Use>,
 }
@@ -141,6 +144,11 @@ const MEMORY_TOOL: &str = "remember";
 pub struct Features {
     /// The user's memory: facts recalled into its turns, `remember`.
     pub memory: bool,
+    /// In a project's chats, the project's facts recalled into its turns and
+    /// `remember` for new ones (docs/projects.md). The project's
+    /// instructions and board reach every agent: they are its brief.
+    #[serde(default = "yes")]
+    pub project_memory: bool,
     /// `web_search` and `web_fetch`.
     pub web: bool,
     /// Read and search files.
@@ -161,7 +169,8 @@ impl Features {
     /// The tools a custom agent with these features asks for.
     pub fn tools(&self) -> Vec<String> {
         let groups = [
-            (self.memory, &[MEMORY_TOOL][..]),
+            // The master offers it per turn only for the memory it may write.
+            (self.memory || self.project_memory, &[MEMORY_TOOL][..]),
             (self.web, WEB_TOOLS),
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
@@ -269,6 +278,7 @@ pub fn custom(
         max_subagents: None,
         max_subagent_tokens: None,
         memory: features.memory,
+        project_memory: features.project_memory,
         available_as,
     };
     let mut agent = build(id, fm, prompt, Origin::Custom)?;
@@ -308,6 +318,10 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         h.update(part.as_bytes());
         h.update([0u8]);
     }
+    // Only when off, so the hashes of agents from before this switch stay.
+    if !fm.project_memory {
+        h.update(b"no-project-memory\0");
+    }
     let prompt_hash = hex::encode(h.finalize())[..16].to_string();
     for d in &fm.delegates {
         if !valid_id(d) || d == id {
@@ -327,6 +341,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     let any = |tools: &[&str]| tools.iter().any(|t| fm.tools.allows(t));
     let features = Features {
         memory: fm.memory,
+        project_memory: fm.project_memory,
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),

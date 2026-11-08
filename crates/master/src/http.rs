@@ -12,6 +12,7 @@ use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth};
 
 mod agent_edits;
+mod projects;
 mod providers;
 mod workspaces;
 
@@ -179,7 +180,8 @@ pub fn router(master: Master) -> Router {
             post(restore_turn),
         )
         .route("/api/sessions/{id}/approvals/{approval_id}", post(approval))
-        .route("/api/ws", get(crate::ws::upgrade));
+        .route("/api/ws", get(crate::ws::upgrade))
+        .merge(projects::routes());
     api.fallback(crate::assets::serve)
         .layer(axum::middleware::from_fn_with_state(
             master.clone(),
@@ -872,8 +874,11 @@ async fn delete_user(
     guard_admin_change(&m, &who, &target, true).await?;
     let uid = target.user_id.clone();
     // Refused (409) while they are the only owner of a team workspace with
-    // other members; their chats leave every team workspace.
+    // other members; their chats leave every team workspace. The projects of
+    // the workspaces that go with them go too, and their facts.
+    let projects = crate::projects::ids(&m).await;
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
+    crate::projects::forget_gone(&m, projects).await;
     let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
     let _ = m.inner.live.send(crate::Live::SessionsChanged);
     // Their running agentic chats stop (the account is gone).
@@ -929,12 +934,17 @@ async fn list_sessions(
         None => true,
     };
     let rows = m.inner.mirror.call(|s| s.sessions()).await?;
+    let links = crate::projects::links(&m).await?;
     Ok(Json(json!({
         "sessions": rows
             .iter()
             .filter(|r| who.can_see(r.owner_id.as_deref()))
             .filter(in_scope)
-            .map(|r| session_json(r, blocked.as_deref()))
+            .map(|r| {
+                let mut v = session_json(r, blocked.as_deref());
+                v["project_id"] = json!(crate::projects::effective(&links, r));
+                v
+            })
             .collect::<Vec<_>>()
     })))
 }
@@ -949,7 +959,12 @@ async fn get_session(
     let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     let blocked = ws::agentic_blocked(&m, &who, &row).await;
-    Ok(Json(session_json(&row, blocked.as_deref())))
+    let mut v = session_json(&row, blocked.as_deref());
+    v["project_id"] = json!(crate::projects::effective(
+        &crate::projects::links(&m).await?,
+        &row
+    ));
+    Ok(Json(v))
 }
 
 async fn delete_session(
@@ -1011,12 +1026,15 @@ struct CreateBody {
     /// token: any existing workspace, or none.
     #[serde(default)]
     workspace_id: Option<String>,
+    /// Start the chat in this project (docs/projects.md).
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 async fn create_session(
     State(m): State<Master>,
     headers: HeaderMap,
-    Json(b): Json<CreateBody>,
+    Json(mut b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     if b.incognito && b.profile != Some(harness_core::event::Profile::Chat) {
@@ -1034,11 +1052,13 @@ async fn create_session(
     {
         return Err(ApiError(StatusCode::FORBIDDEN, why));
     }
+    let project = projects::for_new_chat(&m, &who, &mut b, scope.as_ref()).await?;
     let title = b
         .title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "New session".into());
-    // The master stamps owner and workspace once the node has the chat.
+    // The master stamps owner, workspace and project once the node has the
+    // chat.
     let sid = m
         .create_session(crate::CreateSpec {
             profile: b.profile,
@@ -1051,6 +1071,7 @@ async fn create_session(
             incognito: b.incognito,
             owner_id: who.user_id.clone(),
             workspace_id: scope.map(|a| a.workspace.workspace_id),
+            project_id: project,
         })
         .await?;
     Ok(Json(json!({ "session_id": sid })))
