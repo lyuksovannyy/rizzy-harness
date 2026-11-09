@@ -453,6 +453,19 @@ fn mark_untrusted_chat(tx: &Transaction<'_>, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// `Store::chat_untrusted` on an open connection. One hop up is the whole
+/// chain: delegation is one level deep (a delegate's spec has no delegates
+/// of its own), and a deleted parent hands its mark down
+/// (`on_session_deleted`).
+fn untrusted(conn: &rusqlite::Connection, sid: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1
+                OR session_id = (SELECT parent_id FROM sessions WHERE session_id = ?1))",
+        params![sid],
+        |r| r.get(0),
+    )?)
+}
+
 /// The routine's newest run other than `exclude`, when it is a `skipped`
 /// or `missed` run with this status and reason: the one to fold into.
 fn foldable(
@@ -1151,8 +1164,8 @@ impl Store {
     }
 
     /// The owner prompted in chat `sid`: mark its run continued. Returns
-    /// whether the chat holds data from an external event, which stays true
-    /// after its run is gone (its routine deleted).
+    /// whether the chat holds data from an external event (`chat_untrusted`),
+    /// which stays true after its run is gone (its routine deleted).
     pub fn run_promote(&self, sid: SessionId) -> Result<bool> {
         let conn = self.lock();
         let id = sid.to_string();
@@ -1160,11 +1173,14 @@ impl Store {
             "UPDATE routine_runs SET promoted = 1 WHERE session_id = ?1 AND promoted = 0",
             params![id],
         )?;
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1)",
-            params![id],
-            |r| r.get(0),
-        )?)
+        untrusted(&conn, &id)
+    }
+
+    /// Whether chat `sid` holds data from an external event: it is marked,
+    /// or it is a sub-agent's chat whose parent is (the parent handed it a
+    /// task written from that data, and the owner can prompt it directly).
+    pub fn chat_untrusted(&self, sid: SessionId) -> Result<bool> {
+        untrusted(&self.lock(), &sid.to_string())
     }
 
     /// Unseen finished runs per routine of `owner`.
@@ -1351,12 +1367,21 @@ impl Store {
 
 /// Called by `Store::delete_session` inside its transaction: the run keeps
 /// its status, times, trigger and usage, but no text of the deleted chat;
-/// the chat's untrusted mark goes with it.
+/// the chat's untrusted mark goes with it. Its sub-agents' chats are not
+/// deleted with it, and they hold what it handed them, so they take the
+/// mark over first.
 pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
     tx.execute(
         "UPDATE routine_runs SET session_id = NULL, chat_deleted = 1, prompt = NULL,
              event = NULL, warnings = NULL
          WHERE session_id = ?1",
+        params![sid],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO routine_untrusted_chats (session_id)
+         SELECT session_id FROM sessions
+         WHERE parent_id = ?1
+           AND EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1)",
         params![sid],
     )?;
     tx.execute(

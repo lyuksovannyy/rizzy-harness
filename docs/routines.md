@@ -1,8 +1,9 @@
 # Routines
 
-Status: phase B built (phase A's schedules, Run now, runs, results and API, plus the webhook
-source, untrusted runs, sample events and run-chat retention). The contract this follows is the
-sidebar areas contract (§8).
+Status: phase C built (phase A's schedules, Run now, runs, results and API; phase B's webhook
+source, untrusted runs, sample events and run-chat retention; phase C's hardening: the untrusted
+mark on delegates' chats, retention under load, the approval seam). The contract this follows is
+the sidebar areas contract (§8).
 
 ## What a routine is
 
@@ -128,12 +129,57 @@ unattended, so review-and-report routines finish on their own; `bash`, `edit`, `
 endpoint, and after 24 hours it is cancelled. `allow_session` lasts one run (each run is a new
 chat).
 
+### The approval seam (`runner::approval_for`)
+
 **The one place a run's approval mode is chosen** is `runner::approval_for(spec, untrusted,
-node)`, which returns the spec's `ask` or `ask_all`. It is the seam for trusted routines (below).
+node)`. In v1 it returns the spec's `ask` or `ask_all` and ignores the other two arguments; they
+are there for trusted routines (Later), which plug in here and nowhere else on the master. It is
+called once per run, when the run's chat is created; the owner's later turns in that chat never go
+through it.
+
+What a trusted mode would have to change:
+
+- **The spec**: a new `RoutineSpec.trusted_tools: string[]` (today an unknown field, refused with
+  400), checked at save against the agent's tools, and offered only for schedule routines.
+- **`approval_for`** returns the mode plus that allowlist, and the allowlist only when the run is
+  not `untrusted` and `node` announces a new capability `preapproved_tools` (`Master::node_has`).
+- **The chat**: `CreateSpec` and the protocol's `session.create` gain an additive `preapproved`
+  list, sent only to a node with that capability.
+- **The node**: its `approve()` allows a listed tool without asking only if node.toml allows
+  unattended approval (`max_approval_mode = "auto"`), records `resolved_by: "policy"`, and drops
+  the list when the run's turn ends, so the owner's own turns there ask as usual. A delegate's chat
+  asks as today unless the protocol says otherwise.
+- **The UI**: a "Run these tools without asking" list in Advanced, for schedule routines on capable
+  nodes.
+
+What must stay:
+
+- **Untrusted stays untrusted.** A run with any `event.*` in its prompt (every webhook routine that
+  uses its event, and Run now with a sample event) is untrusted, gets no allowlist, and its chat is
+  marked for good: every later turn there, a delegate's chat under it, and those chats after the
+  routine, its runs or the parent chat are gone. Trust is never a property of a webhook.
+- `auto` stays refused at save; `approval_mode` stays `ask`/`ask_all`, and the node still clamps it
+  (T5): the node, not the master, decides whether anything runs unattended.
+- Everything not on the list still parks the run in "Waiting for you" and times out after 24 hours.
+- Access is re-checked at every fire (account, membership, `routines`, and for agentic routines the
+  grant and `agentic`); a refusal blocks and pauses the routine as today.
+- Untrusted runs keep their protections whatever the approval mode: no memory, no `web_fetch` or
+  `web_search`, the routine's own agent, the note.
 
 ## Webhooks (`crates/master/src/http/hooks.rs`)
 
 `POST /api/hooks/{trigger_id}` with `Authorization: Bearer <secret>` fires a webhook routine.
+The routine's "When" card shows the line to try it with (the page's origin plus the trigger's
+`url_path`; the secret inline right after a save or a rotation, `$HOOK_SECRET` later), and it
+works as shown:
+
+```sh
+curl -X POST 'http://127.0.0.1:7777/api/hooks/<trigger_id>' \
+  -H "Authorization: Bearer $HOOK_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"hello"}'
+# 202 {"run_id":"…"}; a prompt "Got {{event.body.text}}" renders as "Got hello".
+```
 
 - **The secret** is 256 bits of random hex, shown once (in the create or edit answer under
   `secrets`, or by rotation), stored only as its SHA-256 and compared in constant time. It is
@@ -186,12 +232,30 @@ Event data never reaches tool arguments, the folder, node, model, agent or title
 
 **The flag sticks to the chat.** When a run turns untrusted, the same store transaction marks its
 chat in `routine_untrusted_chats` (a table added in phase B; the frozen tables are unchanged).
-`routines::on_owner_prompt`, called before every prompt the owner sends, answers from that mark,
-so every later turn runs untrusted (`PromptOpts.untrusted`, built in the master). The mark outlives
-the run: deleting the routine, or its workspace, cascades the runs but not the mark. Only deleting
-the chat removes it. It fails closed: if the mark cannot be read, the turn is untrusted. The chat's
-banner comes from `SessionRow.routine.untrusted`, so it shows while the routine exists; once the
-routine is deleted the chat has no routine mark, but its turns stay untrusted.
+`routines::on_owner_prompt`, called before every prompt the owner sends, answers from that mark
+(`Store::chat_untrusted`), so every later turn runs untrusted (`PromptOpts.untrusted`, built in
+the master). The mark outlives the run: deleting the routine, or its workspace, cascades the runs
+but not the mark. Only deleting the chat removes it. It fails closed: if the mark cannot be read,
+the turn is untrusted. The chat's banner comes from `SessionRow.routine.untrusted`, so it shows
+while the routine exists; once the routine is deleted the chat has no routine mark, but its turns
+stay untrusted.
+
+**Delegates' chats.** A sub-agent the run delegates to works in a chat of its own, which belongs to
+the same owner and holds the task the parent wrote from the event. The owner can open and prompt
+it directly, so it counts as untrusted when its parent is marked (delegation is one level deep, so
+one hop up is the whole chain). Deleting the parent chat, by the owner or by retention, leaves the
+delegates' chats behind; they take the mark over in the same transaction.
+
+**Every way a chat goes on keeps it.** The mark belongs to the chat, not to the run, the routine,
+the agent, the project or the workspace, and every turn the owner starts passes through
+`on_owner_prompt` (the runner and the HTTP prompt handler are the only callers of
+`Master::prompt`). So
+undoing a turn (`/turns/{turn}/restore`), choosing a parallel answer (`/variants`), switching the
+chat's agent (`/agent`), moving the chat into a project (its brief and board, never its facts) or
+out of it, turning the routine off or deleting it, and the owner leaving the routine's workspace
+(the chat falls back to their Personal workspace, where their memory is on) all leave it
+untrusted. `hooks_http.rs` tests each of these over HTTP. Code that acts on a chat outside a
+prompt (filing a `remember` call, say) asks `routines::chat_untrusted`, which fails closed.
 
 ## Results, Recent and attention (`results.rs`)
 
@@ -223,7 +287,10 @@ Hourly (`routines::hourly`, from the master's one maintenance loop), in this ord
 3. Expired `Idempotency-Key`s, and webhook throttles that are full again.
 
 Deleting a run's chat, by the owner or by retention, clears the run's rendered prompt, event and
-warnings, and the chat's untrusted mark; status, times, trigger and usage stay.
+warnings, and the chat's untrusted mark (its delegates' chats keep one of their own); status,
+times, trigger and usage stay. Because retention goes first, a run older than 90 days whose chat
+it just deleted is forgotten in the same hour. A backlog drains at 100 chats an hour, oldest first
+across routines (`retention_drains_a_backlog_at_100_chats_an_hour`).
 
 ## Permissions and audit
 
@@ -240,7 +307,12 @@ they may no longer run; `why` explains the rest ("Guests can't run routines in A
 
 Audit kinds: `routine.created`, `routine.updated`, `routine.deleted`, `routine.paused`,
 `routine.run`, `routine.blocked`, `hook.secret_rotated`, `hook.rejected` (throttled). Lines carry
-ids, reasons, sizes and hashes, never prompt text, event content or a secret.
+ids, reasons, sizes and hashes, never prompt text, event content or a secret. Tracing lines carry
+ids and store errors only. `webhook_content_never_reaches_logs_or_audit` holds both to that: it
+sends marked bodies, headers, a query string, an `Idempotency-Key` and wrong secrets through every
+webhook answer (401, 413, 415, 400, 409, 429, a duplicate, overlap, a skipped run, a run that went
+through) and finds none of them in the audit rows or in any log line (every level of the harness
+targets, info and up of the rest).
 
 ## Config: `[routines]` in config.toml
 
@@ -297,11 +369,10 @@ and 32 deep, received now. The preview renders with it and reports `untrusted` a
 
 ## Later
 
-**Trusted routines** (the seam only). A per-routine allowlist of tools that run without a click
-(`RoutineSpec.trusted_tools`, refused today as an unknown field), honoured only on nodes whose
-node.toml allows `auto`, enforced by the node (T5), never for untrusted runs or any later turn of
-an untrusted chat. It plugs into `runner::approval_for` on the master, an additive
-`session.create.preapproved` behind a new node capability, and the node's `approve()`.
+**Trusted routines** (the seam only). A per-routine allowlist of tools that run without a click,
+honoured only on nodes whose node.toml allows `auto`, enforced by the node (T5), never for
+untrusted runs or any later turn of an untrusted chat. What it would change, and what must stay,
+is under "The approval seam" above.
 
 **Moved out of v1:** internal event sources (`chat.finished`, `node.offline`/`online`,
 `artifact.ready`) behind an internal bus, each one more `impl EventSource`; `same_chat` output;
