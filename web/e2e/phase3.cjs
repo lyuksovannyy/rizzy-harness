@@ -6,7 +6,7 @@ const fs = require('fs');
 // Needs Playwright with Chromium. Exits non-zero on the first failure.
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-'));
 fs.mkdirSync(`${S}/p3/data`, { recursive: true });
@@ -24,17 +24,19 @@ async function skipOnboarding(page, admin) {
     await keywordsOnly(page);
   }
   await page.waitForSelector('text=About you');
-  await page.click('button:has-text("Continue")');
+  await page.click('button:text-is("Continue")');
   await page.waitForSelector('h2:has-text("Search engine")');
   await page.click('button:has-text("Finish")');
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const start = () => spawn(BIN, ['--data-dir', `${S}/p3/data`, 'serve', '--bind', '127.0.0.1:7798'], { detached: true, stdio: 'ignore' });
 const log = (...a) => console.log('•', ...a);
+// The server of the moment (the test restarts it); killed on failure too, so
+// a failed run never leaves its port taken.
+let srv = null;
 (async () => {
-  let srv = start();
-  await sleep(1500);
-  const code = fs.readFileSync(`${S}/p3/data/claim-code`, 'utf8').trim();
+  srv = start();
+  const code = await claimCode(`${S}/p3/data/claim-code`, URL);
   const b = await chromium.launch();
   const ctx = await b.newContext({ viewport: { width: 1280, height: 800 } });
   const p = await ctx.newPage();
@@ -85,7 +87,9 @@ const log = (...a) => console.log('•', ...a);
   log('writer turn labelled');
 
   // Switch session agent
-  await p.selectOption('.composer select[aria-label=agent]', 'scout');
+  // The composer's agent picker is a listbox button, not a native select.
+  await p.click('.composer button.select-button[aria-label^="agent:"]');
+  await p.click('[role=listbox][aria-label=agent] [role=option]:has-text("Scout")');
   await p.waitForSelector('.divider:has-text("Scout")');
   log('agent switch recorded');
   await p.screenshot({ path: `${S}/p3-4-conversation.png` });
@@ -171,4 +175,8 @@ const log = (...a) => console.log('•', ...a);
   log('screenshots in', S);
   await b.close();
   process.kill(-srv.pid, 'SIGKILL');
-})().catch(e => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });
+})().catch(e => {
+  console.error('FAILED:', e.message.split('\n')[0]);
+  if (srv) process.kill(-srv.pid, 'SIGKILL');
+  process.exit(1);
+});

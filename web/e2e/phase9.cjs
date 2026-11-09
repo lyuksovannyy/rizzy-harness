@@ -8,7 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e9-'));
 const D = `${S}/data`, R = `${S}/repo`;
@@ -49,8 +49,7 @@ const whisper = http.createServer((req, res) => {
 
   const srv = spawn(BIN, ['--data-dir', D, 'serve', '--bind', '127.0.0.1:7793'], { detached: true, stdio: 'ignore' });
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${D}/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${D}/claim-code`, URL_);
     const b = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
     const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, permissions: ['microphone'] });
     const p = await ctx.newPage();
@@ -61,7 +60,7 @@ const whisper = http.createServer((req, res) => {
     await createOwner(p, code);
     await p.click('text=Skip: use the built-in demo');
     await keywordsOnly(p);
-    await p.click('button:has-text("Continue")');
+    await p.click('button:text-is("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
     // The demo skip keeps the configured demo provider and its two models.

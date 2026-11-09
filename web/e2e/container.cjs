@@ -22,7 +22,7 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     await createOwner(p, CODE);
     await p.click('text=Skip: use the built-in demo');
     await keywordsOnly(p);
-    await p.click('button:has-text("Continue")');
+    await p.click('button:text-is("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
     await p.keyboard.type('hello from the container');

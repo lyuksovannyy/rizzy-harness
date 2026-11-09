@@ -1,9 +1,9 @@
 # Sidebar, search panel and account menu: design note
 
-Status: Phase A of the sidebar areas (the integrated contract, sections 3 and 4), built on branch
-`areas/i3-shell` on top of the Phase 0 scaffold. Routines, Media and Artifacts show in the sidebar
-and in search once their backends answer `show: true` in `/api/features`; until they merge, their
-`features()` stubs say false and their search providers return nothing.
+Status: built (the integrated contract of the sidebar areas, sections 3 and 4, phases 0 to C).
+Routines, Media and Artifacts show in the sidebar and in search while their backends answer
+`show: true` in `/api/features` for this viewer and workspace; search rows come from each area's
+own provider (`media::search`, `artifacts::search`).
 
 ## The sidebar
 
@@ -187,6 +187,18 @@ render as text. There is no cross-workspace search and no `#/search` route.
 
 ## Bundle
 
+Phase C, measured 2026-11-08: total 359.5 KB and first load 102.3 KB, as after Phase B (no shell
+code changed). The total is a soft limit from this phase on (the user's decision); only the first
+load (104 KB) is a hard ceiling. A Lucide icon two lazy pages share becomes its own
+chunk of 0.2–0.3 KB (eleven of them). Grouping all icons the first screen does not draw into one
+shared lazy chunk (rolldown `codeSplitting` groups) took the total from 359.5 to 356.8 KB, but
+made each lazy page's first visit about 3 KB heavier, since every page then loads all of them:
+Login 2.5 → 5.5 KB, SearchPanel 3.0 → 5.9, AccountMenu 3.1 → 6.2, Routines 11.8 → 14.9. That
+trades what visits download for the sum of chunks, so it was not kept. Nothing else in the
+shell's files is duplicated or heavier than it needs to be: each module sits in one chunk, and
+the small shared chunks (`copy`, the eye icon, `anchored`) are what Login, Settings and the
+account menu really share.
+
 Phase B, measured 2026-11-08: the login form became its own lazy chunk (`App.tsx`, as
 ChangePassword already was; signed-in visits never draw it), taking the first load from 103.7 KB
 (the merged Phase A) to 102.1 KB. The split costs 1.1 KB of total: Login is 2.0 KB, and the eye
@@ -212,13 +224,17 @@ drawer handling, and `when` through Similar, less the switcher and the inline se
   a routine there, with why, until it is deleted (`routines_show_while_orphaned_ones_remain`);
   Media rows in the Media tab and All, with the thumbnail path the row loads, which only the
   owner can (`media_rows_carry_thumbnails_their_owner_can_load`); `checked` against artifact and
-  media rows with foreign thumbnails (`file_rows_keep_only_same_origin_thumbnails`).
+  media rows with foreign thumbnails (`file_rows_keep_only_same_origin_thumbnails`); artifacts an
+  agent really published on a worker node (the mock model's `publish:`), found in the Artifacts
+  tab and All as a typed row (`image`, "v1 · <size>", the version's same-origin thumbnail once
+  the owner's browser made it), private to the owner, then shared with the workspace's members
+  (the tab appearing for a member without the agentic grant), never for a non-member (404), and
+  gone from search with its thumbnail once deleted
+  (`published_artifacts_are_found_by_whoever_may_see_them`).
 - Web: `sidebar.test.tsx`, `accountmenu.test.tsx`, `searchpanel.test.tsx` (including thumbnails,
   same-origin only, falling back to the icon), `shell.test.tsx` (shortcuts, the narrow drawer,
   the rail and the unseen count) and `lib/workspaces.test.ts` (`accountLine`, `switchRoute`).
 - End to end: `web/e2e/phase4.cjs` (Ctrl+K from the composer, rows, the kept tab, Enter, "/" and
   Esc, the rail), `web/e2e/phase6.cjs` (an incognito chat is not found through the panel);
-  `phase3.cjs` and `phase5.cjs` reach Settings through the account menu.
-
-Still waiting on Artifacts (files backend, Phase B): the features case with a visible shared
-artifact, and artifact rows from the real `artifacts::search`.
+  `phase3.cjs` and `phase5.cjs` reach Settings through the account menu. The scripts wait for a
+  started server through `claimCode` (`web/e2e/onboard.cjs`) instead of a fixed sleep.

@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { log, check, sleep, contrast } = require('./rich/lib.cjs');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2eb-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -71,8 +71,7 @@ async function savePrefs(p, pick) {
 (async () => {
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7788'], { detached: true, stdio: 'ignore' });
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 860 }, colorScheme: 'dark' });
     const p = await ctx.newPage();
@@ -85,7 +84,7 @@ async function savePrefs(p, pick) {
     await createOwner(p, code);
     await p.click('text=Skip: use the built-in demo');
     await keywordsOnly(p);
-    await p.click('button:has-text("Continue")');
+    await p.click('button:text-is("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
 

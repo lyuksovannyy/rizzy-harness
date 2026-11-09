@@ -53,6 +53,9 @@ module.exports = async function cite(t) {
   // A source needs no confirm: the click opens it (the page is stubbed).
   await ctx.route(/^https:\/\/a\.example\//, (r) => r.fulfill({ status: 200, contentType: 'text/plain', body: 'source page' }));
   const [popup] = await Promise.all([ctx.waitForEvent('page'), cited.locator('.cite').first().click()]);
+  // The new tab exists before its navigation commits (a noopener tab starts
+  // blank); its URL is known once it commits.
+  await popup.waitForURL(/^https:\/\/a\.example\//, { timeout: 10000 }).catch(() => {});
   check(popup.url() === 'https://a.example/rust', 'opened ' + popup.url());
   check((await cited.locator('.link-confirm').count()) === 0, 'no confirm for a source');
   await popup.close();
@@ -91,7 +94,9 @@ module.exports = async function cite(t) {
   // new page is S3, a known one keeps S2), and the labels it hands back
   // resolve to its pages here, not to this session's S1.
   await t.newChat('Ask');
-  await p.selectOption('.composer select[aria-label="agent"]', 'ultracode');
+  // The composer's agent picker is a listbox button, not a native select.
+  await p.click('.composer button.select-button[aria-label^="agent:"]');
+  await p.click('[role=listbox][aria-label=agent] [role=option]:has-text("Ultracode")');
   await t.send('cite: rust');
   await p.waitForSelector('.tool-web .web-status:has-text("Searched “rust” · 2 results")');
   await t.send('delegate: scout=cite: other rust');

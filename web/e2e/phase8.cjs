@@ -7,7 +7,7 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e8-'));
 const A = `${S}/master`, B = `${S}/remote`;
@@ -26,8 +26,7 @@ let PAGE = null;
   const srv = spawn(BIN, ['--data-dir', A, 'serve', '--bind', '127.0.0.1:7794', '--node-listen', '127.0.0.1:7744'], { detached: true, stdio: 'ignore' });
   let nodeProc = null;
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${A}/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${A}/claim-code`, URL_);
     const b = await chromium.launch();
     const p = await b.newPage({ viewport: { width: 1280, height: 900 } });
     PAGE = p;
@@ -37,7 +36,7 @@ let PAGE = null;
     await createOwner(p, code);
     await p.click('text=Skip: use the built-in demo');
     await keywordsOnly(p);
-    await p.click('button:has-text("Continue")');
+    await p.click('button:text-is("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
 
@@ -82,7 +81,9 @@ let PAGE = null;
     await p.waitForSelector('h1.greeting');
     await p.fill('.composer textarea', 'delegate: scout=look around | writer=draft a note');
     await p.click('.mode-switch button:has-text("Agentic")');
-    await p.selectOption('.composer select[aria-label="agent"]', 'ultracode');
+    // The composer's agent picker is a listbox button, not a native select.
+    await p.click('.composer button.select-button[aria-label^="agent:"]');
+    await p.click('[role=listbox][aria-label=agent] [role=option]:has-text("Ultracode")');
     await p.selectOption('.agentic-row select', nodeId);
     await p.fill('.agentic-row input', `${B}/ws`);
     await p.click('.composer .send');
@@ -117,7 +118,15 @@ let PAGE = null;
     if (PAGE) await PAGE.screenshot({ path: `${S}/p8-fail.png` }).catch(() => {});
     throw e;
   } finally {
-    process.kill(-srv.pid, 'SIGKILL');
-    if (nodeProc && nodeProc.exitCode === null) process.kill(-nodeProc.pid, 'SIGKILL');
+    // Either may have exited already; a failed kill must not hide the error.
+    for (const proc of [srv, nodeProc]) {
+      if (proc && proc.exitCode === null) {
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch {
+          // Gone between the check and the kill.
+        }
+      }
+    }
   }
 })().catch((e) => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });

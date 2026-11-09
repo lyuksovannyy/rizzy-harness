@@ -27,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { check, log, sleep, chat } = require('./rich/lib.cjs');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-rich-'));
@@ -59,7 +59,7 @@ async function signUp(p, code) {
   await p.click('text=Skip: use the built-in demo');
   await keywordsOnly(p);
   await p.waitForSelector('text=About you');
-  await p.click('button:has-text("Continue")');
+  await p.click('button:text-is("Continue")');
   await p.waitForSelector('h2:has-text("Search engine")');
   await p.click('button:has-text("Finish")');
   await p.waitForSelector('h1.greeting');
@@ -76,8 +76,7 @@ async function signUp(p, code) {
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7797'], { detached: true, stdio: 'ignore' });
   let b;
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${S}/data/claim-code`, URL_);
     b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
     const p = await ctx.newPage();

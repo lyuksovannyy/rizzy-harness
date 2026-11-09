@@ -8,7 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner } = require('./onboard.cjs');
+const { claimCode, createOwner } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e7-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -42,8 +42,7 @@ const emb = http.createServer((req, res) => {
   const embUrl = `http://127.0.0.1:${emb.address().port}/v1`;
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7795'], { detached: true, stdio: 'ignore' });
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
     const p = await b.newPage({ viewport: { width: 1280, height: 860 } });
     const errors = [];
@@ -60,16 +59,16 @@ const emb = http.createServer((req, res) => {
     await p.waitForSelector('[role=radiogroup][aria-label="embeddings source"] button[aria-checked=true]:has-text("Ollama")');
     const endpoint = 'label:has-text("Ollama endpoint") input';
     await p.fill(endpoint, 'http://127.0.0.1:1/v1');
-    await p.click('text=Save and continue');
+    await p.click('form button.primary:has-text("Save and continue")');
     await p.waitForSelector('.error-text');
     log('bad endpoint refused:', (await p.innerText('.error-text')).slice(0, 60));
     // ...the right one is saved.
     await p.fill(endpoint, embUrl);
     await p.click('[role=radiogroup][aria-label="embeddings model preset"] button:has-text("Fast")');
     await p.screenshot({ path: `${S}/p7-1-onboarding.png` });
-    await p.click('text=Save and continue');
+    await p.click('form button.primary:has-text("Save and continue")');
     await p.waitForSelector('text=About you');
-    await p.click('button:has-text("Continue")');
+    await p.click('button:text-is("Continue")');
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
     const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
