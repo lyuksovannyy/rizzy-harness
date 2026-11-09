@@ -774,3 +774,123 @@ fn an_untrusted_chat_stays_marked_after_its_routine_goes() {
     s.delete_session(sa, true).unwrap();
     assert!(!s.run_promote(sa).unwrap());
 }
+
+#[test]
+fn a_sub_agents_chat_shares_its_parents_mark() {
+    let (s, w) = store();
+    s.routine_create(&routine("a", "u1", &w, vec![]), CAPS, 1)
+        .unwrap();
+    let (parent, plain) = (chat(&s, None), chat(&s, None));
+    s.run_start(&run("ra", "a", "pending", 1)).unwrap();
+    let patch = RunPatch {
+        status: Some("running".into()),
+        session_id: Some(parent.to_string()),
+        untrusted: Some(true),
+        ..Default::default()
+    };
+    assert!(s.run_update("ra", &patch).unwrap());
+    let (kid, plain_kid) = (chat(&s, Some(parent)), chat(&s, Some(plain)));
+
+    // The owner prompting a delegate's chat directly gets an untrusted turn.
+    assert!(s.chat_untrusted(kid).unwrap());
+    assert!(s.run_promote(kid).unwrap());
+    assert!(!s.chat_untrusted(plain_kid).unwrap());
+    assert!(
+        !s.routine_marks(&[parent]).unwrap()[&parent].promoted,
+        "the run is continued only in its own chat"
+    );
+
+    // Deleting the parent (by its owner, or by retention) leaves the
+    // delegate's chat behind, still marked; a trusted parent passes nothing.
+    s.delete_session(parent, true).unwrap();
+    assert!(!s.chat_untrusted(parent).unwrap());
+    assert!(s.chat_untrusted(kid).unwrap());
+    s.delete_session(plain, true).unwrap();
+    assert!(!s.chat_untrusted(plain_kid).unwrap());
+    s.delete_session(kid, true).unwrap();
+    assert!(!s.chat_untrusted(kid).unwrap());
+}
+
+/// Retention under load: many routines with many seen run chats. Each
+/// call lists at most `limit`, oldest first across routines, never one of a
+/// routine's newest `keep` seen and uncontinued chats, and never a chat
+/// that is continued, unseen or still going, however old.
+#[test]
+fn retention_drains_a_backlog_in_bounded_batches() {
+    const ROUTINES: usize = 20;
+    const RUNS: usize = 45;
+    const KEEP: usize = 30;
+    let (s, w) = store();
+    let mut kept = std::collections::HashSet::new();
+    let mut eligible = Vec::new();
+    for r in 0..ROUTINES {
+        let id = format!("r{r}");
+        s.routine_create(&routine(&id, "u1", &w, vec![]), CAPS, 1)
+            .unwrap();
+        for i in 0..RUNS {
+            let sid = chat(&s, None);
+            // Interleaved in time across routines.
+            let at = (i * ROUTINES + r) as i64 * 1000;
+            let run_id = format!("{id}-{i}");
+            finished_run(&s, &run_id, &id, at, Some(sid), "completed");
+            match i {
+                0 => {
+                    s.mark_run_seen(&id, &run_id).unwrap();
+                    s.run_promote(sid).unwrap();
+                    kept.insert(sid);
+                }
+                1 => {
+                    kept.insert(sid);
+                }
+                _ => {
+                    s.mark_run_seen(&id, &run_id).unwrap();
+                    if i >= RUNS - KEEP {
+                        kept.insert(sid);
+                    } else {
+                        eligible.push((at, sid));
+                    }
+                }
+            }
+        }
+        // A run still going, started before all of them.
+        let live = chat(&s, None);
+        s.run_start(&run(&format!("{id}-live"), &id, "pending", -1))
+            .unwrap();
+        let patch = RunPatch {
+            status: Some("running".into()),
+            session_id: Some(live.to_string()),
+            ..Default::default()
+        };
+        s.run_update(&format!("{id}-live"), &patch).unwrap();
+        kept.insert(live);
+    }
+    eligible.sort();
+    let eligible: Vec<SessionId> = eligible.into_iter().map(|(_, sid)| sid).collect();
+    assert_eq!(eligible.len(), ROUTINES * (RUNS - 2 - KEEP));
+
+    // Hour by hour: 100, 100, then the rest, oldest first.
+    let mut deleted = Vec::new();
+    for want in [100, 100, eligible.len() - 200, 0] {
+        let batch = s.run_chats_beyond(KEEP, 100).unwrap();
+        assert_eq!(batch.len(), want);
+        assert!(batch.iter().all(|sid| !kept.contains(sid)));
+        for sid in &batch {
+            s.delete_session(*sid, true).unwrap();
+        }
+        deleted.extend(batch);
+    }
+    assert_eq!(deleted, eligible);
+    // What is left per routine: the newest 30 seen ones, the continued,
+    // the unseen and the live one; every deleted run kept its row.
+    for r in 0..ROUTINES {
+        let runs = s.runs_page(&format!("r{r}"), None, 100).unwrap();
+        assert_eq!(runs.len(), RUNS + 1);
+        let with_chat = runs.iter().filter(|x| x.session_id.is_some()).count();
+        assert_eq!(with_chat, KEEP + 3);
+        assert!(
+            runs.iter()
+                .filter(|x| x.chat_deleted)
+                .all(|x| x.status == "completed" && x.prompt.is_none())
+        );
+    }
+}

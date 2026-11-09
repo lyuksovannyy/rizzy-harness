@@ -262,6 +262,18 @@ pub async fn on_owner_prompt(m: &Master, sid: SessionId) -> PromptFlags {
     results::on_owner_prompt(m, sid).await
 }
 
+/// Whether chat `sid` holds data from an external event (it, or the chat
+/// that delegated to it, is marked), without marking any run continued.
+/// Fails closed. For checks outside a prompt, such as filing a `remember`
+/// call: the turn's recorded memory is gone after a restart, the mark is not.
+pub async fn chat_untrusted(m: &Master, sid: SessionId) -> bool {
+    m.inner
+        .mirror
+        .call(move |s| s.chat_untrusted(sid))
+        .await
+        .unwrap_or(true)
+}
+
 /// What a routine run decides about the owner's own turns in its chat.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PromptFlags {

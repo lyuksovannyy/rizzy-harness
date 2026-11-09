@@ -83,9 +83,15 @@ pub(crate) struct Retry {
 }
 
 /// The one place a run's approval mode is chosen: the spec's `ask` or
-/// `ask_all`, never `auto` (a node clamps it further). Trusted routines
-/// (docs/routines.md, Later) would extend this function and nothing else
-/// on the master.
+/// `ask_all`, never `auto` (a node clamps it further, T5).
+///
+/// This is the seam for trusted routines (docs/routines.md, "The approval
+/// seam"), which is why it takes what v1 ignores. A trusted mode would
+/// return the mode plus the spec's tool allowlist, and only when the run is
+/// not `untrusted` (no `event.*` in its prompt, so a webhook run never
+/// qualifies) and `node` announces `preapproved_tools`. Nothing else on the
+/// master chooses: `auto` stays refused at save, and an untrusted chat's
+/// later turns never come through here.
 pub fn approval_for(spec: &RoutineSpec, _untrusted: bool, _node: Option<&str>) -> ApprovalMode {
     match spec.approval_mode {
         ApprovalMode::AskAll => ApprovalMode::AskAll,

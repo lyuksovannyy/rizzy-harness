@@ -10,6 +10,7 @@
 //! tools and `remember` (so an untrusted turn can be seen to lose them), or
 //! a fake node that records what the master sends it.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,14 +19,17 @@ use std::time::Duration;
 use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::agent::AgentSpec;
 use harness_core::event::Profile;
-use harness_core::{RawEvent, Secret};
+use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
+use harness_master::config::Config;
+use harness_master::providers::ProviderRuntime;
 use harness_master::routines::{self, Clock};
 use harness_master::{Master, router};
 use harness_memory::SqliteMemory;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
 use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
 use harness_store::Store;
+use harness_store::routines::{Claimed, NewRun, RunPatch};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -90,8 +94,55 @@ async fn rt(root: &Path, id: &str, profile: Profile) -> NodeRuntime {
 type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 
 /// A chat node that runs nothing: it records every command and acks it,
-/// and mirrors a `session_created` for each chat it is asked to create.
-fn fake_chat_node() -> (NodeLink, Seen) {
+/// mirrors a `session_created` for each chat it is asked to create and an
+/// `agent_changed` for each agent switch, and sends whatever else a test
+/// makes it say (`emit`).
+#[derive(Clone)]
+struct Fake {
+    seen: Seen,
+    to_master: mpsc::UnboundedSender<NodeToMaster>,
+    seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
+}
+
+impl Fake {
+    /// Send `kind` as the next event of chat `sid`.
+    fn emit(&self, sid: SessionId, kind: &str, payload: Value) {
+        let seq = {
+            let mut seqs = self.seqs.lock().unwrap();
+            let n = seqs.entry(sid).or_default();
+            *n += 1;
+            *n
+        };
+        let event = RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: seq as i64,
+            kind: kind.into(),
+            payload,
+        };
+        self.to_master.send(NodeToMaster::Event { event }).unwrap();
+    }
+
+    /// A chat of this node, a sub-agent's of `parent` when given.
+    fn created(&self, sid: SessionId, title: &str, parent: Option<&str>) {
+        let mut payload = json!({"title": title, "cwd": "", "model": "m", "backend": "native",
+            "node_id": "master", "profile": "chat", "approval_mode": "ask"});
+        if let Some(p) = parent {
+            payload["parent_session"] = json!(p);
+        }
+        self.emit(sid, "session_created", payload);
+    }
+
+    /// How many prompts reached this node.
+    fn prompts(&self) -> usize {
+        let seen = self.seen.lock().unwrap();
+        seen.iter()
+            .filter(|m| matches!(m, MasterToNode::Prompt { .. }))
+            .count()
+    }
+}
+
+fn fake_chat_node() -> (NodeLink, Fake) {
     let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
     let (to_master, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
     to_master
@@ -104,41 +155,40 @@ fn fake_chat_node() -> (NodeLink, Seen) {
             sessions: vec![],
         })
         .unwrap();
-    let seen: Seen = Arc::default();
-    let rec = seen.clone();
+    let fake = Fake {
+        seen: Arc::default(),
+        to_master,
+        seqs: Arc::default(),
+    };
+    let node = fake.clone();
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
-            if let MasterToNode::Create {
-                session_id,
-                title,
-                cwd,
-                ..
-            } = &msg
-            {
-                let payload = json!({"title": title, "cwd": cwd, "model": "m", "backend": "native",
-                    "node_id": "master", "profile": "chat", "approval_mode": "ask"});
-                let event = RawEvent {
-                    session_id: *session_id,
-                    seq: 1,
-                    ts_ms: 1,
-                    kind: "session_created".into(),
-                    payload,
-                };
-                to_master.send(NodeToMaster::Event { event }).unwrap();
+            match &msg {
+                MasterToNode::Create {
+                    session_id, title, ..
+                } => node.created(*session_id, title, None),
+                MasterToNode::SetAgent {
+                    session_id, agent, ..
+                } => node.emit(
+                    *session_id,
+                    "agent_changed",
+                    json!({"agent": agent.agent_ref()}),
+                ),
+                _ => {}
             }
             let req_id = msg.req_id().map(str::to_string);
-            rec.lock().unwrap().push(msg);
+            node.seen.lock().unwrap().push(msg);
             if let Some(req_id) = req_id {
                 let ack = NodeToMaster::Ack {
                     req_id,
                     ok: true,
                     error: None,
                 };
-                to_master.send(ack).unwrap();
+                node.to_master.send(ack).unwrap();
             }
         }
     });
-    (NodeLink { to_node, from_node }, seen)
+    (NodeLink { to_node, from_node }, fake)
 }
 
 struct T {
@@ -146,8 +196,8 @@ struct T {
     master: Master,
     clock: Arc<AtomicI64>,
     root: String,
-    /// What the fake chat node received, when the chat node is fake.
-    seen: Option<Seen>,
+    /// The chat node, when it is fake.
+    fake: Option<Fake>,
     _runtimes: Vec<NodeRuntime>,
 }
 
@@ -155,6 +205,11 @@ struct T {
 /// `fake_chat`) and an agentic node "local", routines on a manual clock at
 /// `t0`; "alex" claims it.
 async fn start(dir: &Path, fake_chat: bool) -> T {
+    start_with(dir, fake_chat, None).await
+}
+
+/// `start` with config.toml's settings `cfg` (low caps), when given.
+async fn start_with(dir: &Path, fake_chat: bool, cfg: Option<Config>) -> T {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let path = dir.join("claim-code");
@@ -167,13 +222,17 @@ async fn start(dir: &Path, fake_chat: bool) -> T {
     let master = Master::new(Store::open_in_memory().unwrap(), auth);
     master.set_agents(harness_agents::AgentSet::load(&dir.join("none")).0);
     master.set_memory(Arc::new(SqliteMemory::open_in_memory().unwrap()));
+    if let Some(cfg) = cfg {
+        let (rt, _) = ProviderRuntime::start(cfg, dir, Default::default()).unwrap();
+        master.set_provider_runtime(Arc::new(rt));
+    }
     let root = dir.join("work");
     std::fs::create_dir_all(&root).unwrap();
     let mut runtimes = Vec::new();
-    let seen = if fake_chat {
-        let (link, seen) = fake_chat_node();
+    let fake = if fake_chat {
+        let (link, fake) = fake_chat_node();
         master.add_link(link, true).await.unwrap();
-        Some(seen)
+        Some(fake)
     } else {
         let chat = rt(&root, "master", Profile::Chat).await;
         master.add_link(chat.attach().await, true).await.unwrap();
@@ -192,7 +251,7 @@ async fn start(dir: &Path, fake_chat: bool) -> T {
         master,
         clock,
         root: root.display().to_string(),
-        seen,
+        fake,
         _runtimes: runtimes,
     }
 }
@@ -756,7 +815,7 @@ async fn untrusted_runs_and_later_turns_get_no_memory_and_no_web_tools() {
 
 /// The newest prompt the fake chat node received: its agent and context.
 async fn last_prompt(t: &T, after: usize) -> (AgentSpec, String) {
-    let seen = t.seen.as_ref().unwrap();
+    let seen = &t.fake.as_ref().unwrap().seen;
     for _ in 0..500 {
         let found = {
             let seen = seen.lock().unwrap();
@@ -1129,4 +1188,726 @@ async fn retention_keeps_30_seen_run_chats_per_routine() {
         run_of(&t, &alex, &id, &run_id(2)).await["chat_deleted"],
         false
     );
+}
+
+async fn user_id(t: &T, c: &str) -> String {
+    let (_, me) = req(t, Method::GET, "/api/me", None, c).await;
+    me["user"]["user_id"].as_str().unwrap().to_string()
+}
+
+/// A team workspace "Acme" of `owner`'s, with `member` in it.
+async fn acme(t: &T, owner: &str, member: &str) -> String {
+    let body = json!({"name": "Acme"});
+    let (st, w) = req(t, Method::POST, "/api/workspaces", Some(body), owner).await;
+    assert_eq!(st, StatusCode::OK, "{w}");
+    let ws = w["workspace_id"].as_str().unwrap().to_string();
+    let body = json!({"username": member, "role": "member"});
+    let path = format!("/api/workspaces/{ws}/members");
+    let (st, v) = req(t, Method::POST, &path, Some(body), owner).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    ws
+}
+
+/// Prompt chat `sid` as `c`: the agent and context the fake node got.
+async fn prompt_node(t: &T, c: &str, sid: &str, text: &str) -> (AgentSpec, String) {
+    let before = t.fake.as_ref().unwrap().prompts();
+    let path = format!("/api/sessions/{sid}/prompt");
+    let (st, v) = req(t, Method::POST, &path, Some(json!({"text": text})), c).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    last_prompt(t, before).await
+}
+
+/// Fire hook `h` with `text`: the run, and what the fake node got for it.
+async fn fire_node(t: &T, h: &Hook, text: &str) -> (String, AgentSpec, String) {
+    let before = t.fake.as_ref().unwrap().prompts();
+    let run = fire_text(t, h, text).await;
+    let (spec, ctx) = last_prompt(t, before).await;
+    (run, spec, ctx)
+}
+
+/// An untrusted turn: no memory (none of `facts` recalled), no web tools
+/// or `remember` on the agent and its delegates, the note last.
+fn untrusted_turn(spec: &AgentSpec, ctx: &str, facts: &[&str]) {
+    assert!(denies_all(spec), "{:?}", spec.deny_tools);
+    assert!(ctx.ends_with(UNTRUSTED_NOTE), "{ctx}");
+    for f in facts {
+        assert!(!ctx.contains(f), "{f} recalled: {ctx}");
+    }
+}
+
+/// Until chat `sid` is `c`'s and `ok` holds for its row.
+async fn wait_row(t: &T, c: &str, sid: &str, ok: impl Fn(&Value) -> bool) -> Value {
+    let path = format!("/api/sessions/{sid}");
+    for _ in 0..500 {
+        let (st, row) = req(t, Method::GET, &path, None, c).await;
+        if st == StatusCode::OK && ok(&row) {
+            return row;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("chat {sid} never got there");
+}
+
+/// The untrusted mark is the chat's, so nothing that continues, reshapes or
+/// moves an untrusted chat lets event data out: undoing a turn, choosing a
+/// parallel answer, switching the agent, moving the chat into a project and
+/// out again, turning the routine off, the owner prompting a delegate's chat
+/// directly, and that chat again once its parent is deleted.
+#[tokio::test]
+async fn every_way_of_continuing_an_untrusted_chat_stays_untrusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), true).await;
+    let fake = t.fake.clone().unwrap();
+    let alex = alex(&t).await;
+    let ask = "when are the beds watered at dawn?";
+    let mine = "Alex waters the beds at dawn";
+    let theirs = "the garden beds are watered at dawn";
+    let facts = [mine, theirs];
+    let fact = json!({"text": mine});
+    let (st, v) = req(&t, Method::POST, "/api/memory", Some(fact), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let garden = json!({"name": "Garden", "instructions": "Use metric units."});
+    let (st, p) = req(&t, Method::POST, "/api/projects", Some(garden), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    let pid = p["project_id"].as_str().unwrap().to_string();
+    let path = format!("/api/projects/{pid}/memory");
+    let fact = json!({"text": theirs});
+    assert_eq!(
+        req(&t, Method::POST, &path, Some(fact), &alex).await.0,
+        StatusCode::OK
+    );
+
+    // A plain chat, and a delegate's chat under it, recall and keep their
+    // tools: the checks below can tell.
+    let plain = plain_chat(&t, &alex, json!({"profile": "chat"})).await;
+    let (spec, ctx) = prompt_node(&t, &alex, &plain, ask).await;
+    assert!(ctx.contains(mine) && !denies_all(&spec), "{ctx}");
+    let plain_kid = SessionId::new();
+    fake.created(plain_kid, "@scout: look", Some(&plain));
+    let kid_path = plain_kid.to_string();
+    wait_row(&t, &alex, &kid_path, |_| true).await;
+    let (spec, ctx) = prompt_node(&t, &alex, &kid_path, ask).await;
+    assert!(
+        !denies_all(&spec) && !ctx.ends_with(UNTRUSTED_NOTE),
+        "{ctx}"
+    );
+
+    let h = webhook(&t, &alex, "Inbox", chat_spec("{{event.text}}")).await;
+    let (run, spec, ctx) = fire_node(&t, &h, ask).await;
+    untrusted_turn(&spec, &ctx, &facts);
+    let sid = wait_status(&t, &alex, &h.id, &run, "running").await["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let chat = |p: &str| format!("/api/sessions/{sid}/{p}");
+
+    // Undo a turn, then choose a parallel answer: the same chat goes on.
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &chat("turns/t1/restore"),
+        Some(json!({})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
+    untrusted_turn(&spec, &ctx, &facts);
+    let pick = json!({"group": "g1", "message_id": "m1"});
+    let (st, v) = req(&t, Method::POST, &chat("variants"), Some(pick), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
+    untrusted_turn(&spec, &ctx, &facts);
+    {
+        let seen = fake.seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|m| matches!(m, MasterToNode::Restore { .. }))
+        );
+        assert!(
+            seen.iter()
+                .any(|m| matches!(m, MasterToNode::SelectVariant { .. }))
+        );
+    }
+
+    // Another agent for the chat: its turns, and its delegates', still deny.
+    let other = json!({"agent_id": "ultracode"});
+    let (st, v) = req(&t, Method::POST, &chat("agent"), Some(other), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    wait_row(&t, &alex, &sid, |r| r["agent_id"] == "ultracode").await;
+    let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
+    assert_eq!(spec.agent_id, "ultracode");
+    assert!(!spec.delegates.is_empty());
+    untrusted_turn(&spec, &ctx, &facts);
+
+    // Into a project: its brief, not its facts. Out again: still untrusted.
+    let into = json!({"project_id": pid});
+    let (st, v) = req(&t, Method::PUT, &chat("project"), Some(into), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
+    assert!(ctx.contains("Use metric units."), "{ctx}");
+    untrusted_turn(&spec, &ctx, &facts);
+    let out = json!({"project_id": null});
+    let (st, v) = req(&t, Method::PUT, &chat("project"), Some(out), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
+    assert!(!ctx.contains("Project \"Garden\""), "{ctx}");
+    untrusted_turn(&spec, &ctx, &facts);
+
+    // The routine turned off changes nothing for the chat.
+    let path = format!("/api/routines/{}", h.id);
+    let off = json!({"enabled": false});
+    assert_eq!(
+        req(&t, Method::PATCH, &path, Some(off), &alex).await.0,
+        StatusCode::OK
+    );
+    let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
+    untrusted_turn(&spec, &ctx, &facts);
+
+    // A delegate's chat is its owner's to prompt, and holds what the parent
+    // handed it: untrusted too, also once the parent is deleted.
+    let kid = SessionId::new();
+    fake.created(kid, "@scout: from the event", Some(&sid));
+    let kid = kid.to_string();
+    wait_row(&t, &alex, &kid, |_| true).await;
+    let (spec, ctx) = prompt_node(&t, &alex, &kid, ask).await;
+    untrusted_turn(&spec, &ctx, &facts);
+    let gone = format!("/api/sessions/{sid}");
+    assert_eq!(
+        req(&t, Method::DELETE, &gone, None, &alex).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        req(&t, Method::GET, &gone, None, &alex).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (spec, ctx) = prompt_node(&t, &alex, &kid, ask).await;
+    untrusted_turn(&spec, &ctx, &facts);
+    // The check other code can ask outside a prompt.
+    assert!(routines::chat_untrusted(&t.master, kid.parse().unwrap()).await);
+    assert!(!routines::chat_untrusted(&t.master, plain_kid).await);
+}
+
+/// An owner who leaves the routine's workspace keeps the run's chat (it
+/// falls back to their Personal workspace, where their memory is on); it
+/// stays untrusted there, also once the routine is blocked and paused.
+#[tokio::test]
+async fn an_untrusted_chat_stays_untrusted_once_its_owner_lost_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), true).await;
+    let alex = alex(&t).await;
+    let bob = bob(&t, &alex).await;
+    let bob_id = user_id(&t, &bob).await;
+    let ws = acme(&t, &alex, "bob").await;
+    let ask = "when are the beds watered at dawn?";
+    let fact = "Bob waters the beds at dawn";
+    let body = json!({"text": fact});
+    let (st, v) = req(&t, Method::POST, "/api/memory", Some(body), &bob).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let body = json!({"workspace_id": ws, "name": "Acme inbox", "spec": chat_spec("{{event.text}}"),
+                      "triggers": webhook_trigger()});
+    let (st, v) = req(&t, Method::POST, "/api/routines", Some(body), &bob).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let tid = v["routine"]["triggers"][0]["trigger_id"].as_str().unwrap();
+    let h = Hook {
+        id: v["routine"]["routine_id"].as_str().unwrap().to_string(),
+        secret: v["secrets"][tid].as_str().unwrap().to_string(),
+        tid: tid.to_string(),
+    };
+    let (run, spec, ctx) = fire_node(&t, &h, ask).await;
+    untrusted_turn(&spec, &ctx, &[fact]);
+    let sid = wait_status(&t, &bob, &h.id, &run, "running").await["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row = wait_row(&t, &bob, &sid, |_| true).await;
+    assert_eq!(row["workspace_id"], ws.as_str(), "{row}");
+
+    // Bob leaves Acme: the chat is his Personal one now, where a plain chat
+    // recalls.
+    let path = format!("/api/workspaces/{ws}/members/{bob_id}");
+    let (st, v) = req(&t, Method::DELETE, &path, None, &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let row = wait_row(&t, &bob, &sid, |r| r["workspace_id"] != ws.as_str()).await;
+    let plain = plain_chat(&t, &bob, json!({"profile": "chat"})).await;
+    let (_, ctx) = prompt_node(&t, &bob, &plain, ask).await;
+    assert!(ctx.contains(fact), "{ctx} ({row})");
+    let (spec, ctx) = prompt_node(&t, &bob, &sid, ask).await;
+    untrusted_turn(&spec, &ctx, &[fact]);
+
+    // The run ends; the next call is refused at admission and pauses the
+    // routine; the chat is as untrusted as before.
+    let fake = t.fake.as_ref().unwrap();
+    let chat: SessionId = sid.parse().unwrap();
+    fake.emit(chat, "turn_started", json!({"turn_id": "t1"}));
+    fake.emit(
+        chat,
+        "turn_ended",
+        json!({"turn_id": "t1", "reason": "completed"}),
+    );
+    wait_status(&t, &bob, &h.id, &run, "completed").await;
+    let (st, _, v) = post_hook(
+        &t,
+        &h.tid,
+        Some(&h.secret),
+        "text/plain",
+        b"x".to_vec(),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let (_, r) = req(
+        &t,
+        Method::GET,
+        &format!("/api/routines/{}", h.id),
+        None,
+        &bob,
+    )
+    .await;
+    assert_eq!(r["paused_reason"], "blocked", "{r}");
+    let (spec, ctx) = prompt_node(&t, &bob, &sid, ask).await;
+    untrusted_turn(&spec, &ctx, &[fact]);
+}
+
+/// Both run-time caps answer a webhook call with 202 `{skipped: "cap"}`
+/// (config.toml's `[routines]`, set low here): the owner's runs going at
+/// once, and the day's runs, which also pauses the routine until the day's
+/// window has room again.
+#[tokio::test]
+async fn webhook_calls_over_a_cap_are_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.routines.max_concurrent_per_user = 1;
+    cfg.routines.max_runs_per_user_per_day = 3;
+    let t = start_with(dir.path(), false, Some(cfg)).await;
+    let alex = alex(&t).await;
+    let slow = webhook(&t, &alex, "Slow", chat_spec("{{event.text}}")).await;
+    let quick = webhook(&t, &alex, "Quick", chat_spec("{{event.text}}")).await;
+    let minute = std::cell::Cell::new(0);
+    // Each call a minute later, so the call-rate bucket never answers.
+    let call = async |h: &Hook, text: &str| {
+        minute.set(minute.get() + 1);
+        t.set_clock(t0() + minute.get() * MIN);
+        post_hook(&t, &h.tid, Some(&h.secret), "text/plain", text.into(), &[]).await
+    };
+
+    // One run of the owner's at a time: the second routine's call is
+    // skipped, and its routine stays as it was.
+    let (st, _, v) = call(&slow, "slow: 400").await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let first = v["run_id"].as_str().unwrap().to_string();
+    wait_status(&t, &alex, &slow.id, &first, "running").await;
+    let (st, _, v) = call(&quick, "hi").await;
+    assert_eq!((st, v), (StatusCode::ACCEPTED, json!({"skipped": "cap"})));
+    let list = runs(&t, &alex, &quick.id).await;
+    assert_eq!(list[0]["status"], "skipped");
+    assert_eq!(list[0]["reason"], "1 of your routines were already running");
+    assert_eq!(list[0]["trigger_kind"], "webhook");
+    wait_status(&t, &alex, &slow.id, &first, "completed").await;
+
+    // Three runs a day: the fourth call is skipped and pauses the routine,
+    // so the next call is refused (409) before it is counted.
+    for _ in 0..2 {
+        let (st, _, v) = call(&quick, "hi").await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+        let run = v["run_id"].as_str().unwrap().to_string();
+        wait_status(&t, &alex, &quick.id, &run, "completed").await;
+    }
+    let (st, _, v) = call(&quick, "hi").await;
+    assert_eq!((st, v), (StatusCode::ACCEPTED, json!({"skipped": "cap"})));
+    let list = runs(&t, &alex, &quick.id).await;
+    assert_eq!(
+        list[0]["reason"],
+        "the daily limit of 3 routine runs was reached"
+    );
+    let (_, r) = req(
+        &t,
+        Method::GET,
+        &format!("/api/routines/{}", quick.id),
+        None,
+        &alex,
+    )
+    .await;
+    assert_eq!(r["paused_reason"], "cap");
+    let (st, _, v) = call(&quick, "hi").await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(runs(&t, &alex, &quick.id).await.len(), list.len());
+    // The cap is the owner's: the other routine's call is skipped too.
+    let (st, _, v) = call(&slow, "hi").await;
+    assert_eq!((st, v), (StatusCode::ACCEPTED, json!({"skipped": "cap"})));
+    let (_, att) = req(&t, Method::GET, "/api/attention", None, &alex).await;
+    let paused: Vec<&Value> = att["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "paused")
+        .collect();
+    assert_eq!(paused.len(), 2, "{att}");
+    assert!(
+        paused
+            .iter()
+            .all(|r| r["reason"] == "the daily limit of routine runs was reached")
+    );
+
+    // A day later the scheduler lifts the pause and calls run again.
+    t.set_clock(t0() + 24 * HOUR + 10 * MIN);
+    routines::handle(&t.master).unwrap().tick(&t.master).await;
+    let (_, r) = req(
+        &t,
+        Method::GET,
+        &format!("/api/routines/{}", quick.id),
+        None,
+        &alex,
+    )
+    .await;
+    assert_eq!(r["paused_reason"], Value::Null, "{r}");
+    minute.set(24 * 60 + 10);
+    let (st, _, v) = call(&quick, "hi").await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    assert!(v["run_id"].is_string(), "{v}");
+    settle(&t, &alex, &quick.id).await;
+}
+
+/// Run `id` of `routine`, started at `at` and going in chat `sid` (a chat
+/// of a node that is gone, so deleting it only forgets it).
+fn running_run(s: &Store, routine: &str, id: &str, at: i64, sid: SessionId) {
+    let payload = json!({"title": "t", "cwd": "", "model": "m", "backend": "native",
+        "node_id": "gone", "profile": "chat", "approval_mode": "ask"});
+    let created = RawEvent {
+        session_id: sid,
+        seq: 1,
+        ts_ms: 1,
+        kind: "session_created".into(),
+        payload,
+    };
+    s.append("gone", &created).unwrap();
+    let run = NewRun {
+        run_id: id.into(),
+        routine_id: routine.into(),
+        trigger_id: None,
+        trigger_kind: "manual".into(),
+        scheduled_ms: None,
+        started_ms: at,
+        status: "pending".into(),
+        reason: None,
+        repeats: 1,
+        event: None,
+    };
+    assert_eq!(s.run_start(&run).unwrap(), Claimed::Started);
+    let patch = RunPatch {
+        status: Some("running".into()),
+        session_id: Some(sid.to_string()),
+        prompt: Some("hello".into()),
+        ..Default::default()
+    };
+    assert!(s.run_update(id, &patch).unwrap());
+}
+
+/// `running_run`, then completed and seen (unless `unseen`).
+fn finished_run(s: &Store, routine: &str, id: &str, at: i64, sid: SessionId, unseen: bool) {
+    running_run(s, routine, id, at, sid);
+    assert!(s.run_finish(id, "completed", None, at + 10).unwrap());
+    if !unseen {
+        assert!(s.mark_run_seen(routine, id).unwrap());
+    }
+}
+
+/// Retention under load (`routines::hourly`): six routines with fifty seen
+/// run chats each, 120 beyond the newest 30 per routine. An hour deletes at
+/// most 100 of them, oldest first across routines; the newest 30 of each
+/// routine and every continued, unseen or running chat, however old, stay.
+/// The hour's order holds: retention runs before the run purge (a run over
+/// 90 days old goes in the same hour its chat does), then the expired
+/// Idempotency-Keys go.
+#[tokio::test]
+async fn retention_drains_a_backlog_at_100_chats_an_hour() {
+    const ROUTINES: usize = 6;
+    const SEEN: i64 = 50;
+    const DAY: i64 = 24 * HOUR;
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), true).await;
+    let alex = alex(&t).await;
+    let s = t.master.inner_mirror();
+    let (mut kept, mut eligible, mut ancient) = (Vec::new(), Vec::new(), Vec::new());
+    for r in 0..ROUTINES {
+        let body = json!({"name": format!("Busy {r}"), "spec": chat_spec("Ping"),
+                          "triggers": [{"kind": "schedule", "config": {"type": "interval", "every_minutes": 60}}]});
+        let (st, v) = req(&t, Method::POST, "/api/routines", Some(body), &alex).await;
+        assert_eq!(st, StatusCode::CREATED, "{v}");
+        let id = v["routine"]["routine_id"].as_str().unwrap().to_string();
+        // The continued and the unseen chat are the routine's oldest.
+        for (i, at) in [(0, t0() - 300 * DAY), (1, t0() - 299 * DAY)] {
+            let sid = SessionId::new();
+            finished_run(&s, &id, &format!("{id}-{i}"), at, sid, i == 1);
+            if i == 0 {
+                assert!(!s.run_promote(sid).unwrap());
+            }
+            kept.push(sid);
+        }
+        for i in 0..SEEN {
+            let sid = SessionId::new();
+            let run = format!("{id}-seen-{i}");
+            // Interleaved across routines; routine 0's oldest five are more
+            // than 90 days old.
+            let at = match (r, i) {
+                (0, 0..5) => t0() - 100 * DAY + i,
+                _ => t0() - (SEEN - i) * HOUR + r as i64 * MIN,
+            };
+            finished_run(&s, &id, &run, at, sid, false);
+            if i < SEEN - 30 {
+                eligible.push((at, sid, run.clone()));
+                if at < t0() - 90 * DAY {
+                    ancient.push(run);
+                }
+            } else {
+                kept.push(sid);
+            }
+        }
+        // And one still running, older than all of them.
+        let sid = SessionId::new();
+        running_run(&s, &id, &format!("{id}-live"), t0() - 400 * DAY, sid);
+        kept.push(sid);
+    }
+    eligible.sort();
+    assert_eq!(eligible.len(), 120);
+    assert_eq!(ancient.len(), 5);
+    // An Idempotency-Key from two days ago, long expired.
+    let h = webhook(&t, &alex, "Keyed", chat_spec("{{event.text}}")).await;
+    let call = NewRun {
+        run_id: "keyed".into(),
+        routine_id: h.id.clone(),
+        trigger_id: Some(h.tid.clone()),
+        trigger_kind: "webhook".into(),
+        scheduled_ms: None,
+        started_ms: t0() - 2 * DAY,
+        status: "pending".into(),
+        reason: None,
+        repeats: 1,
+        event: None,
+    };
+    s.webhook_claim(&h.id, &h.tid, Some("k"), &call, t0() - 2 * DAY)
+        .unwrap();
+    s.run_finish("keyed", "completed", None, t0() - 2 * DAY)
+        .unwrap();
+
+    let exists = |sid: &SessionId| s.session(*sid).unwrap().is_some();
+    routines::hourly(&t.master).await;
+    let (first, rest) = eligible.split_at(100);
+    assert!(first.iter().all(|(_, sid, _)| !exists(sid)));
+    assert!(rest.iter().all(|(_, sid, _)| exists(sid)));
+    assert!(kept.iter().all(exists), "kept chats were deleted");
+    // Retention, then the purge: the old runs whose chats just went are
+    // forgotten; the others keep their row without the chat's text.
+    for (_, _, run) in first {
+        let row = s.run(run).unwrap();
+        if ancient.contains(run) {
+            assert!(row.is_none(), "{run} outlived its chat by 90 days");
+        } else {
+            let row = row.unwrap();
+            assert!(row.chat_deleted && row.prompt.is_none(), "{row:?}");
+            assert_eq!(row.status, "completed");
+        }
+    }
+    assert_eq!(s.dedupe_purge(t0()).unwrap(), 0, "the hour purged the key");
+
+    // The next hour takes the rest; then there is nothing left to do.
+    routines::hourly(&t.master).await;
+    assert!(eligible.iter().all(|(_, sid, _)| !exists(sid)));
+    routines::hourly(&t.master).await;
+    assert!(kept.iter().all(exists));
+}
+
+/// Every tracing line of this test binary once installed: `harness*`
+/// targets at every level (so raising `HARNESS_LOG` leaks nothing either),
+/// the rest from info up (what `harness serve` writes by default).
+struct Capture(Arc<Mutex<String>>);
+
+/// Field values as text.
+struct Text<'a>(&'a mut String);
+
+impl tracing::field::Visit for Text<'_> {
+    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.0, " {}={v:?}", f.name());
+    }
+}
+
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+        m.target().starts_with("harness") || *m.level() <= tracing::Level::INFO
+    }
+    fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        span.record(&mut Text(&mut self.0.lock().unwrap()));
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        values.record(&mut Text(&mut self.0.lock().unwrap()));
+    }
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, e: &tracing::Event<'_>) {
+        let mut log = self.0.lock().unwrap();
+        log.push_str(e.metadata().target());
+        e.record(&mut Text(&mut log));
+        log.push('\n');
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn captured() -> Arc<Mutex<String>> {
+    static LOG: std::sync::OnceLock<Arc<Mutex<String>>> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| {
+        let log = Arc::new(Mutex::new(String::new()));
+        tracing::subscriber::set_global_default(Capture(log.clone())).unwrap();
+        log
+    })
+    .clone()
+}
+
+/// No body text, header value or secret reaches a log line or an audit row
+/// on any webhook path: refusals before and after the secret, bad bodies
+/// and keys, throttles, duplicates, overlap, a skipped run and a run that
+/// went through; the logs from every harness target at every level.
+#[tokio::test]
+async fn webhook_content_never_reaches_logs_or_audit() {
+    let log = captured();
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), false).await;
+    let alex = alex(&t).await;
+    // Debug: proves the capture sees every level of harness targets.
+    tracing::debug!(target: "harness_capture", "capture-sentinel");
+    let h = webhook(
+        &t,
+        &alex,
+        "Quiet",
+        chat_spec("{{event.body.note}} {{event.text}}"),
+    )
+    .await;
+    let strict = json!({"profile": "chat", "agent_id": "general", "on_missing": "skip",
+                        "prompt": "{{event.body.absent}}"});
+    let skips = webhook(&t, &alex, "Strict", strict).await;
+    let (body, header, key, wrong) = ("BODYMARK", "HDRMARK", "KEYMARK", "WRONGMARK");
+    let note = |extra: &str| json_body(json!({"note": format!("{body} {extra}")}));
+    let headers = [
+        ("x-sender-note", header),
+        ("user-agent", header),
+        ("x-forwarded-for", header),
+    ];
+    let minute = std::cell::Cell::new(0);
+    let call = async |tid: &str, secret: &str, ct: &str, b: Vec<u8>, key: Option<&str>| {
+        minute.set(minute.get() + 1);
+        t.set_clock(t0() + minute.get() * MIN);
+        let mut hs = headers.to_vec();
+        if let Some(k) = key {
+            hs.push(("idempotency-key", k));
+        }
+        let path = format!("{tid}?q={body}-query");
+        post_hook(&t, &path, Some(secret), ct, b, &hs).await.0
+    };
+    let json_ct = "application/json";
+
+    // Refused before the secret: an unknown id, a wrong secret, too big.
+    let unknown = "0193f1c2a4b57d6e8f9012345678abcd";
+    assert_eq!(
+        call(unknown, &h.secret, json_ct, note("a"), None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&h.tid, wrong, json_ct, note("b"), None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut big = body.repeat(20_000).into_bytes();
+    big.truncate(64 * 1024 + 1);
+    assert_eq!(
+        call(&h.tid, &h.secret, "text/plain", big, None).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    // Refused after it: bad bodies and keys.
+    let html = format!("<p>{body}</p>").into_bytes();
+    assert_eq!(
+        call(&h.tid, &h.secret, "text/html", html, None).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    let broken = format!("{{\"note\": \"{body}").into_bytes();
+    assert_eq!(
+        call(&h.tid, &h.secret, json_ct, broken, None).await,
+        StatusCode::BAD_REQUEST
+    );
+    let mut not_text = body.as_bytes().to_vec();
+    not_text.push(0xff);
+    assert_eq!(
+        call(&h.tid, &h.secret, "text/plain", not_text, None).await,
+        StatusCode::BAD_REQUEST
+    );
+    let long_key = format!("{key}{}", "k".repeat(200));
+    assert_eq!(
+        call(&h.tid, &h.secret, json_ct, note("c"), Some(&long_key)).await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Through: a run, an overlapping call while the next one runs, a repeat.
+    assert_eq!(
+        call(&h.tid, &h.secret, json_ct, note("d"), Some(key)).await,
+        StatusCode::ACCEPTED
+    );
+    settle(&t, &alex, &h.id).await;
+    let slow = format!("slow: 300 {body}").into_bytes();
+    assert_eq!(
+        call(&h.tid, &h.secret, "text/plain", slow, None).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        call(&h.tid, &h.secret, json_ct, note("e"), None).await,
+        StatusCode::ACCEPTED
+    );
+    settle(&t, &alex, &h.id).await;
+    assert_eq!(
+        call(&h.tid, &h.secret, json_ct, note("f"), Some(key)).await,
+        StatusCode::ACCEPTED
+    );
+    let statuses: Vec<Value> = runs(&t, &alex, &h.id)
+        .await
+        .iter()
+        .map(|r| r["status"].clone())
+        .collect();
+    assert_eq!(
+        Value::Array(statuses),
+        json!(["skipped", "completed", "completed"])
+    );
+    // A run skipped for a missing value names the path, never content.
+    assert_eq!(
+        call(&skips.tid, &skips.secret, json_ct, note("g"), None).await,
+        StatusCode::ACCEPTED
+    );
+    settle(&t, &alex, &skips.id).await;
+    let skipped = &runs(&t, &alex, &skips.id).await[0];
+    assert_eq!(skipped["status"], "skipped", "{skipped}");
+    // Paused, then throttled.
+    let path = format!("/api/routines/{}", h.id);
+    let off = json!({"enabled": false});
+    assert_eq!(
+        req(&t, Method::PATCH, &path, Some(off), &alex).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&h.tid, &h.secret, json_ct, note("h"), None).await,
+        StatusCode::CONFLICT
+    );
+    for _ in 0..21 {
+        let (st, ..) = post_hook(&t, &h.tid, Some(wrong), json_ct, note("i"), &headers).await;
+        assert_ne!(st, StatusCode::ACCEPTED);
+    }
+    routines::hourly(&t.master).await;
+
+    let log = log.lock().unwrap().clone();
+    assert!(log.contains("capture-sentinel"), "nothing was captured");
+    let lines = t.master.inner_mirror().routine_audit_lines().unwrap();
+    assert!(lines.iter().any(|(k, _)| k == "hook.rejected"), "{lines:?}");
+    for needle in [body, header, key, wrong, &h.secret, &skips.secret] {
+        assert!(!log.contains(needle), "{needle} in the log:\n{log}");
+        assert!(
+            lines.iter().all(|(_, d)| !d.contains(needle)),
+            "{needle} in the audit: {lines:?}"
+        );
+    }
 }
