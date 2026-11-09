@@ -35,16 +35,16 @@ const INITIAL_KB = 110;
 // ceiling, the lazy-chunk checks and the library markers below.
 
 // Measured total of the last merged phase, with what it bought.
-const BASE_KB = 359.5; // Phase B merged (measured 359.49): webhooks UI, Artifacts page + chat cards + Save as artifact, fold items, search thumbnails, lazy Login (measured 2026-11-08; initial 102.3)
+const BASE_KB = 362.9; // Phase C merged (measured 362.9): images in chats (composer attach + downscale chunk, bubble thumbnails, fold images), Use in chat, Still in N chats, chat-delete Media offer, Project Artifacts tab + filter (measured 2026-11-09; initial 103.0)
 
 // I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I2_KB = 0.1; // Phase C: fold.ts copies user_message.images (measured +0.03 over 359.49, 2026-11-08; initial unchanged at 102.3)
+const I2_KB = 0;
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I3_KB = 0; // Phase C: no shell code added, measured 359.49 (initial 102.31), BASE_KB itself; one shared lazy chunk for the icons was tried (total -2.7) and dropped, since it made each lazy page's first visit about 3 KB heavier (docs/sidebar-search.md, measured 2026-11-08)
+const I3_KB = 0;
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I4_KB = 3.5; // Phase C, measured +3.41: downscale chunk 1.1 (lazy), composer image chips/paste/drop and the home pickup +0.7 (initial), bubble thumbnails and the chat-delete Media offer +0.6 (Conversation), Project Artifacts tab and bar images +0.3, Artifacts project filter and header-size previews +0.2, Use in chat / Still in N chats +0.4 (Media, preview, media lib), lib/artifacts helper chunk +0.1 (measured 2026-11-08; initial 103.0)
+const I4_KB = 0;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
