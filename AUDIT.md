@@ -370,22 +370,35 @@ in a table, is simpler, revocable in one `DELETE`, and is what the code had.
 Go back to it (`tower-sessions` if you want a library). Bring JWTs back on
 the day there is a second server and a shared database, not before.
 
-### D2. No schema migrations
+### D2. No schema migrations, and the trigger for adding them has already passed
 
 Every table is `CREATE TABLE IF NOT EXISTS` run at start
 (`store/src/lib.rs:470-478`). There is no `user_version`, no `ALTER TABLE`,
-no migration list. The first column you need to add after someone has real
-data is a hand-written emergency.
+no migration list.
 
-The code already shows the damage. Rather than add columns, state has been
-pushed into the generic `kv` table as strings: the per-user session version
+This is a recorded decision, not an oversight: `PLAN.md` §0 says "No
+compatibility code before the first release … Migrations start with the
+first tagged release", and no tag exists yet. As a rule for a private
+prototype that is reasonable. Two things make it wrong today:
+
+- The README's first line tells people to `docker pull …:edge`, and the
+  image has been published from `main`. Anyone who followed it has a data
+  directory with no upgrade path. The trigger should be "first published
+  image", and that has happened.
+- The last merge broke the rule in the other direction: it kept the old
+  session table and its functions, and added code whose only job is to
+  clear the pre-JWT cookie (`auth.rs:49-52, 668-676`). That is compatibility
+  code for a release that never happened.
+
+Separately, state has been pushed into the generic `kv` table as strings: the per-user session version
 lives at `auth.session_version.<uid>` (`store/src/lib.rs:445-447`,
 `1519-1527`), and preferences, node setups, the model cache, agent edits and
 workspace settings are JSON blobs there too (9 modules call `kv_get`/`kv_set`).
 That is a schemaless database inside the SQL database, with no constraints
 and no foreign keys.
 
-Add a migration runner now, while there are no users to migrate.
+Add the migration runner before the first tag, and stop advertising the
+image until it is there.
 
 ### D3. One mutex around one SQLite connection, and full-table scans behind it
 
@@ -537,7 +550,8 @@ Required before a second person uses it:
 1. **A sandbox for the agent shell** (S1). Landlock or bubblewrap on the
    node, with network off by default. Everything else in the threat model
    leans on a human clicking "allow".
-2. **Schema migrations** (D2).
+2. **Schema migrations** (D2), before the first tag or the next published
+   image, whichever comes first.
 3. **Backup and restore.** There is no `backup` command and no documented
    procedure. Four SQLite files plus a blob directory whose keys live in one
    of those files: copy one without the other and the files are unreadable.
