@@ -141,7 +141,7 @@ export function MemoryPage(props: { version: number }) {
             ))}
           </ul>
         )}
-        <div className="muted small">Stored in: {backend === "builtin" ? "this server" : backend}</div>
+        <div className="muted small">Stored in: {backend === "builtin" ? "this server" : backend === "qdrant" ? "this server (vectors in Qdrant)" : backend}</div>
       </div>
     </div>
   );
@@ -293,7 +293,20 @@ export function MemoryCfgForm(props: {
       </div>
     );
   }
-  if (cfg.backend !== "builtin") {
+  const locked = cfg.locked ?? [];
+  if (locked.length > 0) {
+    return (
+      <div className="stack">
+        <div className="muted">
+          Memory is set by the server&apos;s environment (.env): {cfg.backend} backend, {cfg.recall} recall
+          {cfg.recall === "meaning" && cfg.model ? `, embeddings model ${cfg.model}` : ""}. Change{" "}
+          {locked.map((l) => l.var).join(", ")} there and restart to adjust it.
+        </div>
+        {onward}
+      </div>
+    );
+  }
+  if (cfg.backend !== "builtin" && cfg.backend !== "qdrant") {
     return (
       <div className="stack">
         <div className="muted">Memory uses the {cfg.backend} backend (set in config.toml).</div>

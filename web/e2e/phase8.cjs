@@ -45,7 +45,7 @@ let PAGE = null;
     await p.click('text=Create join command');
     const cmd = await p.innerText('.join-cmd');
     await p.screenshot({ path: `${S}/p8-1-join.png` });
-    const token = /--token (\S+)/.exec(cmd)[1];
+    const token = /HARNESS_JOIN_TOKEN=(\S+)/.exec(cmd)[1];
     const fp = /--fingerprint (\S+)/.exec(cmd)[1];
     const url = /join (wss:\/\/\S+)/.exec(cmd)[1];
     log('join url:', url, '| fingerprint', fp.slice(0, 20) + '…');

@@ -155,7 +155,7 @@ impl Embedder {
 
 /// A short, printable piece of an error body: the JSON error message when
 /// there is one, else plain text; HTML pages are dropped.
-fn error_detail(body: &str) -> String {
+pub(crate) fn error_detail(body: &str) -> String {
     let body = body.trim();
     let text = match serde_json::from_str::<Value>(body) {
         Ok(v) => [

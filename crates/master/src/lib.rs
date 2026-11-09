@@ -10,8 +10,11 @@ pub mod auth;
 pub mod avatars;
 pub mod blobs;
 pub mod config;
+pub mod env;
 mod favicon;
 mod http;
+pub mod jwt;
+pub mod kv;
 pub mod media;
 pub mod model_cache;
 pub mod node_setups;
@@ -120,11 +123,16 @@ struct NodeConn {
     capabilities: Vec<String>,
 }
 
+/// The node a command went to, and where its ack goes.
+type PendingAck = (String, oneshot::Sender<Result<(), String>>);
+
 pub struct MasterInner {
     pub mirror: Store,
     nodes: Mutex<HashMap<String, NodeConn>>,
     live: broadcast::Sender<Live>,
-    acks: Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>,
+    /// Pending commands by request id, with the node each went to: only
+    /// that node's ack settles it.
+    acks: Mutex<HashMap<String, PendingAck>>,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
@@ -258,6 +266,11 @@ const UNTRUSTED_NOTE: &str = "Parts of this conversation come from an external e
 const UNTRUSTED_DENIED: [&str; 3] = ["remember", "web_fetch", "web_search"];
 
 /// Marks a session created without a model: it follows the defaults.
+/// A node-supplied label for the UI: no control characters, at most `max` chars.
+fn clean_label(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
 fn auto_model_key(sid: SessionId) -> String {
     format!("session-model-auto:{sid}")
 }
@@ -655,6 +668,20 @@ impl Master {
         } else {
             Profile::Agentic
         };
+        // The chat profile is the master's own in-process runtime (it gets
+        // chats of people without the agentic grant): a remote node that
+        // claims it is refused rather than handed those chats.
+        if !embedded && profile == Profile::Chat {
+            return Err(format!(
+                "remote node {node_id} may not serve the chat profile"
+            ));
+        }
+        // What a remote node says about itself is shown in the UI.
+        let (hostname, version) = if embedded {
+            (hostname, version)
+        } else {
+            (clean_label(&hostname, 64), clean_label(&version, 64))
+        };
         if protocol_version != PROTOCOL_VERSION {
             return Err(format!(
                 "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
@@ -784,7 +811,18 @@ impl Master {
                 }
             }
             NodeToMaster::Ack { req_id, ok, error } => {
-                if let Some(tx) = lock(&self.inner.acks).remove(&req_id) {
+                let tx = {
+                    let mut acks = lock(&self.inner.acks);
+                    match acks.get(&req_id) {
+                        Some((to, _)) if to == node_id => acks.remove(&req_id).map(|(_, tx)| tx),
+                        Some(_) => {
+                            tracing::warn!(node = %node_id, "ack for another node's request; ignored");
+                            None
+                        }
+                        None => None,
+                    }
+                };
+                if let Some(tx) = tx {
                     let _ = tx.send(if ok {
                         Ok(())
                     } else {
@@ -867,7 +905,7 @@ impl Master {
     ) -> Result<(), CommandError> {
         let req_id = new_id();
         let (tx, rx) = oneshot::channel();
-        lock(&self.inner.acks).insert(req_id.clone(), tx);
+        lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
         let sent = {
             let nodes = lock(&self.inner.nodes);
             nodes
