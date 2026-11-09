@@ -142,6 +142,7 @@ pub fn extensions(format: &str) -> &'static [&'static str] {
         "dll" => &["dll"],
         "wasm" => &["wasm"],
         "txt" => &["txt", "md", "log", "csv", "json", "toml", "yaml", "yml"],
+        "md" => &["md", "markdown"],
         _ => &[],
     }
 }
@@ -295,6 +296,9 @@ fn narrow(
             None => (kind, format),
         },
         ("archive", "gz") if matches!(ext, Some("tar.gz" | "tgz")) => ("archive", "tar.gz".into()),
+        // Text named as prose is a document (Artifacts' Documents filter);
+        // other text (logs, data, code) stays "other".
+        ("other", "txt") if matches!(ext, Some("md" | "markdown")) => ("document", "md".into()),
         _ => (kind, format),
     }
 }
@@ -1052,6 +1056,11 @@ mod tests {
             ("document", "pdf", "download")
         );
         assert_eq!(sn(b"hello, plain text\n").format, "txt");
+        // Named as Markdown, text is a document; other text names change nothing.
+        let md = sniff(b"# Notes\n\nAll good.\n", Some("report.md"), None);
+        assert_eq!((md.kind, md.format.as_str()), ("document", "md"));
+        assert_eq!(sniff(b"a,b\n1,2\n", Some("data.csv"), None).kind, "other");
+        assert_eq!(sniff(&[0, 1, 2, 3, 0xFF], Some("x.md"), None).format, "bin");
         assert_eq!(sn(&[0, 1, 2, 3, 0xFF]).format, "bin");
         assert_eq!(sn(b"").format, "bin");
     }

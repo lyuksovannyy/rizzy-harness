@@ -221,33 +221,46 @@ describe("media", () => {
     expect(attach().title).not.toContain("images");
   });
 
-  test("deleting asks first, then offers the chat's Media files", async () => {
-    const ask = vi.fn((_q: string) => true);
+  const deleteButton = () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!;
+  const inDialog = (label: string) =>
+    [...host.querySelectorAll<HTMLButtonElement>(".delete-chat button")].find((b) => b.textContent === label)!;
+
+  test("deleting asks in the page, then offers the chat's Media files (unticked)", async () => {
+    const ask = vi.fn(() => true);
     vi.stubGlobal("confirm", ask);
     mediaApi.list.mockResolvedValue({ items: [{}, {}, {}], next: null });
     await show([], sessionRow());
-    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    await act(async () => deleteButton().click());
     expect(mediaApi.list).toHaveBeenCalledWith({ workspace: "w1", session: SID });
-    expect(ask.mock.calls.map((c) => c[0])).toEqual([
-      "Delete this chat for good?",
-      "Also delete the 3 Media files that came from this chat? Cancel keeps them in Media.",
-    ]);
+    const dialog = host.querySelector(".delete-chat")!;
+    expect(dialog.textContent).toContain("Delete this chat for good?");
+    expect(dialog.textContent).toContain("Also delete the 3 Media files that came from this chat");
+    const box = dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(box.checked).toBe(false);
+    await act(async () => box.click());
+    await act(async () => inDialog("Delete").click());
     expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: true });
+    expect(ask).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
   test("with no Media files from the chat (or Media off) it is just the chat; Cancel keeps it", async () => {
-    const ask = vi.fn((_q: string) => true);
-    vi.stubGlobal("confirm", ask);
     mediaApi.list.mockRejectedValue(new Error("not found"));
     await show([], sessionRow());
-    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
-    expect(ask).toHaveBeenCalledTimes(1);
-    expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: false });
-    vi.mocked(api.deleteSession).mockClear();
-    ask.mockReturnValue(false);
-    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    await act(async () => deleteButton().click());
+    expect(host.querySelector(".delete-chat input")).toBeNull();
+    await act(async () => inDialog("Cancel").click());
+    expect(host.querySelector(".delete-chat")).toBeNull();
     expect(api.deleteSession).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+    await act(async () => deleteButton().click());
+    await act(async () => inDialog("Delete").click());
+    expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: false });
+  });
+
+  test("one Media file reads as one", async () => {
+    mediaApi.list.mockResolvedValue({ items: [{}], next: null });
+    await show([], sessionRow());
+    await act(async () => deleteButton().click());
+    expect(host.querySelector(".delete-chat")!.textContent).toContain("Also delete the Media file that came from this chat");
   });
 });

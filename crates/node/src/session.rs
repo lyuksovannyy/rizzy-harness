@@ -947,10 +947,7 @@ impl TurnHost for Session {
             call_id: call_id.into(),
             tool: tool.into(),
             input: input.clone(),
-            reason: match risk {
-                ToolRisk::Mutating => format!("`{tool}` can change files or run programs"),
-                ToolRisk::ReadOnly => format!("approval mode requires asking for `{tool}`"),
-            },
+            reason: approval_reason(tool, risk),
         }))
         .await;
         let cancel = self.current_cancel().unwrap_or_default();
@@ -972,5 +969,33 @@ impl TurnHost for Session {
         }))
         .await;
         decision
+    }
+}
+
+/// What an approval card says the tool would do. Publishing changes nothing
+/// on this node, it sends a copy away, so it says that instead.
+fn approval_reason(tool: &str, risk: ToolRisk) -> String {
+    match (tool, risk) {
+        ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),
+        (_, ToolRisk::Mutating) => format!("`{tool}` can change files or run programs"),
+        (_, ToolRisk::ReadOnly) => format!("approval mode requires asking for `{tool}`"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_cards_say_what_the_tool_does() {
+        let publish = approval_reason("publish", ToolRisk::Mutating);
+        assert!(
+            publish.contains("Artifacts") && !publish.contains("run programs"),
+            "{publish}"
+        );
+        assert_eq!(
+            approval_reason("bash", ToolRisk::Mutating),
+            "`bash` can change files or run programs"
+        );
     }
 }

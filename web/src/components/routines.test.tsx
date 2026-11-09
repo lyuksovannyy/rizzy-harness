@@ -384,6 +384,25 @@ describe("editor", () => {
     expect(routinesApi.run).toHaveBeenCalledWith("r1", { issue: { title: "Login fails", number: 42 } });
   });
 
+  test("the sample event stays in this browser across visits; emptied, it is forgotten", async () => {
+    const hooked = routine({
+      triggers: [{ trigger_id: "h1", kind: "webhook", config: {}, next_run_ms: null, last_fired_ms: null, url_path: "/api/hooks/h1", secret_set: true }],
+    });
+    routinesApi.list.mockResolvedValue(LIST({ routines: [hooked] }));
+    routinesApi.preview.mockResolvedValue(PREVIEW);
+    localStorage.removeItem("routine-sample:r1");
+    await show("r1", { webhooks: true });
+    const sample = '{"issue": {"number": 7}}';
+    type(host.querySelector<HTMLTextAreaElement>(".routine-hook textarea")!, sample);
+    expect(localStorage.getItem("routine-sample:r1")).toBe(sample);
+    await show(null);
+    await show("r1", { webhooks: true });
+    const box = host.querySelector<HTMLTextAreaElement>(".routine-hook textarea")!;
+    expect(box.value).toBe(sample);
+    type(box, "");
+    expect(localStorage.getItem("routine-sample:r1")).toBeNull();
+  });
+
   test("a run's chat can land in a project; preview errors not about the prompt carry no offset", async () => {
     const project = { project_id: "p".repeat(32), workspace_id: "w1", name: "Website", description: "", icon: "", accent: "", chats: 0, updated_ms: 0 };
     routinesApi.list.mockResolvedValue(LIST());

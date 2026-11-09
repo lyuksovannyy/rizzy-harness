@@ -49,6 +49,27 @@ const loadSearch = () => import("./SearchPanel");
 const SearchPanel = lazy(loadSearch);
 const preloadSearch = () => void loadSearch().catch(() => {});
 
+/** Stands in for the search panel while its chunk loads, so the first keys
+ * typed land in a search box (not the composer behind it) and carry over. */
+function SearchPending(props: { typed: { current: string } }) {
+  return (
+    <dialog className="search-panel" open aria-label="Search">
+      <div className="search-box">
+        <div className="search-top">
+          <input
+            className="search-input"
+            aria-label="Search"
+            placeholder="Search"
+            autoFocus
+            defaultValue={props.typed.current}
+            onChange={(e) => (props.typed.current = e.target.value)}
+          />
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
 /** Until `/api/features` answers: no area shows. */
 const NO_FEATURES: Features = {
   voice: false,
@@ -153,6 +174,7 @@ export function Shell(props: {
   const [drawer, setDrawer] = useState(false);
   const narrow = useNarrow();
   const [searching, setSearching] = useState(false);
+  const searchTyped = useRef("");
   const menuButton = useRef<HTMLButtonElement>(null);
   const shellBox = useRef<HTMLDivElement>(null);
   const route = useRoute();
@@ -507,6 +529,7 @@ export function Shell(props: {
   // On a phone the drawer closes first; the panel then covers the screen.
   const openSearch = useCallback(() => {
     preloadSearch();
+    searchTyped.current = "";
     setDrawer(false);
     setSearching(true);
   }, []);
@@ -705,8 +728,9 @@ export function Shell(props: {
         </Suspense>
       </main>
       {searching && (
-        <Suspense fallback={null}>
+        <Suspense fallback={<SearchPending typed={searchTyped} />}>
           <SearchPanel
+            typed={() => searchTyped.current}
             workspace={workspaceId}
             kinds={features.search.kinds}
             projects={projects}

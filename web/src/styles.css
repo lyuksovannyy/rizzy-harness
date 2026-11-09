@@ -4471,3 +4471,15 @@ button.danger-text { color: var(--bad); }
   .runs-result { max-width: none; }
 }
 /* ── end feature pages ── */
+/* The "Delete chat" confirm. */
+.delete-chat {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  border: none;
+  border-radius: var(--r-lg);
+  background: var(--surface-pop);
+  color: var(--fg);
+  box-shadow: var(--shadow-2);
+}
+.delete-chat::backdrop { background: var(--scrim); }
+.delete-chat .media-confirm { margin: 0; }

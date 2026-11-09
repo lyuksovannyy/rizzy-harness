@@ -176,8 +176,14 @@ impl View {
                 Some(_) => json!({ "private": true }),
             },
         };
-        let meta: Value = serde_json::from_str(&v.meta).unwrap_or_else(|_| json!({}));
+        let mut meta: Value = serde_json::from_str(&v.meta).unwrap_or_else(|_| json!({}));
         let b = v.blob.as_ref();
+        // The node names its own platform for every file; only a build has one.
+        if !crate::artifacts::is_build(b.map(|b| b.kind.as_str()))
+            && let Some(m) = meta.as_object_mut()
+        {
+            m.remove("target");
+        }
         // An image's size from its header (read at commit, never decoded);
         // other kinds' previews hold only the owner's browser hints.
         let image = b.is_some_and(|b| b.kind == "image");

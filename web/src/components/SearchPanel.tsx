@@ -122,6 +122,8 @@ export default function SearchPanel(props: {
   /** For the icons of projects and of chats in them. */
   projects: ProjectSummary[];
   timeZone?: string | null;
+  /** What was typed into the stand-in box while this chunk loaded. */
+  typed?: () => string;
   onOpen: (r: Route) => void;
   onClose: () => void;
 }) {
@@ -131,7 +133,7 @@ export default function SearchPanel(props: {
   const list = useRef<HTMLUListElement>(null);
   const sentinel = useRef<HTMLLIElement>(null);
   const ids = useId();
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(() => props.typed?.() ?? "");
   const [kinds, setKinds] = useState(props.kinds);
   const [tab, setTab] = useState(readTab);
   const [page, setPage] = useState<Page | null>(null);
@@ -145,7 +147,16 @@ export default function SearchPanel(props: {
 
   useEffect(() => {
     dialog.current?.showModal?.();
-    input.current?.focus();
+    const el = input.current;
+    // Keys typed into the stand-in after this panel's first render count too.
+    const late = props.typed?.();
+    if (el && late && late !== el.value) {
+      el.value = late;
+      setQ(late);
+    }
+    el?.focus();
+    // Typing carried over from the stand-in box goes on at its end.
+    el?.setSelectionRange(el.value.length, el.value.length);
   }, []);
 
   // Each change of query or tab asks again, once typing pauses; a newer

@@ -186,6 +186,7 @@ fn search_row(
             let target = serde_json::from_str::<ArtifactMeta>(&v.meta)
                 .ok()
                 .and_then(|m| m.target)
+                .filter(|_| is_build(blob.map(|b| b.kind.as_str())))
                 .map(|t| format!(" · {t}"))
                 .unwrap_or_default();
             format!(
@@ -512,6 +513,12 @@ pub async fn hourly(m: &Master) -> Vec<String> {
     swept.gone
 }
 
+/// Whether a file of this kind is a build, the only kind a target triple
+/// describes (a document or a picture runs nowhere).
+pub fn is_build(kind: Option<&str>) -> bool {
+    matches!(kind, Some("binary" | "package" | "archive"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +535,9 @@ mod tests {
 
     #[test]
     fn kinds() {
+        // Only a build is described by a target triple.
+        assert!(is_build(Some("binary")) && is_build(Some("archive")));
+        assert!(!is_build(Some("document")) && !is_build(Some("image")) && !is_build(None));
         assert_eq!(kind_label("package"), "package");
         assert_eq!(kind_label("bin"), "other");
     }

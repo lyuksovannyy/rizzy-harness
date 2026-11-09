@@ -5,7 +5,6 @@ import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, 
 import { api } from "../api";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
-import { mediaApi } from "../lib/media";
 import { fallbackNote } from "../lib/models";
 import { markRunSeen } from "../lib/routineResults";
 import { routineHash } from "../lib/routes";
@@ -29,6 +28,7 @@ import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
+import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
@@ -268,16 +268,9 @@ export default function Conversation(props: {
   const imagesUsed = items.reduce((n, it) => n + (it.type === "user" ? (it.images?.length ?? 0) : 0), 0);
   const artifacts = useChatArtifacts(sessionId, live, stagedKeys(items), saveable);
   const [savingFile, setSavingFile] = useState(false);
-  // Deleting asks, then offers the viewer's Media files that came from this
-  // chat (none while Media is off), which can go with it.
-  const remove = async () => {
-    if (!confirm(t("conv.deleteConfirm"))) return;
-    const from = incognito ? null : await mediaApi.list({ workspace: workspaceId, session: sessionId }).catch(() => null);
-    const n = from?.items.length ?? 0;
-    const media = n > 0 && confirm(`Also delete the ${n}${from!.next ? "+" : ""} Media file${n > 1 ? "s" : ""} that came from this chat? Cancel keeps them in Media.`);
-    await api.deleteSession(sessionId, { media }).catch(() => {});
-    location.hash = "#/";
-  };
+  // Deleting asks in a dialog that also offers the chat's Media files.
+  const [deleting, setDeleting] = useState(false);
+  const remove = () => setDeleting(true);
 
   const page = (
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
@@ -325,10 +318,11 @@ export default function Conversation(props: {
             <Package size={18} />
           </button>
         )}
-        <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={() => void remove()}>
+        <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={remove}>
           <Trash2 size={18} />
         </button>
       </header>
+      {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} onClose={() => setDeleting(false)} />}
       {savingFile && (
         <div className="incognito-banner save-file-bar">
           <SaveAsArtifact autoFocus />
@@ -355,7 +349,7 @@ export default function Conversation(props: {
       {incognito && (
         <div className="incognito-banner">
           <span>{t("conv.incognito")}</span>
-          <button type="button" className="link" onClick={() => void remove()}>
+          <button type="button" className="link" onClick={remove}>
             {t("conv.deleteNow")}
           </button>
         </div>

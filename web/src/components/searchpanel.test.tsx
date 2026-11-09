@@ -89,6 +89,16 @@ describe("search panel", () => {
     expect(host.querySelector('[aria-live="polite"]')!.textContent).toBe("2 results");
   });
 
+  test("starts from what was typed while it loaded, the caret at the end", async () => {
+    await act(async () =>
+      root.render(<SearchPanel workspace="w1" kinds={["chats"]} projects={[]} typed={() => "walk"} onOpen={vi.fn()} onClose={vi.fn()} />),
+    );
+    expect(input().value).toBe("walk");
+    expect(input().selectionStart).toBe(4);
+    await settle();
+    expect(search.mock.calls.at(-1)![0]).toBe("walk");
+  });
+
   test("opens on the last tab used, unless the viewer no longer has it", async () => {
     localStorage.setItem("harness.searchTab", "projects");
     await render();

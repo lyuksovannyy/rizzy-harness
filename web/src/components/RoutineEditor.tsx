@@ -71,8 +71,13 @@ export function RoutineEditor(props: {
   const [busy, setBusy] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
-  // The "Sample event (JSON)" box: the editor's own, never saved.
-  const [sample, setSample] = useState("");
+  // The "Sample event (JSON)" box: never sent to be saved, but kept in this
+  // browser per routine, so saving (or coming back) does not empty it.
+  const [sample, setSampleState] = useState(() => readSample(routine?.routine_id));
+  const setSample = (v: string) => {
+    setSampleState(v);
+    if (routine) keepSample(routine.routine_id, v);
+  };
   const prompt = useRef<HTMLTextAreaElement>(null);
   const workspaceId = list.workspace_id ?? props.scope ?? undefined;
 
@@ -135,6 +140,8 @@ export function RoutineEditor(props: {
         ? await routinesApi.update(routine.routine_id, body)
         : await routinesApi.create({ ...(workspaceId ? { workspace_id: workspaceId } : {}), ...body });
       setDraft(draftOf(res.routine, Date.now()));
+      // A new routine's editor opens again under its id: hand the sample over.
+      keepSample(res.routine.routine_id, sample);
       setNote("Saved.");
       props.onSaved(res.routine, res.secrets ?? {});
     } catch (e) {
@@ -148,6 +155,7 @@ export function RoutineEditor(props: {
     if (!routine || !confirm(`Delete ${routine.name}? The chats of its runs stay.`)) return;
     try {
       await routinesApi.remove(routine.routine_id);
+      keepSample(routine.routine_id, "");
       props.onDeleted();
     } catch (e) {
       setError(message(e));
@@ -442,4 +450,25 @@ export function RoutineTabs(props: { id: string; tab: "settings" | "runs"; navig
       ))}
     </div>
   );
+}
+
+const SAMPLE_KEY = "routine-sample:";
+
+/** The sample event kept for a routine in this browser ("" when none, or storage is off). */
+function readSample(id: string | undefined): string {
+  if (!id) return "";
+  try {
+    return localStorage.getItem(SAMPLE_KEY + id) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function keepSample(id: string, v: string) {
+  try {
+    if (v.trim()) localStorage.setItem(SAMPLE_KEY + id, v);
+    else localStorage.removeItem(SAMPLE_KEY + id);
+  } catch {
+    // Storage off (private window): the box just starts empty next time.
+  }
 }

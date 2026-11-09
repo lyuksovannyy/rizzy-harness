@@ -35,7 +35,7 @@ const INITIAL_KB = 110;
 // ceiling, the lazy-chunk checks and the library markers below.
 
 // Measured total of the last merged phase, with what it bought.
-const BASE_KB = 362.9; // Phase C merged (measured 362.9): images in chats (composer attach + downscale chunk, bubble thumbnails, fold images), Use in chat, Still in N chats, chat-delete Media offer, Project Artifacts tab + filter (measured 2026-11-09; initial 103.0)
+const BASE_KB = 363.6; // Phase C merged (measured 362.9): images in chats (composer attach + downscale chunk, bubble thumbnails, fold images), Use in chat, Still in N chats, chat-delete Media offer, Project Artifacts tab + filter (measured 2026-11-09; initial 103.0); then +0.6 for the walkthrough fixes: the in-page Delete chat dialog (Conversation), the search box that catches typing while the panel loads (+0.2 initial, initial 103.2), the kept routine sample (2026-11-09)
 
 // I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I2_KB = 0;
