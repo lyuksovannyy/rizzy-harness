@@ -4,14 +4,17 @@
 [![image](https://img.shields.io/badge/ghcr.io-rizzy--harness-blue?logo=docker)](https://github.com/lyuksovannyy/rizzy-harness/pkgs/container/rizzy-harness)
 [![release](https://img.shields.io/github/v/release/lyuksovannyy/rizzy-harness?include_prereleases&sort=semver)](https://github.com/lyuksovannyy/rizzy-harness/releases)
 
-```bash
-docker pull ghcr.io/lyuksovannyy/rizzy-harness:edge
-```
+> **Pre-release.** There is no tagged release and no upgrade path yet: the
+> data directory's format still changes without migrations, so an update can
+> require wiping it. Do not keep anything in it you cannot lose. A security
+> review ([`AUDIT.md`](AUDIT.md)) is being worked through in
+> [`FIX_PLAN.md`](FIX_PLAN.md); until its Phase 2 is done, run it on
+> `127.0.0.1` for yourself only.
 
-The image is the **central server** (web UI, chats, node setup); worker nodes
-run on real hosts. Tags: `latest` and `X.Y.Z` for releases, `edge` for `main`
-after CI passes. Setup: [Central server in Docker](#central-server-in-docker).
-Release binaries (Linux x86_64): [Releases](https://github.com/lyuksovannyy/rizzy-harness/releases).
+The image is the **central server** (web UI, chats); worker nodes run on real
+hosts. `ghcr.io/lyuksovannyy/rizzy-harness:edge` follows `main` after CI
+passes; `latest` and `X.Y.Z` will exist from the first release. Setup:
+[Central server in Docker](#central-server-in-docker).
 
 A self-hosted coding-agent harness: one Rust binary that serves a web dashboard
 for coding agents, with the agent loop running on the machine that owns the
