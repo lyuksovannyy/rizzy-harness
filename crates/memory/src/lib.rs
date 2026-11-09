@@ -9,6 +9,7 @@
 
 mod embed;
 mod mem0;
+mod qdrant;
 mod sqlite;
 mod tool;
 
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 pub use embed::{ApiStyle, Embedder, Preset};
 pub use mem0::Mem0Memory;
+pub use qdrant::QdrantIndex;
 pub use sqlite::SqliteMemory;
 pub use tool::Remember;
 

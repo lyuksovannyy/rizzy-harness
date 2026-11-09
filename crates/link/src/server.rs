@@ -25,9 +25,20 @@ pub fn bridge(
     let (mut sink, mut stream) = ws.split();
     tokio::spawn(async move {
         let mut first = true;
+        let mut ping = crate::ping_ticker();
+        let mut heard = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 _ = stop.cancelled() => break,
+                _ = ping.tick() => {
+                    if heard.elapsed() > crate::IDLE_LIMIT {
+                        tracing::info!(node = %node_id, "node link idle; closing");
+                        break;
+                    }
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
                 out = to_node_rx.recv() => match out {
                     Some(m) => {
                         let Ok(t) = serde_json::to_string(&m) else { continue };
@@ -37,7 +48,7 @@ pub fn bridge(
                     }
                     None => break,
                 },
-                inc = stream.next() => match inc {
+                inc = stream.next() => match inc.inspect(|_| heard = tokio::time::Instant::now()) {
                     Some(Ok(Message::Text(t))) => {
                         let msg: NodeToMaster = match serde_json::from_str(t.as_str()) {
                             Ok(m) => m,

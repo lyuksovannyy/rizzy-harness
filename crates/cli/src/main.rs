@@ -33,16 +33,24 @@ enum Cmd {
     /// Run the master with an embedded node and the web UI.
     Serve {
         /// Address to listen on. Non-loopback requires --insecure-bind until TLS lands.
-        #[arg(long, default_value = "127.0.0.1:7777")]
+        #[arg(long, env = "HARNESS_BIND", default_value = "127.0.0.1:7777")]
         bind: SocketAddr,
         /// Allow a non-loopback address that is not a WireGuard interface
         /// (only on a network you trust). WireGuard addresses need no flag.
-        #[arg(long)]
+        #[arg(
+            long,
+            env = "HARNESS_INSECURE_BIND",
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         insecure_bind: bool,
         /// Serve the UI over HTTPS with a self-signed certificate (trust
         /// `keys/ui-cert.pem` once). Needed off-localhost for notifications
         /// and the microphone: browsers only allow them on secure pages.
-        #[arg(long)]
+        #[arg(
+            long,
+            env = "HARNESS_TLS",
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         tls: bool,
         /// Extra `host:port` values accepted in Host/Origin headers.
         #[arg(
@@ -53,7 +61,7 @@ enum Cmd {
         allowed_hosts: Vec<String>,
         /// Accept remote worker nodes here (TLS with a pinned self-signed
         /// certificate, Ed25519 node keys). Off unless given.
-        #[arg(long)]
+        #[arg(long, env = "HARNESS_NODE_LISTEN")]
         node_listen: Option<SocketAddr>,
         /// Run no agentic node here: chats only, agentic sessions go to
         /// remote nodes. Used by the container image (nodes need a real host).
@@ -98,7 +106,9 @@ enum NodeCmd {
     Join {
         /// `wss://host:port` of the master's node listener.
         master_url: String,
-        #[arg(long)]
+        /// The single-use join token. Prefer the environment variable: an
+        /// argument is visible to other users in the process list.
+        #[arg(long, env = "HARNESS_JOIN_TOKEN", hide_env_values = true)]
         token: String,
         /// The master certificate fingerprint shown with the token.
         #[arg(long)]
@@ -153,6 +163,7 @@ fn allowed_hosts(bind: SocketAddr, extra: &[String]) -> Vec<String> {
     v
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     dir: &Path,
     bind: SocketAddr,
@@ -161,7 +172,9 @@ async fn serve(
     extra_hosts: Vec<String>,
     node_listen: Option<SocketAddr>,
     no_local_node: bool,
+    dotenv_names: &[String],
 ) -> anyhow::Result<()> {
+    check_database_url()?;
     match net::exposure(bind, insecure_bind, net::in_container())? {
         net::Exposure::Loopback => {}
         net::Exposure::WireGuard(iface) => {
@@ -185,11 +198,26 @@ async fn serve(
             if tls { "" } else { " and WITHOUT TLS: passwords and cookies travel in clear text" }
         ),
     }
-    let cfg = Config::load(&dir.join(CONFIG_FILE))?;
+    let env = harness_master::env::EnvSettings::from_env();
+    if !env.locked().is_empty() {
+        tracing::info!(
+            settings = ?env.locked().iter().map(|l| l.var).collect::<Vec<_>>(),
+            "settings fixed by the environment (.env)"
+        );
+    }
+    let cfg = Config::load_with_env(&dir.join(CONFIG_FILE), &env)?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
     let secrets = harness_core::SecretSet::default();
-    let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
-    let runtime = Arc::new(runtime);
+    for v in harness_master::env::secret_values() {
+        secrets.add(v);
+    }
+    let (runtime, mut env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
+    // Nothing from `.env` or the server's own HARNESS_* settings reaches an
+    // agent's shell (database and Redis URLs, the JWT secret, keys).
+    env_remove.extend(harness_master::env::hidden_from_tools(dotenv_names));
+    env_remove.sort();
+    env_remove.dedup();
+    let runtime = Arc::new(runtime.with_env(env));
     // Both runtimes share one swappable provider: settings can change it live.
     let provider: Arc<dyn Provider> = runtime.provider.clone();
     tracing::info!(
@@ -267,7 +295,19 @@ async fn serve(
     // Use the bound address (port 0 resolves here) for the Host allowlist.
     let addr = listener.local_addr()?;
     let token = auth::load_or_create_token(&api_token_path(dir))?;
-    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls);
+    let kv = harness_master::kv::open(
+        &std::env::var("HARNESS_KV_URL").unwrap_or_default(),
+        &mirror,
+    )
+    .await?;
+    tracing::info!(backend = kv.name(), "key-value store");
+    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls)
+        .with_jwt(harness_master::jwt::JwtKey::load(dir)?)
+        .with_kv(kv)
+        .with_ttls(
+            env_number("HARNESS_ACCESS_TTL_SECS", auth::ACCESS_TTL_S)?,
+            env_number("HARNESS_REFRESH_TTL_DAYS", auth::REFRESH_TTL_S / 86_400)? * 86_400,
+        );
     let unclaimed = mirror.call(|s| s.user_count()).await? == 0;
     if unclaimed {
         let path = dir.join("claim-code");
@@ -376,6 +416,36 @@ async fn serve(
             .await?;
     }
     Ok(())
+}
+
+/// A whole number from the environment, or `default` when unset.
+fn env_number(var: &str, default: i64) -> anyhow::Result<i64> {
+    match std::env::var(var) {
+        Ok(v) if !v.trim().is_empty() => v
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .with_context(|| format!("{var} must be a positive whole number")),
+        _ => Ok(default),
+    }
+}
+
+/// `HARNESS_DATABASE_URL`: SQLite in the data dir is the only database so
+/// far. MariaDB/MySQL URLs are recognised (the Docker templates name them)
+/// and refused with a clear message rather than ignored.
+fn check_database_url() -> anyhow::Result<()> {
+    let url = std::env::var("HARNESS_DATABASE_URL").unwrap_or_default();
+    let url = url.trim();
+    let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or(url);
+    match scheme {
+        "" | "sqlite" => Ok(()),
+        "mysql" | "mariadb" => bail!(
+            "HARNESS_DATABASE_URL: MariaDB is not supported yet (the storage port is planned; \
+             see docs/storage-backends.md). Unset it to use SQLite in the data directory."
+        ),
+        other => bail!("HARNESS_DATABASE_URL: unknown database {other:?} (use sqlite://)"),
+    }
 }
 
 /// The model a node uses when the master sends none (the master resolves
@@ -576,8 +646,48 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// `.env` from `HARNESS_ENV_FILE`, else (for `serve` only) the working
+/// directory: a node or CLI command run inside some project must not pick
+/// up that project's `.env`. Loaded before the runtime starts any thread
+/// (the environment is process-wide); variables already set win over the
+/// file. Returns the names it set.
+fn load_dotenv() -> anyhow::Result<Vec<String>> {
+    let explicit = std::env::var_os("HARNESS_ENV_FILE").is_some();
+    let serving = std::env::args().skip(1).any(|a| a == "serve");
+    if !explicit && !serving {
+        return Ok(Vec::new());
+    }
+    let path = match std::env::var_os("HARNESS_ENV_FILE") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(".env"),
+    };
+    let iter = match dotenvy::from_path_iter(&path) {
+        Ok(i) => i,
+        Err(e) if e.not_found() && !explicit => return Ok(Vec::new()),
+        Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+    };
+    let mut set = Vec::new();
+    for item in iter {
+        let (k, v) = item.with_context(|| format!("parsing {}", path.display()))?;
+        if std::env::var_os(&k).is_none() {
+            set.push((k, v));
+        }
+    }
+    let names = set.iter().map(|(k, _)| k.clone()).collect();
+    // dotenvy sets them itself (no unsafe here): only the ones not set yet.
+    dotenvy::from_path(&path).with_context(|| format!("loading {}", path.display()))?;
+    Ok(names)
+}
+
+fn main() -> anyhow::Result<()> {
+    let loaded = load_dotenv()?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(loaded))
+}
+
+async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("HARNESS_LOG")
@@ -606,6 +716,7 @@ async fn main() -> anyhow::Result<()> {
                 allowed_hosts,
                 node_listen,
                 no_local_node,
+                &dotenv_names,
             )
             .await
         }

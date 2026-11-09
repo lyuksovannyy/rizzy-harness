@@ -15,6 +15,19 @@ use crate::{Master, lock};
 /// How long a join token stays valid.
 pub const JOIN_TOKEN_TTL: Duration = Duration::from_secs(15 * 60);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections that have not finished the handshake yet. Anyone who can
+/// reach the port can open one; past this many, new ones are dropped at
+/// once instead of each holding a task and a buffer for the timeout.
+const MAX_PENDING_HANDSHAKES: usize = 32;
+
+/// Node ids the master assigns: `[a-z0-9-]`, at most 64 characters. Others
+/// are refused before any lookup or audit row.
+fn plausible_node_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
 
 fn token_hash(t: &str) -> String {
     hex::encode(Sha256::digest(t.trim().as_bytes()))
@@ -69,6 +82,7 @@ impl Master {
     pub fn serve_nodes(&self, listener: TcpListener, cert: Arc<MasterCert>) -> anyhow::Result<()> {
         let tls = cert.server_config()?;
         let this = self.clone();
+        let pending = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_HANDSHAKES));
         tokio::spawn(async move {
             loop {
                 let (tcp, peer) = match listener.accept().await {
@@ -79,9 +93,13 @@ impl Master {
                         continue;
                     }
                 };
+                let Ok(permit) = pending.clone().try_acquire_owned() else {
+                    tracing::warn!(%peer, "too many node handshakes in progress; dropped");
+                    continue;
+                };
                 let (this, tls, cert) = (this.clone(), tls.clone(), cert.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = this.node_connection(tcp, tls, &cert).await {
+                    if let Err(e) = this.node_connection(tcp, tls, &cert, permit).await {
                         tracing::info!(%peer, error = %e, "node connection ended");
                     }
                 });
@@ -95,6 +113,7 @@ impl Master {
         tcp: tokio::net::TcpStream,
         tls: Arc<rustls::ServerConfig>,
         cert: &MasterCert,
+        permit: tokio::sync::OwnedSemaphorePermit,
     ) -> anyhow::Result<()> {
         let mut ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, accept(tcp, tls)).await??;
         let nonce = new_nonce();
@@ -107,6 +126,8 @@ impl Master {
         .await?;
         let hello: Option<Hello> =
             tokio::time::timeout(HANDSHAKE_TIMEOUT, recv_json(&mut ws)).await??;
+        // The handshake is over either way: free the slot.
+        drop(permit);
         let signed = identity::auth_message(&nonce, &cert.fingerprint());
         let reject = |reason: &str| ServerMsg::Rejected {
             reason: reason.into(),
@@ -151,16 +172,28 @@ impl Master {
                 Ok(())
             }
             Some(Hello::Auth { node_id, signature }) => {
+                if !plausible_node_id(&node_id) {
+                    send_json(&mut ws, &reject("unknown or revoked node")).await?;
+                    return Ok(());
+                }
                 let id = node_id.clone();
                 let key = self.inner.mirror.call(move |s| s.node_key(&id)).await?;
+                let known = key.is_some();
                 let ok = key.is_some_and(|k| identity::verify(&k, &signed, &signature));
                 if !ok {
-                    let detail = serde_json::json!({ "node_id": node_id }).to_string();
-                    let _ = self
-                        .inner
-                        .mirror
-                        .call(move |s| s.audit("node.auth_failed", &detail))
-                        .await;
+                    // Audit rows only for registered, unrevoked nodes (a
+                    // wrong key): ids anyone can make up would let a
+                    // stranger grow the audit log without limit.
+                    if known {
+                        let detail = serde_json::json!({ "node_id": node_id }).to_string();
+                        let _ = self
+                            .inner
+                            .mirror
+                            .call(move |s| s.audit("node.auth_failed", &detail))
+                            .await;
+                    } else {
+                        tracing::info!(node = %node_id, "auth from an unknown node id");
+                    }
                     send_json(&mut ws, &reject("unknown or revoked node")).await?;
                     return Ok(());
                 }

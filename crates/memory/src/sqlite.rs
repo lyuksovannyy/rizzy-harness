@@ -7,7 +7,9 @@ use harness_core::SessionId;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::embed::{cosine, from_blob, to_blob};
-use crate::{Embedder, Fact, FactKind, MemoryError, MemoryStore, NewFact, Result, Status};
+use crate::{
+    Embedder, Fact, FactKind, MemoryError, MemoryStore, NewFact, QdrantIndex, Result, Status,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS facts (
@@ -32,11 +34,19 @@ CREATE TABLE IF NOT EXISTS fact_vec (
     vec   BLOB NOT NULL,
     PRIMARY KEY (id, model)
 );
+-- Facts whose vector for a model is in the external index (Qdrant).
+CREATE TABLE IF NOT EXISTS fact_indexed (
+    id    TEXT NOT NULL,
+    model TEXT NOT NULL,
+    PRIMARY KEY (id, model)
+);
 "#;
 
 pub struct SqliteMemory {
     conn: Arc<Mutex<Connection>>,
     embedder: RwLock<Option<Arc<Embedder>>>,
+    /// Vectors in Qdrant instead of `fact_vec`.
+    index: RwLock<Option<Arc<QdrantIndex>>>,
 }
 
 fn kind_str(k: FactKind) -> &'static str {
@@ -111,7 +121,105 @@ impl SqliteMemory {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             embedder: RwLock::new(None),
+            index: RwLock::new(None),
         })
+    }
+
+    /// Keep vectors in `index` (Qdrant) rather than in `memory.db`.
+    pub fn set_vector_index(&self, index: Option<Arc<QdrantIndex>>) {
+        *self.index.write().unwrap_or_else(|p| p.into_inner()) = index;
+    }
+
+    fn vector_index(&self) -> Option<Arc<QdrantIndex>> {
+        self.index.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Drop `id`'s vectors from the external index (best effort: recall
+    /// checks every hit against `facts`, so a leftover never surfaces).
+    async fn unindex(&self, id: &str) {
+        if let Some(ix) = self.vector_index()
+            && let Err(e) = ix.delete(&[id.to_string()]).await
+        {
+            tracing::warn!(error = %e, "could not remove a memory's vector from qdrant");
+        }
+    }
+
+    /// `vector_recall` with the vectors in Qdrant.
+    async fn indexed_recall(
+        &self,
+        ix: Arc<QdrantIndex>,
+        emb: Arc<Embedder>,
+        owner: Option<String>,
+        query: &str,
+    ) -> Result<Vec<(String, f32)>> {
+        let model = emb.model.clone();
+        let (o, m) = (owner.clone(), model.clone());
+        let missing: Vec<(String, String)> = self
+            .db(move |c| {
+                let mut st = c.prepare(
+                    "SELECT f.id, f.text FROM facts f
+                     WHERE f.status = 'active' AND f.owner_id IS ?1
+                       AND NOT EXISTS (SELECT 1 FROM fact_indexed v WHERE v.id = f.id AND v.model = ?2)
+                     LIMIT 256",
+                )?;
+                let rows = st
+                    .query_map(params![o, m], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await?;
+        for chunk in missing.chunks(64) {
+            let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+            let vecs = emb.embed(&texts).await?;
+            let points = chunk
+                .iter()
+                .zip(vecs)
+                .map(|((id, _), v)| (id.clone(), owner.clone(), v))
+                .collect();
+            ix.upsert(&model, points).await?;
+            let (ids, m) = (
+                chunk.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                model.clone(),
+            );
+            self.db(move |c| {
+                let tx = c.transaction()?;
+                for id in ids {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO fact_indexed (id, model) VALUES (?1, ?2)",
+                        params![id, m],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+        }
+        let q = emb
+            .embed(&[query.to_string()])
+            .await?
+            .pop()
+            .unwrap_or_default();
+        let hits = ix.search(owner.as_deref(), &model, &q, 100).await?;
+        // Only facts that are still there, active and this owner's.
+        let ids: Vec<String> = hits.iter().map(|(id, _)| id.clone()).collect();
+        let live: std::collections::HashSet<String> = self
+            .db(move |c| {
+                let mut st = c.prepare(
+                    "SELECT id FROM facts WHERE id = ?1 AND status = 'active' AND owner_id IS ?2",
+                )?;
+                let mut out = std::collections::HashSet::new();
+                for id in ids {
+                    if st.exists(params![id, owner])? {
+                        out.insert(id);
+                    }
+                }
+                Ok(out)
+            })
+            .await?;
+        Ok(hits
+            .into_iter()
+            .filter(|(id, _)| live.contains(id))
+            .collect())
     }
 
     /// Turn vector recall on (Some) or off (None). Takes effect immediately;
@@ -301,6 +409,7 @@ impl MemoryStore for SqliteMemory {
         status: Option<Status>,
     ) -> Result<Option<Fact>> {
         let text = text.map(|t| crate::clean_text(&t)).transpose()?;
+        let changed_text = text.is_some();
         let id2 = id.to_string();
         self.db(move |c| {
             let tx = c.transaction()?;
@@ -318,6 +427,7 @@ impl MemoryStore for SqliteMemory {
                     )?;
                     // The old vector no longer matches the text.
                     tx.execute("DELETE FROM fact_vec WHERE id = ?1", params![id2])?;
+                    tx.execute("DELETE FROM fact_indexed WHERE id = ?1", params![id2])?;
                 }
             }
             if let Some(s) = status {
@@ -330,23 +440,33 @@ impl MemoryStore for SqliteMemory {
             Ok(())
         })
         .await?;
+        if changed_text {
+            self.unindex(id).await;
+        }
         self.get(id).await
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
+        let gone = id.to_string();
         let id = id.to_string();
-        self.db(move |c| {
-            let tx = c.transaction()?;
-            let n = tx.execute("DELETE FROM facts WHERE id = ?1", params![id])?;
-            tx.execute("DELETE FROM fact_fts WHERE id = ?1", params![id])?;
-            tx.execute("DELETE FROM fact_vec WHERE id = ?1", params![id])?;
-            if n > 0 {
-                tx.execute("INSERT INTO fact_fts(fact_fts) VALUES('optimize')", [])?;
-            }
-            tx.commit()?;
-            Ok(n > 0)
-        })
-        .await
+        let deleted = self
+            .db(move |c| {
+                let tx = c.transaction()?;
+                let n = tx.execute("DELETE FROM facts WHERE id = ?1", params![id])?;
+                tx.execute("DELETE FROM fact_fts WHERE id = ?1", params![id])?;
+                tx.execute("DELETE FROM fact_vec WHERE id = ?1", params![id])?;
+                tx.execute("DELETE FROM fact_indexed WHERE id = ?1", params![id])?;
+                if n > 0 {
+                    tx.execute("INSERT INTO fact_fts(fact_fts) VALUES('optimize')", [])?;
+                }
+                tx.commit()?;
+                Ok(n > 0)
+            })
+            .await?;
+        if deleted {
+            self.unindex(&gone).await;
+        }
+        Ok(deleted)
     }
 
     async fn recall(&self, owner: Option<&str>, query: &str, k: usize) -> Result<Vec<Fact>> {
@@ -377,9 +497,14 @@ impl MemoryStore for SqliteMemory {
             .clone();
         // Vector candidates when an embedder is configured; a failing
         // endpoint degrades to keyword recall rather than failing the chat.
-        let vec: Vec<String> = match emb {
+        let found = match (emb, self.vector_index()) {
+            (None, _) => None,
+            (Some(e), Some(ix)) => Some(self.indexed_recall(ix, e, o.clone(), query).await),
+            (Some(e), None) => Some(self.vector_recall(e, o.clone(), query).await),
+        };
+        let vec: Vec<String> = match found {
             None => vec![],
-            Some(e) => match self.vector_recall(e, o.clone(), query).await {
+            Some(found) => match found {
                 Ok(v) => v
                     .into_iter()
                     .filter(|(_, s)| *s >= 0.35)

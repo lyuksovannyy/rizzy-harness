@@ -573,3 +573,175 @@ async fn login_throttle_after_repeated_failures() {
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+/// Every `Set-Cookie` of a response as `name=value`, plus the raw headers.
+async fn cookies_of(r: reqwest::Response) -> (StatusCode, Vec<String>, Vec<String>) {
+    let raw: Vec<String> = r
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    let pairs = raw
+        .iter()
+        .map(|c| c.split(';').next().unwrap().to_string())
+        .collect();
+    (r.status(), pairs, raw)
+}
+
+fn cookie<'a>(pairs: &'a [String], name: &str) -> &'a str {
+    pairs
+        .iter()
+        .find(|p| p.starts_with(&format!("{name}=")))
+        .map(String::as_str)
+        .unwrap_or_else(|| panic!("no {name} cookie in {pairs:?}"))
+}
+
+async fn refresh(s: &Server, refresh_cookie: &str) -> (StatusCode, Vec<String>) {
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/auth/refresh", s.base))
+        .header("cookie", refresh_cookie)
+        .send()
+        .await
+        .unwrap();
+    let (st, pairs, _) = cookies_of(r).await;
+    (st, pairs)
+}
+
+#[tokio::test]
+async fn jwt_access_and_refresh_tokens() {
+    let s = start().await;
+    claim_admin(&s).await;
+    let app = harness_core::APP_NAME;
+    let (access, refresh_name) = (format!("{app}_access"), format!("{app}_refresh"));
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/login", s.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    let (st, pairs, raw) = cookies_of(r).await;
+    assert_eq!(st, StatusCode::OK);
+    // Both HttpOnly and SameSite=Strict; the refresh token only goes to /api/auth.
+    assert!(
+        raw.iter()
+            .all(|c| c.contains("HttpOnly") && c.contains("SameSite=Strict"))
+    );
+    let rc = raw.iter().find(|c| c.starts_with(&refresh_name)).unwrap();
+    assert!(rc.contains("Path=/api/auth"), "{rc}");
+    let a1 = cookie(&pairs, &access).to_string();
+    let r1 = cookie(&pairs, &refresh_name).to_string();
+    assert_eq!(a1.split('.').count(), 3, "a JWT");
+    assert_eq!(get(&s, "/api/me", Some(&a1), None).await.0, StatusCode::OK);
+    // A refresh token is not an access token.
+    let as_access = r1.replacen(&refresh_name, &access, 1);
+    assert_eq!(
+        get(&s, "/api/me", Some(&as_access), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Rotation: new tokens; the old refresh token still works for a moment
+    // (two tabs at once), and the new ones work.
+    let (st, p2) = refresh(&s, &r1).await;
+    assert_eq!(st, StatusCode::OK);
+    let (a2, r2) = (
+        cookie(&p2, &access).to_string(),
+        cookie(&p2, &refresh_name).to_string(),
+    );
+    assert_ne!(r1, r2);
+    assert_eq!(get(&s, "/api/me", Some(&a2), None).await.0, StatusCode::OK);
+    let (st, _) = refresh(&s, &r1).await;
+    assert_eq!(st, StatusCode::OK, "within the grace period");
+
+    // A tampered refresh token is refused.
+    let mut forged = r2.clone();
+    forged.push('x');
+    assert_eq!(refresh(&s, &forged).await.0, StatusCode::UNAUTHORIZED);
+
+    // Logout ends the login at once: its access and refresh tokens stop.
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/logout", s.base))
+        .header("cookie", &a2)
+        .send()
+        .await
+        .unwrap();
+    let (st, cleared, _) = cookies_of(r).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(cookie(&cleared, &access), format!("{access}="));
+    assert_eq!(
+        get(&s, "/api/me", Some(&a2), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get(&s, "/api/me", Some(&a1), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(refresh(&s, &r2).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(refresh(&s, "").await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn refresh_token_replayed_after_rotation_revokes_the_login() {
+    let s = start().await;
+    claim_admin(&s).await;
+    let app = harness_core::APP_NAME;
+    let (access, refresh_name) = (format!("{app}_access"), format!("{app}_refresh"));
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/login", s.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    let (_, pairs, _) = cookies_of(r).await;
+    let r1 = cookie(&pairs, &refresh_name).to_string();
+    let (_, p2) = refresh(&s, &r1).await;
+    let a2 = cookie(&p2, &access).to_string();
+    // Another login of the same user is not affected by what follows.
+    let (_, other) = login(&s, "alex", "admin password").await;
+    let other = other.unwrap();
+
+    tokio::time::sleep(harness_master::auth::REFRESH_GRACE + Duration::from_secs(1)).await;
+    assert_eq!(
+        refresh(&s, &r1).await.0,
+        StatusCode::UNAUTHORIZED,
+        "replayed"
+    );
+    assert_eq!(
+        get(&s, "/api/me", Some(&a2), None).await.0,
+        StatusCode::UNAUTHORIZED,
+        "the whole login is revoked"
+    );
+    assert_eq!(
+        get(&s, "/api/me", Some(&other), None).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn logout_with_only_the_refresh_cookie_ends_the_login() {
+    let s = start().await;
+    claim_admin(&s).await;
+    let app = harness_core::APP_NAME;
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/login", s.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    let (_, pairs, _) = cookies_of(r).await;
+    let access = cookie(&pairs, &format!("{app}_access")).to_string();
+    let refresh_c = cookie(&pairs, &format!("{app}_refresh")).to_string();
+    // The browser dropped the expired access cookie; only the refresh one goes.
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/auth/logout", s.base))
+        .header("cookie", &refresh_c)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(refresh(&s, &refresh_c).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        get(&s, "/api/me", Some(&access), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}

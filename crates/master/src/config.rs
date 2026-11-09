@@ -215,8 +215,23 @@ pub enum MemoryBackend {
     Builtin,
     /// A self-hosted mem0 server (restart to switch).
     Mem0,
+    /// The built-in store with its vectors in a Qdrant server
+    /// (`qdrant_url`); needs meaning recall (an embeddings model).
+    Qdrant,
     Off,
 }
+
+impl MemoryBackend {
+    /// Facts live in the built-in SQLite store (embeddings settings apply).
+    pub fn is_builtin(self) -> bool {
+        matches!(self, Self::Builtin | Self::Qdrant)
+    }
+}
+
+/// The Qdrant collection prefix when none is set; the vector size is
+/// appended (`harness_memory_768`), so a new embeddings model with another
+/// size gets its own collection.
+pub const QDRANT_COLLECTION: &str = "harness_memory";
 
 /// How the built-in memory finds relevant facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -263,9 +278,24 @@ pub struct MemoryConfig {
     pub mem0_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem0_key_secret: Option<String>,
+    /// Qdrant's base URL (Qdrant backend). Its API key, if any, comes from
+    /// `HARNESS_QDRANT_API_KEY`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub qdrant_url: String,
+    /// Collection prefix; empty: [`QDRANT_COLLECTION`].
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub qdrant_collection: String,
 }
 
 impl MemoryConfig {
+    pub fn qdrant_collection(&self) -> &str {
+        if self.qdrant_collection.is_empty() {
+            QDRANT_COLLECTION
+        } else {
+            &self.qdrant_collection
+        }
+    }
+
     pub fn model(&self) -> String {
         if self.embeddings_model.is_empty() {
             self.preset.ollama_model().to_string()
@@ -488,21 +518,53 @@ fn is_local_url(p: &reqwest::Url) -> bool {
     p.scheme() == "http"
         && p.username().is_empty()
         && p.password().is_none()
-        && matches!(p.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+        && p.host_str().is_some_and(|h| {
+            matches!(h, "localhost" | "127.0.0.1" | "[::1]")
+                || plain_http_hosts().iter().any(|a| a.eq_ignore_ascii_case(h))
+        })
+}
+
+/// Host names the operator allows over plain http besides this machine
+/// (`HARNESS_PLAIN_HTTP_HOSTS=ollama,vllm`): services on a private
+/// container network, which have no certificate. Read once.
+fn plain_http_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS.get_or_init(|| {
+        std::env::var("HARNESS_PLAIN_HTTP_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .collect()
+    })
 }
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let c = Self::load_raw(path)?;
+        c.validate()?;
+        Ok(c)
+    }
+
+    /// Parse without validating (the environment may complete it).
+    pub fn load_raw(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => {
-                let c: Config =
-                    toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-                c.validate()?;
-                Ok(c)
-            }
+            Ok(s) => toml::from_str(&s).with_context(|| format!("parsing {}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// The config the server runs with: `config.toml` with the
+    /// environment's settings on top (see `env.rs`), after writing the ones
+    /// the file lacks into it.
+    pub fn load_with_env(path: &Path, env: &crate::env::EnvSettings) -> anyhow::Result<Self> {
+        env.seed_file(path)?;
+        let mut c = Self::load_raw(path)?;
+        env.apply(&mut c)?;
+        c.normalize();
+        c.validate()?;
+        Ok(c)
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -560,6 +622,17 @@ impl Config {
         }
         if self.memory.backend == MemoryBackend::Mem0 && self.memory.mem0_url.is_empty() {
             bail!("[memory] backend = \"mem0\" needs mem0_url");
+        }
+        if self.memory.backend == MemoryBackend::Qdrant {
+            let u = &self.memory.qdrant_url;
+            if !u.starts_with("http://") && !u.starts_with("https://") {
+                bail!("[memory] backend = \"qdrant\" needs an http(s) qdrant_url");
+            }
+            if self.memory.recall != Recall::Meaning {
+                bail!(
+                    "[memory] backend = \"qdrant\" stores vectors: set recall = \"meaning\" and an embeddings model"
+                );
+            }
         }
         let mc = &self.memory;
         let eu = &mc.embeddings_url;
