@@ -162,6 +162,9 @@ pub struct ProviderRuntime {
     /// Held by every config change from its `config()` read through its
     /// `save` / `apply`, so no change writes back a stale snapshot.
     edits: tokio::sync::Mutex<()>,
+    /// Settings the environment fixes (`.env`): they win over every change
+    /// and are never written over `config.toml`'s own values.
+    env: crate::env::EnvSettings,
 }
 
 impl ProviderRuntime {
@@ -182,9 +185,27 @@ impl ProviderRuntime {
                 data_dir: data_dir.to_path_buf(),
                 config: Mutex::new(cfg),
                 edits: tokio::sync::Mutex::new(()),
+                env: crate::env::EnvSettings::default(),
             },
             built.env_remove,
         ))
+    }
+
+    /// Keep `env`'s settings on top of every later change.
+    pub fn with_env(mut self, env: crate::env::EnvSettings) -> Self {
+        self.env = env;
+        self
+    }
+
+    pub fn env(&self) -> &crate::env::EnvSettings {
+        &self.env
+    }
+
+    /// Write `cfg` to `config.toml`, keeping the file's own values for the
+    /// settings the environment fixes.
+    fn persist(&self, cfg: &Config) -> anyhow::Result<()> {
+        let path = self.data_dir.join(harness_core::CONFIG_FILE);
+        self.env.for_file(cfg, &path)?.save(&path)
     }
 
     pub fn config(&self) -> Config {
@@ -210,19 +231,21 @@ impl ProviderRuntime {
     }
 
     /// Validate and persist a config change that does not touch the provider.
-    pub fn save(&self, cfg: Config) -> anyhow::Result<()> {
+    pub fn save(&self, mut cfg: Config) -> anyhow::Result<()> {
+        self.env.apply(&mut cfg)?;
         cfg.validate()?;
-        cfg.save(&self.data_dir.join(harness_core::CONFIG_FILE))?;
+        self.persist(&cfg)?;
         *self.config.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
         Ok(())
     }
 
     /// Validate, build, persist to `config.toml`, then switch. Running turns
     /// finish on the old provider; the next turn uses the new one.
-    pub fn apply(&self, cfg: Config) -> anyhow::Result<()> {
+    pub fn apply(&self, mut cfg: Config) -> anyhow::Result<()> {
+        self.env.apply(&mut cfg)?;
         cfg.validate()?;
         let built = build(&cfg, &self.data_dir)?;
-        cfg.save(&self.data_dir.join(harness_core::CONFIG_FILE))?;
+        self.persist(&cfg)?;
         for k in built.keys {
             self.secrets.add(k);
         }
@@ -326,11 +349,32 @@ pub fn memory(cfg: &Config, data_dir: &Path, secrets: &SecretSet) -> anyhow::Res
                 Arc::new(harness_memory::Mem0Memory::new(&cfg.memory.mem0_url, key));
             (Some(m), None)
         }
-        MemoryBackend::Builtin => {
+        MemoryBackend::Builtin | MemoryBackend::Qdrant => {
             let s = Arc::new(
                 harness_memory::SqliteMemory::open(&data_dir.join("memory.db"))
                     .map_err(|e| anyhow::anyhow!("opening memory.db: {e}"))?,
             );
+            if cfg.memory.backend == MemoryBackend::Qdrant {
+                let key = std::env::var("HARNESS_QDRANT_API_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+                    .map(Secret::new);
+                if key.is_some() && !crate::config::url_allowed(&cfg.memory.qdrant_url) {
+                    anyhow::bail!(
+                        "a Qdrant URL that gets an API key must be https:// (plain http only for \
+                         localhost or HARNESS_PLAIN_HTTP_HOSTS)"
+                    );
+                }
+                if let Some(k) = &key {
+                    secrets.add(k.clone());
+                }
+                tracing::info!(url = %cfg.memory.qdrant_url, "memory vectors in qdrant");
+                s.set_vector_index(Some(Arc::new(harness_memory::QdrantIndex::new(
+                    &cfg.memory.qdrant_url,
+                    cfg.memory.qdrant_collection(),
+                    key,
+                ))));
+            }
             s.set_embedder(embedder(cfg, data_dir, secrets)?);
             let m: Arc<dyn harness_memory::MemoryStore> = s.clone();
             (Some(m), Some(s))

@@ -42,6 +42,19 @@ pub type Result<T> = std::result::Result<T, LinkError>;
 /// Largest WebSocket message accepted on the link.
 pub const MAX_MESSAGE: usize = 8 * 1024 * 1024;
 
+/// Both ends ping this often once the link is up...
+pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+/// ...and drop it after this long without hearing anything (a half-open
+/// TCP connection would otherwise look connected until the OS gives up).
+pub const IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A ticker for `PING_EVERY` whose first tick is one period away.
+pub(crate) fn ping_ticker() -> tokio::time::Interval {
+    let mut t = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    t
+}
+
 /// Write a file only the owner can read.
 pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;

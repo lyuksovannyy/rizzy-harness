@@ -1,8 +1,15 @@
 //! Authentication and browser hardening (PLAN.md T1–T3, §0 accounts).
 //!
 //! * People log in with username + password (Argon2id). A successful login
-//!   sets a random session id in an `HttpOnly; SameSite=Strict` cookie; only
-//!   its SHA-256 is stored, so a leaked database does not leak sessions.
+//!   sets two `HttpOnly; SameSite=Strict` cookies holding signed JWTs
+//!   (`jwt.rs`): a short-lived **access token** (every request; checked by
+//!   signature, no session table) and a **refresh token** (sent only to
+//!   `/api/auth/refresh`) that is rotated on each use. Refresh tokens are
+//!   tracked in the KV store (`kv.rs`): a refresh token used again after
+//!   its short grace period is treated as stolen and its whole login (the
+//!   token family) is revoked. Logout revokes the family too, so its access
+//!   tokens stop at once. Logging a user out everywhere raises their
+//!   session version, which every token carries.
 //! * The first account (an admin) is created with a one-time **claim code**
 //!   from `<data>/claim-code` (0600), so whoever reaches a fresh server first
 //!   cannot take it over. The file is deleted once claimed.
@@ -37,13 +44,61 @@ use harness_store::Store;
 use subtle::ConstantTimeEq;
 
 use crate::Master;
+use crate::jwt::{Claims, Use};
 
+/// The pre-JWT session cookie; only ever cleared now.
 pub fn cookie_name() -> String {
     format!("{APP_NAME}_session")
 }
 
-/// UI sessions last this long.
-const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
+pub fn access_cookie_name() -> String {
+    format!("{APP_NAME}_access")
+}
+
+pub fn refresh_cookie_name() -> String {
+    format!("{APP_NAME}_refresh")
+}
+
+/// The only path the refresh cookie is sent to.
+pub const REFRESH_PATH: &str = "/api/auth";
+
+/// Defaults; `HARNESS_ACCESS_TTL_SECS` / `HARNESS_REFRESH_TTL_DAYS` change them.
+pub const ACCESS_TTL_S: i64 = 15 * 60;
+pub const REFRESH_TTL_S: i64 = 30 * 24 * 3600;
+
+/// A rotated refresh token still works this long (two tabs refreshing at
+/// once, a response lost on the way); after that, using it again revokes
+/// the login.
+pub const REFRESH_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn now_s() -> i64 {
+    harness_core::now_ms() / 1000
+}
+
+fn refresh_key(jti: &str) -> String {
+    format!("auth.refresh.{jti}")
+}
+
+fn family_key(fam: &str) -> String {
+    format!("auth.family.{fam}")
+}
+
+/// The two tokens of a login.
+pub struct Tokens {
+    pub access: String,
+    pub refresh: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshError {
+    #[error("not logged in")]
+    Invalid,
+    /// A rotated refresh token came back after its grace period.
+    #[error("this login was revoked; log in again")]
+    Reused,
+    #[error("{0}")]
+    Internal(String),
+}
 
 #[derive(Clone)]
 pub struct Auth {
@@ -57,6 +112,11 @@ pub struct Auth {
     /// Caller (user id, or `api-token`) -> recent failed lookups by
     /// username (adding a workspace member).
     lookups: Failures,
+    jwt: crate::jwt::JwtKey,
+    /// Refresh tokens and revoked token families.
+    kv: Arc<dyn crate::kv::Kv>,
+    access_ttl_s: i64,
+    refresh_ttl_s: i64,
 }
 
 type Failures = Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>;
@@ -337,7 +397,140 @@ impl Auth {
             claim: Arc::new(tokio::sync::Mutex::new(None)),
             failures: Arc::default(),
             lookups: Arc::default(),
+            jwt: crate::jwt::JwtKey::ephemeral(),
+            kv: Arc::new(crate::kv::MemoryKv::default()),
+            access_ttl_s: ACCESS_TTL_S,
+            refresh_ttl_s: REFRESH_TTL_S,
         }
+    }
+
+    /// Sign tokens with `key` (by default a key that dies with the process).
+    pub fn with_jwt(self, key: crate::jwt::JwtKey) -> Self {
+        Self { jwt: key, ..self }
+    }
+
+    /// Keep refresh tokens in `kv` (by default in this process only).
+    pub fn with_kv(self, kv: Arc<dyn crate::kv::Kv>) -> Self {
+        Self { kv, ..self }
+    }
+
+    pub fn with_ttls(self, access_s: i64, refresh_s: i64) -> Self {
+        Self {
+            access_ttl_s: access_s.max(30),
+            refresh_ttl_s: refresh_s.max(access_s.max(30)),
+            ..self
+        }
+    }
+
+    pub fn kv_name(&self) -> &'static str {
+        self.kv.name()
+    }
+
+    fn refresh_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.refresh_ttl_s as u64)
+    }
+
+    /// New tokens for `user_id`, in login `fam` (a new login when `None`).
+    pub async fn issue(
+        &self,
+        store: &Store,
+        user_id: &str,
+        fam: Option<String>,
+    ) -> Result<Tokens, RefreshError> {
+        let uid = user_id.to_string();
+        let sv = store
+            .call(move |s| s.session_version(&uid))
+            .await
+            .map_err(|e| RefreshError::Internal(e.to_string()))?;
+        let fam = fam.unwrap_or_else(|| random_hex(16));
+        let now = now_s();
+        let access = Claims::new(user_id, Use::Access, sv, &fam, now, self.access_ttl_s);
+        let refresh = Claims::new(user_id, Use::Refresh, sv, &fam, now, self.refresh_ttl_s);
+        self.kv
+            .set(&refresh_key(&refresh.jti), "live", self.refresh_ttl())
+            .await
+            .map_err(|e| RefreshError::Internal(e.to_string()))?;
+        Ok(Tokens {
+            access: self.jwt.sign(&access),
+            refresh: self.jwt.sign(&refresh),
+        })
+    }
+
+    async fn family_revoked(&self, fam: &str) -> Result<bool, crate::kv::KvError> {
+        Ok(self.kv.get(&family_key(fam)).await?.is_some())
+    }
+
+    /// Revoke a whole login: its refresh tokens and, at once, its access tokens.
+    pub async fn revoke_family(&self, fam: &str) {
+        if let Err(e) = self
+            .kv
+            .set(&family_key(fam), "revoked", self.refresh_ttl())
+            .await
+        {
+            tracing::warn!(error = %e, "could not revoke a login");
+        }
+    }
+
+    /// Trade a refresh token for new tokens (rotation).
+    pub async fn refresh(&self, store: &Store, token: &str) -> Result<Tokens, RefreshError> {
+        let c: Claims = self.jwt.verify(token).ok_or(RefreshError::Invalid)?;
+        if !c.valid(Use::Refresh, now_s()) {
+            return Err(RefreshError::Invalid);
+        }
+        let internal = |e: crate::kv::KvError| RefreshError::Internal(e.to_string());
+        if self.family_revoked(&c.fam).await.map_err(internal)? {
+            return Err(RefreshError::Invalid);
+        }
+        let uid = c.sub.clone();
+        let current = store
+            .call(move |s| s.user_for_token(&uid))
+            .await
+            .map_err(|e| RefreshError::Internal(e.to_string()))?;
+        match current {
+            Some((_, sv)) if sv == c.sv => {}
+            _ => return Err(RefreshError::Invalid),
+        }
+        match self
+            .kv
+            .get(&refresh_key(&c.jti))
+            .await
+            .map_err(internal)?
+            .as_deref()
+        {
+            Some("live") => {
+                self.kv
+                    .set(&refresh_key(&c.jti), "rotated", REFRESH_GRACE)
+                    .await
+                    .map_err(internal)?;
+            }
+            Some(_) => {} // rotated moments ago: still accepted
+            None => {
+                self.revoke_family(&c.fam).await;
+                let detail = serde_json::json!({ "user_id": c.sub }).to_string();
+                let _ = store
+                    .call(move |s| s.audit("auth.refresh_reused", &detail))
+                    .await;
+                return Err(RefreshError::Reused);
+            }
+        }
+        self.issue(store, &c.sub, Some(c.fam)).await
+    }
+
+    /// The login family behind a request's tokens, for logout.
+    pub fn family_of(&self, headers: &HeaderMap) -> Option<String> {
+        let read = |name: &str, want: Use| {
+            let t = named_cookie(headers, name)?;
+            let c: Claims = self.jwt.verify(&t)?;
+            (c.token_use == want).then_some(c.fam)
+        };
+        read(&access_cookie_name(), Use::Access)
+            .or_else(|| read(&refresh_cookie_name(), Use::Refresh))
+    }
+
+    fn access_claims(&self, headers: &HeaderMap) -> Option<Claims> {
+        let t = named_cookie(headers, &access_cookie_name())?;
+        let c: Claims = self.jwt.verify(&t)?;
+        c.valid(Use::Access, now_s()).then_some(c)
     }
 
     /// Is this username currently locked out by repeated failures?
@@ -451,21 +644,35 @@ impl Auth {
         rest.is_some_and(|h| self.host_allowed(h))
     }
 
-    pub fn session_cookie(&self, id: &str) -> HeaderValue {
+    fn cookie(&self, name: &str, value: &str, path: &str, max_age: i64) -> HeaderValue {
         let secure = if self.secure_cookie { "; Secure" } else { "" };
         HeaderValue::from_str(&format!(
-            "{}={id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{secure}",
-            cookie_name()
+            "{name}={value}; HttpOnly; SameSite=Strict; Path={path}; Max-Age={max_age}{secure}"
         ))
         .expect("ascii cookie")
     }
 
-    pub fn clear_cookie(&self) -> HeaderValue {
-        HeaderValue::from_str(&format!(
-            "{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-            cookie_name()
-        ))
-        .expect("ascii cookie")
+    /// `Set-Cookie` values for a login: the access cookie first.
+    pub fn session_cookies(&self, t: &Tokens) -> [HeaderValue; 2] {
+        [
+            self.cookie(&access_cookie_name(), &t.access, "/", self.access_ttl_s),
+            self.cookie(
+                &refresh_cookie_name(),
+                &t.refresh,
+                REFRESH_PATH,
+                self.refresh_ttl_s,
+            ),
+        ]
+    }
+
+    /// `Set-Cookie` values that end a login in this browser (the pre-JWT
+    /// session cookie too).
+    pub fn clear_cookies(&self) -> [HeaderValue; 3] {
+        [
+            self.cookie(&access_cookie_name(), "", "/", 0),
+            self.cookie(&refresh_cookie_name(), "", REFRESH_PATH, 0),
+            self.cookie(&cookie_name(), "", "/", 0),
+        ]
     }
 }
 
@@ -481,8 +688,12 @@ pub enum ClaimError {
     Internal(String),
 }
 
+/// The access cookie's value.
 pub fn cookie_value(headers: &HeaderMap) -> Option<String> {
-    let name = cookie_name();
+    named_cookie(headers, &access_cookie_name())
+}
+
+pub fn named_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
@@ -491,25 +702,6 @@ pub fn cookie_value(headers: &HeaderMap) -> Option<String> {
         .filter_map(|kv| kv.trim().split_once('='))
         .find(|(k, _)| *k == name)
         .map(|(_, v)| v.to_string())
-}
-
-/// Start a UI session for `user_id`; returns the cookie value.
-pub async fn create_ui_session(
-    store: &Store,
-    user_id: &str,
-) -> Result<String, harness_store::StoreError> {
-    let id = random_hex(32);
-    let (hash, uid) = (sha256_hex(&id), user_id.to_string());
-    let expires = harness_core::now_ms() + SESSION_TTL_MS;
-    store
-        .call(move |s| s.ui_session_create(&hash, &uid, expires))
-        .await?;
-    Ok(id)
-}
-
-pub async fn delete_ui_session(store: &Store, id: &str) {
-    let hash = sha256_hex(id);
-    let _ = store.call(move |s| s.ui_session_delete(&hash)).await;
 }
 
 /// The principal behind a request, if any.
@@ -525,21 +717,29 @@ pub async fn authenticate(master: &Master, headers: &HeaderMap) -> Option<Princi
             .token_matches(bearer.trim())
             .then(Principal::api_token);
     }
-    let id = cookie_value(headers)?;
-    // Session ids are 64 hex chars; reject anything else before touching the DB.
-    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
+    // Signature and expiry first: a forged or stale token costs no lookup.
+    let auth = &master.inner.auth;
+    let c = auth.access_claims(headers)?;
+    // A logged-out login stops at once, not when its token expires.
+    match auth.family_revoked(&c.fam).await {
+        Ok(false) => {}
+        Ok(true) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot check logins; refusing the request");
+            return None;
+        }
     }
-    let hash = sha256_hex(&id);
-    let now = harness_core::now_ms();
-    master
+    // The account as it is now: disabled, demoted or logged out everywhere
+    // since the token was issued all count.
+    let uid = c.sub.clone();
+    let (user, sv) = master
         .inner
         .mirror
-        .call(move |s| s.ui_session_user(&hash, now))
+        .call(move |s| s.user_for_token(&uid))
         .await
         .ok()
-        .flatten()
-        .map(Principal::from_user)
+        .flatten()?;
+    (sv == c.sv).then(|| Principal::from_user(user))
 }
 
 pub async fn is_authenticated(master: &Master, headers: &HeaderMap) -> bool {
@@ -718,8 +918,9 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(
             header::COOKIE,
-            HeaderValue::from_str(&format!("a=1; {}=abc; b=2", cookie_name())).unwrap(),
+            HeaderValue::from_str(&format!("a=1; {}=abc; b=2", access_cookie_name())).unwrap(),
         );
         assert_eq!(cookie_value(&h).as_deref(), Some("abc"));
+        assert_eq!(named_cookie(&h, "b").as_deref(), Some("2"));
     }
 }

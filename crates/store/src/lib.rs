@@ -442,6 +442,10 @@ fn asks_with_a_block(payload: &serde_json::Value) -> bool {
     })
 }
 
+fn session_version_key(user_id: &str) -> String {
+    format!("auth.session_version.{user_id}")
+}
+
 fn is_incognito(payload: &serde_json::Value) -> bool {
     payload.get("incognito").and_then(|v| v.as_bool()) == Some(true)
 }
@@ -1509,13 +1513,41 @@ impl Store {
         Ok(n as u64)
     }
 
-    /// Log a user out everywhere. Returns how many sessions were removed.
+    /// Log a user out everywhere: their session version goes up, so every
+    /// access and refresh token issued before stops working. Returns how
+    /// many legacy (pre-JWT) sessions were removed.
     pub fn ui_sessions_delete_for_user(&self, user_id: &str) -> Result<usize> {
-        let conn = self.lock();
-        Ok(conn.execute(
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let key = session_version_key(user_id);
+        tx.execute(
+            "INSERT INTO kv (k, v) VALUES (?1, '1')
+             ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT)",
+            params![key],
+        )?;
+        let n = tx.execute(
             "DELETE FROM ui_sessions WHERE user_id = ?1",
             params![user_id],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// The user's session version (0 until they were first logged out
+    /// everywhere); tokens carry it and must match.
+    pub fn session_version(&self, user_id: &str) -> Result<i64> {
+        Ok(self
+            .kv_get(&session_version_key(user_id))?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// An enabled user and their session version, for checking a token.
+    pub fn user_for_token(&self, user_id: &str) -> Result<Option<(UserRow, i64)>> {
+        let Some(u) = self.user_by_id(user_id)?.filter(|u| !u.disabled) else {
+            return Ok(None);
+        };
+        Ok(Some((u, self.session_version(user_id)?)))
     }
 
     pub fn user_by_username(&self, username: &str) -> Result<Option<UserRow>> {
@@ -1584,6 +1616,16 @@ impl Store {
             .lock()
             .execute("DELETE FROM kv WHERE k = ?1", params![k])?
             > 0)
+    }
+
+    /// Delete keys under `prefix` whose value is `<expires_ms>|...` with
+    /// `expires_ms <= now_ms` (the expiring entries of the master's KV).
+    pub fn kv_sweep_expired(&self, prefix: &str, now_ms: i64) -> Result<usize> {
+        Ok(self.lock().execute(
+            "DELETE FROM kv WHERE substr(k, 1, length(?1)) = ?1 AND instr(v, '|') > 0
+               AND CAST(substr(v, 1, instr(v, '|') - 1) AS INTEGER) <= ?2",
+            params![prefix, now_ms],
+        )?)
     }
 
     pub fn kv_set(&self, k: &str, v: &str) -> Result<()> {

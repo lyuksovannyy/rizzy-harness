@@ -77,11 +77,19 @@ where
     tracing::info!(node = %id, url = %remote.url, "connected to master");
     let (to_node, mut from_node) = attach().await;
     let (mut sink, mut stream) = ws.split();
+    let mut ping = crate::ping_ticker();
+    let mut heard = tokio::time::Instant::now();
     loop {
         tokio::select! {
             _ = stop.cancelled() => {
                 let _ = sink.send(Message::Close(None)).await;
                 return Ok(());
+            }
+            _ = ping.tick() => {
+                if heard.elapsed() > crate::IDLE_LIMIT {
+                    return Err(LinkError::Protocol("master went silent".into()));
+                }
+                sink.send(Message::Ping(Vec::new().into())).await?;
             }
             out = from_node.recv() => match out {
                 Some(m) => {
@@ -90,7 +98,7 @@ where
                 }
                 None => return Ok(()),
             },
-            inc = stream.next() => match inc {
+            inc = stream.next() => match inc.inspect(|_| heard = tokio::time::Instant::now()) {
                 Some(Ok(Message::Text(t))) => {
                     let m: MasterToNode = serde_json::from_str(t.as_str())
                         .map_err(|e| LinkError::Protocol(e.to_string()))?;

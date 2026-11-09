@@ -112,7 +112,7 @@ export const api = {
     call<{ ok: boolean }>("POST", "/api/setup", { claim_code, username, password }),
   login: (username: string, password: string) =>
     call<{ ok: boolean }>("POST", "/api/login", { username, password }),
-  logout: () => call<{ ok: boolean }>("POST", "/api/logout"),
+  logout: () => call<{ ok: boolean }>("POST", "/api/auth/logout"),
   nodes: () => call<{ nodes: NodeInfo[] }>("GET", "/api/nodes"),
   remoteNodes: () =>
     call<{ nodes: RemoteNode[]; listener: { port: number; fingerprint: string } | null }>("GET", "/api/admin/nodes"),

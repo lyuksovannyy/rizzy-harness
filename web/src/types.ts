@@ -699,8 +699,14 @@ export type Preset = "fast" | "balanced" | "best";
 
 export type MemorySource = "provider" | "ollama";
 
+/** A setting the server's environment (`.env`) fixes. */
+export interface EnvLock {
+  key: string;
+  var: string;
+}
+
 export interface MemoryCfg {
-  backend: "builtin" | "mem0" | "off";
+  backend: "builtin" | "mem0" | "qdrant" | "off";
   recall: "keywords" | "meaning";
   source: MemorySource;
   provider_id: string | null;
@@ -711,6 +717,8 @@ export interface MemoryCfg {
   model: string;
   active_model: string | null;
   presets: { id: Preset; model: string; size: string }[];
+  /** Settings `.env` fixes; the form is read-only while there are any. */
+  locked?: EnvLock[];
 }
 
 export interface AttentionItem {

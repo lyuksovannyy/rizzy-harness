@@ -544,7 +544,8 @@ async fn images_are_refused_where_they_cannot_go() {
 async fn a_node_without_the_capability_gets_no_images() {
     let t = start().await;
     let (link, seen) = old_node("old");
-    t.master.add_link(link, false).await.unwrap();
+    // An older build of the master's own chat runtime (always embedded).
+    t.master.add_link(link, true).await.unwrap();
     let sid = chat(&t, json!({"node_id": "old"})).await;
     let img = image(&t, "a.png", png(4, 4, b"x"), Some(&sid)).await;
     let (st, v) = prompt(&t, &sid, json!({"text": "hi", "images": [img]})).await;

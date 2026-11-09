@@ -38,6 +38,7 @@ tokio-util.workspace = true
 hex.workspace = true
 jiff.workspace = true
 reqwest.workspace = true
+redis.workspace = true
 mime_guess.workspace = true
 # Gzip for the web UI's text files (assets.rs).
 flate2.workspace = true
