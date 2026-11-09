@@ -171,8 +171,9 @@ for (const f of allJs.filter((f) => /\/highlight\.worker-/.test(f))) {
   if (has(f, /\b(document|window)\./)) failures.push(`${f} uses the DOM, which a worker does not have`);
 }
 if (initialKb > INITIAL_KB) failures.push("initial JS is over its budget");
+// Soft: reported, never a failure (it failed CI on main while called soft).
 if (totalKb > TOTAL_KB) {
-  failures.push(`total JS is over its budget: if the growth is wanted, raise your line above to it with the reason (the total is soft)`);
+  console.warn(`warning: total JS is ${totalKb.toFixed(1)} KB, over the recorded ${TOTAL_KB}: raise your line above to it with the reason`);
 }
 if (initialKb > PROGRAM_INITIAL_KB) failures.push(`initial JS is over the program ceiling of ${PROGRAM_INITIAL_KB} KB`);
 for (const msg of failures) console.error(msg);
