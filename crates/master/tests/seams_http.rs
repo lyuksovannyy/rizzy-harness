@@ -395,13 +395,14 @@ async fn hooks_change_nothing_users_see_yet() {
     let (_, att) = req(&t, Method::GET, "/api/attention", None, &alex).await;
     assert_eq!(att["routines"], json!([]), "{att}");
 
-    // Images are refused until chats take them; nothing reaches the node.
+    // An image that is not a Media item of the caller's is refused;
+    // nothing reaches the node (images_http.rs covers the rest).
     let before = t.chat_node.lock().unwrap().len();
     let body = json!({"text": "look", "images": ["0193f1c2a4b57d6e8f9012345678abcd"]});
     let path = format!("/api/sessions/{sid}/prompt");
     let (st, v) = req(&t, Method::POST, &path, Some(body), &alex).await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
-    assert_eq!(v["error"], "images are not available yet");
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"], "unknown media item");
     assert_eq!(t.chat_node.lock().unwrap().len(), before);
 
     let path = format!("/api/sessions/{sid}?media=1");

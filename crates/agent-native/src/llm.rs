@@ -6,7 +6,7 @@
 use futures::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
-    CacheControl, ChatMessage, ChatOptions, ChatRequest as GChatRequest, ChatStreamEvent,
+    Binary, CacheControl, ChatMessage, ChatOptions, ChatRequest as GChatRequest, ChatStreamEvent,
     ContentPart, MessageContent, ReasoningEffort, Tool, ToolCall, ToolResponse,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
@@ -77,6 +77,28 @@ impl LlmProvider {
     }
 }
 
+/// A user message's text, then its images as binary parts (an image
+/// without bytes is named instead; `images::attach` leaves none).
+fn user_parts(text: &str, images: &[ImagePart]) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    let mut text = text.to_string();
+    for i in images.iter().filter(|i| i.data.is_none()) {
+        text = format!("{text}\n\n{}", image_note(&i.name));
+    }
+    if !text.is_empty() {
+        parts.push(ContentPart::Text(text));
+    }
+    parts.extend(images.iter().filter_map(|i| {
+        let data = i.data.clone()?;
+        Some(ContentPart::Binary(Binary::from_base64(
+            i.mime.clone(),
+            data,
+            Some(i.name.clone()),
+        )))
+    }));
+    parts
+}
+
 pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
     let mut msgs = Vec::new();
     let mut system_seen = false;
@@ -93,6 +115,9 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                 msgs.push(m)
             }
             ChatMsg::User(t) => msgs.push(ChatMessage::user(t.clone())),
+            ChatMsg::UserImages { text, images } => msgs.push(ChatMessage::user(
+                MessageContent::from_parts(user_parts(text, images)),
+            )),
             ChatMsg::Assistant { text, tool_calls } => {
                 let mut parts = Vec::new();
                 if !text.is_empty() {
@@ -397,6 +422,44 @@ mod tests {
         });
         assert_eq!(r.messages.len(), 4);
         assert_eq!(r.tools.as_ref().map(|t| t.len()), Some(1));
+    }
+
+    #[test]
+    fn images_become_binary_parts() {
+        let r = to_genai(&ChatRequest {
+            model: "m".into(),
+            messages: vec![ChatMsg::UserImages {
+                text: "what is this?".into(),
+                images: vec![
+                    ImagePart {
+                        sha256: "ab".into(),
+                        mime: "image/png".into(),
+                        name: "a.png".into(),
+                        data: Some("aGk=".into()),
+                    },
+                    ImagePart {
+                        sha256: "cd".into(),
+                        mime: "image/jpeg".into(),
+                        name: "gone.jpg".into(),
+                        data: None,
+                    },
+                ],
+            }],
+            tools: vec![],
+            effort: None,
+            cache: false,
+        });
+        let parts = r.messages[0].content.parts();
+        assert_eq!(parts.len(), 2);
+        let ContentPart::Text(t) = &parts[0] else {
+            panic!("{parts:?}")
+        };
+        assert_eq!(t, "what is this?\n\n[image: gone.jpg]");
+        let ContentPart::Binary(b) = &parts[1] else {
+            panic!("{parts:?}")
+        };
+        assert_eq!(b.content_type, "image/png");
+        assert!(matches!(&b.source, genai::chat::BinarySource::Base64(d) if &**d == "aGk="));
     }
 
     /// Answers with its own name and the model id it was sent.

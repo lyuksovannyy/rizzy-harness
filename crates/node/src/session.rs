@@ -52,6 +52,8 @@ pub(crate) struct Input {
     /// An answer to a choices or form block: `text` is then the user's
     /// note, and the message records the canonical answer before it.
     pub reply: Option<FormReply>,
+    /// Images, with their bytes (`session.prompt.images`).
+    pub images: Vec<harness_protocol::ChatImage>,
 }
 
 /// A sub-agent's private worktree.
@@ -266,8 +268,15 @@ impl Session {
         if !compare.is_empty() && (self.profile != Profile::Chat || compare.len() > 4) {
             return Err("parallel answers need a chat and at most 4 models".into());
         }
-        if input.reply.is_some() && (!input.attachments.is_empty() || !compare.is_empty()) {
-            return Err("an answer goes alone, without attachments or parallel answers".into());
+        if input.reply.is_some()
+            && (!input.attachments.is_empty() || !compare.is_empty() || !input.images.is_empty())
+        {
+            return Err(
+                "an answer goes alone, without attachments, images or parallel answers".into(),
+            );
+        }
+        if self.incognito && !input.images.is_empty() {
+            return Err("images can't go into an incognito chat".into());
         }
         let turn_id = new_id();
         let cancel = CancellationToken::new();
@@ -290,11 +299,35 @@ impl Session {
                 return Err(e);
             }
         };
+        let extra = TurnExtra {
+            images: msg.images.clone(),
+            ..extra
+        };
         let this = self.clone();
         tokio::spawn(async move {
             this.run_turn(msg, agent, compare, extra, cancel).await;
         });
         Ok(())
+    }
+
+    /// Check a message's images and keep their bytes with the chat, before
+    /// the message that names them is recorded.
+    async fn keep_images(
+        &self,
+        images: Vec<harness_protocol::ChatImage>,
+    ) -> Result<Vec<ImageRef>, String> {
+        if images.is_empty() {
+            return Ok(vec![]);
+        }
+        let (refs, kept) = crate::images::accept(images)?;
+        let sid = self.id.to_string();
+        self.node
+            .cfg
+            .store
+            .call(move |s| s.session_images_put(&sid, &kept))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(refs)
     }
 
     /// The message a turn starts with. An answer is checked against the
@@ -306,7 +339,9 @@ impl Session {
             text,
             attachments,
             reply,
+            images,
         } = input;
+        let images = self.keep_images(images).await?;
         let text = match &reply {
             None => text,
             Some(r) => {
@@ -327,6 +362,7 @@ impl Session {
             text,
             attachments,
             reply,
+            images,
         })
     }
 
@@ -654,16 +690,18 @@ impl Session {
             savings: savings.clone(),
             publishes: Arc::default(),
         });
+        // A sub-agent gets its task as text only, never the images.
         let msg = UserMessage {
             turn_id,
             text: task,
             attachments: vec![],
             reply: None,
+            images: vec![],
         };
         let extra = TurnExtra {
             savings,
-            context: None,
             refs: Some(refs),
+            ..Default::default()
         };
         let (reason, usage) = child
             .run_turn(msg, Some(agent), vec![], extra, cancel)
@@ -825,6 +863,34 @@ impl TurnHost for Session {
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         self.run_child(agent, task, refs, cancel, started).await
+    }
+
+    async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
+        use base64::Engine as _;
+        let (sid, wanted) = (self.id.to_string(), sha256.to_vec());
+        match self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.session_images(&sid, &wanted))
+            .await
+        {
+            Ok(found) => found
+                .into_iter()
+                .map(|i| harness_core::backend::ImageData {
+                    data: base64::engine::general_purpose::STANDARD
+                        .encode(&i.bytes)
+                        .into(),
+                    sha256: i.sha256,
+                    mime: i.mime,
+                })
+                .collect(),
+            Err(e) => {
+                // The model is then told the images' names instead.
+                tracing::warn!(session = %self.id, error = %e, "could not read the chat's images");
+                Vec::new()
+            }
+        }
     }
 
     fn artifacts(&self) -> Option<Arc<dyn harness_core::artifacts::ArtifactSink>> {

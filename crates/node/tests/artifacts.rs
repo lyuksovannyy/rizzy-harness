@@ -167,6 +167,7 @@ impl Node {
             savings: None,
             context: None,
             reply: None,
+            images: vec![],
         });
     }
 }

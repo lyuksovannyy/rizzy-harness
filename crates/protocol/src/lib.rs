@@ -19,6 +19,48 @@ pub const MAX_CHUNK: u32 = 256 * 1024;
 /// the link).
 pub const CAP_ARTIFACTS: &str = "artifacts";
 
+/// The node capability that announces `session.prompt.images`. The master
+/// sends images only to nodes whose hello listed it.
+pub const CAP_IMAGES: &str = "images";
+
+/// At most this many images go with one message...
+pub const MAX_IMAGES: usize = 4;
+/// ...and at most this many bytes of them together (before base64).
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+/// The largest serialized `session.prompt` the master sends: the link's
+/// frame is 8 MiB, and images, attachments, the agent spec and the context
+/// together could pass it otherwise.
+pub const MAX_PROMPT_JSON: usize = 7 * 1024 * 1024;
+
+/// One image sent with a prompt (`session.prompt.images`). The node keeps
+/// the bytes for the chat and records the rest in `user_message.images`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatImage {
+    pub media_id: String,
+    /// Hex sha256 of the bytes (the node checks it).
+    pub sha256: String,
+    pub mime: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// The bytes, base64.
+    pub data: String,
+}
+
+impl ChatImage {
+    /// What the message records: everything but the bytes.
+    pub fn image_ref(&self) -> harness_core::event::ImageRef {
+        harness_core::event::ImageRef {
+            media_id: self.media_id.clone(),
+            sha256: self.sha256.clone(),
+            mime: self.mime.clone(),
+            name: self.name.clone(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionHead {
     pub session_id: SessionId,
@@ -128,6 +170,9 @@ pub enum MasterToNode {
         /// note (may be empty). The node checks it against its own log.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<harness_core::event::FormReply>,
+        /// Images for this message; only to nodes with `CAP_IMAGES`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ChatImage>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
@@ -332,6 +377,41 @@ mod tests {
     }
 
     #[test]
+    fn prompt_images_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let img = ChatImage {
+            media_id: "m".into(),
+            sha256: "ab".repeat(32),
+            mime: "image/png".into(),
+            name: "a.png".into(),
+            width: 2,
+            height: 1,
+            data: "aGk=".into(),
+        };
+        let p = MasterToNode::Prompt {
+            req_id: "r".into(),
+            session_id: sid,
+            text: "look".into(),
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            savings: None,
+            context: None,
+            reply: None,
+            images: vec![img.clone()],
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v["images"],
+            json!([{"media_id": "m", "sha256": "ab".repeat(32), "mime": "image/png",
+                    "name": "a.png", "width": 2, "height": 1, "data": "aGk="}])
+        );
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), p);
+        let r = img.image_ref();
+        assert_eq!((r.media_id.as_str(), r.width, r.height), ("m", 2, 1));
+    }
+
+    #[test]
     fn prompt_reply_roundtrips_and_is_omitted_when_absent() {
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
         let prompt = |reply| MasterToNode::Prompt {
@@ -344,9 +424,11 @@ mod tests {
             savings: None,
             context: None,
             reply,
+            images: vec![],
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");
+        assert!(v.get("images").is_none(), "{v}");
         let p = prompt(Some(harness_core::event::FormReply {
             message_id: "m1".into(),
             block_id: "db".into(),

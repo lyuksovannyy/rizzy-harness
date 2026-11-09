@@ -137,6 +137,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         req_id: "p".into(),
         session_id: sid,
         text: "run: echo sk-node-secret-1 > out.txt; echo written".into(),
+        images: vec![],
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -178,6 +179,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         req_id: "p".into(),
         session_id: sid,
         text: "run: sleep 100".into(),
+        images: vec![],
     });
     h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await;
@@ -209,6 +211,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         req_id: "p2".into(),
         session_id: sid,
         text: format!("run: (sleep 1000) & echo $! > {}; wait", pidfile.display()),
+        images: vec![],
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -273,6 +276,7 @@ async fn policy_denied_tool_never_runs() {
         req_id: "p".into(),
         session_id: sid,
         text: "run: touch nope".into(),
+        images: vec![],
     });
     let EventKind::ApprovalResolved(r) = h
         .until(|k| matches!(k, EventKind::ApprovalResolved(_)))
@@ -330,6 +334,7 @@ async fn resume_replays_in_batches() {
         req_id: "p".into(),
         session_id: sid,
         text: "hello world".into(),
+        images: vec![],
     });
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     h.send(MasterToNode::Resume {
@@ -444,6 +449,7 @@ async fn recovers_interrupted_turn_on_start() {
             req_id: "p".into(),
             session_id: sid,
             text: "continue".into(),
+            images: vec![],
         })
         .unwrap();
     loop {
@@ -503,6 +509,7 @@ async fn sub_task_sessions_ask_no_questions() {
             req_id: "p".into(),
             session_id: sid,
             text: "ui: choices".into(),
+            images: vec![],
         })
         .unwrap();
     let blocks = loop {
@@ -559,6 +566,7 @@ async fn git_checkpoints_and_undo() {
         req_id: "p".into(),
         session_id: sid,
         text: "run: echo v2 > keep.txt; echo new > made.txt".into(),
+        images: vec![],
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -617,6 +625,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
             req_id: "p".into(),
             session_id: sid,
             text: format!("run: echo v{v} > notes.txt; echo {v} > f{v}.txt"),
+            images: vec![],
         });
         let EventKind::Checkpoint(after) = h
             .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))

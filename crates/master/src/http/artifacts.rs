@@ -178,6 +178,14 @@ impl View {
         };
         let meta: Value = serde_json::from_str(&v.meta).unwrap_or_else(|_| json!({}));
         let b = v.blob.as_ref();
+        // An image's size from its header (read at commit, never decoded);
+        // other kinds' previews hold only the owner's browser hints.
+        let image = b.is_some_and(|b| b.kind == "image");
+        let (width, height) = if image {
+            (v.preview.width, v.preview.height)
+        } else {
+            (None, None)
+        };
         json!({
             "version_id": v.version_id,
             "seq": v.seq,
@@ -191,6 +199,8 @@ impl View {
             "kind": b.map(|b| b.kind.clone()),
             "format": b.map(|b| b.format.clone()),
             "display": b.map(|b| b.display.clone()),
+            "width": width,
+            "height": height,
             "meta": meta,
             "notes": v.notes,
             "node": { "node_id": v.node_id, "hostname": self.nodes.get(&v.node_id).cloned().unwrap_or_default() },

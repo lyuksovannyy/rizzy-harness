@@ -69,6 +69,7 @@ fn events() -> Vec<RawEvent> {
             text: "fix the bug".into(),
             attachments: vec![],
             reply: None,
+            images: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -248,6 +249,15 @@ fn events() -> Vec<RawEvent> {
                 truncated: false,
             }],
             reply: None,
+            // Images go into the view as references; no bytes in events.
+            images: vec![ImageRef {
+                media_id: "01a19bf2000070008000000000000b01".into(),
+                sha256: "cd".repeat(32),
+                mime: "image/png".into(),
+                name: "screenshot.png".into(),
+                width: 1280,
+                height: 720,
+            }],
         }),
         EventKind::HistorySummarized(HistorySummarized {
             turn_id: "t2".into(),
@@ -312,6 +322,7 @@ fn events() -> Vec<RawEvent> {
                 block_id: "next".into(),
                 values: json!({"selected": ["o1"]}).as_object().unwrap().clone(),
             }),
+            images: vec![],
         }),
         // A `publish` call and the file the node staged for it, then a
         // file the user saved, and one that could not be saved.
@@ -396,6 +407,11 @@ fn a_streamed_message_gets_its_final_blocks() {
         .collect();
     assert!(users[0].get("reply").is_none());
     assert_eq!(users[2]["reply"]["block_id"], "next");
+    // Images are copied as references, and left out when there are none.
+    assert!(users[0].get("images").is_none());
+    assert_eq!(users[1]["images"][0]["name"], "screenshot.png");
+    assert_eq!(users[1]["images"][0]["width"], 1280);
+    assert!(users[1]["images"][0].get("data").is_none());
     assert!(view["meta"]["parent_session"].is_string());
 }
 

@@ -1,9 +1,9 @@
 # Media and the blob store: design note
 
-Status: **Phases A and B built** (the blob store, Media uploads, serving, thumbnails, quotas,
-sweeps, storage settings; Artifacts and the agent items they add, marked **[B]**, see
-[artifacts.md](artifacts.md)). Images in chats (Phase C) build on it and are marked **[C]**.
-The contract is the sidebar-areas design (v2), §5 and §6; this note says what the code does
+Status: **built** (Phase A: the blob store, Media uploads, serving, thumbnails, quotas,
+sweeps, storage settings; Phase B: Artifacts and the agent items they add, marked **[B]**, see
+[artifacts.md](artifacts.md); Phase C: images in chats, marked **[C]**). The contract is the
+sidebar-areas design (v2), §5 and §6, with its Appendix B; this note says what the code does
 and why.
 
 ## What Media is
@@ -23,9 +23,10 @@ Media is each account's **private library** of images, video and audio.
   `crates/store/src/media.rs`).
 - **Media files only.** Documents, archives and binaries are refused with 415 "not a media file;
   build outputs go to Artifacts". A PDF is a document.
-- **Off until images in chats land.** `[media] enabled` defaults to `false`: on its own, Media
-  would be an upload-only locker. While it is off every `/api/media` route answers 404,
-  `features.media.show` is false and search has no Media tab. Phase C flips the default.
+- **On by default** **[C]**. `[media] enabled = false` in config.toml turns it off: every
+  `/api/media` route then answers 404, `features.media.show` is false, search has no Media
+  tab and chats take no images. Agent items are still recorded (they are only references), so
+  they appear once Media is on again.
 
 ## The blob store
 
@@ -186,7 +187,7 @@ interface MediaItem {
 | Method and path | Body | Answer / errors |
 |---|---|---|
 | GET `/api/media?workspace=&kind=&origin=&session=&q=&before=&limit=60` | – | `{items, next, usage:{used, quota}, limits:{max_file}}`; `kind` is `image`, `video`, `audio` or `other`; `next` is the cursor to pass as `before`; `quota` 0 = unlimited |
-| POST `/api/media?workspace=` | the raw file, streamed; name in `X-File-Name` (percent-encoded UTF-8, never in the URL) | 201 `MediaItem` · 200 `{…, duplicate: true}` · 408 · 413 · 415 · 429 · 507 |
+| POST `/api/media?workspace=&origin=upload\|chat&session=` | the raw file, streamed; name in `X-File-Name` (percent-encoded UTF-8, never in the URL) | 201 `MediaItem` · 200 `{…, duplicate: true}` · 408 · 413 · 415 · 429 · 507; `origin=chat` **[C]**: images only (else 415), `session` the chat when it exists already (someone else's: 404; incognito: 409) |
 | GET `/api/media/{id}` | – | `MediaItem` · 404 |
 | PATCH `/api/media/{id}` | `{name?, width?, height?, duration_ms?, no_thumb?}` | `MediaItem`; hints clamped to 1..100000 px and ≤ 48 h, width and height ignored for images (header values win); hints and `no_thumb` from the blob's owner only (403) |
 | DELETE `/api/media/{id}` · POST `/api/media/delete` `{ids}` (≤ 100) | – | `{ok}`; ids that are not the caller's are skipped silently |
@@ -203,11 +204,68 @@ the list's visibility (owner, effective workspace): rows of `type` image, video,
 `media_other`, preview "Uploaded" / "From chat ‘…’" / "Published by an agent", and the
 thumbnail as a same-origin path. The list's `q` uses the same tokens and the same index.
 
+## Images in chats [C]
+
+The composer uploads each image to Media (`origin=chat`, after the browser downsized and
+re-encoded it, which also drops EXIF and GPS), then sends the message with their ids:
+`POST /api/sessions/{id}/prompt` `{text, images: [media_id]}`.
+
+**`media::prompt_images` checks, in order** (`crates/master/src/media.rs`):
+
+| check | refusal |
+|---|---|
+| Media is on | 404 |
+| at most 4 images, each once | 413 · 400 |
+| the chat is not incognito | 409 "Images can't go into an incognito chat." |
+| each is the caller's own item (the API token: anyone's), an image in PNG, JPEG, WebP or GIF (what every vision provider reads) | 404 · 415 |
+| at most 5 MiB together | 413 "Too much attached to one message" |
+| the chat's node announced the `images` capability | 422 "This chat's worker can't take images yet; update it." |
+| the chat's model sees images (`vision` in the model's configuration; unlisted counts as no) | 422 "<model> can't see images; choose a model that can." |
+| the chat carries at most 50 images (ones it already carries are free) | 409 |
+
+A turn run by another agent (an @mention) or compared across models is checked again in
+`Master::prompt` against each of those models; a refusal there is 409 with the same text,
+because the HTTP layer maps that error to 409. An answer to a question never carries images
+(400).
+
+**The 8 MiB frame.** `Master::prompt` measures the serialized `session.prompt` (images in
+base64, up to five 100,000-character attachments, the agent spec, the context) and refuses
+anything over 7 MiB with 413 "Too much attached to one message", before it reaches the link.
+Nothing is recorded and the chat carries nothing.
+
+**On the wire:** `session.prompt.images: [{media_id, sha256, mime, name, width, height, data}]`
+(`data` base64), only to nodes whose hello listed `images`. `media_id` is there because the
+node writes the message: `user_message.images: [{media_id, sha256, mime, name, width,
+height}]`, references only, never bytes. Both folds copy them to `UserItem.images`.
+
+**On the node** (`crates/node/src/images.rs`, `session.rs`): the limits again, the type, the
+base64 and the sha256 of every image are checked; the bytes go into node.db (or chat.db)
+`session_images`, keyed by (chat, sha256), and are deleted with the chat under
+`secure_delete`. Incognito chats refuse images here too.
+
+**To the model** (`crates/agent-native/src/images.rs`): a user message with images becomes
+`ChatMsg::UserImages`, sent as `ContentPart::Binary` parts after its text. Only the newest
+three image-bearing messages are shown again; older ones, and any whose bytes are missing,
+name each image as `[image: name]` in the text, so a long chat does not pay for every picture
+on every step. Summaries and sub-agents get text only. The mock provider answers "I see N
+image(s)." to a message with images.
+
+**Which chats carry an item:** `media_uses(media_id, session_id)` gets a row once the prompt
+reached the node; `MediaItem.chats` counts them, and a chat's deletion removes its rows. An
+item uploaded before its chat existed (the home composer) takes the first chat it is sent in
+as its source. `DELETE /api/sessions/{id}?media=1` first deletes the caller's items whose
+source is that chat (sent there, or published there by an agent; the artifacts stay).
+
+`features.media.vision_images` is true while Media is on and some listed model sees images;
+the composer still checks the chat's model.
+
 ## Deleting, honestly
 
 - Deleting an item deletes its blob when nothing else references it (another workspace's item
   on the same bytes, or an artifact version **[B]**): row, WAL, file, in that order.
 - Deleting an agent item never touches the artifact version behind it **[B]**.
-- Images sent in chats **[C]**: deleting the Media item does not reach copies a chat's worker
-  node keeps for the conversation, and copies already sent to a model provider cannot be
-  recalled. The delete dialog says so ("Still in N chats…").
+- Images sent in chats **[C]**: deleting the Media item does not reach the copies a chat's
+  worker node keeps for the conversation (they go when the chat is deleted), and copies
+  already sent to a model provider cannot be recalled. `MediaItem.chats` says how many chats
+  still carry the item, and the delete dialog says so ("Still in N chats. Delete those chats
+  to remove it there. Copies already sent to the model provider can't be recalled.").

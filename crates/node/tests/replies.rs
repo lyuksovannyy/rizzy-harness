@@ -85,6 +85,7 @@ impl Chat {
             savings: None,
             context: None,
             reply,
+            images: vec![],
         });
     }
 

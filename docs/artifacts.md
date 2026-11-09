@@ -163,7 +163,10 @@ the artifact keeps the item and the blob it shows.
 | POST `/api/sessions/{id}/artifacts` `{path, name?}` | the chat's owner, agentic | 202 `{requested:true}`; 409 node offline, too old, or the node's refusal |
 
 `latest` in a list is the newest ready version, or the newest of any status while none is ready
-(a first upload still pending). `progress` is in memory, for pending versions only. Changes send
+(a first upload still pending). A version's `width` and `height` are the image's header
+dimensions, read at commit without decoding (Phase C), and `null` when unknown or for anything
+but an image; a page can apply the 40 MP guard to them with Media off. `progress` is in memory,
+for pending versions only. Changes send
 the content-free `artifacts_changed` to the owner's sockets, or to every socket for a shared
 artifact.
 

@@ -194,6 +194,41 @@ struct UploadQuery {
     workspace: Option<String>,
     #[serde(default)]
     origin: Option<String>,
+    /// `origin=chat`: the chat it is attached in, when it exists already
+    /// (the home composer uploads before the chat does; the first chat it
+    /// is sent in becomes its source).
+    #[serde(default)]
+    session: Option<String>,
+}
+
+/// Where an upload comes from: the Media page, or a chat's composer (an
+/// image, never in an incognito chat). Returns whether it is a chat's and
+/// that chat when given.
+async fn upload_origin(
+    m: &Master,
+    who: &Principal,
+    q: &UploadQuery,
+) -> ApiResult<(bool, Option<String>)> {
+    match q.origin.as_deref() {
+        None | Some("upload") => Ok((false, None)),
+        Some("chat") => {
+            let Some(id) = q.session.as_deref().filter(|s| !s.is_empty()) else {
+                return Ok((true, None));
+            };
+            let row = super::visible_session(m, who, id).await?;
+            if row.incognito {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "Images can't go into an incognito chat.".into(),
+                ));
+            }
+            Ok((true, Some(row.session_id.to_string())))
+        }
+        Some(_) => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "origin is upload or chat".into(),
+        )),
+    }
 }
 
 /// `X-File-Name`, percent-encoded UTF-8 (names never go in the URL).
@@ -230,21 +265,7 @@ async fn upload(
     body: Body,
 ) -> ApiResult<Response> {
     let who = caller(&m, &headers).await?;
-    match q.origin.as_deref() {
-        None | Some("upload") => {}
-        Some("chat") => {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "images in chats are not available yet".into(),
-            ));
-        }
-        Some(_) => {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "origin is upload or chat".into(),
-            ));
-        }
-    }
+    let (from_chat, session) = upload_origin(&m, &who, &q).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let name = file_name(&headers)?;
     let declared = headers
@@ -268,21 +289,25 @@ async fn upload(
         .await
         .map_err(refused)?;
     let sniffed = crate::sniff::sniff(&written.head, Some(&name), declared.as_deref());
-    if !crate::sniff::is_media(sniffed.kind) {
+    let refusal = if !crate::sniff::is_media(sniffed.kind) {
+        Some("not a media file; build outputs go to Artifacts")
+    } else if from_chat && sniffed.kind != "image" {
+        Some("only images go into a chat")
+    } else {
+        None
+    };
+    if let Some(why) = refusal {
         // The writer is done: its file is ours to remove.
         let _ = std::fs::remove_file(&written.path);
-        return Err(ApiError(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "not a media file; build outputs go to Artifacts".into(),
-        ));
+        return Err(ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, why.into()));
     }
     let item = NewItem {
         media_id: harness_core::new_id(),
         owner_id: who.user_id.clone(),
         workspace_id: scope.as_ref().map(|a| a.id().to_string()),
         name,
-        origin: "upload".into(),
-        session_id: None,
+        origin: if from_chat { "chat" } else { "upload" }.into(),
+        session_id: session,
     };
     let blob = NewBlob {
         blob_id: written.blob_id.clone(),
@@ -413,36 +438,13 @@ async fn update(
     Ok(Json(item_json(&row)))
 }
 
-/// Delete items of the caller's (the API token: anyone's), then the blobs
-/// nothing references any more: rows first (`secure_delete`), the WAL
-/// truncated, then the files.
-async fn delete_items(m: &Master, who: &Principal, ids: Vec<String>) -> ApiResult<()> {
-    let owner = who.user_id.clone();
-    let gone = m
-        .inner
-        .mirror
-        .call(move |s| {
-            let d = s.media_delete(owner.as_deref(), &ids)?;
-            if !d.blobs.is_empty() {
-                s.checkpoint()?;
-            }
-            Ok::<_, harness_store::StoreError>(d)
-        })
-        .await?;
-    storage::unlink(m, gone.blobs).await;
-    if gone.items > 0 {
-        changed(m, who);
-    }
-    Ok(())
-}
-
 async fn delete_one(
     State(m): State<Master>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let (who, row) = visible(&m, &headers, &id).await?;
-    delete_items(&m, &who, vec![row.media_id]).await?;
+    media::delete(&m, &who, vec![row.media_id]).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -466,7 +468,7 @@ async fn delete_many(
     }
     // Ids that are not the caller's are skipped (the store checks the
     // owner), so nothing confirms they exist.
-    delete_items(&m, &who, b.ids).await?;
+    media::delete(&m, &who, b.ids).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

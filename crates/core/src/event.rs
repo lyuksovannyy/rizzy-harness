@@ -197,6 +197,24 @@ pub struct UserMessage {
     /// user's own typing, never model text), plus the user's note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<FormReply>,
+    /// Images sent with the message. Only references: the bytes stay in the
+    /// owner's Media on the master and in the node's `session_images`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageRef>,
+}
+
+/// An image a user message carries (`user_message.images`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageRef {
+    /// The Media item it was sent from (it may be deleted since).
+    pub media_id: String,
+    /// Hex sha256 of the bytes; the node keys its copy by it.
+    pub sha256: String,
+    pub mime: String,
+    pub name: String,
+    /// From the file's header; 0 when it could not be read.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// The user's answer to an input block of an earlier assistant message.
@@ -780,6 +798,7 @@ mod tests {
                 block_id: "db".into(),
                 values,
             }),
+            images: vec![],
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(

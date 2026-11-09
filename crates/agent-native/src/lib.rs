@@ -1,6 +1,7 @@
 //! The native agent loop: stream a completion, run requested tools (through the
 //! host's approval gate), feed results back, repeat until the model stops.
 
+pub mod images;
 pub mod llm;
 pub mod mask;
 pub mod mock;
@@ -20,7 +21,8 @@ use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
 pub use provider::{
-    ChatMsg, ChatRequest, Completion, Effort, Provider, ProviderError, ToolSpec, estimate_tokens,
+    ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, ToolSpec,
+    estimate_tokens,
 };
 
 /// Flush coalesced deltas at least this often...
@@ -94,8 +96,12 @@ fn transcript(prev: Option<&str>, events: &[RawEvent]) -> String {
         out.push_str(&format!("Earlier summary:\n{p}\n\n"));
     }
     for m in history_to_messages(events) {
-        match m {
-            ChatMsg::User(t) => out.push_str(&format!("User: {t}\n\n")),
+        match &m {
+            // Images reach the summariser by name only.
+            ChatMsg::User(_) | ChatMsg::UserImages { .. } => {
+                let t = images::as_text(&m).unwrap_or_default();
+                out.push_str(&format!("User: {t}\n\n"));
+            }
             ChatMsg::Assistant { text, tool_calls } => {
                 if !text.is_empty() {
                     out.push_str(&format!("Assistant: {text}\n\n"));
@@ -346,7 +352,7 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
         match k {
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
-                out.push(ChatMsg::User(m.model_text()));
+                out.push(images::user_msg(m.model_text(), &m.images));
             }
             EventKind::AssistantMessage(m) if !keep(&m) => {}
             EventKind::AssistantMessage(m) => {
@@ -381,9 +387,8 @@ fn observed_text(messages: &[ChatMsg]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|m| match m {
-            ChatMsg::User(t) => Some(t.clone()),
             ChatMsg::Tool { content, .. } => Some(content.clone()),
-            _ => None,
+            other => other.user_text().map(str::to_string),
         })
         .collect()
 }
@@ -562,10 +567,18 @@ impl AgentBackend for NativeBackend {
         messages.extend(history_to_messages(recent));
         // Per-turn context sits after the history: the system prompt and the
         // history stay byte-identical from turn to turn (prompt cache).
-        messages.push(ChatMsg::User(match &ctx.extra.context {
+        let user_text = match &ctx.extra.context {
             Some(c) => format!("<context>\n{c}\n</context>\n\n{}", ctx.user_text),
             None => ctx.user_text.clone(),
-        }));
+        };
+        messages.push(images::user_msg(user_text, &ctx.extra.images));
+        let wanted = images::wanted(&messages);
+        let loaded = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            host.images(&wanted).await
+        };
+        images::attach(&mut messages, &loaded);
         if !ctx.compare.is_empty() {
             return self.compare(&ctx, messages, usage, author, ui).await;
         }
@@ -1697,6 +1710,7 @@ mod tests {
                     text: "hi".into(),
                     attachments: vec![],
                     reply: None,
+                    images: vec![],
                 }),
             ),
             mk(
@@ -1722,6 +1736,7 @@ mod tests {
                     text: "again".into(),
                     attachments: vec![],
                     reply: None,
+                    images: vec![],
                 }),
             ),
         ];
@@ -1779,6 +1794,7 @@ mod tests {
                 text: format!("question {n} {}", "word ".repeat(200)),
                 attachments: vec![],
                 reply: None,
+                images: vec![],
             }),
             &mut out,
         );
