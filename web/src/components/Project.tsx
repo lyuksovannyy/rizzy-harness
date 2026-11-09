@@ -1,9 +1,12 @@
 // A project's page (docs/projects.md): a bar that starts chats inside it,
-// then Chats, Board, Memory and Settings. Also the create form (`#/p/new`).
+// then Chats, Board, Memory, Artifacts (what its chats published, while the
+// server keeps them) and Settings. Also the create form (`#/p/new`).
 // Loaded on demand; the strings live here, not in the first-load catalog.
 import { ArrowLeft, ArrowRight, MessageSquare, Trash2, X } from "lucide-react";
 import { type CSSProperties, type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { HttpError } from "../api";
+import { type Artifact, artifactsApi, latestUrl } from "../lib/artifacts";
+import { useFeatures } from "../lib/features";
 import {
   type Board,
   type BoardCard,
@@ -14,18 +17,20 @@ import {
   type ProjectDetail,
   projectsApi,
 } from "../lib/projects";
-import type { ProjectTab } from "../lib/routes";
+import { artifactHash, type ProjectTab } from "../lib/routes";
 import { accentColor, PROJECT_ICONS, ProjectIcon } from "../lib/projectIcons";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import { Composer, type Submission } from "./Composer";
 import { ACCENTS } from "./forms";
 
-type Tab = ProjectTab;
+// Artifacts has no route of its own (lib/routes.ts): the tab is this page's.
+type Tab = ProjectTab | "artifacts";
 const TABS: [Tab, string][] = [
   ["chats", "Chats"],
   ["board", "Board"],
   ["memory", "Memory"],
+  ["artifacts", "Artifacts"],
   ["settings", "Settings"],
 ];
 
@@ -68,6 +73,9 @@ export default function Project(props: {
   // The default follows the preferences, which may arrive after this page.
   useEffect(() => setAgentId(props.defaultAgent), [props.defaultAgent]);
   const { id, version } = props;
+  // What the server offers here: the Artifacts tab, and images on the bar.
+  const features = useFeatures(props.workspaceId, id !== "new");
+  const artifactsShown = !!features?.artifacts.show;
 
   useEffect(() => {
     if (id === "new") return;
@@ -117,9 +125,10 @@ export default function Project(props: {
           onSubmit={(s) => props.onSubmit(s, project.project_id)}
           voice={props.voice}
           project={{ nodeId: project.settings.node_id, cwd: project.settings.cwd }}
+          images={features?.media.vision_images ? { workspace: props.workspaceId } : null}
         />
         <div className="tabs" role="tablist">
-          {TABS.map(([x, label]) => (
+          {TABS.filter(([x]) => x !== "artifacts" || artifactsShown).map(([x, label]) => (
             <button key={x} role="tab" aria-selected={tab === x} className={tab === x ? "on" : ""} onClick={() => setTab(x)}>
               {label}
             </button>
@@ -128,6 +137,7 @@ export default function Project(props: {
         {tab === "chats" && <Chats project={project} own={own} all={props.chats} onOpen={props.onOpenChat} />}
         {tab === "board" && <BoardView project={project} chats={own} version={version} onOpen={props.onOpenChat} />}
         {tab === "memory" && <ProjectMemory project={project} version={props.memoryVersion} onOpen={props.onOpenChat} />}
+        {tab === "artifacts" && <ProjectArtifacts project={project} workspaceId={props.workspaceId} />}
         {tab === "settings" && (
           <ProjectSettings project={project} nodes={props.nodes} onSaved={setProject} onDeleted={props.onDeleted} />
         )}
@@ -256,6 +266,40 @@ function NewProject({ workspaceId, onCreated }: { workspaceId: string | null; on
         </form>
       </div>
     </section>
+  );
+}
+
+/** What the project's chats published (`?project=`), newest first; each
+ * opens on the Artifacts page, which has the versions and actions. */
+function ProjectArtifacts(props: { project: ProjectDetail; workspaceId: string | null }) {
+  const [list, setList] = useState<Artifact[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pid = props.project.project_id;
+  useEffect(() => {
+    artifactsApi.list({ workspace: props.workspaceId, project: pid }).then(
+      (p) => setList(p.artifacts),
+      (e) => setError(message(e)),
+    );
+  }, [pid, props.workspaceId]);
+  if (error) return <p className="error-text">{error}</p>;
+  if (!list) return <p className="muted">Loading…</p>;
+  if (!list.length) return <p className="muted">No artifacts yet. Files agents publish from this project's agentic chats show here.</p>;
+  return (
+    <ul className="project-chats">
+      {list.map((a) => (
+        <li key={a.artifact_id}>
+          <a className="session-item" href={artifactHash(a.artifact_id)}>
+            <span className="ellipsis grow">{a.name}</span>
+            {a.latest && <span className="muted small">v{a.latest.seq}</span>}
+          </a>
+          {a.latest?.status === "ready" && (
+            <a className="link small" href={latestUrl(a.artifact_id)} download>
+              Download
+            </a>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
 

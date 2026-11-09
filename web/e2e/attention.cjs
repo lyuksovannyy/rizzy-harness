@@ -19,13 +19,24 @@ const URL_ = 'http://127.0.0.1:7792/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };
+/** The claim code once the server answers; a busy machine can take a while to start it. */
+async function claimCode() {
+  for (let i = 0; i < 600; i++) {
+    try {
+      await fetch(URL_);
+      return fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    } catch {
+      await sleep(100);
+    }
+  }
+  throw new Error('the server did not start within a minute');
+}
 let PAGE = null;
 
 (async () => {
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7792'], { detached: true, stdio: 'ignore' });
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    const code = await claimCode();
     const b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 860 }, permissions: ['notifications'] });
     // Record notifications instead of showing them.

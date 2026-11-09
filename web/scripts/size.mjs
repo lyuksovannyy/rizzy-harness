@@ -44,7 +44,7 @@ const I2_KB = 0.1; // Phase C: fold.ts copies user_message.images (measured +0.0
 const I3_KB = 0; // Phase C: no shell code added, measured 359.49 (initial 102.31), BASE_KB itself; one shared lazy chunk for the icons was tried (total -2.7) and dropped, since it made each lazy page's first visit about 3 KB heavier (docs/sidebar-search.md, measured 2026-11-08)
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I4_KB = 0;
+const I4_KB = 3.5; // Phase C, measured +3.41: downscale chunk 1.1 (lazy), composer image chips/paste/drop and the home pickup +0.7 (initial), bubble thumbnails and the chat-delete Media offer +0.6 (Conversation), Project Artifacts tab and bar images +0.3, Artifacts project filter and header-size previews +0.2, Use in chat / Still in N chats +0.4 (Media, preview, media lib), lib/artifacts helper chunk +0.1 (measured 2026-11-08; initial 103.0)
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
@@ -122,12 +122,14 @@ const lazyI3 = [
   ...lazyChunk(/\/Login-/, "login form"),
 ];
 
-// I4: its lazy chunks (the area pages, then their previews).
+// I4: its lazy chunks (the area pages, their previews, and the composer's
+// image shrinking, which loads on the first image put in a message).
 const lazyI4 = [
   ...lazyChunk(/\/Routines-/, "Routines page"),
   ...lazyChunk(/\/Media-/, "Media page"),
   ...lazyChunk(/\/Artifacts-/, "Artifacts page"),
   ...lazyChunk(/\/MediaPreview-/, "Media preview"),
+  ...lazyChunk(/\/downscale-/, "image downscale"),
 ];
 
 console.log(`lazy chunks checked: ${lazyI3.length} (I3), ${lazyI4.length} (I4)`);

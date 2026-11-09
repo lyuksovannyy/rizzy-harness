@@ -1,11 +1,11 @@
 // One Media item, large (docs/media.md §6.8): a modal dialog (focus kept
 // inside, Esc closes, ←/→ step through the grid) with the picture, player
 // or a Download, and beside it the name to rename, what the file is, where
-// it came from, the artifact an agent's item also lives in, and Delete (with
-// "Delete from both" for an agent's item). Its own lazy chunk, shared with
-// chats. An image
-// too large to decode safely, a HEIC the browser cannot show and a MOV it
-// cannot play all fall back to Download.
+// it came from, the artifact an agent's item also lives in, "Use in chat",
+// and Delete (with "Delete from both" for an agent's item, and what stays in
+// the chats an image went into). Its own lazy chunk, shared with chats. An
+// image too large to decode safely, a HEIC the browser cannot show and a MOV
+// it cannot play all fall back to Download.
 import { ChevronLeft, ChevronRight, Download, File, Film, Image as ImageIcon, Music, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bytes } from "../lib/bytes";
@@ -19,6 +19,7 @@ import {
   mediaApi,
   originLine,
   safeToDecode,
+  stillIn,
 } from "../lib/media";
 import { artifactHash } from "../lib/routes";
 
@@ -48,6 +49,8 @@ export default function MediaPreview(props: {
   onChanged: (m: MediaItem) => void;
   /** `note`: the item went, but something it asked for did not (an artifact version that stayed). */
   onDeleted: (id: string, note: string | null) => void;
+  /** "Use in chat": offered only for an image a message can carry. */
+  onUse?: () => void;
 }) {
   const m = props.item;
   const dialog = useRef<HTMLDialogElement>(null);
@@ -226,6 +229,7 @@ export default function MediaPreview(props: {
         {confirming ? (
           <div className="media-confirm stack" role="group" aria-label="Delete">
             <p>Delete {m.name} from Media?</p>
+            {m.chats > 0 && <p className="small muted">{stillIn(m.chats)}</p>}
             {m.artifact && (
               <p className="small muted">The file stays in Artifacts ({artifactName(m.artifact)}); delete it there to free space.</p>
             )}
@@ -246,6 +250,11 @@ export default function MediaPreview(props: {
         ) : (
           <div className="row">
             {download}
+            {props.onUse && (
+              <button type="button" onClick={props.onUse}>
+                Use in chat
+              </button>
+            )}
             <span className="grow" />
             <button type="button" className="danger" onClick={() => setConfirming(true)}>
               Delete

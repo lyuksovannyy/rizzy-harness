@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
 import type { Artifact, ArtifactPage, ArtifactQuery, ArtifactVersion, ArtifactWithVersions } from "../lib/artifacts";
 import type { MediaItem } from "../lib/media";
+import type { ProjectSummary } from "../lib/projects";
 import type { Route } from "../lib/routes";
 import type { Features, Me, WorkspaceSummary } from "../types";
 
@@ -112,12 +113,15 @@ afterEach(() => {
 });
 
 const flush = () => act(() => new Promise((r) => setTimeout(r, 0)));
-async function show(p: { id?: string | null; me?: Me; features?: Features } = {}) {
+async function show(p: { id?: string | null; me?: Me; features?: Features; projects?: ProjectSummary[] } = {}) {
   await act(async () =>
-    root.render(<Artifacts me={p.me ?? meIn(PERSONAL)} scope="w1" navigate={navigate} live={live} features={p.features ?? features()} id={p.id ?? null} projects={[]} />),
+    root.render(
+      <Artifacts me={p.me ?? meIn(PERSONAL)} scope="w1" navigate={navigate} live={live} features={p.features ?? features()} id={p.id ?? null} projects={p.projects ?? []} />,
+    ),
   );
   await flush();
 }
+const PROJECT: ProjectSummary = { project_id: id(7), workspace_id: "w1", name: "CLI", description: "", icon: "box", accent: "blue", chats: 2, updated_ms: 0 };
 const rows = () => [...host.querySelectorAll<HTMLLIElement>(".artifact-row")];
 const buttons = (within: ParentNode = host) => [...within.querySelectorAll<HTMLButtonElement>("button")];
 const button = (text: string, within: ParentNode = host) => buttons(within).find((b) => b.textContent?.trim() === text || b.getAttribute("aria-label") === text);
@@ -136,7 +140,7 @@ describe("list", () => {
       listing([artifact(1), artifact(2, { mine: false, visibility: "workspace", owner: { username: "bob" }, latest: version({ session: { private: true }, meta: {} }) })]),
     );
     await show({ me: meIn(TEAM) });
-    expect(artifactsApi.list).toHaveBeenCalledWith({ workspace: "w1", kind: null, mine: false, q: "" });
+    expect(artifactsApi.list).toHaveBeenCalledWith({ workspace: "w1", project: null, kind: null, mine: false, q: "" });
     expect(host.querySelector(".media-usage")!.textContent).toBe("1.0 GB of 4.0 GB used");
     const [mine, theirs] = rows();
     expect(mine!.querySelector(".artifact-line")!.textContent).toBe("app1v712 MBx86_64-unknown-linux-gnu");
@@ -190,6 +194,33 @@ describe("list", () => {
     expect(host.querySelector(".media-empty")!.textContent).toBe("You can't run agentic chats here.");
     await act(async () => radio("Kind", "Media").click());
     expect(host.querySelector(".media-empty")!.textContent).toBe("Nothing here with these filters.");
+  });
+
+  test("the project filter, only where the workspace has projects", async () => {
+    artifactsApi.list.mockResolvedValue(listing([artifact(1)]));
+    await show();
+    expect(host.querySelector('select[aria-label="Project"]')).toBeNull();
+    await show({ projects: [PROJECT] });
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Project"]')!;
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Every project", "CLI"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, id(7));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(artifactsApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ project: id(7) }));
+    artifactsApi.list.mockResolvedValue(listing([]));
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(artifactsApi.list).toHaveBeenLastCalledWith(expect.objectContaining({ project: null }));
+  });
+
+  test("a name with no version ready yet offers no Download", async () => {
+    artifactsApi.list.mockResolvedValue(listing([artifact(1, { latest: version({ status: "pending", progress: { received: 1, total: 4 } }) })]));
+    await show();
+    expect(rows()[0]!.querySelector("a.button-like")).toBeNull();
+    expect(rows()[0]!.querySelector(".agent-info .muted")!.textContent).toContain("no version ready yet");
   });
 
   test("Load more by cursor", async () => {
@@ -345,6 +376,21 @@ describe("detail", () => {
     root = createRoot(host);
     await show({ id: id(2) });
     expect(host.querySelector("img.artifact-preview")!.getAttribute("src")).toBe(`/api/artifacts/${id(2)}/versions/v7/preview`);
+  });
+
+  test("an image version's own header size decides, without asking Media", async () => {
+    const png = version({ kind: "image", format: "png", display: "inline", meta: {}, width: 800, height: 600 });
+    artifactsApi.get.mockResolvedValue(detail(artifact(2, { kind: "image", latest: png, media_id: id(5) }), [png]));
+    await show({ id: id(2) });
+    expect(host.querySelector("img.artifact-preview")!.getAttribute("src")).toBe(`/api/artifacts/${id(2)}/versions/v7/preview`);
+    // Over 40 MP: never decoded, whatever Media says.
+    const bomb = version({ kind: "image", format: "png", display: "inline", meta: {}, width: 20_000, height: 20_000 });
+    artifactsApi.get.mockResolvedValue(detail(artifact(3, { kind: "image", latest: bomb, media_id: id(6) }), [bomb]));
+    act(() => root.unmount());
+    root = createRoot(host);
+    await show({ id: id(3) });
+    expect(host.querySelector(".artifact-preview")).toBeNull();
+    expect(mediaApi.get).not.toHaveBeenCalled();
   });
 
   test("a gone or private artifact says so", async () => {

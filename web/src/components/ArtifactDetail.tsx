@@ -151,7 +151,7 @@ export function ArtifactActions(props: { a: Artifact | ArtifactWithVersions; can
         </form>
       ) : (
         <>
-          {a.latest && (
+          {a.latest?.status === "ready" && (
             <a className="button-like" href={latestUrl(a.artifact_id)} download>
               Download
             </a>
@@ -323,19 +323,23 @@ export function Versions(props: { a: Pick<Artifact, "artifact_id" | "mine">; ver
 }
 
 /** A picture, a player, or nothing: images only when their size is known to
- * be safe to decode, which only the lineage's Media item tells. */
+ * be safe to decode. The version's header size says so; a server that sends
+ * none leaves it to the lineage's Media item, when that shows this version. */
 function Preview({ a, v }: { a: ArtifactWithVersions; v: ArtifactVersion }) {
-  const [safe, setSafe] = useState(false);
+  const known = v.kind === "image" && ((v.width && v.height) || v.format === "svg");
+  const own = known ? safeToDecode({ kind: "image", display: v.display ?? "download", format: v.format ?? "", width: v.width ?? null, height: v.height ?? null }) : null;
+  const [vouched, setVouched] = useState(false);
   const [broken, setBroken] = useState(false);
   const mediaId = a.media_id;
   useEffect(() => {
-    setSafe(false);
-    if (v.kind !== "image" || !mediaId) return;
+    setVouched(false);
+    if (v.kind !== "image" || own !== null || !mediaId) return;
     mediaApi
       .get(mediaId)
-      .then((m) => setSafe(m.artifact?.version_id === v.version_id && safeToDecode(m)))
+      .then((m) => setVouched(m.artifact?.version_id === v.version_id && safeToDecode(m)))
       .catch(() => {});
-  }, [mediaId, v.version_id, v.kind]);
+  }, [mediaId, v.version_id, v.kind, own]);
+  const safe = own ?? vouched;
   if (broken) return <p className="muted small">This browser can't show this file; download it instead.</p>;
   const src = previewUrl(a.artifact_id, v.version_id);
   if (v.kind === "video") return <video className="artifact-preview" src={src} controls preload="metadata" onError={() => setBroken(true)} />;

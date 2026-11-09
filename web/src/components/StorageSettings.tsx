@@ -45,7 +45,8 @@ export function StorageSettings(_props: { me: Me }) {
     }
   };
   const changed = FIELDS.some((f) => form[f.key] !== data.settings[f.key]);
-  const usedShare = data.disk.total ? 1 - data.disk.free / data.disk.total : 0;
+  // Both are null when the server could not measure its disk.
+  const { free, total } = data.disk;
   return (
     <div className="stack">
       <form
@@ -92,9 +93,9 @@ export function StorageSettings(_props: { me: Me }) {
         <h3>Usage</h3>
         <p className="small">
           {bytes(data.total)} stored in all.{" "}
-          {data.disk.total > 0 && (
+          {free !== null && !!total && (
             <span className="muted">
-              The data disk has {bytes(data.disk.free)} free of {bytes(data.disk.total)} ({Math.round(usedShare * 100)}% used).
+              The data disk has {bytes(free)} free of {bytes(total)} ({Math.round((1 - free / total) * 100)}% used).
             </span>
           )}
         </p>

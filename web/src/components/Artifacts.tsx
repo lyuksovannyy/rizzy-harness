@@ -25,6 +25,7 @@ function ArtifactList(props: ArtifactsPageProps) {
   const can = canOf(props);
   const [kind, setKind] = useState<KindFilter | "all">("all");
   const [whose, setWhose] = useState<Whose>("all");
+  const [project, setProject] = useState("");
   const [typed, setTyped] = useState("");
   const [q, setQ] = useState("");
   const [page, setPage] = useState<Listing | null>(null);
@@ -38,7 +39,7 @@ function ArtifactList(props: ArtifactsPageProps) {
     return () => clearTimeout(t);
   }, [typed]);
 
-  const filters = { workspace: scope, kind: kind === "all" ? null : kind, mine: whose === "mine", q };
+  const filters = { workspace: scope, project: project || null, kind: kind === "all" ? null : kind, mine: whose === "mine", q };
   const load = useCallback(() => {
     artifactsApi
       .list(filters)
@@ -48,7 +49,7 @@ function ArtifactList(props: ArtifactsPageProps) {
       })
       .catch((e) => setError(message(e)));
     setVersion((n) => n + 1);
-  }, [scope, kind, whose, q]);
+  }, [scope, project, kind, whose, q]);
   useEffect(() => {
     load();
     return live.onTopic("artifacts", load);
@@ -72,7 +73,7 @@ function ArtifactList(props: ArtifactsPageProps) {
 
   // "Shared" has no server filter: the rows shared with the workspace, mine or not.
   const rows = (page?.artifacts ?? []).filter((a) => whose !== "shared" || a.visibility === "workspace");
-  const filtered = kind !== "all" || whose !== "all" || !!q;
+  const filtered = kind !== "all" || whose !== "all" || !!project || !!q;
   const usage = page?.usage;
   return (
     <Page>
@@ -97,6 +98,16 @@ function ArtifactList(props: ArtifactsPageProps) {
             ]}
             onChange={setWhose}
           />
+        )}
+        {props.projects.length > 0 && (
+          <select aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
+            <option value="">Every project</option>
+            {props.projects.map((p) => (
+              <option key={p.project_id} value={p.project_id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
         )}
         <input type="search" className="grow" aria-label="Search artifacts" placeholder="Search names, files and notes" value={typed} onChange={(e) => setTyped(e.target.value)} />
       </div>
@@ -160,7 +171,7 @@ function Row(props: {
             {a.visibility === "workspace" && <span className="tag">Shared</span>}
           </span>
           <span className="small muted">
-            {[from, v ? null : "no version ready yet", when(a.updated_ms, Date.now())].filter(Boolean).join(" · ")}
+            {[from, v?.status === "ready" ? null : "no version ready yet", when(a.updated_ms, Date.now())].filter(Boolean).join(" · ")}
           </span>
         </div>
         <button type="button" className="link small" aria-expanded={props.open} onClick={props.onToggle}>

@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
-// What a chat adds for routines and artifacts: the banner of a chat holding
-// webhook data, the seen mark for a finished run's chat (in a visible page
-// only), the saved-file and failed-save items, and the header's "Save a
-// file" form, offered only in agentic chats the viewer drives while the
-// server keeps Artifacts.
+// What a chat adds for routines, artifacts and media: the banner of a chat
+// holding webhook data, the seen mark for a finished run's chat (in a
+// visible page only), the saved-file and failed-save items, the header's
+// "Save a file" form (agentic chats the viewer drives while the server
+// keeps Artifacts), images under a message (opening the preview, or
+// "removed from Media"), the bar's images, and deleting the chat with or
+// without the Media files that came from it.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -13,12 +15,15 @@ import type { Features, Item, RoutineMark, SessionRow, SessionView } from "../ty
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), deleteSession: vi.fn(), prompt: vi.fn(), approve: vi.fn() },
+  api: { features: (s: unknown) => features(s), deleteSession: vi.fn(() => Promise.resolve({ ok: true })), prompt: vi.fn(), approve: vi.fn() },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
 vi.mock("../lib/artifacts", async (original) => ({ ...(await original<typeof import("../lib/artifacts")>()), artifactsApi }));
+const mediaApi = { list: vi.fn(), get: vi.fn() };
+vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi }));
+const { api } = await import("../api");
 const { default: Conversation } = await import("./Conversation");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -68,8 +73,17 @@ const mark = (over: Partial<RoutineMark> = {}): RoutineMark => ({
   untrusted: false,
   ...over,
 });
-const FEATURES = (enabled: boolean) =>
-  ({ artifacts: { enabled, show: enabled, why: null }, media: { enabled: false, show: false }, routines: { enabled: true } }) as unknown as Features;
+const FEATURES = (enabled: boolean, vision_images = false) =>
+  ({ artifacts: { enabled, show: enabled, why: null }, media: { enabled: vision_images, show: vision_images, vision_images }, routines: { enabled: true } }) as unknown as Features;
+/** Until `ok` holds, a render at a time (the preview is its own chunk). */
+const until = (ok: () => unknown) =>
+  vi.waitFor(
+    async () => {
+      await act(async () => {});
+      if (!ok()) throw new Error("not yet");
+    },
+    { timeout: 15_000, interval: 10 },
+  );
 
 let host: HTMLElement;
 let root: Root;
@@ -154,11 +168,86 @@ describe("artifacts", () => {
   });
 
   test("no Save a file in a chat chat, for a blocked viewer, or with Artifacts off", async () => {
-    await show([], sessionRow({ profile: "chat" }), "chat");
     await show([], sessionRow({ blocked: "You can't run agentic chats here." }));
     expect(features).not.toHaveBeenCalled();
+    // A chat chat asks too (images), but saves no files.
+    await show([], sessionRow({ profile: "chat" }), "chat");
+    expect(features).toHaveBeenCalledWith({ workspace: "w1" });
+    expect(host.querySelector('button[aria-label="Save a file as an artifact"]')).toBeNull();
+    // Each chat is its own mount (Shell keys it by id), so it asks afresh.
+    act(() => root.unmount());
+    root = createRoot(host);
     features.mockResolvedValue(FEATURES(false));
     await show([], sessionRow());
     expect(host.querySelector('button[aria-label="Save a file as an artifact"]')).toBeNull();
+  });
+});
+
+describe("media", () => {
+  const ref = (n: number) => ({ media_id: String(n).padStart(32, "c"), sha256: "s", mime: "image/webp", name: `p${n}.webp`, width: 800, height: 600 });
+  const user = (images: ReturnType<typeof ref>[]): Item => ({ type: "user", turn_id: "t1", text: "look", images });
+  beforeEach(() => {
+    vi.mocked(api.deleteSession).mockClear();
+    mediaApi.list.mockReset();
+    mediaApi.get.mockReset();
+  });
+
+  test("a message's images open the preview; one deleted from Media says so", async () => {
+    mediaApi.get.mockImplementation((id: string) =>
+      id === ref(1).media_id
+        ? Promise.resolve({ ...ref(1), kind: "image", format: "webp", display: "inline", size: 1, chats: 1, origin: "chat", source: null, artifact: null, has_thumb: false, no_thumb: false, duration_ms: null, workspace_id: "w1", created_ms: 0, updated_ms: 0 })
+        : Promise.reject(Object.assign(new Error("gone"), { status: 404 })),
+    );
+    await show([user([ref(1), ref(2)])], sessionRow());
+    const pictures = [...host.querySelectorAll<HTMLButtonElement>(".bubble-image")];
+    expect(pictures.map((b) => b.querySelector("img")!.getAttribute("src"))).toEqual([`/api/media/${ref(1).media_id}/content`, `/api/media/${ref(2).media_id}/content`]);
+    await act(async () => pictures[0]!.click());
+    await until(() => host.querySelector("dialog.media-preview"));
+    expect(host.querySelector("dialog.media-preview")!.getAttribute("aria-label")).toBe("p1.webp");
+    await act(async () => pictures[1]!.click());
+    await until(() => host.querySelector(".bubble-images .chip"));
+    expect(host.querySelector(".bubble-images .chip")!.textContent).toBe("p2.webp: removed from Media");
+  });
+
+  test("the bar takes images where the server does", async () => {
+    features.mockResolvedValue(FEATURES(true, true));
+    await show([], sessionRow());
+    const attach = () => host.querySelector<HTMLButtonElement>('button[aria-label="Attach files"]')!;
+    expect(attach().title).toBe("Attach documents or images (images are kept in Media)");
+    features.mockResolvedValue(FEATURES(true, false));
+    act(() => root.unmount());
+    root = createRoot(host);
+    await show([], sessionRow());
+    expect(attach().title).not.toContain("images");
+  });
+
+  test("deleting asks first, then offers the chat's Media files", async () => {
+    const ask = vi.fn((_q: string) => true);
+    vi.stubGlobal("confirm", ask);
+    mediaApi.list.mockResolvedValue({ items: [{}, {}, {}], next: null });
+    await show([], sessionRow());
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    expect(mediaApi.list).toHaveBeenCalledWith({ workspace: "w1", session: SID });
+    expect(ask.mock.calls.map((c) => c[0])).toEqual([
+      "Delete this chat for good?",
+      "Also delete the 3 Media files that came from this chat? Cancel keeps them in Media.",
+    ]);
+    expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: true });
+    vi.unstubAllGlobals();
+  });
+
+  test("with no Media files from the chat (or Media off) it is just the chat; Cancel keeps it", async () => {
+    const ask = vi.fn((_q: string) => true);
+    vi.stubGlobal("confirm", ask);
+    mediaApi.list.mockRejectedValue(new Error("not found"));
+    await show([], sessionRow());
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: false });
+    vi.mocked(api.deleteSession).mockClear();
+    ask.mockReturnValue(false);
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    expect(api.deleteSession).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

@@ -4436,6 +4436,16 @@ button.danger-text { color: var(--bad); }
 .save-artifact-form input { flex: 1; min-width: 160px; }
 .save-file-bar { margin-top: var(--space-2); }
 .untrusted-banner { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+/* Images in chats: a chip with the picture in the bar, pictures under a
+   message's bubble (on their own line). */
+.image-chip img { width: 18px; height: 18px; object-fit: cover; border-radius: 4px; }
+.msg.user:has(> .bubble-images) { flex-wrap: wrap; }
+.bubble-images { flex-basis: 100%; }
+.bubble-image {
+  display: grid; place-items: center; min-width: 64px; min-height: 64px; padding: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg); color: var(--fg-2);
+}
+.bubble-image img { display: block; width: auto; height: 120px; max-width: 220px; object-fit: cover; }
 @media (max-width: 760px) {
   /* A row on two lines: the name and facts, then versions and actions under them. */
   .artifact-main { flex-wrap: wrap; row-gap: var(--space-2); }

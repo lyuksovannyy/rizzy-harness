@@ -3,7 +3,9 @@
 import { FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
+import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
+import { mediaApi } from "../lib/media";
 import { fallbackNote } from "../lib/models";
 import { markRunSeen } from "../lib/routineResults";
 import { routineHash } from "../lib/routes";
@@ -26,6 +28,7 @@ import { inputBlock, inputState, progressSignature, progressSlots, type Progress
 import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
+import { BubbleImages } from "./ChatImages";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
@@ -160,19 +163,8 @@ function useRunSeen(mark: RoutineMark | null | undefined) {
   }, [due, routineId, runId]);
 }
 
-/** Whether the server keeps Artifacts at all; asked only for agentic chats
- * the viewer drives, where "Save as artifact" could show. */
-function useArtifactsOn(ask: boolean, workspaceId: string | null | undefined): boolean {
-  const [on, setOn] = useState(false);
-  useEffect(() => {
-    if (!ask) return;
-    api
-      .features(workspaceId ? { workspace: workspaceId } : null)
-      .then((f) => setOn(f.artifacts.enabled))
-      .catch(() => {});
-  }, [ask, workspaceId]);
-  return ask && on;
-}
+/** A chat takes this many images in all (docs/media.md §6.6). */
+const CHAT_IMAGES = 50;
 
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
@@ -269,12 +261,21 @@ export default function Conversation(props: {
   const notes = fallbackNotes(items);
   const routine = props.row?.routine;
   useRunSeen(routine);
-  const saveable = useArtifactsOn(agentic && !blocked && !incognito, props.row?.workspace_id);
+  // What the server offers here: "Save as artifact" in agentic chats, images in any.
+  const workspaceId = props.row?.workspace_id ?? null;
+  const features = useFeatures(workspaceId, !!props.row && !blocked && !incognito);
+  const saveable = agentic && !!features?.artifacts.enabled;
+  const imagesUsed = items.reduce((n, it) => n + (it.type === "user" ? (it.images?.length ?? 0) : 0), 0);
   const artifacts = useChatArtifacts(sessionId, live, stagedKeys(items), saveable);
   const [savingFile, setSavingFile] = useState(false);
+  // Deleting asks, then offers the viewer's Media files that came from this
+  // chat (none while Media is off), which can go with it.
   const remove = async () => {
     if (!confirm(t("conv.deleteConfirm"))) return;
-    await api.deleteSession(sessionId).catch(() => {});
+    const from = incognito ? null : await mediaApi.list({ workspace: workspaceId, session: sessionId }).catch(() => null);
+    const n = from?.items.length ?? 0;
+    const media = n > 0 && confirm(`Also delete the ${n}${from!.next ? "+" : ""} Media file${n > 1 ? "s" : ""} that came from this chat? Cancel keeps them in Media.`);
+    await api.deleteSession(sessionId, { media }).catch(() => {});
     location.hash = "#/";
   };
 
@@ -452,6 +453,7 @@ export default function Conversation(props: {
                             ))}
                           </ul>
                         )}
+                        {!!it.images?.length && <BubbleImages images={it.images} />}
                       </div>
                     );
                   case "assistant": {
@@ -576,11 +578,13 @@ export default function Conversation(props: {
             draftKey={`harness.draft.${sessionId}`}
             voice={props.voice}
             onStop={() => void api.cancel(sessionId)}
+            images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
             onSubmit={async (s) => {
               stick.current = true;
               await api.prompt(sessionId, s.text, {
                 ...(s.effort ? { effort: s.effort } : {}),
                 ...(s.attachments.length ? { attachments: s.attachments } : {}),
+                ...(s.images?.length ? { images: s.images } : {}),
               });
             }}
           />

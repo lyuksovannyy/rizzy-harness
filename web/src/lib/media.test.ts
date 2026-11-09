@@ -3,14 +3,15 @@
 // are safe to decode (header dimensions, 40 MP, 16,384 px), the origin line,
 // and the upload: a raw body with the name in a header (never in the URL),
 // progress, a retry after the server's Retry-After, and its error text;
-// deleting several (100 per call) and "Delete from both".
+// chat images; deleting several (100 per call) and "Delete from both"; what
+// "Use in chat" may offer and what a delete says about chats.
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { bytes } from "./bytes";
 import type { MediaItem } from "./media";
 
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 vi.mock("../api", async (original) => ({ ...(await original<typeof import("../api")>()), call: (...a: unknown[]) => call(...a) }));
-const { clockTime, deleteMedia, originLine, safeToDecode, upload } = await import("./media");
+const { chatReady, clockTime, deleteMedia, originLine, safeToDecode, stillIn, upload } = await import("./media");
 
 describe("helpers", () => {
   test("sizes and lengths", () => {
@@ -33,6 +34,20 @@ describe("helpers", () => {
     expect(safeToDecode(img({ format: "svg", width: null, height: null, display: "img" }))).toBe(true);
     expect(safeToDecode(img({ display: "download", format: "tiff" }))).toBe(false);
     expect(safeToDecode({ ...img({}), kind: "video" })).toBe(false);
+  });
+
+  test("Use in chat: an image shown as it is, safe to decode, within one message's 5 MB", () => {
+    const m = (over: Partial<MediaItem>) => ({ ...img({}), size: 1000, ...over }) as MediaItem;
+    expect(chatReady(m({}))).toBe(true);
+    expect(chatReady(m({ size: 5 * 1024 * 1024 + 1 }))).toBe(false);
+    expect(chatReady(m({ display: "img", format: "heic" }))).toBe(false);
+    expect(chatReady(m({ width: 9000, height: 9000 }))).toBe(false);
+    expect(chatReady(m({ kind: "video" }))).toBe(false);
+  });
+
+  test("a delete says which chats keep the image", () => {
+    expect(stillIn(1)).toBe("Still in 1 chat. Delete those chats to remove it there. Copies already sent to the model provider can't be recalled.");
+    expect(stillIn(3)).toMatch(/^Still in 3 chats\. /);
   });
 
   test("where an item came from", () => {
@@ -102,6 +117,18 @@ describe("upload", () => {
     expect(progress).toEqual([0.25]);
     x.answer(200, { media_id: "m1", duplicate: true });
     expect(await done).toEqual({ item: { media_id: "m1", duplicate: true }, duplicate: true });
+  });
+
+  test("a chat image says so, and keeps saying so when asked again", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    const done = upload(new File(["x"], "a.webp", { type: "image/webp" }), "w1", () => {}, "chat");
+    expect(sent[0]!.url).toBe("/api/media?origin=chat&workspace=w1");
+    sent[0]!.answer(429, { error: "busy" });
+    vi.advanceTimersByTime(5000);
+    expect(sent[1]!.url).toBe("/api/media?origin=chat&workspace=w1");
+    sent[1]!.answer(201, { media_id: "m1" });
+    expect((await done).item.media_id).toBe("m1");
   });
 
   test("a busy server is asked again after its Retry-After; a refusal gives its reason", async () => {

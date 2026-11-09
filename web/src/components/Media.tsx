@@ -9,6 +9,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { HttpError } from "../api";
 import { bytes } from "../lib/bytes";
 import {
+  chatReady,
   clockTime,
   deleteMedia,
   FILTER_KIND,
@@ -16,6 +17,7 @@ import {
   type MediaItem,
   mediaApi,
   type MyStorage,
+  PENDING_IMAGES,
   storageApi,
   thumbUrl,
   upload,
@@ -60,6 +62,16 @@ interface Sending {
 export function tileLabel(m: MediaItem, now: number): string {
   const added = when(m.created_ms, now).replace(/^(Yesterday|Now)$/i, (w) => w.toLowerCase());
   return `${m.name}, ${KIND_LABEL[m.kind]}, ${bytes(m.size)}, added ${added}${m.origin === "agent" ? ", published by an agent" : ""}`;
+}
+
+/** "Use in chat": the id waits in this tab for the home bar (at most the 4 a message takes). */
+export function keepForChat(id: string): void {
+  try {
+    const ids = JSON.parse(sessionStorage.getItem(PENDING_IMAGES) ?? "[]") as string[];
+    sessionStorage.setItem(PENDING_IMAGES, JSON.stringify([...ids.filter((x) => x !== id), id].slice(-4)));
+  } catch {
+    /* storage unavailable: the bar starts empty */
+  }
 }
 
 /** The empty grid names only sources that exist: agents publish once Artifacts shows. */
@@ -168,6 +180,7 @@ export default function Media(props: MediaPageProps) {
 
   const chosen = (items ?? []).filter((m) => selected.has(m.media_id));
   const fromAgents = chosen.filter((m) => m.artifact).length;
+  const inChats = chosen.filter((m) => m.chats > 0).length;
   const remove = async (both: boolean) => {
     setConfirming(false);
     try {
@@ -289,6 +302,8 @@ export default function Media(props: MediaPageProps) {
                 Delete {chosen.length === 1 ? "this item" : `these ${chosen.length} items`} from Media?
                 {fromAgents > 0 &&
                   ` ${fromAgents === 1 ? "One came from an agent and stays" : `${fromAgents} came from agents and stay`} in Artifacts; delete there to free space.`}
+                {inChats > 0 &&
+                  ` ${inChats === 1 ? "One is" : `${inChats} are`} still in chats; delete those chats to remove them there. Copies already sent to the model provider can't be recalled.`}
               </span>
               <button type="button" onClick={() => setConfirming(false)}>
                 Cancel
@@ -380,6 +395,14 @@ export default function Media(props: MediaPageProps) {
             onNext={at >= 0 && at < shown.length - 1 ? () => move(1) : undefined}
             onClose={close}
             onChanged={patch}
+            onUse={
+              props.features.media.vision_images && chatReady(open)
+                ? () => {
+                    keepForChat(open.media_id);
+                    navigate({ kind: "home" });
+                  }
+                : undefined
+            }
             onDeleted={(_id, note) => {
               setLeftOver(note);
               close();
