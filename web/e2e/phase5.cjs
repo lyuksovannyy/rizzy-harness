@@ -6,7 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e5-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -51,8 +51,7 @@ function fakeProvider() {
   const fake = await fakeProvider();
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7800'], { detached: true, stdio: 'ignore' });
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 860 }, timezoneId: 'Europe/Riga' });
     const p = await ctx.newPage();
@@ -70,27 +69,32 @@ function fakeProvider() {
     await p.fill('input[placeholder="My endpoint"]', 'Fake');
     await p.fill('input[placeholder="my-endpoint"]', 'fake');
     await p.fill('input[type=password]', 'sk-wrong-key-999');
-    await p.click('text=Test connection');
+    await p.click('button[aria-label="Test connection"]');
     await p.waitForSelector('.error-text');
     log('wrong key:', (await p.innerText('.error-text')).slice(0, 60));
     await p.fill('input[type=password]', KEY);
-    await p.click('text=Test connection');
+    await p.click('button[aria-label="Test connection"]');
     await p.waitForSelector('.model-pick');
     log('models:', (await p.innerText('.model-pick ul')).replace(/\s+/g, ' '));
-    // Offer both models; fake-large is General's, so everyone's default.
+    // Offer both models; fake-large is General's main model, so everyone's default.
     await p.check('.model-pick li:has-text("fake-small") input[type=checkbox]');
     await p.check('.model-pick li:has-text("fake-large") input[type=checkbox]');
-    await p.click('button[aria-label^="Default agents for fake-large:"]');
-    await p.click('[role=menu] [role=menuitemcheckbox]:has-text("General")');
+    await p.click('button.agent-pick[aria-label$="(fake-large)"]');
+    await p.click('[role=menu] button[aria-label="General: main model"]');
     await p.keyboard.press('Escape');
-    await p.waitForSelector('button[aria-label="Default agents for fake-large: General"]');
+    await p.waitForSelector('button.agent-pick[aria-label="For: General (fake-large)"]');
+    // Every offered model needs an agent: fake-small is General's fallback.
+    await p.click('button.agent-pick[aria-label$="(fake-small)"]');
+    await p.click('[role=menu] button[aria-label="General: fallback"]');
+    await p.keyboard.press('Escape');
     await p.screenshot({ path: `${S}/p5-1-provider.png` });
-    await p.click('text=Save and continue');
+    await p.click('button.primary:has-text("Save and continue") >> visible=true');
     await keywordsOnly(p);
 
     // Step 3: profile (time zone pre-filled from the browser).
     await p.waitForSelector('text=About you');
-    const tzBox = 'role=combobox[name="Time zone"]';
+    // The profile fields, by their ids (each is named by its label, "Time zone (optional)").
+    const tzBox = 'input[role=combobox][id$="-tz"]';
     const tz = await p.inputValue(tzBox);
     log('prefilled tz:', tz);
     check(tz === 'Europe/Riga', 'timezone should be prefilled from the browser');
@@ -106,12 +110,12 @@ function fakeProvider() {
     check((await p.inputValue(tzBox)) === 'Europe/Riga', 'Enter picks the first suggestion');
     await p.fill('input[placeholder="alex"]', 'Alex');
     // Country: suggestions from the browser's country names.
-    const country = 'role=combobox[name="Country"]';
+    const country = 'input[role=combobox][id$="-country"]';
     await p.fill(country, 'latv');
     await p.click('[role=option]:has-text("Latvia")');
     check((await p.inputValue(country)) === 'Latvia', 'country picked');
     // City: suggestions limited to the chosen country (data loaded on focus).
-    const city = 'role=combobox[name="City"]';
+    const city = 'input[role=combobox][id$="-city"]';
     await p.click(city);
     await p.fill(city, 'ri');
     await p.waitForSelector('[role=option]:has-text("Riga")');
@@ -121,7 +125,7 @@ function fakeProvider() {
     await p.screenshot({ path: `${S}/p5-2-profile.png` });
     await p.click('[role=option]:has-text("Riga")');
     check((await p.inputValue(city)) === 'Riga', 'city picked');
-    await p.click('button:has-text("Continue")');
+    await p.click('button:text-is("Continue")');
 
     // Step 3: search engine.
     await p.waitForSelector('h2:has-text("Search engine")');

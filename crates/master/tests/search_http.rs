@@ -1,19 +1,22 @@
 //! The search panel's API (chats, projects, the All tab, paging, privacy),
-//! with the rows other areas bring (routine run chats, Media items and
-//! their thumbnails), similar-chat suggestions, the per-viewer feature
-//! flags and the classifier store.
+//! with the rows other areas bring (routine run chats, Media items,
+//! published artifacts and their thumbnails), similar-chat suggestions,
+//! the per-viewer feature flags and the classifier store.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::Secret;
 use harness_core::event::Profile;
+use harness_core::policy::ApprovalMode;
 use harness_master::auth::{Auth, Claim};
 use harness_master::config::Config;
 use harness_master::providers::ProviderRuntime;
 use harness_master::routines::{self, Clock};
 use harness_master::{Master, ModelInfo, router};
+use harness_node::artifacts::StageConfig;
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
@@ -21,21 +24,63 @@ use serde_json::{Value, json};
 
 struct T {
     base: String,
+    /// The worker node's folder agentic chats run in (`start_artifacts`).
+    work: PathBuf,
     _dir: tempfile::TempDir,
 }
 
 async fn start() -> T {
-    serve(false).await
+    serve(false, false).await
 }
 
 /// The same server with Media switched on: `[media] enabled` in a managed
 /// config and the blob store open, as `harness serve` does.
 async fn start_media() -> T {
-    serve(true).await
+    serve(true, false).await
 }
 
-async fn serve(media: bool) -> T {
+/// Media on plus a worker node that stages files, so agentic chats can
+/// `publish` (the mock model's `publish: <path> as <name>`).
+async fn start_artifacts() -> T {
+    serve(true, true).await
+}
+
+/// An agentic worker node with artifact staging, confined to `work`.
+async fn worker(dir: &Path, work: &Path) -> NodeRuntime {
+    let data = dir.join("node-data");
+    std::fs::create_dir_all(&data).unwrap();
+    NodeRuntime::start(NodeConfig {
+        node_id: "local".into(),
+        hostname: "builder".into(),
+        policy: NodePolicy {
+            workspace_roots: vec![work.into()],
+            max_approval_mode: ApprovalMode::Auto,
+            ..Default::default()
+        },
+        store: Store::open_in_memory().unwrap(),
+        backend: Arc::new(NativeBackend::new(
+            Arc::new(Mock {
+                delay: Duration::from_millis(1),
+            }),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        )),
+        default_model: "mock".into(),
+        secrets: Default::default(),
+        profile: Profile::Agentic,
+        incognito_ttl: None,
+        checkpoints_dir: None,
+        artifacts: Some(StageConfig::new(data)),
+    })
+    .await
+    .unwrap()
+}
+
+async fn serve(media: bool, with_worker: bool) -> T {
     let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.canonicalize().unwrap();
     let chat = NodeRuntime::start(NodeConfig {
         node_id: "master".into(),
         hostname: "h".into(),
@@ -96,6 +141,10 @@ async fn serve(media: bool) -> T {
             ..Default::default()
         },
     ]);
+    if with_worker {
+        let node = worker(dir.path(), &work).await;
+        master.add_link(node.attach().await, true).await.unwrap();
+    }
     master.add_link(chat.attach().await, true).await.unwrap();
     // Run now works; the timed loops stay off, nothing here is scheduled.
     routines::start_with(&master, Clock::wall(), false);
@@ -103,6 +152,7 @@ async fn serve(media: bool) -> T {
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
     T {
         base: format!("http://{addr}"),
+        work,
         _dir: dir,
     }
 }
@@ -1007,6 +1057,156 @@ async fn media_rows_carry_thumbnails_their_owner_can_load() {
     assert_eq!(st, StatusCode::OK);
     let (_, v) = panel(&t, Some(&alex), "q=kiwi&in=media").await;
     assert_eq!(ids(&v), [clip]);
+    assert_eq!(
+        image(&t, &alex, &thumb).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// In an agentic chat of `cookie`'s on the worker, in `ws` (`None`: the
+/// active workspace), the agent publishes `file` from the work folder as
+/// `name`; the artifact's id and version once the master has the file.
+async fn publish(
+    t: &T,
+    cookie: &str,
+    ws: Option<&str>,
+    file: &str,
+    name: &str,
+) -> (String, String) {
+    let mut body = json!({"profile": "agentic", "cwd": t.work, "approval_mode": "auto"});
+    if let Some(ws) = ws {
+        body["workspace_id"] = json!(ws);
+    }
+    let (st, _, v) = req(t, Method::POST, "/api/sessions", Some(body), Some(cookie)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let text = format!("publish: {file} as {name}");
+    let path = format!("/api/sessions/{sid}/prompt");
+    let (st, _, v) = req(
+        t,
+        Method::POST,
+        &path,
+        Some(json!({ "text": text })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let path = format!("/api/sessions/{sid}/artifacts");
+    for _ in 0..600 {
+        let (_, _, v) = req(t, Method::GET, &path, None, Some(cookie)).await;
+        if let Some(row) = v.as_array().and_then(|rows| rows.first())
+            && row["status"] != "pending"
+        {
+            assert_eq!(row["status"], "ready", "{row}");
+            let id = |k: &str| row[k].as_str().unwrap().to_string();
+            return (id("artifact_id"), id("version_id"));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{file} was never published");
+}
+
+/// Artifact rows in the panel, from the real `artifacts::search`: the
+/// Artifacts tab and All with the typed row, its preview and the
+/// same-origin thumbnail; a private artifact is its owner's alone, a
+/// shared one reaches the workspace's members and never a non-member
+/// (T10); a deleted artifact leaves search and its thumbnail goes.
+#[tokio::test]
+async fn published_artifacts_are_found_by_whoever_may_see_them() {
+    let t = start_artifacts().await;
+    let alex = login_admin(&t).await;
+    let bob = new_user(&t, &alex, "bob").await;
+    let carol = new_user(&t, &alex, "carol").await;
+    let acme = team(&t, &alex, "Acme", &[("bob", "member")]).await;
+    std::fs::write(t.work.join("kiwi.png"), png(b"kiwi")).unwrap();
+    let (art, vid) = publish(&t, &alex, Some(&acme), "kiwi.png", "kiwi press").await;
+    let ask = |tab: &str| format!("q=kiwi&in={tab}&workspace={acme}");
+
+    let (_, v) = panel(&t, Some(&alex), &ask("artifacts")).await;
+    assert_eq!(ids(&v), std::slice::from_ref(&art));
+    let row = &v["results"][0];
+    assert_eq!(
+        (&row["kind"], &row["type"]),
+        (&json!("artifact"), &json!("image"))
+    );
+    assert_eq!(row["title"], format!("{M}kiwi{E} press"));
+    let preview = row["preview"].as_str().unwrap();
+    assert!(preview.starts_with("v1 · "), "size line: {row}");
+    assert!(row["snippet"].is_null(), "{row}");
+    assert!(row.get("thumb").is_none(), "no thumbnail yet: {row}");
+
+    // The owner's browser makes the thumbnail; the row then points at it.
+    let thumb = format!("/api/artifacts/{art}/versions/{vid}/thumb");
+    let r = reqwest::Client::new()
+        .put(format!("{}{thumb}", t.base))
+        .header("cookie", &alex)
+        .body(png(b"thumb"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let (_, v) = panel(&t, Some(&alex), &ask("artifacts")).await;
+    assert_eq!(v["results"][0]["thumb"], thumb);
+    let r = image(&t, &alex, &thumb).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "image/png");
+    assert_eq!(r.headers()["cross-origin-resource-policy"], "same-origin");
+    // All: the same row among the other kinds.
+    let (_, v) = panel(&t, Some(&alex), &ask("all")).await;
+    let found = of_kind(&v, "artifact");
+    assert_eq!(found.len(), 1, "{v}");
+    assert_eq!(
+        (&found[0]["id"], &found[0]["thumb"]),
+        (&json!(art), &json!(thumb))
+    );
+
+    // Private: bob, a member without the agentic grant, has no Artifacts
+    // area or tab and finds nothing, nor loads the thumbnail.
+    let features = format!("/api/features?workspace={acme}");
+    let (_, _, f) = req(&t, Method::GET, &features, None, Some(&bob)).await;
+    assert_eq!(f["artifacts"]["show"], false, "{f}");
+    for tab in ["artifacts", "all"] {
+        let (_, v) = panel(&t, Some(&bob), &ask(tab)).await;
+        assert!(of_kind(&v, "artifact").is_empty(), "{tab}: {v}");
+        assert!(!v["kinds"].as_array().unwrap().contains(&json!("artifacts")));
+    }
+    assert_eq!(
+        image(&t, &bob, &thumb).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // Shared with Acme: its members find it, with the area and tab shown.
+    let path = format!("/api/artifacts/{art}");
+    let share = json!({"visibility": "workspace"});
+    let (st, _, v) = req(&t, Method::PATCH, &path, Some(share), Some(&alex)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, _, f) = req(&t, Method::GET, &features, None, Some(&bob)).await;
+    assert_eq!(f["artifacts"]["show"], true, "{f}");
+    for tab in ["artifacts", "all"] {
+        let (_, v) = panel(&t, Some(&bob), &ask(tab)).await;
+        let found = of_kind(&v, "artifact");
+        assert_eq!(found.len(), 1, "{tab}: {v}");
+        assert_eq!(found[0]["id"], art.as_str());
+        assert!(v["kinds"].as_array().unwrap().contains(&json!("artifacts")));
+    }
+    assert_eq!(image(&t, &bob, &thumb).await.status(), StatusCode::OK);
+    // Carol is no member: Acme's search is closed, her own has nothing.
+    let (st, _) = panel(&t, Some(&carol), &ask("all")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    for q in ["q=kiwi&in=artifacts", "q=kiwi&in=all", "in=artifacts"] {
+        let (_, v) = panel(&t, Some(&carol), q).await;
+        assert!(of_kind(&v, "artifact").is_empty(), "{q}: {v}");
+    }
+
+    // Deleted: gone from everyone's search, and the thumbnail with it.
+    let (st, _, v) = req(&t, Method::DELETE, &path, None, Some(&alex)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    for who in [&alex, &bob] {
+        for tab in ["artifacts", "all"] {
+            let (_, v) = panel(&t, Some(who), &ask(tab)).await;
+            assert!(of_kind(&v, "artifact").is_empty(), "{tab}: {v}");
+        }
+    }
     assert_eq!(
         image(&t, &alex, &thumb).await.status(),
         StatusCode::NOT_FOUND

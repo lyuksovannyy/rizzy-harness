@@ -1,4 +1,24 @@
 // Helpers shared by the e2e scripts for the first-run screens (not a script).
+const fs = require('fs');
+
+/**
+ * The claim code of a server just started, once it has written the code to
+ * `file` and answers on `url`. A cold debug build on a busy machine can take
+ * longer than any fixed sleep.
+ */
+async function claimCode(file, url, timeoutMs = 60000) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const code = fs.readFileSync(file, 'utf8').trim();
+      if (code && (await fetch(url)).ok) return code;
+    } catch {
+      // Not written or not listening yet.
+    }
+    if (Date.now() > until) throw new Error(`no server at ${url} (${file})`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
 
 /**
  * Claim the server as its owner: the claim code opens the account fields,
@@ -19,4 +39,4 @@ async function keywordsOnly(p) {
   await p.waitForSelector('h2:has-text("About you")');
 }
 
-module.exports = { createOwner, keywordsOnly };
+module.exports = { claimCode, createOwner, keywordsOnly };

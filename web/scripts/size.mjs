@@ -41,7 +41,7 @@ const BASE_KB = 359.5; // Phase B merged (measured 359.49): webhooks UI, Artifac
 const I2_KB = 0.1; // Phase C: fold.ts copies user_message.images (measured +0.03 over 359.49, 2026-11-08; initial unchanged at 102.3)
 
 // I3: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
-const I3_KB = 0;
+const I3_KB = 0; // Phase C: no shell code added, measured 359.49 (initial 102.31), BASE_KB itself; one shared lazy chunk for the icons was tried (total -2.7) and dropped, since it made each lazy page's first visit about 3 KB heavier (docs/sidebar-search.md, measured 2026-11-08)
 
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I4_KB = 0;

@@ -7,7 +7,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e4-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -23,7 +23,7 @@ async function skipOnboarding(page, admin) {
     await keywordsOnly(page);
   }
   await page.waitForSelector('text=About you');
-  await page.click('button:has-text("Continue")');
+  await page.click('button:text-is("Continue")');
   await page.waitForSelector('h2:has-text("Search engine")');
   await page.click('button:has-text("Finish")');
 }
@@ -34,8 +34,7 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
 (async () => {
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7799'], { detached: true, stdio: 'ignore' });
   try {
-    await sleep(1500);
-    const code = fs.readFileSync(`${S}/data/claim-code`, 'utf8').trim();
+    const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
     const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
     const errors = [];

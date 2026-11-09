@@ -19,7 +19,9 @@ code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
 phase status.
 
 **Status:** Phases 1–8 done and most of Phase 9 (checkpoints with undo, sub-agent
-worktrees, parallel answers, voice input), and [rich messages](#rich-messages).
+worktrees, parallel answers, voice input), [rich messages](#rich-messages), and
+the sidebar areas: [Routines](#routines), [Media](#media),
+[Artifacts](#artifacts) and the [search panel](#the-sidebar-search-and-the-account-menu).
 See PLAN.md for what is left out and why.
 
 ## Quick start
@@ -77,11 +79,12 @@ still version beside chats when the window is wide enough.
 
 ## Workspaces
 
-Every account has a **Personal** workspace. The switcher at the top of the
-sidebar picks the workspace you work in: new chats go there, and the chat list,
-search and the default agent and model follow it. Create more workspaces from
-the switcher (a server setting decides whether everyone may, or only server
-admins) and add other accounts by username.
+Every account has a **Personal** workspace. The account menu (your name at the
+bottom of the sidebar) → **Workspaces** picks the workspace you work in: new
+chats go there, and the chat list, search, Routines, Media, Artifacts and the
+default agent and model follow it. Create more workspaces from the same menu
+(**+ New workspace…**; a server setting decides whether everyone may, or only
+server admins) and add other accounts by username.
 
 A chat stays private to the person who started it, in every workspace and for
 admins too: a workspace groups chats and decides what applies to them, not who
@@ -121,6 +124,170 @@ else your default from Preferences, else the workspace's default, else the
 server's. Agentic sessions need both the server admin's agentic grant on your
 account and a role with agentic permission in the workspace; losing either
 stops your running agentic work there and leaves its approvals deny-only.
+
+## The sidebar, search and the account menu
+
+Top to bottom: **New chat**, **Agents**, then **Routines**, **Media** and
+**Artifacts** (each shown once you can use it in this workspace; Routines
+carries a dot while results wait unseen), **Connections** (a placeholder for
+later), then the **Projects** and **Recent** sections and your account.
+Collapsed, the sidebar is a rail of icons; on a phone it is a drawer.
+
+**Search** (the magnifier, **Ctrl K** / **⌘ K**, or **/** outside a text
+field) opens the search panel over the page. Its tabs are All, Chats, Media,
+Artifacts and Projects (only those you have here), and it opens on the tab you
+used last. A row shows the title, the first sentence of the latest message (or
+the description) and, when the words matched elsewhere, a snippet; ↑/↓ pick
+a row, Enter opens it, Esc closes the panel. Search covers only the workspace you are in, and
+only your own chats, for admins too. Routine run chats are found by a search
+but are not listed while the box is empty.
+
+The **account menu** has your Profile, Settings, Log out and the
+**Workspaces** submenu (Personal first, then your team workspaces with your
+role, **+ New workspace…** and Workspace settings). It is a keyboard menu:
+Enter or ↓ opens it, → opens Workspaces, Esc goes back. Design notes:
+[docs/sidebar-search.md](docs/sidebar-search.md).
+
+## Routines
+
+A routine starts a chat for you on a schedule or when a webhook is called:
+**Routines** in the sidebar → **New routine**, then the agent, the prompt and
+when it runs. Schedules are cron (5 fields), every N minutes, or once, in your
+time zone; a routine has either up to 8 schedules or exactly one webhook.
+**Run now** works any time. Each run is a new chat titled `<routine> · <date
+time>`; it shows in Recent while it runs, waits or has an unseen result, and the
+result shows on Home with a notification (each routine says whether to notify
+always, on failures or never). The Runs tab lists every run with its trigger,
+status, duration, tokens and the first sentence of its answer.
+
+- **Prompts** take variables (`{{now.date}}`, `{{routine.name}}`,
+  `{{last_run.status}}`, and `{{event.body.<path>}}` / `{{event.text}}` for a
+  webhook); the editor's preview renders the prompt and the next runs on the
+  server.
+- **Agentic routines** run in `ask` or `ask_all` only: a command, an edit or a
+  publish waits for your click in "Waiting for you" and is cancelled after
+  24 hours. Read-only work finishes on its own.
+- **Webhooks**: `POST /api/hooks/<trigger id>` with
+  `Authorization: Bearer <secret>` and a JSON or plain-text body of at most
+  64 KiB (`Idempotency-Key` is honoured for 24 hours). The secret is shown once
+  when you save (Rotate makes a new one). The server binds 127.0.0.1 by
+  default, so a webhook reaches it only from this machine, over
+  [WireGuard](#using-it-from-other-devices-wireguard), or through a TLS proxy
+  whose Host is allowed (`--allowed-host`).
+- **What a webhook sends is untrusted.** Its data only fills the prompt; that
+  chat, and every later turn in it, gets no memory (no recall, no
+  `remember`), no `web_fetch` or `web_search`, and a banner saying so.
+- Guests cannot own routines. A routine runs as its owner: losing the
+  workspace permission or the agentic grant pauses it at the next fire.
+
+The newest 30 seen run chats per routine are kept (older ones are deleted
+hourly, unless you continued them); runs keep their status and usage. Limits,
+in `config.toml` (the defaults):
+
+```toml
+[routines]
+enabled = true                       # false: nothing fires, nothing new can be saved
+webhooks = true                      # false: hooks answer 409
+min_interval_minutes = 5             # shortest gap between two runs of one schedule
+max_per_user = 25
+max_per_workspace = 100
+max_triggers = 8                     # schedules per routine
+max_concurrent_runs = 4              # server-wide
+max_concurrent_per_user = 2
+max_runs_per_user_per_day = 200
+hook_rate_per_minute = 10            # per webhook, burst 5
+keep_runs = 200                      # per routine, and none older than 90 days
+keep_run_chats = 30
+approval_timeout_hours = 24
+```
+
+Details, the API and the trusted-routine seam: [docs/routines.md](docs/routines.md).
+
+## Media
+
+**Media** is your private library of images, video and audio: files you
+upload there, images you attach to chat messages, and the media files agents
+publish (one item per artifact, showing its newest version). Nobody else sees
+it, admins included; the workspace only filters what you see. The grid has
+thumbnails (made by your browser), filters by kind and a name search; a
+preview plays audio and video and offers Download and **Use in chat**.
+
+Attach images (PNG, JPEG, WebP or GIF; up to 4 per message) by picking,
+pasting or dropping them in the composer of a chat whose model has
+`vision = true`. Your browser scales each down (which also strips EXIF and GPS
+data) before it is uploaded to Media; temporary chats take no images.
+Deleting an item that chats still carry tells you so ("Still in N chats"),
+and deleting a chat can also delete the files it brought into Media. Copies
+already sent to a model provider cannot be recalled. Media is on by default:
+
+```toml
+[media]
+enabled = true                       # false: no Media page, no images in chats
+```
+
+Files are recognised by their bytes, never their name; only raster images,
+audio and video are shown in the page (SVG and HEIC only as images), anything
+else downloads. Design notes and the API: [docs/media.md](docs/media.md).
+
+## Artifacts
+
+**Artifacts** holds the files agents build for you: binaries, packages,
+archives, documents and media, each name with its versions. In an agentic
+chat an agent calls `publish` (Coder and Writer have it, and any custom agent
+that may edit files or run commands); in `ask` mode you approve each publish. You can also
+use **Save as artifact** on a file a tool card shows, or the field in the chat
+header. The node copies the file (a folder is packed as `.tar.gz`), the
+server pulls it and checks its size and sha256, and the chat card turns into
+Download / Open in Artifacts.
+
+- An artifact is private to you until you **Share with workspace** (team
+  workspaces only); members then see and download it. Rename, delete, pin a
+  version (up to 10) or delete one from its row or its page.
+- Each version shows its size, sha256 (copy it and compare with
+  `sha256sum`), git commit, node, the chat it came from and, for a pack,
+  its files. The last 5 versions are kept, plus pinned ones.
+- Scripts can fetch the newest version with the API token:
+  `curl -LOJ -H "Authorization: Bearer $(rizzy-harness token)" http://127.0.0.1:7777/api/artifacts/<id>/latest/download`.
+- Artifacts are stored files: nothing is ever rendered or run; only images,
+  audio and video get a preview.
+
+```toml
+[artifacts]                          # config.toml
+enabled = true
+keep_versions = 5                    # ready, unpinned versions kept per artifact
+max_pinned = 10
+```
+
+Each node decides for itself in its `node.toml` (the defaults):
+
+```toml
+[artifacts]
+enabled = true                       # false: no publish tool, no "Save as artifact" there
+max_mb = 200                         # one file or folder (uncompressed)
+stage_max_mb = 2048                  # all files waiting to upload
+stage_ttl_hours = 24                 # a file the server never fetched is deleted after this
+deny_globs = []                      # names never published, e.g. ["*.sqlite", "dist/private/**"]
+```
+
+A node only publishes from the chat's folder (or its `workspace_roots` when
+`allow_outside_workspace` is on), never from its data directory, never
+through a symlink, and refuses secret-like names (`.env*`, `*.pem`, `*.key`,
+`id_rsa*`, `.ssh/`, and so on) to agents. Design notes:
+[docs/artifacts.md](docs/artifacts.md).
+
+### Storage limits
+
+Media and Artifacts share these limits, also under Settings → Server →
+**Storage**, which shows each account's usage (numbers only). A file over a
+limit is refused; nothing stored is ever removed to make room.
+
+```toml
+[storage]
+max_file_mb = 200                    # one upload or published file
+account_quota_mb = 4096              # Media + Artifacts per account; 0 = no limit
+server_quota_mb = 20480              # every account's files together
+min_free_mb = 1024                   # free space kept on the data disk
+```
 
 ## Configuration
 
@@ -316,7 +483,7 @@ graphify gets no API keys.
 ## Projects
 
 A project groups chats around one piece of work inside a workspace:
-**Projects** in the sidebar (under the workspace switcher) → **+**, then pick a
+**Projects** in the sidebar → **+**, then pick a
 name, an icon, an accent and a board template. In a team workspace owners and
 admins manage projects; every member sees them and works in them with their
 own chats. Start chats from the project's page, or add a chat from its header's
@@ -559,6 +726,20 @@ node web/e2e/phase9.cjs target/debug/rizzy-harness
 
 ```bash
 node web/e2e/attention.cjs target/debug/rizzy-harness
+```
+
+Routines, Media and Artifacts (media.cjs needs ffmpeg to make its sample files):
+
+```bash
+node web/e2e/routines.cjs target/debug/rizzy-harness
+```
+
+```bash
+node web/e2e/media.cjs target/debug/rizzy-harness
+```
+
+```bash
+node web/e2e/artifacts.cjs target/debug/rizzy-harness
 ```
 
 Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):

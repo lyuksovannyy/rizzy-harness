@@ -22,7 +22,9 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
 * **The harness process stays light; the server around it may not.** The central server is the
   user's hub and can host local models and helper services next to the harness. Soft budget for
   the harness itself, measured every phase: idle < 50 MB RSS, and no core feature *requires* a
-  local ML model. Breaking it needs a written reason here.
+  local ML model. Breaking it needs a written reason here. The sidebar areas (2026-11-08)
+  keep it: stored files stream in 64 KiB pieces, nothing is decoded in the process (thumbnails
+  are made by the browser), and the routine scheduler is one sleeping task.
 * **Everything heavy is a service = a URL.** Memory server, embedding model, reranker, later
   speech. Each is *managed* (the master installs, starts and health-checks it), *LAN* (another
   own machine) or *cloud API*. Locality only changes the URL; the code path is identical. Local
@@ -100,6 +102,11 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
 
 * Sidebar v1: New chat, chat search, Recents, user menu. Projects and Library later; Images,
   Scheduled, Plugins and Explore cut.
+* Sidebar since 2026-11-08: New chat, Agents, **Routines** (was "Scheduled"), **Media** (was
+  "Images") and **Artifacts** (was "Library"), each shown per viewer and workspace; Plugins
+  stay cut, as a disabled **Connections** entry ("Later"); Projects and Recent sections; the
+  account menu in the footer, which also holds the workspaces; search in a panel (Ctrl K)
+  instead of the inline box.
 * Home: localized, time-of-day greeting with the user's name (strings in i18n catalogs from day one).
 * Bar: `+` attach · input · agent selector · model + effort (effort only when the model
   supports it, from a model capability registry) · mic (later) · mode switch
@@ -365,6 +372,9 @@ login page.
 | T13 | Credentials sniffed on the network | Default bind is 127.0.0.1. `--insecure-bind` serves plain HTTP with a loud warning (VPN/tailnet only); real TLS arrives with the node link (Phase 8). |
 | T9 | Runaway processes | Bash runs in its own process group; cancel/timeout sends SIGTERM then SIGKILL to the group. Cancel propagates master → node as `session.cancel`. Output is capped. |
 | T14 | Model output (possibly steered by injected web or repo content) phishes, exfiltrates or poses as the harness through what the chat renders | No model HTML, scripts, iframes or remote images; links show their real host and odd ones need a confirm with the full URL; `ui:` blocks are validated in Rust and drawn from the stored spec in a "from <agent>" frame; secret-asking questions and fields are refused; answers carry ids, never model text; the node checks every answer against its log. Details: Status, "2026-11-07 — Rich messages". |
+| T16 | Routines run without a human present, partly on external webhook data: injected text steers an agent or uses its web tools as a relay, a revoked user's routine keeps running, a webhook is abused or its sender locked out | The owner's account, membership, `routines` permission and, for agentic routines, the grant and `agentic` permission are re-checked at every fire; a refusal pauses the routine. Webhook data only fills the prompt, single pass, cleaned and capped, and marks the run untrusted: new chat, memory off, `web_fetch`/`web_search` and `remember` withheld, the routine's own agent, fixed title, an untrusted note; the flag sticks to the chat for every later turn (`routine_untrusted_chats`). Agentic routines run in `ask`/`ask_all` only (no `auto`); parked approvals, delegates' included, are cancelled after 24 h. Webhook secrets are 256-bit, header-only, stored as SHA-256, compared in constant time; throttles count failures only before authentication, and audit lines carry no content. Caps per user, per workspace and per day. Details: [docs/routines.md](docs/routines.md). |
+| T17 | Files stored and served from the app origin (uploads, published builds) run script, phish, crash the viewer's tab, or outlive their deletion | Kinds by magic bytes; inline only for sniffed raster image, audio and video (SVG and HEIC only in `<img>` context, with `Vary` and a variant ETag); everything else attachment + octet-stream; a per-response sandbox CSP that the guard keeps; nosniff, CORP same-origin; owner-only access (or shared-artifact members); corrected download extension; sniffed thumbnails; dimensions from headers and no browser decoding above 40 MP; no server-side decoding or unpacking; no import by URL. Per-blob keys plus `secure_delete` and a WAL truncate remove deleted files and their keys from the live files (not from SSD or copy-on-write remnants of master.db); account deletion cleans files, FTS rows and the WAL at once. Details: [docs/media.md](docs/media.md). |
+| T18 | A compromised node or steered agent uses publishing to fill the master's disk, pull secrets, plant files in another user's artifacts, or slip files past checks; a compromised master uses stage ids to read or delete node files | Publishing is a mutating tool (approval in `ask`) and node.toml `[artifacts] enabled` can turn it off; node-side confinement (session cwd or workspace roots, never the data dir, `O_NOFOLLOW` + fd re-check, regular files only, secret-like names refused or skipped); a staged copy; stage ids resolved through the node's own index, never as paths; pull-only, windowed transfers started by a validated event from the owning node and sent only to nodes that announce the `artifacts` capability; owner, workspace and project from the publishing session's own row, never `parent_id`; exact size and sha256; quotas, a free-disk floor, per-node pending and hourly caps, and per-owner lineage caps. Details: [docs/artifacts.md](docs/artifacts.md). |
 
 ---
 
@@ -430,6 +440,31 @@ login page.
 * **Phase 1 binds loopback only**; TLS arrives with the node link in Phase 2.
 * **MCP:** use the official `rmcp` crate (verified: crates.io `rmcp`, repo
   `modelcontextprotocol/rust-sdk`, 3.8.0 as of 2026-10-26). Pin at Phase 4 start.
+* **Sidebar areas dependencies (2026-11-08)**, all added at once before the parallel work
+  so `Cargo.toml` and `Cargo.lock` never conflicted, each with minimal features:
+  * **`croner` 4.0.2** (`jiff` feature) for routine schedules: exactly 5 cron fields, in an
+    IANA time zone through `jiff`, with the DST gap and overlap rules in
+    `routines/schedule.rs`. 4.0.3 was days old (two-week rule). It brings `derive_builder`,
+    `darling` and `strum` at build time (duplicate-version warnings in `cargo deny`, not
+    failures). `jiff-cron` was the fallback, unused.
+  * **`aws-lc-rs` 1.19.0** used directly for the blob store: AES-256-GCM with a random key
+    **per blob** held only in master.db, in 64 KiB STREAM segments with the blob id as AAD, so
+    a range read decrypts only its segments. Deleting a file deletes its key under
+    `secure_delete` and truncates the WAL (crypto-shredding of the live files, not of SSD
+    remnants). The same version was already linked through rustls.
+  * **`infer` 0.22.0** (no default features) for sniffing by magic bytes; never by extension.
+  * **`tar` 0.4.46** (no xattr), **`flate2` 1.1.10** (`rust_backend`) and **`walkdir`
+    2.5.0** on the node, to pack a published folder into `.tar.gz` (writing only; the master
+    never unpacks).
+  * **`base64` 0.23.1** as a workspace dependency (file chunks in protocol messages),
+    **`nix` gains `fs`** on master and node (`statvfs` for the free-disk floor, open flags
+    for the node's `O_NOFOLLOW` reads), **`unicode-segmentation` 1.13.3** for
+    `search::first_sentence` (sentence and grapheme boundaries).
+  * **Hand-written, by exception to "use maintained dependencies":** the HTTP `Range`
+    parser, the image-header readers (PNG, JPEG, GIF, WebP, AVIF, BMP dimensions, read
+    without decoding) and the ELF/PE/Mach-O checks in `sniff.rs`. Each is a few dozen lines
+    over bounded input and avoids pulling in a decoder; the header readers have a fuzz test,
+    the range parser table and random-range tests.
 
 ## 6. Licences of references
 
@@ -1413,6 +1448,8 @@ the agent that asked, at its ui level.
 **Out of scope, and why**
 * Sandboxed HTML/JS widgets, artifacts, MCP Apps: they need a second origin (today one
   port, `frame-ancestors 'none'`, no frame-src) and are the largest phishing surface.
+  (The **Artifacts** area of 2026-11-08 is not these: it stores files agents publish and
+  serves them as downloads; nothing in it is ever rendered or run.)
 * Mermaid: 194-251 KB gzip even lazy, against the remaining budget; shown as source.
 * A blocking mid-turn `ask_user` tool, tool-driven cards: new kinds, a route, restart
   recovery and about 1k more prompt tokens; forms that end the turn cover both modes.
@@ -1715,3 +1752,80 @@ Personal, and savings is the server owner's cost control.
 
 **Next:** shared chats and shared memory inside a workspace; custom roles;
 per-user node access.
+
+### 2026-11-08 — Sidebar areas: routines, media, artifacts, search
+
+Built by four implementers in parallel on one frozen contract (JSON shapes, SQL, Live topics,
+protocol messages, the `publish` description and every cross-area signature), in a scaffold
+phase and three merged phases. Every dependency and every seam one area needed in another's
+file landed first, so the phases merged without touching shared lines.
+
+**Done**
+* **Sidebar** (`Sidebar.tsx`): New chat, Agents, Routines, Media, Artifacts (each while
+  `/api/features?workspace=` says `show` for this viewer, with `why` for empty pages),
+  Connections as a disabled "Later" entry, the Projects and Recent sections (open or closed as
+  left), the account button; a 56px rail when collapsed, a drawer at 760px and below. Every row
+  is a link with `aria-current`.
+* **Account menu** (lazy chunk, preloaded on pointer, focus or touch): Profile, Settings, Log
+  out and the Workspaces submenu that replaced the switcher (Personal first, team workspaces
+  with role and badge, "+ New workspace…"), as an APG menu button.
+* **Search panel** (lazy chunk, Ctrl/Cmd K or "/"): `GET /api/search?in=all|chats|projects|
+  media|artifacts` with one provider per area behind one `Provider` signature, FTS syntax
+  inert, tiers, an All merge, cursors, three-line rows (title, first sentence of the latest
+  message, an excerpt only when needed) and same-origin thumbnails only (`search::checked`).
+  Chats are the caller's own for everyone (T10); routine run chats are found by a query but not
+  listed empty; incognito and sub-agent chats never.
+* **Routines** (docs/routines.md): schedules (cron in a time zone, interval, once; DST rules)
+  or one webhook; templates with `event.*` for webhooks; runs as new chats with results in
+  Recent, Home, attention and notifications; agentic runs in `ask`/`ask_all` with a 24 h
+  approval timeout; untrusted runs (T16) whose flag sticks to the chat; retention of 30 seen
+  run chats per routine; caps in `[routines]`.
+* **Blob store** (docs/media.md): per-blob AES-256-GCM keys in master.db, crypto-shredding of
+  the live files, sniffing by magic bytes, the T17 serving rules, quotas and a free-disk floor
+  in `[storage]`, upload slots and timeouts, hourly sweeps.
+* **Media**: a private library of images, video and audio with browser-made thumbnails;
+  images in chats for vision models (the node's `images` capability, a 7 MiB frame guard,
+  "Still in N chats" on delete); `[media] enabled` now defaults to true.
+* **Artifacts** (docs/artifacts.md): the `publish` tool (Coder, Writer and any agent that may
+  edit files or run commands; approved in `ask`) and "Save as artifact"; the node's confined stage
+  pipeline and `[artifacts]` in node.toml; pull-only, verified transfer (T18); versions with
+  retention (5 plus up to 10 pinned), sharing with the workspace, one Media item per image,
+  video or audio lineage.
+* **Settings → Server → Storage**: the limits and each account's usage (numbers only).
+* **Bundle**: the login form is its own lazy chunk, so signed-in visits never load it. From
+  this round on the total is a soft limit (each feature raises its own line with a reason);
+  the first load keeps a hard ceiling of 104 KB gzip, because every first visit waits for it.
+
+**Evidence**
+* Tests per area: store, unit and HTTP tests for routines (clock seam; the webhook order and
+  throttles; untrusted turns with a real chat runtime), the blob store and sniffing (STREAM
+  round trips, the key-shredding gate), media, artifacts (a hostile fake node, confinement,
+  the capability gate, retention), search (`search_http.rs`, incl. real routine run chats,
+  media and published artifacts with their thumbnails and visibility) and the web (sidebar,
+  account menu, search panel, shell, the three pages, chat cards).
+* End to end on the debug binary (Playwright): `phase3`–`phase9`, `rich`, `setup`, `savings`,
+  `backdrop`, `container` (the binary in container mode), `routines`, `media`, `artifacts`
+  and `attention` pass; the older scripts were brought up to date with the onboarding and
+  provider forms, the composer's agent picker and the account menu, and now wait for the
+  server instead of sleeping.
+* Bundle: first load 102.3 KB gzip (ceiling 104), total 359.5 KB after Phase B, before the
+  last phase's images-in-chats code (measured on each merge; `web/scripts/size.mjs`).
+
+**Deviations from the contract (accepted)**
+* A fifth routines table, `routine_untrusted_chats`: the untrusted flag outlives the routine
+  and its runs and goes only with the chat.
+* All-failed artifact lineages wait for the hourly sweep (their reason stays on the chat
+  card), hidden from lists, search and caps; `latest` falls back to the newest version of any
+  status while none is ready.
+* The Artifacts "Shared" filter is client-side; "Save as artifact" reads `/api/features` once
+  per agentic chat; the webhook sample event is never saved.
+
+**Risks / gaps**
+* SSD and copy-on-write remnants of master.db can keep deleted keys (README, docs/media.md).
+* Webhooks reach only where the master is reachable (loopback by default).
+* A chat's untrusted banner comes from its routine mark, so it goes with a deleted routine
+  while the chat's turns stay untrusted.
+* The 30-per-hour stage throttle is in memory and resets with the master.
+
+**Next:** Connections (a separate host name, sandboxed); trusted routines through
+`runner::approval_for`; more event sources (`impl EventSource`); shared Media in workspaces.
