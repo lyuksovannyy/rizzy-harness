@@ -174,7 +174,6 @@ async fn serve(
     no_local_node: bool,
     dotenv_names: &[String],
 ) -> anyhow::Result<()> {
-    check_database_url()?;
     match net::exposure(bind, insecure_bind, net::in_container())? {
         net::Exposure::Loopback => {}
         net::Exposure::WireGuard(iface) => {
@@ -213,7 +212,7 @@ async fn serve(
     }
     let (runtime, mut env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
     // Nothing from `.env` or the server's own HARNESS_* settings reaches an
-    // agent's shell (database and Redis URLs, the JWT secret, keys).
+    // agent's shell (provider keys, the join token).
     env_remove.extend(harness_master::env::hidden_from_tools(dotenv_names));
     env_remove.sort();
     env_remove.dedup();
@@ -295,19 +294,7 @@ async fn serve(
     // Use the bound address (port 0 resolves here) for the Host allowlist.
     let addr = listener.local_addr()?;
     let token = auth::load_or_create_token(&api_token_path(dir))?;
-    let kv = harness_master::kv::open(
-        &std::env::var("HARNESS_KV_URL").unwrap_or_default(),
-        &mirror,
-    )
-    .await?;
-    tracing::info!(backend = kv.name(), "key-value store");
-    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls)
-        .with_jwt(harness_master::jwt::JwtKey::load(dir)?)
-        .with_kv(kv)
-        .with_ttls(
-            env_number("HARNESS_ACCESS_TTL_SECS", auth::ACCESS_TTL_S)?,
-            env_number("HARNESS_REFRESH_TTL_DAYS", auth::REFRESH_TTL_S / 86_400)? * 86_400,
-        );
+    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls);
     let unclaimed = mirror.call(|s| s.user_count()).await? == 0;
     if unclaimed {
         let path = dir.join("claim-code");
@@ -416,36 +403,6 @@ async fn serve(
             .await?;
     }
     Ok(())
-}
-
-/// A whole number from the environment, or `default` when unset.
-fn env_number(var: &str, default: i64) -> anyhow::Result<i64> {
-    match std::env::var(var) {
-        Ok(v) if !v.trim().is_empty() => v
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|n| *n > 0)
-            .with_context(|| format!("{var} must be a positive whole number")),
-        _ => Ok(default),
-    }
-}
-
-/// `HARNESS_DATABASE_URL`: SQLite in the data dir is the only database so
-/// far. MariaDB/MySQL URLs are recognised (the Docker templates name them)
-/// and refused with a clear message rather than ignored.
-fn check_database_url() -> anyhow::Result<()> {
-    let url = std::env::var("HARNESS_DATABASE_URL").unwrap_or_default();
-    let url = url.trim();
-    let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or(url);
-    match scheme {
-        "" | "sqlite" => Ok(()),
-        "mysql" | "mariadb" => bail!(
-            "HARNESS_DATABASE_URL: MariaDB is not supported yet (the storage port is planned; \
-             see docs/storage-backends.md). Unset it to use SQLite in the data directory."
-        ),
-        other => bail!("HARNESS_DATABASE_URL: unknown database {other:?} (use sqlite://)"),
-    }
 }
 
 /// The model a node uses when the master sends none (the master resolves

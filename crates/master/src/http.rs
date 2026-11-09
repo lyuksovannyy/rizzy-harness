@@ -26,10 +26,6 @@ pub fn router(master: Master) -> Router {
         .route("/api/setup", get(setup_status).post(setup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
-        .route("/api/auth/refresh", post(refresh_tokens))
-        // Under /api/auth the refresh cookie comes along, so logout finds
-        // the login even after the access cookie expired.
-        .route("/api/auth/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
         .route(
@@ -356,46 +352,14 @@ async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<R
     session_response(&m, &user.user_id).await
 }
 
-/// A new login for `user_id`: both token cookies.
+/// A new login for `user_id`: the session cookie.
 async fn session_response(m: &Master, user_id: &str) -> ApiResult<Response> {
-    let t = m
-        .inner
-        .auth
-        .issue(&m.inner.mirror, user_id, None)
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(with_cookies(
-        &m.inner.auth.session_cookies(&t),
+    let id = auth::create_ui_session(&m.inner.mirror, user_id).await?;
+    Ok((
+        [(header::SET_COOKIE, m.inner.auth.session_cookie(&id))],
         Json(json!({"ok": true})),
-    ))
-}
-
-fn with_cookies(cookies: &[axum::http::HeaderValue], body: impl IntoResponse) -> Response {
-    let mut r = body.into_response();
-    for c in cookies {
-        r.headers_mut().append(header::SET_COOKIE, c.clone());
-    }
-    r
-}
-
-/// Rotate the refresh cookie and get a new access cookie. The web client
-/// calls this before the access token runs out and after any 401.
-async fn refresh_tokens(State(m): State<Master>, headers: HeaderMap) -> Response {
-    let auth = &m.inner.auth;
-    let Some(token) = auth::named_cookie(&headers, &auth::refresh_cookie_name()) else {
-        return ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()).into_response();
-    };
-    match auth.refresh(&m.inner.mirror, &token).await {
-        Ok(t) => with_cookies(&auth.session_cookies(&t), Json(json!({"ok": true}))),
-        Err(auth::RefreshError::Internal(e)) => {
-            tracing::warn!(error = %e, "refresh failed");
-            ApiError(StatusCode::SERVICE_UNAVAILABLE, "try again".into()).into_response()
-        }
-        Err(e) => with_cookies(
-            &auth.clear_cookies(),
-            ApiError(StatusCode::UNAUTHORIZED, e.to_string()),
-        ),
-    }
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -438,20 +402,35 @@ async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<R
 }
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
-    // The whole login ends: its refresh token and, at once, its access token.
-    if let Some(fam) = m.inner.auth.family_of(&headers) {
-        m.inner.auth.revoke_family(&fam).await;
+    // The session row goes, so a copy of the cookie is useless from now on.
+    if let Some(id) = auth::cookie_value(&headers) {
+        auth::delete_ui_session(&m.inner.mirror, &id).await;
     }
-    with_cookies(&m.inner.auth.clear_cookies(), Json(json!({"ok": true})))
+    (
+        [(header::SET_COOKIE, m.inner.auth.clear_cookie())],
+        Json(json!({"ok": true})),
+    )
+        .into_response()
 }
 
-async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
+async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Response> {
     let who = require_any(&m, &headers).await?;
     // The active workspace comes along so the UI can key on it at once.
     let workspace = workspaces::active_summary(&m, &who).await?;
-    Ok(Json(
+    let body = Json(
         json!({ "ok": true, "app": harness_core::APP_NAME, "user": who, "workspace": workspace }),
-    ))
+    );
+    // The server-side expiry slides with use; the browser's copy of the
+    // cookie has to slide too, so it is sent again here (the UI asks for
+    // /api/me each time it loads).
+    Ok(match auth::cookie_value(&headers) {
+        Some(id) if who.user_id.is_some() => (
+            [(header::SET_COOKIE, m.inner.auth.session_cookie(&id))],
+            body,
+        )
+            .into_response(),
+        _ => body.into_response(),
+    })
 }
 
 async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {

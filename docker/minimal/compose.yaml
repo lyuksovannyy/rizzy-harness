@@ -1,5 +1,5 @@
-# Minimal: the harness alone. SQLite and the key-value store (logins) live
-# in the data directory; nothing else to run.
+# Minimal: the harness alone. Everything (SQLite: chats, accounts, logins)
+# lives in the data directory; nothing else to run.
 #   cp .env.example .env            # then edit it
 #   mkdir -p data && sudo chown 10001:10001 data   # the image runs as uid 10001
 #   docker compose up -d

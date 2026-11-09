@@ -63,9 +63,6 @@ infer = { version = "0.22.0", default-features = false }
 jiff = { version = "0.2.39", features = ["tzdb-bundle-always"] }
 mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs"] }
-# Refresh tokens and other short-lived shared state when HARNESS_KV_URL is
-# redis:// (the Standard / Full Docker templates); in-memory otherwise.
-redis = { version = "1.8.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "multipart"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }

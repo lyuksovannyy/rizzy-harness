@@ -3,7 +3,6 @@
 // server replays exactly what we missed. Duplicates are dropped by seq, and a
 // gap (which the server should never produce) triggers a resubscribe.
 import { apply, emptyView, FoldError } from "./fold";
-import { refreshSession } from "./session";
 import type { RawEvent, SessionView } from "./types";
 
 export type ConnState = "connecting" | "live" | "offline";
@@ -105,9 +104,7 @@ export class Live {
     const ws = new WebSocket(`${proto}//${location.host}/api/ws`);
     this.ws = ws;
     this.setState("connecting");
-    let up = false;
     ws.onopen = () => {
-      up = true;
       this.backoff = 500;
       this.setState("live");
       for (const id of this.views.keys()) this.sendSubscribe(id);
@@ -127,8 +124,6 @@ export class Live {
       this.ws = null;
       this.setState("offline");
       if (!this.closed) {
-        // Refused before it opened: the access token may have run out.
-        if (!up) void refreshSession();
         setTimeout(() => this.connect(), this.backoff);
         this.backoff = Math.min(this.backoff * 2, 5000);
       }

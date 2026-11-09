@@ -1,7 +1,7 @@
 # Storage backends
 
-What the server keeps where, what can be swapped today, and the plan for
-MariaDB. The Docker templates in [`docker/`](../docker/) are built on this.
+What the server keeps where, what can be swapped today, and the future
+plan for MariaDB. The Docker templates in [`docker/`](../docker/) are built on this.
 
 ## Today
 
@@ -12,12 +12,10 @@ MariaDB. The Docker templates in [`docker/`](../docker/) are built on this.
 | Blobs (files, images) | the encrypted blob store in the data directory | no |
 | Memory facts, keyword recall | `memory.db` (SQLite + FTS5) | `mem0` replaces it whole |
 | Memory vectors | `memory.db`, or **Qdrant** (`HARNESS_MEMORY_BACKEND=qdrant`) | yes |
-| Refresh tokens, revoked logins | **KV**: `master.db` (`local://`, default), in-process (`memory://`) or **Redis** (`redis://`) | yes (`HARNESS_KV_URL`) |
-| Access tokens | nowhere: signed JWTs, checked by signature | n/a |
+| Browser logins | `ui_sessions` in `master.db`: the SHA-256 of the session cookie, the user, and an expiry that slides with use | with the port |
 
-`HARNESS_DATABASE_URL` accepts `sqlite://` (or nothing). A `mysql://` or
-`mariadb://` URL is refused at start with a message pointing here, so a
-template that names MariaDB never silently runs on something else.
+There is no database or cache setting: SQLite in the data directory is the
+only database, and one server process owns it.
 
 ## Qdrant (memory vectors)
 
@@ -36,19 +34,14 @@ owner and keyword index. Qdrant holds one vector per fact:
 - If Qdrant or the embeddings endpoint is down, recall falls back to
   keywords and the chat goes on.
 
-## KV (refresh tokens)
+## MariaDB port (future plan: Phase 6 of FIX_PLAN.md)
 
-Three keys, all with a time to live:
-
-- `auth.refresh.<jti>`: `live`, then `rotated` for 30 s after use.
-- `auth.family.<id>`: present when that login is revoked (logout, or a
-  refresh token replayed after its grace period).
-- The default `local://` stores them in `master.db`'s `kv` table with the
-  expiry in the value, swept as it writes. `memory://` keeps them in the
-  process: a restart logs everyone out and forgets logouts, so it suits
-  tests more than servers.
-
-## MariaDB port (planned)
+Not scheduled. The trigger is a deployment that needs more than one server
+process or a managed database (see Phase 6 of [`FIX_PLAN.md`](../FIX_PLAN.md)).
+Redis returns with it and not before: with one process a login is one
+indexed lookup in SQLite, and a shared cache only earns its place when
+several processes must see the same logins. Until then no template starts
+either service.
 
 The store is about 6.5k lines of SQLite-specific SQL behind
 `Store::call(|s| s.method(..))`, used from about 300 places in the master.
@@ -72,6 +65,3 @@ The plan:
    in CI, with MariaDB in a service container.
 6. **Migration tool.** `rizzy-harness db copy --to mysql://...` moves an
    existing `master.db`.
-
-Until then the Standard and Full templates run MariaDB only behind the
-`mariadb` compose profile, and the harness keeps using SQLite.

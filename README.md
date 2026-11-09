@@ -573,8 +573,8 @@ data directory once on each device:
 ## Central server in Docker
 
 Ready-made templates live in [`docker/`](docker/): **minimal** (the harness
-alone), **standard** (with Redis) and **full** (with Redis, Qdrant and Ollama
-for memory recall by meaning), each configured through a `.env` file
+alone) and **full** (with Qdrant and Ollama for memory recall by meaning),
+each configured through a `.env` file
 ([`docker/env.reference`](docker/env.reference)). Settings in `.env` win over
 `config.toml` and show read-only in the UI, without overwriting what
 `config.toml` already holds. The rest of this section is the single-container

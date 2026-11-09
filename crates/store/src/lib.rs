@@ -310,11 +310,17 @@ CREATE TABLE IF NOT EXISTS users (
     can_agentic   INTEGER NOT NULL DEFAULT 0,
     must_change_password INTEGER NOT NULL DEFAULT 0
 );
+-- Browser logins. `token_hash` is the SHA-256 of the cookie value, so a
+-- leaked database does not leak logins. `expires_ms` slides forward on use.
 CREATE TABLE IF NOT EXISTS ui_sessions (
-    token_hash TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    expires_ms INTEGER NOT NULL
+    token_hash   TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    created_ms   INTEGER NOT NULL,
+    last_seen_ms INTEGER NOT NULL,
+    expires_ms   INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ui_sessions_user ON ui_sessions(user_id);
+CREATE INDEX IF NOT EXISTS ui_sessions_expires ON ui_sessions(expires_ms);
 -- Full-text index over chats (derived from events; rebuildable). Title and
 -- message text are separate columns so ranking can weight titles higher.
 CREATE VIRTUAL TABLE IF NOT EXISTS chat_fts USING fts5(
@@ -442,9 +448,8 @@ fn asks_with_a_block(payload: &serde_json::Value) -> bool {
     })
 }
 
-fn session_version_key(user_id: &str) -> String {
-    format!("auth.session_version.{user_id}")
-}
+/// How often a UI session in use has its expiry moved forward.
+pub const UI_SESSION_TOUCH_MS: i64 = 60 * 1000;
 
 fn is_incognito(payload: &serde_json::Value) -> bool {
     payload.get("incognito").and_then(|v| v.as_bool()) == Some(true)
@@ -1513,41 +1518,12 @@ impl Store {
         Ok(n as u64)
     }
 
-    /// Log a user out everywhere: their session version goes up, so every
-    /// access and refresh token issued before stops working. Returns how
-    /// many legacy (pre-JWT) sessions were removed.
+    /// Log a user out everywhere. Returns how many logins were removed.
     pub fn ui_sessions_delete_for_user(&self, user_id: &str) -> Result<usize> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let key = session_version_key(user_id);
-        tx.execute(
-            "INSERT INTO kv (k, v) VALUES (?1, '1')
-             ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT)",
-            params![key],
-        )?;
-        let n = tx.execute(
+        Ok(self.lock().execute(
             "DELETE FROM ui_sessions WHERE user_id = ?1",
             params![user_id],
-        )?;
-        tx.commit()?;
-        Ok(n)
-    }
-
-    /// The user's session version (0 until they were first logged out
-    /// everywhere); tokens carry it and must match.
-    pub fn session_version(&self, user_id: &str) -> Result<i64> {
-        Ok(self
-            .kv_get(&session_version_key(user_id))?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0))
-    }
-
-    /// An enabled user and their session version, for checking a token.
-    pub fn user_for_token(&self, user_id: &str) -> Result<Option<(UserRow, i64)>> {
-        let Some(u) = self.user_by_id(user_id)?.filter(|u| !u.disabled) else {
-            return Ok(None);
-        };
-        Ok(Some((u, self.session_version(user_id)?)))
+        )?)
     }
 
     pub fn user_by_username(&self, username: &str) -> Result<Option<UserRow>> {
@@ -1558,46 +1534,77 @@ impl Store {
         self.user_where("user_id = ?1", user_id)
     }
 
-    /// Store a UI session. Only a hash of the cookie value is kept.
+    /// Store a UI session that lasts until `expires_ms`. Only a hash of
+    /// the cookie value is kept. Expired sessions (anyone's) are removed
+    /// here, so the table does not grow without a timer.
     pub fn ui_session_create(
         &self,
         token_hash: &str,
         user_id: &str,
+        now_ms: i64,
         expires_ms: i64,
     ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO ui_sessions (token_hash, user_id, expires_ms) VALUES (?1, ?2, ?3)",
-            params![token_hash, user_id, expires_ms],
+            "DELETE FROM ui_sessions WHERE expires_ms <= ?1",
+            params![now_ms],
+        )?;
+        conn.execute(
+            "INSERT INTO ui_sessions (token_hash, user_id, created_ms, last_seen_ms, expires_ms)
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![token_hash, user_id, now_ms, expires_ms],
         )?;
         Ok(())
     }
 
-    /// The user behind a UI session, if it exists and `now_ms < expires_ms`.
-    pub fn ui_session_user(&self, token_hash: &str, now_ms: i64) -> Result<Option<UserRow>> {
-        let user_id: Option<String> = {
-            let conn = self.lock();
-            conn.query_row(
-                "SELECT user_id FROM ui_sessions WHERE token_hash = ?1 AND expires_ms > ?2",
-                params![token_hash, now_ms],
-                |r| r.get(0),
-            )
-            .optional()?
+    /// The user behind a UI session, if it exists, `now_ms < expires_ms`
+    /// and the user is not disabled: one indexed lookup. A session in use
+    /// slides: its expiry moves to `now_ms + ttl_ms`, written at most once
+    /// per `UI_SESSION_TOUCH_MS`, not on every request.
+    pub fn ui_session_user(
+        &self,
+        token_hash: &str,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<Option<UserRow>> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT u.{}, s.last_seen_ms FROM ui_sessions s
+             JOIN users u ON u.user_id = s.user_id
+             WHERE s.token_hash = ?1 AND s.expires_ms > ?2 AND u.disabled = 0",
+            Self::USER_COLS.replace(", ", ", u.")
+        );
+        let found = conn
+            .query_row(&sql, params![token_hash, now_ms], |r| {
+                Ok((Self::user_from_row(r)?, r.get::<_, i64>(8)?))
+            })
+            .optional()?;
+        let Some((user, last_seen_ms)) = found else {
+            return Ok(None);
         };
-        match user_id {
-            // A disabled user's sessions are dead even before cleanup.
-            Some(id) => Ok(self.user_by_id(&id)?.filter(|u| !u.disabled)),
-            None => Ok(None),
+        if now_ms - last_seen_ms >= UI_SESSION_TOUCH_MS {
+            conn.execute(
+                "UPDATE ui_sessions SET last_seen_ms = ?2, expires_ms = ?3 WHERE token_hash = ?1",
+                params![token_hash, now_ms, now_ms.saturating_add(ttl_ms)],
+            )?;
         }
+        Self::finish_user(user).map(Some)
     }
 
-    pub fn ui_session_delete(&self, token_hash: &str) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
+    /// How many UI sessions are stored, expired ones included.
+    pub fn ui_session_count(&self) -> Result<u64> {
+        let n: i64 = self
+            .lock()
+            .query_row("SELECT COUNT(*) FROM ui_sessions", [], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// End one UI session (logout). `true` when it existed.
+    pub fn ui_session_delete(&self, token_hash: &str) -> Result<bool> {
+        Ok(self.lock().execute(
             "DELETE FROM ui_sessions WHERE token_hash = ?1",
             params![token_hash],
-        )?;
-        Ok(())
+        )? > 0)
     }
 
     /// Every `(key, value)` whose key starts with `prefix`.
@@ -1616,16 +1623,6 @@ impl Store {
             .lock()
             .execute("DELETE FROM kv WHERE k = ?1", params![k])?
             > 0)
-    }
-
-    /// Delete keys under `prefix` whose value is `<expires_ms>|...` with
-    /// `expires_ms <= now_ms` (the expiring entries of the master's KV).
-    pub fn kv_sweep_expired(&self, prefix: &str, now_ms: i64) -> Result<usize> {
-        Ok(self.lock().execute(
-            "DELETE FROM kv WHERE substr(k, 1, length(?1)) = ?1 AND instr(v, '|') > 0
-               AND CAST(substr(v, 1, instr(v, '|') - 1) AS INTEGER) <= ?2",
-            params![prefix, now_ms],
-        )?)
     }
 
     pub fn kv_set(&self, k: &str, v: &str) -> Result<()> {
