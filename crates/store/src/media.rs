@@ -9,8 +9,7 @@ use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 use crate::blobs::{BlobInsert, BlobRow, Limits, NewBlob, OverQuota, Preview};
 use crate::{Result, Store};
 
-/// Run by `Store::init`, after the blob tables it references. The table of
-/// chats that carry an item (`media_uses`) ships with images in chats.
+/// Run by `Store::init`, after the blob tables it references.
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS media_items (
     media_id     TEXT PRIMARY KEY,
@@ -30,6 +29,12 @@ CREATE INDEX IF NOT EXISTS media_items_session ON media_items(session_id);
 CREATE UNIQUE INDEX IF NOT EXISTS media_items_artifact ON media_items(artifact_id) WHERE artifact_id IS NOT NULL;
 CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(media_id UNINDEXED, name,
     tokenize = 'unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS media_uses (
+    media_id   TEXT NOT NULL REFERENCES media_items(media_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (media_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS media_uses_session ON media_uses(session_id);
 "#;
 
 /// An item's effective workspace: the one it was added in while its owner
@@ -55,12 +60,13 @@ fn item_cols() -> String {
         "mi.media_id, mi.owner_id, {MEDIA_WS}, mi.name, mi.origin, mi.session_id, mi.artifact_id,
          mi.version_id, mi.created_ms, mi.updated_ms, s.title,
          b.blob_id, b.owner_id, b.sha256, b.size, b.kind, b.format, b.mime, b.display, b.created_ms,
-         p.width, p.height, p.duration_ms, p.thumb IS NOT NULL, p.no_thumb, av.seq, aa.name"
+         p.width, p.height, p.duration_ms, p.thumb IS NOT NULL, p.no_thumb, av.seq, aa.name,
+         (SELECT COUNT(*) FROM media_uses u WHERE u.media_id = mi.media_id)"
     )
 }
 
 /// The marked name `media_search` adds after `item_cols`.
-const MARKED_AT: usize = 27;
+const MARKED_AT: usize = 28;
 
 const ITEM_JOINS: &str = "JOIN blobs b ON b.blob_id = mi.blob_id
      LEFT JOIN blob_previews p ON p.blob_id = mi.blob_id
@@ -87,6 +93,8 @@ pub struct MediaRow {
     /// The version it shows and its lineage's name, while both exist.
     pub artifact_seq: Option<u64>,
     pub artifact_name: Option<String>,
+    /// Chats that still carry it (`media_uses`): sent there as an image.
+    pub chats: u64,
     pub created_ms: i64,
     pub updated_ms: i64,
     pub blob: BlobRow,
@@ -111,6 +119,7 @@ impl MediaRow {
             preview: crate::blobs::preview_at(r, 20)?,
             artifact_seq: r.get::<_, Option<i64>>(25)?.map(|v| v.max(0) as u64),
             artifact_name: r.get(26)?,
+            chats: r.get::<_, i64>(27)?.max(0) as u64,
         })
     }
 
@@ -337,10 +346,10 @@ pub(crate) fn forget_owner(tx: &Transaction, user_id: &str) -> Result<()> {
     forget_fts(tx, &ids)
 }
 
-/// Called by `Store::delete_session` inside its transaction, so a deleted
-/// chat leaves no rows that name it. Nothing yet: the chats that carry an
-/// item (`media_uses`) ship with images in chats.
-pub(crate) fn on_session_deleted(_tx: &rusqlite::Transaction, _sid: &str) -> crate::Result<()> {
+/// Called by `Store::delete_session` inside its transaction: a deleted chat
+/// no longer carries any item.
+pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+    tx.execute("DELETE FROM media_uses WHERE session_id = ?1", params![sid])?;
     Ok(())
 }
 
@@ -537,5 +546,63 @@ impl Store {
             items: gone.len(),
             blobs,
         })
+    }
+}
+
+impl Store {
+    /// Chat `sid` now carries `ids` (sent there as images). An item added
+    /// from a chat's composer before the chat existed (origin `chat`, no
+    /// chat yet) takes this one as its source.
+    pub fn media_uses_add(&self, sid: &str, ids: &[String]) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        for id in ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO media_uses (media_id, session_id)
+                 SELECT media_id, ?2 FROM media_items WHERE media_id = ?1",
+                params![id, sid],
+            )?;
+            tx.execute(
+                "UPDATE media_items SET session_id = ?2
+                 WHERE media_id = ?1 AND origin = 'chat' AND session_id IS NULL",
+                params![id, sid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The items chat `sid` carries.
+    pub fn media_uses_in(&self, sid: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut st = conn.prepare("SELECT media_id FROM media_uses WHERE session_id = ?1")?;
+        let ids = st
+            .query_map(params![sid], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// The chats that carry item `media_id`.
+    pub fn media_chats(&self, media_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut st = conn
+            .prepare("SELECT session_id FROM media_uses WHERE media_id = ?1 ORDER BY session_id")?;
+        let ids = st
+            .query_map(params![media_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// `owner`'s items (the API token: anyone's) that came from chat `sid`.
+    pub fn media_from_session(&self, owner: Option<&str>, sid: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(
+            "SELECT media_id FROM media_items
+             WHERE session_id = ?1 AND (?2 IS NULL OR owner_id = ?2)",
+        )?;
+        let ids = st
+            .query_map(params![sid, owner], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
     }
 }

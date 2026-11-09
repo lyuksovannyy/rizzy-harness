@@ -22,6 +22,7 @@
 //!   message per step with the same `ui:progress` block moved on, each with
 //!   a cheap call (bash `true`, else web_search) so the next step is a new
 //!   request; the last message has every step done and calls nothing
+//! * a message with images -> `I see N image(s).` (the images it was shown)
 //! * anything else   -> echoes the message back, streamed word by word; an
 //!   answer to a question or form echoes its canonical text
 //!   (`You said: Choice answer · colour: blue`)
@@ -123,7 +124,7 @@ fn progress_step(user: &str, messages: &[ChatMsg]) -> Option<(usize, usize)> {
     let n = n.parse::<usize>().unwrap_or(3).clamp(1, 20);
     let since = messages
         .iter()
-        .rposition(|m| matches!(m, ChatMsg::User(_)))
+        .rposition(|m| m.user_text().is_some())
         .map_or(0, |i| i + 1);
     let results = messages[since..]
         .iter()
@@ -202,11 +203,20 @@ impl Provider for Mock {
             .messages
             .iter()
             .rev()
-            .find_map(|m| match m {
-                ChatMsg::User(t) => Some(t.clone()),
-                _ => None,
-            })
+            .find_map(|m| m.user_text().map(str::to_string))
             .unwrap_or_default();
+        // Just shown images: say how many arrived with their bytes.
+        if let Some(ChatMsg::UserImages { images, .. }) = req.messages.last() {
+            let n = images.iter().filter(|i| i.data.is_some()).count();
+            let text = self
+                .stream_words(vec![format!("I see {n} image(s).")], &deltas)
+                .await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+            });
+        }
         // Per-turn context comes first in the user message; commands follow it.
         let (context, user) = match raw_user
             .strip_prefix("<context>\n")

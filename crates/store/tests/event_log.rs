@@ -401,6 +401,7 @@ fn an_open_message_names_the_agent_that_wrote_it() {
             text: "hi".into(),
             attachments: vec![],
             reply: None,
+            images: vec![],
         }),
     );
     for e in [

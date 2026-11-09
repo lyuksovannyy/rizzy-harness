@@ -248,6 +248,11 @@ async fn an_agent_publishes_and_the_file_downloads_byte_for_byte() {
     assert_eq!(latest["sha256"], sha(&bytes));
     assert_eq!(latest["status"], "ready");
     assert_eq!(latest["node"]["hostname"], "builder");
+    // Not an image: no header dimensions.
+    assert!(
+        latest["width"].is_null() && latest["height"].is_null(),
+        "{latest}"
+    );
     assert_eq!(latest["session"]["session_id"], sid);
     assert!(
         latest["meta"]["source_path"]
@@ -406,6 +411,11 @@ async fn a_republished_image_keeps_one_media_item() {
     let a = &list["artifacts"][0];
     assert_eq!(a["media_id"], mid);
     assert_eq!(a["kind"], "image");
+    // The version carries the header dimensions, without Media.
+    assert_eq!(
+        (a["latest"]["width"].clone(), a["latest"]["height"].clone()),
+        (json!(4), json!(3))
+    );
     // A PNG may be previewed, as its own type.
     let id = a["artifact_id"].as_str().unwrap().to_string();
     let vid = a["latest"]["version_id"].as_str().unwrap();

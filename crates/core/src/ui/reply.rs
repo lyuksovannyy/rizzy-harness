@@ -133,6 +133,7 @@ mod tests {
             text: "hi".into(),
             attachments: vec![],
             reply: None,
+            images: vec![],
         })
     }
 

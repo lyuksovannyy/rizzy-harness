@@ -21,6 +21,9 @@ pub enum Item {
         /// The answer to an input block, when this message is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<FormReply>,
+        /// Images sent with it (references; the bytes stay in Media).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageRef>,
     },
     /// Turns before this point reach the model only as a summary.
     Summary {
@@ -193,6 +196,7 @@ impl SessionView {
                 text: m.text,
                 attachments: m.attachments.into_iter().map(|a| a.name).collect(),
                 reply: m.reply,
+                images: m.images,
             }),
             EventKind::AssistantDelta(d) => {
                 let found = self.items.iter_mut().rev().find_map(|i| match i {
@@ -555,6 +559,7 @@ mod tests {
                 text: "Choice answer · db: pg".into(),
                 attachments: vec![],
                 reply,
+                images: vec![],
             })
         };
         let evs = vec![ev(sid, 1, msg(Some(reply.clone()))), ev(sid, 2, msg(None))];

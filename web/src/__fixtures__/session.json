@@ -379,6 +379,16 @@
             "truncated": false
           }
         ],
+        "images": [
+          {
+            "height": 720,
+            "media_id": "01a19bf2000070008000000000000b01",
+            "mime": "image/png",
+            "name": "screenshot.png",
+            "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "width": 1280
+          }
+        ],
         "text": "@writer draft the changelog",
         "turn_id": "t2"
       },
@@ -763,6 +773,16 @@
       {
         "attachments": [
           "notes.md"
+        ],
+        "images": [
+          {
+            "height": 720,
+            "media_id": "01a19bf2000070008000000000000b01",
+            "mime": "image/png",
+            "name": "screenshot.png",
+            "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "width": 1280
+          }
         ],
         "text": "@writer draft the changelog",
         "turn_id": "t2",

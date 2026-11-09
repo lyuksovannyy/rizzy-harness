@@ -286,6 +286,20 @@ impl Reader {
     }
 }
 
+/// A whole small blob's plaintext (an image for a prompt; never a large
+/// file, which is streamed).
+pub fn read_all(path: &Path, blob_id: &str, key: &[u8], size: u64) -> io::Result<Vec<u8>> {
+    let mut r = Reader::open(path, blob_id, key, size)?;
+    let mut out = Vec::with_capacity(size as usize);
+    if size > 0 {
+        r.range(0, size - 1, |b| {
+            out.extend_from_slice(b);
+            Ok(())
+        })?;
+    }
+    Ok(out)
+}
+
 /// What a `Range` header asks for, against a file of `size` bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Range {
@@ -563,15 +577,8 @@ mod tests {
         w.finish().unwrap()
     }
 
-    fn read_all(w: &Written) -> Vec<u8> {
-        let mut r = Reader::open(&w.path, &w.blob_id, &w.key, w.size).unwrap();
-        let mut out = Vec::new();
-        r.range(0, w.size.saturating_sub(1), |c| {
-            out.extend_from_slice(c);
-            Ok(())
-        })
-        .unwrap();
-        out
+    fn read_back(w: &Written) -> Vec<u8> {
+        read_all(&w.path, &w.blob_id, &w.key, w.size).unwrap()
     }
 
     const ID: &str = "0193f1c2a4b57d6e8f9012345678abcd";
@@ -601,7 +608,7 @@ mod tests {
                 sealed_len(n as u64)
             );
             assert_eq!(w.head, bytes[..n.min(64)]);
-            assert_eq!(read_all(&w), bytes, "size {n}");
+            assert_eq!(read_back(&w), bytes, "size {n}");
         }
     }
 
@@ -658,7 +665,7 @@ mod tests {
         // The right bytes under another blob's id (AAD).
         assert!(fail(&disk, "ffffffffffffffffffffffffffffffff", w.size));
         // And the original still reads.
-        assert_eq!(read_all(&w), bytes);
+        assert_eq!(read_back(&w), bytes);
     }
 
     #[test]

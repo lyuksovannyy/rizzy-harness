@@ -42,6 +42,21 @@ pub trait TurnHost: Send + Sync {
     fn artifacts(&self) -> Option<std::sync::Arc<dyn crate::artifacts::ArtifactSink>> {
         None
     }
+
+    /// The bytes of this session's images among `sha256` (those it has; an
+    /// image it lacks is named to the model instead of shown).
+    async fn images(&self, _sha256: &[String]) -> Vec<ImageData> {
+        Vec::new()
+    }
+}
+
+/// An image's bytes for the model (`TurnHost::images`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageData {
+    pub sha256: String,
+    pub mime: String,
+    /// Base64, shared: a turn copies its messages on every step.
+    pub data: std::sync::Arc<str>,
 }
 
 /// How a delegated sub-task ended.
@@ -91,6 +106,9 @@ pub struct TurnExtra {
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
     /// `None` means the book comes from this session's own log.
     pub refs: Option<SharedRefs>,
+    /// The images sent with this turn's message (their bytes come from
+    /// `TurnHost::images`).
+    pub images: Vec<crate::event::ImageRef>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

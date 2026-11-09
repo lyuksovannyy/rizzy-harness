@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 mod git;
+mod images;
 pub mod policy;
 mod session;
 
@@ -180,6 +181,7 @@ impl NodeRuntime {
             if self.inner.stages.is_some() {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
+            capabilities.push(harness_protocol::CAP_IMAGES.into());
             let _ = out_tx.send(NodeToMaster::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 node_id: self.inner.cfg.node_id.clone(),
@@ -386,18 +388,20 @@ impl NodeRuntime {
                 savings,
                 context,
                 reply,
+                images,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
                 let extra = harness_core::backend::TurnExtra {
                     savings: savings.unwrap_or_default(),
                     context,
-                    refs: None,
+                    ..Default::default()
                 };
                 let input = session::Input {
                     text,
                     attachments,
                     reply,
+                    images,
                 };
                 match self.session(session_id) {
                     Some(s) => s.prompt(input, agent, compare, extra).await,

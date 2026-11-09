@@ -8,6 +8,12 @@ use tokio::sync::mpsc;
 pub enum ChatMsg {
     System(String),
     User(String),
+    /// A user message with images. Only the newest few carry their bytes
+    /// (`IMAGE_TURNS`); older ones, and summaries, name them in the text.
+    UserImages {
+        text: String,
+        images: Vec<ImagePart>,
+    },
     Assistant {
         text: String,
         tool_calls: Vec<ToolCallRef>,
@@ -16,6 +22,31 @@ pub enum ChatMsg {
         call_id: String,
         content: String,
     },
+}
+
+/// One image of a user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagePart {
+    pub sha256: String,
+    pub mime: String,
+    pub name: String,
+    /// Base64; `None` until the host gave the bytes (`attach_images`).
+    pub data: Option<std::sync::Arc<str>>,
+}
+
+impl ChatMsg {
+    /// What the user wrote, for user messages with or without images.
+    pub fn user_text(&self) -> Option<&str> {
+        match self {
+            ChatMsg::User(t) | ChatMsg::UserImages { text: t, .. } => Some(t),
+            _ => None,
+        }
+    }
+}
+
+/// How an image the model does not get is named in the text.
+pub fn image_note(name: &str) -> String {
+    format!("[image: {}]", name.replace(['[', ']', '\n'], " "))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +126,10 @@ pub trait Provider: Send + Sync {
     ) -> Result<Completion, ProviderError>;
 }
 
+/// What one image counts for in `estimate_tokens`, in characters (about a
+/// thousand tokens, near what providers bill for a downsized photo).
+const IMAGE_CHARS: usize = 4000;
+
 /// Rough token count (4 characters per token). Used to decide when to
 /// summarise and by the mock provider; real usage comes from the provider.
 pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
@@ -102,6 +137,7 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
         .iter()
         .map(|m| match m {
             ChatMsg::System(t) | ChatMsg::User(t) => t.len(),
+            ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()
                     + tool_calls
