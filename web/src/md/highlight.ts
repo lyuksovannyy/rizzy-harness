@@ -40,8 +40,3 @@ export const LOADERS: Record<Grammar, Loader> = {
 export async function loadGrammar(grammar: Grammar): Promise<void> {
   if (!refractor.registered(grammar)) refractor.register((await LOADERS[grammar]()).default);
 }
-
-export async function highlight(code: string, grammar: Grammar) {
-  await loadGrammar(grammar);
-  return refractor.highlight(code, grammar);
-}

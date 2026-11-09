@@ -1,10 +1,18 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
+import { refractor } from "refractor/core";
 import { renderHast, type HastNode } from "./hast";
-import { highlight, LOADERS } from "./highlight";
-import { grammarFor, GRAMMARS } from "./langs";
+import { loadGrammar, LOADERS } from "./highlight";
+import { grammarFor, GRAMMARS, type Grammar } from "./langs";
 
 const html = (n: HastNode) => renderToStaticMarkup(<>{renderHast(n)}</>);
+
+// What highlight.worker.ts does for one block: load the grammar, then call
+// refractor.
+async function highlight(code: string, grammar: Grammar) {
+  await loadGrammar(grammar);
+  return refractor.highlight(code, grammar);
+}
 
 describe("renderHast", () => {
   test("keeps spans with their classes and text", () => {

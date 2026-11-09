@@ -90,7 +90,3 @@ export function urlOrigin(template: string | null | undefined): string | null {
 export function engineOrigin(e: Engine): string | null {
   return urlOrigin(e.text ?? e.image);
 }
-
-export function searchUrl(template: string, query: string): string {
-  return template.replaceAll("{q}", encodeURIComponent(query.trim()));
-}

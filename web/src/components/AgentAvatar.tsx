@@ -5,6 +5,7 @@
 import { AlertTriangle } from "lucide-react";
 import { useId, useRef } from "react";
 import { useMedia } from "../bg/hooks";
+import { fnv1a } from "../lib/fnv";
 import { rawModel } from "../lib/models";
 import type { Agent, AgentAvatar as Avatar, AvatarAccent, AvatarEyes, AvatarShape, AvatarState } from "../types";
 
@@ -14,16 +15,6 @@ export const AVATAR_ACCENTS: AvatarAccent[] = ["blue", "violet", "green", "orang
 export const STATES: AvatarState[] = ["idle", "thinking", "working", "unsure", "done", "error"];
 
 const REDUCE = "(prefers-reduced-motion: reduce)";
-
-/** FNV-1a: small and stable, the same input always gives the same number. */
-function hash(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
 
 // The bodies in a 40×40 box, drawn with a round stroke of their own paint
 // so the corners soften. `eye` is where the eyes sit: their height and half
@@ -75,7 +66,7 @@ export function AgentAvatar(props: {
   const [cy, half] = body.eye;
   const gap = half + eye.spread;
   // Agents side by side should not blink together.
-  const delay = `${(hash(`${shape}${eyes}${accent}${raw}`) % 4000) / 1000}s`;
+  const delay = `${(fnv1a(`${shape}${eyes}${accent}${raw}`) % 4000) / 1000}s`;
   const one = (side: "l" | "r") => (
     <g className={`av-eye ${side}`} transform={`translate(${20 + (side === "l" ? -gap : gap)} ${cy + eye.dy})`}>
       <g className="av-gaze">

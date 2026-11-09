@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { abilities, allEngines, BUILTIN_ENGINES, engineByUrl, engineMention, engineOrigin, searchUrl, supports, urlOrigin } from "./engines";
+import { abilities, allEngines, BUILTIN_ENGINES, engineByUrl, engineMention, engineOrigin, supports, urlOrigin } from "./engines";
 
 describe("search engines", () => {
   it("built-ins carry real templates and their abilities", () => {
@@ -30,9 +30,6 @@ describe("search engines", () => {
     expect(engineMention("@yandex  red panda", all)).toEqual({ engine: all.find((e) => e.id === "yandex"), query: "red panda" });
     expect(engineMention("@nope cats", all)).toBeNull();
     expect(engineMention("cats @google", all)).toBeNull();
-    expect(searchUrl("https://yandex.com/images/search?text={q}", "red panda & co")).toBe(
-      "https://yandex.com/images/search?text=red%20panda%20%26%20co",
-    );
   });
 
   it("an engine's favicon comes from the origin of its text URL, else its image URL", () => {
