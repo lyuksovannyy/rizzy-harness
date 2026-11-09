@@ -10,7 +10,6 @@ how to learn programming
 how to learn programming for beginners
 how to learn programming for free
 how to learn programming for beginners step by step
-reaction time test
 rust programming language
 rust programming
 rust programming language book
@@ -20,9 +19,7 @@ git how to rename a branch
 git how to create a new branch
 git how to delete a branch
 docker desktop
-dockers pants
 docker hub
-dockers shoes
 sql query
 sql query examples
 sql query formatter
@@ -40,8 +37,6 @@ linux commands cheat sheet
 linux command line
 linux command to check disk space
 api meaning
-apical pulse
-apiary meaning
 api key
 python how to add to a list
 python how to add to a set
@@ -71,12 +66,10 @@ docker alternatives
 docker app
 docker and kubernetes
 sql query analyzer
-sql query and
 sql query all tables in database
 sql query add column to table
 typescript ai
 typescript array
-typescript ai jev
 typescript as const
 how to code a website
 how to code an app
@@ -87,7 +80,6 @@ linux command awk
 linux command apt
 linux command arguments
 api acronym
-api anything
 api access
 api ai
 python how to block comment

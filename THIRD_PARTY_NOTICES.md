@@ -96,3 +96,22 @@ id checks and the secret lexicon are our own code.
   "The Complexity Trap" (JetBrains Research, MIT). No code copied.
 - Repository map: the approach of aider's repo map (tree-sitter tags ranked by
   PageRank), reimplemented.
+
+## Home-screen wall lists
+
+`web/public/wall/queries.txt` and `web/public/wall/topics/*.txt` are not our
+own writing. They were collected by `web/scripts/harvest_queries.py`, which
+asks Google's autocomplete endpoint
+(`https://suggestqueries.google.com/complete/search`) for completions of a
+fixed set of everyday prefixes ("how to", "what is", …) and keeps the
+suggestions. The script is run by hand and the results are committed; the
+app never contacts Google at runtime.
+
+The lines are short factual query strings (a few words each), shown only as
+faint decoration behind the home screen. They are filtered by
+`web/src/bg/wall-policy.json` (enforced by `web/src/bg/wallLists.test.ts`)
+and were read through by hand once to remove unsuitable lines.
+
+Google has not licensed these suggestions to us, and its terms do not
+plainly allow collecting them this way. Replace the lists with hand-written
+ones before any commercial distribution.
