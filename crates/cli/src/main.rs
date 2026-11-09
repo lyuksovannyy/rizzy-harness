@@ -320,8 +320,6 @@ async fn serve(
     if let Some(b) = builtin_memory {
         master.set_builtin_memory(b);
     }
-    // Servers set up over SSH: read-only checks every 10 minutes.
-    master.start_node_watchdog(std::time::Duration::from_secs(600));
     if let Some(t) = harness_master::providers::transcriber(&cfg, dir, &secrets)? {
         master.set_transcriber(t);
     }
@@ -336,8 +334,8 @@ async fn serve(
             .add_link(node.attach().await, true)
             .await
             .map_err(anyhow::Error::msg)?;
-        // The built-in node shares this machine and its node.toml with the
-        // master, so the settings page may switch graphify for it.
+        // The built-in node shares this machine with the master, so the
+        // settings page can show its graphify status (read-only).
         master.set_graphify(graphify.clone(), dir.join("node.toml"));
     }
     master

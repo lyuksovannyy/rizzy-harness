@@ -6,7 +6,7 @@ import { Live } from "../live";
 import { t } from "../lib/i18n";
 import { type ClassifierState, decide, emptyState, parseState, record, serialize } from "../lib/classifier";
 import { agenticBlockReason, type Mode } from "../lib/modes";
-import { NODES_HASH, parseRoute, type Route, routeHash } from "../lib/routes";
+import { parseRoute, type Route, routeHash } from "../lib/routes";
 import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
@@ -20,7 +20,6 @@ import type {
   Features,
   Me,
   ModelInfo,
-  NodeAttention,
   NodeInfo,
   Notice,
   Prefs,
@@ -157,7 +156,6 @@ export function Shell(props: {
   const [features, setFeatures] = useState<Features>(NO_FEATURES);
   const voice = features.voice;
   const [attention, setAttention] = useState<AttentionItem[]>([]);
-  const [nodeAttention, setNodeAttention] = useState<NodeAttention[]>([]);
   const [routineAttention, setRoutineAttention] = useState<RoutineAttention[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -195,21 +193,10 @@ export function Shell(props: {
     api
       .attention()
       .then((r) => {
-        const nodes = r.nodes ?? [];
-        const ids = [...r.items.map((a) => a.session_id), ...nodes.map((n) => `node:${n.setup_id}`)];
+        const ids = r.items.map((a) => a.session_id);
         // Notify about chats that just started waiting (not on first load).
         if (waiting.current && notifyEnabled()) {
           for (const id of newlyWaiting(waiting.current, ids)) {
-            if (id.startsWith("node:")) {
-              const n = nodes.find((x) => `node:${x.setup_id}` === id)!;
-              const note = new Notification(`Server ${n.host}`, { body: n.problems.map((p) => p.detail).join("; "), tag: id });
-              note.onclick = () => {
-                window.focus();
-                location.hash = NODES_HASH;
-                note.close();
-              };
-              continue;
-            }
             const a = r.items.find((x) => x.session_id === id)!;
             const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
             if (viewing) continue;
@@ -226,7 +213,6 @@ export function Shell(props: {
         }
         waiting.current = ids;
         setAttention(r.items);
-        setNodeAttention(nodes);
         setRoutineAttention(r.routines ?? []);
       })
       .catch(() => {});
@@ -363,9 +349,9 @@ export function Shell(props: {
 
   // Tab title shows how many chats wait for the user.
   useEffect(() => {
-    const n = attention.length + nodeAttention.length;
+    const n = attention.length;
     document.title = n ? `(${n}) ${APP_TITLE}` : APP_TITLE;
-  }, [attention.length, nodeAttention.length]);
+  }, [attention.length]);
 
   // Looking at a chat that asked a question counts as seeing it.
   const viewing = route.kind === "session" ? route.id : null;
@@ -718,7 +704,6 @@ export function Shell(props: {
               toReview={toReview}
               voice={voice}
               attention={attention}
-              nodeAttention={nodeAttention}
               routines={routineAttention}
               notices={notices}
               seed={home.seed}

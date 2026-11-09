@@ -15,14 +15,12 @@ mod favicon;
 mod http;
 pub mod media;
 pub mod model_cache;
-pub mod node_setups;
 pub mod nodes;
 pub mod notices;
 pub mod prefs;
 pub mod presets;
 pub mod projects;
 pub mod providers;
-pub mod provision;
 pub mod resolver;
 pub mod routines;
 pub mod search;
@@ -135,7 +133,8 @@ pub struct MasterInner {
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
     providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
-    /// The built-in node's graphify switch and its node.toml.
+    /// The built-in node's graphify state (read from node.toml at start) and
+    /// the path of that node.toml, for the settings page to show.
     graphify: Mutex<
         Option<(
             Arc<harness_tools::graphify::GraphifyState>,
@@ -152,7 +151,6 @@ pub struct MasterInner {
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
-    provision: provision::Jobs,
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
@@ -355,7 +353,6 @@ impl Master {
                 remote_stops: Mutex::new(HashMap::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
-                provision: Mutex::new(HashMap::new()),
                 turn_memory: Mutex::new(HashMap::new()),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),

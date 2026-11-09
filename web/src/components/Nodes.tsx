@@ -2,17 +2,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { NodeInfo, RemoteNode } from "../types";
-import { ManagedServers } from "./ManagedServers";
-import { ServerSetup } from "./ServerSetup";
 
 export function Nodes(props: { nodes: NodeInfo[] }) {
   const [remote, setRemote] = useState<RemoteNode[]>([]);
   const [listener, setListener] = useState<{ port: number; fingerprint: string } | null>(null);
   const [join, setJoin] = useState<{ token: string; port: number; fingerprint: string; expires_in_s: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [setups, setSetups] = useState(0);
   const load = useCallback(() => {
-    setSetups((v) => v + 1);
     api
       .remoteNodes()
       .then((r) => {
@@ -78,15 +74,6 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
           </tbody>
         </table>
       </div>
-      <ManagedServers version={setups} />
-      <div className="card stack">
-        <h3>Set up a server over SSH</h3>
-        <p className="muted small">
-          Fully supported: Debian 13 and Ubuntu 26.04 LTS. Other Debian/Ubuntu releases and Debian-based systems work
-          but are not tested; anything else is refused.
-        </p>
-        <ServerSetup onDone={load} />
-      </div>
       <div className="card stack">
         <h3>Add a node by hand</h3>
         {!listener ? (
@@ -98,7 +85,8 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
           <>
             <p className="muted">
               On the other machine, install the same binary, then run these two commands. The code works once and
-              expires in 15 minutes.
+              expires in 15 minutes. The README's "Set up a node by hand" has the user, folder, node.toml and systemd
+              unit; securing that machine (firewall, SSH) is up to you.
             </p>
             {join ? (
               <pre className="mono join-cmd">

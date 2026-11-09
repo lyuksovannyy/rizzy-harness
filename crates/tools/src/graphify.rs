@@ -11,7 +11,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use harness_core::policy::ToolRisk;
@@ -32,24 +31,17 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 /// Shared between the tool and whoever may switch it (the embedded node's
 /// settings page, or node.toml at start).
 pub struct GraphifyState {
-    allowed: AtomicBool,
+    allowed: bool,
     out_root: PathBuf,
 }
 
 impl GraphifyState {
     pub fn new(allowed: bool, out_root: PathBuf) -> Arc<Self> {
-        Arc::new(Self {
-            allowed: AtomicBool::new(allowed),
-            out_root,
-        })
+        Arc::new(Self { allowed, out_root })
     }
 
     pub fn allowed(&self) -> bool {
-        self.allowed.load(Ordering::Relaxed)
-    }
-
-    pub fn set_allowed(&self, v: bool) {
-        self.allowed.store(v, Ordering::Relaxed)
+        self.allowed
     }
 
     /// Where the graph for `workspace` lives (outside the repository).
@@ -253,8 +245,8 @@ mod tests {
         };
         assert!(!t.enabled(&on), "node does not allow it");
         assert!(!t.enabled(&Default::default()));
-        s.set_allowed(true);
-        // Still needs the binary; without it, off.
+        // Allowed in node.toml: still needs the binary; without it, off.
+        let t = GraphQuery::new(GraphifyState::new(true, std::env::temp_dir()));
         assert_eq!(t.enabled(&on), find_binary().is_some());
     }
 

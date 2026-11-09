@@ -35,7 +35,7 @@ const INITIAL_KB = 110;
 // ceiling, the lazy-chunk checks and the library markers below.
 
 // Measured total of the last merged phase, with what it bought.
-const BASE_KB = 364.0; // +0.4 for the JWT session keeper (refresh on 401, renew while open; initial 103.5) on top of 363.6: Phase C merged (measured 362.9): images in chats (composer attach + downscale chunk, bubble thumbnails, fold images), Use in chat, Still in N chats, chat-delete Media offer, Project Artifacts tab + filter (measured 2026-11-09; initial 103.0); then +0.6 for the walkthrough fixes: the in-page Delete chat dialog (Conversation), the search box that catches typing while the panel loads (+0.2 initial, initial 103.2), the kept routine sample (2026-11-09)
+const BASE_KB = 361.0; // measured 360.9 on 2026-11-09 (initial 102.9) after the fix-plan cuts: the JWT session keeper, the server-setup pages and node-problem notices, and dead code are gone
 
 // I2: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I2_KB = 0;

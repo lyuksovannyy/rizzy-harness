@@ -292,15 +292,9 @@ async fn propose_confirm_recall() {
     assert_eq!(st, StatusCode::OK, "{v}");
     off_turn_checks(&t, &c).await;
     // No built-in node here: graphify is decided by each node's node.toml.
-    let (st, _) = req(
-        &t,
-        Method::PUT,
-        "/api/admin/graphify",
-        Some(json!({"allowed": true})),
-        &c,
-    )
-    .await;
-    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, v) = req(&t, Method::GET, "/api/admin/graphify", None, &c).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["local_node"], false);
 
     // Incognito: no recall and no remember tool.
     turn(&t, &c, "which tram do I take?", true).await;

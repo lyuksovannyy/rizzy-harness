@@ -361,8 +361,8 @@ login page.
 | T1 | Network attacker reaches the master UI | Bind `127.0.0.1` by default. Non-loopback bind requires TLS (Phase 2) or the explicit `--insecure-bind` flag (tailnet/WireGuard mode), which logs a warning on every start. |
 | T2 | Malicious website in the user's browser (CSRF, DNS rebinding, cross-site WS) | Accounts with Argon2id passwords; the first (admin) account needs a one-time claim code from a 0600 file. Login sets one `HttpOnly; SameSite=Strict` cookie holding a random 256-bit session id; only its SHA-256 is stored (`ui_sessions`), so a leaked database does not leak logins. `authenticate` is one indexed lookup joined to `users` (missing, expired or disabled → 401). A session ends 30 days after its last use (the expiry is moved at most once a minute); logout deletes its row, and a password change or reset, disabling the account and deleting it delete all of the user's rows, so a copied cookie stops working at the next request; unknown usernames are verified against a dummy hash so timing does not reveal them. A separate 256-bit API token (0600 file) serves scripts as `Bearer`. Every request checks `Host` against an allowlist (anti-rebinding) and every state-changing request and the WS upgrade check `Origin`. Token compared in constant time. |
 | T3 | Secrets leak via logs, URLs, event log | Provider keys are referenced by env-var name in config, held in `Secret<String>` (redacted `Debug`), never put in events. Tool output is scrubbed of known secret values before it is stored. No token in any URL (no `?token=`). `tracing` never logs headers. |
-| T4 | Prompt injection from repo content makes the model run harmful commands | Default approval mode `ask`: every mutating tool (bash, edit, write) needs a human click; read-only tools are confined to the session workspace. No network sandbox in v1 (open risk R2). |
-| T5 | Compromised master widens node permissions | **Node-local policy (`node.toml`) is authoritative** and is not settable over the protocol: allowed workspace roots, max approval mode (`ask` default; master can request stricter, never looser), tool denylist, whether remote-created sessions are allowed at all. The node logs every command it received in its own store. |
+| T4 | Prompt injection from repo content makes the model run harmful commands | Default approval mode `ask`: every mutating tool (bash, edit, write) needs a human click; read-only tools are confined to the session workspace. No network sandbox in v1 (open risk R2). File tools walk every path with `lstat`: a symlink that dangles or leaves the workspace is refused, `write`/`edit` do not follow a link at the last component, and nothing is written under `.git` (its config and hooks run commands). Stored shell output (`tool_output`) has random ids and belongs to the session that produced it. Residual: an intermediate directory swapped for a link between check and open is followed; bash itself is not confined (R2). |
+| T5 | Compromised master widens node permissions | **Node-local policy (`node.toml`) is authoritative** and is not settable over the protocol or over HTTP (no endpoint writes it or installs software; graphify is allowed only by `graphify = true` in it, read at start): allowed workspace roots, max approval mode (`ask` default; master can request stricter, never looser), tool denylist, whether remote-created sessions are allowed at all. The node logs every command it received in its own store. |
 | T6 | Compromised master approves things on nodes | Accepted in v1: the master is the approval channel, so a compromised master can approve anything inside node policy. Bounded by T5. Future: approvals signed by a user device key verified on the node (R1). |
 | T7 | Rogue node / stolen node key | Node keys pinned after operator approval; revocation deletes the pin and drops the link. A node only writes its own sessions; the master rejects events for sessions owned by another node. |
 | T8 | MITM on the node link | WSS plus Ed25519 mutual challenge-response with pinned keys, so a mis-issued TLS cert alone is not enough. |
@@ -1829,3 +1829,27 @@ file landed first, so the phases merged without touching shared lines.
 
 **Next:** Connections (a separate host name, sandboxed); trusted routines through
 `runner::approval_for`; more event sources (`impl EventSource`); shared Media in workspaces.
+
+### 2026-11-09 — Node setup over SSH removed; graphify install and node.toml endpoints removed
+
+FIX_PLAN 1.4 (AUDIT D4, Q2) and 1.2 (AUDIT S13, Q3). **Removed:** `crates/provision`
+(russh, the setup scripts, WireGuard config generation, the watchdog), the master's
+`provision.rs` / `node_setups.rs`, `/api/admin/provision*` and `/api/admin/node-setups*`,
+the server problems in `/api/attention`, the *Set up a server over SSH* and *Servers set up
+over SSH* UI, `e2e/setup.cjs` and `fake_sshd`; `russh` is gone from `Cargo.lock`. Why: it
+was a separate product (users, nftables, sshd, WireGuard on someone else's server) where a
+bug locks people out of their server or opens it, for a v0.1 with no users; Ansible or
+cloud-init do it with a track record. Nodes are now set up by hand (README "Set up a node by
+hand": user, folder, `node.toml`, the join command, a systemd unit to copy); hardening the
+host is the operator's job. The status entries of 2026-11-03 about node setup are history.
+Also removed: `POST /api/admin/graphify/install`, `PUT /api/admin/graphify` and the
+hand-written `node.toml` editor; graphify is allowed only by `graphify = true` in
+`node.toml`, read at start, and installed with `rizzy-harness graphify install` on the node.
+The settings card is read-only and shows those two steps, so T5 holds for HTTP too. Kept:
+remote nodes, *Create join command*, `node join` / `node run`, revocation, the node link and
+the WireGuard interface check for `--bind`. Not done here: the node's start-up self-checks
+(sandbox, data dir outside the workspace roots), which are FIX_PLAN 2.7 and 2.1.
+**Evidence:** `settings_http.rs::no_endpoint_installs_software_or_edits_node_toml` (the
+removed routes answer 404/405 with a built-in node wired in, node.toml unchanged);
+`savings.test.tsx` (no install button or allow switch, the steps shown);
+`cargo tree -p harness -i russh` finds nothing.

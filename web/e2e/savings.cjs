@@ -1,5 +1,6 @@
-// Settings → Token savings: toggles persist, chats cap the style, graphify
-// can be allowed for the built-in node (writes node.toml).
+// Settings → Token savings: toggles persist, chats cap the style, and the
+// graphify card only says what to do on the node: nothing in the page
+// installs graphify or writes node.toml.
 // Usage: node web/e2e/savings.cjs <harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -57,13 +58,13 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     await g.locator('text=This machine:').waitFor({ timeout: 15000 });
     const installed = await g.locator('text=/graphify \\d/').count();
     log('graphify on this machine:', installed ? 'installed' : 'not installed');
-    if (installed) {
-      await g.locator('label:has-text("Allow on the built-in node") input').click(); // controlled: flips after the save
-      await g.locator('text=allowed for the built-in node').waitFor();
-      const node = fs.readFileSync(`${S}/data/node.toml`, 'utf8');
-      check(node.includes('# my node') && node.includes('graphify = true'), 'node.toml:\n' + node);
-      log('allowed: node.toml updated, comments kept');
-    }
+    check((await g.locator('button').count()) === 0, 'graphify card has no buttons (no install)');
+    check((await g.locator('text=Allow on the built-in node').count()) === 0, 'no allow switch');
+    const steps = await g.locator('[data-testid=graphify-steps] pre').textContent();
+    check(steps.includes('rizzy-harness graphify install') && steps.includes('graphify = true'), 'steps: ' + steps);
+    const node = fs.readFileSync(`${S}/data/node.toml`, 'utf8');
+    check(node === `# my node\nworkspace_roots = ["${S}"]\n`, 'node.toml untouched:\n' + node);
+    log('graphify card shows the node steps; node.toml untouched');
     await p.screenshot({ path: `${S}/sv-1.png`, fullPage: true });
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     await b.close();

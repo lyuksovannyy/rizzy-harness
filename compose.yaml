@@ -15,13 +15,10 @@ services:
     # (0.0.0.0 is refused with host networking.)
     network_mode: host
     command: ["serve", "--bind", "127.0.0.1:7777"]
-    # After `sudo wg-quick up` of the printed config, accept nodes over the tunnel:
+    # Accept remote nodes on the host's VPN address (README → "Set up a node by hand"):
     # command: ["serve", "--bind", "127.0.0.1:7777", "--node-listen", "10.77.0.1:7443"]
     volumes:
       - ./data:/data
-    environment:
-      # Where ./data is on the host, so printed commands (wg-quick) work there.
-      HARNESS_HOST_DATA_DIR: ${PWD}/data
 
   # UI only, no remote nodes, isolated network: publish on loopback only.
   # rizzy-harness:

@@ -305,3 +305,72 @@ fn effort_override_is_validated_and_gated() {
             .is_err()
     );
 }
+
+/// FIX_PLAN 1.2 and 1.4: no HTTP call installs software, writes node.toml
+/// or sets up a server over SSH. The routes are gone, not merely refused,
+/// so they cannot come back as a side effect of an unrelated change. The
+/// built-in node is wired in, which is when the old endpoints did act.
+#[tokio::test]
+async fn no_endpoint_installs_software_or_edits_node_toml() {
+    let t = start().await;
+    let node_toml = t._dir.path().join("node.toml");
+    let original = "# mine\nworkspace_roots = [\"/w\"]\n";
+    std::fs::write(&node_toml, original).unwrap();
+    let state = harness_tools::graphify::GraphifyState::new(false, t._dir.path().join("graphify"));
+    t.master.set_graphify(state.clone(), node_toml.clone());
+    let (_, admin, _) = req(
+        &t,
+        Method::POST,
+        "/api/setup",
+        Some(json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"})),
+        None,
+    )
+    .await;
+    let admin = admin.unwrap();
+
+    let (st, _, _) = req(
+        &t,
+        Method::PUT,
+        "/api/admin/graphify",
+        Some(json!({"allowed": true})),
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
+    let (st, _, _) = req(
+        &t,
+        Method::POST,
+        "/api/admin/graphify/install",
+        None,
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    for (method, path) in [
+        (Method::POST, "/api/admin/provision/probe"),
+        (Method::POST, "/api/admin/provision"),
+        (Method::GET, "/api/admin/provision/x"),
+        (Method::GET, "/api/admin/node-setups"),
+        (Method::POST, "/api/admin/node-setups/x/firewall"),
+    ] {
+        let (st, _, _) = req(&t, method.clone(), path, Some(json!({})), Some(&admin)).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    assert_eq!(std::fs::read_to_string(&node_toml).unwrap(), original);
+    assert!(!state.allowed());
+
+    // Status stays readable, with what to do on the node instead.
+    let (st, _, v) = req(&t, Method::GET, "/api/admin/graphify", None, Some(&admin)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["local_node"], true);
+    assert_eq!(v["allowed"], false);
+    assert_eq!(v["node_toml"], node_toml.display().to_string());
+    let steps = v["steps"].to_string();
+    assert!(
+        steps.contains("rizzy-harness graphify install") && steps.contains("graphify = true"),
+        "{steps}"
+    );
+    // The join command, which stays, still answers.
+    let (st, _, _) = req(&t, Method::GET, "/api/admin/nodes", None, Some(&admin)).await;
+    assert_eq!(st, StatusCode::OK);
+}

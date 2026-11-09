@@ -87,7 +87,6 @@ model; `README.md` is the user manual; `docs/` has one design note per area.
 | `crates/agent-native`, `crates/agents` | the agent loop, providers, agent definitions |
 | `crates/node` | node runtime, sessions, node-side policy, checkpoints |
 | `crates/master` | HTTP API, auth, WebSocket fan-out, routines, storage |
-| `crates/provision` | node setup over SSH (frozen, see the fix plan) |
 | `crates/cli` | the binary: `serve`, `node join`, `node run`, `doctor` |
 | `web/` | React 19 + Vite + TypeScript UI, embedded into the binary |
 

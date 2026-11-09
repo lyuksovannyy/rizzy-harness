@@ -2,7 +2,7 @@ import { DEFAULT_IMAGE_SEARCH } from "../lib/engines";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { greeting } from "../lib/greeting";
 import { t } from "../lib/i18n";
-import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, NodeAttention, RoutineAttention } from "../types";
+import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, RoutineAttention } from "../types";
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import { Attention } from "./Attention";
@@ -38,7 +38,6 @@ export function Home(props: {
   toReview?: number;
   voice?: boolean;
   attention?: AttentionItem[];
-  nodeAttention?: NodeAttention[];
   /** Routine results not seen yet, shown below the chats waiting for the user. */
   routines?: RoutineAttention[];
   /** Lasting problems (a model gone from its provider): always shown, above the similar chats. */
@@ -134,7 +133,6 @@ export function Home(props: {
         {similarCount === 0 && (
           <Attention
             items={props.attention ?? []}
-            nodes={props.nodeAttention}
             routines={props.routines}
             onOpen={props.onOpen}
             timeZone={props.timeZone}

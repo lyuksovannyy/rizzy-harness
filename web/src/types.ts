@@ -750,8 +750,6 @@ export interface RoutineAttention {
 
 export interface AttentionResponse {
   items: AttentionItem[];
-  /** Server problems, for admins. */
-  nodes?: NodeAttention[];
   routines?: RoutineAttention[];
 }
 
@@ -765,69 +763,6 @@ export interface Features {
   media: { enabled: boolean; show: boolean; max_file: number; vision_images: boolean };
   artifacts: { enabled: boolean; show: boolean; why: string | null };
   search: { kinds: SearchKind[] };
-}
-
-export interface SetupStep {
-  id: string;
-  title: string;
-  status: "pending" | "running" | "ok" | "warning" | "failed" | "todo" | "waiting" | "skipped";
-  detail: string;
-  script?: string;
-  root: boolean;
-  choices?: { id: string; label: string }[];
-}
-
-export type Engine = "podman" | "docker" | "none";
-
-export interface SetupState {
-  id: string;
-  mode: "auto" | "manual";
-  host: string;
-  /** The user harness logs in as now. */
-  user: string;
-  engine: Engine;
-  steps: SetupStep[];
-  finished: boolean;
-  node_id: string | null;
-  error: string | null;
-}
-
-export interface NodeProblem {
-  kind: "ssh" | "firewall" | "reach" | "host_key";
-  detail: string;
-}
-
-export interface NodeAttention {
-  setup_id: string;
-  host: string;
-  node_id: string | null;
-  problems: NodeProblem[];
-}
-
-export interface SetupRecord {
-  id: string;
-  host: string;
-  port: number;
-  login_user: string;
-  fingerprint: string;
-  mode: "auto" | "manual";
-  engine: Engine;
-  ssh_protected: boolean;
-  firewall_enabled: boolean;
-  watch_ssh: boolean;
-  watch_firewall: boolean;
-  admin_sudo: boolean;
-  node_id: string | null;
-  created_ms: number;
-  last_check_ms: number | null;
-  problems: NodeProblem[];
-}
-
-export interface SetupCommands {
-  firewall_on: string;
-  firewall_off: string;
-  ssh_on: string;
-  ssh_off: string;
 }
 
 export type Style = "off" | "lite" | "full" | "ultra";
@@ -847,12 +782,15 @@ export interface TokenSavings {
   graphify: boolean;
 }
 
+/** `GET /api/admin/graphify`: read-only. node.toml decides; no HTTP call
+ * installs graphify or edits node.toml. */
 export interface GraphifyStatus {
   local_node: boolean;
   allowed: boolean;
+  /** The built-in node's node.toml, when there is a built-in node. */
+  node_toml: string | null;
   installed: string | null;
   pinned_version: string;
-  remote_setup: string[];
-  install_ok?: boolean;
-  install_log?: string;
+  /** What to do on a node to turn it on. */
+  steps: string[];
 }

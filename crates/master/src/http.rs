@@ -124,18 +124,6 @@ pub fn router(master: Master) -> Router {
         .route("/api/nodes", get(nodes))
         .route("/api/admin/nodes", get(admin_nodes))
         .route("/api/admin/nodes/join", post(node_join_token))
-        .route("/api/admin/provision/probe", post(provision_probe))
-        .route("/api/admin/node-setups", get(list_setups))
-        .route(
-            "/api/admin/node-setups/{id}",
-            axum::routing::patch(update_setup).delete(forget_setup),
-        )
-        .route("/api/admin/node-setups/{id}/check", post(check_setup))
-        .route("/api/admin/node-setups/{id}/firewall", post(setup_firewall))
-        .route("/api/admin/provision", post(provision_start))
-        .route("/api/admin/provision/{id}", get(provision_state))
-        .route("/api/admin/provision/{id}/answer", post(provision_answer))
-        .route("/api/admin/provision/{id}/recheck", post(provision_recheck))
         .route("/api/admin/nodes/{id}", axum::routing::delete(revoke_node))
         .route("/api/models", get(models))
         .route("/api/agents", get(agents).post(agent_edits::create_agent))
@@ -162,8 +150,7 @@ pub fn router(master: Master) -> Router {
         )
         .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
         .route("/api/admin/savings", get(get_savings).put(put_savings))
-        .route("/api/admin/graphify", get(get_graphify).put(put_graphify))
-        .route("/api/admin/graphify/install", post(install_graphify))
+        .route("/api/admin/graphify", get(get_graphify))
         .route(
             "/api/memory/{id}",
             axum::routing::patch(update_memory).delete(delete_memory),
@@ -1903,16 +1890,8 @@ async fn attention(
         .mirror
         .call(move |s| s.attention(owner.as_deref(), &viewer))
         .await?;
-    // Server problems from the node watchdog, for admins.
-    let nodes = if who.is_admin() {
-        crate::node_setups::attention(&m).await
-    } else {
-        vec![]
-    };
     let routines = crate::routines::attention(&m, &who).await?;
-    Ok(Json(
-        json!({ "items": items, "nodes": nodes, "routines": routines }),
-    ))
+    Ok(Json(json!({ "items": items, "routines": routines })))
 }
 
 #[derive(Deserialize)]
@@ -1935,344 +1914,6 @@ async fn mark_seen(
         .await?;
     let _ = m.inner.live.send(crate::Live::SessionsChanged);
     Ok(Json(json!({ "ok": true })))
-}
-
-#[derive(Deserialize)]
-struct ProbeBody {
-    host: String,
-    #[serde(default = "ssh_port")]
-    port: u16,
-}
-
-fn ssh_port() -> u16 {
-    22
-}
-
-fn valid_host(h: &str) -> bool {
-    !h.is_empty()
-        && h.len() <= 253
-        && h.chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c))
-}
-
-/// The server's SSH host key fingerprint, for the user to compare with the
-/// provider's console before sending any credential.
-async fn provision_probe(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<ProbeBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    if !valid_host(&b.host) {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid host".into()));
-    }
-    let fp = harness_provision::ssh::probe(&b.host, b.port)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    Ok(Json(json!({ "fingerprint": fp })))
-}
-
-/// Credentials are moved into `Secret`s at once and only used for the first
-/// login; this struct is never logged.
-#[derive(Deserialize)]
-struct ProvisionBody {
-    host: String,
-    #[serde(default = "ssh_port")]
-    port: u16,
-    user: String,
-    /// From the probe, confirmed by the user.
-    fingerprint: String,
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    private_key: Option<String>,
-    #[serde(default)]
-    passphrase: Option<String>,
-    mode: crate::provision::Mode,
-    /// The user's own public key, kept on the server (automatic mode).
-    #[serde(default)]
-    own_pubkey: Option<String>,
-    /// Copy this server's model provider and key to the node.
-    #[serde(default)]
-    copy_provider: bool,
-    #[serde(default)]
-    engine: harness_provision::facts::Engine,
-    /// Automatic mode: keep harness's passwordless sudo afterwards.
-    #[serde(default)]
-    keep_admin_sudo: bool,
-    /// Automatic mode: key-only SSH and the firewall (opt-out, default on).
-    #[serde(default = "yes")]
-    protect_ssh: bool,
-    #[serde(default = "yes")]
-    protect_firewall: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-async fn provision_start(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<ProvisionBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let ProvisionBody {
-        host,
-        port,
-        user,
-        fingerprint,
-        password,
-        private_key,
-        passphrase,
-        mode,
-        own_pubkey,
-        copy_provider,
-        engine,
-        keep_admin_sudo,
-        protect_ssh,
-        protect_firewall,
-    } = b;
-    let bad = |m: &str| Err(ApiError(StatusCode::BAD_REQUEST, m.into()));
-    if !valid_host(&host) {
-        return bad("invalid host");
-    }
-    // Automatic setup creates harness's own user, which takes root.
-    if mode == crate::provision::Mode::Auto && user != "root" {
-        return bad(
-            "automatic setup needs the root login (user `root`); harness then creates its own user. \
-             Use manual setup to keep your own user.",
-        );
-    }
-    if user.is_empty()
-        || !user
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-    {
-        return bad("invalid user name");
-    }
-    if !fingerprint.starts_with("SHA256:") {
-        return bad("confirm the server's host key fingerprint first");
-    }
-    let own_pubkey = own_pubkey
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty());
-    if let Some(k) = &own_pubkey
-        && (!k.starts_with("ssh-") && !k.starts_with("ecdsa-")
-            || k.contains('\n')
-            || k.contains('\''))
-    {
-        return bad("your public key must be one line starting with ssh- or ecdsa-");
-    }
-    let auth = match (password, private_key) {
-        (Some(p), None) if !p.is_empty() => {
-            harness_provision::ssh::Auth::Password(harness_core::Secret::new(p))
-        }
-        (None, Some(k)) if !k.trim().is_empty() => harness_provision::ssh::Auth::Key(
-            harness_core::Secret::new(k),
-            passphrase.map(harness_core::Secret::new),
-        ),
-        _ => return bad("give a password or a private key"),
-    };
-    let job = m
-        .start_provision(crate::provision::StartRequest {
-            host,
-            port,
-            user,
-            fingerprint,
-            auth,
-            mode,
-            own_pubkey,
-            copy_provider,
-            engine,
-            keep_admin_sudo: keep_admin_sudo && mode == crate::provision::Mode::Auto,
-            protect_ssh,
-            protect_firewall,
-        })
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "id": job.id })))
-}
-
-fn job_or_404(m: &Master, id: &str) -> ApiResult<std::sync::Arc<crate::provision::Job>> {
-    m.provision_job(id)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such setup".into()))
-}
-
-async fn provision_state(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    Ok(Json(job_or_404(&m, &id)?.state()))
-}
-
-#[derive(Deserialize)]
-struct AnswerBody {
-    step: String,
-    choice: String,
-}
-
-/// Answer a step that waits for the user (e.g. "create harness's own user").
-async fn provision_answer(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(b): Json<AnswerBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let job = job_or_404(&m, &id)?;
-    if !job.answer(&b.step, &b.choice) {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "that step is not waiting for this answer".into(),
-        ));
-    }
-    Ok(Json(json!({ "ok": true })))
-}
-
-async fn provision_recheck(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let job = job_or_404(&m, &id)?;
-    job.recheck()
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    Ok(Json(job.state()))
-}
-
-async fn setup_or_404(m: &Master, id: &str) -> ApiResult<crate::node_setups::SetupRecord> {
-    m.setup(id)
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such server".into()))
-}
-
-/// Servers set up over SSH, with the commands for manual changes.
-async fn list_setups(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let list: Vec<serde_json::Value> = m
-        .setups()
-        .await?
-        .iter()
-        .map(|r| json!({ "setup": r, "commands": crate::node_setups::commands(r) }))
-        .collect();
-    Ok(Json(json!({ "setups": list })))
-}
-
-#[derive(Deserialize)]
-struct SetupPatch {
-    #[serde(default)]
-    mode: Option<crate::provision::Mode>,
-    #[serde(default)]
-    watch_ssh: Option<bool>,
-    #[serde(default)]
-    watch_firewall: Option<bool>,
-}
-
-/// Change the saved mode or what the watchdog looks at. Nothing on the
-/// server changes.
-async fn update_setup(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(b): Json<SetupPatch>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let mut r = setup_or_404(&m, &id).await?;
-    if let Some(mode) = b.mode {
-        r.mode = mode;
-    }
-    if let Some(v) = b.watch_ssh {
-        r.watch_ssh = v;
-    }
-    if let Some(v) = b.watch_firewall {
-        r.watch_firewall = v;
-    }
-    if !r.watch_ssh {
-        r.problems.retain(|p| p.kind != "ssh");
-    }
-    if !r.watch_firewall {
-        r.problems.retain(|p| p.kind != "firewall");
-    }
-    m.save_setup(&r).await?;
-    let _ = m.inner.live.send(crate::Live::SessionsChanged);
-    Ok(Json(json!(r)))
-}
-
-async fn forget_setup(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    if !m.forget_setup(&id).await? {
-        return Err(ApiError(StatusCode::NOT_FOUND, "no such server".into()));
-    }
-    Ok(Json(json!({ "ok": true })))
-}
-
-async fn check_setup(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let r = setup_or_404(&m, &id).await?;
-    let r = m
-        .check_setup(r)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    Ok(Json(json!(r)))
-}
-
-#[derive(Deserialize)]
-struct FirewallBody {
-    enable: bool,
-    /// A root login for this action (unless harness kept sudo).
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    private_key: Option<String>,
-    #[serde(default)]
-    passphrase: Option<String>,
-}
-
-/// Automatic mode: turn the firewall on or off on the server.
-async fn setup_firewall(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(b): Json<FirewallBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let r = setup_or_404(&m, &id).await?;
-    if r.mode != crate::provision::Mode::Auto {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "manual mode: run the commands yourself, or switch this server to automatic".into(),
-        ));
-    }
-    let root = match (b.password, b.private_key) {
-        (Some(p), None) if !p.is_empty() => Some(harness_provision::ssh::Auth::Password(
-            harness_core::Secret::new(p),
-        )),
-        (None, Some(k)) if !k.trim().is_empty() => Some(harness_provision::ssh::Auth::Key(
-            harness_core::Secret::new(k),
-            b.passphrase.map(harness_core::Secret::new),
-        )),
-        _ => None,
-    };
-    let r = m
-        .set_firewall(r, b.enable, root)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    Ok(Json(json!(r)))
 }
 
 // ---- token savings -------------------------------------------------------
@@ -2301,143 +1942,24 @@ async fn put_savings(
     Ok(Json(cfg.savings))
 }
 
-async fn graphify_json(m: &Master) -> serde_json::Value {
-    let local = m.graphify();
-    serde_json::json!({
-        "local_node": local.is_some(),
-        "allowed": local.as_ref().is_some_and(|(s, _)| s.allowed()),
-        "installed": harness_tools::graphify::installed_version().await,
-        "pinned_version": harness_tools::graphify::VERSION,
-        "remote_setup": [
-            "rizzy-harness graphify install",
-            "echo 'graphify = true' >> <data dir>/node.toml   # then restart the node",
-        ],
-    })
-}
-
+/// Whether graphify is installed and allowed on the built-in node, and what to
+/// do on a node to turn it on. Read-only: node.toml is the node's, so no HTTP
+/// call installs graphify or edits it (FIX_PLAN 1.2, PLAN T5).
 async fn get_graphify(
     State(m): State<Master>,
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&m, &headers).await?;
-    Ok(Json(graphify_json(&m).await))
-}
-
-#[derive(Deserialize)]
-struct GraphifyBody {
-    allowed: bool,
-}
-
-/// Allow or forbid graphify on the built-in node (writes its node.toml).
-/// Remote nodes decide in their own node.toml.
-async fn put_graphify(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<GraphifyBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let Some((state, path)) = m.graphify() else {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this server runs no built-in node; allow graphify in each node's node.toml".into(),
-        ));
-    };
-    set_toml_bool(&path, "graphify", b.allowed)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    state.set_allowed(b.allowed);
-    Ok(Json(graphify_json(&m).await))
-}
-
-/// Install the pinned graphify for the user running harness (built-in node).
-async fn install_graphify(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    if m.graphify().is_none() {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this server runs no built-in node; run `rizzy-harness graphify install` on each node"
-                .into(),
-        ));
-    }
-    let (ok, log) = match harness_tools::graphify::install().await {
-        Ok(l) => (true, l),
-        Err(l) => (false, l),
-    };
-    let mut v = graphify_json(&m).await;
-    v["install_ok"] = ok.into();
-    v["install_log"] = log
-        .chars()
-        .rev()
-        .take(4000)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>()
-        .into();
-    Ok(Json(v))
-}
-
-/// Set a top-level `key = true|false` in a TOML file, keeping the rest of
-/// the file (and its comments) as it is.
-fn set_toml_bool(path: &std::path::Path, key: &str, v: bool) -> Result<(), String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    let line = format!("{key} = {v}");
-    let mut found = false;
-    let mut in_table = false;
-    let mut out: Vec<String> = Vec::new();
-    for l in text.lines() {
-        let t = l.trim_start();
-        if t.starts_with('[') {
-            in_table = true;
-        }
-        let is_key = !in_table
-            && t.strip_prefix(key)
-                .is_some_and(|r| r.trim_start().starts_with('='));
-        if is_key && !found {
-            out.push(line.clone());
-            found = true;
-        } else if !is_key {
-            out.push(l.to_string());
-        }
-    }
-    if !found {
-        // Top-level keys must come before any [table].
-        let at = out
-            .iter()
-            .position(|l| l.trim_start().starts_with('['))
-            .unwrap_or(out.len());
-        out.insert(at, line);
-    }
-    let mut s = out.join("\n");
-    s.push('\n');
-    // Must still parse as a node policy before it replaces the file.
-    toml::from_str::<toml::Value>(&s).map_err(|e| e.to_string())?;
-    std::fs::write(path, s).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-#[cfg(test)]
-mod savings_tests {
-    #[test]
-    fn toml_bool_is_set_in_place() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("node.toml");
-        super::set_toml_bool(&p, "graphify", true).unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "graphify = true\n");
-        std::fs::write(
-            &p,
-            "# my roots\nworkspace_roots = [\"/w\"]\ngraphify = true\n",
-        )
-        .unwrap();
-        super::set_toml_bool(&p, "graphify", false).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            "# my roots\nworkspace_roots = [\"/w\"]\ngraphify = false\n"
-        );
-    }
+    let local = m.graphify();
+    Ok(Json(json!({
+        "local_node": local.is_some(),
+        "allowed": local.as_ref().is_some_and(|(s, _)| s.allowed()),
+        "node_toml": local.as_ref().map(|(_, p)| p.display().to_string()),
+        "installed": harness_tools::graphify::installed_version().await,
+        "pinned_version": harness_tools::graphify::VERSION,
+        "steps": [
+            "rizzy-harness graphify install",
+            "graphify = true    # add to node.toml, then restart the node",
+        ],
+    })))
 }
