@@ -30,10 +30,10 @@ one changes scope, so decide before the phase that depends on it starts.
 
 | # | Decision | Recommended | If you choose the other |
 |---|---|---|---|
-| Q1 | Remove JWT, refresh tokens, the KV layer, Redis and the MariaDB container; go back to a server-side session table? | **Yes.** Nothing can use several server processes yet. | Keep them, and tasks 3.1–3.2 must also harden the refresh flow; add `rediss://`; replace `jwt.rs` with `jsonwebtoken`. |
-| Q2 | SSH provisioning (create users, WireGuard, nftables, sshd, watchdog): keep, freeze or cut? | **Freeze.** No new work; mark it experimental in the UI; fix only task 3.8. Revisit after Phase 4. | Cut: delete `crates/provision` and its UI (about 3,400 lines of Rust), keep "Create join command". Task 3.8 disappears. |
+| Q1 | Auth and storage back ends | **Decided:** remove JWT, refresh tokens and the KV layer; go back to a server-side session table. Remove the Redis and MariaDB containers from the templates until code uses them. Keep a MariaDB port with Redis as a planned milestone (section 3, Phase 6) with a written trigger. | — |
+| Q2 | SSH provisioning (create users, WireGuard, nftables, sshd, watchdog) | **Decided: cut.** Nodes are set up by hand with the join command; the node app sets up and checks its own sandbox. | — |
 | Q3 | Remove the HTTP endpoints that install graphify and edit `node.toml`? | **Yes.** Keep the CLI command; the UI shows it. | Keep: hash-pin the package and switch the editor to `toml_edit` with an atomic write, and delete the T5 claim. |
-| Q4 | The home-screen "wall" lists scraped from Google's autocomplete | **Delete the data**; write a short list by hand or drop the wall background. | Keep, and accept the terms-of-service exposure in a shipped binary. |
+| Q4 | The home-screen "wall" lists scraped from Google's autocomplete | **Decided: keep for now.** Cosmetic and low risk. Skim the lists once for anything you would not choose to show; replace with a hand-written list when convenient (required before any commercial use). | — |
 | Q5 | May a project member put text into shared project memory without a manager? | **No.** A manager activates; add a per-project switch to allow members. | Leave as is and record it in the threat model as an accepted cross-user injection path. |
 | Q6 | Sandbox network default for the agent's shell | **On**, with `network = "off"` per node, because builds and installs need it. An allow-list proxy comes later. | Off by default: safer, and most real coding work breaks until the proxy exists. |
 | Q7 | Who may use the embedded local node | **Server admins only.** Other accounts need a remote node. | Everyone with the grant: then task 2.7 (sandbox) must ship before a second account is created. |
@@ -55,13 +55,13 @@ one changes scope, so decide before the phase that depends on it starts.
 
 | ID | Fixes | Change | Done when |
 |---|---|---|---|
-| 1.1 | D1, L9 (needs Q1) | Restore server-side sessions: one opaque 256-bit token in an `HttpOnly; SameSite=Strict` cookie, its SHA-256 in a `sessions` table (`user_id`, `created_ms`, `last_seen_ms`, `expires_ms`), 30-day sliding expiry. `authenticate` is one indexed lookup joined to `users`. Delete `jwt.rs`, `kv.rs`, `/api/auth/refresh`, the legacy-cookie clearing, the per-user session version in `kv`, `web/src/session.ts` and its `fetch` patch, the `redis` dependency, `HARNESS_JWT_SECRET` / `HARNESS_KV_URL` / `HARNESS_DATABASE_URL`, the Redis and MariaDB services in `docker/`, `docs/storage-backends.md`'s KV and MariaDB sections. | Logout, disable, delete and password reset each remove the user's rows and the next request is 401 (tests). `grep -ri "jwt\|redis\|mariadb"` finds nothing outside the changelog. `docker/standard` is gone or is `minimal`. **M** |
+| 1.1 | D1, L9 (needs Q1) | Restore server-side sessions: one opaque 256-bit token in an `HttpOnly; SameSite=Strict` cookie, its SHA-256 in a `sessions` table (`user_id`, `created_ms`, `last_seen_ms`, `expires_ms`), 30-day sliding expiry. `authenticate` is one indexed lookup joined to `users`. Delete `jwt.rs`, `kv.rs`, `/api/auth/refresh`, the legacy-cookie clearing, the per-user session version in `kv`, `web/src/session.ts` and its `fetch` patch, the `redis` dependency, `HARNESS_JWT_SECRET` / `HARNESS_KV_URL` / `HARNESS_DATABASE_URL`, the Redis and MariaDB services in `docker/` (they return with Phase 6). `docs/storage-backends.md` keeps the MariaDB section, rewritten as the Phase 6 plan. | Logout, disable, delete and password reset each remove the user's rows and the next request is 401 (tests). `grep -ri "jwt\|redis"` finds nothing outside the changelog and the Phase 6 plan; no template starts a service the server does not use. `docker/standard` is gone or is `minimal`. **M** |
 | 1.2 | S13 (needs Q3) | Delete `POST /api/admin/graphify/install`, `PUT /api/admin/graphify` and `set_toml_bool`. The settings page shows `rizzy-harness graphify install` and the `node.toml` line to add. | No HTTP handler writes `node.toml` or spawns an installer. T5 is true again. **S** |
-| 1.3 | §5.2 (needs Q4) | Delete `web/public/wall/*.txt` and `web/scripts/harvest_queries.py`; ship a hand-written list or remove `WallBg`. | No scraped data in the repository or the binary. **S** |
-| 1.4 | D4 (needs Q2) | Mark node setup over SSH "experimental" in the UI and README. No other change. | Label visible; README says "test on a throwaway VPS". **S** |
+| 1.3 | §5.2 (Q4) | Read through `web/public/wall/*.txt` once and remove anything unsuitable. Record the source of the lists in `THIRD_PARTY_NOTICES.md`. Replacing them is optional, not scheduled. | Lists reviewed; provenance noted. **S** |
+| 1.4 | D4, L2 (Q2) | **Cut SSH provisioning.** Delete `crates/provision`, `master/src/provision.rs`, `node_setups.rs`, their routes, UI (`ServerSetup`, `ManagedServers`), the watchdog, `e2e/setup.cjs` and the `russh` dependency. Keep "Create join command". `node join` prints what it will do, and `node run` checks at start that its sandbox works (2.7) and that its data directory is outside every workspace root (2.1), refusing to start otherwise. README: a short manual node setup (user, folder, join, systemd unit to copy). | `cargo tree` has no `russh`; a node set up from the README passes its own start checks. **M** |
 | 1.5 | D7, §5.2 | Remove dead code: `searchUrl` in `lib/engines.ts`, `highlight()` in `md/highlight.ts`, three of the four FNV-1a copies, `.idea/` (and add it to `.gitignore`). | `pnpm typecheck` and tests pass; `git ls-files .idea` is empty. **S** |
 
-**Gate 1:** auth is one table and one cookie; about 1,000 lines gone; CI green.
+**Gate 1:** auth is one table and one cookie; about 4,500 lines gone; CI green.
 
 ### Phase 2 — Contain the agent (one to two weeks)
 
@@ -96,7 +96,7 @@ a test in CI. Only after this gate may a second account get the agentic grant.
 | 3.5 | S12 (needs Q5) | Activating a project fact requires "may manage"; a member's proposals stay proposals. Optional per-project setting to allow members. | Test: a member's `PATCH {status: "active"}` on their own proposal is 403. **S** |
 | 3.6 | L3–L8 | Provider "test" and "model list" calls use `url_allowed` and the public-address resolver unless the host is in `HARNESS_PLAIN_HTTP_HOSTS`. 500 responses carry a fixed message and a request id; the detail goes to the log. `source_path` is returned to the artifact's owner only. Cookie-authenticated state-changing requests must carry an allowed `Origin` with the server's scheme. `Strict-Transport-Security` with `--tls`; `Cache-Control: no-store` on `/api/*`. Secret files are refused when group- or world-readable. `docs/media.md`: describe the blob scheme as crypto-shredding, add the format specification and test vectors. | One test per item. **M** |
 | 3.7 | L1, L15 | Node link: bounded channels with back-pressure in both directions; connect and handshake timeouts on the node; snapshot batches limited by bytes. Either implement `allow_remote_sessions` in `node.toml` or remove the sentence from T5. Correct "mutual challenge-response" in the docs. | Test: a node that floods frames is throttled, master memory stays flat. **M** |
-| 3.8 | L2 (skip if Q2 = cut) | Provisioning scripts: quote every interpolated value with `shlex`; upload the binary to a `mktemp -d` directory owned by the login user instead of `/tmp/rizzy-harness.upload`; quoted heredoc delimiters that cannot occur in the body. | Test: a username and a join token containing `'`, `$( )` and a newline produce scripts that `bash -n` accepts and that contain the value only inside quotes. **S** |
+| 3.8 | — | *Removed: provisioning was cut in 1.4.* | — |
 | 3.9 | L10–L13 | "Allow for this turn" on bash is labelled as exactly that and offered only after the first approval. `web_fetch` provenance counts user messages and successful results of search, fetch and read tools only, never error text. `is_public` rejects 6to4, Teredo and IPv4-compatible IPv6. The mem0 client percent-encodes ids and uses the same-origin redirect policy as the other clients. | Tests: a URL that appears only in an error message is refused; `2002:7f00:1::` is not public. **S** |
 | 3.10 | L14 | Browser: drafts are cleared on logout and chat delete and never stored for incognito chats; Markdown `#` links are limited to footnote ids; a user's temporary password is generated by the server and shown once, not typed into `prompt()`. | Tests for each. **S** |
 
@@ -140,6 +140,28 @@ line back.
 | 5.12 | §2.2 | Temml font: get the licence clarified upstream or remove `Temml.woff2`. | `THIRD_PARTY_NOTICES.md` has no disputed entry. **S** |
 | 5.13 | §2.1 | `genai`: write down the fallback (which crates, what changes behind `Provider`) and store Anthropic thinking blocks so R8 can be closed against a real key. | R7 and R8 have an owner and a test plan. **M** |
 
+### Phase 6 — MariaDB and Redis for teams (planned, not scheduled)
+
+The goal is real: one code base that serves a single user on SQLite and a
+team on MariaDB. It is not scheduled because nothing needs it yet, and it
+roughly doubles the cost of every later storage change.
+
+**Trigger:** a concrete deployment that needs more than one server process
+(high availability, rolling upgrades) or must use a managed database. Team
+size alone is not the trigger: after 4.5, SQLite carries a medium team.
+
+**Why Redis waits for the same trigger:** with one process, a session is one
+indexed lookup in SQLite. Redis earns its place only when several processes
+share sessions, rate limits and the live-event fan-out.
+
+| ID | Change | Done when |
+|---|---|---|
+| 6.1 | **Storage behind a trait.** `harness-store` exposes its operations as a trait; the SQLite implementation is the current code. No behaviour change. | Master and node compile against the trait only. **L** |
+| 6.2 | **Choose the query layer.** The closest Rust equivalent of SQLAlchemy is **SeaORM** (an async ORM over SQLx, with **SeaQuery** as its dialect-neutral query builder): one set of entities and queries for SQLite, MariaDB/MySQL and PostgreSQL, with raw SQL for the exceptions. **Diesel** is the other mature ORM, stricter at compile time and less convenient for code that must be generic over back ends. **SQLx** alone is not an ORM: its queries are per-dialect SQL strings. Recommended: SeaQuery for building queries, SeaORM's migrator for both dialects, entities only where they pay for themselves. Check each against rule 6 and build one vertical slice (users and sessions) on both databases before committing. | An ADR with the slice's code and timings. **M** |
+| 6.3 | **Port.** Move the store's queries to the chosen layer. This makes the store async, so `Store::call` becomes an `async fn`. Known exceptions that need per-dialect code: full-text search (FTS5 and `bm25` against InnoDB `FULLTEXT`), `secure_delete` crypto-shredding, `INSERT OR IGNORE` / `ON CONFLICT`, and the single-writer assumption in `append` and the workspace membership checks (`SELECT … FOR UPDATE` on MariaDB). The node's own log stays SQLite. | The store and master test suites pass on SQLite and on MariaDB in CI (service container). **L, several weeks** |
+| 6.4 | **Redis** for sessions, rate limits and cross-process live events (pub/sub), with `rediss://`. In-process implementations stay the default. | Two server processes behind one address: login on one is valid on the other, a chat streams through either. **L** |
+| 6.5 | `rizzy-harness db copy --to mysql://…`; the `standard` and `full` Docker templates return with services the server uses. | A SQLite data directory moves to MariaDB and back in a test. **M** |
+
 ## 4. Order and dependencies
 
 ```
@@ -150,7 +172,7 @@ line back.
 2.4 ─► 4.8                     (measure log growth only after the cap exists)
 1.1 ─► 4.3                     (the migration baseline should not contain dead tables)
 4.1 ─► 4.2                     (the route test protects the split)
-4.3 ─► 4.4, 4.5 ─► tag v0.1.0
+4.3 ─► 4.4, 4.5 ─► tag v0.1.0 ─► (trigger) ─► 6.1 ─► 6.2 ─► 6.3 ─► 6.4, 6.5
 ```
 
 Phases 2 and 3 can overlap once 1.1 is merged: they touch different crates
@@ -163,7 +185,7 @@ Phases 2 and 3 can overlap once 1.1 is merged: they touch different crates
   risk after 2.7.
 - **No signed approvals** from a user device (`PLAN.md` R1). A compromised
   master can still approve within node policy.
-- **No MariaDB port, no multi-process server.** Removed in 1.1, not planned.
+- **No MariaDB port or multi-process server before `v0.1.0`.** It is Phase 6, with a trigger.
 - **No rewrite of the event log.** 4.8 measures first.
 - **No new features.** Skills, MCP, external harness backends and the rest
   of Phase 9 wait for Gate 3.
@@ -177,7 +199,8 @@ Stress-tested before writing; these are the weak points.
 | The sandbox breaks real work | Toolchains live under `$HOME` and write caches there; an allow-list misses some on day one. | Ship 2.7 with `best-effort` logging for a week on your own machine (log what would be denied), tune the default lists, then switch the default to `required`. |
 | The env allow-list breaks tools | Same reason: `CARGO_HOME`, `NVM_DIR`, proxies. | `env_pass` exists from the first version, and the error message for a missing tool points at it. |
 | Checkpoints through a separate git directory are slow on large repositories | The first `git add -A` hashes every file. | Alternates avoid storing objects twice; measure on a large repository in 2.6 and keep a per-node switch to turn checkpoints off. |
-| 1.1 is called a step backwards | It removes a feature that was just merged. | It removes no capability anyone can use today. If Q1 is "no", the plan still works, with more to harden. |
+| 1.1 is called a step backwards | It removes a feature that was just merged. | It removes no capability anyone can use today; Phase 6 brings Redis back when a second process exists. |
+| Cutting provisioning makes node setup too tedious, so people skip hardening | Automatic mode did the firewall and SSH steps for them. | The node refuses to start without a working sandbox and a safe data directory (1.4), so the part that protects the harness is not optional. Host hardening is the operator's job and the README says so. |
 | Phase 2 stalls and the freeze is abandoned | The sandbox is the largest task and the least fun. | 2.1–2.6 are small and independently valuable; merge them first. If 2.7 slips, Q7 = "admins only" keeps the worst case closed. |
 | Fixes drift from the threat model again | That is how half of these findings arose. | Rule 7, and task 5.9 ties each threat to a test. |
 
@@ -196,7 +219,7 @@ Every finding in `AUDIT.md` and the task that closes it.
 | Audit | Task | | Audit | Task |
 |---|---|---|---|---|
 | S1 | 2.1, 2.2, 2.7 | | L1 | 3.7 |
-| S2 | 2.3 | | L2 | 3.8 (or cut, Q2) |
+| S2 | 2.3 | | L2 | 1.4 (cut) |
 | S3 | 2.4 | | L3 | 3.6 |
 | S4 | 3.1 | | L4 | 3.6, 4.2 |
 | S5 | 3.2 | | L5 | 3.6 |
@@ -211,10 +234,10 @@ Every finding in `AUDIT.md` and the task that closes it.
 | D1 | 1.1 | | L14 | 3.10 |
 | D2 | 4.3 | | L15 | 3.7 |
 | D3 | 4.5 | | §5.1 CI red, no protection | 0.1, 0.2, 0.4 |
-| D4 | Q2, 1.4, freeze (rule 1) | | §5.2 Actions, images, signing | 5.1, 5.3 |
+| D4 | 1.4 (cut), freeze (rule 1) | | §5.2 Actions, images, signing | 5.1, 5.3 |
 | D5 | 2.4, 4.8 | | §5.2 bots, deny, audit, toolchain | 5.1, 5.2 |
 | D6 | 4.1, 4.2 | | §5.2 double CI runs, `.idea` | 0.3, 1.5 |
-| D7 | 1.5, 5.4–5.8 | | §5.2 scraped wall data | 1.3 |
+| D7 | 1.5, 5.4–5.8 | | §5.2 scraped wall data | 1.3 (kept, reviewed) |
 | D8 | 5.9 | | §5.2 bus factor, outside review | Gate 3 |
 | D9 | 5.11 | | §6 backup | 4.4 |
 | §2.1 `pdf-extract` | 3.4 | | §6 limits, TLS, health, SIGTERM, audit, logs | 3.3, 4.6, 4.7 |
