@@ -208,11 +208,13 @@ impl Tool for Bash {
                 let (text, cut) = cap(f.text);
                 if f.removed_lines > 0 || cut {
                     let total = combined.lines().count();
-                    let id = store.put(combined);
+                    let note = match store.put(combined) {
+                        Some(id) => format!("full output: tool_output id={id}"),
+                        None => "the full output could not be kept".to_string(),
+                    };
                     (
                         format!(
-                            "{text}\n[filtered: {} of {total} lines not shown; full output: \
-                             tool_output id={id}]",
+                            "{text}\n[filtered: {} of {total} lines not shown; {note}]",
                             f.removed_lines
                         ),
                         cut,

@@ -122,7 +122,7 @@ impl Tool for Write {
         ToolRisk::Mutating
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
-        let path = match str_arg(&input, "path").and_then(|p| ctx.resolve(p)) {
+        let path = match str_arg(&input, "path").and_then(|p| ctx.resolve_for_write(p)) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -135,13 +135,13 @@ impl Tool for Write {
         {
             return ToolOutcome::err(format!("{}: {e}", parent.display()));
         }
-        match tokio::fs::write(&path, content).await {
+        match write_nofollow(&path, content.as_bytes()).await {
             Ok(()) => ToolOutcome::ok(format!(
                 "Wrote {} ({} lines)",
                 path.display(),
                 content.lines().count()
             )),
-            Err(e) => ToolOutcome::err(format!("{}: {e}", path.display())),
+            Err(e) => ToolOutcome::err(e),
         }
     }
 }
@@ -170,7 +170,7 @@ impl Tool for Edit {
         ToolRisk::Mutating
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
-        let path = match str_arg(&input, "path").and_then(|p| ctx.resolve(p)) {
+        let path = match str_arg(&input, "path").and_then(|p| ctx.resolve_for_write(p)) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -188,9 +188,9 @@ impl Tool for Edit {
             .get("replace_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let text = match tokio::fs::read_to_string(&path).await {
+        let text = match read_nofollow(&path).await {
             Ok(t) => t,
-            Err(e) => return ToolOutcome::err(format!("{}: {e}", path.display())),
+            Err(e) => return ToolOutcome::err(e),
         };
         let count = text.matches(old).count();
         if count == 0 {
@@ -207,14 +207,45 @@ impl Tool for Edit {
         } else {
             text.replacen(old, new, 1)
         };
-        match tokio::fs::write(&path, updated).await {
+        match write_nofollow(&path, updated.as_bytes()).await {
             Ok(()) => ToolOutcome::ok(format!(
                 "Edited {}: {count} replacement(s), first at line {first_line}",
                 path.display()
             )),
-            Err(e) => ToolOutcome::err(format!("{}: {e}", path.display())),
+            Err(e) => ToolOutcome::err(e),
         }
     }
+}
+
+/// Create or truncate `path` and write `bytes`, refusing a symlink at the
+/// last component (see [`crate::open_nofollow`]).
+async fn write_nofollow(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut f = crate::open_nofollow(
+        path,
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )
+    .await?;
+    f.write_all(bytes)
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.flush()
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Read `path` as UTF-8 without following a symlink at the last component.
+async fn read_nofollow(path: &std::path::Path) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut f = crate::open_nofollow(path, tokio::fs::OpenOptions::new().read(true)).await?;
+    let mut text = String::new();
+    f.read_to_string(&mut text)
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -282,5 +313,161 @@ mod tests {
         let ctx = ToolCtx::new(dir.path());
         let r = Read.run(&ctx, json!({"path": "/etc/hostname"})).await;
         assert!(!r.ok && r.output.contains("outside"));
+    }
+
+    #[cfg(unix)]
+    mod links {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        fn write(ctx: &ToolCtx, path: &str) -> ToolOutcome {
+            futures_block(Write.run(ctx, json!({"path": path, "content": "x\n"})))
+        }
+
+        fn edit(ctx: &ToolCtx, path: &str) -> ToolOutcome {
+            futures_block(Edit.run(
+                ctx,
+                json!({"path": path, "old_string": "a", "new_string": "b"}),
+            ))
+        }
+
+        fn futures_block<F: std::future::Future>(f: F) -> F::Output {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(f)
+        }
+
+        #[test]
+        fn dangling_link_as_last_component_is_refused() {
+            let ws = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("x.service");
+            symlink(&target, ws.path().join("notes.md")).unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            let w = write(&ctx, "notes.md");
+            assert!(!w.ok, "{}", w.output);
+            assert!(w.output.contains("symlink"), "{}", w.output);
+            assert!(!target.exists(), "the write followed the link");
+        }
+
+        #[test]
+        fn dangling_link_as_a_middle_component_is_refused() {
+            let ws = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("newdir");
+            symlink(&target, ws.path().join("d")).unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            let w = write(&ctx, "d/f.txt");
+            assert!(!w.ok, "{}", w.output);
+            assert!(!target.exists(), "the write created a directory outside");
+        }
+
+        #[test]
+        fn link_to_an_existing_outside_file_is_refused() {
+            let ws = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("keep");
+            std::fs::write(&target, "a\n").unwrap();
+            symlink(&target, ws.path().join("l")).unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            assert!(!write(&ctx, "l").ok);
+            assert!(!edit(&ctx, "l").ok);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\n");
+        }
+
+        #[test]
+        fn link_to_an_inside_file_writes_the_target() {
+            let ws = tempfile::tempdir().unwrap();
+            std::fs::write(ws.path().join("real.txt"), "a\n").unwrap();
+            symlink(ws.path().join("real.txt"), ws.path().join("l")).unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            let e = edit(&ctx, "l");
+            assert!(e.ok, "{}", e.output);
+            assert_eq!(
+                std::fs::read_to_string(ws.path().join("real.txt")).unwrap(),
+                "b\n"
+            );
+            let w = write(&ctx, "l");
+            assert!(w.ok, "{}", w.output);
+            assert_eq!(
+                std::fs::read_to_string(ws.path().join("real.txt")).unwrap(),
+                "x\n"
+            );
+            assert!(
+                std::fs::symlink_metadata(ws.path().join("l"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+
+        #[test]
+        fn git_directory_is_read_only() {
+            let ws = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(ws.path().join(".git/hooks")).unwrap();
+            std::fs::write(ws.path().join(".git/config"), "a\n").unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            for p in [".git/config", ".git/hooks/pre-commit", "sub/../.git/config"] {
+                let w = write(&ctx, p);
+                assert!(!w.ok && w.output.contains(".git"), "{p}: {}", w.output);
+            }
+            let e = edit(&ctx, ".git/config");
+            assert!(!e.ok && e.output.contains(".git"), "{}", e.output);
+            assert!(!ws.path().join(".git/hooks/pre-commit").exists());
+            assert_eq!(
+                std::fs::read_to_string(ws.path().join(".git/config")).unwrap(),
+                "a\n"
+            );
+            let r = futures_block(Read.run(&ctx, json!({"path": ".git/config"})));
+            assert!(r.ok, "{}", r.output);
+            // A link into .git is no way around it.
+            symlink(ws.path().join(".git"), ws.path().join("g")).unwrap();
+            let w = write(&ctx, "g/hooks/pre-commit");
+            assert!(!w.ok && w.output.contains(".git"), "{}", w.output);
+        }
+
+        #[test]
+        fn git_rule_holds_outside_the_workspace_too() {
+            let ws = tempfile::tempdir().unwrap();
+            let ctx = ToolCtx {
+                allow_outside_workspace: true,
+                ..ToolCtx::new(ws.path())
+            };
+            assert!(!write(&ctx, ".git/config").ok);
+            let w = write(&ctx, "plain.txt");
+            assert!(w.ok, "{}", w.output);
+        }
+
+        #[test]
+        fn outside_mode_still_does_not_follow_a_final_link() {
+            let ws = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("t");
+            symlink(&target, ws.path().join("l")).unwrap();
+            let ctx = ToolCtx {
+                allow_outside_workspace: true,
+                ..ToolCtx::new(ws.path())
+            };
+            assert!(!write(&ctx, "l").ok);
+            assert!(!target.exists());
+        }
+
+        #[test]
+        fn plain_nested_files_and_traversal() {
+            let ws = tempfile::tempdir().unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            let w = write(&ctx, "a/b/c.txt");
+            assert!(w.ok && w.output.starts_with("Wrote "), "{}", w.output);
+            assert_eq!(
+                std::fs::read_to_string(ws.path().join("a/b/c.txt")).unwrap(),
+                "x\n"
+            );
+            let again = write(&ctx, "a/b/c.txt");
+            assert!(again.ok, "{}", again.output);
+            let t = write(&ctx, "../escape.txt");
+            assert!(!t.ok && t.output.contains("outside"), "{}", t.output);
+        }
     }
 }

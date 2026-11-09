@@ -73,6 +73,9 @@ pub struct DelegateOutcome {
 }
 
 pub struct TurnCtx<'a> {
+    /// The session this turn belongs to. Per-session state kept by a
+    /// backend shared by many sessions (stored tool outputs) is keyed by it.
+    pub session_id: crate::SessionId,
     pub turn_id: String,
     /// Every event of this session before this turn, in seq order.
     pub history: Vec<RawEvent>,

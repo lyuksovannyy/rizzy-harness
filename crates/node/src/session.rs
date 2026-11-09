@@ -408,6 +408,7 @@ impl Session {
             let backend = this.node.cfg.backend.clone();
             backend
                 .run_turn(TurnCtx {
+                    session_id: this.id,
                     turn_id: tid,
                     history,
                     user_text,

@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 pub use bash::Bash;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
-pub use outputs::{OutputStore, ToolOutput};
+pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
 pub use search::{Glob, Grep};
 
@@ -49,7 +49,8 @@ pub struct ToolCtx {
     /// Token-saving methods in effect for this call.
     pub savings: harness_core::savings::Savings,
     /// Where full outputs of filtered commands are kept (`tool_output`).
-    pub outputs: Option<Arc<OutputStore>>,
+    /// Bound to the session the call runs for.
+    pub outputs: Option<SessionOutputs>,
     /// Citation labels for web results, shared by every call of the turn.
     pub refs: SharedRefs,
     /// Where `publish` stages files (the node session's stager); `None`
@@ -87,39 +88,31 @@ impl ToolCtx {
 
     /// Resolve a user/model-supplied path against the workspace and enforce
     /// confinement. Works for paths that do not exist yet.
+    ///
+    /// The path is walked one component at a time with `lstat`. Inside the
+    /// workspace a symlink is followed only when its target exists and is
+    /// inside the workspace too; a dangling link is refused wherever it is
+    /// in the path, because whatever creates its target later (a `write`, a
+    /// `mkdir -p`) would land wherever the link points. The result is the
+    /// real path: existing part canonical, the part that does not exist yet
+    /// appended.
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
-        let raw = Path::new(p);
-        let joined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else {
-            self.workspace.join(raw)
-        };
-        let normalized = normalize(&joined);
         if self.allow_outside_workspace {
-            return Ok(normalized);
+            return Ok(self.normalized(p));
         }
         let ws = self
             .workspace
             .canonicalize()
             .map_err(|e| format!("workspace: {e}"))?;
-        // Canonicalize the deepest existing ancestor to defeat symlink escapes.
-        let mut existing = normalized.as_path();
-        let mut rest = Vec::new();
-        while !existing.exists() {
-            match (existing.parent(), existing.file_name()) {
-                (Some(parent), Some(name)) => {
-                    rest.push(name.to_os_string());
-                    existing = parent;
-                }
-                _ => break,
-            }
-        }
-        let mut real = existing
-            .canonicalize()
-            .map_err(|e| format!("{}: {e}", existing.display()))?;
-        for part in rest.iter().rev() {
-            real.push(part);
-        }
+        // Relative paths start at the real workspace, so the walk is always
+        // over an absolute path whatever `workspace` looks like.
+        let raw = Path::new(p);
+        let normalized = normalize(&if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            ws.join(raw)
+        });
+        let real = walk(&normalized, Some(&ws), p)?;
         if real.starts_with(&ws) {
             Ok(real)
         } else {
@@ -130,6 +123,135 @@ impl ToolCtx {
             ))
         }
     }
+
+    /// [`Self::resolve`] for a path about to be written: also refuses any
+    /// path inside a `.git` directory, in every mode. The repository's git
+    /// config and hooks run commands (`core.fsmonitor`, `pre-commit`) the
+    /// next time anyone runs git there, outside every approval.
+    ///
+    /// The caller must still open the file without following a symlink at
+    /// the last component ([`open_nofollow`]): the link could be swapped in
+    /// after this check.
+    pub fn resolve_for_write(&self, p: &str) -> Result<PathBuf, String> {
+        let path = self.resolve(p)?;
+        // In outside mode `resolve` does not look at links; find where the
+        // path really goes so a link to some `.git` is no way around this.
+        let real = if self.allow_outside_workspace {
+            walk(&path, None, p).unwrap_or_else(|_| path.clone())
+        } else {
+            path.clone()
+        };
+        let ws = self
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| normalize(&self.workspace));
+        // Only components below the workspace count when it is inside, so
+        // a workspace that itself lives under some `.git` still works.
+        let checked = real.strip_prefix(&ws).unwrap_or(&real);
+        let in_git = checked.components().any(|c| match c {
+            Component::Normal(n) => n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(".git")),
+            _ => false,
+        });
+        if in_git {
+            return Err(format!(
+                "refusing to write {p}: it is inside a .git directory. The repository's git \
+                 configuration and hooks can run commands, so they are read-only to the agent; \
+                 ask the user to make this change"
+            ));
+        }
+        Ok(path)
+    }
+
+    fn normalized(&self, p: &str) -> PathBuf {
+        let raw = Path::new(p);
+        let joined = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            self.workspace.join(raw)
+        };
+        normalize(&joined)
+    }
+}
+
+/// Walk `path` (absolute, already normalized) one component at a time with
+/// `lstat`, following symlinks, and return the real path. With `ws`, a
+/// symlink met inside `ws` must resolve to an existing target inside `ws`.
+/// Without it, nothing is refused and a dangling link ends the walk (the
+/// rest is appended as it is).
+fn walk(path: &Path, ws: Option<&Path>, shown: &str) -> Result<PathBuf, String> {
+    let mut real = PathBuf::new();
+    let mut missing = false;
+    for c in path.components() {
+        let name = match c {
+            Component::Normal(n) => n,
+            other => {
+                real.push(other.as_os_str());
+                continue;
+            }
+        };
+        if missing {
+            real.push(name);
+            continue;
+        }
+        let candidate = real.join(name);
+        match std::fs::symlink_metadata(&candidate) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing = true;
+                real = candidate;
+            }
+            Err(e) => return Err(format!("{}: {e}", candidate.display())),
+            Ok(md) if md.file_type().is_symlink() => {
+                let inside = ws.is_some_and(|ws| real.starts_with(ws));
+                match candidate.canonicalize() {
+                    Ok(target) => {
+                        if inside
+                            && let Some(ws) = ws
+                            && !target.starts_with(ws)
+                        {
+                            return Err(format!(
+                                "path {shown}: {} is a symlink to {}, outside the session \
+                                 workspace {}; refusing to follow it",
+                                candidate.display(),
+                                target.display(),
+                                ws.display()
+                            ));
+                        }
+                        real = target;
+                    }
+                    Err(e) if ws.is_some() => {
+                        return Err(format!(
+                            "path {shown}: {} is a symlink whose target cannot be resolved \
+                             ({e}); refusing to follow a dangling symlink",
+                            candidate.display()
+                        ));
+                    }
+                    Err(_) => {
+                        missing = true;
+                        real = candidate;
+                    }
+                }
+            }
+            Ok(_) => real = candidate,
+        }
+    }
+    Ok(real)
+}
+
+/// Open `path` without following a symlink at its last component (`write`
+/// and `edit`): a link put there after [`ToolCtx::resolve_for_write`]
+/// checked the path fails with a clear error instead of being followed.
+pub(crate) async fn open_nofollow(
+    path: &Path,
+    opts: &mut tokio::fs::OpenOptions,
+) -> Result<tokio::fs::File, String> {
+    opts.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
+    opts.open(path).await.map_err(|e| {
+        if e.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32) {
+            format!("{}: is a symlink; refusing to follow it", path.display())
+        } else {
+            format!("{}: {e}", path.display())
+        }
+    })
 }
 
 fn normalize(p: &Path) -> PathBuf {
@@ -254,6 +376,31 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         let ctx = ToolCtx::new(dir.path());
         assert!(ctx.resolve("link/file").is_err());
+    }
+
+    #[test]
+    fn resolve_refuses_dangling_links_anywhere_in_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("nope"), dir.path().join("dl")).unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let last = ctx.resolve("dl").unwrap_err();
+        assert!(last.contains("symlink"), "{last}");
+        assert!(ctx.resolve("dl/x/y").is_err());
+        // A dangling link that would point inside is refused too: its
+        // target cannot be checked until it exists.
+        std::os::unix::fs::symlink(dir.path().join("later"), dir.path().join("in")).unwrap();
+        assert!(ctx.resolve("in").is_err());
+    }
+
+    #[test]
+    fn resolve_follows_links_that_stay_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("l")).unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let r = ctx.resolve("l/new.txt").unwrap();
+        assert_eq!(r, dir.path().canonicalize().unwrap().join("real/new.txt"));
     }
 
     #[test]

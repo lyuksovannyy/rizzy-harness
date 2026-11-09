@@ -179,6 +179,7 @@ impl Turn {
         let host = Host::default();
         backend
             .run_turn(TurnCtx {
+                session_id: harness_core::SessionId::new(),
                 turn_id: "t1".into(),
                 history: self
                     .history

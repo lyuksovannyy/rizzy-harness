@@ -1097,7 +1097,7 @@ impl NativeBackend {
             env_remove: self.config.env_remove.clone(),
             observed: Arc::new(observed.to_vec()),
             savings: ctx.extra.savings.clone(),
-            outputs: Some(self.outputs.clone()),
+            outputs: Some(self.outputs.session(ctx.session_id)),
             refs: refs.clone(),
             artifacts: host.artifacts(),
             call_id: call.call_id.clone(),
@@ -1197,6 +1197,7 @@ mod tests {
 
     fn ctx<'a>(host: &'a RecHost, text: &str, cwd: &std::path::Path) -> TurnCtx<'a> {
         TurnCtx {
+            session_id: harness_core::SessionId::new(),
             turn_id: "t".into(),
             history: vec![],
             user_text: text.into(),
@@ -1379,6 +1380,106 @@ mod tests {
         let all = outputs.concat();
         assert!(!all.contains("sk-supersecret-123"), "{all}");
         assert!(all.contains("[REDACTED]"));
+    }
+
+    /// `run: <cmd>` calls bash, `out: <id>` calls tool_output; after a tool
+    /// result it stops.
+    struct Scripted;
+
+    #[async_trait::async_trait]
+    impl Provider for Scripted {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            let done = Completion {
+                text: "done".into(),
+                tool_calls: vec![],
+                usage: None,
+            };
+            if matches!(req.messages.last(), Some(ChatMsg::Tool { .. })) {
+                return Ok(done);
+            }
+            let user = req
+                .messages
+                .iter()
+                .rev()
+                .find_map(|m| m.user_text())
+                .unwrap_or_default();
+            let (tool, input) = if let Some(c) = user.strip_prefix("run: ") {
+                ("bash", json!({"command": c}))
+            } else if let Some(id) = user.strip_prefix("out: ") {
+                ("tool_output", json!({"id": id, "limit": 1}))
+            } else {
+                return Ok(done);
+            };
+            Ok(Completion {
+                text: String::new(),
+                tool_calls: vec![ToolCallRef {
+                    call_id: new_id(),
+                    tool: tool.into(),
+                    input,
+                }],
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_outputs_are_private_to_their_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = NativeBackend::new(
+            Arc::new(Scripted),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        );
+        let savings = harness_core::savings::Savings {
+            filter_shell_output: true,
+            ..Default::default()
+        };
+        let turn = |host: &'static RecHost, sid: SessionId, text: &str| {
+            let mut c = ctx(host, text, dir.path());
+            c.session_id = sid;
+            c.extra.savings = savings.clone();
+            c
+        };
+        let leak = |h: RecHost| -> &'static RecHost { Box::leak(Box::new(h)) };
+        let finished = |host: &RecHost| -> Vec<(bool, String)> {
+            host.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::ToolCallFinished(f) => Some((f.ok, f.output.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (a, other) = (SessionId::new(), SessionId::new());
+        let host_a = leak(RecHost::new(Decision::Allow));
+        // Long enough to be cut, so the full output is stored.
+        b.run_turn(turn(host_a, a, "run: seq 1 20000")).await;
+        let out = finished(host_a).pop().unwrap().1;
+        let id = out
+            .split("tool_output id=")
+            .nth(1)
+            .and_then(|r| r.split(']').next())
+            .unwrap_or_else(|| panic!("no id in {out}"))
+            .to_string();
+
+        let host_b = leak(RecHost::new(Decision::Allow));
+        b.run_turn(turn(host_b, other, &format!("out: {id}"))).await;
+        let (ok, text) = finished(host_b).pop().unwrap();
+        assert!(!ok && text.contains("no stored output"), "{text}");
+
+        let host_a2 = leak(RecHost::new(Decision::Allow));
+        b.run_turn(turn(host_a2, a, &format!("out: {id}"))).await;
+        let (ok, text) = finished(host_a2).pop().unwrap();
+        assert!(ok && text.starts_with("1\t1\n"), "{text}");
     }
 
     /// Stands in for the web tools: labels the page in `query` (a URL) and
