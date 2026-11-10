@@ -257,6 +257,37 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
     assert!(!alive, "child {pid} survived cancel");
 }
 
+/// A cancel sent right after a prompt stops that prompt's turn, even
+/// though cancels are answered ahead of the session's queued commands.
+#[tokio::test]
+async fn cancel_right_after_prompt_stops_that_turn() {
+    let mut h = Harness::new(default_policy).await;
+    let sid = h.create().await;
+    for round in 0..5 {
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: format!("p{round}"),
+            session_id: sid,
+            text: "slow: 400".into(),
+            images: vec![],
+        });
+        h.send(MasterToNode::Cancel {
+            req_id: format!("x{round}"),
+            session_id: sid,
+        });
+        let EventKind::TurnEnded(t) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await
+        else {
+            unreachable!()
+        };
+        assert_eq!(t.reason, TurnEndReason::Cancelled, "round {round}");
+    }
+}
+
 #[tokio::test]
 async fn policy_denied_tool_never_runs() {
     let mut h = Harness::new(|root| NodePolicy {

@@ -32,6 +32,19 @@ pub const FLUSH_BYTES: usize = 2048;
 
 const MAX_STEPS: usize = 50;
 
+/// After a cancel, how long a tool has to return on its own (bash kills
+/// its process group in that time) before the turn stops waiting for it.
+pub const TOOL_CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// Aborts a helper task when the call that started it ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The orchestration tool (handled by the loop itself, not a `Tool`).
 pub const DELEGATE: &str = "delegate";
 
@@ -1144,13 +1157,25 @@ impl NativeBackend {
         // room in the channel is always woken by the next drain.
         let call_id = call.call_id.clone();
         let secrets = &self.config.secrets;
-        // The tool itself observes cancellation (and kills its process group),
-        // so we must not abandon its future: use a token that never fires here.
-        let never = tokio_util::sync::CancellationToken::new();
+        // The tool itself observes cancellation (bash kills its process
+        // group), so its future is not dropped at once: it gets
+        // `TOOL_CANCEL_GRACE` to return on its own. A tool still running
+        // then (stuck in a syscall, a bug) is abandoned so the turn ends
+        // (AUDIT S10); a blocking thread it left keeps running detached.
+        let abandon = tokio_util::sync::CancellationToken::new();
+        let watch = {
+            let (cancel, abandon) = (ctx.cancel.clone(), abandon.clone());
+            tokio::spawn(async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(TOOL_CANCEL_GRACE).await;
+                abandon.cancel();
+            })
+        };
+        let _stop_watch = AbortOnDrop(watch);
         let step = coalesce(
             tool.run(&tctx, call.input.clone()),
             rx,
-            &never,
+            &abandon,
             host,
             |text| {
                 EventKind::ToolOutputDelta(ToolOutputDelta {
@@ -1827,6 +1852,50 @@ mod tests {
             cancel.cancel();
         });
         let out = backend().run_turn(c).await;
+        assert_eq!(out.reason, TurnEndReason::Cancelled);
+    }
+
+    /// A tool that ignores its cancellation token (stuck in a syscall, a
+    /// bug) still cannot hold the turn past the grace period (AUDIT S10).
+    #[tokio::test]
+    async fn cancel_ends_the_turn_even_if_a_tool_ignores_it() {
+        struct Stuck;
+        #[async_trait::async_trait]
+        impl harness_tools::Tool for Stuck {
+            fn name(&self) -> &'static str {
+                "read"
+            }
+            fn description(&self) -> &'static str {
+                "never returns"
+            }
+            fn schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::ReadOnly
+            }
+            async fn run(&self, _ctx: &ToolCtx, _input: Value) -> ToolOutcome {
+                std::future::pending().await
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let c = ctx(&host, "read: x", dir.path());
+        let cancel = c.cancel.clone();
+        let b = NativeBackend::new(
+            Arc::new(mock::Mock {
+                delay: Duration::from_millis(1),
+            }),
+            vec![Arc::new(Stuck)],
+            NativeConfig::default(),
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.cancel();
+        });
+        let out = tokio::time::timeout(TOOL_CANCEL_GRACE + Duration::from_secs(2), b.run_turn(c))
+            .await
+            .expect("a tool that ignores cancel held the turn");
         assert_eq!(out.reason, TurnEndReason::Cancelled);
     }
 
