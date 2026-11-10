@@ -1,0 +1,174 @@
+{
+ "files": {
+  "01-loop-tools-editing-shell.md": {
+   "features": 61,
+   "bytes": 179378
+  },
+  "02-permissions-sandbox-security.md": {
+   "features": 34,
+   "bytes": 168910
+  },
+  "03-context-memory.md": {
+   "features": 26,
+   "bytes": 109745
+  },
+  "04-planning-subagents-background.md": {
+   "features": 42,
+   "bytes": 183176
+  },
+  "05-sessions-git.md": {
+   "features": 29,
+   "bytes": 119426
+  },
+  "06-extensibility.md": {
+   "features": 35,
+   "bytes": 157466
+  },
+  "07-models-observability.md": {
+   "features": 25,
+   "bytes": 132122
+  },
+  "08-ui-browser-collaboration.md": {
+   "features": 24,
+   "bytes": 119934
+  },
+  "09-remote-distributed-architecture.md": {
+   "features": 33,
+   "bytes": 145480
+  },
+  "10-config-licence-distinctive.md": {
+   "features": 23,
+   "bytes": 155796
+  }
+ },
+ "features": 332,
+ "matrices_bytes": 48728,
+ "common_bytes": 22155,
+ "single_bytes": 34399,
+ "ours_bytes": 58518,
+ "corrections_bytes": 52037,
+ "round2_bytes": 36904,
+ "distinctive_bytes": 41564,
+ "overhyped_bytes": 21925,
+ "surveys": {
+  "antigravity.md": {
+   "bytes": 67140,
+   "entries": 93,
+   "urls": 71,
+   "verified_in_review": 11,
+   "corrected_in_review": 4
+  },
+  "claude-code.md": {
+   "bytes": 902191,
+   "entries": 806,
+   "urls": 263,
+   "verified_in_review": 0,
+   "corrected_in_review": 0
+  },
+  "claude-desktop.md": {
+   "bytes": 60482,
+   "entries": 94,
+   "urls": 65,
+   "verified_in_review": 19,
+   "corrected_in_review": 9
+  },
+  "cline.md": {
+   "bytes": 57231,
+   "entries": 95,
+   "urls": 93,
+   "verified_in_review": 20,
+   "corrected_in_review": 2
+  },
+  "codex.md": {
+   "bytes": 98271,
+   "entries": 161,
+   "urls": 151,
+   "verified_in_review": 37,
+   "corrected_in_review": 10
+  },
+  "cursor.md": {
+   "bytes": 61292,
+   "entries": 95,
+   "urls": 84,
+   "verified_in_review": 15,
+   "corrected_in_review": 4
+  },
+  "deepseek-harness.md": {
+   "bytes": 78376,
+   "entries": 100,
+   "urls": 75,
+   "verified_in_review": 23,
+   "corrected_in_review": 8
+  },
+  "goose.md": {
+   "bytes": 65411,
+   "entries": 99,
+   "urls": 102,
+   "verified_in_review": 24,
+   "corrected_in_review": 3
+  },
+  "hermes-agent.md": {
+   "bytes": 75186,
+   "entries": 126,
+   "urls": 5,
+   "verified_in_review": 19,
+   "corrected_in_review": 2
+  },
+  "oh-my-pi.md": {
+   "bytes": 57183,
+   "entries": 112,
+   "urls": 61,
+   "verified_in_review": 20,
+   "corrected_in_review": 5
+  },
+  "openclaw.md": {
+   "bytes": 75100,
+   "entries": 112,
+   "urls": 138,
+   "verified_in_review": 18,
+   "corrected_in_review": 4
+  },
+  "opencode.md": {
+   "bytes": 56883,
+   "entries": 110,
+   "urls": 74,
+   "verified_in_review": 21,
+   "corrected_in_review": 4
+  },
+  "opencodex.md": {
+   "bytes": 37186,
+   "entries": 36,
+   "urls": 44,
+   "verified_in_review": 8,
+   "corrected_in_review": 7
+  },
+  "openhands.md": {
+   "bytes": 62565,
+   "entries": 89,
+   "urls": 31,
+   "verified_in_review": 18,
+   "corrected_in_review": 5
+  },
+  "pi.md": {
+   "bytes": 64716,
+   "entries": 104,
+   "urls": 91,
+   "verified_in_review": 12,
+   "corrected_in_review": 2
+  },
+  "warp.md": {
+   "bytes": 68906,
+   "entries": 114,
+   "urls": 115,
+   "verified_in_review": 12,
+   "corrected_in_review": 4
+  },
+  "zed-acp.md": {
+   "bytes": 54081,
+   "entries": 47,
+   "urls": 98,
+   "verified_in_review": 19,
+   "corrected_in_review": 0
+  }
+ }
+}

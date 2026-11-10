@@ -1,0 +1,48 @@
+## 13. What surprised us and what looks overhyped
+
+### Genuine surprises
+
+Things that contradict a reasonable prior, including reversals.
+
+- **Pi shipped MCP after arguing against it.** Its author argued against MCP in 2025 on context-bloat grounds; MCP was added in 0.99.0 as a built-in extension, behind code mode and deferral, and the homepage still lists it among deliberate non-features (https://pi.dev/docs/latest/mcp, https://pi.dev/).
+- **Zed removed its checkpoints.** "Restore Checkpoint" was removed in 1.27.0 (2026-11-04) because per-prompt Git snapshots slowed or hung large repositories; the Agent Panel page is silent about it (https://zed.dev/releases/stable, corrected in review). A shipped feature withdrawn on cost is rare evidence.
+- **OpenCode discontinued session sharing** in v1.19.1 (15 October 2026); the survey first recorded it as merely undocumented (https://opencode.ai/changelog/v1.19.1, corrected in review).
+- **Claude Code withdrew its task tools on newer models.** TaskCreate and its siblings are default only on older models and were withdrawn for Opus 4.8, Sonnet 5, Fable 5 and newer in 2.1.233 (https://code.claude.com/docs/en/tools-reference.md).
+- **Claude Code's sub-agent nesting went from 5 levels to off to 3 within six weeks,** while its digest still says 5; a 200 cap on total spawns was added in 2.1.212 and removed in 2.1.224 (https://code.claude.com/docs/en/sub-agents.md).
+- **goose removed background sub-agents and its orchestrator** in v1.55.0, then added resume in v1.56.0 (https://goose-docs.ai/docs/guides/context-engineering/subagents.md).
+- **Codex removed its MCP server,** and the only replacement, the App Server, is labelled "experimental and isn't supported for production workloads" while the stable Python SDK is built on it (https://learn.chatgpt.com/docs/mcp-server.md, https://learn.chatgpt.com/docs/app-server.md).
+- **Codex rejects Landlock** for filesystem-restricted policies because Landlock cannot isolate Unix sockets, the same residual our gate3 sandbox documents (https://learn.chatgpt.com/docs/sandboxing.md).
+- **Codex passes secrets to child processes by default:** `ignore_default_excludes` defaults to true, so `*KEY*`, `*SECRET*` and `*TOKEN*` variables pass through (https://learn.chatgpt.com/docs/config-file/config-advanced.md). No surveyed harness documents starting children from an empty environment, as ours does.
+- **Codex's App Server accepts unauthenticated non-loopback connections by default "during rollout"** (https://learn.chatgpt.com/docs/app-server.md).
+- **Claude Code's plan mode is not enforced in interactive terminals where bypass is available;** Claude is only instructed not to edit (https://code.claude.com/docs/en/permission-modes.md).
+- **Claude Code's credential masking is partial.** It needs experimental TLS termination, covers sandboxed Bash only, is blocked outright by macOS for masked files, and leaves the real file readable when its pattern does not match; it is a different mechanism from the cloud secret proxy (https://code.claude.com/docs/en/sandboxing.md, corrected in review).
+- **Claude Code mods fail open by default,** and the built-in guard loads only with managed settings or a Team or Enterprise login, so API-key users get none and a user mod can approve past deny rules (https://code.claude.com/docs/en/plugins/mods/overview.md, corrected in review).
+- **Anthropic's restriction on third-party claude.ai login has a carve-out:** an end user may sign in to the unmodified `claude` binary with their own subscription, including where a platform hosts Claude Code (https://code.claude.com/docs/en/agent-sdk/overview.md, corrected in review).
+- **Oh My Pi's default approval mode is `yolo`** (https://omp.sh/docs/approvals), and its auth broker hands clients API keys, not only access tokens, over plain HTTP on loopback (https://omp.sh/docs/secrets, corrected in review).
+- **Hermes' container backends skip dangerous-command approval and disable checkpoints** (https://hermes-agent.nousresearch.com/docs/user-guide/security, corrected).
+- **Hermes documents that a smaller summary model silently drops middle turns** rather than summarising them (https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching).
+- **OpenClaw's dreaming is on by default with no time-based retention,** by the project's own admission (https://docs.openclaw.ai/concepts/dreaming).
+- **Human approval of agent-written memory is rare.** Only Antigravity `/learn` and Hermes (opt-in, off by default) gate writes; Claude Code, Codex, OpenHands, Claude chat and OpenClaw do not (see "Who approves an agent memory write" in `round1/synth/03-context-memory.md`).
+- **Cursor's self-hosted workers keep the loop in Cursor's cloud** and send file contents, terminal output, diffs and screenshots back (https://cursor.com/docs/cloud-agent/self-hosted). "Self-hosted" means self-hosted execution, not a self-hosted agent.
+- **No surveyed split design lets the execution side outrank the control side.** Even Claude Code's self-hosted runner receives its tool list and permission rules from the control plane (https://code.claude.com/docs/en/self-hosted-environments-configuration.md, corrected).
+
+### Claims bigger in marketing than in the documented mechanism
+
+Including controls whose own vendor says they are not a security boundary.
+
+- **Antigravity's "sandboxed" browser** drives the user's real Chrome profile with live sign-ins over the DevTools MCP (https://antigravity.google/docs/commands/browser).
+- **Cursor's Auto-review is marketed as a default and documented as not a security boundary;** run-mode guardrails are "best-effort" (https://cursor.com/docs/agent/security, https://cursor.com/docs/agent/security/run-modes). Its classifier runs on Cursor's backend, so command context leaves the machine.
+- **Claude Code's own limits:** Bash rules are "not a security boundary", the sandbox is "not a complete isolation boundary", auto mode "does not guarantee safety", server-managed settings are not a security boundary (https://code.claude.com/docs/en/permissions.md, https://code.claude.com/docs/en/sandboxing.md, https://code.claude.com/docs/en/permission-modes.md, https://code.claude.com/docs/en/server-managed-settings.md).
+- **Claude Code vendor claims without mechanism:** fast mode "up to 2.5x faster", Ultrareview's "every finding independently reproduced", enterprise cost averages, and a communications kit saying the CLI talks directly to Anthropic's API, which is false for gateway and cloud-provider deployments (see Claude Code in `round1/synth/_parts/overhyped.md`).
+- **Oh My Pi's hashline benchmark is the maintainer's own,** titled for 15 models while the body lists 16, and the docs' editing pages do not describe hashline at all (https://stencil.so/blog/the-harness-problem, corrected in review).
+- **Oh My Pi's TTSR "zero standing context cost"** is not stated on the TTSR page (https://omp.sh/docs/ttsr, corrected); its "time-traveling" is abort-and-retry with partial output discarded (see Oh My Pi in `round1/synth/_parts/overhyped.md`). Its approvals and sub-agent isolation are each documented as "not a sandbox" (https://omp.sh/docs/approvals, https://omp.sh/docs/subagents).
+- **Codex's mobile and remote "secure relay layer"** has no technical description (https://learn.chatgpt.com/docs/remote-connections.md).
+- **Cline's "every action requires your explicit approval"** sits beside a CLI that defaults to auto-approve, schedules that default to yolo and an SDK that default-allows (see Cline in `round1/synth/_parts/overhyped.md`). Its plan mode is not a security boundary, since `python -c` can still write (https://docs.cline.bot/features/subagents.md), and `.clineignore` is "not a security boundary" while its token savings are a vendor claim (https://docs.cline.bot/customization/clineignore.md).
+- **OpenClaw's operator scopes are a guardrail within one trust domain, not tenant isolation;** `sessionKey` is a routing selector, not authentication (https://docs.openclaw.ai/gateway/security/trust-model). Its prompt-injection page cites attack-success rates by model with no primary source.
+- **OpenHands is "open source" without a licence named on the comparison page,** has no authentication by default, and its Helm chart is "an unauthenticated, single-tenant application" (https://docs.openhands.dev/overview/faqs.md, corrected). Its security analyzers are "not a sandbox replacement" (https://docs.openhands.dev/sdk/guides/security.md).
+- **OpenCode's admin policies "only tighten",** yet a policy allow can lift an earlier policy deny, and they are not a sandbox for plugin code (https://opencode.ai/docs/policies/, corrected). Its product page's "100% free" is a vendor claim.
+- **goose's adversary-mode reviewer fails open** on errors (https://goose-docs.ai/docs/guides/security/adversary-mode.md).
+- **ACP's permission requests are advisory,** and ACP does not sandbox agents (https://agentclientprotocol.com/protocol/v1/security.md).
+- **Warp's redaction is "a backstop, not a substitute"** (https://docs.warp.dev/platform/architecture/), and "open" covers the client only; SOC 2, zero data retention and "no code stored" are vendor claims.
+- **DeepSeek harness: 278k stars for a repository created on 2026-08-13** says nothing about maturity; the project's own `SAFETY.md` says it has had no security audit and must not be treated as production-ready (https://github.com/deepseek-ai/deepseek-harness/blob/master/SAFETY.md).
+- **OpenCodex's "40+ providers" and "zero client patches"** are vendor claims; its Remote Workspace is presented as a feature but labelled an experimental foundation (see OpenCodex in `round1/synth/_parts/overhyped.md`).
