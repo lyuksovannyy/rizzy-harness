@@ -115,6 +115,21 @@ fn check_url(u: &url::Url, allow_private: bool) -> Result<(), String> {
     }
 }
 
+/// The resolver behind `web_fetch`, for the server's other clients that
+/// must reach public addresses only (provider and model tests, AUDIT L3).
+/// It checks the address that is connected to, so DNS rebinding does not
+/// get past it; IP-literal hosts never reach a resolver, so check those
+/// with [`check_public_url`].
+pub fn public_only_resolver() -> Arc<dyn reqwest::dns::Resolve> {
+    Arc::new(PublicOnly)
+}
+
+/// The URL check behind `web_fetch`: http(s), no credentials, and no
+/// private, loopback or `localhost` host when it is a literal.
+pub fn check_public_url(u: &url::Url) -> Result<(), String> {
+    check_url(u, false)
+}
+
 /// HTTP client for model-chosen URLs. `allow_private` exists for tests only;
 /// `private_redirects` separately controls whether redirects may go inward.
 fn fetch_client(allow_private: bool, private_redirects: bool) -> reqwest::Client {

@@ -256,22 +256,27 @@ impl ProviderRuntime {
 }
 
 /// Models a provider lists, with what it reports about each, for the
-/// onboarding picker. Doubles as a key check.
+/// onboarding picker. Doubles as a key check. Only to a public address or
+/// a host `out` lists (AUDIT L3).
 pub async fn list_models(
     kind: ProviderKind,
     base_url: &str,
     key: Option<&Secret<String>>,
     ollama: bool,
+    out: &crate::outbound::Outbound,
 ) -> Result<Vec<ModelConfig>, String> {
     match api_kind(kind) {
         None => Ok(vec![ModelConfig {
             id: "mock".into(),
             ..Default::default()
         }]),
-        Some(k) => harness_agent_native::models::list_models(k, base_url, key, ollama)
-            .await
-            .map(|v| v.into_iter().map(ModelConfig::from).collect())
-            .map_err(|e| e.to_string()),
+        Some(k) => {
+            let dns = out.provider_call(base_url).await?;
+            harness_agent_native::models::list_models(k, base_url, key, ollama, &dns)
+                .await
+                .map(|v| v.into_iter().map(ModelConfig::from).collect())
+                .map_err(|e| e.to_string())
+        }
     }
 }
 

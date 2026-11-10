@@ -3,6 +3,9 @@
 //! under the T17 headers; "Save as artifact"; one Media item per image
 //! lineage; who sees and changes what (T10); search and features.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,7 +113,7 @@ async fn send(
     rb = if auth.starts_with("Bearer ") {
         rb.header("authorization", auth)
     } else {
-        rb.header("cookie", auth)
+        rb.header("cookie", auth).same_origin()
     };
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -124,6 +127,7 @@ async fn get(t: &T, path: &str, c: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{}{path}", t.base))
         .header("cookie", c)
+        .same_origin()
         .send()
         .await
         .unwrap()
@@ -144,7 +148,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -278,7 +282,7 @@ async fn an_agent_publishes_and_the_file_downloads_byte_for_byte() {
         ("content-security-policy", CSP),
         ("x-content-type-options", "nosniff"),
         ("cross-origin-resource-policy", "same-origin"),
-        ("cache-control", "private, no-cache"),
+        ("cache-control", "no-store"),
         ("content-type", "application/octet-stream"),
     ] {
         assert_eq!(r.headers()[h], v, "{h}");
@@ -571,6 +575,38 @@ async fn who_sees_shares_and_deletes() {
         "not bob's chat"
     );
     let vid = a["versions"][0]["version_id"].as_str().unwrap();
+    // Where alex's file was on alex's node is alex's alone (AUDIT L5): not
+    // in the detail, its latest, the version endpoint or the list.
+    let (_, owner_view) = send(&t, Method::GET, &one, None, &alex).await;
+    assert!(
+        owner_view["versions"][0]["meta"]["source_path"].is_string(),
+        "{owner_view}"
+    );
+    let (_, v1) = send(
+        &t,
+        Method::GET,
+        &format!("{one}/versions/{vid}"),
+        None,
+        &bob,
+    )
+    .await;
+    let (_, listed) = send(
+        &t,
+        Method::GET,
+        &format!("/api/artifacts?workspace={acme}"),
+        None,
+        &bob,
+    )
+    .await;
+    for (what, meta) in [
+        ("detail", &a["versions"][0]["meta"]),
+        ("latest", &a["latest"]["meta"]),
+        ("version", &v1["meta"]),
+        ("list", &listed["artifacts"][0]["latest"]["meta"]),
+    ] {
+        assert!(meta.is_object(), "{what}: {meta}");
+        assert!(meta.get("source_path").is_none(), "{what}: {meta}");
+    }
     let r = get(&t, &format!("{one}/versions/{vid}/download"), &bob).await;
     assert_eq!(r.bytes().await.unwrap().as_ref(), b"the tool");
     // Only the owner changes it; a member cannot delete it, the admin can.

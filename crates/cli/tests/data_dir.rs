@@ -191,3 +191,59 @@ async fn bash_cannot_read_keys_beside_the_project() {
     assert!(out.contains("project-file-ok"), "{out}");
     assert!(out.contains("built"), "{out}");
 }
+
+/// AUDIT L7: a file holding a secret that group or others can read stops
+/// `serve` before it is read, naming the file and the `chmod`. Each in a
+/// fresh data directory; a symlink is judged by its target.
+#[cfg(unix)]
+#[test]
+fn open_secret_files_stop_the_server() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+    let cases: [(&str, &str); 4] = [
+        ("api-token", "api-token"),
+        ("secrets.toml", "secrets.toml"),
+        ("keys/ui-key.der", "ui-key.der"),
+        ("link", "api-token"),
+    ];
+    for (file, named) in cases {
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("keys")).unwrap();
+        if file == "link" {
+            // api-token -> elsewhere/token (0640): the target counts.
+            let target = data.path().join("token-target");
+            std::fs::write(&target, "a".repeat(64)).unwrap();
+            mode(&target, 0o640).unwrap();
+            std::os::unix::fs::symlink(&target, data.path().join("api-token")).unwrap();
+        } else {
+            let path = data.path().join(file);
+            std::fs::write(&path, "x").unwrap();
+            mode(&path, 0o644).unwrap();
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rizzy-harness"))
+            .args(["--data-dir", data.path().to_str().unwrap()])
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .env("HARNESS_LOG", "error")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn harness");
+        let started = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{file}: the server started with a readable secret file");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let mut err = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+        assert!(!status.success(), "{file}");
+        assert!(err.contains("chmod 600"), "{file}: {err}");
+        assert!(err.contains(named), "{file}: {err}");
+    }
+}

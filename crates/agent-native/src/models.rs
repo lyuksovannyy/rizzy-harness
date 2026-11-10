@@ -67,13 +67,20 @@ pub fn same_origin_redirects() -> reqwest::redirect::Policy {
     })
 }
 
-fn client(timeout: Duration) -> Result<reqwest::Client, ProviderError> {
-    reqwest::Client::builder()
+/// The resolver a server-side call connects through: `None` for any
+/// address, or one that refuses some (the master passes its public-only
+/// resolver unless the operator listed the host, AUDIT L3).
+pub type Dns = Option<std::sync::Arc<dyn reqwest::dns::Resolve>>;
+
+fn client(timeout: Duration, dns: &Dns) -> Result<reqwest::Client, ProviderError> {
+    let mut b = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .redirect(same_origin_redirects())
-        .build()
-        .map_err(|e| ProviderError::Http(e.to_string()))
+        .redirect(same_origin_redirects());
+    if let Some(r) = dns {
+        b = b.dns_resolver(r.clone());
+    }
+    b.build().map_err(|e| ProviderError::Http(e.to_string()))
 }
 
 /// The body, or an error once it passes `cap` bytes.
@@ -145,8 +152,9 @@ pub async fn list_models(
     base_url: &str,
     api_key: Option<&Secret<String>>,
     ollama: bool,
+    dns: &Dns,
 ) -> Result<Vec<ModelMeta>, ProviderError> {
-    let client = client(Duration::from_secs(20))?;
+    let client = client(Duration::from_secs(20), dns)?;
     let base = normalize_base(base_url);
     let started = Instant::now();
     let mut out: Vec<ModelMeta> = Vec::new();
@@ -192,7 +200,7 @@ pub async fn list_models(
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out.dedup_by(|a, b| a.id == b.id);
     if ollama || is_ollama(base_url) {
-        probe_ollama(&base, &mut out).await;
+        probe_ollama(&base, &mut out, dns).await;
     }
     Ok(out)
 }
@@ -317,10 +325,10 @@ pub fn parse_ollama_show(v: &Value, m: &mut ModelMeta) {
     }
 }
 
-async fn probe_ollama(base: &str, models: &mut [ModelMeta]) {
+async fn probe_ollama(base: &str, models: &mut [ModelMeta], dns: &Dns) {
     let host = base.trim_end_matches('/').trim_end_matches("/v1");
     let url = format!("{host}/api/show");
-    let Ok(client) = client(Duration::from_secs(5)) else {
+    let Ok(client) = client(Duration::from_secs(5), dns) else {
         return;
     };
     let ids: Vec<(usize, String)> = models
@@ -372,8 +380,9 @@ pub async fn test_chat(
     base_url: &str,
     api_key: Option<&Secret<String>>,
     model: &str,
+    dns: &Dns,
 ) -> Result<String, ProviderError> {
-    let client = client(TEST_TIMEOUT)?;
+    let client = client(TEST_TIMEOUT, dns)?;
     let base = normalize_base(base_url);
     let messages = serde_json::json!([{ "role": "user", "content": TEST_PROMPT }]);
     let v = match kind {

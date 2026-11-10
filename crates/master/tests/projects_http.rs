@@ -2,6 +2,9 @@
 //! projects and the per-turn project context, project memory proposals, the
 //! board and its templates.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -109,7 +112,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).send().await.unwrap();
+    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -150,6 +153,7 @@ async fn users(t: &T) -> (String, String) {
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&r))
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
         .send()
         .await

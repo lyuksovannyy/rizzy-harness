@@ -296,10 +296,22 @@ min_free_mb = 1024                   # free space kept on the data disk
 
 Everything lives in the data directory (`~/.local/share/rizzy-harness`, or
 `--data-dir` / `HARNESS_DATA_DIR`). Back it up as a whole: the files under
-`blobs/` (Media and Artifacts) are encrypted with keys kept only in `master.db`,
-so neither is any use without the other. Deleting a file removes its key from
-the live database, but old copies of `master.db` pages can survive on SSDs and
-copy-on-write filesystems ([docs/media.md](docs/media.md)).
+`blobs/` (Media and Artifacts) are encrypted with per-file keys kept only in
+`master.db`, so neither is any use without the other. That is for deleting
+(crypto-shredding: a deleted file's key is gone from the live database), not
+for keeping the directory secret: whoever can read `master.db` can read every
+file, so use full-disk encryption for that. Old copies of `master.db` pages can
+survive on SSDs and copy-on-write filesystems ([docs/media.md](docs/media.md)).
+
+**Secret files must be private.** `serve` (and `node run`) refuse to start
+when a file holding a secret is readable or writable by group or others,
+naming it and the fix (`chmod 600 <file>`): `secrets.toml`, `api-token`,
+`claim-code`, the private keys in `keys/` (`*-key.der`, `node.key`) and the
+`.env` that `serve` reads. A symlink is judged by its target. The server
+creates all of these 0600 itself; this catches a copied or restored file. In
+Docker, the data directory's files keep their host mode through the bind
+mount: fix the mode on the host. (Unix only; on other systems nothing is
+checked.)
 
 `config.toml`: model providers. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600
@@ -381,6 +393,17 @@ with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
 not set it by hand either.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
+
+**Local and LAN model servers need `HARNESS_PLAIN_HTTP_HOSTS`.** The
+provider and model tests in Settings and the model listing are requests the
+server makes to an admin-typed URL, so they reach public addresses only,
+checked on the address actually connected to. A model server on this machine,
+your LAN or a container network is allowed by host name or address, comma
+separated, then restart: `HARNESS_PLAIN_HTTP_HOSTS=localhost` for Ollama on
+this machine, `HARNESS_PLAIN_HTTP_HOSTS=ollama,192.168.1.20` for others. The
+same list allows plain `http://` with a key. A test of an unlisted private host
+fails with the exact value to add. (Chats themselves use the saved provider's
+URL as before.)
 
 Chats and web tools (restart after changing):
 
@@ -713,6 +736,19 @@ data directory once on each device:
 ```bash
 ./target/release/rizzy-harness serve --bind 10.8.0.1:7777 --tls
 ```
+
+With `--tls` every response for a host name (not `localhost`, not an IP
+address) carries `Strict-Transport-Security: max-age=15552000` (180 days,
+this host only): the browser then refuses plain `http://` for that name. If
+you turn `--tls` off again, clear the name in the browser's HSTS settings or
+wait out the 180 days.
+
+The browser's `Origin` must match the server's scheme: a page served over
+`http://` cannot drive a `--tls` server, and the reverse. Behind a reverse
+proxy that terminates TLS for a plain-HTTP server, allow the proxy's origin
+with its scheme: `--allowed-host https://chat.example.com` (a bare
+`host:port` entry means the server's own scheme). `X-Forwarded-Proto` is not
+read.
 
 ## Central server in Docker
 

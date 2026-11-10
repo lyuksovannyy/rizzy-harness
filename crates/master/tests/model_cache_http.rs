@@ -2,6 +2,9 @@
 //! custom models, model tests (chat and embeddings), providers without chat
 //! models; agent fallbacks, notices about unavailable models, avatars.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -149,6 +152,11 @@ async fn start() -> T {
         }),
     );
     master.set_provider_runtime(Arc::new(rt));
+    // The fake providers run on 127.0.0.1: listed, as an operator would
+    // list a local model server (HARNESS_PLAIN_HTTP_HOSTS).
+    master.set_outbound(harness_master::outbound::Outbound::new([
+        "127.0.0.1".to_string()
+    ]));
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(l, router(m2)).await.unwrap() });
     let mut t = T {
@@ -176,7 +184,8 @@ async fn start() -> T {
 async fn call(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", &t.admin);
+        .header("cookie", &t.admin)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -677,7 +686,8 @@ async fn call_as(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", cookie);
+        .header("cookie", cookie)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -714,6 +724,7 @@ async fn member(t: &T, name: &str) -> String {
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", &first)
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": "a password of my own"}))
         .send()
         .await

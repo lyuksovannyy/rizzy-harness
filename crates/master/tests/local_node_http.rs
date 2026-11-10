@@ -4,6 +4,9 @@
 //! accounts with the agentic grant use a remote node. `[nodes]
 //! local_node_users = "granted"` lets everyone with the grant in.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -123,7 +126,7 @@ async fn send(
     }
     match auth {
         Some(TOKEN) => rb = rb.bearer_auth(TOKEN),
-        Some(c) => rb = rb.header("cookie", c),
+        Some(c) => rb = rb.header("cookie", c).same_origin(),
         None => {}
     }
     let r = rb.send().await.unwrap();

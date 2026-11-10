@@ -160,8 +160,8 @@ impl View {
         })
     }
 
-    /// `ArtifactVersion` (sidebar areas §7.8).
-    fn version(&self, m: &Master, v: &VersionRow) -> Value {
+    /// `ArtifactVersion` (sidebar areas §7.8) of a version of `r`.
+    fn version(&self, m: &Master, r: &ArtifactRow, v: &VersionRow) -> Value {
         let progress = (v.status == "pending")
             .then(|| crate::artifact_pull::progress(m, &v.version_id))
             .flatten()
@@ -183,6 +183,13 @@ impl View {
             && let Some(m) = meta.as_object_mut()
         {
             m.remove("target");
+        }
+        // Where the file was on its node is the owner's directory layout:
+        // not for the members a shared artifact is shown to (AUDIT L5).
+        if !mine(&self.viewer, r)
+            && let Some(m) = meta.as_object_mut()
+        {
+            m.remove("source_path");
         }
         // An image's size from its header (read at commit, never decoded);
         // other kinds' previews hold only the owner's browser hints.
@@ -231,7 +238,7 @@ impl View {
             "owner": r.owner_name.as_ref().map(|u| json!({ "username": u })),
             "project_id": r.project_id,
             "versions": r.ready,
-            "latest": latest.map(|v| self.version(m, v)),
+            "latest": latest.map(|v| self.version(m, r, v)),
             "media_id": if is_mine { r.media_id.clone() } else { None },
             "updated_ms": r.updated_ms,
         })
@@ -374,7 +381,7 @@ async fn detail(
     v["versions"] = json!(
         versions
             .iter()
-            .map(|x| view.version(&m, x))
+            .map(|x| view.version(&m, &row, x))
             .collect::<Vec<_>>()
     );
     Ok(Json(v))
@@ -505,9 +512,9 @@ async fn version(
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let (_, v) = visible_version(&m, &who, &id, &vid).await?;
+    let (row, v) = visible_version(&m, &who, &id, &vid).await?;
     let view = View::new(&m, &who, &[&v]).await?;
-    Ok(Json(view.version(&m, &v)))
+    Ok(Json(view.version(&m, &row, &v)))
 }
 
 #[derive(Deserialize)]

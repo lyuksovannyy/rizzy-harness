@@ -23,7 +23,9 @@
 //!   Argon2 run takes one of 4 permits ([`limits`], AUDIT S4).
 //! * No secret is ever logged or accepted in a URL.
 //! * Every request's `Host` must be allowlisted (DNS-rebinding defence), and
-//!   any `Origin` sent must match an allowed host (CSRF / cross-site WS).
+//!   any `Origin` sent must match an allowed host with its scheme (CSRF /
+//!   cross-site WS); cookie-authenticated writes and WebSockets must send
+//!   one.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -146,11 +148,15 @@ pub fn random_hex(bytes: usize) -> String {
     hex::encode(buf)
 }
 
-/// Read a 0600 secret file, creating it with `make()` on first run.
+/// Read a 0600 secret file, creating it with `make()` on first run. An
+/// existing file open to group or others is refused before it is read
+/// (AUDIT L7), with the `chmod` that fixes it.
 pub fn load_or_create_secret(
     path: &Path,
     make: impl FnOnce() -> String,
 ) -> std::io::Result<Secret<String>> {
+    crate::secrets::check_private(path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
     match std::fs::read_to_string(path) {
         Ok(s) if !s.trim().is_empty() => return Ok(Secret::new(s.trim().to_string())),
         Ok(_) => {}
@@ -436,6 +442,12 @@ impl Auth {
         }
     }
 
+    /// Whether this server serves TLS itself (`--tls`): its own scheme is
+    /// `https`. A TLS-terminating proxy in front does not count.
+    pub fn serves_tls(&self) -> bool {
+        self.secure_cookie
+    }
+
     /// The process's password hasher (4 at once).
     pub fn hasher(&self) -> &Hasher {
         &self.hasher
@@ -604,17 +616,37 @@ impl Auth {
         Ok(user)
     }
 
-    fn host_allowed(&self, host: &str) -> bool {
-        self.allowed_hosts
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case(host))
+    /// The allowed origins: `(scheme, host[:port])`. An entry without a
+    /// scheme is reached with the server's own (`https` with `--tls`); an
+    /// entry written as an origin (`https://chat.example`) names how
+    /// browsers reach it, for a TLS proxy in front of a plain-HTTP server.
+    fn origins(&self) -> impl Iterator<Item = (&str, &str)> {
+        let own = if self.serves_tls() { "https" } else { "http" };
+        self.allowed_hosts.iter().map(move |h| {
+            if let Some(rest) = h.strip_prefix("https://") {
+                ("https", rest.trim_end_matches('/'))
+            } else if let Some(rest) = h.strip_prefix("http://") {
+                ("http", rest.trim_end_matches('/'))
+            } else {
+                (own, h.as_str())
+            }
+        })
     }
 
+    fn host_allowed(&self, host: &str) -> bool {
+        self.origins().any(|(_, h)| h.eq_ignore_ascii_case(host))
+    }
+
+    /// `origin` is exactly `scheme://host[:port]` of an allowed entry, with
+    /// that entry's scheme: an `http://` page cannot drive an `https://`
+    /// server or the reverse, and `null` (sandboxed frames, `file:`) never
+    /// matches.
     fn origin_allowed(&self, origin: &str) -> bool {
-        let rest = origin
-            .strip_prefix("http://")
-            .or_else(|| origin.strip_prefix("https://"));
-        rest.is_some_and(|h| self.host_allowed(h))
+        let Some((scheme, rest)) = origin.split_once("://") else {
+            return false;
+        };
+        self.origins()
+            .any(|(s, h)| s.eq_ignore_ascii_case(scheme) && h.eq_ignore_ascii_case(rest))
     }
 
     fn cookie(&self, value: &str, max_age_s: i64) -> HeaderValue {
@@ -746,15 +778,45 @@ pub async fn guard(State(master): State<Master>, req: Request, next: Next) -> Re
     if !auth.host_allowed(host) {
         return (StatusCode::FORBIDDEN, "host not allowed").into_response();
     }
-    if let Some(origin) = req.headers().get(header::ORIGIN) {
-        let ok = origin.to_str().is_ok_and(|o| auth.origin_allowed(o));
-        if !ok {
-            return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+    match req.headers().get(header::ORIGIN) {
+        Some(origin) => {
+            let ok = origin.to_str().is_ok_and(|o| auth.origin_allowed(o));
+            if !ok {
+                return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+            }
         }
+        // A browser sends `Origin` on every state-changing request and on
+        // every WebSocket; a cookie-carrying one without it is not a page
+        // of ours (`SameSite=Strict` is the first line, this the second).
+        // Scripts with the API token send none and need none: a cross-site
+        // page cannot set `Authorization`.
+        None if needs_origin(&req) => {
+            return (StatusCode::FORBIDDEN, "origin required").into_response();
+        }
+        None => {}
     }
     let mut resp = next.run(req).await;
     security_headers(resp.headers_mut());
     resp
+}
+
+/// A request that must carry `Origin`: cookie-authenticated (a session
+/// cookie and no `Authorization: Bearer`, which `authenticate` would use
+/// instead) and state-changing (any method but GET, HEAD and OPTIONS, or a
+/// WebSocket upgrade).
+fn needs_origin(req: &Request) -> bool {
+    use axum::http::Method;
+    let h = req.headers();
+    let bearer = h
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("Bearer "));
+    let upgrade = h
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let changes = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    !bearer && cookie_value(h).is_some() && (changes || upgrade)
 }
 
 /// The app's CSP, for every response that does not bring its own.
@@ -796,6 +858,32 @@ mod tests {
         }
     }
 
+    /// AUDIT L7: an existing token or claim-code file that group or others
+    /// can read is refused before it is read, also behind a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_files_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("api-token");
+        std::fs::write(&p, "a".repeat(64)).unwrap();
+        for m in [0o644, 0o640, 0o604, 0o660] {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).unwrap();
+            let e = load_or_create_token(&p).unwrap_err().to_string();
+            assert!(
+                e.contains("chmod 600") && e.contains("api-token"),
+                "{m:o}: {e}"
+            );
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load_or_create_token(&p).unwrap().expose(), &"a".repeat(64));
+        let link = dir.path().join("claim-code");
+        std::os::unix::fs::symlink(&p, &link).unwrap();
+        assert!(load_or_create_secret(&link, new_claim_code).is_ok());
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_or_create_secret(&link, new_claim_code).is_err());
+    }
+
     #[test]
     fn host_and_origin_checks() {
         let a = Auth::new(
@@ -808,6 +896,29 @@ mod tests {
         assert!(a.origin_allowed("http://127.0.0.1:7777"));
         assert!(!a.origin_allowed("http://evil.example"));
         assert!(!a.origin_allowed("null"));
+        // The scheme counts: this server is plain HTTP.
+        assert!(!a.origin_allowed("https://127.0.0.1:7777"));
+        assert!(!a.origin_allowed("http://127.0.0.1:7778"));
+        assert!(!a.origin_allowed("http://127.0.0.1:7777/x"));
+        assert!(!a.origin_allowed("127.0.0.1:7777"));
+        let tls = Auth::new(
+            Secret::new("t".into()),
+            vec!["box:7777".into(), "https://chat.example".into()],
+            true,
+        );
+        assert!(tls.origin_allowed("https://box:7777"));
+        assert!(!tls.origin_allowed("http://box:7777"));
+        // An entry written as an origin: a TLS proxy in front.
+        assert!(tls.host_allowed("chat.example"));
+        assert!(tls.origin_allowed("https://chat.example"));
+        assert!(!tls.origin_allowed("http://chat.example"));
+        let proxied = Auth::new(
+            Secret::new("t".into()),
+            vec!["127.0.0.1:7777".into(), "https://chat.example".into()],
+            false,
+        );
+        assert!(proxied.origin_allowed("https://chat.example"));
+        assert!(!proxied.origin_allowed("https://127.0.0.1:7777"));
         assert!(a.token_matches("t"));
         assert!(!a.token_matches("u"));
     }

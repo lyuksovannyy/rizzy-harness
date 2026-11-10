@@ -6,6 +6,9 @@
 //! from the publishing session's own row only; nodes without the
 //! capability are never sent `artifact.*`.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -349,7 +352,8 @@ async fn start() -> T {
 async fn req(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", &t.alex);
+        .header("cookie", &t.alex)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -434,6 +438,7 @@ async fn an_honest_transfer_arrives_byte_for_byte() {
     let r = reqwest::Client::new()
         .get(format!("{}{path}", t.base))
         .header("cookie", &t.alex)
+        .same_origin()
         .send()
         .await
         .unwrap();

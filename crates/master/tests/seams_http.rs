@@ -3,6 +3,9 @@
 //! topics scoped to their owner, node capabilities, and hooks that change
 //! nothing a user sees yet.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -127,7 +130,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).send().await.unwrap();
+    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -147,7 +150,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -299,6 +302,8 @@ async fn socket(t: &T, c: &str) -> Socket {
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
+    let origin = format!("http://{}", r.uri().authority().unwrap());
+    r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     assert_eq!(next_type(&mut s).await, "error");

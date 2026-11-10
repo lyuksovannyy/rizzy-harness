@@ -6,6 +6,9 @@
 //! 8 MiB frame is never reached). A Media item reports the chats that still
 //! carry it.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -211,7 +214,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).send().await.unwrap();
+    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -231,6 +234,7 @@ async fn account(t: &T, name: &str) -> String {
     let r = client
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&first))
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": format!("{name}s own password")}))
         .send()
         .await
@@ -271,6 +275,7 @@ async fn upload(
     let r = reqwest::Client::new()
         .post(url)
         .header("cookie", c)
+        .same_origin()
         .header("x-file-name", name)
         .body(bytes)
         .send()
@@ -590,6 +595,7 @@ async fn a_message_over_7_mib_is_refused_before_the_link() {
         let r = reqwest::Client::new()
             .post(format!("{}/api/attachments?name=n{n}.txt", t.base))
             .header("cookie", &t.alex)
+            .same_origin()
             .body("x".repeat(100_000))
             .send()
             .await

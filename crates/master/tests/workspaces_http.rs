@@ -2,6 +2,9 @@
 //! members, the role guards, chats following membership (and staying
 //! private), the agentic gate, server-admin views and owner recovery.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -128,7 +131,7 @@ async fn send(
     }
     match auth {
         Some(TOKEN) => rb = rb.bearer_auth(TOKEN),
-        Some(c) => rb = rb.header("cookie", c),
+        Some(c) => rb = rb.header("cookie", c).same_origin(),
         None => {}
     }
     let r = rb.send().await.unwrap();
@@ -1295,6 +1298,8 @@ async fn ui_sockets_hear_workspace_changes() {
         .into_client_request()
         .unwrap();
     req.headers_mut().insert("cookie", s.admin.parse().unwrap());
+    let origin = format!("http://{}", req.uri().authority().unwrap());
+    req.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
     // An answer proves the socket listens to live updates before the change.
     socket.send(Message::Text("hello".into())).await.unwrap();

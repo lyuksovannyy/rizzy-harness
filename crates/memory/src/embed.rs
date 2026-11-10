@@ -89,6 +89,18 @@ impl Embedder {
         }
     }
 
+    /// Connect through `dns` (the master's public-only resolver for an
+    /// admin's test of an unlisted host, AUDIT L3).
+    pub fn with_resolver(mut self, dns: std::sync::Arc<dyn reqwest::dns::Resolve>) -> Self {
+        self.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(same_origin_redirects())
+            .dns_resolver(dns)
+            .build()
+            .expect("static client config");
+        self
+    }
+
     pub fn with_style(mut self, style: ApiStyle) -> Self {
         self.style = style;
         self

@@ -1,5 +1,8 @@
 //! Per-user preferences (`/api/me/settings`) and per-message effort.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,7 +96,7 @@ async fn req(
         rb = rb.json(&b);
     }
     rb = match cookie {
-        Some(c) => rb.header("cookie", c),
+        Some(c) => rb.header("cookie", c).same_origin(),
         None => rb.bearer_auth("tok"),
     };
     let r = rb.send().await.unwrap();

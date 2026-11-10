@@ -18,11 +18,13 @@ pub mod media;
 pub mod model_cache;
 pub mod nodes;
 pub mod notices;
+pub mod outbound;
 pub mod prefs;
 pub mod presets;
 pub mod projects;
 pub mod providers;
 pub mod resolver;
+pub mod response;
 pub mod routines;
 pub mod search;
 pub mod secrets;
@@ -167,6 +169,8 @@ pub struct MasterInner {
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
     sockets: ws::Sockets,
+    /// Hosts an admin's provider test may reach besides public addresses.
+    outbound: Mutex<outbound::Outbound>,
 }
 
 /// What the UI asks for when starting a session.
@@ -363,6 +367,7 @@ impl Master {
                 pulls: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
+                outbound: Mutex::new(outbound::Outbound::from_env()),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -381,6 +386,17 @@ impl Master {
 
     pub fn provider_runtime(&self) -> Option<Arc<providers::ProviderRuntime>> {
         lock(&self.inner.providers).clone()
+    }
+
+    /// Where provider tests and model listings may connect
+    /// (`HARNESS_PLAIN_HTTP_HOSTS` unless set here).
+    pub fn outbound(&self) -> outbound::Outbound {
+        lock(&self.inner.outbound).clone()
+    }
+
+    /// Replace the listed hosts (tests list their 127.0.0.1 fakes).
+    pub fn set_outbound(&self, o: outbound::Outbound) {
+        *lock(&self.inner.outbound) = o;
     }
 
     pub fn set_graphify(

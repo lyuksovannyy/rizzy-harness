@@ -5,6 +5,9 @@
 //! timeouts, revocation, caps and the preview. Nodes are real runtimes on
 //! the scripted mock model.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -148,7 +151,8 @@ async fn send(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header(auth.0, auth.1);
+        .header(auth.0, auth.1)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -186,7 +190,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -399,6 +403,8 @@ async fn socket(t: &T, c: &str) -> Socket {
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
+    let origin = format!("http://{}", r.uri().authority().unwrap());
+    r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     // The server answers the bad message: the socket is listening.

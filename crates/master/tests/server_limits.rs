@@ -2,6 +2,9 @@
 //! graceful shutdown, and that long-lived routes are not cut by the request
 //! timeout. Timeouts are shortened so each test takes about a second.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::future::pending;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -443,6 +446,8 @@ async fn a_websocket_outlives_the_request_timeout_and_does_not_hold_shutdown() {
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let origin = format!("http://{}", r.uri().authority().unwrap());
+    r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(r).await.unwrap();
     tokio::time::sleep(REQUEST * 3).await;
     ws.send(Message::Text("hello".into())).await.unwrap();
@@ -472,6 +477,7 @@ async fn a_slow_upload_through_the_real_router_is_not_cut() {
     let r = reqwest::Client::new()
         .post(format!("http://{}/api/attachments", srv.addr))
         .header("cookie", cookie)
+        .same_origin()
         .header("content-type", "multipart/form-data; boundary=b")
         .body(reqwest::Body::wrap_stream(body))
         .send()
