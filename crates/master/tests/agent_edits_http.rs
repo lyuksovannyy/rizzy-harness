@@ -453,17 +453,74 @@ async fn aliases_and_categories() {
     assert_eq!(listed_critic["aliases"], json!(["crit"]));
     assert_eq!(listed_critic["category"], "Quality");
     assert_eq!(listed(&t, "writer").await["category"], "General");
-    // One namespace: an alias or id someone has is refused, saying which.
-    for (id, aliases, code) in [
-        ("other", json!(["crit"]), StatusCode::CONFLICT),
-        ("other", json!(["coder"]), StatusCode::CONFLICT),
-        ("other", json!(["new"]), StatusCode::CONFLICT),
-        ("crit", json!([]), StatusCode::CONFLICT),
-        ("other", json!(["Bad"]), StatusCode::BAD_REQUEST),
-        ("other", json!(["other"]), StatusCode::BAD_REQUEST),
+    // One namespace: an alias or id someone has is refused, naming who has
+    // it (display name and id), in every combination.
+    for (id, aliases, code, says) in [
+        // id vs a built-in's id
+        (
+            "coder",
+            json!([]),
+            StatusCode::CONFLICT,
+            "`coder` is already reserved for the Software Developer agent (coder)",
+        ),
+        // id vs an alias
+        (
+            "ai",
+            json!([]),
+            StatusCode::CONFLICT,
+            "`ai` is already reserved for the Assistant agent (general)",
+        ),
+        (
+            "crit",
+            json!([]),
+            StatusCode::CONFLICT,
+            "`crit` is already reserved for the Critic agent (critic)",
+        ),
+        // alias vs an id
+        (
+            "other",
+            json!(["writer"]),
+            StatusCode::CONFLICT,
+            "`writer` is already reserved for the Writer agent (writer)",
+        ),
+        // alias vs an alias
+        (
+            "other",
+            json!(["dev"]),
+            StatusCode::CONFLICT,
+            "`dev` is already reserved for the Software Developer agent (coder)",
+        ),
+        (
+            "other",
+            json!(["crit"]),
+            StatusCode::CONFLICT,
+            "`crit` is already reserved for the Critic agent (critic)",
+        ),
+        (
+            "other",
+            json!(["new"]),
+            StatusCode::CONFLICT,
+            "`new` is reserved for the page that makes agents",
+        ),
+        // inside one definition
+        (
+            "other",
+            json!(["twice", "twice"]),
+            StatusCode::BAD_REQUEST,
+            "`twice` is listed twice in this agent's aliases",
+        ),
+        (
+            "other",
+            json!(["other"]),
+            StatusCode::BAD_REQUEST,
+            "`other` is this agent's own id",
+        ),
+        ("other", json!(["Bad"]), StatusCode::BAD_REQUEST, "Bad"),
     ] {
         let (st, v) = call(&t, Method::POST, "/api/agents", Some(body(id, aliases))).await;
         assert_eq!(st, code, "{id}: {v}");
+        let e = v["error"].as_str().unwrap_or_default();
+        assert!(e.contains(says), "{id}: {e}");
     }
     let mut long = body("other", json!([]));
     long["category"] = json!("c".repeat(40));
@@ -479,6 +536,22 @@ async fn aliases_and_categories() {
     .await;
     assert_eq!(st, StatusCode::OK, "{d}");
     assert_eq!(d["aliases"], json!(["crit", "nitpick"]));
+    // Editing names the holder too.
+    let (st, v) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/critic",
+        Some(json!({"aliases": ["crit", "research"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("`research` is already reserved for the Researcher agent (researcher)"),
+        "{v}"
+    );
     assert_eq!(d["category"], "Quality");
 
     // A built-in's aliases and category are fixed; sending them unchanged

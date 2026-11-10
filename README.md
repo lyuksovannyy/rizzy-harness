@@ -949,9 +949,11 @@ set `memory: false` (no recall, no `remember`), `project_memory: false` (no
 project facts in project chats), `available_as: [agent]` or
 `[subagent]` (default both), `aliases: [h, ...]` (more handles) and
 `category: IT` (the picker's group, default General). Ids and aliases are one
-namespace: a new agent cannot take a handle any agent has; an existing file
-or agent whose id is now a built-in's alias keeps its id and the built-in loses
-that alias (logged at startup). Deleting an agent leaves its chats
+namespace: making or changing an agent with a handle another agent has is
+refused, naming it ("`ai` is already reserved for the Assistant agent
+(general)"), as is an alias listed twice or equal to the agent's own id. An
+existing file or agent whose id is now a built-in's alias keeps its id and the
+built-in loses that alias (logged at startup, naming both agents). Deleting an agent leaves its chats
 readable; each needs another agent before its next message. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
 ## Development

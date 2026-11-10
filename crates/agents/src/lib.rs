@@ -95,12 +95,24 @@ pub enum AgentError {
     Shadowed(String),
     /// `alias` is dropped from `id`: `by` has it as its id or claimed it
     /// first. The agent itself loads.
-    #[error("{id}: alias @{alias} dropped: {by} already uses it")]
-    AliasTaken {
-        id: String,
-        alias: String,
-        by: String,
-    },
+    #[error("{0}")]
+    AliasTaken(Box<AliasClash>),
+}
+
+/// An alias dropped from agent `id` because agent `by` has it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "alias @{alias} of the {name} agent ({id}) dropped: the {by_name} agent ({by}) already has \
+     it as its {how}"
+)]
+pub struct AliasClash {
+    pub id: String,
+    pub name: String,
+    pub alias: String,
+    pub by: String,
+    pub by_name: String,
+    /// `id` or `alias`: what `alias` is to `by`.
+    pub how: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -464,24 +476,30 @@ pub fn labels(
 /// dropped from the later one and reported. Then every `delegates` names
 /// ids (an alias there becomes its agent's id; itself and repeats go).
 pub(crate) fn settle(agents: &mut [Agent]) -> Vec<AgentError> {
-    let ids: HashSet<String> = agents.iter().map(|a| a.id.clone()).collect();
+    let names: HashMap<String, String> = agents
+        .iter()
+        .map(|a| (a.id.clone(), a.name.clone()))
+        .collect();
     let mut owner: HashMap<String, String> = HashMap::new();
     let mut errors = Vec::new();
     for a in agents.iter_mut() {
-        let id = a.id.clone();
+        let (id, name) = (a.id.clone(), a.name.clone());
         a.aliases.retain(|alias| {
-            let by = if ids.contains(alias) {
-                Some(alias.clone())
+            let by = if names.contains_key(alias) {
+                Some((alias.clone(), "id"))
             } else {
-                owner.get(alias).cloned()
+                owner.get(alias).map(|o| (o.clone(), "alias"))
             };
             match by {
-                Some(by) => {
-                    errors.push(AgentError::AliasTaken {
+                Some((by, how)) => {
+                    errors.push(AgentError::AliasTaken(Box::new(AliasClash {
                         id: id.clone(),
+                        name: name.clone(),
                         alias: alias.clone(),
+                        by_name: names.get(&by).cloned().unwrap_or_default(),
                         by,
-                    });
+                        how,
+                    })));
                     false
                 }
                 None => {

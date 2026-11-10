@@ -47,10 +47,13 @@ back like any removed agent (below).
 **Aliases and categories.** `aliases` (frontmatter, and `aliases` on a custom agent) are
 more handles: `@ai`, `"agent_id": "dev"` and a definition's `delegates` resolve to the
 id, which is what events, sessions and settings store (settings take ids only). Ids and
-aliases are one namespace: creating a custom agent with a handle any agent has, or that
-a built-in or file declares, is refused (409). For data from before the roster (a file
-`dev.md`, a custom agent `ai`), the id wins and the built-in loses that alias, with a
-warning in the log; among aliases the first claim wins (built-ins, files, custom
+aliases are one namespace: creating or changing a custom agent with a handle any agent has,
+or that a built-in or file declares, is refused (409) with a message naming the holder
+("`ai` is already reserved for the Assistant agent (general)"); an alias listed twice or
+equal to the agent's own id is refused (400) saying so. For data from before the roster (a
+file `dev.md`, a custom agent `ai`), the id wins and the built-in loses that alias, with a
+warning in the log that names both agents (a hard error there would stop an upgraded server
+from loading a data directory that was valid the day before); among aliases the first claim wins (built-ins, files, custom
 agents). `category` (at most 32 characters, default "General") groups agents in the UI.
 Both are optional, so older definitions and saved custom agents still load, and both
 are fixed on built-in and file agents.

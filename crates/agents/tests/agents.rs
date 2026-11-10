@@ -205,8 +205,14 @@ fn a_file_whose_id_is_a_new_alias_keeps_loading() {
     assert_eq!(set.resolve("dev").unwrap().id, "dev");
     assert!(set.get("coder").unwrap().aliases.is_empty());
     assert!(
-        matches!(errors.as_slice(), [AgentError::AliasTaken { id, alias, .. }] if id == "coder" && alias == "dev"),
+        matches!(errors.as_slice(), [AgentError::AliasTaken(c)] if c.id == "coder" && c.alias == "dev"),
         "{errors:?}"
+    );
+    // The log line names both agents.
+    assert_eq!(
+        errors[0].to_string(),
+        "alias @dev of the Software Developer agent (coder) dropped: the My dev agent (dev) \
+         already has it as its id"
     );
 }
 
@@ -650,7 +656,7 @@ fn ids_and_aliases_share_one_namespace() {
     let (set, errors) = AgentSet::load(dir.path());
     let taken: Vec<String> = errors
         .iter()
-        .filter(|e| matches!(e, AgentError::AliasTaken { .. }))
+        .filter(|e| matches!(e, AgentError::AliasTaken(_)))
         .map(|e| e.to_string())
         .collect();
     assert_eq!(taken.len(), 2, "{errors:?}");

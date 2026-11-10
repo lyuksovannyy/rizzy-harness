@@ -57,7 +57,7 @@ impl Agents {
         let (set, errors) = self.base.with_edits(&self.edits);
         for e in errors {
             match e {
-                harness_agents::AgentError::AliasTaken { .. } => {
+                harness_agents::AgentError::AliasTaken(_) => {
                     tracing::warn!(error = %e, "dropping an agent alias")
                 }
                 _ => tracing::warn!(error = %e, "skipping an agent edit"),
@@ -225,6 +225,20 @@ impl Master {
             false,
         )?;
         let aliases: Vec<String> = c.aliases.iter().map(|a| a.trim().to_string()).collect();
+        // Collisions inside the definition, said plainly before the
+        // general checks.
+        for (i, a) in aliases.iter().enumerate() {
+            if a == id {
+                return Err(AgentEditError::Bad(format!(
+                    "`{a}` is this agent's own id: an alias must be another handle"
+                )));
+            }
+            if aliases[..i].contains(a) {
+                return Err(AgentEditError::Bad(format!(
+                    "`{a}` is listed twice in this agent's aliases"
+                )));
+            }
+        }
         // Aliases and category are checked like a file's (`labels`).
         let (aliases, _) = harness_agents::labels(id, &aliases, Some(&category))
             .map_err(|e| AgentEditError::Bad(e.to_string()))?;
@@ -244,24 +258,20 @@ impl Master {
         let _w = writes.lock().await;
         let exists = self.agent_edits().custom.contains_key(id);
         if create {
-            if RESERVED.contains(&id) || self.handle_taken(id, None) || exists {
-                return Err(AgentEditError::Refused(format!(
-                    "the handle @{id} is taken: choose another"
-                )));
+            if let Some(why) = self.handle_holder(id, None) {
+                return Err(AgentEditError::Refused(why));
             }
         } else if !exists {
             return Err(self.edit_refusal(id));
         }
         // Ids and aliases are one namespace, built-ins' and files' included
         // (also an alias a custom agent's id pushed out of the set).
-        if let Some(a) = c
+        if let Some(why) = c
             .aliases
             .iter()
-            .find(|a| RESERVED.contains(&a.as_str()) || self.handle_taken(a, Some(id)))
+            .find_map(|a| self.handle_holder(a, Some(id)))
         {
-            return Err(AgentEditError::Refused(format!(
-                "the handle @{a} is taken: choose another alias"
-            )));
+            return Err(AgentEditError::Refused(why));
         }
         let (k, v) = (
             key(CUSTOM, id),
@@ -276,9 +286,33 @@ impl Master {
 
     /// Whether `handle` is an id or alias of an agent other than `except`:
     /// in use, or declared by a built-in or file agent.
-    fn handle_taken(&self, handle: &str, except: Option<&str>) -> bool {
-        let other = |a: Option<&Agent>| a.is_some_and(|a| Some(a.id.as_str()) != except);
-        other(self.agents().resolve(handle)) || other(self.agent_definitions().resolve(handle))
+    /// Why `handle` cannot be a new id or alias for agent `except`: the
+    /// words name the agent that holds it ("`ai` is already reserved for
+    /// the Assistant agent (general)"). `None`: it is free.
+    fn handle_holder(&self, handle: &str, except: Option<&str>) -> Option<String> {
+        if RESERVED.contains(&handle) {
+            return Some(format!(
+                "`{handle}` is reserved for the page that makes agents: choose another"
+            ));
+        }
+        let holder = |a: Option<&Agent>| {
+            a.filter(|a| Some(a.id.as_str()) != except)
+                .map(|a| (a.name.clone(), a.id.clone()))
+        };
+        // A custom agent a built-in or file shadows is still stored under
+        // its id.
+        let shadowed = self
+            .agent_edits()
+            .custom
+            .get(handle)
+            .filter(|_| Some(handle) != except)
+            .map(|c| (c.name.clone(), handle.to_string()));
+        let (name, id) = holder(self.agents().resolve(handle))
+            .or_else(|| holder(self.agent_definitions().resolve(handle)))
+            .or(shadowed)?;
+        Some(format!(
+            "`{handle}` is already reserved for the {name} agent ({id}): choose another"
+        ))
     }
 
     /// Delete an agent made on the page. Built-in and file agents stay.
