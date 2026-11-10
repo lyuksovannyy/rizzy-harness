@@ -164,7 +164,7 @@ impl Prefs {
         one_of("theme", &self.theme, THEMES)?;
         one_of("backdrop", &self.backdrop, BACKDROPS)?;
         if let Some(a) = &self.default_agent {
-            crate::workspaces::check_default_agent(&m.agents(), a)?;
+            crate::workspaces::check_default_agent(&m.agents(), "default_agent", a)?;
         }
         if let Some(model) = &self.default_model
             && m.find_model(model).is_none()

@@ -186,10 +186,13 @@ fills the field; nothing is saved until the user presses Save.
 
 ## Edge cases
 
-- **Deleting an agent that chats use**: the chat's next turn falls back to the server's default
-  agent instead of failing with "unknown agent" (this helps for agent files removed from disk and
-  removed built-ins such as `ultracode` too). Not the workspace's default: that may be a more
-  capable agent, and a stale name must not gain power. A routine naming it is blocked instead. Old
+- **Deleting an agent that chats use** (or removing its file, or a built-in such as `ultracode`
+  going away): the chat still lists and opens, but its next prompt is refused with
+  `AgentGone` (409, "this chat's agent "x" no longer exists: choose another agent for this
+  chat"), and works again after `set_agent` to an existing agent. No fallback: a stand-in could
+  be more capable than the agent named (owner's decision, 2026-11). A default agent setting that
+  names a missing or sub-agent-only agent is kept as stored and refused when a chat needs it
+  (`BadDefault`, 409, naming the setting). A routine naming it is blocked. Old
   turns keep their agent snapshot (name and prompt hash). Deleting also drops its look and model
   chain from `config.toml`, so a new agent with the same id doesn't inherit them.
 - **Ids are permanent**: the handle is the id (`@coder`); it is chosen at creation and can't change
@@ -211,8 +214,8 @@ fills the field; nothing is saved until the user presses Save.
    master refuses such an agent for a new chat, `set_agent`, a prompt's `agent_id`, a leading
    `@mention` (the prompt is refused with the reason, not answered by another agent; with an
    explicit `agent_id` the mention is only text), workspace and user defaults (refused on save,
-   dropped on read) and routines (blocked). A chat whose agent became sub-agent-only or was
-   removed runs as the server's default agent.
+   refused when used) and routines (blocked). A chat whose agent became sub-agent-only or was
+   removed refuses its next prompt until another agent is chosen.
 7. **Additional instructions per workspace** **[ws]**: should a team admin be able to add them to
    built-ins for their team (my proposal: yes, after the server's own), or only server admins?
 8. **Who can make agents in a team workspace** **[ws]**: only `settings` holders (admins), or
@@ -233,7 +236,7 @@ fills the field; nothing is saved until the user presses Save.
   `?scope=server` like `/api/agents`, so the model line on the page follows the same workspace's
   chains as the list (through the scope's `Resolver`). The edits themselves stay server-wide.
 - In `Master::prompt`, the agent is checked against the chat's workspace `Resolver`: a chat whose
-  agent was deleted goes on with that workspace's default agent, and an agent with memory off gets
+  agent was deleted refuses the prompt until another agent is chosen, and an agent with memory off gets
   neither recall nor `remember`, in the same condition as incognito and the workspace's "use my
   memory" rule.
 - Switching workspace while on an agents page goes to the agents list.

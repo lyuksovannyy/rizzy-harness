@@ -337,8 +337,20 @@ pub enum CommandError {
     Rejected(String),
     #[error("store: {0}")]
     Store(#[from] harness_store::StoreError),
-    #[error("unknown agent {0:?}")]
+    #[error("unknown agent {0:?}: choose one of the agents listed")]
     UnknownAgent(String),
+    /// The chat's own agent no longer exists (deleted, its file removed, a
+    /// removed built-in such as `ultracode`). The chat stays readable; a
+    /// prompt needs another agent first.
+    #[error(
+        "this chat's agent {0:?} no longer exists: choose another agent for this chat, \
+         then send the message again"
+    )]
+    AgentGone(String),
+    /// A default agent setting names an agent that cannot run the chat; the
+    /// text names the setting and the agent.
+    #[error("{0}")]
+    BadDefault(String),
     /// The agent exists but runs only as a sub-agent (`available_as`): it
     /// takes sub-tasks from other agents and never runs a chat.
     #[error(
@@ -1158,9 +1170,12 @@ impl Master {
             },
             None => None,
         };
-        // A chat whose agent was deleted goes on with the default one.
-        let kept = r.session_agent(row.agent_id.as_deref());
-        let chosen = named.or(mention).or(kept);
+        // The chat's own agent; one that is gone or became sub-agent-only
+        // refuses the prompt (an explicit agent or a mention still works).
+        let chosen = match named.or(mention) {
+            Some(id) => Some(id),
+            None => r.session_agent(row.agent_id.as_deref())?,
+        };
         let session_model = self.session_model(&row).await;
         let mut agent = r.agent_spec_with(
             chosen.as_deref(),
@@ -1269,7 +1284,7 @@ impl Master {
     ) -> Option<String> {
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         let session_model = self.session_model(row).await;
-        let kept = r.session_agent(row.agent_id.as_deref());
+        let kept = r.session_agent(row.agent_id.as_deref()).ok().flatten();
         let main =
             match r.agent_spec_with(agent_id.or(kept.as_deref()), session_model.as_deref(), None) {
                 Ok(agent) => turn_model(&agent, session_model.as_deref(), row),

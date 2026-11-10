@@ -17,9 +17,13 @@ use harness_store::Store;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-async fn runtime(root: &std::path::Path) -> NodeRuntime {
+async fn runtime(root: &std::path::Path, id: &str, profile: Profile) -> NodeRuntime {
+    let tools = match profile {
+        Profile::Agentic => harness_tools::builtin(),
+        Profile::Chat => Vec::new(),
+    };
     NodeRuntime::start(NodeConfig {
-        node_id: "master".into(),
+        node_id: id.into(),
         hostname: "h".into(),
         policy: NodePolicy {
             workspace_roots: vec![root.into()],
@@ -30,12 +34,12 @@ async fn runtime(root: &std::path::Path) -> NodeRuntime {
             Arc::new(Mock {
                 delay: Duration::from_millis(1),
             }),
-            Vec::new(),
+            tools,
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
-        profile: Profile::Chat,
+        profile,
         incognito_ttl: None,
         checkpoints_dir: None,
         artifacts: None,
@@ -85,8 +89,10 @@ async fn start() -> T {
         ..Default::default()
     }]);
     master.set_agents(agents("[subagent]"));
-    let chat = runtime(dir.path()).await;
+    let chat = runtime(dir.path(), "master", Profile::Chat).await;
     master.add_link(chat.attach().await, true).await.unwrap();
+    let worker = runtime(dir.path(), "local", Profile::Agentic).await;
+    master.add_link(worker.attach().await, true).await.unwrap();
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
     T {
@@ -94,6 +100,11 @@ async fn start() -> T {
         master,
         _dir: dir,
     }
+}
+
+/// The error text of a refused call.
+fn error(v: &Value) -> &str {
+    v["error"].as_str().unwrap_or_default()
 }
 
 async fn post(t: &T, path: &str, body: Value) -> (StatusCode, Value) {
@@ -222,8 +233,10 @@ async fn a_subagent_only_agent_never_runs_a_chat() {
     assert!(!evs.iter().any(|e| e.kind == "agent_changed"));
 }
 
+/// A chat whose agent became sub-agent-only refuses its next prompt with
+/// the reason; choosing another agent makes it usable again.
 #[tokio::test]
-async fn a_chat_whose_agent_became_subagent_only_runs_as_the_default() {
+async fn a_chat_whose_agent_became_subagent_only_is_refused_until_changed() {
     let t = start().await;
     t.master.set_agents(agents("[agent, subagent]"));
     let sid = chat(&t, Some("helper")).await;
@@ -235,9 +248,24 @@ async fn a_chat_whose_agent_became_subagent_only_runs_as_the_default() {
         json!({"text": "hello"}),
     )
     .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(says_subagent(&v), "{v}");
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/agent"),
+        json!({"agent_id": "writer"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "hello"}),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
-    assert_eq!(turn_agents(&evs), ["general"]);
+    assert_eq!(turn_agents(&evs), ["writer"]);
 }
 
 /// The built-in roster: `@scout` is refused (Scout is a sub-agent only),
@@ -288,10 +316,12 @@ async fn built_in_mentions_and_aliases() {
     assert_eq!(row["agent_id"], "researcher");
 }
 
-/// Chats made with Ultracode, which is gone, still take prompts: they run
-/// as the default agent, never as a more capable stand-in.
+/// Chats made with Ultracode, which is gone, refuse a prompt with an
+/// error that names the agent and says what to do; the chat still lists and
+/// opens, and works again once another agent is chosen. Never a silent
+/// stand-in.
 #[tokio::test]
-async fn an_ultracode_chat_runs_as_the_default_agent() {
+async fn an_ultracode_chat_is_refused_until_another_agent_is_chosen() {
     let t = start().await;
     let mut old = builtins();
     old.push(
@@ -312,17 +342,92 @@ async fn an_ultracode_chat_runs_as_the_default_agent() {
         json!({"text": "hello"}),
     )
     .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let e = error(&v);
+    assert!(
+        e.contains("ultracode") && e.contains("choose another agent"),
+        "{v}"
+    );
+    // Listing and opening it still work.
+    let row = get(&t, &format!("/api/sessions/{sid}")).await;
+    assert_eq!(row["agent_id"], "ultracode");
+    let list = get(&t, "/api/sessions").await;
+    assert!(list.to_string().contains(&sid), "{list}");
+    // One turn with an explicit agent works without changing the chat.
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "hello", "agent_id": "writer"}),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
-    assert_eq!(turn_agents(&evs), ["general"]);
-    // Naming it is an unknown agent, as for any other removed id.
-    let (st, _) = post(
+    events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
+    // Naming it is an unknown agent, named in the error.
+    let (st, v) = post(
         &t,
         &format!("/api/sessions/{sid}/agent"),
         json!({"agent_id": "ultracode"}),
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(error(&v).contains("ultracode"), "{v}");
+    // Another agent, and the chat goes on.
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/agent"),
+        json!({"agent_id": "general"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "hello again"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let evs = events_until(&t, &sid, |e| {
+        e.iter().filter(|x| x.kind == "turn_ended").count() == 2
+    })
+    .await;
+    assert_eq!(turn_agents(&evs), ["writer", "general"]);
+}
+
+/// Unknown ids are refused wherever an agent is named, and the error names
+/// the id; a leading `@name` that is no agent stays plain text.
+#[tokio::test]
+async fn unknown_agents_are_named_in_the_error() {
+    let t = start().await;
+    let (st, v) = post(
+        &t,
+        "/api/sessions",
+        json!({"profile": "chat", "agent_id": "nope"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(error(&v).contains("nope"), "{v}");
+    let sid = chat(&t, None).await;
+    for (path, body) in [
+        ("prompt", json!({"text": "hi", "agent_id": "nope"})),
+        ("agent", json!({"agent_id": "nope"})),
+    ] {
+        let (st, v) = post(&t, &format!("/api/sessions/{sid}/{path}"), body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{path}: {v}");
+        let e = error(&v);
+        assert!(
+            e.contains("\"nope\"") && e.contains("choose"),
+            "{path}: {v}"
+        );
+    }
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "@everyone the build is green"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
+    assert_eq!(turn_agents(&evs), ["general"]);
 }
 
 /// Agent-only agents (the Teamlead, the Assistant) are in no roster, and a

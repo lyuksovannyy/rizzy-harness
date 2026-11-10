@@ -349,6 +349,25 @@ async fn custom_agents_are_made_changed_kept_and_deleted() {
         t.master.agents().get("lead").unwrap().delegates,
         ["smol", "researcher", "coder", "writer", "scout", "reviewer"]
     );
+    // Its next prompt is refused, naming the agent; another agent for the
+    // chat and it goes on.
+    let (st, v) = call(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "second"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("\"checker\""), "{v}");
+    let (st, v) = call(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/agent"),
+        Some(json!({"agent_id": "general"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     say(&t, &sid, "second").await;
     assert!(
         last_request(&t)

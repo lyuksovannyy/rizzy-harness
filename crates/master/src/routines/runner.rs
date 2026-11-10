@@ -730,6 +730,8 @@ async fn launch_failed(m: &Master, a: &Admitted, run: &RunRow, e: CommandError) 
         }
         CommandError::UnknownAgent(_)
         | CommandError::SubagentOnly { .. }
+        | CommandError::AgentGone(_)
+        | CommandError::BadDefault(_)
         | CommandError::Rejected(_) => block(m, r, Some(&run.run_id), &e.to_string(), now).await,
         _ => finish(m, run, r, "failed", Some(e.to_string())).await,
     }

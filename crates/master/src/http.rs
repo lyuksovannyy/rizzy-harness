@@ -239,7 +239,9 @@ impl From<CommandError> for ApiError {
             CommandError::UnknownSession => StatusCode::NOT_FOUND,
             CommandError::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-            CommandError::Rejected(_) => StatusCode::CONFLICT,
+            CommandError::Rejected(_)
+            | CommandError::AgentGone(_)
+            | CommandError::BadDefault(_) => StatusCode::CONFLICT,
             CommandError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             CommandError::UnknownAgent(_) | CommandError::SubagentOnly { .. } => {
                 StatusCode::BAD_REQUEST

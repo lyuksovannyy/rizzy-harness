@@ -923,9 +923,14 @@ A message that starts with `@handle` (an id or an alias: `@dev fix the
 build`) goes to that agent for one turn; the chat's agent stays. An agent
 that runs only as a sub-agent (Scout) cannot answer a chat: `@scout ...`,
 choosing it for a chat, or making it a default is refused with a message
-saying so. A chat naming an agent that no longer exists (such as the removed
-Ultracode) goes on with the server's default agent; a routine naming one is
-paused and says why.
+saying so. An agent that does not exist is refused wherever it is named, and
+the error names it. A chat whose agent no longer exists (such as the removed
+Ultracode) still opens, but its next message is refused ("this chat's agent
+"ultracode" no longer exists: choose another agent for this chat"); pick
+another agent in the chat and it goes on. A default agent setting that names
+a missing agent is refused the same way when a chat needs it, naming the
+setting to fix. A routine naming a missing agent is paused and says why. A
+message that starts with `@something` that is no agent is ordinary text.
 
 Delegating agents split big jobs into parallel sub-tasks (at most 4 per turn
 and 200k tokens by default; set `delegates`, `max_subagents` and
@@ -946,8 +951,8 @@ project facts in project chats), `available_as: [agent]` or
 `category: IT` (the picker's group, default General). Ids and aliases are one
 namespace: a new agent cannot take a handle any agent has; an existing file
 or agent whose id is now a built-in's alias keeps its id and the built-in loses
-that alias (logged at startup). Deleting an agent leaves its chats to the
-default agent. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
+that alias (logged at startup). Deleting an agent leaves its chats
+readable; each needs another agent before its next message. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
 ## Development
 

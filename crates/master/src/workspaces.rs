@@ -130,13 +130,18 @@ pub struct WorkspaceSettings {
     pub agent_models: BTreeMap<String, AgentChain>,
 }
 
-/// Whether `id` may be a default agent (a workspace's or a user's): it
-/// exists and may run a chat. Settings take ids, not aliases.
-pub fn check_default_agent(agents: &harness_agents::AgentSet, id: &str) -> Result<(), String> {
+/// Whether `id` may be the default agent that `field` (a workspace's or a
+/// user's setting) names: it exists and may run a chat. Settings take ids,
+/// not aliases. The error starts with the field.
+pub fn check_default_agent(
+    agents: &harness_agents::AgentSet,
+    field: &str,
+    id: &str,
+) -> Result<(), String> {
     match agents.get(id) {
-        None => Err(format!("unknown agent {id:?}")),
+        None => Err(format!("{field}: unknown agent {id:?}")),
         Some(a) if !a.features.as_agent => Err(format!(
-            "{} (@{id}) works only as a sub-agent and cannot be a default agent",
+            "{field}: {} (@{id}) works only as a sub-agent and cannot be a default agent",
             a.name
         )),
         Some(_) => Ok(()),
@@ -201,7 +206,7 @@ impl WorkspaceSettings {
     pub fn validate(&self, m: &Master) -> Result<(), String> {
         let agents = m.agents();
         if let Some(a) = &self.default_agent {
-            check_default_agent(&agents, a)?;
+            check_default_agent(&agents, "default_agent", a)?;
         }
         let models = m.models();
         let knows = |id: &str| models.iter().any(|x| x.id == id);
@@ -211,19 +216,18 @@ impl WorkspaceSettings {
         Ok(())
     }
 
-    /// Without references that went stale since they were saved: unknown
+    /// Without the chains that went stale since they were saved: unknown
     /// agents, chains whose main model is gone, fallbacks that are gone.
-    /// What this returns always passes `validate`, so the UI can save what
-    /// it read.
+    /// The default agent stays as stored even when it went stale: a chat
+    /// that needs it is refused with an error naming the setting, and the
+    /// settings page shows what to fix (saving it unchanged is refused the
+    /// same way).
     pub fn normalized(&self, m: &Master) -> Self {
         let agents = m.agents();
         let models = m.models();
         let knows = |id: &str| models.iter().any(|x| x.id == id);
         Self {
-            default_agent: self
-                .default_agent
-                .clone()
-                .filter(|a| check_default_agent(&agents, a).is_ok()),
+            default_agent: self.default_agent.clone(),
             agent_models: self
                 .agent_models
                 .iter()
