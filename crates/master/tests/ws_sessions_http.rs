@@ -3,6 +3,9 @@
 //! its login on a timer and before every subscribe, client messages are at
 //! most 64 KiB, and a user has at most 8 sockets.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -54,7 +57,12 @@ async fn req(t: &T, method: Method, path: &str, body: Option<Value>, c: &str) ->
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    rb.header("cookie", c).send().await.unwrap().status()
+    rb.header("cookie", c)
+        .same_origin()
+        .send()
+        .await
+        .unwrap()
+        .status()
 }
 
 fn cookie(r: &reqwest::Response) -> String {
@@ -72,7 +80,7 @@ async fn post(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Respo
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -120,6 +128,7 @@ async fn users(t: &T) -> [(String, String); 2] {
         let me: Value = reqwest::Client::new()
             .get(format!("{}/api/me", t.base))
             .header("cookie", &c)
+            .same_origin()
             .send()
             .await
             .unwrap()
@@ -139,6 +148,8 @@ async fn try_socket(t: &T, c: &str) -> Result<Socket, WsError> {
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
+    let origin = format!("http://{}", r.uri().authority().unwrap());
+    r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await?;
     // Answered: the server's loop is running.
     s.send(Message::Text("hello".into())).await.unwrap();

@@ -10,6 +10,9 @@
 //! tools and `remember` (so an untrusted turn can be seen to lose them), or
 //! a fake node that records what the master sends it.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -273,7 +276,8 @@ async fn req(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", c);
+        .header("cookie", c)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -297,7 +301,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }

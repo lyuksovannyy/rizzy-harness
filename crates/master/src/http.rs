@@ -203,6 +203,12 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             master.clone(),
             auth::guard,
         ))
+        // Outermost: request ids, 500 bodies and cache/transport headers
+        // for every response, the guard's refusals included.
+        .layer(axum::middleware::from_fn_with_state(
+            master.clone(),
+            crate::response::finish,
+        ))
         .with_state(master)
 }
 

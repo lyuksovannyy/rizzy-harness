@@ -231,6 +231,10 @@ async fn serve(
             "settings fixed by the environment (.env)"
         );
     }
+    // Every file holding a secret, before any is read (AUDIT L7): the API
+    // token and the claim code are checked where they are read.
+    harness_master::secrets::check_private(&dir.join("secrets.toml"))?;
+    harness_master::secrets::check_keys(dir)?;
     let cfg = Config::load_with_env(&dir.join(CONFIG_FILE), &env)?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
     let secrets = harness_core::SecretSet::default();
@@ -557,6 +561,7 @@ fn start_sandbox(
 }
 
 async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> anyhow::Result<()> {
+    harness_master::secrets::check_keys(dir)?;
     let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
     let node_id = harness_link::client::join(url, fingerprint, token, &hostname(), &key).await?;
     let remote = RemoteToml {
@@ -578,6 +583,8 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
         &std::fs::read_to_string(dir.join("remote.toml"))
             .context("not joined yet: run `node join` first")?,
     )?;
+    harness_master::secrets::check_private(&dir.join("secrets.toml"))?;
+    harness_master::secrets::check_keys(dir)?;
     let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
     let cfg = Config::load(&dir.join(CONFIG_FILE))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
@@ -742,6 +749,8 @@ fn load_dotenv() -> anyhow::Result<Vec<String>> {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(".env"),
     };
+    // It holds provider keys: refused when others can read it (AUDIT L7).
+    harness_master::secrets::check_private(&path)?;
     let iter = match dotenvy::from_path_iter(&path) {
         Ok(i) => i,
         Err(e) if e.not_found() && !explicit => return Ok(Vec::new()),

@@ -1,6 +1,9 @@
 //! Provider setup by an admin: test, apply, persist, hot-swap, scrub,
 //! several providers routed by prefix, per-agent default models.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,6 +118,11 @@ async fn start_with(setup: impl FnOnce(&std::path::Path)) -> T {
         }),
     );
     master.set_provider_runtime(rt);
+    // The fake providers run on 127.0.0.1: listed, as an operator would
+    // list a local model server (HARNESS_PLAIN_HTTP_HOSTS).
+    master.set_outbound(harness_master::outbound::Outbound::new([
+        "127.0.0.1".to_string()
+    ]));
     master.add_link(chat.attach().await, true).await.unwrap();
     tokio::spawn(async move { axum::serve(l, router(master)).await.unwrap() });
     let mut t = T {
@@ -150,7 +158,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let st = r.status();

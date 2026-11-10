@@ -3,6 +3,9 @@
 //! gates on prompts, approvals and restores; the revocation sweep; new
 //! chats announced after stamping; and each member's memory switch.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -173,7 +176,7 @@ async fn send(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -661,6 +664,7 @@ async fn agentic_work_stops_when_access_goes() {
     let r = reqwest::Client::new()
         .post(format!("{}/api/attachments?name=notes.txt", s.base))
         .header("cookie", &carol)
+        .same_origin()
         .body("tram timetable".as_bytes().to_vec())
         .send()
         .await
