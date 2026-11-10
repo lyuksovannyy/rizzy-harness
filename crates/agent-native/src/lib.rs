@@ -389,14 +389,60 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
     out
 }
 
-/// What the user and tools said in this conversation (not the model, not
-/// the system prompt): the provenance set for network tools.
-fn observed_text(messages: &[ChatMsg]) -> Vec<String> {
+/// Tools whose successful output may vouch for a URL (`web_fetch`
+/// provenance). Not `bash` (a `curl` error or an `echo` can plant any
+/// string), not `tool_output` (replays bash), not `grep`/`glob`/`outline`,
+/// not memory, not a sub-agent's answer. A failed call never vouches: some
+/// errors echo model-chosen strings.
+const URL_SOURCES: [&str; 3] = ["web_search", "web_fetch", "read"];
+
+/// Call ids in `history` that finished ok and ran a [`URL_SOURCES`] tool.
+fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
+    let mut tool_of: std::collections::HashMap<String, String> = Default::default();
+    let mut out = HashSet::new();
+    for e in history {
+        match e.typed() {
+            Ok(EventKind::AssistantMessage(m)) => {
+                for c in m.tool_calls {
+                    tool_of.insert(c.call_id, c.tool);
+                }
+            }
+            Ok(EventKind::ToolCallFinished(f))
+                if f.ok
+                    && tool_of
+                        .get(&f.call_id)
+                        .is_some_and(|t| URL_SOURCES.contains(&t.as_str())) =>
+            {
+                out.insert(f.call_id);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What the user and trusted tool results said in this conversation (not
+/// the model, not the system prompt, not memory or page context, not bash,
+/// not errors): the provenance set for network tools. `current` is the
+/// index of this turn's user message in `messages` and the user's own words
+/// for it (empty for a sub-agent, whose "user" message is its parent model's
+/// task); the message itself also carries the per-turn context block.
+fn observed_text(
+    messages: &[ChatMsg],
+    trusted: &HashSet<String>,
+    current: Option<(usize, &str)>,
+) -> Vec<String> {
     messages
         .iter()
-        .filter_map(|m| match m {
-            ChatMsg::Tool { content, .. } => Some(content.clone()),
-            other => other.user_text().map(str::to_string),
+        .enumerate()
+        .filter_map(|(i, m)| match m {
+            ChatMsg::Tool { call_id, content } => {
+                trusted.contains(call_id).then(|| content.clone())
+            }
+            other => other.user_text().map(|t| match current {
+                Some((idx, own)) if idx == i => own.to_string(),
+                _ => t.to_string(),
+            }),
         })
         .collect()
 }
@@ -606,6 +652,7 @@ impl AgentBackend for NativeBackend {
             None => ctx.user_text.clone(),
         };
         messages.push(images::user_msg(user_text, &ctx.extra.images));
+        let user_idx = messages.len() - 1;
         let wanted = images::wanted(&messages);
         let loaded = if wanted.is_empty() {
             Vec::new()
@@ -623,6 +670,14 @@ impl AgentBackend for NativeBackend {
             .and_then(parse_effort)
             .or(self.config.effort);
         let mut allowed_for_session: HashSet<String> = HashSet::new();
+        let mut trusted = trusted_results(recent);
+        // A sub-agent's "user" message is its parent model's task: not the
+        // user's words.
+        let own_words = if ctx.parent_session.is_some() {
+            String::new()
+        } else {
+            ctx.user_text.clone()
+        };
         let (mut subagents, mut sub_tokens) = (0u32, 0u64);
         // Citation labels continue from the whole log (not only the part
         // after a summary), so `[S3]` names one page for the whole session.
@@ -834,7 +889,7 @@ impl AgentBackend for NativeBackend {
                     input: call.input.clone(),
                 }))
                 .await;
-                let observed = observed_text(&messages);
+                let observed = observed_text(&messages, &trusted, Some((user_idx, &own_words)));
                 let outcome = self
                     .run_tool(
                         &ctx,
@@ -856,6 +911,9 @@ impl AgentBackend for NativeBackend {
                     sources: self.scrub_sources(outcome.sources),
                 }))
                 .await;
+                if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
+                    trusted.insert(call.call_id.clone());
+                }
                 messages.push(ChatMsg::Tool {
                     call_id: call.call_id,
                     content: output,
@@ -2113,5 +2171,269 @@ mod tests {
             payload,
         });
         assert_eq!(texts(&raw), ["[mock-big] You said: hello"]);
+    }
+
+    // ---- web_fetch provenance (audit L11) --------------------------------
+
+    /// A stand-in tool: fixed result, named like the real one.
+    struct Fixed {
+        name: &'static str,
+        ok: bool,
+        output: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Fixed {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn description(&self) -> &'static str {
+            "fixed"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, _: &ToolCtx, _: Value) -> ToolOutcome {
+            if self.ok {
+                ToolOutcome::ok(self.output)
+            } else {
+                ToolOutcome::err(self.output)
+            }
+        }
+    }
+
+    /// Stands in for `web_fetch`: says whether `url` is in the provenance set.
+    struct Probe;
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Probe {
+        fn name(&self) -> &'static str {
+            "web_fetch"
+        }
+        fn description(&self) -> &'static str {
+            "probe"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+            let url = input["url"].as_str().unwrap_or("");
+            ToolOutcome::ok(format!(
+                "seen={}",
+                ctx.observed.iter().any(|t| t.contains(url))
+            ))
+        }
+    }
+
+    /// Calls the listed tools one per request, in order, then stops.
+    struct Chain(Vec<(&'static str, Value)>);
+
+    #[async_trait::async_trait]
+    impl Provider for Chain {
+        fn name(&self) -> &'static str {
+            "chain"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            let since = req
+                .messages
+                .iter()
+                .rposition(|m| m.user_text().is_some())
+                .map_or(0, |i| i + 1);
+            let done = req.messages[since..]
+                .iter()
+                .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                .count();
+            let tool_calls = self
+                .0
+                .get(done)
+                .map(|(t, i)| ToolCallRef {
+                    call_id: new_id(),
+                    tool: (*t).into(),
+                    input: i.clone(),
+                })
+                .into_iter()
+                .collect();
+            Ok(Completion {
+                text: "done".into(),
+                tool_calls,
+                usage: None,
+            })
+        }
+    }
+
+    const U: &str = "https://laundered.example/path";
+
+    fn fixed(name: &'static str, ok: bool, output: &'static str) -> Arc<dyn harness_tools::Tool> {
+        Arc::new(Fixed { name, ok, output })
+    }
+
+    fn fetch_call() -> (&'static str, Value) {
+        ("web_fetch", json!({"url": U}))
+    }
+
+    /// Run `calls` (the last one is the probe) and return what the probe saw.
+    async fn probe_after(
+        tools: Vec<Arc<dyn harness_tools::Tool>>,
+        calls: Vec<(&'static str, Value)>,
+        user: &str,
+        context: Option<&str>,
+        parent: bool,
+    ) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let b = NativeBackend::new(Arc::new(Chain(calls)), tools, NativeConfig::default());
+        let mut c = ctx(&host, user, dir.path());
+        c.extra.context = context.map(str::to_string);
+        if parent {
+            c.parent_session = Some(SessionId::new());
+        }
+        b.run_turn(c).await;
+        let ev = host.events.lock().unwrap();
+        ev.iter()
+            .rev()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) if f.output.starts_with("seen=") => {
+                    Some(f.output.clone())
+                }
+                _ => None,
+            })
+            .expect("probe ran")
+    }
+
+    #[tokio::test]
+    async fn url_only_in_a_tool_error_is_not_observed() {
+        for name in ["web_search", "read"] {
+            let seen = probe_after(
+                vec![
+                    fixed(
+                        name,
+                        false,
+                        "error: cannot open https://laundered.example/path",
+                    ),
+                    Arc::new(Probe),
+                ],
+                vec![(name, json!({})), fetch_call()],
+                "hello",
+                None,
+                false,
+            )
+            .await;
+            assert_eq!(seen, "seen=false", "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn url_only_in_bash_output_is_not_observed() {
+        let seen = probe_after(
+            vec![
+                fixed("bash", true, "https://laundered.example/path"),
+                Arc::new(Probe),
+            ],
+            vec![("bash", json!({})), fetch_call()],
+            "hello",
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(seen, "seen=false");
+    }
+
+    #[tokio::test]
+    async fn url_in_a_successful_search_or_read_is_observed() {
+        for name in ["web_search", "read"] {
+            let seen = probe_after(
+                vec![
+                    fixed(name, true, "result https://laundered.example/path"),
+                    Arc::new(Probe),
+                ],
+                vec![(name, json!({})), fetch_call()],
+                "hello",
+                None,
+                false,
+            )
+            .await;
+            assert_eq!(seen, "seen=true", "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn url_in_the_user_message_counts_but_not_context_or_a_task() {
+        let user = "read https://laundered.example/path please";
+        let tools = || -> Vec<Arc<dyn harness_tools::Tool>> { vec![Arc::new(Probe)] };
+        let seen = async |user: &str, context: Option<&str>, parent: bool| {
+            probe_after(tools(), vec![fetch_call()], user, context, parent).await
+        };
+        assert_eq!(seen(user, None, false).await, "seen=true");
+        // Memory recall and page context ride on the user message but are
+        // not the user's words.
+        assert_eq!(
+            seen("hello", Some(&format!("memory: {U}")), false).await,
+            "seen=false"
+        );
+        // A sub-agent's "user" message is the parent model's task text.
+        assert_eq!(seen(user, None, true).await, "seen=false");
+    }
+
+    #[test]
+    fn only_ok_search_fetch_read_results_in_history_count() {
+        let sid = SessionId::new();
+        let mut seq = 0;
+        let mut history = vec![];
+        for (id, tool, ok) in [
+            ("c1", "bash", true),
+            ("c2", "read", false),
+            ("c3", "web_search", true),
+        ] {
+            for kind in [
+                EventKind::AssistantMessage(AssistantMessage {
+                    turn_id: "t0".into(),
+                    message_id: format!("m{id}"),
+                    text: String::new(),
+                    tool_calls: vec![ToolCallRef {
+                        call_id: id.into(),
+                        tool: tool.into(),
+                        input: json!({}),
+                    }],
+                    author: None,
+                    variant: None,
+                    blocks: vec![],
+                }),
+                EventKind::ToolCallFinished(ToolCallFinished {
+                    call_id: id.into(),
+                    ok,
+                    output: format!("{id} https://laundered.example/path"),
+                    exit_code: None,
+                    truncated: false,
+                    sources: vec![],
+                }),
+            ] {
+                seq += 1;
+                let (kind, payload) = kind.into_parts();
+                history.push(RawEvent {
+                    session_id: sid,
+                    seq,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                });
+            }
+        }
+        let observed = observed_text(
+            &history_to_messages(&history),
+            &trusted_results(&history),
+            None,
+        );
+        assert_eq!(observed.len(), 1, "{observed:?}");
+        assert!(observed[0].starts_with("c3 "));
     }
 }
