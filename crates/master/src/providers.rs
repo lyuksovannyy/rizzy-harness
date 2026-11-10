@@ -395,9 +395,8 @@ pub fn transcriber(
     if let Some(k) = &key {
         secrets.add(k.clone());
     }
-    Ok(Some(crate::voice::Transcriber::new(
-        &cfg.voice.url,
-        &cfg.voice.model,
-        key,
-    )))
+    Ok(Some(
+        crate::voice::Transcriber::new(&cfg.voice.url, &cfg.voice.model, key)
+            .with_limits(cfg.voice.limits()),
+    ))
 }

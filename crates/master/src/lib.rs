@@ -18,6 +18,7 @@ pub mod media;
 pub mod model_cache;
 pub mod nodes;
 pub mod notices;
+pub mod pdf;
 pub mod prefs;
 pub mod presets;
 pub mod projects;
@@ -155,6 +156,10 @@ pub struct MasterInner {
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
+    /// Dictations running and used today, per account (FIX_PLAN 3.4).
+    voice_usage: Arc<voice::Usage>,
+    /// The out-of-process PDF reader; without it PDFs are refused.
+    pdf: OnceLock<pdf::PdfReader>,
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
@@ -359,6 +364,8 @@ impl Master {
                 remote_stops: Mutex::new(HashMap::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
+                voice_usage: Default::default(),
+                pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
@@ -428,6 +435,19 @@ impl Master {
     /// UI sockets open right now, all users together.
     pub fn socket_count(&self) -> usize {
         self.inner.sockets.count()
+    }
+
+    pub fn voice_usage(&self) -> &Arc<voice::Usage> {
+        &self.inner.voice_usage
+    }
+
+    /// Set the PDF reader once (`serve`: the harness's own `pdf-text`).
+    pub fn set_pdf_reader(&self, r: pdf::PdfReader) {
+        let _ = self.inner.pdf.set(r);
+    }
+
+    pub fn pdf_reader(&self) -> Option<&pdf::PdfReader> {
+        self.inner.pdf.get()
     }
 
     /// The mirror store (tests and tools).

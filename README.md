@@ -441,7 +441,27 @@ Whisper server with an OpenAI-compatible API:
 url = "http://localhost:8000/v1"     # serves /audio/transcriptions
 model = "Systran/faster-whisper-small"
 # key_secret = "voice"               # if the service needs a key
+# daily_requests = 200               # dictations per account per UTC day (0 = no limit)
+# daily_mb = 100                     # MiB of audio per account per UTC day (0 = no limit)
 ```
+
+Each account dictates one recording at a time (a second one at once gets
+"one dictation at a time", 429) and within the daily limits above (then
+429 until midnight UTC). The counts are kept in memory: a server restart
+starts the day afresh.
+
+Files attached to a message (`+` in the composer) are read on the server:
+text, code, Markdown, CSV, JSON, and PDFs with a text layer. A file is a PDF
+only when its first bytes are `%PDF-`, whatever its name (`notes.pdf` with
+plain text in it is text). PDFs are never parsed inside the server: it
+starts its own binary as `rizzy-harness pdf-text`, which locks itself out of
+every file and the network (Landlock), limits its memory, and is killed after
+20 seconds; two run at once and a third waits up to 10 seconds ("the server
+is busy reading other PDFs"). This needs Linux 6.7 or newer with Landlock
+enabled on the server; elsewhere PDFs are refused with "this server cannot
+read PDFs safely", and text files still work. Each account can hold 20
+uploaded files not yet sent (8 MiB of text); unsent files are deleted after
+the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. Checkpoints live in a private repository in the node's data

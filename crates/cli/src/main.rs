@@ -111,6 +111,10 @@ enum Cmd {
         #[arg(last = true, required = true, value_name = "CMD")]
         command: Vec<std::ffi::OsString>,
     },
+    /// Read a PDF on stdin, write its text on stdout, confined (no files, no
+    /// network, limited memory). The server starts it for PDF attachments.
+    #[command(hide = true)]
+    PdfText,
 }
 
 #[derive(Subcommand)]
@@ -333,6 +337,11 @@ async fn serve(
     // must find the blob store.
     harness_master::storage::open(&master, dir)?;
     master.set_provider_runtime(runtime);
+    // PDF attachments are read by this binary's `pdf-text`, never in here.
+    match std::env::current_exe().and_then(|e| e.canonicalize()) {
+        Ok(exe) => master.set_pdf_reader(harness_master::pdf::PdfReader::new(exe)),
+        Err(e) => tracing::warn!("PDF attachments are off: cannot find this binary: {e}"),
+    }
     master.start_incognito_purge(cfg.chat.incognito_ttl());
     master.start_maintenance();
     // Each provider's model listing: at start when older than a day, then daily.
@@ -775,6 +784,11 @@ fn main() -> anyhow::Result<()> {
             },
         ));
     }
+    // The PDF helper too: one thread, no `.env`, no runtime (its memory
+    // limit covers every mapping, thread stacks included).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_master::pdf::SUBCOMMAND.as_ref()) {
+        std::process::exit(harness_master::pdf::helper_main());
+    }
     let loaded = load_dotenv()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -856,6 +870,10 @@ async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
         Cmd::SandboxExec { .. } => bail!(
             "{} must be the first argument",
             harness_tools::sandbox::SUBCOMMAND
+        ),
+        Cmd::PdfText => bail!(
+            "{} must be the first argument",
+            harness_master::pdf::SUBCOMMAND
         ),
         Cmd::Node {
             cmd:
