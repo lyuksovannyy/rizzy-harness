@@ -59,30 +59,34 @@ impl Tool for Read {
         } else {
             (MAX_LINE_CHARS, false)
         };
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(b) => b,
-            Err(e) => return ToolOutcome::err(format!("{}: {e}", path.display())),
+        let cancel = ctx.cancel.clone();
+        let p = path.clone();
+        let window = Window {
+            first: offset,
+            limit,
+            max_chars,
+            compact,
         };
-        if bytes.iter().take(8192).any(|b| *b == 0) {
-            return ToolOutcome::err(format!("{} looks like a binary file", path.display()));
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        let total = text.lines().count();
-        let mut out = String::new();
-        for (i, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
-            let line: String = if line.chars().count() > max_chars {
-                line.chars().take(max_chars).collect::<String>() + "…"
-            } else {
-                line.to_string()
-            };
-            if compact {
-                // No padding: a few tokens per line add up over long files.
-                out.push_str(&format!("{}\t{}\n", i + 1, line));
-            } else {
-                out.push_str(&format!("{:>6}\t{}\n", i + 1, line));
-            }
-        }
-        if total == 0 {
+        let res = tokio::task::spawn_blocking(move || {
+            read_window(&p, &window, crate::MAX_READ_BYTES, &cancel)
+        })
+        .await;
+        let Lines {
+            mut out,
+            total,
+            capped,
+        } = match res {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return ToolOutcome::err(e),
+            Err(e) => return ToolOutcome::err(format!("read failed: {e}")),
+        };
+        if capped {
+            out.push_str(&format!(
+                "[file truncated at {} bytes: reading stopped there, in line {total}; the rest \
+                 was not read. Use bash (tail, sed -n) for later parts]\n",
+                crate::MAX_READ_BYTES
+            ));
+        } else if total == 0 {
             out.push_str("(empty file)\n");
         } else if offset - 1 + limit < total {
             out.push_str(&format!(
@@ -238,14 +242,137 @@ async fn write_nofollow(path: &std::path::Path, bytes: &[u8]) -> Result<(), Stri
 }
 
 /// Read `path` as UTF-8 without following a symlink at the last component.
+/// Regular files of at most [`crate::MAX_GREP_FILE_BYTES`] only: `edit`
+/// holds the file and its edited copy in memory.
 async fn read_nofollow(path: &std::path::Path) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
-    let mut f = crate::open_nofollow(path, tokio::fs::OpenOptions::new().read(true)).await?;
-    let mut text = String::new();
-    f.read_to_string(&mut text)
+    let cap = crate::MAX_GREP_FILE_BYTES;
+    let f = crate::open_nofollow(path, tokio::fs::OpenOptions::new().read(true)).await?;
+    let len = f
+        .metadata()
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if len > cap {
+        return Err(crate::too_big(path, len, cap));
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    f.take(cap + 1)
+        .read_to_end(&mut bytes)
         .await
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(text)
+    if bytes.len() as u64 > cap {
+        return Err(crate::too_big(path, bytes.len() as u64, cap));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{}: not valid UTF-8", path.display()))
+}
+
+/// Which lines `read` shows, and how.
+struct Window {
+    /// 1-based.
+    first: usize,
+    limit: usize,
+    max_chars: usize,
+    compact: bool,
+}
+
+struct Lines {
+    out: String,
+    /// Lines seen (all of them unless `capped`).
+    total: usize,
+    /// Reading stopped at the byte cap with more of the file left.
+    capped: bool,
+}
+
+/// Stream a regular file line by line through a fixed buffer, keeping only
+/// the lines in `w` (each cut at `max_chars`). Memory is bounded by the
+/// window, never by the file; at most `cap` bytes are read, so a huge or
+/// growing file ends in bounded time. Checks `cancel` between chunks.
+fn read_window(
+    path: &std::path::Path,
+    w: &Window,
+    cap: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Lines, String> {
+    use std::io::{BufRead, Read as _};
+    let cancelled = || Err("[cancelled]".to_string());
+    if cancel.is_cancelled() {
+        return cancelled();
+    }
+    let f = crate::open_regular(path)?;
+    let io = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut r = std::io::BufReader::with_capacity(64 * 1024, f.take(cap + 1));
+    let head = r.fill_buf().map_err(io)?;
+    if head.iter().take(8192).any(|b| *b == 0) {
+        return Err(format!("{} looks like a binary file", path.display()));
+    }
+    // A line's bytes kept for display: enough for `max_chars` characters.
+    let keep = w.max_chars * 4 + 4;
+    let mut out = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut long = false;
+    let mut total = 0usize;
+    let mut read = 0u64;
+    let mut pending = false;
+    let last = w.first.saturating_sub(1).saturating_add(w.limit);
+    let emit = |n: usize, line: &mut Vec<u8>, long: bool, out: &mut String| {
+        if n >= w.first && n <= last {
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let text = String::from_utf8_lossy(line);
+            let mut shown: String = text.chars().take(w.max_chars).collect();
+            if long || text.chars().count() > w.max_chars {
+                shown.push('…');
+            }
+            if w.compact {
+                // No padding: a few tokens per line add up over long files.
+                out.push_str(&format!("{n}\t{shown}\n"));
+            } else {
+                out.push_str(&format!("{n:>6}\t{shown}\n"));
+            }
+        }
+        line.clear();
+    };
+    loop {
+        if cancel.is_cancelled() {
+            return cancelled();
+        }
+        let buf = r.fill_buf().map_err(io)?;
+        if buf.is_empty() || read >= cap {
+            break;
+        }
+        // Never go past the cap, even inside a buffered chunk.
+        let room = (cap - read).min(buf.len() as u64) as usize;
+        let buf = &buf[..room];
+        let (part, nl) = match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => (&buf[..i], true),
+            None => (buf, false),
+        };
+        let wanted = total + 1 >= w.first && total < last;
+        if wanted {
+            let take = keep.saturating_sub(line.len()).min(part.len());
+            line.extend_from_slice(&part[..take]);
+            long |= take < part.len();
+        }
+        pending = true;
+        let used = part.len() + usize::from(nl);
+        r.consume(used);
+        read += used as u64;
+        if nl {
+            total += 1;
+            emit(total, &mut line, long, &mut out);
+            long = false;
+            pending = false;
+        }
+    }
+    // More bytes than the cap: the file was cut (or grew while read).
+    let capped = read >= cap && !r.fill_buf().map_err(io)?.is_empty();
+    if pending {
+        total += 1;
+        emit(total, &mut line, long, &mut out);
+    }
+    Ok(Lines { out, total, capped })
 }
 
 #[cfg(test)]
@@ -313,6 +440,138 @@ mod tests {
         let ctx = ToolCtx::new(dir.path());
         let r = Read.run(&ctx, json!({"path": "/etc/hostname"})).await;
         assert!(!r.ok && r.output.contains("outside"));
+    }
+
+    /// AUDIT S10: no file tool may block on, or load, something that is not
+    /// a bounded regular file.
+    #[cfg(unix)]
+    mod wedge {
+        use super::*;
+        use std::os::unix::fs::symlink;
+        use std::time::Duration;
+
+        fn fifo(path: &std::path::Path) {
+            nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        }
+
+        async fn quick(f: impl std::future::Future<Output = ToolOutcome>) -> ToolOutcome {
+            tokio::time::timeout(Duration::from_secs(3), f)
+                .await
+                .expect("the tool blocked")
+        }
+
+        #[tokio::test]
+        async fn read_refuses_what_is_not_a_regular_file_at_once() {
+            let ws = tempfile::tempdir().unwrap();
+            fifo(&ws.path().join("p"));
+            std::fs::create_dir(ws.path().join("d")).unwrap();
+            let _sock = std::os::unix::net::UnixListener::bind(ws.path().join("s")).unwrap();
+            for (link, target) in [("lp", "p"), ("ld", "d"), ("ls", "s")] {
+                symlink(ws.path().join(target), ws.path().join(link)).unwrap();
+            }
+            let ctx = ToolCtx::new(ws.path());
+            for p in ["p", "lp", "d", "ld", "s", "ls"] {
+                let r = quick(Read.run(&ctx, json!({ "path": p }))).await;
+                assert!(!r.ok, "{p}: {}", r.output);
+                assert!(r.output.contains("not a regular file"), "{p}: {}", r.output);
+            }
+            // Devices, reachable in outside mode, directly and by a link.
+            symlink("/dev/zero", ws.path().join("lz")).unwrap();
+            let out = ToolCtx {
+                allow_outside_workspace: true,
+                ..ToolCtx::new(ws.path())
+            };
+            for p in ["/dev/zero", "/dev/random", "/dev/urandom", "lz", "p"] {
+                let r = quick(Read.run(&out, json!({ "path": p }))).await;
+                assert!(
+                    !r.ok && r.output.contains("not a regular file"),
+                    "{p}: {}",
+                    r.output
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn write_edit_and_outline_do_not_block_on_a_fifo() {
+            let ws = tempfile::tempdir().unwrap();
+            fifo(&ws.path().join("p.rs"));
+            let ctx = ToolCtx {
+                savings: harness_core::savings::Savings {
+                    outline_tool: true,
+                    ..Default::default()
+                },
+                ..ToolCtx::new(ws.path())
+            };
+            let w = quick(Write.run(&ctx, json!({"path": "p.rs", "content": "x"}))).await;
+            assert!(!w.ok, "{}", w.output);
+            let e = quick(Edit.run(
+                &ctx,
+                json!({"path": "p.rs", "old_string": "a", "new_string": "b"}),
+            ))
+            .await;
+            assert!(
+                !e.ok && e.output.contains("not a regular file"),
+                "{}",
+                e.output
+            );
+            let o = quick(crate::Outline.run(&ctx, json!({"path": "p.rs"}))).await;
+            assert!(
+                !o.ok && o.output.contains("not a regular file"),
+                "{}",
+                o.output
+            );
+        }
+
+        /// Resident memory of this process, in bytes.
+        fn rss() -> u64 {
+            let s = std::fs::read_to_string("/proc/self/statm").unwrap();
+            let pages: u64 = s.split_whitespace().nth(1).unwrap().parse().unwrap();
+            pages * 4096
+        }
+
+        #[tokio::test]
+        async fn read_of_a_2gb_sparse_file_stays_under_the_cap() {
+            let ws = tempfile::tempdir().unwrap();
+            let path = ws.path().join("big.log");
+            let head: String = (1..=2000).map(|i| format!("line {i}\n")).collect();
+            std::fs::write(&path, &head).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(2 << 30)
+                .unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            let before = rss();
+            // Past every line there is: the whole cap is scanned.
+            let r = tokio::time::timeout(
+                Duration::from_secs(20),
+                Read.run(&ctx, json!({"path": "big.log", "offset": 5000})),
+            )
+            .await
+            .expect("read took too long");
+            let grown = rss().saturating_sub(before);
+            assert!(
+                r.output
+                    .contains(&format!("truncated at {} bytes", crate::MAX_READ_BYTES)),
+                "{}",
+                r.output
+            );
+            assert!(grown < 256 << 20, "resident memory grew by {grown} bytes");
+            // The start of the file still reads normally.
+            let r = Read.run(&ctx, json!({"path": "big.log", "limit": 3})).await;
+            assert!(r.ok && r.output.contains("     3\tline 3"), "{}", r.output);
+        }
+
+        #[tokio::test]
+        async fn a_cancelled_read_returns() {
+            let ws = tempfile::tempdir().unwrap();
+            std::fs::write(ws.path().join("f"), "a\n").unwrap();
+            let ctx = ToolCtx::new(ws.path());
+            ctx.cancel.cancel();
+            let r = quick(Read.run(&ctx, json!({"path": "f"}))).await;
+            assert!(!r.ok && r.output.contains("cancelled"), "{}", r.output);
+        }
     }
 
     #[cfg(unix)]

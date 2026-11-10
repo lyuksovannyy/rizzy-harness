@@ -33,6 +33,39 @@ struct CreateArgs {
 /// Max events per `session.snapshot` batch.
 const SNAPSHOT_BATCH: usize = 500;
 
+/// Commands that may wait for one session while its lane is busy; past
+/// this the master gets a refusal at once.
+const LANE_DEPTH: usize = 64;
+
+/// The command queue of each session with a lane (see `NodeRuntime::lane`).
+type Lanes = Arc<Mutex<HashMap<SessionId, mpsc::Sender<LaneCmd>>>>;
+
+enum LaneCmd {
+    Msg(Box<MasterToNode>),
+    /// Cancel whatever runs by now, unacked: the tail of a cancel that was
+    /// answered inline (see `NodeRuntime::attach`).
+    Cancel,
+}
+
+/// The session whose lane runs `msg`, for commands that go to a lane.
+fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
+    match msg {
+        MasterToNode::Resume { session_id, .. }
+        | MasterToNode::Create { session_id, .. }
+        | MasterToNode::SelectVariant { session_id, .. }
+        | MasterToNode::Restore { session_id, .. }
+        | MasterToNode::Delete { session_id, .. }
+        | MasterToNode::Prompt { session_id, .. }
+        | MasterToNode::SetAgent { session_id, .. }
+        | MasterToNode::ArtifactStage { session_id, .. }
+        | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
+        MasterToNode::Welcome { .. }
+        | MasterToNode::Cancel { .. }
+        | MasterToNode::ApprovalRespond { .. }
+        | MasterToNode::ArtifactFetch { .. } => None,
+    }
+}
+
 pub struct NodeConfig {
     pub node_id: String,
     pub hostname: String,
@@ -200,11 +233,12 @@ impl NodeRuntime {
         }
         let this = self.clone();
         tokio::spawn(async move {
+            let lanes = Lanes::default();
             while let Some(msg) = in_rx.recv().await {
-                // A fetch is answered from a task of its own, before the
-                // command loop: a transfer never waits behind a command,
-                // nor a command behind a disk read.
                 match msg {
+                    // A fetch is answered from a task of its own: a transfer
+                    // never waits behind a command, nor a command behind a
+                    // disk read.
                     MasterToNode::ArtifactFetch {
                         req_id,
                         session_id,
@@ -212,7 +246,35 @@ impl NodeRuntime {
                         offset,
                         len,
                     } => this.fetch(req_id, session_id, stage_id, offset, len),
-                    other => this.handle(other).await,
+                    // Answered here, at once: they must not wait behind a
+                    // slow restore or delete (AUDIT S10). Neither awaits
+                    // anything (their audit line is written from a task of
+                    // its own).
+                    //
+                    // A cancel stops the running turn now, and also leaves a
+                    // marker in the lane so a prompt sent before it, still
+                    // queued, is stopped too: a cancel covers everything
+                    // sent before it, as when the loop was serial. For a
+                    // session that does not exist yet (its create is still
+                    // queued) the cancel waits its turn in the lane.
+                    MasterToNode::Cancel { session_id, .. }
+                        if this.session(session_id).is_none() =>
+                    {
+                        this.enqueue(&lanes, session_id, LaneCmd::Msg(Box::new(msg)))
+                    }
+                    MasterToNode::Cancel { session_id, .. } => {
+                        this.handle(msg).await;
+                        this.mark_cancel(&lanes, session_id);
+                    }
+                    m @ (MasterToNode::ApprovalRespond { .. } | MasterToNode::Welcome { .. }) => {
+                        this.handle(m).await
+                    }
+                    // Everything else goes to its session's lane: in order
+                    // for that session, concurrently with other sessions.
+                    other => match lane_of(&other) {
+                        Some(sid) => this.enqueue(&lanes, sid, LaneCmd::Msg(Box::new(other))),
+                        None => this.handle(other).await,
+                    },
                 }
             }
         });
@@ -224,6 +286,94 @@ impl NodeRuntime {
 
     fn session(&self, sid: SessionId) -> Option<Arc<Session>> {
         self.inner.session(sid)
+    }
+
+    /// Queue `msg` on its session's lane, starting the lane if there is
+    /// none. A full lane refuses the command at once (a nack, never a
+    /// silent drop, never a wait that would hold up other sessions).
+    fn enqueue(&self, lanes: &Lanes, sid: SessionId, cmd: LaneCmd) {
+        let mut map = lanes.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tx) = map.get(&sid) else {
+            return self.start_lane(lanes, &mut map, sid, cmd);
+        };
+        let cmd = match tx.try_send(cmd) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Full(cmd)) => {
+                drop(map);
+                if let LaneCmd::Msg(msg) = cmd
+                    && let Some(req_id) = msg.req_id()
+                {
+                    self.inner.publish(NodeToMaster::Ack {
+                        req_id: req_id.to_string(),
+                        ok: false,
+                        error: Some(format!(
+                            "this session already has {LANE_DEPTH} commands waiting; try again"
+                        )),
+                    });
+                }
+                return;
+            }
+            // The lane's task ended without removing itself (it panicked):
+            // nothing of its queue is left, so a new lane keeps the order.
+            Err(mpsc::error::TrySendError::Closed(cmd)) => cmd,
+        };
+        self.start_lane(lanes, &mut map, sid, cmd);
+    }
+
+    fn start_lane(
+        &self,
+        lanes: &Lanes,
+        map: &mut HashMap<SessionId, mpsc::Sender<LaneCmd>>,
+        sid: SessionId,
+        first: LaneCmd,
+    ) {
+        let (tx, rx) = mpsc::channel(LANE_DEPTH);
+        let _ = tx.try_send(first);
+        map.insert(sid, tx);
+        tokio::spawn(self.clone().lane(lanes.clone(), sid, rx));
+    }
+
+    /// After an inline cancel: stop whatever the lane starts from commands
+    /// queued before it. No lane, nothing queued, nothing to do; a full
+    /// lane gets no marker (the turn already running was cancelled; a
+    /// prompt among the 64 waiting commands may still start).
+    fn mark_cancel(&self, lanes: &Lanes, sid: SessionId) {
+        let map = lanes.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tx) = map.get(&sid) {
+            let _ = tx.try_send(LaneCmd::Cancel);
+        }
+    }
+
+    /// One session's commands, one at a time, in the order they came. Ends
+    /// as soon as its queue is empty, so lanes exist only for sessions with
+    /// a command in progress (a master that names many sessions cannot pile
+    /// up idle tasks). The check that the queue is empty and the lane's
+    /// removal happen under the map's lock, so no command can be queued on
+    /// a lane that is ending.
+    async fn lane(self, lanes: Lanes, sid: SessionId, mut rx: mpsc::Receiver<LaneCmd>) {
+        loop {
+            let cmd = match rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(_) => {
+                    let mut map = lanes.lock().unwrap_or_else(|p| p.into_inner());
+                    match rx.try_recv() {
+                        Ok(cmd) => cmd,
+                        Err(_) => {
+                            map.remove(&sid);
+                            return;
+                        }
+                    }
+                }
+            };
+            match cmd {
+                LaneCmd::Msg(msg) => self.handle(*msg).await,
+                LaneCmd::Cancel => {
+                    if let Some(s) = self.session(sid) {
+                        s.cancel();
+                    }
+                }
+            }
+        }
     }
 
     /// Answer `artifact.fetch` (never acked: the chunk is the answer).
@@ -308,6 +458,13 @@ impl NodeRuntime {
             .store
             .call(move |s| s.audit(kind, &detail))
             .await;
+    }
+
+    /// [`Self::audit`] from a task of its own, for commands that must be
+    /// answered without waiting for the store.
+    fn audit_later(&self, kind: &'static str, sid: SessionId) {
+        let this = self.clone();
+        tokio::spawn(async move { this.audit(kind, sid).await });
     }
 
     /// Handle one message from the master.
@@ -418,7 +575,7 @@ impl NodeRuntime {
                 }
             }
             MasterToNode::Cancel { session_id, .. } => {
-                self.audit("session.cancel", session_id).await;
+                self.audit_later("session.cancel", session_id);
                 match self.session(session_id) {
                     Some(s) => {
                         s.cancel();
@@ -433,7 +590,7 @@ impl NodeRuntime {
                 decision,
                 ..
             } => {
-                self.audit("approval.respond", session_id).await;
+                self.audit_later("approval.respond", session_id);
                 match self.session(session_id) {
                     Some(s) => s.respond(&approval_id, decision),
                     None => Err("unknown session".into()),

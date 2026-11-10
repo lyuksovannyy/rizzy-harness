@@ -47,10 +47,21 @@ impl Tool for Outline {
                 path.display()
             ));
         }
-        let text = match tokio::fs::read_to_string(&path).await {
-            Ok(t) => t,
-            Err(e) => return ToolOutcome::err(format!("{}: {e}", path.display())),
+        // Regular files of bounded size only: a FIFO named `x.rs` must not
+        // block the call, nor a huge file take the memory (AUDIT S10).
+        let p = path.clone();
+        let text = match tokio::task::spawn_blocking(move || {
+            crate::read_small(&p, crate::MAX_GREP_FILE_BYTES)
+        })
+        .await
+        {
+            Ok(Ok(b)) => String::from_utf8_lossy(&b).into_owned(),
+            Ok(Err(e)) => return ToolOutcome::err(e),
+            Err(e) => return ToolOutcome::err(format!("outline failed: {e}")),
         };
+        if ctx.cancel.is_cancelled() {
+            return ToolOutcome::err("[cancelled]");
+        }
         let lines = text.lines().count();
         match tokio::task::spawn_blocking(move || harness_codemap::outline(&path, &text)).await {
             Ok(Some(o)) => ToolOutcome::ok(format!("{o}[{lines} lines in the file]")),

@@ -507,6 +507,15 @@ command keeps running until it exits, times out or is cancelled, and the
 rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
+**File limits.** The file tools only open regular files: a FIFO, a device
+(`/dev/zero`), a socket or a directory is refused at once, also through a
+symlink. `read` streams a file and stops after 32 MiB, saying where (use
+bash `tail` or `sed -n` for later parts); `grep` skips files over 8 MiB and
+says how many it skipped; `edit` and `outline` refuse files over 8 MiB.
+Cancelling a turn stops any tool: one that does not return by itself
+within 2 seconds is abandoned. A slow undo or delete in one chat never
+delays Stop or an approval answer, in that chat or any other.
+
 ### Token savings
 
 Settings → Server → Token savings switches each method on or off; it is
