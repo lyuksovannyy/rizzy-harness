@@ -25,12 +25,15 @@ pub trait TurnHost: Send + Sync {
     /// Run `task` as `agent` in a new child session on this node and wait for
     /// its turn to end. `started` is called with the child's id as soon as it
     /// exists (so the UI can link to it while it works). The child labels its
-    /// web results from `refs`, the caller's book.
+    /// web results from `refs`, the caller's book. `observed` is the URL
+    /// provenance the caller holds (the user's words and trusted tool
+    /// results, never the task): the child's `web_fetch` may follow these.
     async fn delegate(
         &self,
         _agent: crate::agent::AgentSpec,
         _task: String,
         _refs: SharedRefs,
+        _observed: std::sync::Arc<Vec<String>>,
         _cancel: CancellationToken,
         _started: Box<dyn FnOnce(crate::SessionId) + Send>,
     ) -> Result<DelegateOutcome, String> {
@@ -109,6 +112,9 @@ pub struct TurnExtra {
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
     /// `None` means the book comes from this session's own log.
     pub refs: Option<SharedRefs>,
+    /// A delegated sub-task's inherited URL provenance (see
+    /// `TurnHost::delegate`). Set only by the node, never from the protocol.
+    pub observed: Option<std::sync::Arc<Vec<String>>>,
     /// The images sent with this turn's message (their bytes come from
     /// `TurnHost::images`).
     pub images: Vec<crate::event::ImageRef>,

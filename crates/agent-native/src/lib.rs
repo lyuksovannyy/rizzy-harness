@@ -236,6 +236,7 @@ impl NativeBackend {
         host: &dyn harness_core::backend::TurnHost,
         call: &ToolCallRef,
         refs: &SharedRefs,
+        observed: &Arc<Vec<String>>,
     ) -> (ToolOutcome, Usage) {
         let none = Usage::default();
         let Some(agent) = ctx.agent.as_ref() else {
@@ -272,6 +273,7 @@ impl NativeBackend {
             spec.clone(),
             task,
             refs.clone(),
+            observed.clone(),
             ctx.cancel.child_token(),
             started,
         );
@@ -848,10 +850,17 @@ impl AgentBackend for NativeBackend {
                         }
                     }
                 }
+                // What the parent may fetch, the child may too: the user's
+                // words and trusted results, never the task text.
+                let inherited = Arc::new(observed_text(
+                    &messages,
+                    &trusted,
+                    Some((user_idx, &own_words)),
+                ));
                 let results = futures::future::join_all(
                     admitted
                         .iter()
-                        .map(|c| self.run_delegate(&ctx, host, c, &refs)),
+                        .map(|c| self.run_delegate(&ctx, host, c, &refs, &inherited)),
                 )
                 .await;
                 for (call, (outcome, u)) in admitted.into_iter().zip(results) {
@@ -889,7 +898,10 @@ impl AgentBackend for NativeBackend {
                     input: call.input.clone(),
                 }))
                 .await;
-                let observed = observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                let mut observed = observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                if let Some(inh) = &ctx.extra.observed {
+                    observed.splice(0..0, inh.iter().cloned());
+                }
                 let outcome = self
                     .run_tool(
                         &ctx,
@@ -1725,6 +1737,7 @@ mod tests {
             agent: harness_core::agent::AgentSpec,
             task: String,
             refs: SharedRefs,
+            observed: Arc<Vec<String>>,
             cancel: tokio_util::sync::CancellationToken,
             started: Box<dyn FnOnce(SessionId) + Send>,
         ) -> Result<harness_core::backend::DelegateOutcome, String> {
@@ -1732,7 +1745,9 @@ mod tests {
             started(child);
             let mut c = ctx(&self.child, &task, &self.cwd);
             c.agent = Some(agent);
+            c.parent_session = Some(SessionId::new());
             c.extra.refs = Some(refs);
+            c.extra.observed = Some(observed);
             c.cancel = cancel;
             let out = self.backend.run_turn(c).await;
             let ev = self.child.events.lock().unwrap();
@@ -1759,6 +1774,156 @@ mod tests {
                 usage: out.usage,
                 sources,
             })
+        }
+    }
+
+    /// Parent calls `parent` (fixed-result tools), then delegates `task` to
+    /// a child whose one call is the `web_fetch` probe on `U`. Returns what
+    /// the child's probe saw.
+    async fn child_probe(
+        parent: Vec<(&'static str, Value)>,
+        tools: Vec<Arc<dyn harness_tools::Tool>>,
+        user: &str,
+        task: &str,
+    ) -> String {
+        struct Split(Vec<(&'static str, Value)>, Value);
+        #[async_trait::async_trait]
+        impl Provider for Split {
+            fn name(&self) -> &'static str {
+                "split"
+            }
+            async fn complete(
+                &self,
+                req: &ChatRequest,
+                _deltas: mpsc::UnboundedSender<String>,
+            ) -> Result<Completion, ProviderError> {
+                let is_parent = req.tools.iter().any(|t| t.name == "delegate");
+                let since = req
+                    .messages
+                    .iter()
+                    .rposition(|m| m.user_text().is_some())
+                    .map_or(0, |i| i + 1);
+                let done = req.messages[since..]
+                    .iter()
+                    .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                    .count();
+                let next = if is_parent {
+                    match self.0.get(done) {
+                        Some((t, i)) => Some((*t, i.clone())),
+                        None if done == self.0.len() => Some(("delegate", self.1.clone())),
+                        None => None,
+                    }
+                } else if done == 0 {
+                    Some(("web_fetch", json!({"url": U})))
+                } else {
+                    None
+                };
+                Ok(Completion {
+                    text: "done".into(),
+                    tool_calls: next
+                        .map(|(t, i)| ToolCallRef {
+                            call_id: new_id(),
+                            tool: t.into(),
+                            input: i,
+                        })
+                        .into_iter()
+                        .collect(),
+                    usage: None,
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(NativeBackend::new(
+            Arc::new(Split(parent, json!({"agent": "researcher", "task": task}))),
+            tools,
+            NativeConfig::default(),
+        ));
+        let host = DelegatingHost {
+            parent: RecHost::new(Decision::Allow),
+            child: RecHost::new(Decision::Allow),
+            backend: backend.clone(),
+            cwd: dir.path().to_path_buf(),
+        };
+        let researcher = harness_core::agent::AgentSpec {
+            agent_id: "researcher".into(),
+            tools: harness_core::agent::ToolSelection::List(vec!["web_fetch".into()]),
+            ..scout()
+        };
+        let lead = harness_core::agent::AgentSpec {
+            agent_id: "lead".into(),
+            tools: harness_core::agent::ToolSelection::List(vec![
+                "web_search".into(),
+                "bash".into(),
+                "read".into(),
+            ]),
+            delegates: vec![researcher],
+            ..scout()
+        };
+        let mut c = ctx(&host.parent, user, dir.path());
+        c.agent = Some(lead);
+        let parent_host: &dyn TurnHost = &host;
+        c.host = parent_host;
+        backend.run_turn(c).await;
+        let ev = host.child.events.lock().unwrap();
+        ev.iter()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+                _ => None,
+            })
+            .expect("child probe ran")
+    }
+
+    fn probe_tools() -> Vec<Arc<dyn harness_tools::Tool>> {
+        vec![
+            Arc::new(Probe),
+            fixed("web_search", true, "found https://laundered.example/path"),
+            fixed("bash", true, "https://laundered.example/path"),
+            fixed("read", false, "error https://laundered.example/path"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn child_inherits_url_from_the_parents_user_message() {
+        let seen = child_probe(
+            vec![],
+            probe_tools(),
+            "summarise https://laundered.example/path",
+            "fetch the page",
+        )
+        .await;
+        assert_eq!(seen, "seen=true");
+    }
+
+    #[tokio::test]
+    async fn url_only_in_the_childs_task_is_refused_in_the_child() {
+        let seen = child_probe(
+            vec![],
+            probe_tools(),
+            "hello",
+            "fetch https://laundered.example/path?q=SECRET and https://laundered.example/path",
+        )
+        .await;
+        assert_eq!(seen, "seen=false");
+    }
+
+    #[tokio::test]
+    async fn child_inherits_url_from_a_successful_parent_search() {
+        let seen = child_probe(
+            vec![("web_search", json!({}))],
+            probe_tools(),
+            "hello",
+            "fetch the first hit",
+        )
+        .await;
+        assert_eq!(seen, "seen=true");
+    }
+
+    #[tokio::test]
+    async fn child_does_not_inherit_urls_from_parent_bash_or_errors() {
+        for call in ["bash", "read"] {
+            let seen =
+                child_probe(vec![(call, json!({}))], probe_tools(), "hello", "fetch it").await;
+            assert_eq!(seen, "seen=false", "{call}");
         }
     }
 

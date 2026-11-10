@@ -665,6 +665,7 @@ impl Session {
         agent: AgentSpec,
         task: String,
         refs: SharedRefs,
+        observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
@@ -732,6 +733,7 @@ impl Session {
         let extra = TurnExtra {
             savings,
             refs: Some(refs),
+            observed: Some(observed),
             ..Default::default()
         };
         let (reason, usage) = child
@@ -908,10 +910,12 @@ impl TurnHost for Session {
         agent: AgentSpec,
         task: String,
         refs: SharedRefs,
+        observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
-        self.run_child(agent, task, refs, cancel, started).await
+        self.run_child(agent, task, refs, observed, cancel, started)
+            .await
     }
 
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
