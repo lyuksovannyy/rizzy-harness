@@ -550,6 +550,10 @@ impl NodeRuntime {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&sid);
+        // The session's sandbox temp folder (TMPDIR) goes with it.
+        if let Some(root) = &self.inner.cfg.policy.sandbox_tmp {
+            let _ = std::fs::remove_dir_all(root.join(sid.to_string()));
+        }
         let existed = self
             .inner
             .cfg

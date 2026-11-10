@@ -153,16 +153,41 @@ async fn sessions_and_tools_stay_out_of_the_data_dir() {
     assert!(out.contains("data directory"), "{out}");
     assert!(!out.contains(&token), "{out}");
 
-    // bash is not sandboxed yet (task 2.7): it can still print the file,
-    // but the token is scrubbed from what is stored and shown.
+    // bash runs in the Landlock sandbox (FIX_PLAN 2.7): the data directory
+    // does not exist for it. (Before 2.7 the file was printed and only the
+    // token itself was scrubbed.)
     let sid = s.session(&ws).await;
     let (out, all) = s
         .tool_output(&sid, "run: cat ../data/api-token; echo; echo done")
         .await;
     assert!(out.contains("done"), "{out}");
-    assert!(out.contains("[REDACTED]"), "{out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(!out.contains("[REDACTED]"), "the file was read: {out}");
     assert!(
         !all.contains(&token),
         "the API token is in the events: {all}"
     );
+}
+
+/// The shell's view of the home directory: a private key next to the
+/// project is not readable, the project itself is (FIX_PLAN 2.7).
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_cannot_read_keys_beside_the_project() {
+    let (dir, data, ws) = setup();
+    let ssh = dir.path().join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE-KEY-CANARY\n").unwrap();
+    std::fs::write(ws.join("notes.txt"), "project-file-ok\n").unwrap();
+    let s = start(&data);
+    let sid = s.session(&ws).await;
+    let (out, _) = s
+        .tool_output(
+            &sid,
+            "run: cat ../.ssh/id_ed25519; cat notes.txt; echo built > out.txt && cat out.txt",
+        )
+        .await;
+    assert!(!out.contains("PRIVATE-KEY-CANARY"), "{out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(out.contains("project-file-ok"), "{out}");
+    assert!(out.contains("built"), "{out}");
 }

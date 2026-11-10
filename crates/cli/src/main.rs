@@ -88,6 +88,29 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GraphifyCmd,
     },
+    /// Run a command in a Landlock sandbox: apply the rules to this process,
+    /// then exec the command. The node starts bash and graphify this way
+    /// (node.toml `[sandbox]`).
+    SandboxExec {
+        /// A file or folder the command may read and change.
+        #[arg(long, value_name = "PATH")]
+        rw: Vec<PathBuf>,
+        /// A file or folder the command may read and execute.
+        #[arg(long, value_name = "PATH")]
+        ro: Vec<PathBuf>,
+        /// Deny TCP connect and bind (needs Landlock ABI 4).
+        #[arg(long)]
+        no_network: bool,
+        /// Run with whatever the kernel enforces instead of refusing.
+        #[arg(long)]
+        best_effort: bool,
+        /// Print what is enforced on stderr first.
+        #[arg(long)]
+        status: bool,
+        /// The command and its arguments.
+        #[arg(last = true, required = true, value_name = "CMD")]
+        command: Vec<std::ffi::OsString>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -246,6 +269,7 @@ async fn serve(
                 child_env,
                 &secrets,
                 "local",
+                false,
             )
             .await?,
         )
@@ -427,6 +451,7 @@ fn tool_env(
 }
 
 /// The worker runtime (embedded `local` node, or a remote node).
+#[allow(clippy::too_many_arguments)]
 async fn agentic_node(
     dir: &Path,
     cfg: &Config,
@@ -435,12 +460,15 @@ async fn agentic_node(
     tool_env: harness_tools::ToolEnv,
     secrets: &harness_core::SecretSet,
     node_id: &str,
+    refuse_without_sandbox: bool,
 ) -> anyhow::Result<(NodeRuntime, Arc<harness_tools::graphify::GraphifyState>)> {
     // No session may include this runtime's data directory (for the
     // embedded node, the master's: keys, the API token, every chat), and
     // no file tool may touch it, whatever node.toml allows (AUDIT S1).
     let mut policy = policy;
     policy.protect(dir);
+    // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once.
+    let sandbox = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
@@ -457,6 +485,7 @@ async fn agentic_node(
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),
+            sandbox,
             // The master puts the provider's default effort on each turn's
             // spec, for models that take one.
             effort: None,
@@ -481,6 +510,37 @@ async fn agentic_node(
     })
     .await?;
     Ok((rt, graphify))
+}
+
+/// Set up the shell sandbox for an agentic runtime and record the result
+/// in its policy. `node run` refuses to start without it (`required`);
+/// `serve` starts and its node refuses agentic sessions.
+fn start_sandbox(
+    dir: &Path,
+    policy: &mut NodePolicy,
+    refuse_to_start: bool,
+) -> anyhow::Result<harness_tools::sandbox::Confinement> {
+    let node_toml = dir.join("node.toml");
+    let settings = policy
+        .sandbox
+        .settings()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
+    let s = harness_tools::sandbox::start(&settings, dir, &policy.protected_dirs, &node_toml)
+        .map_err(anyhow::Error::msg)?;
+    match (&s.refusal, settings.mode) {
+        (Some(why), _) if refuse_to_start => bail!("{why}"),
+        (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
+        (None, harness_tools::sandbox::Mode::Required) => {
+            tracing::info!("shell sandbox: {}", s.summary)
+        }
+        (None, _) => tracing::warn!("shell sandbox: {}", s.summary),
+    }
+    if let Some(root) = &s.tmp_root {
+        harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
+    }
+    policy.sandbox_refusal = s.refusal;
+    policy.sandbox_tmp = s.tmp_root;
+    Ok(s.confinement)
 }
 
 async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> anyhow::Result<()> {
@@ -520,6 +580,7 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
         child_env,
         &secrets,
         &remote.node_id,
+        true,
     )
     .await?;
     let stop = tokio_util::sync::CancellationToken::new();
@@ -612,6 +673,25 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
             })
             .map_err(|e| e.to_string()),
     );
+    check(
+        "shell sandbox",
+        NodePolicy::load(&dir.join("node.toml"))
+            .map_err(|e| e.to_string())
+            .and_then(|mut p| {
+                p.protect(dir);
+                let node_toml = dir.join("node.toml");
+                harness_tools::sandbox::start(
+                    &p.sandbox.settings()?,
+                    dir,
+                    &p.protected_dirs,
+                    &node_toml,
+                )
+            })
+            .and_then(|s| match s.refusal {
+                Some(_) => Err(s.summary),
+                None => Ok(s.summary),
+            }),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -668,6 +748,29 @@ fn load_dotenv() -> anyhow::Result<Vec<String>> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The sandbox wrapper runs first: no `.env`, no data directory, no
+    // threads (Landlock confines the calling thread, then `exec`).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref())
+        && let Cmd::SandboxExec {
+            rw,
+            ro,
+            no_network,
+            best_effort,
+            status,
+            command,
+        } = Cli::parse().cmd
+    {
+        std::process::exit(harness_tools::sandbox::exec(
+            harness_tools::sandbox::ExecRequest {
+                rw,
+                ro,
+                no_network,
+                best_effort,
+                status,
+                command,
+            },
+        ));
+    }
     let loaded = load_dotenv()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -746,6 +849,10 @@ async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
             ),
         },
         Cmd::Doctor => doctor(&dir),
+        Cmd::SandboxExec { .. } => bail!(
+            "{} must be the first argument",
+            harness_tools::sandbox::SUBCOMMAND
+        ),
         Cmd::Node {
             cmd:
                 NodeCmd::Join {

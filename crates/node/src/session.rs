@@ -256,7 +256,7 @@ impl Session {
         if self.profile != Profile::Agentic {
             return Ok(());
         }
-        self.node.cfg.policy.check_protected(&self.cwd)
+        self.node.cfg.policy.check_session(&self.cwd)
     }
 
     /// Record a change of the session's active agent.

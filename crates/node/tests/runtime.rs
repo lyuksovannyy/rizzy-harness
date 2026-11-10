@@ -320,6 +320,70 @@ async fn cwd_outside_roots_is_refused() {
     }
 }
 
+/// `[sandbox] mode = "required"` on a node where the sandbox does not work:
+/// no agentic session is created, with the setting named (FIX_PLAN 2.7).
+#[tokio::test]
+async fn a_node_without_its_required_sandbox_refuses_sessions() {
+    let mut h = Harness::new(|root| {
+        let mut p = default_policy(root);
+        p.sandbox_refusal = Some("set [sandbox] mode in node.toml".into());
+        p
+    })
+    .await;
+    h.send(MasterToNode::Create {
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: "c".into(),
+        session_id: SessionId::new(),
+        title: "t".into(),
+        cwd: h.ws.display().to_string(),
+        model: None,
+        approval_mode: None,
+    });
+    match h.link.from_node.recv().await.unwrap() {
+        NodeToMaster::Ack { ok, error, .. } => {
+            assert!(!ok);
+            assert!(error.unwrap().contains("[sandbox] mode"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A session's sandbox temp folder goes when the session is deleted.
+#[tokio::test]
+async fn deleting_a_session_removes_its_temp_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let mut h = Harness::new(|r| {
+        let mut p = default_policy(r);
+        p.sandbox_tmp = Some(root.clone());
+        p
+    })
+    .await;
+    let sid = h.create().await;
+    let other = SessionId::new();
+    for s in [sid, other] {
+        std::fs::create_dir_all(tmp.path().join(s.to_string()).join("x")).unwrap();
+    }
+    h.send(MasterToNode::Delete {
+        req_id: "d".into(),
+        session_id: sid,
+    });
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            NodeToMaster::Deleted { session_id } if session_id == sid => break,
+            _ => {}
+        }
+    }
+    assert!(!tmp.path().join(sid.to_string()).exists());
+    assert!(tmp.path().join(other.to_string()).exists(), "only its own");
+}
+
 /// The node's data directory (keys, the API token, every user's chats)
 /// can never be inside a session (AUDIT S1): not its folder, not above it.
 #[tokio::test]
