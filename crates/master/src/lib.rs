@@ -163,6 +163,8 @@ pub struct MasterInner {
     pulls: artifact_pull::Pulls,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
+    /// Open UI sockets by user, so a login that ends closes them.
+    sockets: ws::Sockets,
 }
 
 /// What the UI asks for when starting a session.
@@ -358,6 +360,7 @@ impl Master {
                 storage: OnceLock::new(),
                 pulls: Default::default(),
                 artifact_throttle: Default::default(),
+                sockets: Default::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -410,6 +413,17 @@ impl Master {
 
     pub fn transcriber(&self) -> Option<Arc<voice::Transcriber>> {
         lock(&self.inner.transcriber).clone()
+    }
+
+    /// How often an open UI socket re-checks its login (default 60 s;
+    /// tests shorten it). Counts for sockets opened afterwards.
+    pub fn set_socket_recheck(&self, every: Duration) {
+        self.inner.sockets.set_recheck(every);
+    }
+
+    /// UI sockets open right now, all users together.
+    pub fn socket_count(&self) -> usize {
+        self.inner.sockets.count()
     }
 
     /// The mirror store (tests and tools).

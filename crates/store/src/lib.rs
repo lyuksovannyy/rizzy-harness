@@ -1568,6 +1568,35 @@ impl Store {
         ttl_ms: i64,
     ) -> Result<Option<UserRow>> {
         let conn = self.lock();
+        let Some((user, last_seen_ms)) = Self::ui_session_lookup(&conn, token_hash, now_ms)? else {
+            return Ok(None);
+        };
+        if now_ms - last_seen_ms >= UI_SESSION_TOUCH_MS {
+            conn.execute(
+                "UPDATE ui_sessions SET last_seen_ms = ?2, expires_ms = ?3 WHERE token_hash = ?1",
+                params![token_hash, now_ms, now_ms.saturating_add(ttl_ms)],
+            )?;
+        }
+        Ok(Some(user))
+    }
+
+    /// [`Self::ui_session_user`] without using the session: nothing is
+    /// written, so the expiry stays where it is. For a WebSocket's re-check
+    /// of its login, which must not keep an idle tab's login alive.
+    pub fn ui_session_check(&self, token_hash: &str, now_ms: i64) -> Result<Option<UserRow>> {
+        let conn = self.lock();
+        match Self::ui_session_lookup(&conn, token_hash, now_ms)? {
+            Some((user, _)) => Ok(Some(user)),
+            None => Ok(None),
+        }
+    }
+
+    /// The live, enabled session's user and when it was last used.
+    fn ui_session_lookup(
+        conn: &Connection,
+        token_hash: &str,
+        now_ms: i64,
+    ) -> Result<Option<(UserRow, i64)>> {
         let sql = format!(
             "SELECT u.{}, s.last_seen_ms FROM ui_sessions s
              JOIN users u ON u.user_id = s.user_id
@@ -1579,16 +1608,9 @@ impl Store {
                 Ok((Self::user_from_row(r)?, r.get::<_, i64>(8)?))
             })
             .optional()?;
-        let Some((user, last_seen_ms)) = found else {
-            return Ok(None);
-        };
-        if now_ms - last_seen_ms >= UI_SESSION_TOUCH_MS {
-            conn.execute(
-                "UPDATE ui_sessions SET last_seen_ms = ?2, expires_ms = ?3 WHERE token_hash = ?1",
-                params![token_hash, now_ms, now_ms.saturating_add(ttl_ms)],
-            )?;
-        }
-        Self::finish_user(user).map(Some)
+        found
+            .map(|(user, last_seen_ms)| Ok((Self::finish_user(user)?, last_seen_ms)))
+            .transpose()
     }
 
     /// How many UI sessions are stored, expired ones included.
