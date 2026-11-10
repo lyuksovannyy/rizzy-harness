@@ -7,6 +7,7 @@ pub mod mask;
 pub mod mock;
 pub mod models;
 pub mod provider;
+pub mod retry;
 pub mod style;
 
 use std::collections::HashSet;
@@ -22,9 +23,10 @@ use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
 pub use provider::{
-    ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, ToolSpec,
-    estimate_tokens,
+    ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, RetryHint,
+    ToolSpec, estimate_tokens,
 };
+pub use retry::RetryPolicy;
 
 /// Flush coalesced deltas at least this often...
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
@@ -74,6 +76,9 @@ pub struct NativeConfig {
     /// Summarise older turns once the history is estimated above this many
     /// tokens (0 = never).
     pub summarize_after_tokens: usize,
+    /// Retries of a model call that failed for a passing reason, before
+    /// the agent's fallbacks.
+    pub retry: retry::RetryPolicy,
 }
 
 impl Default for NativeConfig {
@@ -89,6 +94,7 @@ impl Default for NativeConfig {
             tool_timeout: Duration::from_secs(600),
             effort: None,
             summarize_after_tokens: 0,
+            retry: Default::default(),
         }
     }
 }
@@ -751,27 +757,50 @@ impl AgentBackend for NativeBackend {
                 effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
                 cache: sv.prompt_cache,
             };
-            let (tx, rx) = mpsc::unbounded_channel();
-            let turn_id = ctx.turn_id.clone();
-            let mid = message_id.clone();
-            let (step, emitted) = coalesce_led(
-                self.provider.complete(&req, tx),
-                rx,
-                &ctx.cancel,
-                host,
-                &mut lead,
-                &self.config.secrets,
-                |text| {
-                    EventKind::AssistantDelta(AssistantDelta {
-                        author: author.clone(),
-                        variant: None,
-                        turn_id: turn_id.clone(),
-                        message_id: mid.clone(),
-                        text,
-                    })
-                },
-            )
-            .await;
+            // A passing failure is retried (bounded, with backoff) before
+            // the fallbacks, but only while this attempt has shown nothing:
+            // a partial answer is never repeated.
+            let mut retries = 0;
+            let (step, emitted) = loop {
+                let (tx, rx) = mpsc::unbounded_channel();
+                let turn_id = ctx.turn_id.clone();
+                let mid = message_id.clone();
+                let r = coalesce_led(
+                    self.provider.complete(&req, tx),
+                    rx,
+                    &ctx.cancel,
+                    host,
+                    &mut lead,
+                    &self.config.secrets,
+                    |text| {
+                        EventKind::AssistantDelta(AssistantDelta {
+                            author: author.clone(),
+                            variant: None,
+                            turn_id: turn_id.clone(),
+                            message_id: mid.clone(),
+                            text,
+                        })
+                    },
+                )
+                .await;
+                if let (Step::Done(Err(e)), false) = &r
+                    && let Some(wait) = self.config.retry.delay(e, retries)
+                {
+                    retries += 1;
+                    tracing::warn!(
+                        model = %model,
+                        error = %e.log_line(),
+                        retry = retries,
+                        wait_ms = wait.as_millis() as u64,
+                        "model call failed; retrying"
+                    );
+                    if !retry::wait(wait, &ctx.cancel).await {
+                        break (Step::Cancelled, false);
+                    }
+                    continue;
+                }
+                break r;
+            };
             started |= emitted;
             let completion = match step {
                 Step::Cancelled => {
@@ -784,7 +813,7 @@ impl AgentBackend for NativeBackend {
                 Step::Done(Err(e)) if !started && e.is_model_level() && !chain.is_empty() => {
                     let next = chain.pop_front().unwrap_or_default();
                     let why = self.config.secrets.scrub(&e.to_string());
-                    tracing::warn!(failed = %model, next = %next, error = %why, "model failed; trying a fallback");
+                    tracing::warn!(failed = %model, next = %next, error = %e.log_line(), "model failed; trying a fallback");
                     let reason = from_reason.get_or_insert(why).clone();
                     lead = Some(fallback_event(&ctx.turn_id, &next, &ctx.model, reason));
                     model = next;
@@ -1057,30 +1086,45 @@ impl NativeBackend {
                     effort: None,
                     cache: ctx.extra.savings.prompt_cache,
                 };
-                let (tx, rx) = mpsc::unbounded_channel();
-                let (turn_id, mid, v2, a2) = (
-                    ctx.turn_id.clone(),
-                    message_id.clone(),
-                    variant.clone(),
-                    author.clone(),
-                );
-                let step = coalesce(
-                    self.provider.complete(&req, tx),
-                    rx,
-                    &ctx.cancel,
-                    host,
-                    &self.config.secrets,
-                    |text| {
-                        EventKind::AssistantDelta(AssistantDelta {
-                            author: a2.clone(),
-                            variant: Some(v2.clone()),
-                            turn_id: turn_id.clone(),
-                            message_id: mid.clone(),
-                            text,
-                        })
-                    },
-                )
-                .await;
+                let mut retries = 0;
+                let step = loop {
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let (turn_id, mid, v2, a2) = (
+                        ctx.turn_id.clone(),
+                        message_id.clone(),
+                        variant.clone(),
+                        author.clone(),
+                    );
+                    let (step, emitted) = coalesce_led(
+                        self.provider.complete(&req, tx),
+                        rx,
+                        &ctx.cancel,
+                        host,
+                        &mut None,
+                        &self.config.secrets,
+                        |text| {
+                            EventKind::AssistantDelta(AssistantDelta {
+                                author: a2.clone(),
+                                variant: Some(v2.clone()),
+                                turn_id: turn_id.clone(),
+                                message_id: mid.clone(),
+                                text,
+                            })
+                        },
+                    )
+                    .await;
+                    if let (Step::Done(Err(e)), false) = (&step, emitted)
+                        && let Some(wait) = self.config.retry.delay(e, retries)
+                    {
+                        retries += 1;
+                        tracing::warn!(model = %model, error = %e.log_line(), retry = retries, "model call failed; retrying");
+                        if !retry::wait(wait, &ctx.cancel).await {
+                            break Step::Cancelled;
+                        }
+                        continue;
+                    }
+                    break step;
+                };
                 match step {
                     Step::Done(Ok(c)) => {
                         host.emit(self.assistant_message(
@@ -1134,6 +1178,37 @@ impl NativeBackend {
         }
     }
 
+    /// One model call whose text is not streamed to the user (summaries),
+    /// with the same retries as a turn's calls. `Err(None)` when cancelled.
+    async fn complete_quietly(
+        &self,
+        req: &ChatRequest,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Completion, Option<ProviderError>> {
+        let mut retries = 0;
+        loop {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let r = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(None),
+                r = self.provider.complete(req, tx) => r,
+            };
+            match r {
+                Err(e) => match self.config.retry.delay(&e, retries) {
+                    Some(wait) => {
+                        retries += 1;
+                        tracing::warn!(model = %req.model, error = %e.log_line(), retry = retries, "summary call failed; retrying");
+                        if !retry::wait(wait, cancel).await {
+                            return Err(None);
+                        }
+                    }
+                    None => return Err(Some(e)),
+                },
+                Ok(c) => return Ok(c),
+            }
+        }
+    }
+
     /// Summarise everything before the last `KEEP_TURNS` turns. Returns the
     /// summary, the last seq it covers and the call's usage; `None` when
     /// there is nothing old enough or the call fails (the turn then simply
@@ -1170,11 +1245,7 @@ impl NativeBackend {
             effort: None,
             cache: false,
         };
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let c = tokio::select! {
-            r = self.provider.complete(&req, tx) => r.ok()?,
-            _ = ctx.cancel.cancelled() => return None,
-        };
+        let c = self.complete_quietly(&req, &ctx.cancel).await.ok()?;
         let text = c.text.trim().to_string();
         if text.is_empty() {
             return None;

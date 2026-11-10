@@ -1935,3 +1935,27 @@ the WireGuard interface check for `--bind`. Not done here: the node's start-up s
 removed routes answer 404/405 with a built-in node wired in, node.toml unchanged);
 `savings.test.tsx` (no install button or allow switch, the steps shown);
 `cargo tree -p harness -i russh` finds nothing.
+
+### 2026-11-10 — Provider retry with backoff
+
+Before, one 429, 5xx or dropped connection moved a turn straight to the next fallback, or
+ended it when there was none; every other harness studied retries first
+(`research/harnesses-round-1.md` §8 item 2). Now each model call (a turn's steps, compare
+variants, the summary call) is retried in `agent-native` (`retry.rs`) up to 3 times, waiting
+`2 s · 2ⁿ` capped at 60 s with equal jitter, or the provider's `retry-after-ms` /
+`retry-after` (seconds; an HTTP date is ignored) capped at the same 60 s. Retried: 429
+(except `insufficient_quota` / billing codes), 500, 502, 503, 504, 529, connection and
+stream-start failures. Never: 4xx refusals (401, 403, 400, 404, 413…), `x-should-retry:
+false`, or an attempt whose text has reached the user. After the retries the fallback chain
+applies as before, each fallback with its own retries, so a turn makes at most
+`4 × models in the chain` calls per step. The wait selects on the turn's cancel token. Only
+this layer retries: `genai` 0.7.2 has none and reqwest 0.13 only resends HTTP/2 requests
+the server refused unprocessed. `ProviderError::Status` carries a `RetryHint` read from the
+response headers. Log lines name the status or failure kind only (`ProviderError::log_line`),
+never the response body or a URL; the fallback warning used to log the body.
+**No new event**: the wait shows as the turn still running. A "retrying in N s" notice
+would need an event type (owner's call).
+**Evidence:** `agent-native/tests/retry.rs` (429 then success with no fallback, 400/401/403
+not retried, 4 attempts then the fallback, no retry after streamed text, cancel ends a 30 s
+wait, `Retry-After` honoured and capped through the real `genai` client), `retry.rs` unit
+tests (status table, quota 429, backoff bounds, header parsing, no body in the log line).

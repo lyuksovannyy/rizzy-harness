@@ -85,12 +85,47 @@ pub struct Completion {
     pub usage: Option<Usage>,
 }
 
+/// What a failed response said about trying again (its headers).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetryHint {
+    /// `retry-after-ms` or `retry-after` (seconds; an HTTP date is ignored).
+    pub after: Option<std::time::Duration>,
+    /// `x-should-retry: false` (Anthropic, OpenAI): the provider says a
+    /// retry will fail too.
+    pub no_retry: bool,
+}
+
+impl RetryHint {
+    /// The hint in a response's headers.
+    pub fn from_headers(h: &reqwest::header::HeaderMap) -> Self {
+        let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+        let secs = |s: &str| {
+            s.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .map(|v| std::time::Duration::from_secs_f64(v.min(86_400.0)))
+        };
+        let after = get("retry-after-ms")
+            .and_then(secs)
+            .map(|d| d / 1000)
+            .or_else(|| get("retry-after").and_then(secs));
+        Self {
+            after,
+            no_retry: get("x-should-retry").is_some_and(|v| v.eq_ignore_ascii_case("false")),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("http: {0}")]
     Http(String),
     #[error("provider returned {status}: {body}")]
-    Status { status: u16, body: String },
+    Status {
+        status: u16,
+        body: String,
+        hint: RetryHint,
+    },
     #[error("bad stream: {0}")]
     Stream(String),
     #[error("no provider serves model {0:?}")]
@@ -104,7 +139,7 @@ impl ProviderError {
     pub fn is_model_level(&self) -> bool {
         match self {
             ProviderError::UnknownModel(_) | ProviderError::Http(_) => true,
-            ProviderError::Status { status, body } => match status {
+            ProviderError::Status { status, body, .. } => match status {
                 404 | 408 | 429 | 500..=599 => true,
                 400 => body.to_ascii_lowercase().contains("model"),
                 _ => false,
@@ -112,6 +147,71 @@ impl ProviderError {
             ProviderError::Stream(_) => false,
         }
     }
+
+    /// Whether the same request may succeed if sent again after a wait: a
+    /// rate limit (not an exhausted quota or billing limit), an overloaded
+    /// or failing server, a connection that failed or a stream that broke.
+    /// Never authentication, permission or a bad request. The caller makes
+    /// sure no output of the failed attempt reached the user.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            ProviderError::Http(_) | ProviderError::Stream(_) => true,
+            ProviderError::UnknownModel(_) => false,
+            ProviderError::Status { status, body, hint } => {
+                !hint.no_retry
+                    && match status {
+                        429 => !quota_exhausted(body),
+                        500 | 502 | 503 | 504 | 529 => true,
+                        _ => false,
+                    }
+            }
+        }
+    }
+
+    /// How long the provider asked to wait before trying again.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            ProviderError::Status { hint, .. } => hint.after,
+            _ => None,
+        }
+    }
+
+    /// The error for a log line: the status or the kind of failure, never
+    /// the provider's response body or a URL (either may carry a key or
+    /// the user's text).
+    pub fn log_line(&self) -> String {
+        match self {
+            ProviderError::Http(_) => "connection failed".into(),
+            ProviderError::Stream(_) => "stream failed".into(),
+            ProviderError::Status { status, .. } => format!("status {status}"),
+            ProviderError::UnknownModel(_) => "unknown model".into(),
+        }
+    }
+}
+
+/// The `error.code` / `error.type` of a JSON error body, lowercased
+/// (OpenAI and compatible servers: `{"error": {"code", "type"}}`;
+/// Anthropic: `{"type": "error", "error": {"type"}}`).
+fn error_codes(body: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    ["/error/code", "/error/type", "/code"]
+        .iter()
+        .filter_map(|p| v.pointer(p).and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// A 429 that waiting a minute will not fix: the account's quota or
+/// credit is used up (OpenAI `insufficient_quota`, billing errors).
+fn quota_exhausted(body: &str) -> bool {
+    error_codes(body).iter().any(|c| {
+        matches!(
+            c.as_str(),
+            "insufficient_quota" | "billing_error" | "billing_hard_limit_reached"
+        )
+    })
 }
 
 #[async_trait::async_trait]

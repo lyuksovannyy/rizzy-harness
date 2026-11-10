@@ -374,8 +374,16 @@ and listings never mark it. Testing a saved provider in the UI refreshes its
 listing too, but only with its saved key and preset: a test with a key typed
 into the form, not yet saved, changes neither the listing nor the marks.
 
-An agent has one model; one model may serve several agents. When a turn's
-model is unavailable, or its request fails before any output with a model
+An agent has one model; one model may serve several agents. A model call
+that fails before any output for a passing reason (rate limit 429, server
+error 500/502/503/504, Anthropic's overloaded 529, no connection, a stream
+that breaks before its first word) is retried up to 3 times, waiting 2, 4,
+then 8 seconds (with jitter), or what the provider's `Retry-After` asks, at
+most 60 s; a cancel ends the wait at once. A refused key, a missing
+permission, an exhausted quota or a bad request is not retried, and nothing
+is retried once part of the answer is on screen. The chat shows the turn as
+still running while it waits. When a turn's
+model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
 which model answered. An agent without an `[agent_models]` entry runs on

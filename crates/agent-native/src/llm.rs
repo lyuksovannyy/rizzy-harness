@@ -182,22 +182,28 @@ fn provider_error(e: genai::Error) -> ProviderError {
         genai::Error::WebStream { error, .. } => Some(error.as_ref()),
         _ => None,
     };
-    let status = |g: &genai::Error| match g {
-        genai::Error::HttpError { status, body, .. } => Some(ProviderError::Status {
-            status: status.as_u16(),
-            body: body.clone(),
-        }),
-        genai::Error::WebModelCall {
-            webc_error: genai::webc::Error::ResponseFailedStatus { status, body, .. },
-            ..
-        } => Some(ProviderError::Status {
-            status: status.as_u16(),
-            body: body.clone(),
-        }),
-        _ => g.status().map(|s| ProviderError::Status {
-            status: s.as_u16(),
-            body: String::new(),
-        }),
+    let status = |g: &genai::Error| {
+        let hint = g.headers().map(RetryHint::from_headers).unwrap_or_default();
+        match g {
+            genai::Error::HttpError { status, body, .. } => Some(ProviderError::Status {
+                status: status.as_u16(),
+                body: body.clone(),
+                hint,
+            }),
+            genai::Error::WebModelCall {
+                webc_error: genai::webc::Error::ResponseFailedStatus { status, body, .. },
+                ..
+            } => Some(ProviderError::Status {
+                status: status.as_u16(),
+                body: body.clone(),
+                hint,
+            }),
+            _ => g.status().map(|s| ProviderError::Status {
+                status: s.as_u16(),
+                body: String::new(),
+                hint,
+            }),
+        }
     };
     if let Some(p) = status(&e).or_else(|| inner?.downcast_ref::<genai::Error>().and_then(status)) {
         return p;
