@@ -570,6 +570,14 @@ pub fn exec(req: ExecRequest) -> i32 {
     }
 }
 
+/// Confine the calling thread (and what it later starts) by `req`'s rules
+/// without running a command: for a helper that confines itself after
+/// start-up (`pdf-text`, FIX_PLAN 3.4). Empty `ro`/`rw` means no filesystem
+/// access at all. Call it while the process has one thread.
+pub fn restrict_self(req: &ExecRequest) -> Result<String, String> {
+    imp::restrict(req)
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::ExecRequest;

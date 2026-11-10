@@ -1025,17 +1025,36 @@ impl Store {
         Ok(out)
     }
 
+    /// Store an unsent upload unless its owner's unsent uploads would then
+    /// pass `max_count` or `max_bytes` (bytes of name and text): `false`,
+    /// nothing stored. Counted and inserted under one lock, so two uploads
+    /// at once cannot both slip under the cap. `owner` `None` (the API
+    /// token) counts against its own rows.
     pub fn attachment_put(
         &self,
         id: &str,
         owner: Option<&str>,
         a: &harness_core::event::Attachment,
-    ) -> Result<()> {
-        self.lock().execute(
+        max_count: usize,
+        max_bytes: usize,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let (n, bytes): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(name AS BLOB)) + LENGTH(CAST(text AS BLOB))), 0) FROM attachments WHERE owner_id IS ?1",
+            params![owner],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let size = (a.name.len() + a.text.len()) as i64;
+        if n as usize >= max_count || (bytes + size) as usize > max_bytes {
+            return Ok(false);
+        }
+        tx.execute(
             "INSERT INTO attachments (attachment_id, owner_id, name, mime, text, truncated, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, owner, a.name, a.mime, a.text, a.truncated, harness_core::now_ms()],
         )?;
-        Ok(())
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Remove and return the given uploads, all or nothing. `owner` must

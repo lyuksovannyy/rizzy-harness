@@ -131,6 +131,17 @@ tar.gz, …; `bin` if unknown), the type it is served with, and `display`:
 - The browser never decodes an image above 40 MP or 16,384 px a side: the Media page shows an
   icon and offers Download instead (`web/src/lib/thumbs.ts`).
 
+## Documents attached to a message are not Media (T20)
+
+`POST /api/attachments` (the composer's `+`) keeps no file: it extracts text, stores it in
+master.db `attachments` until the message is sent, and the text then lives in the message's
+event. The same rule as above decides what a file is: a PDF only by `%PDF-` at offset 0,
+never by name. PDFs are read by the confined `rizzy-harness pdf-text` helper
+(`crates/master/src/pdf.rs`), never in the server; refusals: 422 (not readable, no text
+layer, over 20 s, no Landlock on the server), 503 (two PDFs already being read and no slot
+within 10 s), 429 (20 unsent files or 8 MiB of unsent text for this account). Unsent uploads
+expire with the incognito TTL.
+
 ## Serving stored files (T17)
 
 Every content, download and preview endpoint goes through `blobs::serve`, thumbnails through

@@ -1407,6 +1407,7 @@ dependencies = [
  "clap",
  "dirs",
  "dotenvy",
+ "flate2",
  "futures",
  "harness-agent-native",
  "harness-agents",

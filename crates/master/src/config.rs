@@ -240,6 +240,26 @@ pub struct VoiceConfig {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_secret: Option<String>,
+    /// Dictations per account per UTC day (default 200; 0 = unlimited).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_requests: Option<u32>,
+    /// MiB of audio per account per UTC day (default 100; 0 = unlimited).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_mb: Option<u64>,
+}
+
+impl VoiceConfig {
+    pub fn limits(&self) -> crate::voice::Limits {
+        crate::voice::Limits {
+            daily_requests: self
+                .daily_requests
+                .unwrap_or(crate::voice::DEFAULT_DAILY_REQUESTS),
+            daily_bytes: self
+                .daily_mb
+                .unwrap_or(crate::voice::DEFAULT_DAILY_MB)
+                .saturating_mul(1024 * 1024),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -1257,15 +1257,32 @@ async fn upload(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let a = crate::attachments::extract(&q.name, body.to_vec())
+    use crate::attachments::{MAX_UNSENT, MAX_UNSENT_BYTES};
+    let a = crate::attachments::extract(&q.name, body.to_vec(), m.pdf_reader())
         .await
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        .map_err(|e| {
+            let code = if e.busy() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            ApiError(code, e.to_string())
+        })?;
     let id = harness_core::new_id();
     let (aid, owner, att) = (id.clone(), who.user_id.clone(), a.clone());
-    m.inner
+    let stored = m
+        .inner
         .mirror
-        .call(move |s| s.attachment_put(&aid, owner.as_deref(), &att))
+        .call(move |s| s.attachment_put(&aid, owner.as_deref(), &att, MAX_UNSENT, MAX_UNSENT_BYTES))
         .await?;
+    if !stored {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "too many files waiting to be sent (at most {MAX_UNSENT}); send or remove some first"
+            ),
+        ));
+    }
     Ok(Json(json!({
         "attachment_id": id,
         "name": a.name,
@@ -1889,7 +1906,7 @@ async fn transcribe(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
+    let who = require(&m, &headers).await?;
     let t = m.transcriber().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1899,6 +1916,16 @@ async fn transcribe(
     if body.is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "no audio".into()));
     }
+    // Held until the answer (or the dropped request) ends.
+    let _slot = m
+        .voice_usage()
+        .begin(
+            who.user_id.as_deref().unwrap_or(""),
+            body.len() as u64,
+            t.limits(),
+            harness_core::now_ms(),
+        )
+        .map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
     let mime = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

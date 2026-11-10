@@ -40,7 +40,8 @@ reqwest.workspace = true
 mime_guess.workspace = true
 # Gzip for the web UI's text files (assets.rs).
 flate2.workspace = true
-# PDF text for attachments (MIT). Parsing runs in spawn_blocking: it can panic.
+# PDF text for attachments (MIT). Runs only in the `pdf-text` helper process
+# (src/pdf.rs, FIX_PLAN 3.4), never inside the server.
 pdf-extract = "0.12.1"
 rust-embed.workspace = true
 serde.workspace = true
