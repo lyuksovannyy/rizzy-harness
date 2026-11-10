@@ -6,7 +6,8 @@
 //!   database does not leak logins. A session ends 30 days after it was
 //!   last used. Logout deletes its row; a password change or reset,
 //!   disabling the account and deleting it delete all of the user's rows,
-//!   so the next request with an old cookie is refused.
+//!   so the next request with an old cookie is refused, and close the UI
+//!   WebSockets opened with them (`ws`).
 //! * The first account (an admin) is created with a one-time **claim code**
 //!   from `<data>/claim-code` (0600), so whoever reaches a fresh server first
 //!   cannot take it over. The file is deleted once claimed.
@@ -314,25 +315,33 @@ pub async fn create_account(
 }
 
 /// Set a password. `must_change` forces another change at next login (admin
-/// resets). Signs the user out everywhere.
+/// resets). Signs the user out everywhere, open UI sockets included.
 pub async fn set_password(
-    store: &Store,
-    hasher: &Hasher,
+    m: &Master,
     user_id: &str,
     password: String,
     must_change: bool,
 ) -> Result<(), AccountError> {
     validate_password(&password).map_err(AccountError::Invalid)?;
-    let phc = hash_password(hasher, password).await?;
+    let phc = hash_password(m.inner.auth.hasher(), password).await?;
     let uid = user_id.to_string();
-    store
+    m.inner
+        .mirror
         .call(move |s| {
             s.set_password_hash(&uid, &phc, must_change)?;
             s.ui_sessions_delete_for_user(&uid)
         })
         .await
-        .map(|_| ())
-        .map_err(|e| AccountError::Internal(e.to_string()))
+        .map_err(|e| AccountError::Internal(e.to_string()))?;
+    // After the rows are gone (see `ws`).
+    m.inner.sockets.revoke_user(user_id);
+    Ok(())
+}
+
+/// Close every open UI socket of `user_id`. For paths that delete the
+/// user's session rows themselves (disable, delete); call it after.
+pub fn close_sockets(m: &Master, user_id: &str) {
+    m.inner.sockets.revoke_user(user_id);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -684,12 +693,15 @@ pub async fn create_ui_session(
     Ok(id)
 }
 
-/// End the UI session with cookie value `id` (logout).
-pub async fn delete_ui_session(store: &Store, id: &str) {
+/// End the UI session with cookie value `id` (logout), and close the UI
+/// sockets opened with it (they are found by the id's hash).
+pub async fn delete_ui_session(m: &Master, id: &str) {
     let hash = sha256_hex(id);
-    if let Err(e) = store.call(move |s| s.ui_session_delete(&hash)).await {
+    let h = hash.clone();
+    if let Err(e) = m.inner.mirror.call(move |s| s.ui_session_delete(&h)).await {
         tracing::warn!(error = %e, "could not end a login");
     }
+    m.inner.sockets.revoke_session(&hash);
 }
 
 /// The principal behind a request, if any.

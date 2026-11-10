@@ -387,7 +387,7 @@ async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<R
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
     // The session row goes, so a copy of the cookie is useless from now on.
     if let Some(id) = auth::cookie_value(&headers) {
-        auth::delete_ui_session(&m.inner.mirror, &id).await;
+        auth::delete_ui_session(&m, &id).await;
     }
     (
         [(header::SET_COOKIE, m.inner.auth.clear_cookie())],
@@ -568,7 +568,7 @@ async fn change_password(
             "current password is wrong".into(),
         ));
     }
-    auth::set_password(&m.inner.mirror, hasher, &uid, b.new, false).await?;
+    auth::set_password(&m, &uid, b.new, false).await?;
     // Every session was revoked; give this browser a fresh one.
     session_response(&m, &uid).await
 }
@@ -931,6 +931,9 @@ async fn update_user(
                 Ok::<_, harness_store::StoreError>(())
             })
             .await?;
+        if disable {
+            auth::close_sockets(&m, &target.user_id);
+        }
         // Disabled owners stop counting as owners, and whether the user may
         // drive their agentic chats (`blocked`) may have changed: running
         // ones that lost their access stop.
@@ -939,14 +942,7 @@ async fn update_user(
         ws::sweep_revoked(&m, vec![target.user_id.clone()]);
     }
     if let Some(pw) = b.password {
-        auth::set_password(
-            &m.inner.mirror,
-            m.inner.auth.hasher(),
-            &target.user_id,
-            pw,
-            true,
-        )
-        .await?;
+        auth::set_password(&m, &target.user_id, pw, true).await?;
     }
     Ok(Json(user_json(&load_user(&m, &id).await?)))
 }
@@ -965,6 +961,7 @@ async fn delete_user(
     // the workspaces that go with them go too, and their facts.
     let projects = crate::projects::ids(&m).await;
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
+    auth::close_sockets(&m, &target.user_id);
     // Their stored files lost their rows with the account; unlink them.
     crate::storage::on_user_deleted(&m).await;
     crate::projects::forget_gone(&m, projects).await;
