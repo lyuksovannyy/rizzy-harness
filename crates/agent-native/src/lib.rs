@@ -1,6 +1,7 @@
 //! The native agent loop: stream a completion, run requested tools (through the
 //! host's approval gate), feed results back, repeat until the model stops.
 
+pub mod compact;
 pub mod images;
 pub mod llm;
 pub mod mask;
@@ -73,9 +74,10 @@ pub struct NativeConfig {
     pub tool_timeout: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
     pub effort: Option<Effort>,
-    /// Summarise older turns once the history is estimated above this many
-    /// tokens (0 = never).
-    pub summarize_after_tokens: usize,
+    /// Summarise older turns once the history is above this many tokens
+    /// (0 = never). `None`: the model's context window less a reserve
+    /// (`compact::threshold`), or 24k when the window is unknown.
+    pub summarize_after_tokens: Option<usize>,
     /// Retries of a model call that failed for a passing reason, before
     /// the agent's fallbacks.
     pub retry: retry::RetryPolicy,
@@ -93,7 +95,7 @@ impl Default for NativeConfig {
             sandbox: Default::default(),
             tool_timeout: Duration::from_secs(600),
             effort: None,
-            summarize_after_tokens: 0,
+            summarize_after_tokens: None,
             retry: Default::default(),
         }
     }
@@ -634,7 +636,7 @@ impl AgentBackend for NativeBackend {
             .map(|a| a.system_prompt.as_str())
             .unwrap_or(&self.config.system_prompt);
         let sv = &ctx.extra.savings;
-        let keep = sv.keep_tool_outputs.map(|k| k as usize);
+        let mut keep = sv.keep_tool_outputs.map(|k| k as usize);
         let mut system = if ctx.cwd.as_os_str().is_empty() {
             base_prompt.to_string()
         } else {
@@ -656,36 +658,60 @@ impl AgentBackend for NativeBackend {
         }
         let mut usage = Usage::default();
         let (mut summary, mut recent) = split_summary(&ctx.history);
-        let limit = self.config.summarize_after_tokens;
-        let history_tokens = |events: &[RawEvent]| {
+        // The model answering this turn. Until the turn has any output, a
+        // model-level failure moves on to the next of the agent's fallbacks;
+        // the note saying so goes out just before the answer.
+        let mut chain = std::collections::VecDeque::from(model_chain(&ctx.model, agent));
+        let mut model = chain.pop_front().unwrap_or_else(|| ctx.model.clone());
+        let window_of = |m: &str| agent.and_then(|a| a.context_windows.get(m).copied());
+        // Compaction is keyed to the answering model's window, unless a
+        // trigger is configured (0 = never summarise).
+        let configured = self.config.summarize_after_tokens;
+        let limit = compact::threshold(configured, window_of(&model));
+        let estimate = |events: &[RawEvent]| {
             let mut m = history_to_messages(events);
             if let Some(k) = keep {
                 mask::mask_old_outputs(&mut m, k);
             }
-            provider::estimate_tokens(&m) as usize
+            provider::estimate_tokens(&m)
         };
         if limit > 0
-            && history_tokens(recent) > limit
-            && let Some((text, through_seq, u)) =
-                self.summarize(&ctx, summary.as_deref(), recent).await
+            && compact::history_tokens(recent, estimate) as usize > limit
+            && let Some((text, through_seq)) = self
+                .compact(
+                    &ctx,
+                    &model,
+                    window_of(&model),
+                    summary.as_deref(),
+                    recent,
+                    limit / 4,
+                    &mut usage,
+                )
+                .await
         {
-            usage.add(&u);
-            host.emit(EventKind::HistorySummarized(HistorySummarized {
-                turn_id: ctx.turn_id.clone(),
-                through_seq,
-                text: text.clone(),
-            }))
-            .await;
             let start = recent.partition_point(|e| e.seq <= through_seq);
             recent = &recent[start..];
             summary = Some(text);
         }
-        let system = match &summary {
-            Some(t) => format!("{system}\n\nSummary of the earlier conversation:\n{t}"),
-            None => system,
+        if ctx.cancel.is_cancelled() {
+            return TurnOutcome {
+                reason: TurnEndReason::Cancelled,
+                usage: Some(usage),
+                error: None,
+            };
+        }
+        // System prompt (with the summary) and the history before this turn.
+        let base_system = system;
+        let history_msgs = |summary: Option<&str>, recent: &[RawEvent]| {
+            let system = match summary {
+                Some(t) => format!("{base_system}\n\nSummary of the earlier conversation:\n{t}"),
+                None => base_system.clone(),
+            };
+            let mut m = vec![ChatMsg::System(system)];
+            m.extend(history_to_messages(recent));
+            m
         };
-        let mut messages = vec![ChatMsg::System(system)];
-        messages.extend(history_to_messages(recent));
+        let mut messages = history_msgs(summary.as_deref(), recent);
         // Per-turn context sits after the history: the system prompt and the
         // history stay byte-identical from turn to turn (prompt cache).
         let user_text = match &ctx.extra.context {
@@ -693,7 +719,7 @@ impl AgentBackend for NativeBackend {
             None => ctx.user_text.clone(),
         };
         messages.push(images::user_msg(user_text, &ctx.extra.images));
-        let user_idx = messages.len() - 1;
+        let mut user_idx = messages.len() - 1;
         let wanted = images::wanted(&messages);
         let loaded = if wanted.is_empty() {
             Vec::new()
@@ -730,11 +756,6 @@ impl AgentBackend for NativeBackend {
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history))));
 
-        // The model answering this turn. Until the turn has any output, a
-        // model-level failure moves on to the next of the agent's fallbacks;
-        // the note saying so goes out just before the answer.
-        let mut chain = std::collections::VecDeque::from(model_chain(&ctx.model, agent));
-        let mut model = chain.pop_front().unwrap_or_else(|| ctx.model.clone());
         // Why the turn's own model is not the one answering: it is
         // unavailable, or the first error it gave; a later fallback's own
         // failure only goes to the log.
@@ -743,6 +764,9 @@ impl AgentBackend for NativeBackend {
             .clone()
             .map(|r| fallback_event(&ctx.turn_id, &model, &ctx.model, r));
         let mut started = false;
+        // A request the provider refused as too long is compacted and sent
+        // again once per turn; a second refusal ends the turn.
+        let mut overflowed = false;
         for _ in 0..MAX_STEPS {
             let message_id = new_id();
             let mut sent = messages.clone();
@@ -809,6 +833,76 @@ impl AgentBackend for NativeBackend {
                         usage: Some(usage),
                         error: None,
                     };
+                }
+                Step::Done(Err(e)) if !emitted && e.is_context_overflow() => {
+                    let fail = |usage: Usage, what: &str| TurnOutcome {
+                        reason: TurnEndReason::Error,
+                        usage: Some(usage),
+                        error: Some(format!(
+                            "The conversation is too long for the context window of {model}{what}. \
+                             Start a new chat, or switch to a model with a larger context window. \
+                             (provider: {})",
+                            e.log_line()
+                        )),
+                    };
+                    if overflowed {
+                        return fail(
+                            usage,
+                            ", even after summarising older turns and hiding old tool output",
+                        );
+                    }
+                    overflowed = true;
+                    tracing::warn!(model = %model, error = %e.log_line(), "context overflow; compacting");
+                    let before = {
+                        let mut m = messages.clone();
+                        if let Some(k) = keep {
+                            mask::mask_old_outputs(&mut m, k);
+                        }
+                        provider::estimate_tokens(&m)
+                    };
+                    // Older turns into the summary (unless summarising is
+                    // switched off), then this turn's large tool outputs
+                    // but the newest hidden for the rest of the turn.
+                    if configured != Some(0)
+                        && let Some((text, through_seq)) = self
+                            .compact(
+                                &ctx,
+                                &model,
+                                window_of(&model),
+                                summary.as_deref(),
+                                recent,
+                                0,
+                                &mut usage,
+                            )
+                            .await
+                    {
+                        let start = recent.partition_point(|ev| ev.seq <= through_seq);
+                        recent = &recent[start..];
+                        summary = Some(text);
+                        let this_turn = messages.split_off(user_idx);
+                        messages = history_msgs(summary.as_deref(), recent);
+                        user_idx = messages.len();
+                        messages.extend(this_turn);
+                        images::attach(&mut messages, &loaded);
+                    }
+                    if ctx.cancel.is_cancelled() {
+                        return TurnOutcome {
+                            reason: TurnEndReason::Cancelled,
+                            usage: Some(usage),
+                            error: None,
+                        };
+                    }
+                    keep = Some(1);
+                    let after = {
+                        let mut m = messages.clone();
+                        mask::mask_old_outputs(&mut m, 1);
+                        provider::estimate_tokens(&m)
+                    };
+                    if after >= before {
+                        // Nothing to shrink: the same request would fail again.
+                        return fail(usage, "");
+                    }
+                    continue;
                 }
                 Step::Done(Err(e)) if !started && e.is_model_level() && !chain.is_empty() => {
                     let next = chain.pop_front().unwrap_or_default();
@@ -1209,48 +1303,111 @@ impl NativeBackend {
         }
     }
 
-    /// Summarise everything before the last `KEEP_TURNS` turns. Returns the
-    /// summary, the last seq it covers and the call's usage; `None` when
-    /// there is nothing old enough or the call fails (the turn then simply
-    /// sends the full history).
-    async fn summarize(
+    /// Summarise everything before the last `KEEP_TURNS` turns with
+    /// `model`, whose context window is `window` when known. The old part
+    /// is read in pieces at turn boundaries that each fit the window (with
+    /// the summary so far), so no part of it is dropped unread; a single
+    /// turn larger than the window stops it there. Each piece's summary
+    /// covers everything up to its `through_seq` and is emitted at once,
+    /// so a cancel or failure midway leaves the last one valid. Skipped
+    /// when the old part is under `min_old` tokens. Returns the newest
+    /// summary and the last seq it covers; `None` when nothing was
+    /// summarised (the turn then sends the history as it is).
+    #[allow(clippy::too_many_arguments)]
+    async fn compact(
         &self,
         ctx: &TurnCtx<'_>,
+        model: &str,
+        window: Option<u64>,
         prev: Option<&str>,
         recent: &[RawEvent],
-    ) -> Option<(String, u64, Usage)> {
-        let starts: Vec<u64> = recent
+        min_old: usize,
+        usage: &mut Usage,
+    ) -> Option<(String, u64)> {
+        let starts: Vec<usize> = recent
             .iter()
-            .filter(|e| e.kind == "turn_started")
-            .map(|e| e.seq)
+            .enumerate()
+            .filter(|(_, e)| e.kind == "turn_started")
+            .map(|(i, _)| i)
             .collect();
         if starts.len() <= KEEP_TURNS {
             return None;
         }
-        let through = starts[starts.len() - KEEP_TURNS] - 1;
-        let old = &recent[..recent.partition_point(|e| e.seq <= through)];
+        let old = &recent[..starts[starts.len() - KEEP_TURNS]];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
         let old_tokens = provider::estimate_tokens(&history_to_messages(old)) as usize;
-        if old_tokens < self.config.summarize_after_tokens / 4 {
+        if old.is_empty() || old_tokens < min_old {
             return None;
         }
-        let req = ChatRequest {
-            model: ctx.model.clone(),
-            messages: vec![
-                ChatMsg::System(SUMMARY_PROMPT.into()),
-                ChatMsg::User(transcript(prev, old)),
-            ],
-            tools: vec![],
-            effort: None,
-            cache: false,
+        let budget = window.map(|w| w.saturating_sub(compact::SUMMARY_OVERHEAD));
+        let fits = |prev: Option<&str>, part: &[RawEvent]| {
+            budget.is_none_or(|b| {
+                provider::estimate_tokens(&[ChatMsg::User(transcript(prev, part))]) <= b
+            })
         };
-        let c = self.complete_quietly(&req, &ctx.cancel).await.ok()?;
-        let text = c.text.trim().to_string();
-        if text.is_empty() {
-            return None;
+        // Where a piece may end: the start of each later turn, or the end.
+        let ends: Vec<usize> = starts
+            .iter()
+            .copied()
+            .filter(|&i| i > 0 && i < old.len())
+            .chain(std::iter::once(old.len()))
+            .collect();
+        let mut prev = prev.map(str::to_string);
+        let mut done = None;
+        let mut from = 0;
+        while from < old.len() {
+            // The longest piece that fits (pieces only grow by whole turns).
+            let Some(end) = ends
+                .iter()
+                .copied()
+                .filter(|&e| e > from)
+                .take_while(|&e| fits(prev.as_deref(), &old[from..e]))
+                .last()
+            else {
+                tracing::warn!(
+                    model,
+                    "a turn is larger than the summarising model's context window; not summarised"
+                );
+                break;
+            };
+            let req = ChatRequest {
+                model: model.to_string(),
+                messages: vec![
+                    ChatMsg::System(SUMMARY_PROMPT.into()),
+                    ChatMsg::User(transcript(prev.as_deref(), &old[from..end])),
+                ],
+                tools: vec![],
+                effort: None,
+                cache: false,
+            };
+            let c = match self.complete_quietly(&req, &ctx.cancel).await {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(e) = e {
+                        tracing::warn!(model, error = %e.log_line(), "summary call failed");
+                    }
+                    break;
+                }
+            };
+            usage.add(&c.usage.unwrap_or_default());
+            let text = c.text.trim().to_string();
+            if text.is_empty() {
+                break;
+            }
+            let through_seq = old[end - 1].seq;
+            ctx.host
+                .emit(EventKind::HistorySummarized(HistorySummarized {
+                    turn_id: ctx.turn_id.clone(),
+                    through_seq,
+                    text: text.clone(),
+                }))
+                .await;
+            prev = Some(text.clone());
+            done = Some((text, through_seq));
+            from = end;
         }
-        Some((text, through, c.usage.unwrap_or_default()))
+        done
     }
 
     async fn run_tool(
@@ -1452,6 +1609,7 @@ mod tests {
             fallbacks: vec![],
             unavailable: vec![],
             no_effort: vec![],
+            context_windows: Default::default(),
             effort: None,
             budget: Default::default(),
             ui: Default::default(),
@@ -2410,7 +2568,7 @@ mod tests {
             rec.clone(),
             vec![],
             NativeConfig {
-                summarize_after_tokens: 300,
+                summarize_after_tokens: Some(300),
                 ..Default::default()
             },
         );

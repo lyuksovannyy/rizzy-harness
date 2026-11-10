@@ -418,7 +418,8 @@ Chats and web tools (restart after changing):
 ```toml
 [chat]
 incognito_ttl_minutes = 1440         # incognito chats deleted after this idle time
-summarize_after_tokens = 24000       # 0 = never summarise older turns
+# summarize_after_tokens = 24000     # unset: the model's context window less a reserve
+                                     # (24000 when the window is unknown); 0 = never
 
 [web]
 search = "searxng"                   # none | searxng | brave
@@ -436,6 +437,17 @@ preset = "balanced"                  # fast | balanced | best (Ollama model name
 # embeddings_model = "nomic-embed-text"  # overrides the preset; required for provider
 # mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
+
+Older turns are summarised when the history nears the model's context window
+(the window from the provider's model listing or your `context` on a model,
+less a fifth of it, at least 16k, for the reply and tool results), measured
+with the token count the provider reported for the previous turn. Set
+`summarize_after_tokens` to use a fixed number instead. If a provider still
+refuses a request as too long, the turn summarises older turns, hides all but
+the newest large tool output, and tries once more; a second refusal ends the
+turn with a message saying so. A summary is only made by a model whose window
+holds what it reads: a long history is summarised in pieces, and a single turn
+larger than the window is left unsummarised rather than skipped.
 
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.

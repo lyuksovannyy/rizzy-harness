@@ -137,6 +137,11 @@ impl ProviderError {
     /// content: the model is unknown or gone, rate-limited, the provider
     /// fails or cannot be reached. Another model may answer instead.
     pub fn is_model_level(&self) -> bool {
+        // "This model's maximum context length is ..." names the model but
+        // is this request's size: compacting fixes it, another model may not.
+        if self.is_context_overflow() {
+            return false;
+        }
         match self {
             ProviderError::UnknownModel(_) | ProviderError::Http(_) => true,
             ProviderError::Status { status, body, .. } => match status {
@@ -166,6 +171,47 @@ impl ProviderError {
                     }
             }
         }
+    }
+
+    /// The provider refused the request for being longer than the model's
+    /// context window. Gated on the status (400 or 413), then the error's
+    /// code where the provider sends one: `context_length_exceeded`
+    /// (OpenAI, Groq, Azure, LiteLLM), `request_too_large` (Anthropic
+    /// 413). Without a code, the message the provider is known to send:
+    /// Anthropic `prompt is too long`, OpenAI-compatible servers (vLLM,
+    /// DeepSeek, OpenRouter, Mistral, Together) `maximum context length`,
+    /// Gemini `input token count ... exceeds`, llama.cpp `exceeds the
+    /// available context size`, Ollama `exceeds the context length`.
+    pub fn is_context_overflow(&self) -> bool {
+        let ProviderError::Status { status, body, .. } = self else {
+            return false;
+        };
+        if !matches!(status, 400 | 413) {
+            return false;
+        }
+        let codes = error_codes(body);
+        if codes.iter().any(|c| {
+            matches!(
+                c.as_str(),
+                "context_length_exceeded"
+                    | "request_too_large"
+                    | "model_context_window_exceeded"
+                    | "exceed_context_size_error"
+            )
+        }) {
+            return true;
+        }
+        let msg = error_message(body).to_ascii_lowercase();
+        let exceeds =
+            msg.contains("exceed") || msg.contains("too large") || msg.contains("too long");
+        msg.contains("prompt is too long")
+            || msg.contains("maximum context length")
+            || msg.contains("context_length_exceeded")
+            || (exceeds
+                && (msg.contains("context length")
+                    || msg.contains("context window")
+                    || msg.contains("context size")
+                    || msg.contains("input token count")))
     }
 
     /// How long the provider asked to wait before trying again.
@@ -201,6 +247,19 @@ fn error_codes(body: &str) -> Vec<String> {
         .filter_map(|p| v.pointer(p).and_then(Value::as_str))
         .map(str::to_ascii_lowercase)
         .collect()
+}
+
+/// The human-readable message of an error body (`error.message`,
+/// `message`, `detail`), or the body itself when it is not JSON.
+fn error_message(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    ["/error/message", "/message", "/detail", "/error"]
+        .iter()
+        .find_map(|p| v.pointer(p).and_then(Value::as_str))
+        .unwrap_or(body)
+        .to_string()
 }
 
 /// A 429 that waiting a minute will not fix: the account's quota or
@@ -249,4 +308,78 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
         })
         .sum();
     (chars / 4) as u64 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(status: u16, body: &str) -> ProviderError {
+        ProviderError::Status {
+            status,
+            body: body.into(),
+            hint: RetryHint::default(),
+        }
+    }
+
+    #[test]
+    fn context_overflow_is_recognised_per_provider() {
+        let yes = [
+            // OpenAI (and Groq, Azure): the code.
+            (
+                400,
+                r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#,
+            ),
+            // Anthropic: a generic type, so the message.
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 211000 tokens > 200000 maximum"}}"#,
+            ),
+            // Anthropic, over the request size limit.
+            (
+                413,
+                r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#,
+            ),
+            // vLLM / DeepSeek: a numeric code.
+            (
+                400,
+                r#"{"object":"error","message":"This model's maximum context length is 4096 tokens. However, you requested 5000 tokens.","type":"BadRequestError","param":null,"code":400}"#,
+            ),
+            // Gemini's OpenAI-compatible endpoint (an array).
+            (
+                400,
+                r#"[{"error":{"code":400,"message":"The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}]"#,
+            ),
+            // llama.cpp server.
+            (
+                400,
+                r#"{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}"#,
+            ),
+            // Mistral.
+            (
+                400,
+                r#"{"object":"error","message":"Prompt contains 40000 tokens, too large for model with 32768 maximum context length","type":"invalid_request_error"}"#,
+            ),
+        ];
+        for (s, b) in yes {
+            let e = status(s, b);
+            assert!(e.is_context_overflow(), "{s} {b}");
+            assert!(!e.is_model_level(), "not a reason to switch models: {b}");
+            assert!(!e.is_retryable(), "the same request fails again: {b}");
+        }
+        let no = [
+            (
+                400,
+                r#"{"error":{"message":"max_tokens is too large: 100000"}}"#,
+            ),
+            (400, r#"{"error":{"message":"Invalid model: gpt-9"}}"#),
+            (401, r#"{"error":{"message":"prompt is too long"}}"#),
+            (429, r#"{"error":{"code":"context_length_exceeded"}}"#),
+            (500, "maximum context length"),
+        ];
+        for (s, b) in no {
+            assert!(!status(s, b).is_context_overflow(), "{s} {b}");
+        }
+        assert!(!ProviderError::Http("context length exceeded".into()).is_context_overflow());
+    }
 }

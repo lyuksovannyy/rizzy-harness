@@ -846,7 +846,7 @@ summary, incognito TTL).
 * **Token meter**: `turn_ended.usage` gains `context_tokens` (input of the turn's last
   model call); the conversation header shows total tokens and current context size.
 * **Rolling summary**: once the history (since the last summary) is estimated above
-  `[chat] summarize_after_tokens` (default 24k), everything before the last two turns is
+  `[chat] summarize_after_tokens` (default 24k; since 2026-11-10 the model's context window, see below), everything before the last two turns is
   summarised by the same model into a `history_summarized` event; later turns send
   system prompt + summary + recent turns. Skipped when the old part is small (otherwise
   two huge turns would trigger a summary call on every turn). The UI shows the latest
@@ -1959,3 +1959,39 @@ would need an event type (owner's call).
 not retried, 4 attempts then the fallback, no retry after streamed text, cancel ends a 30 s
 wait, `Retry-After` honoured and capped through the real `genai` client), `retry.rs` unit
 tests (status table, quota 429, backoff bounds, header parsing, no body in the log line).
+
+### 2026-11-10 — Compaction keyed to the context window; overflow recovery
+
+Before, summarising triggered at a fixed 24k-token character estimate whatever the model,
+and a provider's context-length error ended the turn (`research/harnesses-round-1.md` §8
+item 3). Now (`agent-native/src/compact.rs`):
+* **Trigger.** `AgentSpec` gains `context_windows` (chain model → tokens), filled by the
+  master from the saved model list (`ModelConfig.context`, from listings or the admin; no
+  network call). The trigger is the window less a reserve (`max(window/5, 16k)`, at most
+  half), or `[chat] summarize_after_tokens` when set (now optional; 0 = never), or 24k when
+  the window is unknown. The history is measured as the previous turn's reported
+  `context_tokens` plus an estimate of its reply, falling back to characters / 4.
+* **Overflow recovery.** A 400/413 recognised as a context overflow (error code
+  `context_length_exceeded` / `request_too_large` / `exceed_context_size_error`, else the
+  known messages of Anthropic, OpenAI-compatible servers, Gemini, llama.cpp, Ollama:
+  `ProviderError::is_context_overflow`) is no longer "model-level" (it used to trigger a
+  fallback because the message names "model"). The step is compacted (older turns
+  summarised, all but the newest large tool output masked for the rest of the turn) and sent
+  once more; a second overflow, or nothing left to shrink, ends the turn with a plain
+  message naming the model. Once per turn.
+* **Summariser window.** The summariser (the answering model) reads the old part in pieces
+  at turn boundaries that each fit its window less 2k; each piece reads the previous
+  summary. A turn larger than the window alone stops summarising there (logged), so nothing
+  is dropped unread. With an unknown window it is one piece, as before.
+* **Log.** Each piece is its own `history_summarized` event (schema unchanged; a turn may now
+  append several, and one may come mid-turn after an overflow), each covering everything up
+  to its `through_seq` on a turn boundary, appended through the session writer. A cancel or
+  failure between pieces leaves the last one valid; the turn then ends `cancelled`.
+**Evidence:** `agent-native/tests/compaction.rs` (200k window does not compact at 32k
+history, unknown window still does; 16k window compacts at 12k; configured value wins both
+ways; overflow → one summary, one retry, success; second overflow fails without a loop and
+without the provider body; pieces fit a 5k summariser and carry the earlier summary; a turn
+bigger than the summariser's window is not summarised; cancel mid-compaction leaves one
+valid summary or none), `compact.rs` and `provider.rs` unit tests (thresholds, reported usage,
+overflow shapes of seven providers and five look-alikes), `model_cache_http.rs`
+(`context_windows` on the spec).

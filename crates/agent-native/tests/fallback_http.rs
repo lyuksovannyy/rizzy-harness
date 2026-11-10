@@ -157,6 +157,7 @@ fn agent(fallbacks: &[&str], unavailable: &[&str]) -> AgentSpec {
         fallbacks: fallbacks.iter().map(|s| s.to_string()).collect(),
         unavailable: unavailable.iter().map(|s| s.to_string()).collect(),
         no_effort: vec![],
+        context_windows: Default::default(),
         effort: None,
         budget: Default::default(),
         ui: Default::default(),
