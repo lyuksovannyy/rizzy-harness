@@ -37,9 +37,6 @@ const SNAPSHOT_BATCH: usize = 500;
 /// this the master gets a refusal at once.
 const LANE_DEPTH: usize = 64;
 
-/// A session's lane task ends after this long without a command.
-const LANE_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// The command queue of each session with a lane (see `NodeRuntime::lane`).
 type Lanes = Arc<Mutex<HashMap<SessionId, mpsc::Sender<LaneCmd>>>>;
 
@@ -348,24 +345,31 @@ impl NodeRuntime {
     }
 
     /// One session's commands, one at a time, in the order they came. Ends
-    /// after `LANE_IDLE` without a command; the check that its queue is
-    /// empty and its removal happen under the map's lock, so no command
-    /// can be queued on a lane that is ending.
+    /// as soon as its queue is empty, so lanes exist only for sessions with
+    /// a command in progress (a master that names many sessions cannot pile
+    /// up idle tasks). The check that the queue is empty and the lane's
+    /// removal happen under the map's lock, so no command can be queued on
+    /// a lane that is ending.
     async fn lane(self, lanes: Lanes, sid: SessionId, mut rx: mpsc::Receiver<LaneCmd>) {
         loop {
-            match tokio::time::timeout(LANE_IDLE, rx.recv()).await {
-                Ok(Some(LaneCmd::Msg(msg))) => self.handle(*msg).await,
-                Ok(Some(LaneCmd::Cancel)) => {
-                    if let Some(s) = self.session(sid) {
-                        s.cancel();
-                    }
-                }
-                Ok(None) => return,
+            let cmd = match rx.try_recv() {
+                Ok(cmd) => cmd,
                 Err(_) => {
                     let mut map = lanes.lock().unwrap_or_else(|p| p.into_inner());
-                    if rx.is_empty() {
-                        map.remove(&sid);
-                        return;
+                    match rx.try_recv() {
+                        Ok(cmd) => cmd,
+                        Err(_) => {
+                            map.remove(&sid);
+                            return;
+                        }
+                    }
+                }
+            };
+            match cmd {
+                LaneCmd::Msg(msg) => self.handle(*msg).await,
+                LaneCmd::Cancel => {
+                    if let Some(s) = self.session(sid) {
+                        s.cancel();
                     }
                 }
             }

@@ -32,9 +32,12 @@ pub const FLUSH_BYTES: usize = 2048;
 
 const MAX_STEPS: usize = 50;
 
-/// After a cancel, how long a tool has to return on its own (bash kills
-/// its process group in that time) before the turn stops waiting for it.
-pub const TOOL_CANCEL_GRACE: Duration = Duration::from_secs(2);
+/// After a cancel, how long a tool has to return on its own before the turn
+/// stops waiting for it. Longer than bash needs to end a group that ignores
+/// SIGTERM (2 s to SIGKILL, up to 2 s draining its pipes), so a normal
+/// cancel still reports its output; a dropped bash call kills its group
+/// anyway.
+pub const TOOL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Aborts a helper task when the call that started it ends.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);

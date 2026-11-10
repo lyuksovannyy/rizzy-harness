@@ -16,6 +16,17 @@ pub struct Bash;
 
 /// Grace period between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// SIGKILLs a process group when dropped while still armed.
+struct KillGroupOnDrop(Option<i32>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            signal_group(pgid, Signal::SIGKILL);
+        }
+    }
+}
 /// Chunks (of at most 8 KiB) in flight from the pipe readers to the loop.
 /// When it is full the readers stop reading and the child blocks on its
 /// pipe: back-pressure, never unbounded memory.
@@ -134,6 +145,10 @@ impl Tool for Bash {
             Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
         };
         let pgid = child.id().map(|p| p as i32);
+        // If this call is dropped before it reaped the group itself (the
+        // agent loop abandons a tool that outlives a cancel), the whole
+        // group dies, not only the shell `kill_on_drop` covers.
+        let mut group = KillGroupOnDrop(pgid);
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
         let out_task = tokio::spawn(pump(
@@ -209,6 +224,9 @@ impl Tool for Bash {
                 }
             }
         }
+        // The group was killed and its leader reaped above: disarm, so a
+        // later drop cannot signal a group id the kernel has reused.
+        group.0 = None;
         // Drain whatever is left; the group is dead so the pipes will close
         // (unless something outside it holds them: give up after a while).
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
@@ -549,6 +567,45 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!pid_alive(pid), "grandchild {pid} survived cancel");
+    }
+
+    /// The agent loop abandons a tool that outlives a cancel by dropping its
+    /// future. That must kill the whole group too, not only the shell: here
+    /// the shell and its child both ignore SIGTERM.
+    #[tokio::test]
+    async fn dropping_the_call_kills_the_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let ctx = ToolCtx::new(dir.path());
+        let cmd = format!(
+            "trap '' TERM; (trap '' TERM; sleep 1000) & echo $! > {}; wait",
+            pidfile.display()
+        );
+        let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": cmd})).await });
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(s) = std::fs::read_to_string(&pidfile)
+                && let Ok(p) = s.trim().parse::<i32>()
+            {
+                pid = Some(p);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let pid = pid.expect("grandchild pid");
+        assert!(pid_alive(pid));
+        h.abort();
+        let _ = h.await;
+        for _ in 0..50 {
+            if !pid_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !pid_alive(pid),
+            "grandchild {pid} survived the dropped call"
+        );
     }
 
     #[tokio::test]
