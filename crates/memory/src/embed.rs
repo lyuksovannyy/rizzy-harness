@@ -49,7 +49,7 @@ const MAX_DETAIL: usize = 200;
 
 /// Redirects only within the same origin: reqwest strips `Authorization`
 /// on a cross-origin hop but not `x-api-key`, so the key would follow.
-fn same_origin_redirects() -> reqwest::redirect::Policy {
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|a| {
         let same = a.previous().last().is_some_and(|prev| {
             prev.scheme() == a.url().scheme()
