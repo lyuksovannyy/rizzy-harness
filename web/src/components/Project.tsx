@@ -853,6 +853,18 @@ function ProjectSettings(props: {
         <input type="checkbox" disabled checked={draft.settings.workspace_memory} readOnly /> Use the workspace's memory too
       </label>
       <span className="field-hint">Workspace memory comes with team workspaces; this project will use it when it exists.</span>
+      <label className="check">
+        <input
+          type="checkbox"
+          disabled={disabled}
+          checked={draft.settings.members_activate_facts}
+          onChange={(e) => set({ settings: { ...draft.settings, members_activate_facts: e.target.checked } })}
+        />{" "}
+        Members may confirm project facts
+      </label>
+      <span className="field-hint">
+        Off: only managers make a proposed fact part of the project's memory, which every member's agent reads.
+      </span>
       <h3>Agentic chats</h3>
       <label>
         Worker node
