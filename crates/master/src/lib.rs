@@ -339,6 +339,13 @@ pub enum CommandError {
     Store(#[from] harness_store::StoreError),
     #[error("unknown agent {0:?}")]
     UnknownAgent(String),
+    /// The agent exists but runs only as a sub-agent (`available_as`): it
+    /// takes sub-tasks from other agents and never runs a chat.
+    #[error(
+        "{name} (@{id}) works only as a sub-agent: other agents hand it tasks, but it cannot \
+         answer a chat. Choose another agent"
+    )]
+    SubagentOnly { id: String, name: String },
     /// A command too large for the node link's frame (images and
     /// attachments together); the text says so to the user.
     #[error("{0}")]
@@ -1134,15 +1141,21 @@ impl Master {
             }
             None => None,
         };
-        let asker = asker.filter(|id| r.agents().get(id).is_some());
-        let mention = leading_mention(&text)
-            .filter(|id| reply.is_none() && r.agents().get(id).is_some())
-            .map(str::to_string);
+        let asker = asker.and_then(|id| r.top_level(&id).ok().map(|a| a.id.clone()));
+        // A leading @mention of an agent that runs only as a sub-agent is
+        // refused, not dropped: the user named an agent that exists, and an
+        // answer from another one would read as if it came from that one.
+        // A mention of no agent at all is just text ("@everyone").
+        let mention = match leading_mention(&text).filter(|_| reply.is_none()) {
+            Some(handle) => match r.top_level(handle) {
+                Ok(a) => Some(a.id.clone()),
+                Err(e @ CommandError::SubagentOnly { .. }) => return Err(e),
+                Err(_) => None,
+            },
+            None => None,
+        };
         // A chat whose agent was deleted goes on with the default one.
-        let kept = row
-            .agent_id
-            .clone()
-            .filter(|id| r.agents().get(id).is_some());
+        let kept = r.session_agent(row.agent_id.as_deref());
         let chosen = asker.or(agent_id).or(mention).or(kept);
         let session_model = self.session_model(&row).await;
         let mut agent = r.agent_spec_with(
@@ -1252,10 +1265,7 @@ impl Master {
     ) -> Option<String> {
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         let session_model = self.session_model(row).await;
-        let kept = row
-            .agent_id
-            .clone()
-            .filter(|id| r.agents().get(id).is_some());
+        let kept = r.session_agent(row.agent_id.as_deref());
         let main =
             match r.agent_spec_with(agent_id.or(kept.as_deref()), session_model.as_deref(), None) {
                 Ok(agent) => turn_model(&agent, session_model.as_deref(), row),

@@ -80,9 +80,11 @@ impl Master {
                 m.default = default.as_deref() == Some(m.id.as_str());
             }
         }
+        // A workspace default that went away, or that runs only as a
+        // sub-agent, gives way to the server's.
         let default_agent = ws
             .and_then(|w| w.default_agent.clone())
-            .filter(|a| agents.get(a).is_some())
+            .filter(|a| agents.get(a).is_some_and(|a| a.features.as_agent))
             .unwrap_or_else(|| agents.default_id().to_string());
         Resolver {
             cfg,
@@ -141,6 +143,43 @@ impl Resolver {
     /// The agent chats get when nobody chose one.
     pub fn default_agent(&self) -> &str {
         &self.default_agent
+    }
+
+    /// The agent `handle` names, when it may run a chat (as the chat's
+    /// agent or for one turn). Every path that picks the agent of a chat or
+    /// a turn comes through here: unknown is `UnknownAgent`, an agent that
+    /// runs only as a sub-agent is `SubagentOnly`.
+    pub fn top_level(&self, handle: &str) -> Result<&Agent, CommandError> {
+        let a = self
+            .agents
+            .get(handle)
+            .ok_or_else(|| CommandError::UnknownAgent(handle.into()))?;
+        if !a.features.as_agent {
+            return Err(CommandError::SubagentOnly {
+                id: a.id.clone(),
+                name: a.name.clone(),
+            });
+        }
+        Ok(a)
+    }
+
+    /// The agent a chat that stored `stored` as its agent runs as: that one
+    /// while it may run a chat. A stale one (deleted, its file removed, or
+    /// now a sub-agent only) gives the server's default agent, not this
+    /// scope's: a workspace may make a more capable agent its default, and
+    /// a stale name must not turn into more power than it had. The turn's
+    /// `turn_started` names the agent that ran, so the change shows. `None`
+    /// (nothing stored): this scope's default.
+    pub fn session_agent(&self, stored: Option<&str>) -> Option<String> {
+        let id = stored?;
+        match self.top_level(id) {
+            Ok(a) => Some(a.id.clone()),
+            Err(e) => {
+                let fallback = self.agents.default_id().to_string();
+                tracing::warn!(agent = id, error = %e, fallback, "a chat's agent cannot run; using the default agent");
+                Some(fallback)
+            }
+        }
     }
 
     /// The model assigned to `agent_id` here, if one is.
@@ -252,9 +291,7 @@ impl Resolver {
         }
         let set = &self.agents;
         let agent = match agent_id {
-            Some(id) => set
-                .get(id)
-                .ok_or_else(|| CommandError::UnknownAgent(id.into()))?,
+            Some(id) => self.top_level(id)?,
             None => set
                 .get(&self.default_agent)
                 .ok_or_else(|| CommandError::UnknownAgent("(default)".into()))?,
@@ -289,11 +326,14 @@ impl Resolver {
         }
         // Sub-agents travel with the spec (nodes keep no definitions). Their
         // own delegates stay empty: delegation is one level deep. One with an
-        // assigned model uses it; the rest inherit the parent's.
+        // assigned model uses it; the rest inherit the parent's. Only agents
+        // available as sub-agents (the set already drops the others from
+        // every roster; this holds for any set).
         spec.delegates = agent
             .delegates
             .iter()
             .filter_map(|d| set.get(d))
+            .filter(|d| d.features.as_subagent)
             .map(|d| {
                 let mut c = d.spec.clone();
                 c.effort = None;
@@ -375,6 +415,68 @@ mod tests {
         let r = m.resolver(Some(&ws));
         assert_eq!(r.default_model().as_deref(), Some("p::a"));
         assert_eq!(r.default_agent(), DEFAULT_AGENT);
+    }
+
+    /// The built-ins plus `helper`, which runs only as a sub-agent.
+    fn with_helper(m: &Master) {
+        let mut all = harness_agents::builtins();
+        all.push(
+            harness_agents::parse(
+                "helper",
+                "---\nname: Helper\ntools: [read]\navailable_as: [subagent]\n---\nHelp.\n",
+                false,
+            )
+            .unwrap(),
+        );
+        m.set_agents(AgentSet::from_agents(all, DEFAULT_AGENT));
+    }
+
+    /// A sub-agent-only agent is no default: refused when saved, dropped
+    /// when a stored one is read, never the agent a chat gets.
+    #[test]
+    fn a_subagent_only_agent_is_no_default() {
+        let m = master();
+        with_helper(&m);
+        let e = WorkspaceSettings::parse(serde_json::json!({"default_agent": "helper"}), &m)
+            .unwrap_err();
+        assert!(e.contains("sub-agent"), "{e}");
+        let stored = WorkspaceSettings {
+            default_agent: Some("helper".into()),
+            ..Default::default()
+        };
+        assert_eq!(stored.normalized(&m).default_agent, None);
+        let r = m.resolver(Some(&stored));
+        assert_eq!(r.default_agent(), DEFAULT_AGENT);
+        assert_eq!(
+            r.agent_spec_with(None, None, None).unwrap().agent_id,
+            DEFAULT_AGENT
+        );
+        assert!(matches!(
+            r.agent_spec_with(Some("helper"), None, None),
+            Err(CommandError::SubagentOnly { .. })
+        ));
+        // A user's own default agent, the same.
+        let prefs = crate::prefs::Prefs {
+            default_agent: Some("helper".into()),
+            ..Default::default()
+        };
+        assert!(prefs.validate(&m).unwrap_err().contains("sub-agent"));
+    }
+
+    /// A routine naming a sub-agent-only agent is refused when saved and
+    /// blocked when it fires: it never runs it as the chat's agent.
+    #[tokio::test]
+    async fn a_routine_never_runs_a_subagent_only_agent() {
+        let m = master();
+        with_helper(&m);
+        let spec = crate::routines::spec::RoutineSpec::parse(serde_json::json!({
+            "profile": "chat", "agent_id": "helper", "prompt": "hi"
+        }))
+        .unwrap();
+        let why = crate::routines::spec::missing(&m, "no-such-workspace", &spec)
+            .await
+            .unwrap();
+        assert!(why.contains("sub-agent"), "{why}");
     }
 
     /// With a config, workspace chains replace the server's, General's sets

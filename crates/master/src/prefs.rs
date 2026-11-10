@@ -163,10 +163,8 @@ impl Prefs {
         one_of("accent", &self.accent, ACCENTS)?;
         one_of("theme", &self.theme, THEMES)?;
         one_of("backdrop", &self.backdrop, BACKDROPS)?;
-        if let Some(a) = &self.default_agent
-            && m.agents().get(a).is_none()
-        {
-            return Err(format!("unknown agent {a:?}"));
+        if let Some(a) = &self.default_agent {
+            crate::workspaces::check_default_agent(&m.agents(), a)?;
         }
         if let Some(model) = &self.default_model
             && m.find_model(model).is_none()

@@ -443,12 +443,17 @@ impl AgentSet {
         (Self::from_agents(agents, DEFAULT_AGENT), errors)
     }
 
+    /// The default is `default_id` when that agent may run a chat, else the
+    /// first one that may: a sub-agent-only agent is never the default.
     pub fn from_agents(agents: Vec<Agent>, default_id: &str) -> Self {
-        let default_id = if agents.iter().any(|a| a.id == default_id) {
-            default_id.to_string()
-        } else {
-            agents.first().map(|a| a.id.clone()).unwrap_or_default()
-        };
+        let usable = |a: &&Agent| a.features.as_agent;
+        let default_id = agents
+            .iter()
+            .filter(usable)
+            .find(|a| a.id == default_id)
+            .or_else(|| agents.iter().find(usable))
+            .map(|a| a.id.clone())
+            .unwrap_or_default();
         Self { agents, default_id }
     }
 

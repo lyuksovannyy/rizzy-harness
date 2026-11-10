@@ -728,9 +728,9 @@ async fn launch_failed(m: &Master, a: &Admitted, run: &RunRow, e: CommandError) 
         CommandError::NodeOffline(_) | CommandError::Timeout => {
             retry_later(m, run, r, e.to_string(), a.event.clone()).await
         }
-        CommandError::UnknownAgent(_) | CommandError::Rejected(_) => {
-            block(m, r, Some(&run.run_id), &e.to_string(), now).await
-        }
+        CommandError::UnknownAgent(_)
+        | CommandError::SubagentOnly { .. }
+        | CommandError::Rejected(_) => block(m, r, Some(&run.run_id), &e.to_string(), now).await,
         _ => finish(m, run, r, "failed", Some(e.to_string())).await,
     }
 }

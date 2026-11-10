@@ -241,7 +241,9 @@ impl From<CommandError> for ApiError {
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             CommandError::Rejected(_) => StatusCode::CONFLICT,
             CommandError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            CommandError::UnknownAgent(_) => StatusCode::BAD_REQUEST,
+            CommandError::UnknownAgent(_) | CommandError::SubagentOnly { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             CommandError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
         };
         ApiError(code, e.to_string())

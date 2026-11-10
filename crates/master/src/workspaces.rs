@@ -130,6 +130,19 @@ pub struct WorkspaceSettings {
     pub agent_models: BTreeMap<String, AgentChain>,
 }
 
+/// Whether `id` may be a default agent (a workspace's or a user's): it
+/// exists and may run a chat. Settings take ids, not aliases.
+pub fn check_default_agent(agents: &harness_agents::AgentSet, id: &str) -> Result<(), String> {
+    match agents.get(id) {
+        None => Err(format!("unknown agent {id:?}")),
+        Some(a) if !a.features.as_agent => Err(format!(
+            "{} (@{id}) works only as a sub-agent and cannot be a default agent",
+            a.name
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 /// The stored document, read leniently: fields this build does not know
 /// are ignored, so a later rename cannot make every workspace unreadable.
 #[derive(Deserialize, Default)]
@@ -187,10 +200,8 @@ impl WorkspaceSettings {
     /// provider runtime.
     pub fn validate(&self, m: &Master) -> Result<(), String> {
         let agents = m.agents();
-        if let Some(a) = &self.default_agent
-            && agents.get(a).is_none()
-        {
-            return Err(format!("unknown agent {a:?}"));
+        if let Some(a) = &self.default_agent {
+            check_default_agent(&agents, a)?;
         }
         let models = m.models();
         let knows = |id: &str| models.iter().any(|x| x.id == id);
@@ -212,7 +223,7 @@ impl WorkspaceSettings {
             default_agent: self
                 .default_agent
                 .clone()
-                .filter(|a| agents.get(a).is_some()),
+                .filter(|a| check_default_agent(&agents, a).is_ok()),
             agent_models: self
                 .agent_models
                 .iter()
