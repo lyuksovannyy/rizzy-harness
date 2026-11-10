@@ -35,6 +35,9 @@ pub struct Config {
     /// get) has no `[workspaces]` section until an admin sets one.
     #[serde(skip_serializing_if = "WorkspacesConfig::is_default")]
     pub workspaces: WorkspacesConfig,
+    /// `[nodes]`: who may use the embedded node; written only when changed.
+    #[serde(skip_serializing_if = "NodesConfig::is_default")]
+    pub nodes: NodesConfig,
     // Each feature's section lives in its own module, written only when
     // changed like `[workspaces]`.
     #[serde(skip_serializing_if = "crate::routines::RoutinesConfig::is_default")]
@@ -60,6 +63,7 @@ impl Default for Config {
             voice: Default::default(),
             savings: Default::default(),
             workspaces: Default::default(),
+            nodes: Default::default(),
             routines: Default::default(),
             storage: Default::default(),
             media: Default::default(),
@@ -82,6 +86,7 @@ struct RawConfig {
     voice: VoiceConfig,
     savings: harness_core::savings::TokenSavings,
     workspaces: WorkspacesConfig,
+    nodes: NodesConfig,
     routines: crate::routines::RoutinesConfig,
     storage: crate::storage::StorageConfig,
     media: crate::media::MediaConfig,
@@ -101,6 +106,7 @@ impl From<RawConfig> for Config {
             voice: r.voice,
             savings: r.savings,
             workspaces: r.workspaces,
+            nodes: r.nodes,
             routines: r.routines,
             storage: r.storage,
             media: r.media,
@@ -132,6 +138,35 @@ impl WorkspacesConfig {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// `[nodes]`: the server's policy for its own embedded worker node.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NodesConfig {
+    /// Who may run agentic sessions on the embedded `local` node, which
+    /// runs as the server's own OS user next to its data directory.
+    pub local_node_users: LocalNodeUsers,
+}
+
+impl NodesConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `local_node_users` in `[nodes]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalNodeUsers {
+    /// Server admins (and the API token) only; other accounts with the
+    /// agentic grant use a remote node. Until the agent shell is sandboxed,
+    /// an agent on this node can read whatever the server's user can.
+    #[default]
+    Admins,
+    /// Every account with the agentic grant. Only for installs where each
+    /// such account is trusted like an admin.
+    Granted,
 }
 
 /// Fallbacks per agent.
@@ -1000,6 +1035,21 @@ mod tests {
             assert_eq!(valid_provider_id(id), ok, "{id}");
         }
         assert!(!valid_provider_id(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn local_node_is_for_admins_unless_granted() {
+        let c = Config::default();
+        assert_eq!(c.nodes.local_node_users, LocalNodeUsers::Admins);
+        assert!(!toml::to_string(&c).unwrap().contains("[nodes]"));
+        let c: Config = toml::from_str("[nodes]\nlocal_node_users = \"granted\"\n").unwrap();
+        assert_eq!(c.nodes.local_node_users, LocalNodeUsers::Granted);
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("local_node_users = \"granted\""), "{text}");
+        let c: Config = toml::from_str("[nodes]\nlocal_node_users = \"admins\"\n").unwrap();
+        assert_eq!(c.nodes.local_node_users, LocalNodeUsers::Admins);
+        assert!(toml::from_str::<Config>("[nodes]\nlocal_node_users = \"everyone\"\n").is_err());
+        assert!(toml::from_str::<Config>("[nodes]\nnope = 1\n").is_err());
     }
 
     #[test]

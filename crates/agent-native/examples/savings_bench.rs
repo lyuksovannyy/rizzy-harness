@@ -111,6 +111,7 @@ async fn one(provider: Arc<LlmProvider>, model: &str, savings: Savings) -> Run {
     let t0 = Instant::now();
     let out = backend
         .run_turn(TurnCtx {
+            session_id: harness_core::SessionId::new(),
             turn_id: "t".into(),
             history: vec![],
             user_text: TASK.into(),

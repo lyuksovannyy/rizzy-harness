@@ -4,14 +4,17 @@
 [![image](https://img.shields.io/badge/ghcr.io-rizzy--harness-blue?logo=docker)](https://github.com/lyuksovannyy/rizzy-harness/pkgs/container/rizzy-harness)
 [![release](https://img.shields.io/github/v/release/lyuksovannyy/rizzy-harness?include_prereleases&sort=semver)](https://github.com/lyuksovannyy/rizzy-harness/releases)
 
-```bash
-docker pull ghcr.io/lyuksovannyy/rizzy-harness:edge
-```
+> **Pre-release.** There is no tagged release and no upgrade path yet: the
+> data directory's format still changes without migrations, so an update can
+> require wiping it. Do not keep anything in it you cannot lose. A security
+> review ([`AUDIT.md`](AUDIT.md)) is being worked through in
+> [`FIX_PLAN.md`](FIX_PLAN.md); until its Phase 2 is done, run it on
+> `127.0.0.1` for yourself only.
 
-The image is the **central server** (web UI, chats, node setup); worker nodes
-run on real hosts. Tags: `latest` and `X.Y.Z` for releases, `edge` for `main`
-after CI passes. Setup: [Central server in Docker](#central-server-in-docker).
-Release binaries (Linux x86_64): [Releases](https://github.com/lyuksovannyy/rizzy-harness/releases).
+The image is the **central server** (web UI, chats); worker nodes run on real
+hosts. `ghcr.io/lyuksovannyy/rizzy-harness:edge` follows `main` after CI
+passes; `latest` and `X.Y.Z` will exist from the first release. Setup:
+[Central server in Docker](#central-server-in-docker).
 
 A self-hosted coding-agent harness: one Rust binary that serves a web dashboard
 for coding agents, with the agent loop running on the machine that owns the
@@ -413,6 +416,21 @@ Who may create workspaces (also a switch under Settings → Server → Workspace
 members_can_create = true            # false: only server admins create workspaces
 ```
 
+Who may run agentic sessions on this server's own (embedded) node:
+
+```toml
+[nodes]
+local_node_users = "admins"          # admins (default) | granted
+```
+
+The embedded node runs as the server's own OS user, next to its data
+directory, and the agent's shell is not sandboxed yet. So by default only
+server admins (and the API token) may use it; other accounts with the
+agentic grant run their agentic sessions on a remote node (`node join`), and
+get "use a remote node, or ask the server admin" on the built-in one, also
+for chats they started there earlier. `"granted"` lets every account with
+the grant use it: choose it only if you trust each of them like an admin.
+
 Dictation (the mic button) needs a transcription service, for example a local
 Whisper server with an OpenAI-compatible API:
 
@@ -423,15 +441,32 @@ model = "Systran/faster-whisper-small"
 # key_secret = "voice"               # if the service needs a key
 ```
 
-In a git repository every agentic turn is checkpointed (under
-`refs/harness/`, without touching your index or branches) and its file
-changes can be undone from the chat. Folders without git get a private
-checkpoint repository in the data directory (nothing is written into the
-folder). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+Every agentic turn is checkpointed and its file changes can be undone
+from the chat. Checkpoints live in a private repository in the node's data
+directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
+written into your folder or your `.git`, and your repository's own git
+config, hooks and filters are never run for a checkpoint or an undo (in a
+repository the private copy borrows your committed objects instead of
+storing them again, and honours `.gitignore`, `.git/info/exclude` and your
+global git ignore file). The
+first checkpoint of a large repository reads every file once. Undo writes
+back the exact bytes. Sub-agents that can write get a temporary git
+worktree; it is refused, and the sub-agent shares the folder, if the
+repository's own config defines filter commands (git-lfs's standard ones
+are allowed). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
+
+**Choose a project folder.** A session's folder may not be the node's data
+directory, be inside it, or contain it: with the default data directory
+`~/.local/share/rizzy-harness`, your home folder and `~/.local` are refused
+(use `~/projects/x` or similar). The file tools (`read`, `write`, `edit`,
+`grep`, `glob`, `outline`) never reach into the data directory, even with
+`allow_outside_workspace = true` or through a symlink. The shell is not
+confined yet: a command you approve can still read it, so its output is
+scrubbed of the API token and known keys.
 
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
@@ -439,7 +474,38 @@ workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]
 allow_outside_workspace = false
 graphify = false                     # let agents query a graphify knowledge graph (see below)
+env_pass = []                        # extra variables the agent's shell gets (see below)
+
+[limits]
+tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
 ```
+
+**The agent's environment.** The shell and every other program a tool
+starts get an empty environment plus `PATH HOME USER LOGNAME SHELL LANG
+LANGUAGE LC_* TERM COLORTERM TZ TMPDIR`, and the names `env_pass` matches
+(exact names or globs: `*`, `?`, `[...]`). Nothing else the server or node
+was started with (cloud credentials, tokens, an SSH agent) reaches the
+agent. Provider key variables, names loaded from `.env` and every
+`HARNESS_*` setting are never passed, even when `env_pass` matches them. A
+tool that worked before and now cannot find its home needs an entry here.
+The usual toolchain variables:
+
+```toml
+env_pass = ["CARGO_HOME", "RUSTUP_HOME", "GOPATH", "NVM_DIR", "PYENV_ROOT",
+            "VIRTUAL_ENV", "JAVA_HOME", "SSH_AUTH_SOCK",
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
+```
+
+Passing `SSH_AUTH_SOCK` lets the agent use every key in your SSH agent. An
+invalid entry stops the node at start; `rizzy-harness doctor` prints the
+effective list.
+
+**Streamed output.** What a command prints is shown live and stored, up to
+`[limits] tool_stream_bytes` per call (default 1 MiB). Past it the stream
+ends with `[output truncated: further output is not shown or stored]`; the
+command keeps running until it exits, times out or is cancelled, and the
+rest of its output is read and dropped. The result the model gets has its
+own, smaller cap and says when the live stream was cut.
 
 ### Token savings
 
@@ -466,17 +532,18 @@ repo_map_tokens = 1024
 ```
 
 **graphify (optional).** A third-party Python program (Graphify-Labs/graphify,
-Apache-2.0) that builds a knowledge graph of the repository. On the built-in
-node: Settings → Server → Token savings → *Install graphify*, then *Allow*. On another
-node (each node decides for itself):
+Apache-2.0) that builds a knowledge graph of the repository. Each node,
+the built-in one too, decides for itself; no web page or API call installs it
+or changes `node.toml`. On the node:
 
 ```bash
 rizzy-harness graphify install
 ```
 
-then add `graphify = true` to that node's `node.toml` and restart it. The
-graph is stored in the node's data folder, never in your repository, and
-graphify gets no API keys.
+then add `graphify = true` to that node's `node.toml` and restart it (the file
+is read at start only). Settings → Server → Token savings shows whether it is
+installed and allowed on the built-in node. The graph is stored in the node's
+data folder, never in your repository, and graphify gets no API keys.
 
 `rizzy-harness doctor` checks the setup.
 
@@ -570,8 +637,8 @@ data directory once on each device:
 ## Central server in Docker
 
 Ready-made templates live in [`docker/`](docker/): **minimal** (the harness
-alone), **standard** (with Redis) and **full** (with Redis, Qdrant and Ollama
-for memory recall by meaning), each configured through a `.env` file
+alone) and **full** (with Qdrant and Ollama for memory recall by meaning),
+each configured through a `.env` file
 ([`docker/env.reference`](docker/env.reference)). Settings in `.env` win over
 `config.toml` and show read-only in the UI, without overwriting what
 `config.toml` already holds. The rest of this section is the single-container
@@ -580,7 +647,7 @@ setup with host networking.
 The master (web UI, chats, node management) can run in a container. **Nodes
 cannot, by design**: a node needs the real host (WireGuard, the firewall, the
 user's files and tools), so the image runs no agentic node; agentic sessions go
-to remote nodes you set up from the UI.
+to remote nodes you set up by hand ([Set up a node by hand](#set-up-a-node-by-hand)).
 
 ```bash
 mkdir -p data && sudo chown 10001:10001 data
@@ -608,15 +675,12 @@ or the WireGuard address). Notes:
   `0.0.0.0` (`HARNESS_CONTAINER=1`); **never publish on `0.0.0.0`**: Docker's
   published ports bypass ufw/iptables rules on the host. A different host
   port needs `HARNESS_ALLOWED_HOSTS=127.0.0.1:8080` (the Host header check).
-- Setting up a node prints `sudo wg-quick up <data>/keys/rizzy-harness.conf`: run it
-  **on the host**. `HARNESS_HOST_DATA_DIR` (set in compose) makes the printed path
-  the host's. Then add `--node-listen 10.77.0.1:7443` to the command.
-- Nodes receive the master's own binary, built on Debian 13: fine for Debian 13
-  and Ubuntu 26.04 nodes, too new for older glibc (the setup checks this).
+- For remote nodes add `--node-listen <host VPN address>:7443` to the command.
+- The image's binary is built on Debian 13: copied to a node, it runs on Debian 13
+  and Ubuntu 26.04, not on older glibc.
 - Building yourself and hitting Docker Hub rate limits:
   `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
-- Published images are linux/amd64 only (the master uploads its own binary to
-  nodes, so nodes must be x86_64 too).
+- Published images are linux/amd64 only.
 
 ## Remote worker nodes
 
@@ -627,37 +691,74 @@ Agentic sessions can run on other machines. Start the master with a node port
 ./target/release/rizzy-harness serve --node-listen 0.0.0.0:7443
 ```
 
-The easy way: Settings → Server → Nodes → **Set up a server over SSH**. Check the
-server's host key, log in once with a password or key (harness installs its
-own key and does not keep yours), and pick:
-
-- **Automatic** for a fresh VPS, logging in as **root**: harness creates its
-  own user `rizzy-harness-admin`, sets up WireGuard, an nftables firewall, key-only
-  SSH, the container engine and the node (which runs as the unprivileged
-  user `rizzy-harness`), then removes its own sudo. Risky steps revert themselves
-  after 2 minutes unless harness can still log in.
-- **Manual** for a server with other things on it, logging in as a **normal
-  user**: a checklist with the commands to run. With root, harness asks
-  whether it may create its own user (without sudo) instead.
-
-In automatic mode, *key-only SSH* and *firewall* can be unticked. After the
-setup the server stays listed under **Servers set up over SSH**: switch the
-mode either way, turn the firewall off/on (automatic mode; harness asks for a
-root login for that one action unless it kept sudo), and choose what the
-watchdog checks every 10 minutes (password logins back on, firewall rules gone).
-It only reports, under the bar and as a notification. SSH hardening is changed
-by hand; the commands are shown there.
-
-Container engine: rootless **Podman** (default) or **Docker** (the `harness`
-user joins the `docker` group, which is effectively root). Fully supported:
-Debian 13 and Ubuntu 26.04 LTS; other Debian-based systems work but are not
-tested. Test it on a throwaway VPS first.
-
-By hand: in Settings → Server → Nodes choose **Create join command** and run the two printed
-commands on the other machine (same binary). That machine needs its own
+In Settings → Server → Nodes choose **Create join command** and run the two
+printed commands on the other machine (same binary). That machine needs its own
 `config.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
+
+### Set up a node by hand
+
+On the node machine, as root (Debian/Ubuntu; adjust for others). The node runs
+as its own unprivileged user and only works in that user's folder:
+
+```bash
+useradd --create-home --shell /usr/sbin/nologin rizzy-harness
+install -d -o rizzy-harness -g rizzy-harness -m 0700 /var/lib/rizzy-harness /home/rizzy-harness/work
+install -m 0755 rizzy-harness /usr/local/bin/rizzy-harness    # the same binary as the master
+```
+
+`/var/lib/rizzy-harness/node.toml` (owned by `rizzy-harness`):
+
+```toml
+# This node decides what the master may do here.
+max_approval_mode = "ask"
+workspace_roots = ["/home/rizzy-harness/work"]
+```
+
+Put the node's `config.toml` (provider and key) next to it, mode 0600. Then
+open a shell as that user and paste the first command from **Create join
+command** (the join token stays in the shell's environment, out of any
+process's argument list):
+
+```bash
+sudo -u rizzy-harness bash
+export HARNESS_DATA_DIR=/var/lib/rizzy-harness
+# paste: HARNESS_JOIN_TOKEN=… rizzy-harness node join wss://<master>:7443 --fingerprint …
+exit
+```
+
+Instead of the second command (`node run` in a terminal), run the node as a
+service, `/etc/systemd/system/rizzy-harness-node.service`:
+
+```ini
+[Unit]
+Description=rizzy-harness worker node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=rizzy-harness
+ExecStart=/usr/local/bin/rizzy-harness --data-dir /var/lib/rizzy-harness node run
+Restart=always
+RestartSec=5
+# The binary stops cleanly on Ctrl-C (SIGINT) only, not on SIGTERM.
+KillSignal=SIGINT
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rizzy-harness /home/rizzy-harness
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload && systemctl enable --now rizzy-harness-node
+```
+
+**Hardening the host is your job**: the firewall, SSH (keys only, no root
+login), updates, and how the node reaches the master (a VPN such as WireGuard
+rather than the open internet). rizzy-harness does not touch them.
 
 The **Ultracode** agent splits big jobs into parallel sub-tasks for Coder,
 Scout and Writer (at most 4 per turn and 200k tokens by default; set
@@ -756,15 +857,7 @@ Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):
 node web/e2e/rich.cjs target/debug/rizzy-harness
 ```
 
-```bash
-cargo build -p harness-provision --features test-util --example fake_sshd
-```
-
-```bash
-node web/e2e/setup.cjs target/debug/rizzy-harness target/debug/examples/fake_sshd
-```
-
-Token savings page (graphify part runs only when it is installed):
+Token savings page (the graphify card is read-only; nothing installs it):
 
 ```bash
 node web/e2e/savings.cjs target/debug/rizzy-harness

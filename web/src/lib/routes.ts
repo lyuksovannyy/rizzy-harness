@@ -84,4 +84,3 @@ export const artifactHash = (id: string | null): string => routeHash({ kind: "ar
 
 /** Links other screens use. */
 export const MEMORY_HASH = settingsHash("account", "memory");
-export const NODES_HASH = settingsHash("server", "nodes");

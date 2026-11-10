@@ -4,6 +4,7 @@
 //! confined to the workspace unless the node policy says otherwise.
 
 mod bash;
+pub mod env;
 pub mod filter;
 mod fs;
 pub mod graphify;
@@ -11,24 +12,26 @@ mod outline;
 pub mod outputs;
 mod publish;
 mod search;
+pub mod stream;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use harness_core::event::{OutputStream, Source};
+use harness_core::event::Source;
 use harness_core::policy::ToolRisk;
 use harness_core::refs::SharedRefs;
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub use bash::Bash;
+pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
-pub use outputs::{OutputStore, ToolOutput};
+pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
 pub use search::{Glob, Grep};
+pub use stream::OutputSink;
 
 /// Cap on what the model sees from one tool call.
 pub const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -36,12 +39,17 @@ pub const MAX_OUTPUT_CHARS: usize = 30_000;
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub cancel: CancellationToken,
-    /// Live output chunks for the UI (bash only today).
-    pub output: Option<mpsc::UnboundedSender<(OutputStream, String)>>,
+    /// Live output chunks for the UI (bash only today), bounded and with a
+    /// total byte budget per call.
+    pub output: Option<OutputSink>,
     pub allow_outside_workspace: bool,
+    /// Folders no file tool may touch in any mode, `allow_outside_workspace`
+    /// included: the node's data directory (keys, the API token, every
+    /// user's chats). Canonical paths, from the node's policy.
+    pub protected: Arc<Vec<PathBuf>>,
     pub timeout: Duration,
-    /// Environment variables removed from child processes (secret holders).
-    pub env_remove: Vec<String>,
+    /// The environment of every child process a tool starts (an allow-list).
+    pub env: ToolEnv,
     /// Text this conversation got from the user and from tools, never text
     /// the model wrote. Network tools only follow URLs found here, so injected
     /// instructions cannot make the model smuggle data out in a URL it builds.
@@ -49,7 +57,8 @@ pub struct ToolCtx {
     /// Token-saving methods in effect for this call.
     pub savings: harness_core::savings::Savings,
     /// Where full outputs of filtered commands are kept (`tool_output`).
-    pub outputs: Option<Arc<OutputStore>>,
+    /// Bound to the session the call runs for.
+    pub outputs: Option<SessionOutputs>,
     /// Citation labels for web results, shared by every call of the turn.
     pub refs: SharedRefs,
     /// Where `publish` stages files (the node session's stager); `None`
@@ -66,8 +75,9 @@ impl ToolCtx {
             cancel: CancellationToken::new(),
             output: None,
             allow_outside_workspace: false,
+            protected: Arc::default(),
             timeout: Duration::from_secs(600),
-            env_remove: Vec::new(),
+            env: ToolEnv::default(),
             observed: Arc::default(),
             savings: Default::default(),
             outputs: None,
@@ -87,39 +97,43 @@ impl ToolCtx {
 
     /// Resolve a user/model-supplied path against the workspace and enforce
     /// confinement. Works for paths that do not exist yet.
+    ///
+    /// The path is walked one component at a time with `lstat`. Inside the
+    /// workspace a symlink is followed only when its target exists and is
+    /// inside the workspace too; a dangling link is refused wherever it is
+    /// in the path, because whatever creates its target later (a `write`, a
+    /// `mkdir -p`) would land wherever the link points. The result is the
+    /// real path: existing part canonical, the part that does not exist yet
+    /// appended.
+    ///
+    /// In every mode, `allow_outside_workspace` included, a path whose real
+    /// location is inside a [`Self::protected`] folder is refused.
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
-        let raw = Path::new(p);
-        let joined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else {
-            self.workspace.join(raw)
-        };
-        let normalized = normalize(&joined);
         if self.allow_outside_workspace {
-            return Ok(normalized);
+            let n = self.normalized(p);
+            // Nothing else is refused here, but where the path really leads
+            // (links followed, dangling ones by their target) must not be
+            // the data directory.
+            self.refuse_protected(&n, p)?;
+            if !self.protected.is_empty() {
+                self.refuse_protected(&walk(&n, None, p)?, p)?;
+            }
+            return Ok(n);
         }
         let ws = self
             .workspace
             .canonicalize()
             .map_err(|e| format!("workspace: {e}"))?;
-        // Canonicalize the deepest existing ancestor to defeat symlink escapes.
-        let mut existing = normalized.as_path();
-        let mut rest = Vec::new();
-        while !existing.exists() {
-            match (existing.parent(), existing.file_name()) {
-                (Some(parent), Some(name)) => {
-                    rest.push(name.to_os_string());
-                    existing = parent;
-                }
-                _ => break,
-            }
-        }
-        let mut real = existing
-            .canonicalize()
-            .map_err(|e| format!("{}: {e}", existing.display()))?;
-        for part in rest.iter().rev() {
-            real.push(part);
-        }
+        // Relative paths start at the real workspace, so the walk is always
+        // over an absolute path whatever `workspace` looks like.
+        let raw = Path::new(p);
+        let normalized = normalize(&if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            ws.join(raw)
+        });
+        let real = walk(&normalized, Some(&ws), p)?;
+        self.refuse_protected(&real, p)?;
         if real.starts_with(&ws) {
             Ok(real)
         } else {
@@ -130,6 +144,163 @@ impl ToolCtx {
             ))
         }
     }
+
+    /// [`Self::resolve`] for a path about to be written: also refuses any
+    /// path inside a `.git` directory, in every mode. The repository's git
+    /// config and hooks run commands (`core.fsmonitor`, `pre-commit`) the
+    /// next time anyone runs git there, outside every approval.
+    ///
+    /// The caller must still open the file without following a symlink at
+    /// the last component ([`open_nofollow`]): the link could be swapped in
+    /// after this check.
+    pub fn resolve_for_write(&self, p: &str) -> Result<PathBuf, String> {
+        let path = self.resolve(p)?;
+        // In outside mode `resolve` does not look at links; find where the
+        // path really goes so a link to some `.git` is no way around this.
+        let real = if self.allow_outside_workspace {
+            walk(&path, None, p).unwrap_or_else(|_| path.clone())
+        } else {
+            path.clone()
+        };
+        let ws = self
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| normalize(&self.workspace));
+        // Only components below the workspace count when it is inside, so
+        // a workspace that itself lives under some `.git` still works.
+        let checked = real.strip_prefix(&ws).unwrap_or(&real);
+        let in_git = checked.components().any(|c| match c {
+            Component::Normal(n) => n.to_str().is_some_and(|n| n.eq_ignore_ascii_case(".git")),
+            _ => false,
+        });
+        if in_git {
+            return Err(format!(
+                "refusing to write {p}: it is inside a .git directory. The repository's git \
+                 configuration and hooks can run commands, so they are read-only to the agent; \
+                 ask the user to make this change"
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Refuse `real` (a real or normalized path) inside a protected folder.
+    fn refuse_protected(&self, real: &Path, shown: &str) -> Result<(), String> {
+        match self.protected.iter().find(|d| real.starts_with(d)) {
+            Some(d) => Err(format!(
+                "path {shown} is inside the harness's own data directory {} (keys, tokens, \
+                 every user's chats); file tools never read or change it",
+                d.display()
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn normalized(&self, p: &str) -> PathBuf {
+        let raw = Path::new(p);
+        let joined = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            self.workspace.join(raw)
+        };
+        normalize(&joined)
+    }
+}
+
+/// Walk `path` (absolute, already normalized) one component at a time with
+/// `lstat`, following symlinks, and return the real path. With `ws`, a
+/// symlink met inside `ws` must resolve to an existing target inside `ws`.
+/// Without it, nothing is refused and a dangling link ends the walk (the
+/// rest is appended as it is).
+fn walk(path: &Path, ws: Option<&Path>, shown: &str) -> Result<PathBuf, String> {
+    walk_links(path, ws, shown, 0)
+}
+
+/// Dangling links followed by their target, one after another (outside
+/// mode), before the walk gives up on a loop.
+const MAX_LINK_HOPS: usize = 40;
+
+fn walk_links(path: &Path, ws: Option<&Path>, shown: &str, hops: usize) -> Result<PathBuf, String> {
+    let mut real = PathBuf::new();
+    let mut missing = false;
+    for c in path.components() {
+        let name = match c {
+            Component::Normal(n) => n,
+            other => {
+                real.push(other.as_os_str());
+                continue;
+            }
+        };
+        if missing {
+            real.push(name);
+            continue;
+        }
+        let candidate = real.join(name);
+        match std::fs::symlink_metadata(&candidate) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing = true;
+                real = candidate;
+            }
+            Err(e) => return Err(format!("{}: {e}", candidate.display())),
+            Ok(md) if md.file_type().is_symlink() => {
+                let inside = ws.is_some_and(|ws| real.starts_with(ws));
+                match candidate.canonicalize() {
+                    Ok(target) => {
+                        if inside
+                            && let Some(ws) = ws
+                            && !target.starts_with(ws)
+                        {
+                            return Err(format!(
+                                "path {shown}: {} is a symlink to {}, outside the session \
+                                 workspace {}; refusing to follow it",
+                                candidate.display(),
+                                target.display(),
+                                ws.display()
+                            ));
+                        }
+                        real = target;
+                    }
+                    Err(e) if ws.is_some() => {
+                        return Err(format!(
+                            "path {shown}: {} is a symlink whose target cannot be resolved \
+                             ({e}); refusing to follow a dangling symlink",
+                            candidate.display()
+                        ));
+                    }
+                    // A dangling link counts as where it points: whatever
+                    // creates its target later lands there, so that is the
+                    // path to judge (the data-dir and `.git` rules).
+                    Err(_) => {
+                        if hops >= MAX_LINK_HOPS {
+                            return Err(format!("path {shown}: too many levels of symbolic links"));
+                        }
+                        let target = std::fs::read_link(&candidate)
+                            .map_err(|e| format!("{}: {e}", candidate.display()))?;
+                        real = walk_links(&normalize(&real.join(target)), None, shown, hops + 1)?;
+                        missing = true;
+                    }
+                }
+            }
+            Ok(_) => real = candidate,
+        }
+    }
+    Ok(real)
+}
+
+/// Open `path` without following a symlink at its last component (`write`
+/// and `edit`): a link put there after [`ToolCtx::resolve_for_write`]
+/// checked the path fails with a clear error instead of being followed.
+pub(crate) async fn open_nofollow(
+    path: &Path,
+    opts: &mut tokio::fs::OpenOptions,
+) -> Result<tokio::fs::File, String> {
+    opts.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
+    opts.open(path).await.map_err(|e| {
+        if e.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32) {
+            format!("{}: is a symlink; refusing to follow it", path.display())
+        } else {
+            format!("{}: {e}", path.display())
+        }
+    })
 }
 
 fn normalize(p: &Path) -> PathBuf {
@@ -254,6 +425,155 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         let ctx = ToolCtx::new(dir.path());
         assert!(ctx.resolve("link/file").is_err());
+    }
+
+    #[test]
+    fn resolve_refuses_dangling_links_anywhere_in_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("nope"), dir.path().join("dl")).unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let last = ctx.resolve("dl").unwrap_err();
+        assert!(last.contains("symlink"), "{last}");
+        assert!(ctx.resolve("dl/x/y").is_err());
+        // A dangling link that would point inside is refused too: its
+        // target cannot be checked until it exists.
+        std::os::unix::fs::symlink(dir.path().join("later"), dir.path().join("in")).unwrap();
+        assert!(ctx.resolve("in").is_err());
+    }
+
+    #[test]
+    fn resolve_follows_links_that_stay_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("l")).unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let r = ctx.resolve("l/new.txt").unwrap();
+        assert_eq!(r, dir.path().canonicalize().unwrap().join("real/new.txt"));
+    }
+
+    /// A home with a project and the harness's data directory beside it
+    /// (AUDIT S1): `(home, project, data)`, all canonical.
+    fn home_with_data() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path().canonicalize().unwrap();
+        let data = h.join(".local/share/rizzy-harness");
+        std::fs::create_dir_all(data.join("keys")).unwrap();
+        std::fs::write(data.join("api-token"), "token-value-123456").unwrap();
+        std::fs::write(data.join("keys/jwt.key"), "jwt-key-value-123456").unwrap();
+        let project = h.join("projects/x");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
+        (home, project, data)
+    }
+
+    fn protected_ctx(project: &Path, data: &Path, outside: bool) -> ToolCtx {
+        ToolCtx {
+            allow_outside_workspace: outside,
+            protected: Arc::new(vec![data.to_path_buf()]),
+            ..ToolCtx::new(project)
+        }
+    }
+
+    fn run(tool: &dyn Tool, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tool.run(ctx, input))
+    }
+
+    #[test]
+    fn file_tools_never_touch_the_data_dir() {
+        let (_home, project, data) = home_with_data();
+        let token = data.join("api-token");
+        for outside in [false, true] {
+            let ctx = protected_ctx(&project, &data, outside);
+            for p in [
+                "../../.local/share/rizzy-harness/api-token".to_string(),
+                token.display().to_string(),
+                data.join("keys/jwt.key").display().to_string(),
+                data.join("new-file").display().to_string(),
+                data.display().to_string(),
+            ] {
+                let e = ctx.resolve(&p).unwrap_err();
+                assert!(e.contains("data directory"), "outside={outside} {p}: {e}");
+                let r = run(&Read, &ctx, serde_json::json!({ "path": p }));
+                assert!(!r.ok && !r.output.contains("token-value"), "{}", r.output);
+                let w = run(
+                    &Write,
+                    &ctx,
+                    serde_json::json!({ "path": p, "content": "x" }),
+                );
+                assert!(!w.ok, "outside={outside} {p}: {}", w.output);
+                let e = run(
+                    &Edit,
+                    &ctx,
+                    serde_json::json!({ "path": p, "old_string": "token", "new_string": "x" }),
+                );
+                assert!(!e.ok, "outside={outside} {p}: {}", e.output);
+                let g = run(
+                    &Grep,
+                    &ctx,
+                    serde_json::json!({ "pattern": "value", "path": p }),
+                );
+                assert!(!g.output.contains("value-123456"), "{}", g.output);
+            }
+            assert_eq!(
+                std::fs::read_to_string(&token).unwrap(),
+                "token-value-123456"
+            );
+            assert!(!data.join("new-file").exists());
+            // Files of the project itself still work.
+            let r = run(&Read, &ctx, serde_json::json!({ "path": "main.rs" }));
+            assert!(r.ok, "{}", r.output);
+        }
+    }
+
+    #[test]
+    fn a_link_into_the_data_dir_is_refused() {
+        let (_home, project, data) = home_with_data();
+        std::os::unix::fs::symlink(&data, project.join("d")).unwrap();
+        std::os::unix::fs::symlink(data.join("api-token"), project.join("t")).unwrap();
+        // A dangling link whose target would be created inside it.
+        std::os::unix::fs::symlink(data.join("later"), project.join("later")).unwrap();
+        for outside in [false, true] {
+            let ctx = protected_ctx(&project, &data, outside);
+            for p in ["d/api-token", "t", "later/x"] {
+                assert!(ctx.resolve(p).is_err(), "outside={outside} {p}");
+                let r = run(&Read, &ctx, serde_json::json!({ "path": p }));
+                assert!(!r.ok && !r.output.contains("token-value"), "{}", r.output);
+            }
+            let w = run(
+                &Write,
+                &ctx,
+                serde_json::json!({ "path": "later/x", "content": "x" }),
+            );
+            assert!(!w.ok, "{}", w.output);
+            assert!(!data.join("later").exists());
+        }
+    }
+
+    #[test]
+    fn searches_from_above_skip_the_data_dir() {
+        let (home, project, data) = home_with_data();
+        let ctx = protected_ctx(&project, &data, true);
+        let root = home.path().display().to_string();
+        let g = run(
+            &Grep,
+            &ctx,
+            serde_json::json!({ "pattern": "value|main", "path": root }),
+        );
+        assert!(g.output.contains("main.rs"), "{}", g.output);
+        assert!(!g.output.contains("value-123456"), "{}", g.output);
+        let l = run(
+            &Glob,
+            &ctx,
+            serde_json::json!({ "pattern": "**/*", "path": root }),
+        );
+        assert!(l.output.contains("main.rs"), "{}", l.output);
+        assert!(!l.output.contains("api-token"), "{}", l.output);
+        assert!(!l.output.contains("jwt.key"), "{}", l.output);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 // The bar's mode classifier: multinomial logistic regression over hashed
 // features, trained online from the mode the user actually used. Rules decide
 // until the model has proven itself on the same recent window.
+import { fnv1a } from "./fnv";
 import { MODES, type Mode } from "./modes";
 import { ruleMode, signals } from "./rules";
 
@@ -46,29 +47,22 @@ export function parseState(v: unknown): ClassifierState {
   return emptyState();
 }
 
-function fnv1a(str: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0) % BUCKETS;
-}
+const bucket = (str: string): number => fnv1a(str) % BUCKETS;
 
 /** Hashed feature indices (with repeats) for a text. */
 export function features(text: string): number[] {
   const lower = text.trim().toLowerCase();
   const out: number[] = [];
   const padded = ` ${lower.slice(0, 200)} `;
-  for (let i = 0; i + 3 <= padded.length; i++) out.push(fnv1a(`c:${padded.slice(i, i + 3)}`));
+  for (let i = 0; i + 3 <= padded.length; i++) out.push(bucket(`c:${padded.slice(i, i + 3)}`));
   const s = signals(text);
-  for (const w of s.words.slice(0, 40)) out.push(fnv1a(`w:${w}`));
-  if (s.words[0]) out.push(fnv1a(`first:${s.words[0]}`));
-  out.push(fnv1a(`len:${Math.min(s.words.length, 8)}`));
+  for (const w of s.words.slice(0, 40)) out.push(bucket(`w:${w}`));
+  if (s.words[0]) out.push(bucket(`first:${s.words[0]}`));
+  out.push(bucket(`len:${Math.min(s.words.length, 8)}`));
   for (const [k, on] of Object.entries({ url: s.url, path: s.path, code: s.code, dev: s.dev, q: s.question, m: s.mention })) {
     if (on) {
       // Strong signals get extra weight by repetition.
-      for (let r = 0; r < 4; r++) out.push(fnv1a(`s:${k}`));
+      for (let r = 0; r < 4; r++) out.push(bucket(`s:${k}`));
     }
   }
   return out;

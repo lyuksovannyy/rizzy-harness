@@ -8,8 +8,6 @@ import type {
   AttentionResponse,
   Decision,
   Features,
-  SetupCommands,
-  SetupRecord,
   TokenSavings,
   GraphifyStatus,
   Effort,
@@ -33,7 +31,6 @@ import type {
   RemoteNode,
   FormReply,
   Role,
-  SetupState,
   SearchKind,
   SearchResponse,
   SessionRow,
@@ -112,19 +109,12 @@ export const api = {
     call<{ ok: boolean }>("POST", "/api/setup", { claim_code, username, password }),
   login: (username: string, password: string) =>
     call<{ ok: boolean }>("POST", "/api/login", { username, password }),
-  logout: () => call<{ ok: boolean }>("POST", "/api/auth/logout"),
+  logout: () => call<{ ok: boolean }>("POST", "/api/logout"),
   nodes: () => call<{ nodes: NodeInfo[] }>("GET", "/api/nodes"),
   remoteNodes: () =>
     call<{ nodes: RemoteNode[]; listener: { port: number; fingerprint: string } | null }>("GET", "/api/admin/nodes"),
   joinToken: () =>
     call<{ token: string; port: number; fingerprint: string; expires_in_s: number }>("POST", "/api/admin/nodes/join"),
-  probeHost: (host: string, port: number) =>
-    call<{ fingerprint: string }>("POST", "/api/admin/provision/probe", { host, port }),
-  startSetup: (b: Record<string, unknown>) => call<{ id: string }>("POST", "/api/admin/provision", b),
-  setupState: (id: string) => call<SetupState>("GET", `/api/admin/provision/${id}`),
-  setupAnswer: (id: string, step: string, choice: string) =>
-    call<{ ok: boolean }>("POST", `/api/admin/provision/${id}/answer`, { step, choice }),
-  setupRecheck: (id: string) => call<SetupState>("POST", `/api/admin/provision/${id}/recheck`),
   revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
   /** The chats in a workspace (the API token: all, unless one is named).
    * `routineRuns` also lists the routine run chats left out once seen. */
@@ -149,17 +139,9 @@ export const api = {
     project_id?: string;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<AttentionResponse>("GET", "/api/attention"),
-  setups: () => call<{ setups: { setup: SetupRecord; commands: SetupCommands }[] }>("GET", "/api/admin/node-setups"),
-  updateSetup: (id: string, b: { mode?: "auto" | "manual"; watch_ssh?: boolean; watch_firewall?: boolean }) =>
-    call<SetupRecord>("PATCH", `/api/admin/node-setups/${id}`, b),
-  forgetSetup: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/node-setups/${id}`),
-  checkSetup: (id: string) => call<SetupRecord>("POST", `/api/admin/node-setups/${id}/check`),
-  setFirewall: (id: string, b: Record<string, unknown>) => call<SetupRecord>("POST", `/api/admin/node-setups/${id}/firewall`, b),
   savings: () => call<TokenSavings>("GET", "/api/admin/savings"),
   saveSavings: (b: TokenSavings) => call<TokenSavings>("PUT", "/api/admin/savings", b),
   graphify: () => call<GraphifyStatus>("GET", "/api/admin/graphify"),
-  allowGraphify: (allowed: boolean) => call<GraphifyStatus>("PUT", "/api/admin/graphify", { allowed }),
-  installGraphify: () => call<GraphifyStatus>("POST", "/api/admin/graphify/install"),
   markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),
   /** What the viewer may use in the workspace (the sidebar's areas). */
   features: (scope?: Scope | null) => call<Features>("GET", scoped("/api/features", scope)),

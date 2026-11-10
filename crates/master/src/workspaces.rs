@@ -398,6 +398,31 @@ pub fn agentic_refusal(who: &Principal, ws: Option<&Access>) -> Option<String> {
     }
 }
 
+/// The refusal for an account that may not use the embedded node
+/// (`[nodes] local_node_users`, FIX_PLAN Q7).
+pub const LOCAL_NODE_ADMINS_ONLY: &str = "agentic sessions on this server's own node are for \
+     server admins: it runs as the server's user, next to its keys and every account's chats. \
+     Use a remote node, or ask the server admin";
+
+/// Whether `who` may run agentic sessions on the embedded node: server
+/// admins and the API token always; everyone with the agentic grant when
+/// `[nodes] local_node_users = "granted"`. Without a provider runtime
+/// (tests) the default applies: admins only.
+pub fn may_use_local_node(m: &Master, who: &Principal) -> bool {
+    who.is_admin()
+        || m.provider_runtime().is_some_and(|rt| {
+            rt.config().nodes.local_node_users == crate::config::LocalNodeUsers::Granted
+        })
+}
+
+/// Why `who` may not run agentic work on node `node_id`, or `None` when
+/// the node rule allows it (the grant and the workspace are checked by
+/// [`agentic_refusal`]).
+pub fn node_refusal(m: &Master, who: &Principal, node_id: &str) -> Option<String> {
+    (m.is_local_node(node_id) && !may_use_local_node(m, who))
+        .then(|| LOCAL_NODE_ADMINS_ONLY.to_string())
+}
+
 /// Why `who` may not make the agentic session `row` do work, or `None`
 /// when they may (always `None` for chats). A row not mirrored far enough
 /// to know its profile counts as agentic, so the check fails closed.
@@ -418,7 +443,7 @@ pub async fn agentic_blocked(m: &Master, who: &Principal, row: &SessionRow) -> O
             Err(_) => return Some("this chat is in a workspace you are not a member of".into()),
         },
     };
-    agentic_refusal(who, ws.as_ref())
+    agentic_refusal(who, ws.as_ref()).or_else(|| node_refusal(m, who, &row.node_id))
 }
 
 /// Whether chat `row` may use its owner's personal memory (recall, and the

@@ -109,9 +109,6 @@ pub const PROVIDER_KEY_VAR: &str = "HARNESS_PROVIDER_API_KEY";
 /// Variables whose values are secrets: added to the redaction set.
 pub const SECRET_VARS: &[&str] = &[
     PROVIDER_KEY_VAR,
-    "HARNESS_JWT_SECRET",
-    "HARNESS_DATABASE_URL",
-    "HARNESS_KV_URL",
     "HARNESS_QDRANT_API_KEY",
     "HARNESS_JOIN_TOKEN",
 ];

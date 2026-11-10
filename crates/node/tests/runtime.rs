@@ -320,6 +320,119 @@ async fn cwd_outside_roots_is_refused() {
     }
 }
 
+/// The node's data directory (keys, the API token, every user's chats)
+/// can never be inside a session (AUDIT S1): not its folder, not above it.
+#[tokio::test]
+async fn cwd_containing_the_data_dir_is_refused() {
+    let mut h = Harness::new(|root| {
+        let mut p = default_policy(root);
+        std::fs::create_dir_all(root.join("ws/.data")).unwrap();
+        p.protect(&root.join("ws/.data"));
+        p
+    })
+    .await;
+    for cwd in [h.ws.clone(), h.ws.join(".data")] {
+        h.send(MasterToNode::Create {
+            profile: None,
+            incognito: false,
+            agent: None,
+            req_id: "c".into(),
+            session_id: SessionId::new(),
+            title: "t".into(),
+            cwd: cwd.display().to_string(),
+            model: None,
+            approval_mode: None,
+        });
+        match h.link.from_node.recv().await.unwrap() {
+            NodeToMaster::Ack { ok, error, .. } => {
+                assert!(!ok);
+                let error = error.unwrap();
+                assert!(error.contains("data directory"), "{error}");
+                assert!(error.contains("project folder"), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// A session from the log whose folder contains the data directory (made
+/// before the rule, or the folder changed since) does no more work there.
+#[tokio::test]
+async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let data = ws.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let path = dir.path().join("node.db");
+    let sid = SessionId::new();
+    {
+        let node = NodeRuntime::start(config(
+            Store::open(&path, Durability::Full).unwrap(),
+            default_policy(dir.path()),
+        ))
+        .await
+        .unwrap();
+        let link = node.attach().await;
+        link.to_node
+            .send(MasterToNode::Create {
+                profile: None,
+                incognito: false,
+                agent: None,
+                req_id: "c".into(),
+                session_id: sid,
+                title: "t".into(),
+                cwd: ws.display().to_string(),
+                model: None,
+                approval_mode: None,
+            })
+            .unwrap();
+        let mut from = link.from_node;
+        loop {
+            if let Some(NodeToMaster::Ack { ok, .. }) = from.recv().await {
+                assert!(ok);
+                break;
+            }
+        }
+    }
+    let mut policy = default_policy(dir.path());
+    policy.protect(&data);
+    let node = NodeRuntime::start(config(
+        Store::open(&path, Durability::Full).unwrap(),
+        policy,
+    ))
+    .await
+    .unwrap();
+    let mut link = node.attach().await;
+    link.to_node
+        .send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text: "run: echo hi > out.txt".into(),
+            images: vec![],
+        })
+        .unwrap();
+    loop {
+        match link.from_node.recv().await.unwrap() {
+            NodeToMaster::Ack { ok, error, .. } => {
+                assert!(!ok);
+                assert!(error.unwrap().contains("data directory"));
+                break;
+            }
+            NodeToMaster::Event { event } => {
+                assert_ne!(event.kind, "turn_started", "a turn started");
+            }
+            _ => {}
+        }
+    }
+    assert!(!ws.join("out.txt").exists());
+}
+
 #[tokio::test]
 async fn resume_replays_in_batches() {
     let mut h = Harness::new(default_policy).await;
@@ -598,6 +711,110 @@ async fn git_checkpoints_and_undo() {
         "v1\n"
     );
     assert!(!h.ws.join("made.txt").exists());
+}
+
+/// A working copy that arrives with a hostile `.git/config` (fsmonitor,
+/// hooks, a filter) runs none of it when a prompt is checkpointed and
+/// undone, before anything was approved.
+#[cfg(unix)]
+#[tokio::test]
+async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        ..Default::default()
+    })
+    .await;
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&h.ws)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success()
+        )
+    };
+    git(&["init", "-q"]);
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    std::fs::write(h.ws.join(".gitattributes"), "* filter=evil\n").unwrap();
+    git(&["add", "."]);
+    git(&["-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
+    let marks = h.ws.parent().unwrap().join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let script = |name: &str| {
+        let p = h.ws.parent().unwrap().join(format!("{name}.sh"));
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n{}\n",
+                marks.join(name).display(),
+                // Filters pass the content through; the others read nothing.
+                if name.starts_with("clean") || name.starts_with("smudge") {
+                    "cat"
+                } else {
+                    "exit 0"
+                }
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    git(&["config", "core.fsmonitor", &script("fsmonitor")]);
+    git(&["config", "filter.evil.clean", &script("clean")]);
+    git(&["config", "filter.evil.smudge", &script("smudge")]);
+    let hooks = h.ws.join(".git/hooks");
+    for n in ["post-index-change", "pre-commit", "post-checkout"] {
+        let p = hooks.join(n);
+        std::fs::copy(script(n), &p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let sid = h.create().await;
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: "run: echo v2 > keep.txt".into(),
+        images: vec![],
+    });
+    let EventKind::Checkpoint(after) = h
+        .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(after.files, ["keep.txt"]);
+    h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    h.send(MasterToNode::Restore {
+        req_id: "r".into(),
+        session_id: sid,
+        turn_id: after.turn_id.clone(),
+        force: false,
+        rewind: false,
+    });
+    h.until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::Restored))
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    let ran: Vec<_> = std::fs::read_dir(&marks)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(ran.is_empty(), "repository config ran: {ran:?}");
 }
 
 /// A folder without git gets a shadow repository outside it; only the

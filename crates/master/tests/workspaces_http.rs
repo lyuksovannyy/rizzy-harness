@@ -70,8 +70,11 @@ async fn start() -> Server {
     std::fs::create_dir(&ws).unwrap();
     let worker = node(dir.path(), "local", Profile::Agentic).await;
     let chats = node(dir.path(), "master", Profile::Chat).await;
-    let (rt, _) =
-        ProviderRuntime::start(Config::default(), dir.path(), Default::default()).unwrap();
+    let mut cfg = Config::default();
+    // Non-admins with the agentic grant use the embedded node here; the
+    // default (admins only) has its own tests in local_node_http.rs.
+    cfg.nodes.local_node_users = harness_master::config::LocalNodeUsers::Granted;
+    let (rt, _) = ProviderRuntime::start(cfg, dir.path(), Default::default()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let claim_path = dir.path().join("claim-code");

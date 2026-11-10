@@ -1,30 +1,30 @@
 # Self-hosting templates
 
-Three Docker Compose templates for the central server (web UI, chats, node
+Two Docker Compose templates for the central server (web UI, chats, node
 management). Agentic nodes do not run in containers by design: they need
 the real host. Set them up from Settings → Server → Nodes.
 
 | Template | Services | Use it for |
 |---|---|---|
-| [`minimal/`](minimal/) | harness | one server, everything in the data directory (SQLite, logins in `master.db`) |
-| [`standard/`](standard/) | harness, Redis, MariaDB¹ | logins in Redis, shared by several harness processes and kept across restarts |
-| [`full/`](full/) | harness, Redis, Qdrant, Ollama, MariaDB¹ | memory recall by meaning: vectors in Qdrant, embeddings from a local Ollama |
+| [`minimal/`](minimal/) | harness | one server, everything in the data directory (SQLite, logins included) |
+| [`full/`](full/) | harness, Qdrant, Ollama | memory recall by meaning: vectors in Qdrant, embeddings from a local Ollama |
 
-¹ MariaDB is provisioned behind the `mariadb` profile. The harness still
-stores everything in SQLite and refuses a `mysql://` `HARNESS_DATABASE_URL`
-with a clear error. See [docs/storage-backends.md](../docs/storage-backends.md).
+Neither template starts a service the server does not use. Everything but
+memory vectors is stored in SQLite in the data directory; a shared database
+is a later plan (see [docs/storage-backends.md](../docs/storage-backends.md)).
 
 ## Start one
 
 ```bash
-cd docker/standard
+cd docker/minimal
 ```
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in the passwords in `.env` (`openssl rand -hex 24` makes one), then:
+Edit `.env` (the `full` template needs a `QDRANT_API_KEY`; `openssl rand -hex 24`
+makes one), then:
 
 ```bash
 mkdir -p data && sudo chown 10001:10001 data
@@ -54,12 +54,11 @@ Open http://127.0.0.1:7777 and claim the server with that code.
   environment: the provider refers to `HARNESS_PROVIDER_API_KEY` by name.
 - No `HARNESS_*` variable and nothing a `.env` sets reaches an agent's shell.
 
-## Several harness processes
+## One harness process
 
-Logins are signed JWTs, so any process can check them. To run more than
-one behind a load balancer, give them the same `HARNESS_JWT_SECRET` and
-`HARNESS_KV_URL` (Redis). Until the database port lands, they would still
-each have their own SQLite, so this is not a supported setup yet.
+Run one server process per data directory. Logins are rows in its SQLite
+database, and every other table lives there too, so a second process behind
+the same address is not a supported setup.
 
 ## Remote nodes from a container
 

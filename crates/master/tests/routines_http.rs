@@ -1593,3 +1593,21 @@ async fn an_offline_node_is_retried_then_fails_and_failures_pause() {
         "paused routines do not fire"
     );
 }
+
+/// The embedded node is for server admins by default (`[nodes]
+/// local_node_users`): an agentic routine there is refused to a member
+/// with the agentic grant, as their chats there are.
+#[tokio::test]
+async fn agentic_routines_on_the_local_node_are_for_admins() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path()).await;
+    let (alex, _) = alex(&t).await;
+    let (bob, _) = account(&t, &alex, "bob", true).await;
+    let agentic = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
+                         "node_id": "local", "cwd": t.root});
+    let (st, v) = create(&t, &bob, None, "a", agentic.clone(), every(60)).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert!(v.to_string().contains("remote node"), "{v}");
+    let (st, v) = create(&t, &alex, None, "a", agentic, every(60)).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+}

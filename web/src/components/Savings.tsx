@@ -63,24 +63,15 @@ const STYLES: { v: Style; label: string }[] = [
   { v: "ultra", label: "Ultra: tersest" },
 ];
 
+/** Read-only: whether graphify may run is the node's call (node.toml, read at
+ * start), so the page says what to do on the node instead of doing it. */
 function GraphifyCard({ enabled, onToggle }: { enabled: boolean; onToggle: (v: boolean) => void }) {
   const [g, setG] = useState<GraphifyStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     api.graphify().then(setG).catch((x) => setErr(String(x)));
   }, []);
-  const act = async (p: Promise<GraphifyStatus>) => {
-    setBusy(true);
-    setErr(null);
-    try {
-      setG(await p);
-    } catch (x) {
-      setErr(x instanceof Error ? x.message : String(x));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const ready = !!g?.local_node && g.allowed && !!g.installed;
   return (
     <div className="card stack" data-testid="graphify">
       <h3>graphify (optional)</h3>
@@ -90,42 +81,27 @@ function GraphifyCard({ enabled, onToggle }: { enabled: boolean; onToggle: (v: b
         in the rizzy-harness data folder, never in your repository, and it gets no API keys.
       </p>
       {g && (
-        <div className="small">
-          This machine: {g.installed ? <b>{g.installed}</b> : "not installed"} (harness installs {g.pinned_version}) ·{" "}
+        <div className="small" data-testid="graphify-status">
+          This machine: {g.installed ? <b>{g.installed}</b> : "not installed"} (the install command pins{" "}
+          {g.pinned_version}) ·{" "}
           {g.local_node ? (g.allowed ? "allowed for the built-in node" : "not allowed for the built-in node") : "no built-in node"}
-        </div>
-      )}
-      {g?.local_node && (
-        <div className="row">
-          <button type="button" disabled={busy} onClick={() => void act(api.installGraphify())}>
-            {busy ? "Working…" : g.installed ? "Reinstall" : "Install graphify"}
-          </button>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={g.allowed}
-              disabled={busy || !g.installed}
-              onChange={(e) => void act(api.allowGraphify(e.target.checked))}
-            />
-            Allow on the built-in node (writes node.toml)
-          </label>
         </div>
       )}
       <label className="check">
         <input type="checkbox" checked={enabled} onChange={(e) => onToggle(e.target.checked)} />
         Offer graph_query to agents (on nodes that allow it and have it installed)
       </label>
-      {g?.install_log && (
-        <details open={g.install_ok === false}>
-          <summary className="small">{g.install_ok ? "Installed" : "Install failed"}: log</summary>
-          <pre className="mono join-cmd">{g.install_log}</pre>
+      {g && (
+        <details open={!!g.local_node && !ready} data-testid="graphify-steps">
+          <summary className="small">{g.local_node ? "Turn it on for a node" : "Turn it on for each node"}</summary>
+          <p className="small muted">
+            Each node decides for itself; nothing here installs it or changes node.toml. On the node, run the
+            install, add the line to {g.node_toml ? <code>{g.node_toml}</code> : "its node.toml"}, then restart the
+            node:
+          </p>
+          <pre className="mono join-cmd">{g.steps.join("\n")}</pre>
         </details>
       )}
-      <details>
-        <summary className="small">Other nodes</summary>
-        <p className="small muted">Each node decides for itself. On the node:</p>
-        <pre className="mono join-cmd">{g?.remote_setup.join("\n")}</pre>
-      </details>
       {err && <div className="error-text">{err}</div>}
     </div>
   );

@@ -3,7 +3,6 @@ import {
   artifactHash,
   MEMORY_HASH,
   mediaHash,
-  NODES_HASH,
   parseRoute,
   projectHash,
   routeHash,
@@ -139,6 +138,6 @@ describe("routeHash", () => {
 
   it("gives the links other screens use", () => {
     expect(settingsHash("server", "workspaces")).toBe("#/settings/server/workspaces");
-    expect([MEMORY_HASH, NODES_HASH]).toEqual(["#/settings/account/memory", "#/settings/server/nodes"]);
+    expect(MEMORY_HASH).toBe("#/settings/account/memory");
   });
 });

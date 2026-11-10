@@ -16,6 +16,10 @@ pub struct Bash;
 
 /// Grace period between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
+/// Chunks (of at most 8 KiB) in flight from the pipe readers to the loop.
+/// When it is full the readers stop reading and the child blocks on its
+/// pipe: back-pressure, never unbounded memory.
+const PIPE_CHANNEL: usize = 8;
 
 fn signal_group(pgid: i32, sig: Signal) {
     // ESRCH (group already gone) is fine.
@@ -48,7 +52,7 @@ fn drain_utf8(buf: &mut Vec<u8>) -> String {
 async fn pump<R: AsyncRead + Unpin>(
     mut r: R,
     stream: OutputStream,
-    tx: mpsc::UnboundedSender<(OutputStream, String)>,
+    tx: mpsc::Sender<(OutputStream, String)>,
 ) {
     let mut chunk = [0u8; 8192];
     let mut pending = Vec::new();
@@ -58,14 +62,16 @@ async fn pump<R: AsyncRead + Unpin>(
             Ok(n) => {
                 pending.extend_from_slice(&chunk[..n]);
                 let s = drain_utf8(&mut pending);
-                if !s.is_empty() && tx.send((stream, s)).is_err() {
+                if !s.is_empty() && tx.send((stream, s)).await.is_err() {
                     break;
                 }
             }
         }
     }
     if !pending.is_empty() {
-        let _ = tx.send((stream, String::from_utf8_lossy(&pending).into_owned()));
+        let _ = tx
+            .send((stream, String::from_utf8_lossy(&pending).into_owned()))
+            .await;
     }
 }
 
@@ -113,6 +119,8 @@ impl Tool for Bash {
             .unwrap_or(ctx.timeout);
 
         let mut cmd = Command::new("bash");
+        // The allow-listed environment (node.toml `env_pass`), nothing else.
+        ctx.env.apply(&mut cmd);
         cmd.arg("-c")
             .arg(&command)
             .current_dir(&ctx.workspace)
@@ -121,16 +129,13 @@ impl Tool for Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        for k in &ctx.env_remove {
-            cmd.env_remove(k);
-        }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
         };
         let pgid = child.id().map(|p| p as i32);
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
         let out_task = tokio::spawn(pump(
             child.stdout.take().expect("piped"),
             OutputStream::Stdout,
@@ -150,12 +155,12 @@ impl Tool for Bash {
         } else {
             4 * crate::MAX_OUTPUT_CHARS
         };
-        let forward = |stream: OutputStream, s: String, combined: &mut String| {
+        // Keep the model's copy (capped) and pass the chunk on to the UI
+        // stream, which has its own budget: past it `send` returns at once,
+        // so the pipes are still read (and discarded) at full speed.
+        let keep = |s: &str, combined: &mut String| {
             if combined.len() < keep_chars {
-                combined.push_str(&s);
-            }
-            if let Some(ui) = &ctx.output {
-                let _ = ui.send((stream, s));
+                combined.push_str(s);
             }
         };
 
@@ -163,7 +168,19 @@ impl Tool for Bash {
         tokio::pin!(deadline);
         let end = loop {
             tokio::select! {
-                Some((stream, s)) = rx.recv() => forward(stream, s, &mut combined),
+                Some((stream, s)) = rx.recv() => {
+                    keep(&s, &mut combined);
+                    if let Some(ui) = &ctx.output {
+                        // The consumer may be behind (the channel is
+                        // bounded): waiting for it must not delay a cancel
+                        // or the timeout.
+                        tokio::select! {
+                            _ = ui.send(stream, s) => {}
+                            _ = ctx.cancel.cancelled() => break End::Cancelled,
+                            _ = &mut deadline => break End::TimedOut,
+                        }
+                    }
+                }
                 status = child.wait() => {
                     break End::Exited(status.ok().and_then(|s| s.code()));
                 }
@@ -192,15 +209,19 @@ impl Tool for Bash {
                 }
             }
         }
-        // Drain whatever is left; the group is dead so the pipes will close.
+        // Drain whatever is left; the group is dead so the pipes will close
+        // (unless something outside it holds them: give up after a while).
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            let _ = out_task.await;
-            let _ = err_task.await;
+            while let Some((stream, s)) = rx.recv().await {
+                keep(&s, &mut combined);
+                if let Some(ui) = &ctx.output {
+                    ui.send(stream, s).await;
+                }
+            }
         })
         .await;
-        while let Ok((stream, s)) = rx.try_recv() {
-            forward(stream, s, &mut combined);
-        }
+        out_task.abort();
+        err_task.abort();
 
         let (mut output, truncated) = match &ctx.outputs {
             Some(store) if ctx.savings.filter_shell_output => {
@@ -208,11 +229,13 @@ impl Tool for Bash {
                 let (text, cut) = cap(f.text);
                 if f.removed_lines > 0 || cut {
                     let total = combined.lines().count();
-                    let id = store.put(combined);
+                    let note = match store.put(combined) {
+                        Some(id) => format!("full output: tool_output id={id}"),
+                        None => "the full output could not be kept".to_string(),
+                    };
                     (
                         format!(
-                            "{text}\n[filtered: {} of {total} lines not shown; full output: \
-                             tool_output id={id}]",
+                            "{text}\n[filtered: {} of {total} lines not shown; {note}]",
                             f.removed_lines
                         ),
                         cut,
@@ -284,34 +307,206 @@ mod tests {
         assert!(r.output.contains("hi") && r.output.contains("err"));
     }
 
-    #[tokio::test]
-    async fn streams_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut ctx = ToolCtx::new(dir.path());
-        ctx.output = Some(tx);
-        let r = Bash
-            .run(&ctx, json!({"command": "printf a; printf b"}))
-            .await;
-        assert!(r.ok);
-        let mut got = String::new();
-        while let Ok((_, s)) = rx.try_recv() {
-            got.push_str(&s);
-        }
-        assert_eq!(got, "ab");
+    use crate::ToolEnv;
+    use crate::stream::{OutputSink, STREAM_CHANNEL, TRUNCATED_MARKER};
+
+    /// A ctx streaming into a sink with `budget`, and a reader that
+    /// collects every chunk and the longest queue it saw.
+    fn streaming(
+        dir: &std::path::Path,
+        budget: usize,
+    ) -> (ToolCtx, tokio::task::JoinHandle<(Vec<String>, usize)>) {
+        let (sink, mut rx) = OutputSink::channel(budget);
+        let mut ctx = ToolCtx::new(dir);
+        ctx.output = Some(sink);
+        let reader = tokio::spawn(async move {
+            let (mut got, mut longest) = (Vec::new(), 0);
+            while let Some((_, s)) = rx.recv().await {
+                longest = longest.max(rx.len() + 1);
+                got.push(s);
+            }
+            (got, longest)
+        });
+        (ctx, reader)
+    }
+
+    async fn run_streaming(ctx: ToolCtx, input: Value) -> ToolOutcome {
+        // Dropping the ctx drops the sink, which ends the reader.
+        Bash.run(&ctx, input).await
     }
 
     #[tokio::test]
-    async fn env_remove_hides_secrets() {
+    async fn streams_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, reader) = streaming(dir.path(), crate::stream::DEFAULT_STREAM_BYTES);
+        let r = run_streaming(ctx, json!({"command": "printf a; printf b"})).await;
+        assert!(r.ok);
+        assert_eq!(reader.await.unwrap().0.concat(), "ab");
+    }
+
+    /// Under the budget the stream is exactly what the command printed.
+    #[tokio::test]
+    async fn output_under_the_budget_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, reader) = streaming(dir.path(), crate::stream::DEFAULT_STREAM_BYTES);
+        let r = run_streaming(ctx, json!({"command": "seq 1 20000"})).await;
+        assert!(r.ok);
+        let want: String = (1..=20000).map(|n| format!("{n}\n")).collect();
+        let got = reader.await.unwrap().0.concat();
+        assert_eq!(got.len(), want.len());
+        assert!(got == want, "stream differs from the command's output");
+        assert!(!got.contains(TRUNCATED_MARKER));
+    }
+
+    /// A flood far past the budget streams at most budget + one marker, the
+    /// queue stays bounded, and the exit code still comes back.
+    #[tokio::test]
+    async fn flood_is_capped_with_one_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = 64 * 1024;
+        let (ctx, reader) = streaming(dir.path(), budget);
+        let r = run_streaming(
+            ctx,
+            json!({"command": "head -c 5000000 /dev/zero | tr '\\0' a; exit 7"}),
+        )
+        .await;
+        assert_eq!(
+            r.exit_code,
+            Some(7),
+            "{}",
+            &r.output[r.output.len() - 200..]
+        );
+        let (chunks, longest) = reader.await.unwrap();
+        let all = chunks.concat();
+        assert!(
+            all.len() <= budget + TRUNCATED_MARKER.len(),
+            "streamed {} bytes",
+            all.len()
+        );
+        assert_eq!(all.matches(TRUNCATED_MARKER).count(), 1);
+        assert!(all.ends_with(TRUNCATED_MARKER), "nothing after the marker");
+        assert_eq!(all.len(), budget + TRUNCATED_MARKER.len());
+        assert!(longest <= STREAM_CHANNEL, "queue reached {longest}");
+    }
+
+    /// A consumer that never reads fills the bounded channel; cancel must
+    /// still kill the group promptly (no deadlock on the full channel).
+    #[tokio::test]
+    async fn cancel_during_flood_with_a_stuck_consumer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, rx) = OutputSink::channel(crate::stream::DEFAULT_STREAM_BYTES);
+        let mut ctx = ToolCtx::new(dir.path());
+        ctx.output = Some(sink);
+        let cancel = ctx.cancel.clone();
+        let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": "yes"})).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = Instant::now();
+        cancel.cancel();
+        let r = tokio::time::timeout(Duration::from_secs(10), h)
+            .await
+            .expect("cancel hung")
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            r.output.contains("cancelled"),
+            "{}",
+            &r.output[r.output.len() - 100..]
+        );
+        assert_eq!(rx.len(), STREAM_CHANNEL, "the consumer never read");
+    }
+
+    #[tokio::test]
+    async fn timeout_during_flood_with_a_stuck_consumer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, _rx) = OutputSink::channel(crate::stream::DEFAULT_STREAM_BYTES);
+        let mut ctx = ToolCtx::new(dir.path());
+        ctx.output = Some(sink);
+        let started = Instant::now();
+        let r = Bash
+            .run(&ctx, json!({"command": "yes", "timeout_secs": 1}))
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(r.output.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn timeout_during_flood_past_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, reader) = streaming(dir.path(), 8192);
+        let started = Instant::now();
+        let r = run_streaming(ctx, json!({"command": "yes", "timeout_secs": 1})).await;
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(r.output.contains("timed out"));
+        let all = reader.await.unwrap().0.concat();
+        assert_eq!(all.len(), 8192 + TRUNCATED_MARKER.len());
+    }
+
+    async fn shell_var(env: ToolEnv, name: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        // cargo sets CARGO_MANIFEST_DIR for test processes.
-        let cmd = json!({"command": "echo \"[${CARGO_MANIFEST_DIR:-unset}]\""});
-        let visible = Bash.run(&ctx, cmd.clone()).await;
-        assert!(!visible.output.contains("[unset]"), "{}", visible.output);
-        ctx.env_remove = vec!["CARGO_MANIFEST_DIR".into()];
-        let r = Bash.run(&ctx, cmd).await;
-        assert!(r.output.contains("[unset]"), "{}", r.output);
+        ctx.env = env;
+        let cmd = format!("printf '[%s]' \"${{{name}:-unset}}\"");
+        Bash.run(&ctx, json!({"command": cmd})).await.output
+    }
+
+    // Cargo sets CARGO_PKG_NAME and CARGO_PKG_VERSION for test processes;
+    // the tests read them and set nothing, so they cannot race.
+    #[tokio::test]
+    async fn unlisted_variables_are_absent() {
+        let out = shell_var(ToolEnv::default(), "CARGO_PKG_NAME").await;
+        assert!(out.contains("[unset]"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn listed_and_glob_matched_variables_are_present() {
+        let env = ToolEnv::new(&["CARGO_PKG_NAME".into()], []).unwrap();
+        let out = shell_var(env, "CARGO_PKG_NAME").await;
+        assert!(out.contains("[harness-tools]"), "{out}");
+        let env = ToolEnv::new(&["CARGO_PKG_*".into()], []).unwrap();
+        let out = shell_var(env.clone(), "CARGO_PKG_VERSION").await;
+        assert!(!out.contains("[unset]"), "{out}");
+        let out = shell_var(env, "CARGO_MANIFEST_DIR").await;
+        assert!(out.contains("[unset]"), "the glob does not match it: {out}");
+    }
+
+    #[tokio::test]
+    async fn deny_listed_variables_stay_absent_even_with_star() {
+        let env = ToolEnv::new(&["*".into()], ["CARGO_PKG_NAME".to_string()]).unwrap();
+        let out = shell_var(env.clone(), "CARGO_PKG_NAME").await;
+        assert!(out.contains("[unset]"), "{out}");
+        let out = shell_var(env, "CARGO_PKG_VERSION").await;
+        assert!(!out.contains("[unset]"), "`*` passes the rest: {out}");
+    }
+
+    #[tokio::test]
+    async fn core_variables_let_ordinary_commands_run() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let r = Bash
+            .run(
+                &ctx,
+                json!({"command": "test -n \"$PATH\" && test -n \"$HOME\" && ls && env | cut -d= -f1 | sort"}),
+            )
+            .await;
+        assert!(r.ok, "{}", r.output);
+        assert!(r.output.contains("f.txt"), "{}", r.output);
+        for line in r
+            .output
+            .lines()
+            .filter(|l| !l.contains(' ') && !l.is_empty())
+        {
+            if line == "f.txt" || line.starts_with('[') {
+                continue;
+            }
+            // bash itself adds PWD, SHLVL and `_`.
+            assert!(
+                crate::env::CORE_VARS.contains(&line)
+                    || line.starts_with("LC_")
+                    || ["PWD", "OLDPWD", "SHLVL", "_"].contains(&line),
+                "unexpected variable {line}"
+            );
+        }
     }
 
     /// Cancel must kill the whole tree, including a grandchild that ignores

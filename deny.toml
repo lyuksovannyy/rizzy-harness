@@ -58,9 +58,3 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-
-# Boost Software License 1.0: permissive (OSI approved, no copyleft), comes
-# with the Redis client. Allowed for this one crate so any other is reviewed.
-[[licenses.exceptions]]
-crate = "xxhash-rust"
-allow = ["BSL-1.0"]

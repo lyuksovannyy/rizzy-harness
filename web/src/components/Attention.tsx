@@ -1,22 +1,19 @@
 // Chats waiting for the user (approvals, questions), then routine results
 // not seen yet, shown under the bar until there are search results to show
 // instead.
-import { NODES_HASH } from "../lib/routes";
 import { openResult, resultLabel } from "../lib/routineResults";
 import { when } from "../lib/when";
-import type { AttentionItem, NodeAttention, RoutineAttention } from "../types";
+import type { AttentionItem, RoutineAttention } from "../types";
 
 export function Attention(props: {
   items: AttentionItem[];
-  nodes?: NodeAttention[];
   routines?: RoutineAttention[];
   onOpen: (id: string) => void;
   /** For the routine rows' times (prefs.timezone). */
   timeZone?: string | null;
 }) {
-  const nodes = props.nodes ?? [];
   const routines = props.routines ?? [];
-  const waiting = props.items.length + nodes.length > 0;
+  const waiting = props.items.length > 0;
   if (!waiting && routines.length === 0) return null;
   const now = Date.now();
   return (
@@ -25,14 +22,6 @@ export function Attention(props: {
         <div className="similar attention" aria-label="chats waiting for you">
           <div className="similar-label">Waiting for you</div>
           <ul>
-            {nodes.map((n) => (
-              <li key={`node-${n.setup_id}`}>
-                <button type="button" onClick={() => (location.hash = NODES_HASH)}>
-                  <span className="similar-title ellipsis">Server {n.host}</span>
-                  <span className="similar-snippet ellipsis">{n.problems.map((p) => p.detail).join("; ")}</span>
-                </button>
-              </li>
-            ))}
             {props.items.map((a) => (
               <li key={a.session_id}>
                 <button type="button" onClick={() => props.onOpen(a.session_id)}>

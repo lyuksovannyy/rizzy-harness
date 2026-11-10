@@ -40,8 +40,7 @@ node sends (`add_link`, `on_node_message`, `Store::append`).
 
 Related, from the `.env` work: the master's agent shells used to inherit
 its whole environment minus the provider-key variables. Once a `.env` is
-loaded, that would include the database and Redis URLs and the JWT
-secret. Now every `HARNESS_*` variable and every name a `.env` sets is
+loaded, that would include every key and URL it holds. Now every `HARNESS_*` variable and every name a `.env` sets is
 removed from tool processes, and the secret ones are also redacted.
 
 ## Left open
@@ -50,8 +49,6 @@ removed from tool processes, and the secret ones are also redacted.
   unbounded channel, so a registered (authenticated) node could make it
   buffer without limit. The fix is a bounded `NodeLink::from_node`; it
   touches about 30 call sites and is left for its own change.
-- **Provisioning passes the join token in argv** of a short root command
-  over SSH. Single-use and short-lived; low risk.
 - **Channel binding** uses the certificate fingerprint, not a TLS exporter
   (RFC 9266). Equivalent here, since losing the master's key is total
   anyway.

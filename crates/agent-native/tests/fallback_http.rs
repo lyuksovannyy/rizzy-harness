@@ -159,6 +159,7 @@ async fn run(
     agent: AgentSpec,
 ) -> harness_core::backend::TurnOutcome {
     b.run_turn(TurnCtx {
+        session_id: harness_core::SessionId::new(),
         turn_id: "t".into(),
         history: vec![],
         user_text: "hi".into(),

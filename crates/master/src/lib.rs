@@ -13,18 +13,14 @@ pub mod config;
 pub mod env;
 mod favicon;
 mod http;
-pub mod jwt;
-pub mod kv;
 pub mod media;
 pub mod model_cache;
-pub mod node_setups;
 pub mod nodes;
 pub mod notices;
 pub mod prefs;
 pub mod presets;
 pub mod projects;
 pub mod providers;
-pub mod provision;
 pub mod resolver;
 pub mod routines;
 pub mod search;
@@ -137,7 +133,8 @@ pub struct MasterInner {
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
     providers: Mutex<Option<Arc<providers::ProviderRuntime>>>,
-    /// The built-in node's graphify switch and its node.toml.
+    /// The built-in node's graphify state (read from node.toml at start) and
+    /// the path of that node.toml, for the settings page to show.
     graphify: Mutex<
         Option<(
             Arc<harness_tools::graphify::GraphifyState>,
@@ -154,7 +151,6 @@ pub struct MasterInner {
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
-    provision: provision::Jobs,
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
@@ -357,7 +353,6 @@ impl Master {
                 remote_stops: Mutex::new(HashMap::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
-                provision: Mutex::new(HashMap::new()),
                 turn_memory: Mutex::new(HashMap::new()),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
@@ -572,16 +567,33 @@ impl Master {
     /// The node a new session of `profile` goes to when none is chosen:
     /// an embedded one first.
     pub fn default_node(&self, profile: Profile) -> Option<String> {
+        self.default_node_where(profile, true)
+    }
+
+    /// [`Self::default_node`] among remote nodes only when `embedded_ok` is
+    /// false (an account that may not use the local node).
+    pub fn default_node_where(&self, profile: Profile, embedded_ok: bool) -> Option<String> {
         let nodes: Vec<_> = self
             .nodes()
             .into_iter()
-            .filter(|n| n.connected && n.profile == profile)
+            .filter(|n| n.connected && n.profile == profile && (embedded_ok || !n.embedded))
             .collect();
         nodes
             .iter()
             .find(|n| n.embedded)
             .or(nodes.first())
             .map(|n| n.node_id.clone())
+    }
+
+    /// Whether `node_id` is this server's own embedded worker node: the
+    /// one that runs as the master's OS user, beside its data directory.
+    /// `local` always counts (remote ids are `node-…`), so a check made
+    /// while the link is down fails closed.
+    pub fn is_local_node(&self, node_id: &str) -> bool {
+        node_id == "local"
+            || lock(&self.inner.nodes)
+                .get(node_id)
+                .is_some_and(|n| n.info.embedded && n.info.profile == Profile::Agentic)
     }
 
     /// A listed model by its `<provider>::<raw>` id.

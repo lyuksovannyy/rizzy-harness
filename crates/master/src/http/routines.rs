@@ -181,10 +181,18 @@ async fn owned(m: &Master, who: &Principal, id: &str) -> ApiResult<(RoutineRow, 
 }
 
 /// Refuse (403) an agentic spec to someone without the agentic rights.
-fn agentic_allowed(who: &Principal, a: &Access, spec: &RoutineSpec) -> ApiResult<()> {
+/// Its node must be one they may use, too (the embedded node is for admins
+/// by default).
+fn agentic_allowed(m: &Master, who: &Principal, a: &Access, spec: &RoutineSpec) -> ApiResult<()> {
     match spec
         .agentic()
-        .then(|| ws::agentic_refusal(who, Some(a)))
+        .then(|| {
+            ws::agentic_refusal(who, Some(a)).or_else(|| {
+                spec.node_id
+                    .as_deref()
+                    .and_then(|n| ws::node_refusal(m, who, n))
+            })
+        })
         .flatten()
     {
         Some(why) => Err(forbidden(why)),
@@ -594,7 +602,7 @@ async fn create(
         return Err(forbidden(why).into());
     }
     let spec = RoutineSpec::parse(b.spec).map_err(bad)?;
-    agentic_allowed(&who, &a, &spec)?;
+    agentic_allowed(&m, &who, &a, &spec)?;
     rspec::check(&m, &a, &spec).await.map_err(bad)?;
     let name = rspec::clean_name(&b.name).map_err(bad)?;
     let now = now(&m);
@@ -663,7 +671,7 @@ async fn update(
         Some(v) => RoutineSpec::parse(v).map_err(bad)?,
         None => RoutineSpec::read(&row.spec).unwrap_or_default(),
     };
-    agentic_allowed(&who, &a, &spec)?;
+    agentic_allowed(&m, &who, &a, &spec)?;
     if changed_spec {
         rspec::check(&m, &a, &spec).await.map_err(bad)?;
     }
@@ -767,7 +775,7 @@ async fn run_now(
         None => None,
     };
     let spec = RoutineSpec::read(&row.spec).unwrap_or_default();
-    agentic_allowed(&who, &a, &spec)?;
+    agentic_allowed(&m, &who, &a, &spec)?;
     if !r::config(&m).enabled {
         return Err(conflict("routines are turned off on this server"));
     }
@@ -932,7 +940,12 @@ async fn rotate_secret(
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
     let (row, a) = owned(&m, &who, &id).await?;
-    agentic_allowed(&who, &a, &RoutineSpec::read(&row.spec).unwrap_or_default())?;
+    agentic_allowed(
+        &m,
+        &who,
+        &a,
+        &RoutineSpec::read(&row.spec).unwrap_or_default(),
+    )?;
     let t = tid.clone();
     let trigger = m.inner.mirror.call(move |s| s.trigger(&t)).await?;
     let Some(trigger) = trigger.filter(|t| t.routine_id == row.routine_id) else {
