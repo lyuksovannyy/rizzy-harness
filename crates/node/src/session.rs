@@ -195,11 +195,10 @@ impl Session {
         let mut head = self.head.lock().await;
         let (kind, mut payload) = kind.into_parts();
         if !self.node.cfg.secrets.is_empty() {
-            let raw = payload.to_string();
-            let clean = self.node.cfg.secrets.scrub(&raw);
-            if clean != raw {
-                payload = serde_json::from_str(&clean).unwrap_or(Value::Null);
-            }
+            // The string fields, not the serialized text: a secret holding a
+            // quote or backslash is escaped there, and a replacement can
+            // break the JSON.
+            self.node.cfg.secrets.scrub_value(&mut payload);
         }
         let ev = RawEvent {
             session_id: self.id,

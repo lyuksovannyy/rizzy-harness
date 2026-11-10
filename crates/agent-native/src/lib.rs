@@ -16,7 +16,8 @@ use std::time::Duration;
 use harness_core::backend::{AgentBackend, TurnCtx, TurnOutcome};
 use harness_core::event::*;
 use harness_core::refs::{RefBook, SharedRefs};
-use harness_core::{RawEvent, new_id};
+use harness_core::secret::StreamScrubber;
+use harness_core::{RawEvent, SecretSet, new_id};
 use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
@@ -438,22 +439,29 @@ async fn coalesce<T, F>(
     rx: impl Chunks,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
+    secrets: &SecretSet,
     make: impl Fn(String) -> EventKind + Send + Sync,
 ) -> Step<T>
 where
     F: std::future::Future<Output = T>,
 {
-    coalesce_led(fut, rx, cancel, host, &mut None, make).await.0
+    coalesce_led(fut, rx, cancel, host, &mut None, secrets, make)
+        .await
+        .0
 }
 
 /// `coalesce`, emitting `lead` (taken) just before the first batch. Also
-/// says whether any batch was emitted.
+/// says whether any batch was emitted. Batches go through a
+/// [`StreamScrubber`], so a secret split across two flushes is still
+/// replaced; the held-back tail is released with the last batch, whether
+/// the stream ended, was cancelled or was cut by its budget.
 async fn coalesce_led<T, F>(
     fut: F,
     mut rx: impl Chunks,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
     lead: &mut Option<EventKind>,
+    secrets: &SecretSet,
     make: impl Fn(String) -> EventKind + Send + Sync,
 ) -> (Step<T>, bool)
 where
@@ -461,14 +469,20 @@ where
 {
     tokio::pin!(fut);
     let mut buf = String::new();
+    let mut scrubber = StreamScrubber::new(secrets.clone());
     let mut emitted = false;
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let flush = async |buf: String, lead: &mut Option<EventKind>| {
+    // `clean` is already scrubbed; an empty one (all held back) is not sent.
+    let flush = async |clean: String, lead: &mut Option<EventKind>| -> bool {
+        if clean.is_empty() {
+            return false;
+        }
         if let Some(l) = lead.take() {
             host.emit(l).await;
         }
-        host.emit(make(buf)).await;
+        host.emit(make(clean)).await;
+        true
     };
     let out = loop {
         tokio::select! {
@@ -478,14 +492,14 @@ where
             Some(d) = rx.next() => {
                 buf.push_str(&d);
                 if buf.len() >= FLUSH_BYTES {
-                    flush(std::mem::take(&mut buf), lead).await;
-                    emitted = true;
+                    let clean = scrubber.push(&std::mem::take(&mut buf));
+                    emitted |= flush(clean, lead).await;
                 }
             }
             _ = tick.tick() => {
                 if !buf.is_empty() {
-                    flush(std::mem::take(&mut buf), lead).await;
-                    emitted = true;
+                    let clean = scrubber.push(&std::mem::take(&mut buf));
+                    emitted |= flush(clean, lead).await;
                 }
             }
         }
@@ -493,10 +507,9 @@ where
     while let Some(d) = rx.try_next() {
         buf.push_str(&d);
     }
-    if !buf.is_empty() {
-        flush(buf, lead).await;
-        emitted = true;
-    }
+    let mut clean = scrubber.push(&buf);
+    clean.push_str(&scrubber.finish());
+    emitted |= flush(clean, lead).await;
     (out, emitted)
 }
 
@@ -670,6 +683,7 @@ impl AgentBackend for NativeBackend {
                 &ctx.cancel,
                 host,
                 &mut lead,
+                &self.config.secrets,
                 |text| {
                     EventKind::AssistantDelta(AssistantDelta {
                         author: author.clone(),
@@ -965,6 +979,7 @@ impl NativeBackend {
                     rx,
                     &ctx.cancel,
                     host,
+                    &self.config.secrets,
                     |text| {
                         EventKind::AssistantDelta(AssistantDelta {
                             author: a2.clone(),
@@ -1152,11 +1167,12 @@ impl NativeBackend {
             rx,
             &never,
             host,
+            secrets,
             |text| {
                 EventKind::ToolOutputDelta(ToolOutputDelta {
                     call_id: call_id.clone(),
                     stream: OutputStream::Stdout,
-                    text: secrets.scrub(&text),
+                    text,
                 })
             },
         )
@@ -1420,6 +1436,49 @@ mod tests {
         let all = outputs.concat();
         assert!(!all.contains("sk-supersecret-123"), "{all}");
         assert!(all.contains("[REDACTED]"));
+    }
+
+    /// A secret that straddles two flushes (the stream sleeps past
+    /// FLUSH_INTERVAL between pieces) is replaced, the held tail comes out
+    /// when the stream ends, and nothing is lost or repeated.
+    #[tokio::test]
+    async fn secret_split_across_flushes_is_scrubbed() {
+        let secret = "sk-supersecret-123";
+        let text = format!("start {secret} end é");
+        for at in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            let host = RecHost::new(Decision::Allow);
+            let (tx, rx) = mpsc::unbounded_channel::<String>();
+            let (a, b) = (text[..at].to_string(), text[at..].to_string());
+            let fut = async move {
+                for piece in [a, b] {
+                    tx.send(piece).unwrap();
+                    tokio::time::sleep(FLUSH_INTERVAL * 3).await;
+                }
+            };
+            let secrets = SecretSet::new(vec![harness_core::Secret::new(secret.into())]);
+            let never = tokio_util::sync::CancellationToken::new();
+            coalesce(fut, rx, &never, &host, &secrets, |text| {
+                EventKind::AssistantDelta(AssistantDelta {
+                    author: Default::default(),
+                    variant: None,
+                    turn_id: "t".into(),
+                    message_id: "m".into(),
+                    text,
+                })
+            })
+            .await;
+            let all: String = host
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::AssistantDelta(d) => Some(d.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(all, "start [REDACTED] end é", "split at {at}");
+        }
     }
 
     /// `run: <cmd>` calls bash, `out: <id>` calls tool_output; after a tool
