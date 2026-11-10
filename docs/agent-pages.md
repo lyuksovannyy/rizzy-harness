@@ -19,12 +19,41 @@ row opens the agent page read-only.
 2. Summary, editable, with a "Write from instructions" button.
 3. Instructions: the agent's own system prompt (a large text area).
 4. Features, as a grid of switch groups (two columns on a wide screen, one on a phone):
-   - **Memory**: Own memory · Workspace memory · Project memory
+   - **Memory**: User facts · Workspace memory · Project memory
    - **Web**: Web search
    - **Available as**: Agent · Sub-agent
    - **Tools**: Read files · Change files · Run commands · Launch sub-agents · Manage workspace
 
 ## Built-in agents
+
+The roster (`crates/agents/builtin/`, since 2026-11; Ultracode removed):
+
+| id | aliases | name | category | runs as | tools |
+|---|---|---|---|---|---|
+| `general` (default) | `ai` | Assistant | General | agent | web_search, web_fetch, remember; user facts, project memory |
+| `smol` | | Smol | General | agent, sub-agent | none; no memory |
+| `researcher` | `research` | Researcher | General | agent, sub-agent | web_search, web_fetch, remember; project memory |
+| `coder` | `dev` | Software Developer | IT | agent, sub-agent | bash, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, web, remember; delegates to scout, researcher, reviewer; project memory |
+| `teamlead` | | Senior Teamlead | IT | agent | the developer's tools; user facts; delegates to coder, researcher, writer, scout, reviewer (4 runs, 200k tokens per turn) |
+| `writer` | | Writer | General | agent, sub-agent | read, write, edit, grep, glob, web, publish, remember; project memory |
+| `scout` | | Scout | IT | sub-agent | read, grep, glob, outline, graph_query; no memory |
+| `reviewer` | | Reviewer | IT | agent, sub-agent | read, grep, glob, outline, graph_query, remember; project memory |
+
+`crates/agents/tests/agents.rs` (`builtin_roster_is_exactly_the_table`) checks every
+row against every tool. Scout and Reviewer are read-only by that list and the loop's
+refusal of other calls, not by a sandbox. A chat or routine that named `ultracode` falls
+back like any removed agent (below).
+
+**Aliases and categories.** `aliases` (frontmatter, and `aliases` on a custom agent) are
+more handles: `@ai`, `"agent_id": "dev"` and a definition's `delegates` resolve to the
+id, which is what events, sessions and settings store (settings take ids only). Ids and
+aliases are one namespace: creating a custom agent with a handle any agent has, or that
+a built-in or file declares, is refused (409). For data from before the roster (a file
+`dev.md`, a custom agent `ai`), the id wins and the built-in loses that alias, with a
+warning in the log; among aliases the first claim wins (built-ins, files, custom
+agents). `category` (at most 32 characters, default "General") groups agents in the UI.
+Both are optional, so older definitions and saved custom agents still load, and both
+are fixed on built-in and file agents.
 
 The user's rule: built-ins cannot be deleted; their name, handle and features are fixed; their
 prompt cannot be replaced. What can change: summary, look, and an extra text appended after the
@@ -55,11 +84,11 @@ in the database).
 
 | Switch | Today | First cut |
 |---|---|---|
-| Own memory | Per-user facts (`crates/memory`): recalled into every turn, the `remember` tool proposes new ones | Works. Off: no recall for that agent's turns and no `remember` tool |
+| User facts (was "Own memory"; key `memory`) | Per-user facts (`crates/memory`): recalled into every turn, the `remember` tool proposes new ones | Works. Off: no recall for that agent's turns and no `remember` tool |
 | Workspace memory | Doesn't exist (a non-goal of workspaces v1) | Shown, disabled, "planned" |
 | Project memory | A project's facts (docs/projects.md): recalled into its chats' turns, `remember` with `scope: "project"` proposes new ones | Works (added with Projects). Off: no project facts and no project proposals in that agent's turns; the project's instructions and board still come |
 | Web search | `web_search` + `web_fetch` tools (chat runtime, from `[web]`) | Works (tool list) |
-| Available as Agent | Every agent is in the picker and `@mentions` | Works in the web (hidden from picker and mentions). The server doesn't refuse it yet |
+| Available as Agent | Every agent is in the picker and `@mentions` | Works: hidden from the picker and mentions, and the server refuses it as a chat's or a turn's agent (`Resolver::top_level`) |
 | Available as Sub-agent | An agent is a sub-agent only if another lists it in `delegates` | Works: off removes it from every agent's `delegates` |
 | Read files | `read`, `grep`, `glob`, `outline`, `graph_query` | Works (tool list) |
 | Change files | `write`, `edit` | Works (tool list) |
@@ -74,8 +103,9 @@ from them. For built-in and file agents they are **derived** from the definition
 truth for those. Node policy still wins: a switch is a request, not a permission (PLAN.md §0).
 
 Two new frontmatter fields carry what the tool list can't express: `memory: false` (default
-true) and `available_as: [agent, subagent]` (default both). Ultracode is `available_as: [agent]`:
-an orchestrator can't run as a sub-agent anyway, because delegation is one level deep.
+true) and `available_as: [agent, subagent]` (default both). The Teamlead and the Assistant are
+`available_as: [agent]` (an orchestrator can't run as a sub-agent anyway, because delegation is
+one level deep), Scout `[subagent]`.
 
 Not switches, but worth knowing: model and fallbacks stay in Settings (per-agent chains), and
 effort, `ui` level and delegation caps stay frontmatter-only. The page shows the model chain
@@ -90,7 +120,8 @@ read-only.
 - **Workspace memory** **[ws]**: facts shared by a team workspace's members. It needs facts keyed by
   workspace (`owner` = workspace id, or a `scope` column in `crates/memory`), a review flow
   (who approves a proposed team fact: the `settings` permission?), and recall that merges personal
-  and workspace facts. The member's "Use my memory in this workspace" switch stays separate: it is
+  and workspace facts. The member's "Share my facts with this workspace" switch (off by default
+  outside Personal) stays separate: it is
   the person's choice, the agent switch is the agent's.
 - **Project memory**: answered by Projects (docs/projects.md): a group of chats in the sidebar with
   instructions, a board and its own facts. The switch is `Features.project_memory` (frontmatter
@@ -155,8 +186,10 @@ fills the field; nothing is saved until the user presses Save.
 
 ## Edge cases
 
-- **Deleting an agent that chats use**: the chat's next turn falls back to the default agent
-  instead of failing with "unknown agent" (this helps for agent files removed from disk too). Old
+- **Deleting an agent that chats use**: the chat's next turn falls back to the server's default
+  agent instead of failing with "unknown agent" (this helps for agent files removed from disk and
+  removed built-ins such as `ultracode` too). Not the workspace's default: that may be a more
+  capable agent, and a stale name must not gain power. A routine naming it is blocked instead. Old
   turns keep their agent snapshot (name and prompt hash). Deleting also drops its look and model
   chain from `config.toml`, so a new agent with the same id doesn't inherit them.
 - **Ids are permanent**: the handle is the id (`@coder`); it is chosen at creation and can't change
@@ -173,9 +206,13 @@ fills the field; nothing is saved until the user presses Save.
 4. **A utility model** for summaries, titles and memory extraction, or keep using the default
    model?
 5. **Launch sub-agents**: is "every agent available as a sub-agent" enough, or should the page pick
-   which ones, as Ultracode's fixed list does?
-6. **Should "Available as Agent: off" be enforced by the server** (refuse it as a chat's agent), or
-   is hiding it from the pickers enough?
+   which ones, as the Teamlead's fixed list does?
+6. ~~**Should "Available as Agent: off" be enforced by the server?**~~ Settled (2026-11): yes. The
+   master refuses such an agent for a new chat, `set_agent`, a prompt's `agent_id`, a leading
+   `@mention` (the prompt is refused with the reason, not answered by another agent; with an
+   explicit `agent_id` the mention is only text), workspace and user defaults (refused on save,
+   dropped on read) and routines (blocked). A chat whose agent became sub-agent-only or was
+   removed runs as the server's default agent.
 7. **Additional instructions per workspace** **[ws]**: should a team admin be able to add them to
    built-ins for their team (my proposal: yes, after the server's own), or only server admins?
 8. **Who can make agents in a team workspace** **[ws]**: only `settings` holders (admins), or
@@ -201,7 +238,7 @@ fills the field; nothing is saved until the user presses Save.
   memory" rule.
 - Switching workspace while on an agents page goes to the agents list.
 - Stubs: Workspace memory and Manage workspace are shown disabled, marked "planned" (Project
-  memory works since Projects). The server doesn't enforce "Available as Agent: off" yet (only the pickers hide it).
+  memory works since Projects). "Available as Agent: off" is enforced by the server since 2026-11.
 - Bundle: the page's lazy chunk is about 5 KB; after the rebase the total is 309.9 of 310 KB and
   the initial load 96.5 of 110 KB (main: 304.9 and 96.1).
 

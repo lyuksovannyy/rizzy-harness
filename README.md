@@ -114,10 +114,12 @@ Settings has four sections:
 - **Account**: your profile, appearance, search engines, default agent and
   model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
-  defaults it gives, and whether your memories are used in its chats.
+  defaults it gives, and whether your facts (your memories) are shared with
+  its chats: always in Personal; in a team workspace off until you turn it
+  on, for the workspace's creator too.
 - **Workspace admin** (admins and owners; not for Personal): its name, default
-  agent, the model each agent uses there (General's is the workspace's default
-  model), members and roles, deleting it.
+  agent, the model each agent uses there (the Assistant's, `general`, is the
+  workspace's default model), members and roles, deleting it.
 - **Server** (server admins): providers, memory recall, token savings, nodes,
   accounts, and every workspace (owners, members, making someone owner,
   deleting). Agents have their own page in the sidebar (below).
@@ -236,7 +238,8 @@ else downloads. Design notes and the API: [docs/media.md](docs/media.md).
 
 **Artifacts** holds the files agents build for you: binaries, packages,
 archives, documents and media, each name with its versions. In an agentic
-chat an agent calls `publish` (Coder and Writer have it, and any custom agent
+chat an agent calls `publish` (Software Developer, Senior Teamlead and Writer
+have it, and any custom agent
 that may edit files or run commands); in `ask` mode you approve each publish. You can also
 use **Save as artifact** on a file a tool card shows, or the field in the chat
 header. The node copies the file (a folder is packed as `.tar.gz`), the
@@ -379,7 +382,7 @@ model is unavailable, or its request fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
 which model answered. An agent without an `[agent_models]` entry runs on
-the default (General's main model) with General's fallbacks; a sub-agent
+the default (the Assistant's main model) with the Assistant's fallbacks; a sub-agent
 without a model of its own runs on its parent's model with the parent's
 fallbacks. A reasoning effort goes only to the models of the chain that take
 one. Unavailable models in use show as notices on the home screen:
@@ -896,9 +899,38 @@ systemctl daemon-reload && systemctl enable --now rizzy-harness-node
 login), updates, and how the node reaches the master (a VPN such as WireGuard
 rather than the open internet). rizzy-harness does not touch them.
 
-The **Ultracode** agent splits big jobs into parallel sub-tasks for Coder,
-Scout and Writer (at most 4 per turn and 200k tokens by default; set
-`delegates`, `max_subagents` and `max_subagent_tokens` in an agent file).
+The built-in agents, grouped by category in the picker:
+
+| Agent (`@handle`, aliases) | Category | Runs as | Can |
+|---|---|---|---|
+| Assistant (`@general`, `@ai`), the default | General | agent | web search and fetch; your facts; project memory |
+| Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
+| Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory |
+| Software Developer (`@coder`, `@dev`) | IT | agent, sub-agent | read, change and search files, run commands, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
+| Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
+| Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
+| Scout (`@scout`) | IT | sub-agent | read and search files only |
+| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
+
+"Your facts" are the memories in Settings → Account; an agent without them
+neither recalls nor proposes them. Scout and Reviewer are read-only by their
+tool list: they are offered no tool that writes or runs anything, and the loop
+refuses any other call. That is not a sandbox: there is no read-only shell
+yet, so Reviewer cannot list a change itself and reviews what it is given or
+reads.
+
+A message that starts with `@handle` (an id or an alias: `@dev fix the
+build`) goes to that agent for one turn; the chat's agent stays. An agent
+that runs only as a sub-agent (Scout) cannot answer a chat: `@scout ...`,
+choosing it for a chat, or making it a default is refused with a message
+saying so. A chat naming an agent that no longer exists (such as the removed
+Ultracode) goes on with the server's default agent; a routine naming one is
+paused and says why.
+
+Delegating agents split big jobs into parallel sub-tasks (at most 4 per turn
+and 200k tokens by default; set `delegates`, `max_subagents` and
+`max_subagent_tokens` in an agent file). Delegation is one level deep: a
+sub-agent never delegates further.
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
@@ -909,8 +941,12 @@ features: only their summary and **additional instructions** (added after
 their own) change there, and **Duplicate** makes an editable copy. **Write
 from instructions** asks the default model for a summary. An agent file can
 set `memory: false` (no recall, no `remember`), `project_memory: false` (no
-project facts in project chats) and `available_as: [agent]` or
-`[subagent]` (default both). Deleting an agent leaves its chats to the
+project facts in project chats), `available_as: [agent]` or
+`[subagent]` (default both), `aliases: [h, ...]` (more handles) and
+`category: IT` (the picker's group, default General). Ids and aliases are one
+namespace: a new agent cannot take a handle any agent has; an existing file
+or agent whose id is now a built-in's alias keeps its id and the built-in loses
+that alias (logged at startup). Deleting an agent leaves its chats to the
 default agent. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
 ## Development
