@@ -18,7 +18,8 @@
 //! * A 256-bit **API token** in `<data>/api-token` (0600) is accepted as
 //!   `Authorization: Bearer` for scripts and tests. It is the machine owner's
 //!   root key: admin rights and access to every session.
-//! * Failed logins are throttled per username.
+//! * Failed logins are throttled per username, in a bounded map; every
+//!   Argon2 run takes one of 4 permits ([`limits`], AUDIT S4).
 //! * No secret is ever logged or accepted in a URL.
 //! * Every request's `Host` must be allowlisted (DNS-rebinding defence), and
 //!   any `Origin` sent must match an allowed host (CSRF / cross-site WS).
@@ -42,6 +43,11 @@ use subtle::ConstantTimeEq;
 
 use crate::Master;
 
+mod limits;
+pub use limits::{
+    BUSY, BUSY_RETRY_AFTER_S, FAILURE_MAP_CAPACITY, HASH_PERMITS, HASH_WAIT, HashError, Hasher,
+};
+
 pub fn cookie_name() -> String {
     format!("{APP_NAME}_session")
 }
@@ -56,8 +62,10 @@ pub struct Auth {
     allowed_hosts: Vec<String>,
     secure_cookie: bool,
     claim: Arc<tokio::sync::Mutex<Option<Claim>>>,
-    /// Lowercase username -> recent failure times (ms).
-    failures: Failures,
+    /// Lowercase username -> recent failed logins; bounded.
+    failures: Arc<limits::FailureMap>,
+    /// Every password hash and verification runs here.
+    hasher: Hasher,
     /// Caller (user id, or `api-token`) -> recent failed lookups by
     /// username (adding a workspace member).
     lookups: Failures,
@@ -72,22 +80,10 @@ pub const THROTTLE_WINDOW_MS: i64 = 15 * 60 * 1000;
 /// "no such user" answer tells whether a username exists (PLAN.md T12).
 pub const LOOKUP_MAX_FAILURES: usize = 10;
 
-/// How many of `key`'s failures are still inside the window (older ones
-/// are dropped).
-fn recent_failures(map: &Failures, key: &str, now_ms: i64) -> usize {
-    let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
-    let list = map.entry(key.to_string()).or_default();
-    list.retain(|t| now_ms - *t < THROTTLE_WINDOW_MS);
-    list.len()
-}
-
-fn record_failure(map: &Failures, key: &str, now_ms: i64) {
-    map.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .entry(key.to_string())
-        .or_default()
-        .push(now_ms);
-}
+/// Request bodies of `/api/login` and `/api/setup` are refused (413) above
+/// this, before they are parsed: a username is at most 32 bytes and a
+/// password 1024, so this leaves room for JSON escapes and nothing more.
+pub const AUTH_BODY_LIMIT: usize = 16 * 1024;
 
 /// The one-time code that creates the first admin account.
 pub struct Claim {
@@ -225,50 +221,66 @@ pub fn validate_password(p: &str) -> Result<(), &'static str> {
     }
 }
 
-/// Argon2id with default parameters; runs off the async runtime.
-pub async fn hash_password(password: String) -> String {
-    tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(password.as_bytes())
-            .expect("argon2 hashing")
-            .to_string()
-    })
-    .await
-    .expect("hash task")
+/// Argon2id with default parameters; runs off the async runtime, under one
+/// of the hasher's permits.
+pub async fn hash_password(hasher: &Hasher, password: String) -> Result<String, HashError> {
+    hasher
+        .run(move || {
+            Argon2::default()
+                .hash_password(password.as_bytes())
+                .map(|h| h.to_string())
+        })
+        .await?
+        .map_err(|_| HashError::Failed)
 }
 
 /// Verify against a PHC string. When the user does not exist, pass `None`: a
 /// dummy hash is still checked so response time does not reveal usernames.
-pub async fn verify_password(password: String, phc: Option<String>) -> bool {
+pub async fn verify_password(
+    hasher: &Hasher,
+    password: String,
+    phc: Option<String>,
+) -> Result<bool, HashError> {
+    let permit = hasher.acquire().await?;
+    verify_with(hasher, permit, password, phc).await
+}
+
+async fn verify_with(
+    hasher: &Hasher,
+    permit: limits::HashPermit,
+    password: String,
+    phc: Option<String>,
+) -> Result<bool, HashError> {
     static DUMMY: OnceLock<String> = OnceLock::new();
-    tokio::task::spawn_blocking(move || {
-        let real = phc.is_some();
-        let phc = phc.unwrap_or_else(|| {
-            DUMMY
-                .get_or_init(|| {
+    hasher
+        .run_with(permit, move || {
+            let real = phc.is_some();
+            let phc = phc.unwrap_or_else(|| {
+                DUMMY
+                    .get_or_init(|| {
+                        Argon2::default()
+                            .hash_password(b"dummy password for timing")
+                            .expect("argon2 hashing")
+                            .to_string()
+                    })
+                    .clone()
+            });
+            let ok = PasswordHash::new(&phc)
+                .map(|h| {
                     Argon2::default()
-                        .hash_password(b"dummy password for timing")
-                        .expect("argon2 hashing")
-                        .to_string()
+                        .verify_password(password.as_bytes(), &h)
+                        .is_ok()
                 })
-                .clone()
-        });
-        let ok = PasswordHash::new(&phc)
-            .map(|h| {
-                Argon2::default()
-                    .verify_password(password.as_bytes(), &h)
-                    .is_ok()
-            })
-            .unwrap_or(false);
-        ok && real
-    })
-    .await
-    .unwrap_or(false)
+                .unwrap_or(false);
+            ok && real
+        })
+        .await
 }
 
 /// Create an account after validating the username and password.
 pub async fn create_account(
     store: &Store,
+    hasher: &Hasher,
     username: String,
     password: String,
     role: Role,
@@ -280,7 +292,7 @@ pub async fn create_account(
     let user = NewUser {
         user_id: harness_core::new_id(),
         username,
-        password_hash: hash_password(password).await,
+        password_hash: hash_password(hasher, password).await?,
         role,
         can_agentic,
         must_change_password,
@@ -305,12 +317,13 @@ pub async fn create_account(
 /// resets). Signs the user out everywhere.
 pub async fn set_password(
     store: &Store,
+    hasher: &Hasher,
     user_id: &str,
     password: String,
     must_change: bool,
 ) -> Result<(), AccountError> {
     validate_password(&password).map_err(AccountError::Invalid)?;
-    let phc = hash_password(password).await;
+    let phc = hash_password(hasher, password).await?;
     let uid = user_id.to_string();
     store
         .call(move |s| {
@@ -328,8 +341,73 @@ pub enum AccountError {
     Invalid(&'static str),
     #[error("that username is taken")]
     Taken,
+    #[error("{BUSY}")]
+    Busy,
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl From<HashError> for AccountError {
+    fn from(e: HashError) -> Self {
+        match e {
+            HashError::Busy => AccountError::Busy,
+            HashError::Failed => AccountError::Internal(e.to_string()),
+        }
+    }
+}
+
+/// Why a login was refused. Unknown usernames, malformed ones, disabled
+/// accounts and wrong passwords are all [`LoginError::Wrong`]: one status,
+/// one body.
+#[derive(Debug, thiserror::Error)]
+pub enum LoginError {
+    #[error("wrong username or password")]
+    Wrong,
+    #[error("too many failed attempts; try again in 15 minutes")]
+    Throttled { retry_after_s: u64 },
+    #[error("{BUSY}")]
+    Busy,
+    #[error("internal error")]
+    Internal,
+}
+
+impl From<HashError> for LoginError {
+    fn from(e: HashError) -> Self {
+        match e {
+            HashError::Busy => LoginError::Busy,
+            HashError::Failed => LoginError::Internal,
+        }
+    }
+}
+
+fn throttled(retry_ms: i64) -> LoginError {
+    LoginError::Throttled {
+        retry_after_s: (retry_ms.max(0) as u64).div_ceil(1000).max(1),
+    }
+}
+
+/// A JSON `{"error": …}` with an optional `Retry-After`.
+fn error_response(status: StatusCode, msg: String, retry_after_s: Option<u64>) -> Response {
+    let mut resp = (status, axum::Json(serde_json::json!({ "error": msg }))).into_response();
+    if let Some(s) = retry_after_s {
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(s));
+    }
+    resp
+}
+
+impl IntoResponse for LoginError {
+    fn into_response(self) -> Response {
+        let (status, retry) = match &self {
+            LoginError::Wrong => (StatusCode::UNAUTHORIZED, None),
+            LoginError::Throttled { retry_after_s } => {
+                (StatusCode::TOO_MANY_REQUESTS, Some(*retry_after_s))
+            }
+            LoginError::Busy => (StatusCode::TOO_MANY_REQUESTS, Some(BUSY_RETRY_AFTER_S)),
+            LoginError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        };
+        error_response(status, self.to_string(), retry)
+    }
 }
 
 impl Auth {
@@ -339,26 +417,89 @@ impl Auth {
             allowed_hosts,
             secure_cookie,
             claim: Arc::new(tokio::sync::Mutex::new(None)),
-            failures: Arc::default(),
+            failures: Arc::new(limits::FailureMap::new(
+                FAILURE_MAP_CAPACITY,
+                THROTTLE_MAX_FAILURES,
+                THROTTLE_WINDOW_MS,
+            )),
+            hasher: Hasher::default(),
             lookups: Arc::default(),
         }
     }
 
-    /// Is this username currently locked out by repeated failures?
-    pub fn login_throttled(&self, username: &str, now_ms: i64) -> bool {
-        recent_failures(&self.failures, &username.to_ascii_lowercase(), now_ms)
-            >= THROTTLE_MAX_FAILURES
+    /// The process's password hasher (4 at once).
+    pub fn hasher(&self) -> &Hasher {
+        &self.hasher
     }
 
-    pub fn record_login_failure(&self, username: &str, now_ms: i64) {
-        record_failure(&self.failures, &username.to_ascii_lowercase(), now_ms);
+    /// Usernames with failures in the window (tests, diagnostics).
+    pub fn login_throttle_len(&self) -> usize {
+        self.failures.len()
     }
 
-    pub fn clear_login_failures(&self, username: &str) {
-        self.failures
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&username.to_ascii_lowercase());
+    /// Most hashes seen running at once.
+    pub fn hash_peak(&self) -> usize {
+        self.hasher.peak()
+    }
+
+    /// Hashes started so far.
+    pub fn hashes_started(&self) -> usize {
+        self.hasher.started()
+    }
+
+    /// Check a username and password. In this order, so that whatever is
+    /// cheap to refuse is refused before anything is paid for:
+    ///
+    /// 1. Format: a name that cannot exist (or a password that could never
+    ///    have been set) is `Wrong`, with no map entry and no hash.
+    /// 2. Throttle, read only: a locked name waits for no permit.
+    /// 3. A hash permit (bounded wait, then `Busy`).
+    /// 4. Reserve a failure slot under one lock (`Throttled` if none is
+    ///    left), so parallel guesses cannot all pass step 2.
+    /// 5. Look up and verify (a dummy hash for unknown names). A failure
+    ///    keeps the slot; a success clears the name. A cancelled request or
+    ///    a store error gives the slot back.
+    pub async fn login(
+        &self,
+        store: &Store,
+        username: &str,
+        password: String,
+    ) -> Result<UserRow, LoginError> {
+        let name = username.trim();
+        if name.len() > 32 || password.len() > 1024 {
+            return Err(LoginError::Wrong);
+        }
+        let name = name.to_ascii_lowercase();
+        if validate_username(&name).is_err() {
+            return Err(LoginError::Wrong);
+        }
+        let now = harness_core::now_ms();
+        self.failures.check(&name, now).map_err(throttled)?;
+        let permit = self.hasher.acquire().await?;
+        let slot = self.failures.try_reserve(&name, now).map_err(throttled)?;
+        let lookup = name.clone();
+        let user = store
+            .call(move |s| s.user_by_username(&lookup))
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "login: user lookup failed");
+                LoginError::Internal
+            })?;
+        let phc = user.as_ref().map(|u| u.password_hash.clone());
+        // Verified even for unknown users, so timing does not reveal
+        // usernames; disabled accounts get the same answer as a wrong
+        // password.
+        let ok = verify_with(&self.hasher, permit, password, phc).await?;
+        match user {
+            Some(u) if ok && !u.disabled => {
+                slot.succeeded();
+                Ok(u)
+            }
+            _ => {
+                slot.failed();
+                Err(LoginError::Wrong)
+            }
+        }
     }
 
     /// Take one of `caller`'s username lookups, or `false` when they have
@@ -409,6 +550,9 @@ impl Auth {
         username: String,
         password: String,
     ) -> Result<UserRow, ClaimError> {
+        // Cheap refusals first, before the lock and before any hash.
+        validate_username(&username).map_err(ClaimError::Invalid)?;
+        validate_password(&password).map_err(ClaimError::Invalid)?;
         let mut guard = self.claim.lock().await;
         let Some(claim) = guard.as_ref() else {
             return Err(ClaimError::AlreadyClaimed);
@@ -431,12 +575,21 @@ impl Auth {
         if !ct_eq(&norm(claim.code.expose()), &norm(code)) {
             return Err(ClaimError::BadCode);
         }
-        let user = create_account(store, username, password, Role::Admin, true, false)
-            .await
-            .map_err(|e| match e {
-                AccountError::Invalid(m) => ClaimError::Invalid(m),
-                other => ClaimError::Internal(other.to_string()),
-            })?;
+        let user = create_account(
+            store,
+            &self.hasher,
+            username,
+            password,
+            Role::Admin,
+            true,
+            false,
+        )
+        .await
+        .map_err(|e| match e {
+            AccountError::Invalid(m) => ClaimError::Invalid(m),
+            AccountError::Busy => ClaimError::Busy,
+            other => ClaimError::Internal(other.to_string()),
+        })?;
         let _ = std::fs::remove_file(&claim.path);
         *guard = None;
         Ok(user)
@@ -483,8 +636,23 @@ pub enum ClaimError {
     BadCode,
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("{BUSY}")]
+    Busy,
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl IntoResponse for ClaimError {
+    fn into_response(self) -> Response {
+        let (status, retry) = match &self {
+            ClaimError::AlreadyClaimed => (StatusCode::CONFLICT, None),
+            ClaimError::BadCode => (StatusCode::FORBIDDEN, None),
+            ClaimError::Invalid(_) => (StatusCode::BAD_REQUEST, None),
+            ClaimError::Busy => (StatusCode::TOO_MANY_REQUESTS, Some(BUSY_RETRY_AFTER_S)),
+            ClaimError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        };
+        error_response(status, self.to_string(), retry)
+    }
 }
 
 /// The session cookie's value, when it has the shape of a session id (64
@@ -646,35 +814,76 @@ mod tests {
 
     #[tokio::test]
     async fn password_hash_roundtrip() {
-        let phc = hash_password("correct horse battery".into()).await;
+        let h = Hasher::default();
+        let phc = hash_password(&h, "correct horse battery".into())
+            .await
+            .unwrap();
         assert!(phc.starts_with("$argon2id$"));
-        assert!(verify_password("correct horse battery".into(), Some(phc.clone())).await);
-        assert!(!verify_password("wrong".into(), Some(phc)).await);
-        assert!(!verify_password("anything".into(), None).await);
+        assert!(
+            verify_password(&h, "correct horse battery".into(), Some(phc.clone()))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !verify_password(&h, "wrong".into(), Some(phc))
+                .await
+                .unwrap()
+        );
+        assert!(!verify_password(&h, "anything".into(), None).await.unwrap());
+    }
+
+    /// FIX_PLAN 3.1: 10,000 logins with distinct 1 MiB usernames. Each is
+    /// refused on its length before it is lowercased (no copy), before the
+    /// failure map (which never allocates) and before any hash.
+    #[tokio::test]
+    async fn ten_thousand_one_mib_usernames_leave_no_trace() {
+        let a = Auth::new(Secret::new("t".into()), vec![], false);
+        let store = Store::open_in_memory().unwrap();
+        let mut name = vec![b'a'; 1024 * 1024];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for i in 0..10_000u32 {
+            // Distinct names: a few pseudo-random bytes changed each time.
+            for _ in 0..4 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let at = (seed as usize) % name.len();
+                name[at] = b'a' + (seed >> 59) as u8 % 26;
+            }
+            name[..4].copy_from_slice(&i.to_le_bytes().map(|b| b'a' + b % 26));
+            let s = std::str::from_utf8(&name).unwrap();
+            let r = a.login(&store, s, "wrong password!".into()).await;
+            assert!(matches!(r, Err(LoginError::Wrong)));
+        }
+        assert_eq!(a.login_throttle_len(), 0);
+        assert_eq!(a.failures.capacity(), 0, "the map never allocated");
+        assert_eq!(a.hashes_started(), 0);
     }
 
     #[test]
     fn throttle_window() {
         let a = Auth::new(Secret::new("t".into()), vec![], false);
+        let f = &a.failures;
         for i in 0..THROTTLE_MAX_FAILURES as i64 {
-            assert!(!a.login_throttled("Bob", i));
-            a.record_login_failure("bob", i);
+            assert!(f.check("bob", i).is_ok());
+            f.try_reserve("bob", i).unwrap().failed();
         }
-        assert!(a.login_throttled("BOB", 10));
-        assert!(!a.login_throttled("alice", 10));
+        assert!(f.check("bob", 10).is_err());
+        assert!(f.try_reserve("bob", 10).is_err());
+        assert!(f.check("alice", 10).is_ok());
         assert!(
-            !a.login_throttled("bob", THROTTLE_WINDOW_MS + 10),
+            f.check("bob", THROTTLE_WINDOW_MS + 10).is_ok(),
             "window expired"
         );
-        a.record_login_failure("carol", 0);
-        a.clear_login_failures("Carol");
-        assert!(!a.login_throttled("carol", 1));
+        f.try_reserve("carol", 0).unwrap().failed();
+        f.try_reserve("carol", 1).unwrap().succeeded();
+        assert!(f.is_empty(), "a success clears the name");
         // Username lookups count per caller, separately from logins.
         for i in 0..LOOKUP_MAX_FAILURES as i64 {
             assert!(a.try_reserve_lookup("u1", i));
         }
         assert!(!a.try_reserve_lookup("u1", 20));
-        assert!(!a.login_throttled("u1", 20));
+        assert!(f.check("u1", 20).is_ok());
         assert!(a.try_reserve_lookup("u2", 20));
         // A slot given back (the username existed) is free again.
         a.release_lookup("u1", 3);

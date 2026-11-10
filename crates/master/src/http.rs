@@ -23,8 +23,16 @@ mod workspaces;
 
 pub fn router(master: Master) -> Router {
     let api = Router::new()
-        .route("/api/setup", get(setup_status).post(setup))
-        .route("/api/login", post(login))
+        .route(
+            "/api/setup",
+            get(setup_status)
+                .post(setup)
+                .layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/api/login",
+            post(login).layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
+        )
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
@@ -191,7 +199,20 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let busy = self.0 == StatusCode::TOO_MANY_REQUESTS && self.1 == auth::BUSY;
+        let mut resp = (self.0, Json(json!({ "error": self.1 }))).into_response();
+        if busy {
+            // No password-hash permit came free in time (auth::Hasher).
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, auth::BUSY_RETRY_AFTER_S.into());
+        }
+        resp
+    }
+}
+
+impl From<auth::HashError> for ApiError {
+    fn from(e: auth::HashError) -> Self {
+        auth::AccountError::from(e).into()
     }
 }
 
@@ -267,6 +288,7 @@ impl From<auth::AccountError> for ApiError {
         let code = match &e {
             auth::AccountError::Invalid(_) => StatusCode::BAD_REQUEST,
             auth::AccountError::Taken => StatusCode::CONFLICT,
+            auth::AccountError::Busy => StatusCode::TOO_MANY_REQUESTS,
             auth::AccountError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, e.to_string())
@@ -320,21 +342,15 @@ struct SetupBody {
 }
 
 async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<Response> {
-    use auth::ClaimError;
-    let user = m
+    let user = match m
         .inner
         .auth
         .claim(&m.inner.mirror, &b.claim_code, b.username, b.password)
         .await
-        .map_err(|e| {
-            let code = match &e {
-                ClaimError::AlreadyClaimed => StatusCode::CONFLICT,
-                ClaimError::BadCode => StatusCode::FORBIDDEN,
-                ClaimError::Invalid(_) => StatusCode::BAD_REQUEST,
-                ClaimError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            ApiError(code, e.to_string())
-        })?;
+    {
+        Ok(u) => u,
+        Err(e) => return Ok(e.into_response()),
+    };
     tracing::info!(username = %user.username, "server claimed by owner");
     session_response(&m, &user.user_id).await
 }
@@ -356,36 +372,16 @@ struct LoginBody {
 }
 
 async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<Response> {
-    let name = b.username.trim().to_ascii_lowercase();
-    let now = harness_core::now_ms();
-    if m.inner.auth.login_throttled(&name, now) {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many failed attempts; try again in 15 minutes".into(),
-        ));
-    }
-    let lookup = name.clone();
-    let user = m
+    // Format, throttle, hash permit and verification: auth::Auth::login.
+    match m
         .inner
-        .mirror
-        .call(move |s| s.user_by_username(&lookup))
-        .await?;
-    let phc = user.as_ref().map(|u| u.password_hash.clone());
-    // Verified even for unknown users, so timing does not reveal usernames;
-    // disabled accounts get the same answer as a wrong password.
-    let ok = auth::verify_password(b.password, phc).await;
-    let user = match user {
-        Some(u) if ok && !u.disabled => u,
-        _ => {
-            m.inner.auth.record_login_failure(&name, now);
-            return Err(ApiError(
-                StatusCode::UNAUTHORIZED,
-                "wrong username or password".into(),
-            ));
-        }
-    };
-    m.inner.auth.clear_login_failures(&name);
-    session_response(&m, &user.user_id).await
+        .auth
+        .login(&m.inner.mirror, &b.username, b.password)
+        .await
+    {
+        Ok(user) => session_response(&m, &user.user_id).await,
+        Err(e) => Ok(e.into_response()),
+    }
 }
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
@@ -565,13 +561,14 @@ async fn change_password(
         .call(move |s| s.user_by_id(&lookup))
         .await?
         .map(|u| u.password_hash);
-    if !auth::verify_password(b.current, phc).await {
+    let hasher = m.inner.auth.hasher();
+    if !auth::verify_password(hasher, b.current, phc).await? {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "current password is wrong".into(),
         ));
     }
-    auth::set_password(&m.inner.mirror, &uid, b.new, false).await?;
+    auth::set_password(&m.inner.mirror, hasher, &uid, b.new, false).await?;
     // Every session was revoked; give this browser a fresh one.
     session_response(&m, &uid).await
 }
@@ -847,6 +844,7 @@ async fn create_user(
     require_admin(&m, &headers).await?;
     let u = auth::create_account(
         &m.inner.mirror,
+        m.inner.auth.hasher(),
         b.username.trim().to_ascii_lowercase(),
         b.password,
         b.role,
@@ -941,7 +939,14 @@ async fn update_user(
         ws::sweep_revoked(&m, vec![target.user_id.clone()]);
     }
     if let Some(pw) = b.password {
-        auth::set_password(&m.inner.mirror, &target.user_id, pw, true).await?;
+        auth::set_password(
+            &m.inner.mirror,
+            m.inner.auth.hasher(),
+            &target.user_id,
+            pw,
+            true,
+        )
+        .await?;
     }
     Ok(Json(user_json(&load_user(&m, &id).await?)))
 }
