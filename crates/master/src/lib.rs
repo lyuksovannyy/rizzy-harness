@@ -567,16 +567,33 @@ impl Master {
     /// The node a new session of `profile` goes to when none is chosen:
     /// an embedded one first.
     pub fn default_node(&self, profile: Profile) -> Option<String> {
+        self.default_node_where(profile, true)
+    }
+
+    /// [`Self::default_node`] among remote nodes only when `embedded_ok` is
+    /// false (an account that may not use the local node).
+    pub fn default_node_where(&self, profile: Profile, embedded_ok: bool) -> Option<String> {
         let nodes: Vec<_> = self
             .nodes()
             .into_iter()
-            .filter(|n| n.connected && n.profile == profile)
+            .filter(|n| n.connected && n.profile == profile && (embedded_ok || !n.embedded))
             .collect();
         nodes
             .iter()
             .find(|n| n.embedded)
             .or(nodes.first())
             .map(|n| n.node_id.clone())
+    }
+
+    /// Whether `node_id` is this server's own embedded worker node: the
+    /// one that runs as the master's OS user, beside its data directory.
+    /// `local` always counts (remote ids are `node-…`), so a check made
+    /// while the link is down fails closed.
+    pub fn is_local_node(&self, node_id: &str) -> bool {
+        node_id == "local"
+            || lock(&self.inner.nodes)
+                .get(node_id)
+                .is_some_and(|n| n.info.embedded && n.info.profile == Profile::Agentic)
     }
 
     /// A listed model by its `<provider>::<raw>` id.

@@ -84,7 +84,9 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
   recorded as `skipped`, and consecutive skips fold into one row (`repeats`).
 - **Admission, at every fire.** The owner's account must exist, be enabled and not owe a password
   change; they must be a member of W with the `routines` permission, and for an agentic routine
-  hold the account's agentic grant and the `agentic` permission; the agent, model and node the
+  hold the account's agentic grant and the `agentic` permission, and be allowed on its node (the
+  embedded `local` node is for server admins unless `[nodes] local_node_users = "granted"`);
+  the agent, model and node the
   spec names must still exist. **Any refusal** records a `blocked` run with the reason, pauses the
   routine (`paused_reason = blocked`), writes an audit line and shows in the owner's attention
   list. Blocked runs are never retried.
@@ -297,7 +299,7 @@ across routines (`retention_drains_a_backlog_at_100_chats_an_hour`).
 | action | who |
 |---|---|
 | see a routine and its runs | its owner; the API token |
-| create, edit, Run now, rotate a secret | its owner, holding `routines` in W now (+ the agentic grant and `agentic` for an agentic routine) |
+| create, edit, Run now, rotate a secret | its owner, holding `routines` in W now (+ the agentic grant, `agentic` and the right to its node for an agentic routine) |
 | delete | its owner, always (so an owner who lost the permission can clear routines away) |
 | anything on someone else's routine | 404 |
 

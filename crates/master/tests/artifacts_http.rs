@@ -77,6 +77,9 @@ async fn start() -> T {
     );
     let mut cfg = Config::default();
     cfg.media.enabled = true;
+    // Non-admins with the agentic grant use the embedded node here; the
+    // default (admins only) has its own tests in local_node_http.rs.
+    cfg.nodes.local_node_users = harness_master::config::LocalNodeUsers::Granted;
     let (rt, _) = ProviderRuntime::start(cfg, dir.path(), Default::default()).unwrap();
     master.set_provider_runtime(Arc::new(rt));
     master.set_agents(harness_agents::AgentSet::load(&dir.path().join("none")).0);

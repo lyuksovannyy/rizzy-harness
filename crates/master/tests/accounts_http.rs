@@ -64,6 +64,14 @@ async fn start() -> Server {
         path: claim_path.clone(),
     });
     let master = Master::new(mirror, auth);
+    // Non-admins with the agentic grant use the embedded node here; the
+    // default (admins only) has its own tests in local_node_http.rs.
+    let mut cfg = harness_master::config::Config::default();
+    cfg.nodes.local_node_users = harness_master::config::LocalNodeUsers::Granted;
+    let (rt, _) =
+        harness_master::providers::ProviderRuntime::start(cfg, dir.path(), Default::default())
+            .unwrap();
+    master.set_provider_runtime(Arc::new(rt));
     master.add_link(node.attach().await, true).await.unwrap();
     let served = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(served)).await.unwrap() });

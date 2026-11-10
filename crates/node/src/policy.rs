@@ -24,6 +24,18 @@ pub struct NodePolicy {
     pub graphify: bool,
     /// Publishing files as artifacts (`[artifacts]`).
     pub artifacts: ArtifactsPolicy,
+    /// Variables passed to tool child processes on top of the core list
+    /// (`PATH`, `HOME`, `LANG`, ...): names or globs such as `"CARGO_*"`.
+    /// Provider keys, `.env` names and `HARNESS_*` are never passed.
+    pub env_pass: Vec<String>,
+    /// Resource limits (`[limits]`).
+    pub limits: LimitsPolicy,
+    /// Folders no session may include and no file tool may touch, in every
+    /// mode: the runtime's own data directory (keys, the API token,
+    /// databases). Set by the runtime with [`NodePolicy::protect`], never
+    /// read from node.toml. Canonical paths.
+    #[serde(skip)]
+    pub protected_dirs: Vec<PathBuf>,
 }
 
 /// `[artifacts]` in node.toml: the node's own switch and limits for files
@@ -57,6 +69,23 @@ impl Default for ArtifactsPolicy {
     }
 }
 
+/// `[limits]` in node.toml.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsPolicy {
+    /// Bytes one tool call may stream live (stored as events and sent to
+    /// the master); the rest is read and dropped after one marker.
+    pub tool_stream_bytes: usize,
+}
+
+impl Default for LimitsPolicy {
+    fn default() -> Self {
+        Self {
+            tool_stream_bytes: harness_tools::stream::DEFAULT_STREAM_BYTES,
+        }
+    }
+}
+
 impl Default for NodePolicy {
     fn default() -> Self {
         Self {
@@ -67,6 +96,9 @@ impl Default for NodePolicy {
             checkpoints_keep: 10,
             graphify: false,
             artifacts: ArtifactsPolicy::default(),
+            env_pass: Vec::new(),
+            limits: LimitsPolicy::default(),
+            protected_dirs: Vec::new(),
         }
     }
 }
@@ -77,16 +109,46 @@ pub enum PolicyError {
     Io(PathBuf, std::io::Error),
     #[error("invalid {0}: {1}")]
     Parse(PathBuf, toml::de::Error),
+    #[error("invalid {0}: {1}")]
+    Invalid(PathBuf, String),
 }
 
 impl NodePolicy {
     /// Load `node.toml`; a missing file means defaults.
     pub fn load(path: &Path) -> Result<Self, PolicyError> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).map_err(|e| PolicyError::Parse(path.into(), e)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(PolicyError::Io(path.into(), e)),
+        let p: Self = match std::fs::read_to_string(path) {
+            Ok(s) => toml::from_str(&s).map_err(|e| PolicyError::Parse(path.into(), e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(PolicyError::Io(path.into(), e)),
+        };
+        p.validate()
+            .map_err(|e| PolicyError::Invalid(path.into(), e))?;
+        Ok(p)
+    }
+
+    /// Values serde cannot check: `env_pass` globs, `[limits]` ranges.
+    pub fn validate(&self) -> Result<(), String> {
+        harness_tools::env::compile_pass(&self.env_pass)?;
+        let n = self.limits.tool_stream_bytes;
+        let (min, max) = (
+            harness_tools::stream::MIN_STREAM_BYTES,
+            harness_tools::stream::MAX_STREAM_BYTES,
+        );
+        if !(min..=max).contains(&n) {
+            return Err(format!(
+                "[limits] tool_stream_bytes = {n}: must be between {min} and {max}"
+            ));
         }
+        Ok(())
+    }
+
+    /// The environment tool child processes get here: the core list, plus
+    /// `env_pass`, minus `deny` (names that hold secrets).
+    pub fn tool_env(
+        &self,
+        deny: impl IntoIterator<Item = String>,
+    ) -> Result<harness_tools::ToolEnv, String> {
+        harness_tools::ToolEnv::new(&self.env_pass, deny)
     }
 
     /// Validate and canonicalize a requested session cwd.
@@ -97,6 +159,7 @@ impl NodePolicy {
         if !p.is_dir() {
             return Err(format!("cwd {cwd} is not a directory"));
         }
+        self.check_protected(&p)?;
         let ok = self.workspace_roots.iter().any(|root| {
             root.canonicalize()
                 .map(|r| p.starts_with(r))
@@ -110,6 +173,54 @@ impl NodePolicy {
                 p.display()
             ))
         }
+    }
+
+    /// Add `dir` to [`Self::protected_dirs`] (canonicalized; a folder that
+    /// does not exist yet is kept as given, made absolute).
+    pub fn protect(&mut self, dir: &Path) {
+        let d = dir
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()));
+        if !self.protected_dirs.contains(&d) {
+            self.protected_dirs.push(d);
+        }
+    }
+
+    /// Refuse a session folder that is a protected folder, inside one, or
+    /// contains one (an ancestor: `$HOME` holds `~/.local/share/...`). The
+    /// folder is canonicalized here, so a link or `..` is judged by where it
+    /// leads; one that cannot be resolved is refused.
+    pub fn check_protected(&self, cwd: &Path) -> Result<(), String> {
+        if self.protected_dirs.is_empty() {
+            return Ok(());
+        }
+        let p = cwd
+            .canonicalize()
+            .map_err(|e| format!("cwd {}: {e}", cwd.display()))?;
+        for d in &self.protected_dirs {
+            // Compare with where it is now, too: it may have been replaced
+            // by a link since start.
+            let now = d.canonicalize().unwrap_or_else(|_| d.clone());
+            for d in [d, &now] {
+                if p.starts_with(d) {
+                    return Err(format!(
+                        "cwd {} is inside the harness's own data directory {}; choose a \
+                         project folder outside it",
+                        p.display(),
+                        d.display()
+                    ));
+                }
+                if d.starts_with(&p) {
+                    return Err(format!(
+                        "cwd {} cannot be used: choose a project folder; this one contains the \
+                         harness's own data directory {}",
+                        p.display(),
+                        d.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn effective_mode(&self, requested: Option<ApprovalMode>) -> ApprovalMode {
@@ -161,6 +272,40 @@ mod tests {
         assert!(p.check_cwd("/definitely/missing").is_err());
     }
 
+    /// The data directory holds the API token, the session keys and every
+    /// user's chats: no session may include it (AUDIT S1).
+    #[test]
+    fn cwd_never_includes_the_data_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let local = home.join(".local");
+        let data = local.join("share/rizzy-harness");
+        std::fs::create_dir_all(data.join("keys")).unwrap();
+        std::fs::create_dir_all(home.join("projects/x")).unwrap();
+        let mut p = NodePolicy {
+            workspace_roots: vec![home.clone()],
+            ..Default::default()
+        };
+        p.protect(&data);
+        let s = |p: &Path| p.to_str().unwrap().to_string();
+        for bad in [&home, &local, &data, &data.join("keys")] {
+            let e = p.check_cwd(&s(bad)).unwrap_err();
+            assert!(e.contains("choose a project folder"), "{e}");
+            assert!(e.contains(&s(&data)), "{e}");
+        }
+        assert!(p.check_cwd(&s(&home.join("projects/x"))).is_ok());
+        assert!(p.check_cwd(&s(&home.join("projects"))).is_ok());
+        // A link that leads into it is judged by where it leads.
+        std::os::unix::fs::symlink(&data, home.join("projects/data")).unwrap();
+        assert!(p.check_cwd(&s(&home.join("projects/data"))).is_err());
+        std::os::unix::fs::symlink(&home, home.join("projects/up")).unwrap();
+        assert!(p.check_cwd(&s(&home.join("projects/up"))).is_err());
+        // A `..` path is no way around it either.
+        assert!(p.check_cwd(&s(&home.join("projects/x/../.."))).is_err());
+        // Nothing in node.toml can set or clear the list.
+        assert!(toml::from_str::<NodePolicy>("protected_dirs = []\n").is_err());
+    }
+
     #[test]
     fn parses_toml_and_rejects_unknown_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -183,5 +328,36 @@ mod tests {
         std::fs::write(&f, "[artifacts]\nmax_megabytes = 5\n").unwrap();
         assert!(NodePolicy::load(&f).is_err());
         assert!(NodePolicy::load(&dir.path().join("missing.toml")).is_ok());
+    }
+
+    #[test]
+    fn env_pass_and_limits_are_validated_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("node.toml");
+        let d = NodePolicy::load(&f).unwrap();
+        assert!(d.env_pass.is_empty(), "nothing extra passes by default");
+        assert_eq!(d.limits.tool_stream_bytes, 1 << 20);
+        std::fs::write(
+            &f,
+            "env_pass = [\"CARGO_*\", \"NVM_DIR\"]\n[limits]\ntool_stream_bytes = 65536\n",
+        )
+        .unwrap();
+        let p = NodePolicy::load(&f).unwrap();
+        assert_eq!(p.env_pass, ["CARGO_*", "NVM_DIR"]);
+        assert_eq!(p.limits.tool_stream_bytes, 65536);
+        for bad in [
+            "env_pass = [\"CARGO_[\"]\n",
+            "env_pass = [\"A=B\"]\n",
+            "env_pass = [\"\"]\n",
+            "[limits]\ntool_stream_bytes = 10\n",
+            "[limits]\ntool_bytes = 65536\n",
+        ] {
+            std::fs::write(&f, bad).unwrap();
+            let e = NodePolicy::load(&f).unwrap_err().to_string();
+            assert!(e.contains("node.toml"), "{bad}: {e}");
+        }
+        std::fs::write(&f, "env_pass = [\"CARGO_[\"]\n").unwrap();
+        let e = NodePolicy::load(&f).unwrap_err().to_string();
+        assert!(e.contains("env_pass") && e.contains("CARGO_["), "{e}");
     }
 }

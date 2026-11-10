@@ -67,6 +67,9 @@ fn config() -> Config {
             ..Default::default()
         })
         .collect();
+    // Non-admins with the agentic grant use the embedded node here; the
+    // default (admins only) has its own tests in local_node_http.rs.
+    cfg.nodes.local_node_users = harness_master::config::LocalNodeUsers::Granted;
     cfg
 }
 

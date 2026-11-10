@@ -130,14 +130,13 @@ async fn run(
     timeout: Duration,
 ) -> Result<String, String> {
     let mut cmd = Command::new(bin);
+    // The allow-listed environment first: it clears everything else.
+    ctx.env.apply(&mut cmd);
     cmd.args(args)
         .current_dir(&ctx.workspace)
         .env("GRAPHIFY_OUT", out)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    for k in &ctx.env_remove {
-        cmd.env_remove(k);
-    }
     let fut = cmd.output();
     let o = tokio::select! {
         r = tokio::time::timeout(timeout, fut) => match r {

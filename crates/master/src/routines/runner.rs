@@ -382,7 +382,11 @@ pub(crate) async fn why_blocked(
         return Err(Some("its settings cannot be read; edit the routine".into()));
     };
     if spec.agentic()
-        && let Some(why) = ws::agentic_refusal(&who, Some(&access))
+        && let Some(why) = ws::agentic_refusal(&who, Some(&access)).or_else(|| {
+            spec.node_id
+                .as_deref()
+                .and_then(|n| ws::node_refusal(m, &who, n))
+        })
     {
         return Err(Some(why));
     }

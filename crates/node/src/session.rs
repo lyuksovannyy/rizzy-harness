@@ -248,6 +248,17 @@ impl Session {
         (self.profile == Profile::Agentic && !self.incognito).then(|| self.cwd.clone())
     }
 
+    /// An agentic session's folder may never include the node's data
+    /// directory. Checked again before every turn and restore, not only at
+    /// create: sessions loaded from the log were created under older rules,
+    /// and a folder can be replaced by a link after the check.
+    fn check_cwd_still_allowed(&self) -> Result<(), String> {
+        if self.profile != Profile::Agentic {
+            return Ok(());
+        }
+        self.node.cfg.policy.check_protected(&self.cwd)
+    }
+
     /// Record a change of the session's active agent.
     pub(crate) async fn set_agent(&self, agent: AgentSpec) -> Result<(), String> {
         self.append(EventKind::AgentChanged(AgentChanged {
@@ -278,6 +289,7 @@ impl Session {
         if self.incognito && !input.images.is_empty() {
             return Err("images can't go into an incognito chat".into());
         }
+        self.check_cwd_still_allowed()?;
         let turn_id = new_id();
         let cancel = CancellationToken::new();
         {
@@ -561,6 +573,7 @@ impl Session {
         if self.is_running() {
             return Err("wait for the running turn to finish".into());
         }
+        self.check_cwd_still_allowed()?;
         let id = self.id;
         let events = self
             .node
@@ -650,7 +663,15 @@ impl Session {
         let short: String = task.chars().take(60).collect();
         // A sub-agent that can change files works in its own git worktree,
         // so parallel sub-agents do not trample each other.
-        let iso = self.isolate(&agent, child_id).await;
+        let (iso, iso_note) = match self.isolate(&agent, child_id).await {
+            Ok(i) => (i, None),
+            Err(e) => (
+                None,
+                Some(format!(
+                    "no separate worktree ({e}); it worked in the shared folder"
+                )),
+            ),
+        };
         let cwd = iso
             .as_ref()
             .map(|i| i.cwd.clone())
@@ -709,7 +730,7 @@ impl Session {
             .await;
         let merge_note = match iso {
             Some(i) => Some(self.merge_back(i, child_id).await),
-            None => None,
+            None => iso_note,
         };
         let log = self
             .node
@@ -742,18 +763,29 @@ impl Session {
     }
 
     /// Prepare a worktree for a sub-agent with write access, seeded with the
-    /// current working state (uncommitted edits included).
-    async fn isolate(&self, agent: &AgentSpec, child: SessionId) -> Option<Isolation> {
+    /// current working state (uncommitted edits included). `Ok(None)`: no
+    /// worktree is wanted (read-only agent, no repository); `Err`: one was
+    /// wanted but could not be made, and the sub-agent shares the folder.
+    async fn isolate(
+        &self,
+        agent: &AgentSpec,
+        child: SessionId,
+    ) -> Result<Option<Isolation>, String> {
         if self.profile != Profile::Agentic
             || !["write", "edit", "bash"]
                 .iter()
                 .any(|t| agent.allows_tool(t))
         {
-            return None;
+            return Ok(None);
         }
-        let root = crate::git::repo_root(&self.cwd).await?;
+        let Some(root) = crate::git::repo_root(&self.cwd).await else {
+            return Ok(None);
+        };
         let project = crate::git::Repo::project(&root);
         let res = async {
+            // Before anything runs in the user's repository: its own config
+            // must not define commands that `add`/checkout would run.
+            crate::git::check_worktree_safe(&root).await?;
             let base = crate::git::snapshot(
                 &project,
                 &format!("refs/harness/{child}/base"),
@@ -783,10 +815,10 @@ impl Session {
         }
         .await;
         match res {
-            Ok(i) => Some(i),
+            Ok(i) => Ok(Some(i)),
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "no worktree for sub-agent; sharing the folder");
-                None
+                Err(e)
             }
         }
     }
@@ -813,6 +845,13 @@ impl Session {
             },
         };
         crate::git::worktree_remove(&iso.root, &iso.worktree).await;
+        // Sub-agent refs are the only ones left in the user's repository
+        // (turn checkpoints live in the shadow); keep them bounded too.
+        crate::git::prune(
+            &crate::git::Repo::project(&iso.root),
+            self.node.cfg.policy.checkpoints_keep,
+        )
+        .await;
         note
     }
 

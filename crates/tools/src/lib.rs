@@ -4,6 +4,7 @@
 //! confined to the workspace unless the node policy says otherwise.
 
 mod bash;
+pub mod env;
 pub mod filter;
 mod fs;
 pub mod graphify;
@@ -11,24 +12,26 @@ mod outline;
 pub mod outputs;
 mod publish;
 mod search;
+pub mod stream;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use harness_core::event::{OutputStream, Source};
+use harness_core::event::Source;
 use harness_core::policy::ToolRisk;
 use harness_core::refs::SharedRefs;
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub use bash::Bash;
+pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
 pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
 pub use search::{Glob, Grep};
+pub use stream::OutputSink;
 
 /// Cap on what the model sees from one tool call.
 pub const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -36,12 +39,17 @@ pub const MAX_OUTPUT_CHARS: usize = 30_000;
 pub struct ToolCtx {
     pub workspace: PathBuf,
     pub cancel: CancellationToken,
-    /// Live output chunks for the UI (bash only today).
-    pub output: Option<mpsc::UnboundedSender<(OutputStream, String)>>,
+    /// Live output chunks for the UI (bash only today), bounded and with a
+    /// total byte budget per call.
+    pub output: Option<OutputSink>,
     pub allow_outside_workspace: bool,
+    /// Folders no file tool may touch in any mode, `allow_outside_workspace`
+    /// included: the node's data directory (keys, the API token, every
+    /// user's chats). Canonical paths, from the node's policy.
+    pub protected: Arc<Vec<PathBuf>>,
     pub timeout: Duration,
-    /// Environment variables removed from child processes (secret holders).
-    pub env_remove: Vec<String>,
+    /// The environment of every child process a tool starts (an allow-list).
+    pub env: ToolEnv,
     /// Text this conversation got from the user and from tools, never text
     /// the model wrote. Network tools only follow URLs found here, so injected
     /// instructions cannot make the model smuggle data out in a URL it builds.
@@ -67,8 +75,9 @@ impl ToolCtx {
             cancel: CancellationToken::new(),
             output: None,
             allow_outside_workspace: false,
+            protected: Arc::default(),
             timeout: Duration::from_secs(600),
-            env_remove: Vec::new(),
+            env: ToolEnv::default(),
             observed: Arc::default(),
             savings: Default::default(),
             outputs: None,
@@ -96,9 +105,20 @@ impl ToolCtx {
     /// `mkdir -p`) would land wherever the link points. The result is the
     /// real path: existing part canonical, the part that does not exist yet
     /// appended.
+    ///
+    /// In every mode, `allow_outside_workspace` included, a path whose real
+    /// location is inside a [`Self::protected`] folder is refused.
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
         if self.allow_outside_workspace {
-            return Ok(self.normalized(p));
+            let n = self.normalized(p);
+            // Nothing else is refused here, but where the path really leads
+            // (links followed, dangling ones by their target) must not be
+            // the data directory.
+            self.refuse_protected(&n, p)?;
+            if !self.protected.is_empty() {
+                self.refuse_protected(&walk(&n, None, p)?, p)?;
+            }
+            return Ok(n);
         }
         let ws = self
             .workspace
@@ -113,6 +133,7 @@ impl ToolCtx {
             ws.join(raw)
         });
         let real = walk(&normalized, Some(&ws), p)?;
+        self.refuse_protected(&real, p)?;
         if real.starts_with(&ws) {
             Ok(real)
         } else {
@@ -162,6 +183,18 @@ impl ToolCtx {
         Ok(path)
     }
 
+    /// Refuse `real` (a real or normalized path) inside a protected folder.
+    fn refuse_protected(&self, real: &Path, shown: &str) -> Result<(), String> {
+        match self.protected.iter().find(|d| real.starts_with(d)) {
+            Some(d) => Err(format!(
+                "path {shown} is inside the harness's own data directory {} (keys, tokens, \
+                 every user's chats); file tools never read or change it",
+                d.display()
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn normalized(&self, p: &str) -> PathBuf {
         let raw = Path::new(p);
         let joined = if raw.is_absolute() {
@@ -179,6 +212,14 @@ impl ToolCtx {
 /// Without it, nothing is refused and a dangling link ends the walk (the
 /// rest is appended as it is).
 fn walk(path: &Path, ws: Option<&Path>, shown: &str) -> Result<PathBuf, String> {
+    walk_links(path, ws, shown, 0)
+}
+
+/// Dangling links followed by their target, one after another (outside
+/// mode), before the walk gives up on a loop.
+const MAX_LINK_HOPS: usize = 40;
+
+fn walk_links(path: &Path, ws: Option<&Path>, shown: &str, hops: usize) -> Result<PathBuf, String> {
     let mut real = PathBuf::new();
     let mut missing = false;
     for c in path.components() {
@@ -225,9 +266,17 @@ fn walk(path: &Path, ws: Option<&Path>, shown: &str) -> Result<PathBuf, String> 
                             candidate.display()
                         ));
                     }
+                    // A dangling link counts as where it points: whatever
+                    // creates its target later lands there, so that is the
+                    // path to judge (the data-dir and `.git` rules).
                     Err(_) => {
+                        if hops >= MAX_LINK_HOPS {
+                            return Err(format!("path {shown}: too many levels of symbolic links"));
+                        }
+                        let target = std::fs::read_link(&candidate)
+                            .map_err(|e| format!("{}: {e}", candidate.display()))?;
+                        real = walk_links(&normalize(&real.join(target)), None, shown, hops + 1)?;
                         missing = true;
-                        real = candidate;
                     }
                 }
             }
@@ -401,6 +450,130 @@ mod tests {
         let ctx = ToolCtx::new(dir.path());
         let r = ctx.resolve("l/new.txt").unwrap();
         assert_eq!(r, dir.path().canonicalize().unwrap().join("real/new.txt"));
+    }
+
+    /// A home with a project and the harness's data directory beside it
+    /// (AUDIT S1): `(home, project, data)`, all canonical.
+    fn home_with_data() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path().canonicalize().unwrap();
+        let data = h.join(".local/share/rizzy-harness");
+        std::fs::create_dir_all(data.join("keys")).unwrap();
+        std::fs::write(data.join("api-token"), "token-value-123456").unwrap();
+        std::fs::write(data.join("keys/jwt.key"), "jwt-key-value-123456").unwrap();
+        let project = h.join("projects/x");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
+        (home, project, data)
+    }
+
+    fn protected_ctx(project: &Path, data: &Path, outside: bool) -> ToolCtx {
+        ToolCtx {
+            allow_outside_workspace: outside,
+            protected: Arc::new(vec![data.to_path_buf()]),
+            ..ToolCtx::new(project)
+        }
+    }
+
+    fn run(tool: &dyn Tool, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tool.run(ctx, input))
+    }
+
+    #[test]
+    fn file_tools_never_touch_the_data_dir() {
+        let (_home, project, data) = home_with_data();
+        let token = data.join("api-token");
+        for outside in [false, true] {
+            let ctx = protected_ctx(&project, &data, outside);
+            for p in [
+                "../../.local/share/rizzy-harness/api-token".to_string(),
+                token.display().to_string(),
+                data.join("keys/jwt.key").display().to_string(),
+                data.join("new-file").display().to_string(),
+                data.display().to_string(),
+            ] {
+                let e = ctx.resolve(&p).unwrap_err();
+                assert!(e.contains("data directory"), "outside={outside} {p}: {e}");
+                let r = run(&Read, &ctx, serde_json::json!({ "path": p }));
+                assert!(!r.ok && !r.output.contains("token-value"), "{}", r.output);
+                let w = run(
+                    &Write,
+                    &ctx,
+                    serde_json::json!({ "path": p, "content": "x" }),
+                );
+                assert!(!w.ok, "outside={outside} {p}: {}", w.output);
+                let e = run(
+                    &Edit,
+                    &ctx,
+                    serde_json::json!({ "path": p, "old_string": "token", "new_string": "x" }),
+                );
+                assert!(!e.ok, "outside={outside} {p}: {}", e.output);
+                let g = run(
+                    &Grep,
+                    &ctx,
+                    serde_json::json!({ "pattern": "value", "path": p }),
+                );
+                assert!(!g.output.contains("value-123456"), "{}", g.output);
+            }
+            assert_eq!(
+                std::fs::read_to_string(&token).unwrap(),
+                "token-value-123456"
+            );
+            assert!(!data.join("new-file").exists());
+            // Files of the project itself still work.
+            let r = run(&Read, &ctx, serde_json::json!({ "path": "main.rs" }));
+            assert!(r.ok, "{}", r.output);
+        }
+    }
+
+    #[test]
+    fn a_link_into_the_data_dir_is_refused() {
+        let (_home, project, data) = home_with_data();
+        std::os::unix::fs::symlink(&data, project.join("d")).unwrap();
+        std::os::unix::fs::symlink(data.join("api-token"), project.join("t")).unwrap();
+        // A dangling link whose target would be created inside it.
+        std::os::unix::fs::symlink(data.join("later"), project.join("later")).unwrap();
+        for outside in [false, true] {
+            let ctx = protected_ctx(&project, &data, outside);
+            for p in ["d/api-token", "t", "later/x"] {
+                assert!(ctx.resolve(p).is_err(), "outside={outside} {p}");
+                let r = run(&Read, &ctx, serde_json::json!({ "path": p }));
+                assert!(!r.ok && !r.output.contains("token-value"), "{}", r.output);
+            }
+            let w = run(
+                &Write,
+                &ctx,
+                serde_json::json!({ "path": "later/x", "content": "x" }),
+            );
+            assert!(!w.ok, "{}", w.output);
+            assert!(!data.join("later").exists());
+        }
+    }
+
+    #[test]
+    fn searches_from_above_skip_the_data_dir() {
+        let (home, project, data) = home_with_data();
+        let ctx = protected_ctx(&project, &data, true);
+        let root = home.path().display().to_string();
+        let g = run(
+            &Grep,
+            &ctx,
+            serde_json::json!({ "pattern": "value|main", "path": root }),
+        );
+        assert!(g.output.contains("main.rs"), "{}", g.output);
+        assert!(!g.output.contains("value-123456"), "{}", g.output);
+        let l = run(
+            &Glob,
+            &ctx,
+            serde_json::json!({ "pattern": "**/*", "path": root }),
+        );
+        assert!(l.output.contains("main.rs"), "{}", l.output);
+        assert!(!l.output.contains("api-token"), "{}", l.output);
+        assert!(!l.output.contains("jwt.key"), "{}", l.output);
     }
 
     #[test]

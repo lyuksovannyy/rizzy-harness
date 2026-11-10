@@ -210,12 +210,13 @@ async fn serve(
     for v in harness_master::env::secret_values() {
         secrets.add(v);
     }
-    let (runtime, mut env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
-    // Nothing from `.env` or the server's own HARNESS_* settings reaches an
-    // agent's shell (provider keys, the join token).
-    env_remove.extend(harness_master::env::hidden_from_tools(dotenv_names));
-    env_remove.sort();
-    env_remove.dedup();
+    // The API token is the machine owner's root key: scrubbed from every
+    // event and tool output like a provider key. Loaded before any runtime
+    // that scrubs starts.
+    let token = auth::load_or_create_token(&api_token_path(dir))?;
+    secrets.add(token.clone());
+    let (runtime, provider_env) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
+    let child_env = tool_env(&policy, provider_env, dotenv_names)?;
     let runtime = Arc::new(runtime.with_env(env));
     // Both runtimes share one swappable provider: settings can change it live.
     let provider: Arc<dyn Provider> = runtime.provider.clone();
@@ -242,7 +243,7 @@ async fn serve(
                 &cfg,
                 policy,
                 provider.clone(),
-                env_remove,
+                child_env,
                 &secrets,
                 "local",
             )
@@ -293,7 +294,6 @@ async fn serve(
         .with_context(|| format!("binding {bind}"))?;
     // Use the bound address (port 0 resolves here) for the Host allowlist.
     let addr = listener.local_addr()?;
-    let token = auth::load_or_create_token(&api_token_path(dir))?;
     let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls);
     let unclaimed = mirror.call(|s| s.user_count()).await? == 0;
     if unclaimed {
@@ -410,16 +410,37 @@ fn fallback_model(cfg: &Config) -> String {
         .unwrap_or_else(|| format!("{}::mock", harness_master::presets::DEMO))
 }
 
+/// The environment of every child process the node's tools start, for the
+/// embedded node and `node run` alike: the core list plus node.toml's
+/// `env_pass`, never a provider key variable, a name `.env` set, or a
+/// `HARNESS_*` setting (the join token).
+fn tool_env(
+    policy: &NodePolicy,
+    provider_env: Vec<String>,
+    dotenv_names: &[String],
+) -> anyhow::Result<harness_tools::ToolEnv> {
+    let mut deny = provider_env;
+    deny.extend(harness_master::env::hidden_from_tools(dotenv_names));
+    policy
+        .tool_env(deny)
+        .map_err(|e| anyhow::anyhow!("node.toml: {e}"))
+}
+
 /// The worker runtime (embedded `local` node, or a remote node).
 async fn agentic_node(
     dir: &Path,
     cfg: &Config,
     policy: NodePolicy,
     provider: Arc<dyn Provider>,
-    env_remove: Vec<String>,
+    tool_env: harness_tools::ToolEnv,
     secrets: &harness_core::SecretSet,
     node_id: &str,
 ) -> anyhow::Result<(NodeRuntime, Arc<harness_tools::graphify::GraphifyState>)> {
+    // No session may include this runtime's data directory (for the
+    // embedded node, the master's: keys, the API token, every chat), and
+    // no file tool may touch it, whatever node.toml allows (AUDIT S1).
+    let mut policy = policy;
+    policy.protect(dir);
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
@@ -431,9 +452,11 @@ async fn agentic_node(
         provider,
         tools,
         NativeConfig {
-            env_remove,
+            tool_env,
+            tool_stream_bytes: policy.limits.tool_stream_bytes,
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
+            protected_dirs: Arc::new(policy.protected_dirs.clone()),
             // The master puts the provider's default effort on each turn's
             // spec, for models that take one.
             effort: None,
@@ -477,7 +500,7 @@ async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> any
     Ok(())
 }
 
-async fn node_run(dir: &Path) -> anyhow::Result<()> {
+async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
     let remote: RemoteToml = toml::from_str(
         &std::fs::read_to_string(dir.join("remote.toml"))
             .context("not joined yet: run `node join` first")?,
@@ -486,14 +509,15 @@ async fn node_run(dir: &Path) -> anyhow::Result<()> {
     let cfg = Config::load(&dir.join(CONFIG_FILE))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
     let secrets = harness_core::SecretSet::default();
-    let (runtime, env_remove) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
+    let (runtime, provider_env) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
+    let child_env = tool_env(&policy, provider_env, dotenv_names)?;
     let provider: Arc<dyn Provider> = runtime.provider.clone();
     let (node, _graphify) = agentic_node(
         dir,
         &cfg,
         policy,
         provider,
-        env_remove,
+        child_env,
         &secrets,
         &remote.node_id,
     )
@@ -572,9 +596,18 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
         NodePolicy::load(&dir.join("node.toml"))
             .map(|p| {
                 format!(
-                    "max approval mode {:?}, {} workspace root(s)",
+                    "max approval mode {:?}, {} workspace root(s); tool environment: {}, LC_*{}{}; \
+                     streamed output per call {} bytes",
                     p.max_approval_mode,
-                    p.workspace_roots.len()
+                    p.workspace_roots.len(),
+                    harness_tools::env::CORE_VARS.join(" "),
+                    if p.env_pass.is_empty() {
+                        ""
+                    } else {
+                        " + env_pass "
+                    },
+                    p.env_pass.join(" "),
+                    p.limits.tool_stream_bytes
                 )
             })
             .map_err(|e| e.to_string()),
@@ -721,6 +754,6 @@ async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
                     fingerprint,
                 },
         } => node_join(&dir, &master_url, &token, &fingerprint).await,
-        Cmd::Node { cmd: NodeCmd::Run } => node_run(&dir).await,
+        Cmd::Node { cmd: NodeCmd::Run } => node_run(&dir, &dotenv_names).await,
     }
 }

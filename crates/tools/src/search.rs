@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use harness_core::policy::ToolRisk;
@@ -22,13 +22,34 @@ fn root(ctx: &ToolCtx, input: &Value) -> Result<PathBuf, String> {
     }
 }
 
-fn walker(root: &PathBuf) -> ignore::Walk {
+/// Links are not followed (the `ignore` default), and a protected folder
+/// (the data directory) is never entered: a search rooted above it, which
+/// outside mode allows, skips it.
+fn walker(root: &PathBuf, protected: &std::sync::Arc<Vec<PathBuf>>) -> ignore::Walk {
+    let protected = protected.clone();
     ignore::WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
         .git_global(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .follow_links(false)
+        .filter_entry(move |e| {
+            e.file_name() != ".git" && !in_protected(e.path(), e.file_type(), &protected)
+        })
         .build()
+}
+
+fn in_protected(path: &Path, kind: Option<std::fs::FileType>, protected: &[PathBuf]) -> bool {
+    if protected.is_empty() {
+        return false;
+    }
+    if protected.iter().any(|d| path.starts_with(d)) {
+        return true;
+    }
+    // The root may not be canonical; judge folders by their real path.
+    kind.is_some_and(|k| k.is_dir())
+        && path
+            .canonicalize()
+            .is_ok_and(|real| protected.iter().any(|d| real.starts_with(d)))
 }
 
 #[async_trait::async_trait]
@@ -82,6 +103,7 @@ impl Tool for Grep {
             None => None,
         };
         let ws = ctx.workspace.clone();
+        let protected = ctx.protected.clone();
         let cancel = ctx.cancel.clone();
         let bounded = ctx.savings.bounded_reads;
         let max_results = if bounded {
@@ -91,7 +113,7 @@ impl Tool for Grep {
         };
         let res = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
-            'files: for entry in walker(&root).flatten() {
+            'files: for entry in walker(&root, &protected).flatten() {
                 if cancel.is_cancelled() {
                     break;
                 }
@@ -177,6 +199,7 @@ impl Tool for Glob {
             Err(e) => return ToolOutcome::err(format!("bad glob: {e}")),
         };
         let ws = ctx.workspace.clone();
+        let protected = ctx.protected.clone();
         let max_files = if ctx.savings.bounded_reads {
             BOUNDED_GLOB_RESULTS
         } else {
@@ -184,7 +207,7 @@ impl Tool for Glob {
         };
         let res = tokio::task::spawn_blocking(move || {
             let mut found: Vec<(SystemTime, String)> = Vec::new();
-            for entry in walker(&root).flatten() {
+            for entry in walker(&root, &protected).flatten() {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }

@@ -37,11 +37,17 @@ pub const DELEGATE: &str = "delegate";
 
 pub struct NativeConfig {
     pub system_prompt: String,
-    /// Env vars removed from tool processes (they hold secrets).
-    pub env_remove: Vec<String>,
+    /// The environment of tool child processes (an allow-list; node.toml
+    /// `env_pass`).
+    pub tool_env: harness_tools::ToolEnv,
+    /// Bytes one tool call may stream as `ToolOutputDelta` events (node.toml
+    /// `[limits] tool_stream_bytes`); the rest is read and dropped.
+    pub tool_stream_bytes: usize,
     /// Values scrubbed from tool output before it is stored or sent to the model.
     pub secrets: harness_core::SecretSet,
     pub allow_outside_workspace: bool,
+    /// Folders file tools never touch (the node's data directory).
+    pub protected_dirs: Arc<Vec<std::path::PathBuf>>,
     pub tool_timeout: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
     pub effort: Option<Effort>,
@@ -54,9 +60,11 @@ impl Default for NativeConfig {
     fn default() -> Self {
         Self {
             system_prompt: default_system_prompt(),
-            env_remove: Vec::new(),
+            tool_env: Default::default(),
+            tool_stream_bytes: harness_tools::stream::DEFAULT_STREAM_BYTES,
             secrets: Default::default(),
             allow_outside_workspace: false,
+            protected_dirs: Arc::default(),
             tool_timeout: Duration::from_secs(600),
             effort: None,
             summarize_after_tokens: 0,
@@ -398,10 +406,36 @@ enum Step<T> {
     Cancelled,
 }
 
+/// Where `coalesce` reads chunks from: model deltas (unbounded, from the
+/// provider) or a tool's bounded output stream.
+trait Chunks {
+    fn next(&mut self) -> impl std::future::Future<Output = Option<String>> + Send;
+    fn try_next(&mut self) -> Option<String>;
+}
+
+impl Chunks for mpsc::UnboundedReceiver<String> {
+    fn next(&mut self) -> impl std::future::Future<Output = Option<String>> + Send {
+        self.recv()
+    }
+    fn try_next(&mut self) -> Option<String> {
+        self.try_recv().ok()
+    }
+}
+
+/// stdout and stderr interleaved into one stream, as a terminal shows them.
+impl Chunks for mpsc::Receiver<(OutputStream, String)> {
+    async fn next(&mut self) -> Option<String> {
+        self.recv().await.map(|(_, s)| s)
+    }
+    fn try_next(&mut self) -> Option<String> {
+        self.try_recv().ok().map(|(_, s)| s)
+    }
+}
+
 /// Drive `fut` while coalescing chunks from `rx` into flushed batches.
 async fn coalesce<T, F>(
     fut: F,
-    rx: mpsc::UnboundedReceiver<String>,
+    rx: impl Chunks,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
     make: impl Fn(String) -> EventKind + Send + Sync,
@@ -416,7 +450,7 @@ where
 /// says whether any batch was emitted.
 async fn coalesce_led<T, F>(
     fut: F,
-    mut rx: mpsc::UnboundedReceiver<String>,
+    mut rx: impl Chunks,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
     lead: &mut Option<EventKind>,
@@ -441,7 +475,7 @@ where
             biased;
             _ = cancel.cancelled() => break Step::Cancelled,
             r = &mut fut => break Step::Done(r),
-            Some(d) = rx.recv() => {
+            Some(d) = rx.next() => {
                 buf.push_str(&d);
                 if buf.len() >= FLUSH_BYTES {
                     flush(std::mem::take(&mut buf), lead).await;
@@ -456,7 +490,7 @@ where
             }
         }
     };
-    while let Ok(d) = rx.try_recv() {
+    while let Some(d) = rx.try_next() {
         buf.push_str(&d);
     }
     if !buf.is_empty() {
@@ -1086,15 +1120,17 @@ impl NativeBackend {
                 harness_core::policy::Decision::Allow => {}
             }
         }
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        // Bounded, with a byte budget for the whole call (PLAN.md T9): a
+        // flood is cut with one marker, then read and dropped by the tool.
+        let (sink, rx) = harness_tools::OutputSink::channel(self.config.tool_stream_bytes);
         let tctx = ToolCtx {
             workspace: ctx.cwd.clone(),
             cancel: ctx.cancel.child_token(),
-            output: Some(out_tx),
+            output: Some(sink),
             allow_outside_workspace: self.config.allow_outside_workspace,
+            protected: self.config.protected_dirs.clone(),
             timeout: self.config.tool_timeout,
-            env_remove: self.config.env_remove.clone(),
+            env: self.config.tool_env.clone(),
             observed: Arc::new(observed.to_vec()),
             savings: ctx.extra.savings.clone(),
             outputs: Some(self.outputs.session(ctx.session_id)),
@@ -1103,14 +1139,9 @@ impl NativeBackend {
             call_id: call.call_id.clone(),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
-        // terminal shows them); the final result carries both.
-        let fwd = tokio::spawn(async move {
-            while let Some((_stream, s)) = out_rx.recv().await {
-                if tx.send(s).is_err() {
-                    break;
-                }
-            }
-        });
+        // terminal shows them); the final result carries both. `coalesce`
+        // polls the tool and drains `rx` in one task, so a tool waiting for
+        // room in the channel is always woken by the next drain.
         let call_id = call.call_id.clone();
         let secrets = &self.config.secrets;
         // The tool itself observes cancellation (and kills its process group),
@@ -1130,9 +1161,18 @@ impl NativeBackend {
             },
         )
         .await;
-        fwd.abort();
         match step {
-            Step::Done(o) => o,
+            Step::Done(mut o) => {
+                if tctx.output.as_ref().is_some_and(|s| s.truncated()) {
+                    o.output.push_str(&format!(
+                        "\n[live output stopped after {} bytes (node.toml [limits] \
+                         tool_stream_bytes): the user saw only the first part; this result \
+                         has its own cap]",
+                        self.config.tool_stream_bytes
+                    ));
+                }
+                o
+            }
             Step::Cancelled => ToolOutcome::err("[cancelled]"),
         }
     }

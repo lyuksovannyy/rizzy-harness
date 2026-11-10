@@ -416,6 +416,21 @@ Who may create workspaces (also a switch under Settings → Server → Workspace
 members_can_create = true            # false: only server admins create workspaces
 ```
 
+Who may run agentic sessions on this server's own (embedded) node:
+
+```toml
+[nodes]
+local_node_users = "admins"          # admins (default) | granted
+```
+
+The embedded node runs as the server's own OS user, next to its data
+directory, and the agent's shell is not sandboxed yet. So by default only
+server admins (and the API token) may use it; other accounts with the
+agentic grant run their agentic sessions on a remote node (`node join`), and
+get "use a remote node, or ask the server admin" on the built-in one, also
+for chats they started there earlier. `"granted"` lets every account with
+the grant use it: choose it only if you trust each of them like an admin.
+
 Dictation (the mic button) needs a transcription service, for example a local
 Whisper server with an OpenAI-compatible API:
 
@@ -426,15 +441,32 @@ model = "Systran/faster-whisper-small"
 # key_secret = "voice"               # if the service needs a key
 ```
 
-In a git repository every agentic turn is checkpointed (under
-`refs/harness/`, without touching your index or branches) and its file
-changes can be undone from the chat. Folders without git get a private
-checkpoint repository in the data directory (nothing is written into the
-folder). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+Every agentic turn is checkpointed and its file changes can be undone
+from the chat. Checkpoints live in a private repository in the node's data
+directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
+written into your folder or your `.git`, and your repository's own git
+config, hooks and filters are never run for a checkpoint or an undo (in a
+repository the private copy borrows your committed objects instead of
+storing them again, and honours `.gitignore`, `.git/info/exclude` and your
+global git ignore file). The
+first checkpoint of a large repository reads every file once. Undo writes
+back the exact bytes. Sub-agents that can write get a temporary git
+worktree; it is refused, and the sub-agent shares the folder, if the
+repository's own config defines filter commands (git-lfs's standard ones
+are allowed). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
+
+**Choose a project folder.** A session's folder may not be the node's data
+directory, be inside it, or contain it: with the default data directory
+`~/.local/share/rizzy-harness`, your home folder and `~/.local` are refused
+(use `~/projects/x` or similar). The file tools (`read`, `write`, `edit`,
+`grep`, `glob`, `outline`) never reach into the data directory, even with
+`allow_outside_workspace = true` or through a symlink. The shell is not
+confined yet: a command you approve can still read it, so its output is
+scrubbed of the API token and known keys.
 
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
@@ -442,7 +474,38 @@ workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]
 allow_outside_workspace = false
 graphify = false                     # let agents query a graphify knowledge graph (see below)
+env_pass = []                        # extra variables the agent's shell gets (see below)
+
+[limits]
+tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
 ```
+
+**The agent's environment.** The shell and every other program a tool
+starts get an empty environment plus `PATH HOME USER LOGNAME SHELL LANG
+LANGUAGE LC_* TERM COLORTERM TZ TMPDIR`, and the names `env_pass` matches
+(exact names or globs: `*`, `?`, `[...]`). Nothing else the server or node
+was started with (cloud credentials, tokens, an SSH agent) reaches the
+agent. Provider key variables, names loaded from `.env` and every
+`HARNESS_*` setting are never passed, even when `env_pass` matches them. A
+tool that worked before and now cannot find its home needs an entry here.
+The usual toolchain variables:
+
+```toml
+env_pass = ["CARGO_HOME", "RUSTUP_HOME", "GOPATH", "NVM_DIR", "PYENV_ROOT",
+            "VIRTUAL_ENV", "JAVA_HOME", "SSH_AUTH_SOCK",
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
+```
+
+Passing `SSH_AUTH_SOCK` lets the agent use every key in your SSH agent. An
+invalid entry stops the node at start; `rizzy-harness doctor` prints the
+effective list.
+
+**Streamed output.** What a command prints is shown live and stored, up to
+`[limits] tool_stream_bytes` per call (default 1 MiB). Past it the stream
+ends with `[output truncated: further output is not shown or stored]`; the
+command keeps running until it exits, times out or is cancelled, and the
+rest of its output is read and dropped. The result the model gets has its
+own, smaller cap and says when the live stream was cut.
 
 ### Token savings
 

@@ -420,9 +420,17 @@ async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Response> 
     })
 }
 
+/// The nodes the caller may pick from: without the right to use the
+/// embedded agentic node (`[nodes] local_node_users`), it is left out.
 async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
-    Ok(Json(json!({ "nodes": m.nodes() })))
+    let who = require(&m, &headers).await?;
+    let local_ok = ws::may_use_local_node(&m, &who);
+    let nodes: Vec<_> = m
+        .nodes()
+        .into_iter()
+        .filter(|n| local_ok || !m.is_local_node(&n.node_id))
+        .collect();
+    Ok(Json(json!({ "nodes": nodes })))
 }
 
 /// Which settings a read of models, agents or notices follows.
@@ -1023,6 +1031,7 @@ async fn list_sessions(
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     // Every listed chat is in the scope's workspace, so one answer fits all.
     let blocked = ws::agentic_refusal(&who, scope.as_ref());
+    let local_ok = ws::may_use_local_node(&m, &who);
     let in_scope = |r: &&harness_store::SessionRow| match &scope {
         Some(a) => r.workspace_id.as_deref() == Some(a.id()),
         None => true,
@@ -1034,7 +1043,9 @@ async fn list_sessions(
         .filter(|r| who.can_see(r.owner_id.as_deref()))
         .filter(in_scope)
         .map(|r| {
-            let mut v = session_json(r, blocked.as_deref());
+            let on_local =
+                (!local_ok && m.is_local_node(&r.node_id)).then_some(ws::LOCAL_NODE_ADMINS_ONLY);
+            let mut v = session_json(r, blocked.as_deref().or(on_local));
             v["project_id"] = json!(crate::projects::effective(&links, r));
             v
         })
@@ -1160,6 +1171,30 @@ async fn create_session(
         return Err(ApiError(StatusCode::FORBIDDEN, why));
     }
     let project = projects::for_new_chat(&m, &who, &mut b, scope.as_ref()).await?;
+    // And the node must be one they may use (the embedded node is for
+    // admins by default): checked after the project may have chosen it;
+    // without a choice, only nodes they may use are candidates.
+    let agentic = b.profile.unwrap_or(harness_core::event::Profile::Agentic)
+        == harness_core::event::Profile::Agentic;
+    if agentic {
+        let local_ok = ws::may_use_local_node(&m, &who);
+        if b.node_id.is_none() && !local_ok {
+            b.node_id = m.default_node_where(harness_core::event::Profile::Agentic, false);
+            if b.node_id.is_none() {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    ws::LOCAL_NODE_ADMINS_ONLY.into(),
+                ));
+            }
+        }
+        if let Some(why) = b
+            .node_id
+            .as_deref()
+            .and_then(|n| ws::node_refusal(&m, &who, n))
+        {
+            return Err(ApiError(StatusCode::FORBIDDEN, why));
+        }
+    }
     let title = b
         .title
         .filter(|t| !t.trim().is_empty())
