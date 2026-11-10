@@ -80,14 +80,16 @@ async fn connect(l: &mut Listener) -> (ClientStream, ServerStream) {
     (c, s)
 }
 
-/// Wait until `n` stops moving for `quiet`, at most `max`.
+/// Wait until `n` has started moving and then stops for `quiet`, at most
+/// `max`. Quiet before the first count is not "settled": on a busy machine
+/// the handshake alone can take longer than `quiet`.
 async fn settle(n: &AtomicUsize, quiet: Duration, max: Duration) -> usize {
     let end = tokio::time::Instant::now() + max;
     let mut last = n.load(Ordering::SeqCst);
     loop {
         tokio::time::sleep(quiet).await;
         let now = n.load(Ordering::SeqCst);
-        if now == last || tokio::time::Instant::now() > end {
+        if (now == last && now > 0) || tokio::time::Instant::now() > end {
             return now;
         }
         last = now;
