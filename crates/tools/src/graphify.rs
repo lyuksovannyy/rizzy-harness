@@ -122,6 +122,28 @@ impl GraphQuery {
     }
 }
 
+/// What the sandboxed program must read to start: the venv the (linked)
+/// binary lives in (`<venv>/bin/graphify`) and the Python install its
+/// `bin/python` points to. A uv- or pipx-made venv is usually under
+/// `~/.local/share`; a system Python is under `/usr` anyway.
+fn install_dirs(bin: &Path) -> Vec<PathBuf> {
+    let up2 = |p: &Path| p.parent().and_then(Path::parent).map(Path::to_path_buf);
+    let mut v = Vec::new();
+    if let Some(venv) = bin.canonicalize().ok().as_deref().and_then(up2) {
+        if let Some(py) = venv
+            .join("bin/python")
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .and_then(up2)
+        {
+            v.push(py);
+        }
+        v.push(venv);
+    }
+    v
+}
+
 async fn run(
     ctx: &ToolCtx,
     bin: &Path,
@@ -129,12 +151,24 @@ async fn run(
     out: &Path,
     timeout: Duration,
 ) -> Result<String, String> {
-    let mut cmd = Command::new(bin);
-    // The allow-listed environment first: it clears everything else.
-    ctx.env.apply(&mut cmd);
-    cmd.args(args)
-        .current_dir(&ctx.workspace)
-        .env("GRAPHIFY_OUT", out)
+    // The allow-listed environment, in the sandbox where the node has one:
+    // the repository read-only, read-write only its own output folder under
+    // the data directory, read-only the program's install (its venv and the
+    // Python it was made from).
+    let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_ref()).collect();
+    let mut cmd = ctx.sandbox.command(
+        bin.as_os_str(),
+        &args,
+        &ctx.workspace,
+        &ctx.env,
+        &ctx.protected,
+        crate::sandbox::Grants {
+            workspace_write: false,
+            owned_write: vec![out.to_path_buf()],
+            read: install_dirs(bin),
+        },
+    )?;
+    cmd.env("GRAPHIFY_OUT", out)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = cmd.output();

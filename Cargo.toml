@@ -59,6 +59,9 @@ ignore = "0.4.34"
 # first 8 KiB is read.
 infer = { version = "0.22.0", default-features = false }
 # Bundled tz database: containers often lack /usr/share/zoneinfo.
+# The Landlock project's own crate (MIT OR Apache-2.0): the shell sandbox
+# (FIX_PLAN 2.7). Pinned exactly: every ABI it adds changes what is enforced.
+landlock = "=0.4.7"
 jiff = { version = "0.2.39", features = ["tzdb-bundle-always"] }
 mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs"] }

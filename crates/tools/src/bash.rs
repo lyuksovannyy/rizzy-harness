@@ -129,13 +129,24 @@ impl Tool for Bash {
             .map(|s| Duration::from_secs(s.clamp(1, 3600)))
             .unwrap_or(ctx.timeout);
 
-        let mut cmd = Command::new("bash");
-        // The allow-listed environment (node.toml `env_pass`), nothing else.
-        ctx.env.apply(&mut cmd);
-        cmd.arg("-c")
-            .arg(&command)
-            .current_dir(&ctx.workspace)
-            .stdin(Stdio::null())
+        // The allow-listed environment (node.toml `env_pass`), nothing else,
+        // in the Landlock sandbox where the node has one (node.toml
+        // `[sandbox]`): read-write the session folder and its temp folder.
+        let mut cmd: Command = match ctx.sandbox.command(
+            "bash".as_ref(),
+            &["-c".as_ref(), command.as_ref()],
+            &ctx.workspace,
+            &ctx.env,
+            &ctx.protected,
+            crate::sandbox::Grants {
+                workspace_write: true,
+                ..Default::default()
+            },
+        ) {
+            Ok(c) => c,
+            Err(e) => return ToolOutcome::err(e),
+        };
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)

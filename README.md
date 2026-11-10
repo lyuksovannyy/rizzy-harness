@@ -424,7 +424,9 @@ local_node_users = "admins"          # admins (default) | granted
 ```
 
 The embedded node runs as the server's own OS user, next to its data
-directory, and the agent's shell is not sandboxed yet. So by default only
+directory. Its shell is sandboxed (see "The shell sandbox"), but on kernels
+before Linux 7.1 it can still reach Unix sockets such as the session bus,
+which can start programs outside the sandbox. So by default only
 server admins (and the API token) may use it; other accounts with the
 agentic grant run their agentic sessions on a remote node (`node join`), and
 get "use a remote node, or ask the server admin" on the built-in one, also
@@ -464,9 +466,9 @@ directory, be inside it, or contain it: with the default data directory
 `~/.local/share/rizzy-harness`, your home folder and `~/.local` are refused
 (use `~/projects/x` or similar). The file tools (`read`, `write`, `edit`,
 `grep`, `glob`, `outline`) never reach into the data directory, even with
-`allow_outside_workspace = true` or through a symlink. The shell is not
-confined yet: a command you approve can still read it, so its output is
-scrubbed of the API token and known keys.
+`allow_outside_workspace = true` or through a symlink. The shell runs in a
+sandbox that cannot open it either (see "The shell sandbox" below); its
+output is still scrubbed of the API token and known keys.
 
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
@@ -478,7 +480,76 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
+
+[sandbox]
+mode = "required"                    # required | best-effort | off
+network = "on"                       # on | off (off: no TCP connect or bind)
+read = []                            # more read-only folders, e.g. "~/.cargo"
+write = []                           # more read-write folders, e.g. "~/.cache"
 ```
+
+**The shell sandbox.** `bash` (and graphify) run through `rizzy-harness
+sandbox-exec`, which locks itself into a Linux Landlock sandbox and then
+starts the command. A command may:
+
+- read and change the session folder, and its own temp folder (`TMPDIR`, a
+  fresh folder per chat, deleted with the chat);
+- read and run `/usr /bin /sbin /lib* /etc /opt` and read `/proc`;
+- use `/dev/null /dev/zero /dev/full /dev/random /dev/urandom`;
+- read the folders in `[sandbox] read`, read and change those in
+  `[sandbox] write`.
+
+Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
+`~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
+users' folders, not `/dev/tty`. A sub-agent's git worktree also gets the
+repository's `.git`, so `git status` and `git commit` work there. Programs
+cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
+fail inside the sandbox. From Linux 6.12 the shell also cannot signal
+processes outside it, and from Linux 7.1 it cannot connect to Unix sockets
+outside its folders (the session bus, the Docker socket, an ssh-agent); on
+older kernels it **can**, see "Limits" below.
+
+It needs Linux 6.2 or newer with Landlock enabled (`landlock` appears in
+`/sys/kernel/security/lsm`; `network = "off"` needs 6.7). `rizzy-harness
+doctor` shows whether it works and which Landlock version the kernel has.
+With `mode = "required"` (the default) a node where it does not work refuses
+agentic sessions with a message naming this setting; `node run` refuses to
+start, `serve` starts for chats only. `"best-effort"` uses whatever the
+kernel enforces and logs a warning; `"off"` runs the shell with every right
+of the node's OS user and logs that on every start.
+
+What breaks by default, and the fix: toolchains and caches under your home
+folder. A command that fails with `Permission denied` on a path under `~`
+needs that folder listed. The usual entries:
+
+```toml
+[sandbox]
+read  = ["~/.rustup", "~/.cargo/bin", "~/.nvm", "~/.local/bin", "~/.pyenv",
+         "~/.sdkman", "~/go/bin", "~/.gitconfig"]
+write = ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.cache",
+         "~/go/pkg", "~/.local/share/uv", "~/.gradle", "~/.m2"]
+```
+
+(`~/` is the node user's home; give `~/.cargo/registry` rather than all of
+`~/.cargo`, which may hold `credentials.toml`.) Also missing by default:
+`/tmp` (use `$TMPDIR`), `/dev/shm` (some Python and browser tests),
+`/sys`, `/var`, `/run`, `/nix/store` on NixOS. A shell sandbox entry may not
+contain, equal or be inside the data directory: the node refuses to start
+with such an entry, because Landlock cannot carve a folder out of a grant.
+For the same reason a data directory under `/usr`, `/etc` or `/opt` is
+refused. Graphify additionally needs its install (found automatically:
+its venv and the Python it was made from).
+
+Limits: Landlock does not cover UDP, so `network = "off"` still allows DNS
+and any UDP traffic; it does not hide that a file exists (`stat` and
+`test -e` still work on paths outside, only opening is denied); `/etc` is
+readable; the session folder's own `.git` is writable, so a command can
+change that repository's hooks and config (the file tools refuse to).
+Before Linux 7.1 a command can connect to Unix sockets such as
+`/run/user/<uid>/bus` or `/var/run/docker.sock`, and through them start
+programs outside the sandbox (`systemd-run --user`, `docker run -v
+/:/host`): on such kernels run the node as its own OS user, without
+membership in the `docker` group and without a login session.
 
 **The agent's environment.** The shell and every other program a tool
 starts get an empty environment plus `PATH HOME USER LOGNAME SHELL LANG

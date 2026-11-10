@@ -11,6 +11,7 @@ pub mod graphify;
 mod outline;
 pub mod outputs;
 mod publish;
+pub mod sandbox;
 mod search;
 pub mod stream;
 
@@ -160,6 +161,9 @@ pub struct ToolCtx {
     pub artifacts: Option<Arc<dyn harness_core::artifacts::ArtifactSink>>,
     /// The call being run, for tools whose events must land on its card.
     pub call_id: String,
+    /// How child processes (bash, graphify) are started: through the
+    /// Landlock wrapper on a sandboxed node (node.toml `[sandbox]`).
+    pub sandbox: sandbox::Confinement,
 }
 
 impl ToolCtx {
@@ -178,6 +182,7 @@ impl ToolCtx {
             refs: Arc::default(),
             artifacts: None,
             call_id: String::new(),
+            sandbox: Default::default(),
         }
     }
 

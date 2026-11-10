@@ -30,12 +30,77 @@ pub struct NodePolicy {
     pub env_pass: Vec<String>,
     /// Resource limits (`[limits]`).
     pub limits: LimitsPolicy,
+    /// The shell sandbox (`[sandbox]`, FIX_PLAN 2.7).
+    pub sandbox: SandboxPolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
     /// read from node.toml. Canonical paths.
     #[serde(skip)]
     pub protected_dirs: Vec<PathBuf>,
+    /// Set by the runtime when `[sandbox] mode = "required"` and the sandbox
+    /// does not work here: every agentic session is refused with this text
+    /// (at create, before every turn and restore). Never read from node.toml.
+    #[serde(skip)]
+    pub sandbox_refusal: Option<String>,
+    /// Where the runtime keeps per-session temp folders (removed with the
+    /// session). Never read from node.toml.
+    #[serde(skip)]
+    pub sandbox_tmp: Option<PathBuf>,
+}
+
+/// `[sandbox]` in node.toml: what the agent's shell (and graphify) may
+/// touch. Nothing the master sends can change it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxPolicy {
+    /// `"required"` (default: refuse agentic sessions where Landlock does
+    /// not work), `"best-effort"` or `"off"`.
+    pub mode: harness_tools::sandbox::Mode,
+    /// `"on"` (default) or `"off"`: deny TCP connect and bind.
+    pub network: harness_tools::sandbox::Network,
+    /// More read-only folders (toolchains: `~/.cargo`, `~/.rustup`, ...).
+    /// `~/` is the node user's home.
+    pub read: Vec<PathBuf>,
+    /// More read-write folders (caches: `~/.cache`, `~/.npm`, ...).
+    pub write: Vec<PathBuf>,
+}
+
+impl SandboxPolicy {
+    /// The settings with `~/` expanded; relative entries are an error.
+    pub fn settings(&self) -> Result<harness_tools::sandbox::Settings, String> {
+        let home = dirs::home_dir();
+        let expand = |key: &str, list: &[PathBuf]| -> Result<Vec<PathBuf>, String> {
+            list.iter()
+                .map(|p| {
+                    let p = match (p.strip_prefix("~"), &home) {
+                        (Ok(rest), Some(h)) => h.join(rest),
+                        (Ok(_), None) => {
+                            return Err(format!(
+                                "[sandbox] {key}: {} uses ~ but there is no home directory",
+                                p.display()
+                            ));
+                        }
+                        (Err(_), _) => p.clone(),
+                    };
+                    if p.is_absolute() {
+                        Ok(p)
+                    } else {
+                        Err(format!(
+                            "[sandbox] {key}: {} must be absolute (or start with ~/)",
+                            p.display()
+                        ))
+                    }
+                })
+                .collect()
+        };
+        Ok(harness_tools::sandbox::Settings {
+            mode: self.mode,
+            network: self.network,
+            read: expand("read", &self.read)?,
+            write: expand("write", &self.write)?,
+        })
+    }
 }
 
 /// `[artifacts]` in node.toml: the node's own switch and limits for files
@@ -98,7 +163,10 @@ impl Default for NodePolicy {
             artifacts: ArtifactsPolicy::default(),
             env_pass: Vec::new(),
             limits: LimitsPolicy::default(),
+            sandbox: SandboxPolicy::default(),
             protected_dirs: Vec::new(),
+            sandbox_refusal: None,
+            sandbox_tmp: None,
         }
     }
 }
@@ -139,6 +207,7 @@ impl NodePolicy {
                 "[limits] tool_stream_bytes = {n}: must be between {min} and {max}"
             ));
         }
+        self.sandbox.settings()?;
         Ok(())
     }
 
@@ -153,6 +222,9 @@ impl NodePolicy {
 
     /// Validate and canonicalize a requested session cwd.
     pub fn check_cwd(&self, cwd: &str) -> Result<PathBuf, String> {
+        if let Some(why) = &self.sandbox_refusal {
+            return Err(why.clone());
+        }
         let p = Path::new(cwd)
             .canonicalize()
             .map_err(|e| format!("cwd {cwd}: {e}"))?;
@@ -173,6 +245,16 @@ impl NodePolicy {
                 p.display()
             ))
         }
+    }
+
+    /// What is checked again before every turn and restore of an agentic
+    /// session: the sandbox still works here (see [`Self::sandbox_refusal`])
+    /// and the folder does not include a protected one.
+    pub fn check_session(&self, cwd: &Path) -> Result<(), String> {
+        if let Some(why) = &self.sandbox_refusal {
+            return Err(why.clone());
+        }
+        self.check_protected(cwd)
     }
 
     /// Add `dir` to [`Self::protected_dirs`] (canonicalized; a folder that
@@ -304,6 +386,55 @@ mod tests {
         assert!(p.check_cwd(&s(&home.join("projects/x/../.."))).is_err());
         // Nothing in node.toml can set or clear the list.
         assert!(toml::from_str::<NodePolicy>("protected_dirs = []\n").is_err());
+    }
+
+    #[test]
+    fn sandbox_settings_parse_and_validate() {
+        use harness_tools::sandbox::{Mode, Network};
+        let d = NodePolicy::default();
+        assert_eq!(d.sandbox.mode, Mode::Required, "fail closed by default");
+        assert_eq!(d.sandbox.network, Network::On, "Q6: on by default");
+        let p: NodePolicy = toml::from_str(
+            "[sandbox]\nmode = \"best-effort\"\nnetwork = \"off\"\n\
+             read = [\"~/.cargo\", \"/opt/x\"]\nwrite = [\"~/.cache\"]\n",
+        )
+        .unwrap();
+        assert_eq!(p.sandbox.mode, Mode::BestEffort);
+        assert_eq!(p.sandbox.network, Network::Off);
+        let s = p.sandbox.settings().unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(s.read, [home.join(".cargo"), PathBuf::from("/opt/x")]);
+        assert_eq!(s.write, [home.join(".cache")]);
+        for bad in [
+            "[sandbox]\nmode = \"maybe\"\n",
+            "[sandbox]\nnetwork = \"udp\"\n",
+            "[sandbox]\nreads = []\n",
+            "sandbox = \"off\"\n",
+        ] {
+            assert!(toml::from_str::<NodePolicy>(bad).is_err(), "{bad}");
+        }
+        let p: NodePolicy = toml::from_str("[sandbox]\nread = [\"relative/dir\"]\n").unwrap();
+        assert!(p.validate().unwrap_err().contains("absolute"));
+        // The runtime-only fields cannot come from node.toml.
+        assert!(toml::from_str::<NodePolicy>("sandbox_refusal = \"x\"\n").is_err());
+        assert!(toml::from_str::<NodePolicy>("sandbox_tmp = \"/x\"\n").is_err());
+    }
+
+    /// Without a working sandbox (mode `required`), no agentic session is
+    /// created, continued or restored.
+    #[test]
+    fn a_sandbox_refusal_refuses_every_session() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = NodePolicy {
+            workspace_roots: vec![root.path().into()],
+            ..Default::default()
+        };
+        assert!(p.check_cwd(root.path().to_str().unwrap()).is_ok());
+        assert!(p.check_session(root.path()).is_ok());
+        p.sandbox_refusal = Some("set [sandbox] mode in node.toml".into());
+        let e = p.check_cwd(root.path().to_str().unwrap()).unwrap_err();
+        assert!(e.contains("[sandbox] mode"), "{e}");
+        assert!(p.check_session(root.path()).is_err());
     }
 
     #[test]
