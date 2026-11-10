@@ -13,6 +13,7 @@ pub mod config;
 pub mod env;
 mod favicon;
 mod http;
+pub mod limits;
 pub mod media;
 pub mod model_cache;
 pub mod nodes;
@@ -25,6 +26,7 @@ pub mod resolver;
 pub mod routines;
 pub mod search;
 pub mod secrets;
+pub mod serve;
 pub mod sniff;
 pub mod storage;
 pub mod voice;
@@ -43,7 +45,7 @@ use harness_store::{AppendOutcome, Store};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-pub use http::router;
+pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);

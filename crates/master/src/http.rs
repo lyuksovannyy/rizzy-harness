@@ -22,6 +22,11 @@ mod storage;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
+    router_with(master, crate::limits::Timeouts::default())
+}
+
+/// `router` with explicit request timeouts (tests shorten them).
+pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router {
     let api = Router::new()
         .route("/api/setup", get(setup_status).post(setup))
         .route("/api/login", post(login))
@@ -178,7 +183,13 @@ pub fn router(master: Master) -> Router {
         .merge(hooks::routes())
         .merge(media::routes())
         .merge(artifacts::routes())
-        .merge(storage::routes());
+        .merge(storage::routes())
+        // Matched routes only (the embedded UI files are not handlers); which
+        // routes get which limit is the table in `limits.rs`.
+        .route_layer(axum::middleware::from_fn_with_state(
+            timeouts,
+            crate::limits::enforce,
+        ));
     api.fallback(crate::assets::serve)
         .layer(axum::middleware::from_fn_with_state(
             master.clone(),

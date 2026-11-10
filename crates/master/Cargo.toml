@@ -35,6 +35,8 @@ unicode-segmentation.workspace = true
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-util.workspace = true
 hex.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 jiff.workspace = true
 reqwest.workspace = true
 mime_guess.workspace = true
