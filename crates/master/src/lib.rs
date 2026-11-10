@@ -110,7 +110,9 @@ pub struct NodeInfo {
 
 struct NodeConn {
     info: NodeInfo,
-    tx: Option<mpsc::UnboundedSender<MasterToNode>>,
+    /// Bounded (`NodeLink`): when it is full the node is not keeping up,
+    /// and sends fail at once rather than queue.
+    tx: Option<mpsc::Sender<MasterToNode>>,
     /// Sessions with a `resume` in flight, so a burst of gaps sends one.
     resuming: HashSet<SessionId>,
     /// Bumped on every (re)connect so a stale pump cannot mark a newer link down.
@@ -539,7 +541,7 @@ impl Master {
         lock(&self.inner.nodes)
             .get(node_id)
             .and_then(|n| n.tx.as_ref())
-            .is_some_and(|tx| tx.send(msg).is_ok())
+            .is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
     /// Whether `node_id`'s latest hello announced `cap`.
@@ -715,7 +717,7 @@ impl Master {
                 "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
             ));
         }
-        let _ = link.to_node.send(MasterToNode::Welcome {
+        let _ = link.to_node.try_send(MasterToNode::Welcome {
             protocol_version: PROTOCOL_VERSION,
         });
         let generation = {
@@ -802,11 +804,16 @@ impl Master {
         if let Some(n) = nodes.get_mut(node_id)
             && n.resuming.insert(sid)
             && let Some(tx) = &n.tx
+            && tx
+                .try_send(MasterToNode::Resume {
+                    session_id: sid,
+                    last_seq,
+                })
+                .is_err()
         {
-            let _ = tx.send(MasterToNode::Resume {
-                session_id: sid,
-                last_seq,
-            });
+            // Not sent (node gone or not keeping up): the next gap or
+            // hello asks again.
+            n.resuming.remove(&sid);
         }
     }
 
@@ -936,15 +943,25 @@ impl Master {
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
         let sent = {
             let nodes = lock(&self.inner.nodes);
-            nodes
-                .get(node_id)
-                .and_then(|n| n.tx.as_ref())
-                .map(|tx| tx.send(build(req_id.clone())).is_ok())
-                .unwrap_or(false)
+            nodes.get(node_id).and_then(|n| n.tx.as_ref()).map(|tx| {
+                match tx.try_send(build(req_id.clone())) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(matches!(e, mpsc::error::TrySendError::Full(_))),
+                }
+            })
         };
-        if !sent {
-            lock(&self.inner.acks).remove(&req_id);
-            return Err(CommandError::NodeOffline(node_id.into()));
+        match sent {
+            Some(Ok(())) => {}
+            // The node is connected but has `TO_NODE_QUEUE` commands it
+            // has not read yet: as good as not answering.
+            Some(Err(true)) => {
+                lock(&self.inner.acks).remove(&req_id);
+                return Err(CommandError::Timeout);
+            }
+            Some(Err(false)) | None => {
+                lock(&self.inner.acks).remove(&req_id);
+                return Err(CommandError::NodeOffline(node_id.into()));
+            }
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
             Ok(Ok(Ok(()))) => Ok(()),

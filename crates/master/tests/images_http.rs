@@ -67,9 +67,9 @@ struct T {
 /// A chat node that sees nothing of images: it announces no `images`
 /// capability, opens chats and acks, and keeps what it was sent.
 fn old_node(id: &str) -> (NodeLink, Arc<Mutex<Vec<MasterToNode>>>) {
-    let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (tx, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
-    tx.send(NodeToMaster::Hello {
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
+    tx.try_send(NodeToMaster::Hello {
         protocol_version: PROTOCOL_VERSION,
         node_id: id.into(),
         hostname: "old".into(),
@@ -104,10 +104,10 @@ fn old_node(id: &str) -> (NodeLink, Arc<Mutex<Vec<MasterToNode>>>) {
                     kind,
                     payload,
                 };
-                let _ = tx.send(NodeToMaster::Event { event });
+                let _ = tx.try_send(NodeToMaster::Event { event });
             }
             if let Some(req_id) = msg.req_id() {
-                let _ = tx.send(NodeToMaster::Ack {
+                let _ = tx.try_send(NodeToMaster::Ack {
                     req_id: req_id.into(),
                     ok: true,
                     error: None,

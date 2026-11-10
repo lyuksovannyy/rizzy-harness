@@ -32,6 +32,17 @@ struct CreateArgs {
 
 /// Max events per `session.snapshot` batch.
 const SNAPSHOT_BATCH: usize = 500;
+/// ...and at most this many bytes of serialized events, a quarter of the
+/// link's frame limit, so a batch always fits in a frame. A single event
+/// larger than this still goes, alone in its batch.
+pub const SNAPSHOT_BYTES: usize = harness_protocol::MAX_FRAME / 4;
+
+/// Messages to the master waiting for the link to send them. Past this,
+/// event publishers wait (see `Inner::publish_wait`).
+const OUT_QUEUE: usize = 256;
+/// Commands from the master waiting for the command loop. Past this, the
+/// link stops reading the master's socket.
+const IN_QUEUE: usize = 64;
 
 /// Commands that may wait for one session while its lane is busy; past
 /// this the master gets a refusal at once.
@@ -92,16 +103,18 @@ pub struct NodeConfig {
 
 /// Both ends of a link as seen from the master: commands in, messages out.
 /// In-process for the embedded node; bridged over WSS for remote nodes.
+/// Both directions are bounded, so neither end can make the other buffer
+/// without limit.
 pub struct NodeLink {
-    pub to_node: mpsc::UnboundedSender<MasterToNode>,
-    pub from_node: mpsc::UnboundedReceiver<NodeToMaster>,
+    pub to_node: mpsc::Sender<MasterToNode>,
+    pub from_node: mpsc::Receiver<NodeToMaster>,
 }
 
 pub(crate) struct Inner {
     pub(crate) cfg: NodeConfig,
     pub(crate) sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
     /// The current link to the master, if connected.
-    link: Mutex<Option<mpsc::UnboundedSender<NodeToMaster>>>,
+    link: Mutex<Option<mpsc::Sender<NodeToMaster>>>,
     /// Where published files are staged; `None` when this runtime does not
     /// publish (the chat runtime, or `[artifacts] enabled = false`).
     pub(crate) stages: Option<Arc<artifacts::Stages>>,
@@ -116,14 +129,42 @@ impl Inner {
             .cloned()
     }
 
+    /// Send without waiting, for replies that are not part of the log
+    /// (artifact chunks). When the queue is full the reply is dropped and
+    /// the master's transfer times out and asks again; events never go
+    /// this way.
     pub(crate) fn publish(&self, msg: NodeToMaster) {
         let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(tx) = link.as_ref()
-            && tx.send(msg).is_err()
-        {
-            // Master side went away; events stay in the store and are
-            // replayed on the next connection.
-            *link = None;
+        let Some(tx) = link.as_ref() else { return };
+        match tx.try_send(msg) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("link to the master is full; dropped a reply");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => *link = None,
+        }
+    }
+
+    /// Send, waiting while the link's queue is full: the caller (a
+    /// session appending an event, the command loop) pauses until the
+    /// master reads, which is the back-pressure. Waiting ends when the link
+    /// closes (the link gives up on a peer that reads nothing for
+    /// `IDLE_LIMIT`); then the message is dropped and, for events, the next
+    /// connection's hello and `resume` replay it from the store.
+    pub(crate) async fn publish_wait(&self, msg: NodeToMaster) {
+        let tx = {
+            let link = self.link.lock().unwrap_or_else(|p| p.into_inner());
+            match link.as_ref() {
+                Some(tx) => tx.clone(),
+                None => return,
+            }
+        };
+        if tx.send(msg).await.is_err() {
+            let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
+            // Only if no newer link replaced it meanwhile.
+            if link.as_ref().is_some_and(|cur| cur.same_channel(&tx)) {
+                *link = None;
+            }
         }
     }
 }
@@ -193,8 +234,8 @@ impl NodeRuntime {
     /// Connect a (new) master link. Any previous link is replaced. `hello` is
     /// queued before any event so the master always sees it first.
     pub async fn attach(&self) -> NodeLink {
-        let (out_tx, out_rx) = mpsc::unbounded_channel();
-        let (in_tx, mut in_rx) = mpsc::unbounded_channel::<MasterToNode>();
+        let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
+        let (in_tx, mut in_rx) = mpsc::channel::<MasterToNode>(IN_QUEUE);
         let heads = self
             .inner
             .cfg
@@ -215,7 +256,8 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
-            let _ = out_tx.send(NodeToMaster::Hello {
+            // A fresh queue: there is room.
+            let _ = out_tx.try_send(NodeToMaster::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 node_id: self.inner.cfg.node_id.clone(),
                 hostname: self.inner.cfg.hostname.clone(),
@@ -622,11 +664,13 @@ impl NodeRuntime {
             } => self.release(session_id, &stage_id),
         };
         if let Some(req_id) = req_id {
-            self.inner.publish(NodeToMaster::Ack {
-                req_id,
-                ok: result.is_ok(),
-                error: result.err(),
-            });
+            self.inner
+                .publish_wait(NodeToMaster::Ack {
+                    req_id,
+                    ok: result.is_ok(),
+                    error: result.err(),
+                })
+                .await;
         }
     }
 
@@ -724,7 +768,8 @@ impl NodeRuntime {
             .map_err(|e| e.to_string())?;
         if existed {
             self.inner
-                .publish(NodeToMaster::Deleted { session_id: sid });
+                .publish_wait(NodeToMaster::Deleted { session_id: sid })
+                .await;
         }
         Ok(())
     }
@@ -758,26 +803,47 @@ impl NodeRuntime {
                     Ok::<_, harness_store::StoreError>((head, evs))
                 })
                 .await;
-            let (head, events) = match res {
+            let (head, mut events) = match res {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(%sid, error = %e, "replay failed");
                     return;
                 }
             };
+            let mut done = events.len() < SNAPSHOT_BATCH;
+            let keep = within_bytes(&events);
+            if keep < events.len() {
+                events.truncate(keep);
+                done = false;
+            }
             let last = events.last().map(|e| e.seq);
-            let done = events.len() < SNAPSHOT_BATCH;
-            self.inner.publish(NodeToMaster::Snapshot {
-                session_id: sid,
-                head_seq: head,
-                events,
-            });
+            self.inner
+                .publish_wait(NodeToMaster::Snapshot {
+                    session_id: sid,
+                    head_seq: head,
+                    events,
+                })
+                .await;
             match last {
                 Some(l) if !done => after = l,
                 _ => return,
             }
         }
     }
+}
+
+/// How many of `events` (at least one) fit in one snapshot of
+/// `SNAPSHOT_BYTES`, the envelope included.
+fn within_bytes(events: &[harness_core::RawEvent]) -> usize {
+    const ENVELOPE: usize = 256;
+    let mut total = ENVELOPE;
+    for (i, e) in events.iter().enumerate() {
+        total += serde_json::to_vec(e).map_or(0, |v| v.len()) + 1;
+        if total > SNAPSHOT_BYTES {
+            return i.max(1);
+        }
+    }
+    events.len()
 }
 
 /// The stage, when this runtime publishes: a worker node with

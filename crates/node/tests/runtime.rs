@@ -66,7 +66,7 @@ impl Harness {
     }
 
     fn send(&self, m: MasterToNode) {
-        self.link.to_node.send(m).unwrap();
+        self.link.to_node.try_send(m).unwrap();
     }
 
     /// Receive until `pred` matches an event; returns it. Acks must be ok.
@@ -558,7 +558,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
         .unwrap();
         let link = node.attach().await;
         link.to_node
-            .send(MasterToNode::Create {
+            .try_send(MasterToNode::Create {
                 profile: None,
                 incognito: false,
                 agent: None,
@@ -588,7 +588,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
     .unwrap();
     let mut link = node.attach().await;
     link.to_node
-        .send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt {
             savings: None,
             context: None,
             reply: None,
@@ -652,6 +652,63 @@ async fn resume_replays_in_batches() {
             other => panic!("{other:?}"),
         }
     }
+}
+
+/// `session.snapshot` batches are cut by bytes as well as by count, so a
+/// replay never builds a frame the link refuses (and then retries forever).
+/// An event bigger than the budget goes alone in its batch.
+#[tokio::test]
+async fn resume_batches_are_limited_by_bytes() {
+    let mut h = Harness::new(default_policy).await;
+    let sid = h.create().await;
+    let budget = harness_node::SNAPSHOT_BYTES;
+    // Eight events of a quarter budget each, then one bigger than it.
+    let sizes = [budget / 4; 8]
+        .into_iter()
+        .chain([budget + budget / 2])
+        .collect::<Vec<_>>();
+    for (i, n) in sizes.iter().enumerate() {
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: format!("p{i}"),
+            session_id: sid,
+            text: "x".repeat(*n),
+            images: vec![],
+        });
+        h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    }
+    let head = h.seen.last().unwrap().seq;
+    h.send(MasterToNode::Resume {
+        session_id: sid,
+        last_seq: 0,
+    });
+    let mut got: Vec<RawEvent> = vec![];
+    let mut batches = 0;
+    while got.last().map(|e| e.seq) != Some(head) {
+        let msg = tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .expect("replay stalled")
+            .unwrap();
+        if let NodeToMaster::Snapshot { events, .. } = &msg {
+            let bytes = serde_json::to_vec(&msg).unwrap().len();
+            assert!(
+                bytes <= budget || events.len() == 1,
+                "a {bytes}-byte snapshot of {} events (budget {budget})",
+                events.len()
+            );
+            batches += 1;
+            got.extend(events.iter().cloned());
+        }
+    }
+    assert!(batches > 2, "only {batches} batches");
+    // Complete and in order.
+    let seqs: Vec<u64> = got.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, (1..=head).collect::<Vec<_>>());
 }
 
 /// A log left mid-turn by a crash is closed out on start.
@@ -737,7 +794,7 @@ async fn recovers_interrupted_turn_on_start() {
     // And the session accepts a new prompt afterwards.
     let mut link = node.attach().await;
     link.to_node
-        .send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt {
             savings: None,
             context: None,
             reply: None,
@@ -797,7 +854,7 @@ async fn sub_task_sessions_ask_no_questions() {
     let node = NodeRuntime::start(config(store, policy)).await.unwrap();
     let mut link = node.attach().await;
     link.to_node
-        .send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt {
             savings: None,
             context: None,
             reply: None,

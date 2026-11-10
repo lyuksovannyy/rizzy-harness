@@ -8,14 +8,10 @@ use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
 use harness_store::Store;
 use tokio::sync::mpsc;
 
-fn link(
-    id: &str,
-    hostname: &str,
-    caps: &[&str],
-) -> (NodeLink, mpsc::UnboundedReceiver<MasterToNode>) {
-    let (to_node, commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (tx, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
-    tx.send(NodeToMaster::Hello {
+fn link(id: &str, hostname: &str, caps: &[&str]) -> (NodeLink, mpsc::Receiver<MasterToNode>) {
+    let (to_node, commands) = mpsc::channel::<MasterToNode>(1024);
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
+    tx.try_send(NodeToMaster::Hello {
         protocol_version: PROTOCOL_VERSION,
         node_id: id.into(),
         hostname: hostname.into(),

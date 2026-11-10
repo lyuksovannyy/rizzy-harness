@@ -1466,10 +1466,10 @@ async fn the_preview_shows_runs_and_the_rendered_prompt() {
 /// An agentic node "gone" that said hello and left at once.
 async fn offline_node(t: &T) {
     use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
-    let (to_node, _commands) = tokio::sync::mpsc::unbounded_channel::<MasterToNode>();
-    let (to_master, from_node) = tokio::sync::mpsc::unbounded_channel::<NodeToMaster>();
+    let (to_node, _commands) = tokio::sync::mpsc::channel::<MasterToNode>(1024);
+    let (to_master, from_node) = tokio::sync::mpsc::channel::<NodeToMaster>(1024);
     to_master
-        .send(NodeToMaster::Hello {
+        .try_send(NodeToMaster::Hello {
             protocol_version: PROTOCOL_VERSION,
             node_id: "gone".into(),
             hostname: "h".into(),

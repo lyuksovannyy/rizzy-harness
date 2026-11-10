@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// The largest WebSocket frame (and message) either end of a remote link
+/// accepts. A bigger one closes the link (checked from the frame header,
+/// before the payload is read).
+pub const MAX_FRAME: usize = 8 * 1024 * 1024;
+
 /// The most file bytes one `artifact.chunk` carries (the node clamps a
 /// larger `len`); with four in flight a transfer stays far below the link's
 /// frame limit.
