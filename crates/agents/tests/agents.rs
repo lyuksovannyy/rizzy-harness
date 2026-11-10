@@ -309,6 +309,8 @@ fn edits_add_summaries_instructions_and_custom_agents() {
                 delegate: true,
                 ..features()
             },
+            aliases: vec![],
+            category: None,
         },
     );
     edits.custom.insert(
@@ -321,6 +323,8 @@ fn edits_add_summaries_instructions_and_custom_agents() {
                 as_subagent: false,
                 ..features()
             },
+            aliases: vec![],
+            category: None,
         },
     );
     // A custom agent cannot take a built-in's id.
@@ -331,6 +335,8 @@ fn edits_add_summaries_instructions_and_custom_agents() {
             summary: String::new(),
             prompt: "s".into(),
             features: features(),
+            aliases: vec![],
+            category: None,
         },
     );
     let (set, errors) = base.with_edits(&edits);
@@ -388,4 +394,109 @@ fn edits_add_summaries_instructions_and_custom_agents() {
     let (quiet, _) = AgentSet::load(dir.path());
     let (set, _) = quiet.with_edits(&Edits::default());
     assert_eq!(set.get("ultracode").unwrap().delegates, ["coder", "writer"]);
+}
+
+#[test]
+fn aliases_and_category_are_optional_and_checked() {
+    let def = |extra: &str| {
+        parse(
+            "helper",
+            &format!("---\nname: H\ntools: []\n{extra}---\nhi\n"),
+            false,
+        )
+    };
+    // Definitions from before the fields still parse, in "General".
+    let plain = def("").unwrap();
+    assert!(plain.aliases.is_empty());
+    assert_eq!(plain.category, "General");
+    let named = def("aliases: [h, aide]\ncategory: IT\n").unwrap();
+    assert_eq!(named.aliases, ["h", "aide"]);
+    assert_eq!(named.category, "IT");
+    // Labels change no behaviour, so no hash.
+    assert_eq!(plain.spec.prompt_hash, named.spec.prompt_hash);
+    // Listed for the UI.
+    let v = serde_json::to_value(&named).unwrap();
+    assert_eq!(v["aliases"], serde_json::json!(["h", "aide"]));
+    assert_eq!(v["category"], "IT");
+    for bad in [
+        "aliases: [Bad]\n".to_string(),
+        "aliases: [helper]\n".to_string(),
+        "aliases: [h, h]\n".to_string(),
+        "category: \"a\\u0007b\"\n".to_string(),
+        format!("category: {}\n", "c".repeat(33)),
+    ] {
+        assert!(
+            matches!(def(&bad), Err(AgentError::Frontmatter { .. })),
+            "{bad}"
+        );
+    }
+    assert_eq!(def("category: \"  \"\n").unwrap().category, "General");
+}
+
+#[test]
+fn ids_and_aliases_share_one_namespace() {
+    use harness_agents::edits::{Custom, Edits};
+    let dir = tempfile::tempdir().unwrap();
+    let write = |id: &str, extra: &str| {
+        std::fs::write(
+            dir.path().join(format!("{id}.md")),
+            format!("---\nname: {id}\ntools: [read]\n{extra}---\nhi\n"),
+        )
+        .unwrap();
+    };
+    write("helper", "aliases: [h, aide]\n");
+    // An id beats an alias: `aide` is an agent of its own.
+    write("aide", "");
+    // The first to claim an alias keeps it (files load in name order).
+    write("other", "aliases: [h]\n");
+    // Delegates may name an alias; the roster holds the id.
+    write("boss", "delegates: [h, other]\navailable_as: [agent]\n");
+    let (set, errors) = AgentSet::load(dir.path());
+    let taken: Vec<String> = errors
+        .iter()
+        .filter(|e| matches!(e, AgentError::AliasTaken { .. }))
+        .map(|e| e.to_string())
+        .collect();
+    assert_eq!(taken.len(), 2, "{errors:?}");
+    assert!(taken.iter().any(|e| e.contains("@aide")), "{taken:?}");
+    assert_eq!(set.get("helper").unwrap().aliases, ["h"]);
+    assert!(set.get("other").unwrap().aliases.is_empty());
+    assert_eq!(set.resolve("h").unwrap().id, "helper");
+    assert_eq!(set.resolve("aide").unwrap().id, "aide");
+    assert_eq!(set.resolve("helper").unwrap().id, "helper");
+    assert!(set.resolve("nobody").is_none());
+    assert!(set.get("h").is_none(), "get takes ids only");
+    assert_eq!(set.get("boss").unwrap().delegates, ["helper", "other"]);
+
+    // Custom agents come last: an alias someone has is dropped, reported.
+    let custom = |aliases: &[&str]| Custom {
+        name: "C".into(),
+        summary: String::new(),
+        prompt: "c".into(),
+        features: features(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        category: None,
+    };
+    let mut edits = Edits::default();
+    edits.custom.insert("c1".into(), custom(&["h", "mine"]));
+    edits
+        .custom
+        .insert("c2".into(), custom(&["mine", "boss", "free"]));
+    let (set, errors) = set.with_edits(&edits);
+    assert_eq!(set.get("c1").unwrap().aliases, ["mine"]);
+    assert_eq!(set.get("c2").unwrap().aliases, ["free"]);
+    assert_eq!(set.resolve("free").unwrap().id, "c2");
+    assert_eq!(set.get("c2").unwrap().category, "General");
+    assert_eq!(errors.len(), 3, "{errors:?}");
+}
+
+#[test]
+fn custom_agents_from_before_the_labels_still_read() {
+    let c: harness_agents::edits::Custom = serde_json::from_str(
+        r#"{"name":"Old","summary":"","prompt":"p","features":{"memory":true,"web":false,
+        "read_files":true,"edit_files":false,"commands":false,"delegate":false,
+        "as_agent":true,"as_subagent":true}}"#,
+    )
+    .unwrap();
+    assert!(c.aliases.is_empty() && c.category.is_none());
 }

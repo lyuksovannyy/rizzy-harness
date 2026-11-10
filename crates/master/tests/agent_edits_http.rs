@@ -392,6 +392,101 @@ async fn memory_off_means_no_recall_and_no_remember() {
     assert!(!all.contains("number 7 tram"), "{all}");
 }
 
+/// Aliases and categories: listed, one namespace with ids, resolved to the
+/// id wherever an agent is named, fixed on built-ins.
+#[tokio::test]
+async fn aliases_and_categories() {
+    let t = start().await;
+    let body = |id: &str, aliases: Value| {
+        json!({"id": id, "name": "Critic", "prompt": "Critique it.", "features": features(),
+               "aliases": aliases, "category": "Quality"})
+    };
+    let (st, d) = call(
+        &t,
+        Method::POST,
+        "/api/agents",
+        Some(body("critic", json!(["crit"]))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let listed_critic = listed(&t, "critic").await;
+    assert_eq!(listed_critic["aliases"], json!(["crit"]));
+    assert_eq!(listed_critic["category"], "Quality");
+    assert_eq!(listed(&t, "writer").await["category"], "General");
+    // One namespace: an alias or id someone has is refused, saying which.
+    for (id, aliases, code) in [
+        ("other", json!(["crit"]), StatusCode::CONFLICT),
+        ("other", json!(["coder"]), StatusCode::CONFLICT),
+        ("other", json!(["new"]), StatusCode::CONFLICT),
+        ("crit", json!([]), StatusCode::CONFLICT),
+        ("other", json!(["Bad"]), StatusCode::BAD_REQUEST),
+        ("other", json!(["other"]), StatusCode::BAD_REQUEST),
+    ] {
+        let (st, v) = call(&t, Method::POST, "/api/agents", Some(body(id, aliases))).await;
+        assert_eq!(st, code, "{id}: {v}");
+    }
+    let mut long = body("other", json!([]));
+    long["category"] = json!("c".repeat(40));
+    let (st, _) = call(&t, Method::POST, "/api/agents", Some(long)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // Its own aliases can change; another's cannot be taken.
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/critic",
+        Some(json!({"aliases": ["crit", "nitpick"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["aliases"], json!(["crit", "nitpick"]));
+    assert_eq!(d["category"], "Quality");
+
+    // A built-in's aliases and category are fixed; sending them unchanged
+    // is fine.
+    let coder = listed(&t, "coder").await;
+    for change in [json!({"aliases": ["mine"]}), json!({"category": "Other"})] {
+        let (st, v) = call(&t, Method::PATCH, "/api/agents/coder", Some(change)).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    }
+    let (st, v) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"aliases": coder["aliases"], "category": coder["category"], "summary": "S."})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    // An alias names the agent; what is stored is its id.
+    let (st, v) = call(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "chat", "agent_id": "crit"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let (_, row) = call(&t, Method::GET, &format!("/api/sessions/{sid}"), None).await;
+    assert_eq!(row["agent_id"], "critic");
+    let other = chat(&t, "general", "hello").await;
+    say(&t, &other, "@nitpick look").await;
+    assert!(last_request(&t).0.starts_with("Critique it."));
+
+    // A custom agent saved before aliases existed still loads.
+    t.store
+        .kv_set(
+            "agent-custom:server:oldie",
+            &json!({"name": "Oldie", "summary": "", "prompt": "Old.", "features": features()})
+                .to_string(),
+        )
+        .unwrap();
+    t.master.load_agent_edits().await.unwrap();
+    let oldie = listed(&t, "oldie").await;
+    assert_eq!(oldie["aliases"], json!([]));
+    assert_eq!(oldie["category"], "General");
+}
+
 #[tokio::test]
 async fn a_summary_is_written_from_the_instructions() {
     let t = start().await;

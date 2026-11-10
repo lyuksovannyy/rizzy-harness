@@ -145,14 +145,14 @@ impl Resolver {
         &self.default_agent
     }
 
-    /// The agent `handle` names, when it may run a chat (as the chat's
-    /// agent or for one turn). Every path that picks the agent of a chat or
+    /// The agent `handle` (an id or an alias) names, when it may run a chat
+    /// (as the chat's agent or for one turn); its id is what gets stored. Every path that picks the agent of a chat or
     /// a turn comes through here: unknown is `UnknownAgent`, an agent that
     /// runs only as a sub-agent is `SubagentOnly`.
     pub fn top_level(&self, handle: &str) -> Result<&Agent, CommandError> {
         let a = self
             .agents
-            .get(handle)
+            .resolve(handle)
             .ok_or_else(|| CommandError::UnknownAgent(handle.into()))?;
         if !a.features.as_agent {
             return Err(CommandError::SubagentOnly {

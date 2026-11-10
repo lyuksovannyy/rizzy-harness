@@ -56,7 +56,12 @@ impl Agents {
     fn compose(&mut self) {
         let (set, errors) = self.base.with_edits(&self.edits);
         for e in errors {
-            tracing::warn!(error = %e, "skipping an agent edit");
+            match e {
+                harness_agents::AgentError::AliasTaken { .. } => {
+                    tracing::warn!(error = %e, "dropping an agent alias")
+                }
+                _ => tracing::warn!(error = %e, "skipping an agent edit"),
+            }
         }
         self.set = set;
     }
@@ -213,11 +218,23 @@ impl Master {
             return Err(AgentEditError::Bad("give the agent a name".into()));
         }
         let prompt = text("the instructions", &c.prompt, MAX_PROMPT, true)?;
+        let category = text(
+            "the category",
+            c.category.as_deref().unwrap_or(""),
+            64,
+            false,
+        )?;
+        let aliases: Vec<String> = c.aliases.iter().map(|a| a.trim().to_string()).collect();
+        // Aliases and category are checked like a file's (`labels`).
+        let (aliases, _) = harness_agents::labels(id, &aliases, Some(&category))
+            .map_err(|e| AgentEditError::Bad(e.to_string()))?;
         let c = Custom {
             name,
             summary: text("the summary", &c.summary, MAX_SUMMARY, false)?,
             prompt,
             features: c.features,
+            aliases,
+            category: Some(category).filter(|c| !c.is_empty()),
         };
         // The rest of what a definition must be (an id, a prompt, somewhere
         // to be used) is checked by building it.
@@ -227,13 +244,24 @@ impl Master {
         let _w = writes.lock().await;
         let exists = self.agent_edits().custom.contains_key(id);
         if create {
-            if RESERVED.contains(&id) || self.agents().get(id).is_some() || exists {
+            if RESERVED.contains(&id) || self.handle_taken(id, None) || exists {
                 return Err(AgentEditError::Refused(format!(
                     "the handle @{id} is taken: choose another"
                 )));
             }
         } else if !exists {
             return Err(self.edit_refusal(id));
+        }
+        // Ids and aliases are one namespace, built-ins' and files' included
+        // (also an alias a custom agent's id pushed out of the set).
+        if let Some(a) = c
+            .aliases
+            .iter()
+            .find(|a| RESERVED.contains(&a.as_str()) || self.handle_taken(a, Some(id)))
+        {
+            return Err(AgentEditError::Refused(format!(
+                "the handle @{a} is taken: choose another alias"
+            )));
         }
         let (k, v) = (
             key(CUSTOM, id),
@@ -244,6 +272,13 @@ impl Master {
         a.edits.custom.insert(id.into(), c);
         a.compose();
         Ok(())
+    }
+
+    /// Whether `handle` is an id or alias of an agent other than `except`:
+    /// in use, or declared by a built-in or file agent.
+    fn handle_taken(&self, handle: &str, except: Option<&str>) -> bool {
+        let other = |a: Option<&Agent>| a.is_some_and(|a| Some(a.id.as_str()) != except);
+        other(self.agents().resolve(handle)) || other(self.agent_definitions().resolve(handle))
     }
 
     /// Delete an agent made on the page. Built-in and file agents stay.

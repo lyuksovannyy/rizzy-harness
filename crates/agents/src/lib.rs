@@ -6,6 +6,8 @@
 //! ---
 //! name: Coder
 //! description: Software engineer that edits and tests code.
+//! aliases: [dev]                                  # more @handles (default none)
+//! category: IT                                    # grouping in the UI (default General)
 //! tools: [bash, read, write, edit, grep, glob]   # or: all
 //! model: openrouter::openai/gpt-4o                # optional, <provider>::<raw>
 //! effort: high                                    # low | medium | high | max
@@ -28,7 +30,15 @@
 //!
 //! `available_as` says where the agent may be used: `agent` puts it in the
 //! picker and `@mentions`, `subagent` lets agents that delegate hand it
-//! sub-tasks (one that is not is dropped from every `delegates`).
+//! sub-tasks (one that is not is dropped from every `delegates`). The server
+//! enforces both: an agent that is not available as an agent never runs a
+//! chat or a turn, however it is named.
+//!
+//! Ids and `aliases` share one namespace: `@dev` and `"agent_id": "dev"`
+//! resolve to the agent's id, which is what events and sessions store. An
+//! id beats an alias, and the first agent to claim an alias keeps it
+//! (built-ins, then files, then agents made on the page); a losing alias is
+//! dropped and reported ([`AgentError::AliasTaken`]), never the agent.
 //!
 //! Agents made on the Agents page live in the master's database, not here:
 //! see [`edits`], which also applies the summary and additional
@@ -36,6 +46,7 @@
 
 pub mod edits;
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use harness_core::agent::{AgentSpec, Budget, ToolSelection, UiLevel};
@@ -43,6 +54,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const DEFAULT_AGENT: &str = "general";
+/// The category of a definition that names none.
+pub const DEFAULT_CATEGORY: &str = "General";
+/// Longest category, in characters.
+pub const MAX_CATEGORY: usize = 32;
+/// Most aliases one agent may have.
+pub const MAX_ALIASES: usize = 8;
 
 const BUILTIN: &[(&str, &str)] = &[
     ("general", include_str!("../builtin/general.md")),
@@ -70,6 +87,14 @@ pub enum AgentError {
     Unavailable(String),
     #[error("{0}: a built-in or file agent has this id")]
     Shadowed(String),
+    /// `alias` is dropped from `id`: `by` has it as its id or claimed it
+    /// first. The agent itself loads.
+    #[error("{id}: alias @{alias} dropped: {by} already uses it")]
+    AliasTaken {
+        id: String,
+        alias: String,
+        by: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +103,10 @@ struct Frontmatter {
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    category: Option<String>,
     tools: ToolSelection,
     #[serde(default)]
     model: Option<String>,
@@ -203,6 +232,10 @@ pub struct Agent {
     pub name: String,
     /// The summary under its name (one or two sentences).
     pub description: String,
+    /// More `@handles` for it, beside its id.
+    pub aliases: Vec<String>,
+    /// A short label the UI groups agents by.
+    pub category: String,
     pub builtin: bool,
     pub origin: Origin,
     pub features: Features,
@@ -272,6 +305,8 @@ pub fn custom(
     let fm = Frontmatter {
         name: name.into(),
         description: summary.into(),
+        aliases: vec![],
+        category: None,
         tools: ToolSelection::List(features.tools()),
         model: None,
         effort: None,
@@ -303,6 +338,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     if fm.available_as.is_empty() {
         return Err(AgentError::Unavailable(id.into()));
     }
+    let (aliases, category) = labels(id, &fm.aliases, fm.category.as_deref())?;
     let system_prompt = body.trim().to_string();
     if system_prompt.is_empty() {
         return Err(AgentError::EmptyPrompt(id.into()));
@@ -357,6 +393,8 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         id: id.into(),
         name: fm.name.clone(),
         description: fm.description,
+        aliases,
+        category,
         builtin: origin == Origin::Builtin,
         origin,
         features,
@@ -379,6 +417,84 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
             caps,
         },
     })
+}
+
+/// Checked aliases (valid ids, not `id`, no repeats, at most
+/// [`MAX_ALIASES`]) and the category (trimmed, printable, at most
+/// [`MAX_CATEGORY`] characters; none or blank is [`DEFAULT_CATEGORY`]).
+pub fn labels(
+    id: &str,
+    aliases: &[String],
+    category: Option<&str>,
+) -> Result<(Vec<String>, String), AgentError> {
+    let bad = |msg: String| AgentError::Frontmatter { id: id.into(), msg };
+    if aliases.len() > MAX_ALIASES {
+        return Err(bad(format!("at most {MAX_ALIASES} aliases")));
+    }
+    let mut seen = HashSet::new();
+    for a in aliases {
+        if !valid_id(a) || a == id || !seen.insert(a.as_str()) {
+            return Err(bad(format!(
+                "bad alias {a:?}: aliases are 1-32 characters (a-z, 0-9, -), each once, not the id"
+            )));
+        }
+    }
+    let category = category.map(str::trim).unwrap_or_default();
+    if category.chars().count() > MAX_CATEGORY || category.chars().any(char::is_control) {
+        return Err(bad(format!(
+            "the category must be at most {MAX_CATEGORY} printable characters"
+        )));
+    }
+    let category = if category.is_empty() {
+        DEFAULT_CATEGORY
+    } else {
+        category
+    };
+    Ok((aliases.to_vec(), category.to_string()))
+}
+
+/// Settle the one namespace of ids and aliases over `agents`, in order: an
+/// alias that is another agent's id, or that an earlier agent claimed, is
+/// dropped from the later one and reported. Then every `delegates` names
+/// ids (an alias there becomes its agent's id; itself and repeats go).
+pub(crate) fn settle(agents: &mut [Agent]) -> Vec<AgentError> {
+    let ids: HashSet<String> = agents.iter().map(|a| a.id.clone()).collect();
+    let mut owner: HashMap<String, String> = HashMap::new();
+    let mut errors = Vec::new();
+    for a in agents.iter_mut() {
+        let id = a.id.clone();
+        a.aliases.retain(|alias| {
+            let by = if ids.contains(alias) {
+                Some(alias.clone())
+            } else {
+                owner.get(alias).cloned()
+            };
+            match by {
+                Some(by) => {
+                    errors.push(AgentError::AliasTaken {
+                        id: id.clone(),
+                        alias: alias.clone(),
+                        by,
+                    });
+                    false
+                }
+                None => {
+                    owner.insert(alias.clone(), id.clone());
+                    true
+                }
+            }
+        });
+    }
+    for a in agents.iter_mut() {
+        let mut seen = HashSet::new();
+        let delegates = std::mem::take(&mut a.delegates);
+        a.delegates = delegates
+            .into_iter()
+            .map(|d| owner.get(&d).cloned().unwrap_or(d))
+            .filter(|d| *d != a.id && seen.insert(d.clone()))
+            .collect();
+    }
+    errors
 }
 
 /// Stable text form of a tool selection for hashing.
@@ -440,12 +556,16 @@ impl AgentSet {
                 Err(e) => errors.push(e),
             }
         }
+        errors.extend(settle(&mut agents));
         (Self::from_agents(agents, DEFAULT_AGENT), errors)
     }
 
     /// The default is `default_id` when that agent may run a chat, else the
     /// first one that may: a sub-agent-only agent is never the default.
-    pub fn from_agents(agents: Vec<Agent>, default_id: &str) -> Self {
+    /// Ids and aliases are settled here too (see [`AgentSet::load`] for
+    /// what is dropped; this reports nothing).
+    pub fn from_agents(mut agents: Vec<Agent>, default_id: &str) -> Self {
+        let _ = settle(&mut agents);
         let usable = |a: &&Agent| a.features.as_agent;
         let default_id = agents
             .iter()
@@ -461,8 +581,24 @@ impl AgentSet {
         &self.agents
     }
 
+    /// An agent by its id (what sessions, events and settings store).
     pub fn get(&self, id: &str) -> Option<&Agent> {
         self.agents.iter().find(|a| a.id == id)
+    }
+
+    /// An agent by its id or one of its aliases (what people type: an
+    /// `@mention`, a prompt's `agent_id`).
+    pub fn resolve(&self, handle: &str) -> Option<&Agent> {
+        self.get(handle).or_else(|| {
+            self.agents
+                .iter()
+                .find(|a| a.aliases.iter().any(|x| x == handle))
+        })
+    }
+
+    /// Whether `handle` is any agent's id or alias.
+    pub fn taken(&self, handle: &str) -> bool {
+        self.resolve(handle).is_some()
     }
 
     pub fn default_agent(&self) -> Option<&Agent> {
