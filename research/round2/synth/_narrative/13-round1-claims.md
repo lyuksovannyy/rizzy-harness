@@ -1,0 +1,174 @@
+## 13. Round 1 claims tested against the code
+
+Round 1 read documentation; Round 2 read the code at one pinned commit per repository. Every Round 1 claim that a Round 2 file checked against the code is a row in one of the ten tables of `round2/synth/_parts/docs-vs-code.md`, published in full in the appendix. This section counts them, lists every refutation, and selects the corrections and confirmations a design decision rests on.
+
+### Counts by verdict
+
+Counted from the table rows of `docs-vs-code.md`, one row per claim per group.
+
+| Feature group | Rows | Confirmed | Corrected | Refuted | Not in code | Not settled | New | Settled or answered | Other |
+|---|---|---|---|---|---|---|---|---|---|
+| 1. Agent loop, tool dispatch, durability | 41 | 24 | 11 | 3 | 1 | 0 | 1 | 0 | 1 |
+| 2. Approvals and permission rules | 210 | 107 | 56 | 13 | 2 | 0 | 32 | 0 | 0 |
+| 3. Sandboxing and where commands run | 46 | 27 | 17 | 0 | 1 | 0 | 0 | 1 | 0 |
+| 4. Credentials, secrets, authentication | 46 | 17 | 24 | 2 | 0 | 1 | 2 | 0 | 0 |
+| 5. Links, workers, client protocols | 73 | 41 | 24 | 3 | 3 | 1 | 1 | 0 | 0 |
+| 6. Sessions, resume, fork, checkpoints | 71 | 51 | 14 | 4 | 2 | 0 | 0 | 0 | 0 |
+| 7. Context, compaction, instructions, memory | 123 | 85 | 27 | 1 | 3 | 1 | 3 | 3 | 0 |
+| 8. Edit tools and mechanics | 40 | 16 | 16 | 3 | 4 | 1 | 0 | 0 | 0 |
+| 9. Sub-agents, models, fallback, retry | 47 | 17 | 21 | 7 | 1 | 0 | 0 | 1 | 0 |
+| 10. Extensibility and unattended operation | 70 | 46 | 18 | 2 | 1 | 0 | 0 | 3 | 0 |
+| **Total** | **767** | **431** | **228** | **38** | **18** | **4** | **39** | **8** | **1** |
+
+How the rows were counted, and where the tables differ:
+
+- The verdict column is free text. Each row is counted under the first verdict word. So "confirmed (corrected detail)", "confirmed with correction" and "confirmed (weaker)" count as confirmed; "refuted for retry, confirmed for fallback" and "refuted (app-server), corrected for exec-server" count as refuted; "refuted (not in code)" counts as refuted.
+- Group 2 uses lower-case headers and is the only large group that marks undocumented behaviour as `new` (32 rows). Its source notes one re-labelling: Hermes Agent's `execute_code` row, "not in code" in the repository file, was entered as "refuted".
+- Group 7 uses "unsettled" (counted as not settled) and "answered"; groups 3, 9 and 10 use "settled" for a Round 1 open question the code answered.
+- Group 8 capitalises its verdicts and uses "Not found" and "Not in code read" (counted as not in code).
+- Group 1 has one row, Cline's loop-detection default, with the verdict "docs and code disagree (read, not run)" (counted as other).
+- A claim can appear in several groups. The 38 refuted rows are 26 distinct claims: Cline's `requires_approval` appears in three tables, goose's `--max-tool-repetitions` in three, and Codex's listener claim in three.
+
+Overall, a little over half the checked claims held as written, about three in ten needed a correction, and one in twenty was contradicted by the code.
+
+### Refuted
+
+Every distinct Round 1 claim the code contradicts, most consequential for our design first.
+
+| Project | What the documentation or Round 1 said | What the code shows | Permalink |
+|---|---|---|---|
+| Cline | The model sets `requires_approval` per command; no fixed allowlist | No such field in the SDK or the extension; only a legacy string and the docs page | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/extensions/tools/schemas.ts#L133-L157 |
+| OpenCode | Denying `execute` removes Code Mode and the tools reachable only through it | The tools become direct tools | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/tool.ts#L265-L270 |
+| OpenCode | The `explore` agent is read-only | `shell *` is allowed; read-only shell is prompt-only | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/plugin/agent.ts#L80-L93 |
+| goose | Sub-agents are disabled in non-autonomous modes; default delegation timeout 5 minutes | The child inherits the mode and approvals are forwarded; no mode check; no sub-agent timeout | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/agents/platform_extensions/summon.rs#L416-L425 |
+| Hermes Agent | `execute_code` is sandboxed beyond environment stripping | The local back end runs a host kernel; no sandbox | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/code_execution_tool.py#L787-L802 |
+| Hermes Agent | Piping a URL into `sh` is on the hardline floor | It is an approvable dangerous pattern | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/approval_detection.py#L124-L157 |
+| Codex | Non-loopback WebSocket listeners are unauthenticated by default "during rollout" | The app-server refuses to start without auth; the exec-server's `--listen` has no such refusal (so: refuted for the app-server, corrected for the exec-server) | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/app-server-transport/src/transport/websocket.rs#L160-L175 |
+| Cline | `yoloModeAllowed: false` disables the YOLO toggle organisation-wide | No code reads it | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/shared/src/remote-config/schema.ts#L199-L201 |
+| Cline | MCP entries have `autoApprove` tool lists | No such field in the SDK schema; approval goes by tool-name policy | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/extensions/mcp/config-loader.ts#L46-L56 |
+| OpenHands | No plan mode | A read-only planner sub-conversation with three tools and `NeverConfirm` | https://github.com/OpenHands/OpenHands/blob/d7293dfd671e23dab182fe71c247ff05f48e780b/src/api/agent-server-adapter.ts#L1352-L1363 |
+| Warp | "Agent decides" is the default for shell commands | GUI default is `AlwaysAsk`; "Agent decides" is the TUI default only | https://github.com/warpdotdev/warp/blob/4b790f5fac9a2cc637c865aacbfa4f2cf64f6c39/crates/cloud_object_models/src/ai_execution_profile.rs#L399-L431 |
+| goose | `--max-tool-repetitions` limits repeated tool calls | The flag is not wired; the inspector is registered with no limit | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/tool_monitor.rs#L99-L134 |
+| Cline | "Spoke" workers run the loop, owned by the daemon | The hub runs the loop in-process; no spoke code | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/hub/server/hub-server-transport.ts#L334-L343 |
+| Cline | Checkpoints use a shadow Git repository separate from the project | Stash commits in the user's own repository under `refs/cline/checkpoints/...` | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/hooks/checkpoint-hooks.ts#L624-L640 |
+| Cline | A checkpoint commit after each tool use | One snapshot per user run, at the first model call | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/hooks/checkpoint-hooks.ts#L658-L708 |
+| Cline | Checkpoints work on folders that are not Git repositories | Not for the built-in snapshotter (a host callback can) | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/hooks/checkpoint-hooks.ts#L515-L533 |
+| DeepSeek harness | A fork cut inside an open turn is rejected | Accepted; the open turn is closed with `forked` closers | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/core/session/src/fork.ts#L21-L30 |
+| Hermes Agent | Default turn cap 500 (sub-agents 50) | Unlimited by default; sub-agents 250 | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/hermes_cli/config_defaults.py#L63-L66 |
+| goose | No generic retry or fallback | A generic retry exists in the provider layer; no fallback chain | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose-provider-types/src/retry.rs#L90-L158 |
+| OpenCode | (Round 1 synthesis) per-agent fallback chains with a `model_fallback` event | None exists in OpenCode | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/session/runner/model.ts#L81-L121 |
+| OpenCodex | Cooldowns are memory-only | Combo cooldowns are persisted to `combo-cooldowns.json` | https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/combos/cooldown-store.ts#L1-L25 |
+| Oh My Pi | Every line is tagged with a short content hash | One 16-bit xxh32 tag per file; lines are bare numbers | https://github.com/can1357/oh-my-pi/blob/e325ffc73ab86e03bdd20a91b77d8e2b3964c906/crates/pi-edit/src/store.rs#L70-L91 |
+| OpenClaw | Workspace files include `TOOLS.md` and `HEARTBEAT.md` | Neither is in the injected set | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/agents/workspace-bootstrap-policy.ts#L30-L37 |
+| Oh My Pi | Ten model roles including `designer` | 16 built-in roles, no `designer` | https://github.com/can1357/oh-my-pi/blob/e325ffc73ab86e03bdd20a91b77d8e2b3964c906/packages/coding-agent/src/config/model-roles.ts#L56-L91 |
+| Cline | A notification fires after 30 s for auto-approved commands | The 30 s is the default timeout; no notification on the SDK path | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/extensions/tools/executors/bash.ts#L837-L843 |
+| OpenCodex | Remote Workspace may be the `ocx-child` relay | `ocx-child` is Remote Link | https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/native/ocx-child/src/lib.rs#L1-L20 |
+
+### Corrected in ways that matter
+
+Corrections that change a design conclusion, not a number.
+
+| Project | What the documentation or Round 1 said | What the code shows | Permalink |
+|---|---|---|---|
+| OpenClaw | The node command gate is on the Gateway; the node decides | The node re-evaluates `system.run`, but a Gateway approval satisfies its allow-list; only a local deny holds | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/node-host/exec-policy.ts#L60-L117 |
+| OpenClaw | Cloud workers are outbound-only | The worker dials out, but the Gateway SSHes into the box for bootstrap and sync | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/gateway/worker-environments/ssh.ts#L259-L291 |
+| OpenClaw | GitHub publication through a Gateway broker; no GitHub credential on the worker | A turn-scoped GitHub token reaches the worker and its shell | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/worker/launch-descriptor.ts#L183-L211 |
+| OpenClaw | The writer claim is checked in the same transaction as every transcript write | Only for fenced writes; the claim is last-writer-wins, not a lock | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/config/sessions/session-accessor.sqlite-transcript-write-snapshot.ts#L104-L130 |
+| OpenClaw | An approval is bound to argv, cwd, env and the pinned executable | Also agent, session, node and device; env is a hash of the overrides only; "allow always" hashes only cwd and the arguments after the first | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/infra/system-run-approval-binding.ts#L72-L90 |
+| Codex | Hooks are trusted by hash; a changed hook needs review again | True for the declaration and plugin bundles; not for a script a repository hook calls | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/hooks/src/engine/discovery.rs#L972-L998 |
+| Codex | The `explorer` role is read-only | `explorer.toml` is empty; no restriction | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/core/src/agent/role.rs#L316-L376 |
+| Codex | Code Mode is under development and off by default | The flag is off, but the bundled catalog sets `code_mode_only` for most models | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/core/src/tools/mod.rs#L66-L76 |
+| Codex (as cited in `harnesses-round-1.md`) | Our Landlock residuals (pathname sockets, UDP, DNS) "are why Codex rejects Landlock" | The code names only socket isolation from the app-server; the rest was our inference | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/linux-sandbox/src/linux_run_main.rs#L386-L393 |
+| OpenCode | A durable per-session event log with sequence numbers | The code exists, but `persist` defaults to false and the shipped CLI never sets it | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/bus.ts#L214-L214 |
+| OpenCode | Plan mode denies edits and asks before bash | Edit tools only; shell, sub-agents and `execute` allowed | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/plugin/plan.ts#L33-L42 |
+| OpenCode | A custom sub-agent uses only its own permissions | Its agent's rules plus a creation-time copy of the parent's session rules | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/session.ts#L311-L314 |
+| OpenCode | The web UI is password-protected by default | One shared secret, no accounts, also accepted as `?auth_token=` | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/server/src/middleware/authorization.ts#L13-L40 |
+| Hermes Agent | The hardline floor holds even under YOLO, everywhere | Skipped on container back ends | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/approval.py#L1282-L1287 |
+| Hermes Agent | Headless modes default to deny | True for cron, `-q`, API and webhooks; `-z` and a bare library context auto-approve | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/approval.py#L1300-L1308 |
+| Hermes Agent | The iron-proxy covers remote and Docker sandboxes | Docker only; the agent's own model calls bypass it | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/environments/docker.py#L786-L812 |
+| DeepSeek harness | Approval resolution is a stage for every tool call | Reached only when a plugin returns `ask`; none does by default | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/core/tools/src/pipeline.ts#L197-L206 |
+| DeepSeek harness | Sandbox back ends report `full` or `partial` enforcement | Computed and stored on the tool result, shown to nobody | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/shell/bash-sandbox/src/index.ts#L115-L124 |
+| goose | The Code Mode JavaScript runtime is isolated | Isolated, but inner `tools.call` skips approval, inspectors and hooks | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/agents/platform_extensions/code_execution.rs#L172-L194 |
+| goose | An opt-in macOS Desktop Seatbelt sandbox | Removed; only a blog post remains | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/documentation/blog/2026-02-23-goose-v1-25-0/index.md#L19-L34 |
+| goose | `--container` runs extensions in Docker | Stdio and built-in extensions only; the Developer shell stays on the host | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/agents/extension_manager/mod.rs#L932-L948 |
+| goose | `--dangerously-unauthenticated` is for local use only | Nothing restricts it to loopback | https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose-cli/src/cli.rs#L1821-L1834 |
+| Cline | No hub authentication is documented | A per-start token, or a loopback `Origin` that any local process can send | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/hub/server/hub-websocket-server.ts#L676-L722 |
+| Cline | `beforeTool` hooks can skip, rewrite or force approval; VS Code needs "Enable Hooks" | True for in-process hooks only; file hooks can only cancel the run and allow on every failure; VS Code hooks default on | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/hooks/hook-file-hooks.ts#L415-L454 |
+| Cline | `CLINE_PLUGIN_MODE=sandbox` restricts plugins | Crash isolation only | https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/runtime/tools/worker-sandbox.ts#L267-L276 |
+| OpenHands | `ConfirmRisky` is the default confirmation policy | Canvas sends `NeverConfirm` unless stored settings enable confirmation | https://github.com/OpenHands/OpenHands/blob/d7293dfd671e23dab182fe71c247ff05f48e780b/src/api/agent-server-adapter.ts#L777-L789 |
+| OpenHands | Secret values stay out of the agent's reach | The session key, which can answer approvals, is in the agent's environment and secret store | https://github.com/OpenHands/OpenHands/blob/d7293dfd671e23dab182fe71c247ff05f48e780b/scripts/dev-with-automation.mjs#L975-L985 |
+| Zed | (not documented) how tool permissions apply to external agents | A settings comment claims deny and confirm precedence; no code consults `tool_permissions` for ACP agents | https://github.com/zed-industries/zed/blob/3def8bad0b62dbda02d5b67b00df96fe8d3957bd/crates/agent_servers/src/acp/v1.rs#L10172-L10225 |
+| Warp | ACP support appears only in changelog wording | An ACP client is implemented, with an auto-approving permission policy | https://github.com/warpdotdev/warp/blob/4b790f5fac9a2cc637c865aacbfa4f2cf64f6c39/app/src/ai/agent_sdk/driver/harness/acp/mod.rs#L1-L16 |
+| OpenCodex | Remote Workspace is read-only by default; writing needs a command-sandbox probe | The probe gates `exec`; read and write are always offered; read-only is the hub's per-session default | https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/remote-control/workspace-device.ts#L372-L384 |
+
+Two "new" rows, behaviour the documentation never mentioned, belong next to these because they change the same conclusions: Codex runs a command matched by an explicit `allow` rule outside the sandbox (https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/core/src/exec_policy.rs#L492-L512), and Oh My Pi merges project settings with no key filter, so a repository can loosen the approval mode (https://github.com/can1357/oh-my-pi/blob/e325ffc73ab86e03bdd20a91b77d8e2b3964c906/packages/coding-agent/src/config/settings.ts#L2800-L2814).
+
+Our own design note `docs/nodes-credentials-environments.md` §7 cited two documentation-level patterns that the code changes: Cline's "key sent per session, never written" is confirmed only in part, with no lifetime on the remote found; "inference proxied by the control side" is confirmed for OpenClaw, Oh My Pi's gateway and OpenCodex, and OpenClaw also keeps a worker-local mode (see "Credentials, secrets and authentication" in `round2/synth/_parts/docs-vs-code.md`).
+
+### Confirmed and now safe to build on
+
+Documented mechanisms the code bears out, which our design leans on.
+
+| Project | Mechanism | Permalink |
+|---|---|---|
+| Codex | Rules take the most restrictive decision across all matches | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/execpolicy/src/policy.rs#L577-L595 |
+| Codex | A custom agent cannot override sandbox, approval policy, provider or MCP; the parent's policy is re-applied last | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/core/src/agent/child_config.rs#L197-L218 |
+| Codex | Project trust gates project config, hooks and exec policies | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/config/src/loader/mod.rs#L1100-L1170 |
+| Codex | Linux sandbox is bubblewrap then seccomp, two stages | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/linux-sandbox/src/linux_run_main.rs#L265-L321 |
+| Codex | A command whose sandbox cannot be enforced is refused | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/exec-server/src/process_sandbox.rs#L226-L230 |
+| Codex | `.git`, `.agents`, `.codex`, `.aws` are protected | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/protocol/src/permissions.rs#L49-L54 |
+| Codex | WebSocket auth happens at the HTTP upgrade; a bad `Origin` gets 403 | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/app-server-transport/src/transport/websocket.rs#L99-L130 |
+| Codex | The daemon Unix socket is host-local: 0700 directory, 0600 socket | https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/app-server-transport/src/transport/unix_socket.rs#L322-L352 |
+| OpenClaw | Each dispatch mints a credential; only a domain-tagged hash bound to the turn claim is stored | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/gateway/worker-environments/credential.ts#L41-L60 |
+| OpenClaw | Owner-epoch fencing rejects stale workers, revalidated per request | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/gateway/worker-environments/admission.ts#L188-L218 |
+| OpenClaw | A closed, default-reject method allow-list on the worker route | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/packages/gateway-protocol/src/schema/worker-admission.ts#L54-L66 |
+| OpenClaw | Provider keys stay on the Gateway; workers request inference by model reference | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/gateway/worker-environments/inference-model.ts#L91-L124 |
+| OpenClaw | Executable resolution re-checked before launch; drift denies | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/infra/system-run-approval-binding.ts#L550-L620 |
+| OpenClaw | Accepted input is stored before the Gateway acknowledges it | https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/state/openclaw-agent-schema.sql#L897-L914 |
+| Hermes Agent | `approvals.deny` runs before YOLO on all back ends and sees through `sudo`, `env`, `sh -c` | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/approval_detection.py#L1623-L1664 |
+| Hermes Agent | Dangerous commands denied in cron by default | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/hermes_cli/config_defaults.py#L1658-L1662 |
+| Hermes Agent | A non-loopback dashboard fails closed without auth; `--insecure` is ignored | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/hermes_cli/main_dashboard.py#L640-L662 |
+| Hermes Agent | Stdio MCP servers get a safe environment baseline | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/tools/mcp_tool_config.py#L199-L207 |
+| Hermes Agent | A crashed turn is marked `unknown` and never replayed | https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/hermes_state_runtime.py#L453-L464 |
+| DeepSeek harness | Approval fails closed and grants only once; `never` is enforced before any answerer | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/interaction/user-approval/src/index.ts#L293-L333 |
+| DeepSeek harness | A failed audit append rejects the request | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/interaction/user-approval/src/index.ts#L224-L261 |
+| DeepSeek harness | No sandbox back end means `SANDBOX_UNAVAILABLE`, never a pass-through | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/sandbox/sandbox-local/src/index.ts#L499-L524 |
+| DeepSeek harness | One live writer per session (`flock`) | https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/session/session-persistence-jsonl/src/lease.ts#L70-L116 |
+| Oh My Pi | Hooks cannot bypass approval; policy re-resolved after a rewrite | https://github.com/can1357/oh-my-pi/blob/e325ffc73ab86e03bdd20a91b77d8e2b3964c906/packages/coding-agent/src/extensibility/extensions/wrapper.ts#L355-L374 |
+| Pi | MCP calls, including nested code-mode calls, pass through the normal tool pipeline | https://github.com/earendil-works/pi/blob/91d9719b4123a83816249d7a7917c75126bb55af/packages/coding-agent/src/core/agent-session.ts#L719-L742 |
+| Pi | pi-env keeps credentials local; only the tools move | https://github.com/earendil-works/pi/blob/91d9719b4123a83816249d7a7917c75126bb55af/packages/env/src/remote-env.ts#L55-L58 |
+| OpenCode | Nested Code Mode tools enforce their own permissions | https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/core/src/codemode/tool.ts#L126-L145 |
+| Zed | Precedence: built-in, deny, confirm, allow, tool default, global default | https://github.com/zed-industries/zed/blob/3def8bad0b62dbda02d5b67b00df96fe8d3957bd/crates/agent/src/tool_permissions.rs#L208-L260 |
+| Zed | Sandbox grants once, for the thread, or always | https://github.com/zed-industries/zed/blob/3def8bad0b62dbda02d5b67b00df96fe8d3957bd/crates/agent/src/sandboxing.rs#L292-L400 |
+| OpenCodex | One-time pairing code; the hub stores only a hash of the bearer; rate-limited | https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/remote-control/workspace-hub.ts#L377-L412 |
+| OpenCodex | Model scope checked against the resolved route, after aliases | https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/server/admission-model-scope.ts#L71-L76 |
+
+### What this says about reading documentation
+
+The errors are not random. Five kinds of claim went wrong most often.
+
+**Enforcement that is prompt-only.** Documentation describes a mode by its intent; the code often enforces it with a sentence in the system prompt. Codex plan mode (https://github.com/openai/codex/blob/82e6bacb9c6950d3b56cb153847fa80bdd698053/codex-rs/core/src/tools/handlers/plan.rs#L87-L91) and its `explorer` role, OpenCode's `explore` agent and the shell in its plan mode, Hermes Agent's plan mode (https://github.com/NousResearch/hermes-agent/blob/95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02/agent/plan_prompt.py#L1-L27), DeepSeek harness's plan mode, and OpenCodex's "never falls back to the hub filesystem", which is an instruction plus the absence of a local tool path (https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/remote-control/workspace-tools.ts#L212-L225). Cline's plan-mode command blacklist says in its own comment that `python -c` gets through.
+
+**Defaults.** The documented default was wrong or applied to another surface: Hermes Agent's turn cap, Warp's "Agent decides", OpenHands' `ConfirmRisky`, Codex's Code Mode (off by flag, on by catalog), OpenCode's durable log (`persist` false), Cline's hooks (default on, https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/apps/vscode/src/core/hooks/hooks-utils.ts#L6-L8), Cline's checkpoints (opt-in in the core, on in the CLI, https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/apps/cli/src/runtime/defaults.ts#L17-L24) and Cline's loop detection (docs say off; the code runs it unless the setting is exactly `false`, read not run, https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/core/src/runtime/orchestration/session-runtime-orchestrator.ts#L1524-L1554).
+
+**Described as on, but off or not wired.** goose's `--max-tool-repetitions`; Cline's `yoloModeAllowed` and `.clineignore`; goose's `GOOSE_CONTEXT_STRATEGY`, which no code reads (https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/agents/state_machine/ops_compaction.rs#L105-L116); goose's argument-hashed permission store, which is dead code (https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/permission/permission_store.rs#L79-L115); DeepSeek harness's read-before-edit check, disabled in the shipped base bundle (https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/bundle/base/cordis.patch.yml#L292-L294); Cline's hub roles, which are a type no authorisation reads (https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/sdk/packages/shared/src/hub.ts#L225-L230); DeepSeek harness's enforcement level, computed and shown to nobody.
+
+**Features removed.** goose's Seatbelt sandbox; Cline's VS Code YOLO toggle (https://github.com/cline/cline/blob/500a40e7b76692153906b44dd68732520a966663/apps/vscode/src/hosts/vscode/vscode-to-file-migration.ts#L282-L313) and its model-set `requires_approval`; OpenHands' microagents, renamed to skills (https://github.com/OpenHands/OpenHands/blob/d7293dfd671e23dab182fe71c247ff05f48e780b/src/utils/skill-scope.ts#L11-L19). The documentation pages still describe them; Cline's docs page still describes the old flag (see "Edit tools and the mechanics behind the scenes" in `round2/synth/_parts/docs-vs-code.md`).
+
+**Words that promise a property the code lacks.** `CLINE_SANDBOX` relocates the data directory; `CLINE_PLUGIN_MODE=sandbox` is crash isolation; Warp's `--sandboxed` is a flag the caller sets about itself (https://github.com/warpdotdev/warp/blob/4b790f5fac9a2cc637c865aacbfa4f2cf64f6c39/crates/warp_cli/src/agent.rs#L621-L623).
+
+The 39 `new` rows add a sixth lesson: the most security-relevant behaviour was often undocumented rather than misdocumented. Codex's `allow` rule leaving the sandbox, OpenCode's HTTP session rules appended last (https://github.com/anomalyco/opencode/blob/05d347d75054bf27778750ad5f2cd30336e81d8f/packages/server/src/handlers/session.ts#L101-L120), OpenHands' server-level bash (https://github.com/OpenHands/OpenHands/blob/d7293dfd671e23dab182fe71c247ff05f48e780b/src/api/bash-service/bash-service.api.ts#L24-L44), goose trusting `readOnlyHint` (https://github.com/aaif-goose/goose/blob/14bf51817b79f6e98ca73c6eda61c11d9d5cc892/crates/goose/src/permission/permission_inspector.rs#L172-L176) and Warp launching other agents with their safety flags off (https://github.com/warpdotdev/warp/blob/4b790f5fac9a2cc637c865aacbfa4f2cf64f6c39/app/src/pane_group/pane/local_harness_launch.rs#L120-L137) were all absent from the documentation.
+
+**Reviewer-confirmed in Round 1, refuted by the code.** Round 1's independent reviewers re-opened the documentation URLs and confirmed that the documentation said what the survey reported. Seven claims they marked `reviewed` are contradicted by the code:
+
+| Claim | Round 1 file where it is labelled `reviewed` | Round 2 refutation |
+|---|---|---|
+| Cline: the model sets `requires_approval`; a notification after 30 s | `round1/synth/01-loop-tools-editing-shell.md` (Cline `run_commands` row); `round1/synth/10-config-licence-distinctive.md` | see "Refuted" above |
+| goose: sub-agents are disabled in non-autonomous modes | `round1/synth/02-permissions-sandbox-security.md` | see "Refuted" above |
+| OpenCode: denying `execute` removes the tools reachable only through it | `round1/synth/01-loop-tools-editing-shell.md`; `round1/synth/06-extensibility.md` | see "Refuted" above |
+| OpenCode: `explore` is read-only | `round1/synth/04-planning-subagents-background.md` | see "Refuted" above |
+| Cline: a shadow Git repository commits after each tool use | `round1/synth/05-sessions-git.md`; `round1/synth/10-config-licence-distinctive.md` | see "Refuted" above |
+| Hermes Agent: iteration budget default 500 | `round1/synth/07-models-observability.md` | see "Refuted" above |
+| Oh My Pi: ten model roles including `designer` | `round1/synth/07-models-observability.md`; `round1/synth/04-planning-subagents-background.md` | see "Refuted" above |
+
+The reviewers did their job: the documentation does say these things. The lesson is about what a documentation review can establish. It confirms what a vendor wrote, not what the program does, and the claims it confirmed most confidently were the ones about safety modes and defaults, which are exactly the claims the code contradicted most often. For anything our design copies from another harness, the evidence must be a line of code at a pinned commit.
