@@ -1235,6 +1235,35 @@ mod tests {
         p
     }
 
+    /// `exec` of a script this test just wrote, tolerating ETXTBSY.
+    ///
+    /// Writing the script and executing it in one process races with other
+    /// test threads: a thread that forks while our write descriptor is open
+    /// gives the child a copy, held until that child's `exec`, and the kernel
+    /// refuses to execute a file with a writer (`Text file busy`). The
+    /// descriptor is close-on-exec, so the window is tiny, but it cannot be
+    /// closed from here, and renaming does not help (same inode). A failed
+    /// spawn ran nothing, so retrying it is safe; only ETXTBSY is retried,
+    /// and only for a bounded time.
+    async fn exec_script(
+        fake: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<std::process::Output, String> {
+        let mut tries = 0;
+        loop {
+            let mut c = hardened(fake);
+            c.args(args);
+            match exec(c, None, timeout).await {
+                Err(e) if e.contains("Text file busy") && tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                r => return r,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_hung_git_is_killed_at_the_timeout() {
         let d = tempfile::tempdir().unwrap();
@@ -1245,7 +1274,7 @@ mod tests {
             &format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display()),
         );
         let t = std::time::Instant::now();
-        let e = exec(hardened(&fake), None, Duration::from_millis(300))
+        let e = exec_script(&fake, &[], Duration::from_millis(300))
             .await
             .unwrap_err();
         assert!(e.contains("did not finish"), "{e}");
@@ -1268,9 +1297,7 @@ mod tests {
     async fn git_gets_a_clean_environment_and_the_overrides() {
         let d = tempfile::tempdir().unwrap();
         let fake = fake_git(d.path(), "env; echo ARGS \"$@\"");
-        let mut c = hardened(&fake);
-        c.arg("status");
-        let out = exec(c, None, GIT_TIMEOUT).await.unwrap();
+        let out = exec_script(&fake, &["status"], GIT_TIMEOUT).await.unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let allowed = [
             "PATH", "HOME", "LANG", "TMPDIR", "PWD", "SHLVL", "_", "OLDPWD",
