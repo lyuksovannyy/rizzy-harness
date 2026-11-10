@@ -180,7 +180,7 @@ async fn kill_mid_stream_restart_and_replay_exactly() {
     let sid = s1
         .post(
             "/api/sessions",
-            json!({"cwd": ws_dir.display().to_string(), "title": "acceptance"}),
+            json!({"cwd": ws_dir.display().to_string(), "title": "acceptance", "agent_id": "coder"}),
         )
         .await["session_id"]
         .as_str()
@@ -276,7 +276,7 @@ async fn kill_while_waiting_for_approval() {
     let sid = s1
         .post(
             "/api/sessions",
-            json!({"cwd": ws_dir.display().to_string()}),
+            json!({"cwd": ws_dir.display().to_string(), "agent_id": "coder"}),
         )
         .await["session_id"]
         .as_str()

@@ -1199,7 +1199,7 @@ async fn agentic_runs_wait_for_approval_and_time_out() {
         &alex,
         None,
         "Orchestrate",
-        spec("ultracode", "delegate: coder=run: echo hi"),
+        spec("teamlead", "delegate: coder=run: echo hi"),
         every(60),
     )
     .await;

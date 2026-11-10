@@ -1,4 +1,4 @@
-//! Ultracode delegation: parallel child sessions, caps, depth one, owner
+//! Teamlead delegation: parallel child sessions, caps, depth one, owner
 //! inheritance, cancel cascading to children.
 
 use std::sync::Arc;
@@ -87,9 +87,9 @@ fn outputs(evs: &[RawEvent]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn ultracode_delegates_in_parallel_within_caps() {
+async fn teamlead_delegates_in_parallel_within_caps() {
     let (m, ws, _d) = setup().await;
-    let sid = session(&m, &ws, "ultracode").await;
+    let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
         "delegate: coder=slow: 20 | scout=slow: 20 | writer=draft notes | coder=delegate: scout=nested | scout=fifth".into(),
@@ -148,18 +148,36 @@ async fn ultracode_delegates_in_parallel_within_caps() {
         && e.payload["text"].as_str().unwrap().starts_with("session: ")));
 
     // A plain agent gets no delegate tool at all.
-    let plain = session(&m, &ws, "coder").await;
+    let plain = session(&m, &ws, "reviewer").await;
     m.prompt(plain, "delegate: scout=x".into(), PromptOpts::default())
         .await
         .unwrap();
     let evs = turns_ended(&m, plain, 1).await;
     assert!(outputs(&evs)[0].contains("unknown tool `delegate`"));
+
+    // Agents that run only as agents are handed no sub-task, named by id
+    // or by alias: the node refuses what is not in the roster.
+    m.prompt(
+        sid,
+        "delegate: general=x | teamlead=y | ai=z".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let outs: Vec<String> = outputs(&evs).into_iter().skip(5).collect();
+    assert_eq!(outs.len(), 3, "{outs:#?}");
+    assert!(
+        outs.iter()
+            .all(|o| o.contains("is not an agent this one can delegate to")),
+        "{outs:#?}"
+    );
 }
 
 #[tokio::test]
 async fn cancelling_the_parent_cancels_children() {
     let (m, ws, _d) = setup().await;
-    let sid = session(&m, &ws, "ultracode").await;
+    let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
         "delegate: coder=slow: 500".into(),
@@ -210,7 +228,7 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
     // Uncommitted user work is visible to the sub-agents.
     std::fs::write(format!("{ws}/draft.txt"), "wip\n").unwrap();
 
-    let sid = session(&m, &ws, "ultracode").await;
+    let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
         "delegate: coder=run: cat draft.txt > a.txt | coder=run: echo b > b.txt".into(),

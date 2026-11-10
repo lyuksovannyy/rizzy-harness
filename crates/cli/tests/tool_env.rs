@@ -105,7 +105,7 @@ async fn embedded_node_shell_sees_only_allowed_variables() {
     let sid = s
         .post(
             "/api/sessions",
-            json!({"cwd": ws.display().to_string(), "approval_mode": "auto"}),
+            json!({"cwd": ws.display().to_string(), "approval_mode": "auto", "agent_id": "coder"}),
         )
         .await["session_id"]
         .as_str()

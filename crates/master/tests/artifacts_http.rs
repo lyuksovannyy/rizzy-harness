@@ -171,7 +171,8 @@ async fn account(t: &T, admin: &str, name: &str, agentic: bool) -> String {
 
 /// An agentic chat of `c`'s on the worker, in `ws` (default: active).
 async fn chat(t: &T, c: &str, ws: Option<&str>) -> String {
-    let mut body = json!({"profile": "agentic", "cwd": t.work, "approval_mode": "auto"});
+    let mut body = json!({"profile": "agentic", "cwd": t.work, "approval_mode": "auto",
+                          "agent_id": "coder"});
     if let Some(w) = ws {
         body["workspace_id"] = json!(w);
     }

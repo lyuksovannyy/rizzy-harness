@@ -62,7 +62,7 @@ impl Server {
         let (st, v) = self
             .post(
                 "/api/sessions",
-                json!({"cwd": cwd.display().to_string(), "approval_mode": "auto"}),
+                json!({"cwd": cwd.display().to_string(), "approval_mode": "auto", "agent_id": "coder"}),
             )
             .await;
         assert!(st.is_success(), "{st} {v}");
@@ -140,7 +140,10 @@ async fn sessions_and_tools_stay_out_of_the_data_dir() {
     // The folder above the data directory, and the data directory itself.
     for cwd in [dir.path().to_path_buf(), data.clone()] {
         let (st, v) = s
-            .post("/api/sessions", json!({"cwd": cwd.display().to_string()}))
+            .post(
+                "/api/sessions",
+                json!({"cwd": cwd.display().to_string(), "agent_id": "coder"}),
+            )
             .await;
         assert!(!st.is_success(), "{} accepted: {v}", cwd.display());
         let msg = v.to_string();

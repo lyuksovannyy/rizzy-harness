@@ -962,7 +962,7 @@ async fn inherited_fallbacks_and_effort() {
     assert_eq!(coder.model.as_deref(), Some("loc::a"));
     assert_eq!(coder.fallbacks, ["loc::b"], "General's, inherited");
     assert_eq!(coder.unavailable, ["loc::a"]);
-    let ultra = t.master.agent_spec(Some("ultracode"), None).unwrap();
+    let ultra = t.master.agent_spec(Some("teamlead"), None).unwrap();
     assert_eq!(ultra.fallbacks, ["loc::b"]);
     assert!(!ultra.delegates.is_empty());
     for d in &ultra.delegates {
@@ -987,8 +987,11 @@ async fn inherited_fallbacks_and_effort() {
     let coder = t.master.agent_spec(Some("coder"), None).unwrap();
     assert_eq!(coder.model.as_deref(), Some("loc::c"));
     assert!(coder.fallbacks.is_empty());
-    let scout = t.master.agent_spec(Some("scout"), Some("loc::c")).unwrap();
-    assert!(scout.fallbacks.is_empty());
+    let reviewer = t
+        .master
+        .agent_spec(Some("reviewer"), Some("loc::c"))
+        .unwrap();
+    assert!(reviewer.fallbacks.is_empty());
 }
 
 /// Every agent has a stable avatar from its id until an admin sets one,

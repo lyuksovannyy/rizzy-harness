@@ -253,14 +253,20 @@ async fn built_ins_take_a_summary_and_additional_instructions_only() {
 async fn custom_agents_are_made_changed_kept_and_deleted() {
     let t = start().await;
     let body = |id: &str| json!({"id": id, "name": "Reviewer", "summary": "Reviews.", "prompt": "Review it.", "features": features()});
-    let (st, d) = call(&t, Method::POST, "/api/agents", Some(body("reviewer"))).await;
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(body("checker"))).await;
     assert_eq!(st, StatusCode::OK, "{d}");
     assert_eq!(d["origin"], "custom");
     assert_eq!(d["prompt"], "Review it.");
-    assert_eq!(listed(&t, "reviewer").await["description"], "Reviews.");
+    assert_eq!(listed(&t, "checker").await["description"], "Reviews.");
     for (id, code) in [
-        ("reviewer", StatusCode::CONFLICT),
+        ("checker", StatusCode::CONFLICT),
         ("coder", StatusCode::CONFLICT),
+        // Built-in ids and aliases are taken too.
+        ("reviewer", StatusCode::CONFLICT),
+        ("teamlead", StatusCode::CONFLICT),
+        ("ai", StatusCode::CONFLICT),
+        ("dev", StatusCode::CONFLICT),
+        ("research", StatusCode::CONFLICT),
         ("new", StatusCode::CONFLICT),
         ("Bad Id", StatusCode::BAD_REQUEST),
     ] {
@@ -281,13 +287,28 @@ async fn custom_agents_are_made_changed_kept_and_deleted() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(
         t.master.agents().get("lead").unwrap().delegates,
-        ["general", "coder", "writer", "scout", "reviewer"]
+        [
+            "smol",
+            "researcher",
+            "coder",
+            "writer",
+            "scout",
+            "reviewer",
+            "checker"
+        ]
     );
+    // Nor as an alias.
+    for alias in ["ai", "dev", "research", "scout"] {
+        let mut b = body("fresh");
+        b["aliases"] = json!([alias]);
+        let (st, v) = call(&t, Method::POST, "/api/agents", Some(b)).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{alias}: {v}");
+    }
 
     let (st, d) = call(
         &t,
         Method::PATCH,
-        "/api/agents/reviewer",
+        "/api/agents/checker",
         Some(json!({"summary": "Reviews code.", "prompt": "Review carefully."})),
     )
     .await;
@@ -299,7 +320,7 @@ async fn custom_agents_are_made_changed_kept_and_deleted() {
     let (st, _) = call(
         &t,
         Method::PATCH,
-        "/api/agents/reviewer",
+        "/api/agents/checker",
         Some(json!({"instructions": "More."})),
     )
     .await;
@@ -313,20 +334,20 @@ async fn custom_agents_are_made_changed_kept_and_deleted() {
     again.load_agent_edits().await.unwrap();
     let kept = again.agents();
     assert_eq!(
-        kept.get("reviewer").unwrap().spec.system_prompt,
+        kept.get("checker").unwrap().spec.system_prompt,
         "Review carefully."
     );
     assert!(kept.get("lead").is_some());
 
     // A chat of a deleted agent goes on with the default one.
-    let sid = chat(&t, "reviewer", "first").await;
+    let sid = chat(&t, "checker", "first").await;
     assert!(last_request(&t).0.starts_with("Review carefully."));
-    let (st, _) = call(&t, Method::DELETE, "/api/agents/reviewer", None).await;
+    let (st, _) = call(&t, Method::DELETE, "/api/agents/checker", None).await;
     assert_eq!(st, StatusCode::OK);
-    assert!(listed(&t, "reviewer").await.is_null());
+    assert!(listed(&t, "checker").await.is_null());
     assert_eq!(
         t.master.agents().get("lead").unwrap().delegates,
-        ["general", "coder", "writer", "scout"]
+        ["smol", "researcher", "coder", "writer", "scout", "reviewer"]
     );
     say(&t, &sid, "second").await;
     assert!(

@@ -1146,7 +1146,11 @@ impl Master {
         // refused, not dropped: the user named an agent that exists, and an
         // answer from another one would read as if it came from that one.
         // A mention of no agent at all is just text ("@everyone").
-        let mention = match leading_mention(&text).filter(|_| reply.is_none()) {
+        // Only read when nothing ahead of it chose: a routine's or the
+        // popup's explicit agent wins, and an event's text cannot fail the
+        // turn by starting with such a mention.
+        let named = asker.or(agent_id);
+        let mention = match leading_mention(&text).filter(|_| reply.is_none() && named.is_none()) {
             Some(handle) => match r.top_level(handle) {
                 Ok(a) => Some(a.id.clone()),
                 Err(e @ CommandError::SubagentOnly { .. }) => return Err(e),
@@ -1156,7 +1160,7 @@ impl Master {
         };
         // A chat whose agent was deleted goes on with the default one.
         let kept = r.session_agent(row.agent_id.as_deref());
-        let chosen = asker.or(agent_id).or(mention).or(kept);
+        let chosen = named.or(mention).or(kept);
         let session_model = self.session_model(&row).await;
         let mut agent = r.agent_spec_with(
             chosen.as_deref(),

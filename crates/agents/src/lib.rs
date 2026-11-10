@@ -61,12 +61,18 @@ pub const MAX_CATEGORY: usize = 32;
 /// Most aliases one agent may have.
 pub const MAX_ALIASES: usize = 8;
 
+/// The built-in roster, in the order the UI lists it. `ultracode` was
+/// removed: chats and routines that name it fall back like any unknown
+/// agent (the master's `Resolver::session_agent`).
 const BUILTIN: &[(&str, &str)] = &[
     ("general", include_str!("../builtin/general.md")),
+    ("smol", include_str!("../builtin/smol.md")),
+    ("researcher", include_str!("../builtin/researcher.md")),
     ("coder", include_str!("../builtin/coder.md")),
+    ("teamlead", include_str!("../builtin/teamlead.md")),
     ("writer", include_str!("../builtin/writer.md")),
     ("scout", include_str!("../builtin/scout.md")),
-    ("ultracode", include_str!("../builtin/ultracode.md")),
+    ("reviewer", include_str!("../builtin/reviewer.md")),
 ];
 
 #[derive(Debug, thiserror::Error)]

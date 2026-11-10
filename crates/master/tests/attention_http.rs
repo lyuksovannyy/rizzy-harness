@@ -174,7 +174,7 @@ async fn approvals_and_questions_need_attention_until_handled() {
     let a = req(
         Method::POST,
         "/api/sessions",
-        Some(json!({"profile": "agentic", "cwd": ws})),
+        Some(json!({"profile": "agentic", "cwd": ws, "agent_id": "coder"})),
     )
     .await["session_id"]
         .as_str()

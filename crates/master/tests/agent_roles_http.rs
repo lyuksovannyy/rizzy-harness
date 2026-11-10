@@ -196,7 +196,17 @@ async fn a_subagent_only_agent_never_runs_a_chat() {
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     assert!(says_subagent(&v), "{v}");
-    // Nothing ran; an ordinary prompt still does, as the session's agent.
+    // With an explicit agent the text is only text: a routine's event
+    // starting with such a mention cannot fail its turn.
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "@helper look at this", "agent_id": "general"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
+    // Nothing else ran; an ordinary prompt still does, as the chat's agent.
     let (st, _) = post(
         &t,
         &format!("/api/sessions/{sid}/prompt"),
@@ -204,8 +214,11 @@ async fn a_subagent_only_agent_never_runs_a_chat() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
-    assert_eq!(turn_agents(&evs), ["general"]);
+    let evs = events_until(&t, &sid, |e| {
+        e.iter().filter(|x| x.kind == "turn_ended").count() == 2
+    })
+    .await;
+    assert_eq!(turn_agents(&evs), ["general", "general"]);
     assert!(!evs.iter().any(|e| e.kind == "agent_changed"));
 }
 
@@ -225,6 +238,137 @@ async fn a_chat_whose_agent_became_subagent_only_runs_as_the_default() {
     assert_eq!(st, StatusCode::OK, "{v}");
     let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
     assert_eq!(turn_agents(&evs), ["general"]);
+}
+
+/// The built-in roster: `@scout` is refused (Scout is a sub-agent only),
+/// `@ai` is the Assistant, stored as `general`.
+#[tokio::test]
+async fn built_in_mentions_and_aliases() {
+    let t = start().await;
+    let sid = chat(&t, None).await;
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "@scout where is main?"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("sub-agent"), "{v}");
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/agent"),
+        json!({"agent_id": "writer"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "@ai hello"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
+    assert_eq!(turn_agents(&evs), ["general"]);
+    assert!(evs.iter().any(|e| matches!(e.typed(),
+        Ok(EventKind::AssistantMessage(m)) if m.author.as_deref() == Some("general"))));
+    // The mention routed one turn; the chat's agent stays the Writer.
+    let row = get(&t, &format!("/api/sessions/{sid}")).await;
+    assert_eq!(row["agent_id"], "writer");
+    // An explicit alias is stored as the id too.
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/agent"),
+        json!({"agent_id": "research"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "agent_changed")).await;
+    let row = get(&t, &format!("/api/sessions/{sid}")).await;
+    assert_eq!(row["agent_id"], "researcher");
+}
+
+/// Chats made with Ultracode, which is gone, still take prompts: they run
+/// as the default agent, never as a more capable stand-in.
+#[tokio::test]
+async fn an_ultracode_chat_runs_as_the_default_agent() {
+    let t = start().await;
+    let mut old = builtins();
+    old.push(
+        parse(
+            "ultracode",
+            "---\nname: Ultracode\ntools: all\navailable_as: [agent]\n---\nOrchestrate.\n",
+            false,
+        )
+        .unwrap(),
+    );
+    t.master
+        .set_agents(AgentSet::from_agents(old, harness_agents::DEFAULT_AGENT));
+    let sid = chat(&t, Some("ultracode")).await;
+    t.master.set_agents(agents("[subagent]"));
+    let (st, v) = post(
+        &t,
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "hello"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let evs = events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "turn_ended")).await;
+    assert_eq!(turn_agents(&evs), ["general"]);
+    // Naming it is an unknown agent, as for any other removed id.
+    let (st, _) = post(
+        &t,
+        &format!("/api/sessions/{sid}/agent"),
+        json!({"agent_id": "ultracode"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+/// Agent-only agents (the Teamlead, the Assistant) are in no roster, and a
+/// sub-agent's spec never carries delegates of its own: depth one.
+#[test]
+fn rosters_of_the_built_ins() {
+    let m = Master::new(
+        Store::open_in_memory().unwrap(),
+        Auth::new(Secret::new("t".into()), vec![], false),
+    );
+    let mut all = builtins();
+    all.push(
+        parse(
+            "greedy",
+            "---\nname: Greedy\ntools: all\ndelegates: [teamlead, general, ai, dev]\n---\nGo.\n",
+            false,
+        )
+        .unwrap(),
+    );
+    m.set_agents(AgentSet::from_agents(all, harness_agents::DEFAULT_AGENT));
+    let ids = |spec: &harness_core::agent::AgentSpec| -> Vec<String> {
+        spec.delegates.iter().map(|d| d.agent_id.clone()).collect()
+    };
+    let greedy = m.agent_spec(Some("greedy"), None).unwrap();
+    assert_eq!(ids(&greedy), ["coder"], "aliases resolve; agent-only go");
+    let lead = m.agent_spec(Some("teamlead"), None).unwrap();
+    assert_eq!(
+        ids(&lead),
+        ["coder", "researcher", "writer", "scout", "reviewer"]
+    );
+    let coder = lead
+        .delegates
+        .iter()
+        .find(|d| d.agent_id == "coder")
+        .unwrap();
+    assert!(coder.delegates.is_empty() && coder.caps.is_none());
+    // As a chat's agent the Software Developer may delegate.
+    let dev = m.agent_spec(Some("dev"), None).unwrap();
+    assert_eq!(dev.agent_id, "coder");
+    assert_eq!(ids(&dev), ["scout", "researcher", "reviewer"]);
+    assert!(
+        m.agent_spec(Some("general"), None)
+            .unwrap()
+            .delegates
+            .is_empty()
+    );
 }
 
 #[test]
