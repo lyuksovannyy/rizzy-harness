@@ -1,7 +1,7 @@
 //! One session: the single writer of its log, the running turn, and the
 //! approval gate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +43,9 @@ pub(crate) struct Session {
     parent_session: Option<SessionId>,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
+    /// Tools a person approved in the running turn. "Allow for this turn"
+    /// counts only once the tool is in here (cleared when a turn starts).
+    turn_approved: Mutex<HashSet<String>>,
 }
 
 /// What the user sent with a prompt.
@@ -104,6 +107,7 @@ impl Session {
             parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            turn_approved: Mutex::new(HashSet::new()),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
@@ -147,6 +151,7 @@ impl Session {
             parent_session: meta.parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            turn_approved: Mutex::new(HashSet::new()),
         }))
     }
 
@@ -403,6 +408,10 @@ impl Session {
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
             .await
             .unwrap_or_default();
+        self.turn_approved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         self.emit(EventKind::TurnStarted(TurnStarted {
             agent: agent.as_ref().map(AgentSpec::agent_ref),
             turn_id: turn_id.clone(),
@@ -655,6 +664,7 @@ impl Session {
         agent: AgentSpec,
         task: String,
         refs: SharedRefs,
+        observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
@@ -722,6 +732,7 @@ impl Session {
         let extra = TurnExtra {
             savings,
             refs: Some(refs),
+            observed: Some(observed),
             ..Default::default()
         };
         let (reason, usage) = child
@@ -898,10 +909,12 @@ impl TurnHost for Session {
         agent: AgentSpec,
         task: String,
         refs: SharedRefs,
+        observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
-        self.run_child(agent, task, refs, cancel, started).await
+        self.run_child(agent, task, refs, observed, cancel, started)
+            .await
     }
 
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
@@ -962,6 +975,7 @@ impl TurnHost for Session {
                 tool: tool.into(),
                 input: input.clone(),
                 reason: format!("`{tool}` is denied by this node's policy"),
+                turn_allow: false,
             }))
             .await;
             self.emit(EventKind::ApprovalResolved(ApprovalResolved {
@@ -975,6 +989,13 @@ impl TurnHost for Session {
         if !self.mode.needs_approval(risk) {
             return Decision::Allow;
         }
+        // "For this turn" is offered, and honoured, only after this tool has
+        // been approved once in the turn, so its first call is always seen.
+        let turn_allow = self
+            .turn_approved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(tool);
         let approval_id = new_id();
         let (tx, rx) = oneshot::channel();
         self.approvals
@@ -987,6 +1008,7 @@ impl TurnHost for Session {
             tool: tool.into(),
             input: input.clone(),
             reason: approval_reason(tool, risk),
+            turn_allow,
         }))
         .await;
         let cancel = self.current_cancel().unwrap_or_default();
@@ -1001,6 +1023,17 @@ impl TurnHost for Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&approval_id);
+        // Whatever the client sent: not offered, not honoured.
+        let decision = match decision {
+            Decision::AllowSession if !turn_allow => Decision::Allow,
+            d => d,
+        };
+        if decision.allows() {
+            self.turn_approved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(tool.to_string());
+        }
         self.emit(EventKind::ApprovalResolved(ApprovalResolved {
             approval_id,
             decision,

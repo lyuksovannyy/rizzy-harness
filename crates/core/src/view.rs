@@ -97,6 +97,9 @@ pub struct ToolResult {
 pub struct ApprovalState {
     pub approval_id: String,
     pub reason: String,
+    /// Whether "allow for this turn" may be offered (see `ApprovalRequested`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_allow: bool,
     pub decision: Option<Decision>,
     pub by: Option<ResolvedBy>,
 }
@@ -285,6 +288,7 @@ impl SessionView {
                     *approval = Some(ApprovalState {
                         approval_id: a.approval_id,
                         reason: a.reason,
+                        turn_allow: a.turn_allow,
                         decision: None,
                         by: None,
                     });
@@ -438,6 +442,7 @@ mod tests {
                     tool: "bash".into(),
                     input: json!({}),
                     reason: "r".into(),
+                    turn_allow: false,
                 }),
             ),
         ];

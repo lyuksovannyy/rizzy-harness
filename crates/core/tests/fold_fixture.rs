@@ -111,6 +111,7 @@ fn events() -> Vec<RawEvent> {
             tool: "bash".into(),
             input: json!({"command": "cargo test"}),
             reason: "runs programs".into(),
+            turn_allow: false,
         }),
         EventKind::ApprovalResolved(ApprovalResolved {
             approval_id: "a1".into(),
@@ -189,6 +190,7 @@ fn events() -> Vec<RawEvent> {
             tool: "edit".into(),
             input: json!({}),
             reason: "changes files".into(),
+            turn_allow: false,
         }),
         EventKind::Checkpoint(Checkpoint {
             turn_id: t(),

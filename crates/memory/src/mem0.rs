@@ -27,6 +27,8 @@ impl Mem0Memory {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
+                // `X-API-Key` would follow a redirect to another host.
+                .redirect(crate::embed::same_origin_redirects())
                 .build()
                 .expect("static client config"),
             base: base_url.trim_end_matches('/').to_string(),
@@ -34,13 +36,30 @@ impl Mem0Memory {
         }
     }
 
+    /// One request. `segs` are path segments after the base URL, each
+    /// percent-encoded as a single segment, so an id holding `/`, `?`, `#`
+    /// or `%` cannot change the path or reach another endpoint; `.` and
+    /// `..` are never sent (answered like a 404).
     async fn call(
         &self,
         method: reqwest::Method,
-        path: &str,
+        segs: &[&str],
+        query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<Value> {
-        let mut rb = self.client.request(method, format!("{}{path}", self.base));
+        if segs.iter().any(|s| matches!(*s, "." | "..")) {
+            return Ok(Value::Null);
+        }
+        let mut url = reqwest::Url::parse(&self.base)
+            .map_err(|e| MemoryError::Embed(format!("mem0: bad base URL: {e}")))?;
+        url.path_segments_mut()
+            .map_err(|()| MemoryError::Embed("mem0: bad base URL".into()))?
+            .pop_if_empty()
+            .extend(segs);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
+        let mut rb = self.client.request(method, url);
         if let Some(k) = &self.key {
             rb = rb.header("X-API-Key", k.expose().as_str());
         }
@@ -131,7 +150,8 @@ impl MemoryStore for Mem0Memory {
             let all = self
                 .call(
                     reqwest::Method::GET,
-                    &format!("/memories?user_id={uid}&top_k=1000"),
+                    &["memories"],
+                    &[("user_id", &uid), ("top_k", "1000")],
                     None,
                 )
                 .await?;
@@ -145,7 +165,8 @@ impl MemoryStore for Mem0Memory {
         let v = self
             .call(
                 reqwest::Method::POST,
-                "/memories",
+                &["memories"],
+                &[],
                 Some(json!({
                     "messages": [{"role": "user", "content": text}],
                     "user_id": uid,
@@ -163,7 +184,7 @@ impl MemoryStore for Mem0Memory {
 
     async fn get(&self, id: &str) -> Result<Option<Fact>> {
         let v = self
-            .call(reqwest::Method::GET, &format!("/memories/{id}"), None)
+            .call(reqwest::Method::GET, &["memories", id], &[], None)
             .await?;
         Ok(parse(&v))
     }
@@ -172,7 +193,8 @@ impl MemoryStore for Mem0Memory {
         let v = self
             .call(
                 reqwest::Method::GET,
-                &format!("/memories?user_id={}&top_k=1000", user(owner)),
+                &["memories"],
+                &[("user_id", user(owner)), ("top_k", "1000")],
                 None,
             )
             .await?;
@@ -195,7 +217,7 @@ impl MemoryStore for Mem0Memory {
             None => cur.text.clone(),
         };
         let raw = self
-            .call(reqwest::Method::GET, &format!("/memories/{id}"), None)
+            .call(reqwest::Method::GET, &["memories", id], &[], None)
             .await?;
         let md = metadata(
             cur.kind,
@@ -205,7 +227,8 @@ impl MemoryStore for Mem0Memory {
         );
         self.call(
             reqwest::Method::PUT,
-            &format!("/memories/{id}"),
+            &["memories", id],
+            &[],
             Some(json!({ "text": text, "metadata": md })),
         )
         .await?;
@@ -215,7 +238,7 @@ impl MemoryStore for Mem0Memory {
     async fn delete(&self, id: &str) -> Result<bool> {
         let existed = self.get(id).await?.is_some();
         if existed {
-            self.call(reqwest::Method::DELETE, &format!("/memories/{id}"), None)
+            self.call(reqwest::Method::DELETE, &["memories", id], &[], None)
                 .await?;
         }
         Ok(existed)
@@ -225,7 +248,8 @@ impl MemoryStore for Mem0Memory {
         let v = self
             .call(
                 reqwest::Method::POST,
-                "/search",
+                &["search"],
+                &[],
                 Some(json!({
                     "query": query,
                     "filters": { "user_id": user(owner) },

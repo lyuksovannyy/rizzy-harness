@@ -449,6 +449,11 @@ pub struct ApprovalRequested {
     pub tool: String,
     pub input: Value,
     pub reason: String,
+    /// "Allow for this turn" (`allow_session`) may be offered: this is not
+    /// the tool's first approval in the turn. The node downgrades the
+    /// decision to a single allow when it is false, whatever a client sends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_allow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

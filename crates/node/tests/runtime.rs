@@ -165,6 +165,95 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
     assert!(v.pending_approvals.is_empty());
 }
 
+/// "Allow for this turn" (`allow_session` on the wire) is honoured only
+/// after the tool's first approval in the turn (audit L10): whatever a
+/// client sends on the first request is a single allow, so the first command
+/// is always seen; the next request offers it, and then it holds for the
+/// rest of the turn only.
+#[tokio::test]
+async fn allow_for_this_turn_is_refused_on_the_first_approval() {
+    let mut h = Harness::new(default_policy).await;
+    let sid = h.create().await;
+    let prompt = |h: &Harness, id: &str| {
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: id.into(),
+            session_id: sid,
+            // Three `bash true` calls in one turn.
+            text: "progress: 4".into(),
+            images: vec![],
+        })
+    };
+    prompt(&h, "p1");
+    let mut asked = vec![];
+    for _ in 0..2 {
+        let EventKind::ApprovalRequested(a) = h
+            .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        asked.push(a.clone());
+        // A scripted or stale client sends "for this turn" every time.
+        h.send(MasterToNode::ApprovalRespond {
+            req_id: "a".into(),
+            session_id: sid,
+            approval_id: a.approval_id,
+            decision: Decision::AllowSession,
+        });
+    }
+    h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    let events: Vec<EventKind> = h.seen.iter().map(|e| e.typed().unwrap()).collect();
+    let requests = events
+        .iter()
+        .filter(|k| matches!(k, EventKind::ApprovalRequested(_)))
+        .count();
+    let resolved: Vec<Decision> = events
+        .iter()
+        .filter_map(|k| match k {
+            EventKind::ApprovalResolved(r) => Some(r.decision),
+            _ => None,
+        })
+        .collect();
+    // The first answer was cut down to a single allow; the second request
+    // came because of it; the third call ran without asking.
+    assert_eq!(requests, 2, "{resolved:?}");
+    assert_eq!(resolved, [Decision::Allow, Decision::AllowSession]);
+    assert!(!asked[0].turn_allow, "first request must not offer it");
+    assert!(asked[1].turn_allow, "second request offers it");
+
+    // A new turn starts over: the first approval again cannot be "for the turn".
+    prompt(&h, "p2");
+    let EventKind::ApprovalRequested(a) = h
+        .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
+        .await
+    else {
+        unreachable!()
+    };
+    assert!(!a.turn_allow);
+    // Deny everything until the turn ends.
+    let mut next = Some(a);
+    while let Some(a) = next.take() {
+        h.send(MasterToNode::ApprovalRespond {
+            req_id: "a".into(),
+            session_id: sid,
+            approval_id: a.approval_id,
+            decision: Decision::Deny,
+        });
+        if let EventKind::ApprovalRequested(a) = h
+            .until(|k| matches!(k, EventKind::ApprovalRequested(_) | EventKind::TurnEnded(_)))
+            .await
+        {
+            next = Some(a);
+        }
+    }
+}
+
 #[tokio::test]
 async fn cancel_while_waiting_for_approval_and_while_running() {
     let mut h = Harness::new(default_policy).await;
@@ -605,6 +694,7 @@ async fn recovers_interrupted_turn_on_start() {
                 tool: "bash".into(),
                 input: serde_json::json!({}),
                 reason: "r".into(),
+                turn_allow: false,
             }),
         ];
         for (i, k) in kinds.into_iter().enumerate() {
