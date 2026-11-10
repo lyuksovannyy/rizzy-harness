@@ -836,8 +836,23 @@ async fn the_memory_switch_keeps_memory_out_of_team_chats() {
         }
     };
 
-    // Recalled in Personal and, until he says otherwise, in Acme.
+    // Recalled in Personal; in Acme only once he shares his facts there
+    // (off for a new membership).
     let ask = "which tram do I take?";
+    turn(&s, &bob, &acme, ask, "general").await;
+    assert!(
+        !last_user_message(&s).contains("number 7 tram"),
+        "off by default"
+    );
+    let (st, v) = call(
+        &s,
+        Method::PUT,
+        &format!("/api/workspaces/{acme}/memory"),
+        Some(json!({"use_memory": true})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     for ws in [&personal, &acme] {
         turn(&s, &bob, ws, ask, "general").await;
         assert!(last_user_message(&s).contains("number 7 tram"), "{ws}");
