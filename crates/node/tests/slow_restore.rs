@@ -93,7 +93,7 @@ struct Link {
 
 impl Link {
     fn send(&self, m: MasterToNode) {
-        self.link.to_node.send(m).unwrap();
+        self.link.to_node.try_send(m).unwrap();
     }
 
     async fn pump_until(&mut self, done: impl Fn(&Self) -> bool, within: Duration) {
