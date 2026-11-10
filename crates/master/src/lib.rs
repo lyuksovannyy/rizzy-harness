@@ -311,6 +311,15 @@ fn deny_untrusted(spec: &mut harness_core::agent::AgentSpec) {
     }
 }
 
+/// The mode of a stored chat (rows from before profiles are Agentic, as a
+/// new session without one is).
+fn profile_of(row: &harness_store::SessionRow) -> Profile {
+    match row.profile.as_deref() {
+        Some("chat") => Profile::Chat,
+        _ => Profile::Agentic,
+    }
+}
+
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
 pub fn leading_mention(text: &str) -> Option<&str> {
     let rest = text.trim_start().strip_prefix('@')?;
@@ -1055,14 +1064,19 @@ impl Master {
         // default unless the user picked another: the default counts as no
         // choice, so the session keeps following the defaults.
         let r = self.resolver_for(workspace.as_deref()).await;
-        let auto = r.agent_spec_with(spec.agent_id.as_deref(), None, None)?;
+        // An explicit agent beats the defaults; without one, the mode's.
+        let agent_id = match spec.agent_id {
+            Some(a) => a,
+            None => r.default_for(profile)?.to_string(),
+        };
+        let auto = r.agent_spec_with(Some(&agent_id), None, None)?;
         let chosen = spec
             .model
             .filter(|m| !m.trim().is_empty())
             .filter(|m| auto.model.as_deref() != Some(m.as_str()));
         let agent = match &chosen {
             None => auto,
-            Some(m) => r.agent_spec_with(spec.agent_id.as_deref(), Some(m), None)?,
+            Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
         let sid = SessionId::new();
@@ -1176,6 +1190,11 @@ impl Master {
             Some(id) => Some(id),
             None => r.session_agent(row.agent_id.as_deref())?,
         };
+        // A chat that never stored an agent gets its mode's default.
+        let chosen = match chosen {
+            Some(id) => Some(id),
+            None => Some(r.default_for(profile_of(&row))?.to_string()),
+        };
         let session_model = self.session_model(&row).await;
         let mut agent = r.agent_spec_with(
             chosen.as_deref(),
@@ -1284,7 +1303,11 @@ impl Master {
     ) -> Option<String> {
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         let session_model = self.session_model(row).await;
-        let kept = r.session_agent(row.agent_id.as_deref()).ok().flatten();
+        let kept = r
+            .session_agent(row.agent_id.as_deref())
+            .ok()
+            .flatten()
+            .or_else(|| r.default_for(profile_of(row)).ok().map(str::to_string));
         let main =
             match r.agent_spec_with(agent_id.or(kept.as_deref()), session_model.as_deref(), None) {
                 Ok(agent) => turn_model(&agent, session_model.as_deref(), row),

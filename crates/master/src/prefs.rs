@@ -40,8 +40,12 @@ pub struct Prefs {
     pub image_search_url: String,
     #[serde(default)]
     pub custom_engines: Vec<CustomEngine>,
+    /// The user's default agent for ordinary (chat-mode) chats.
     #[serde(default)]
     pub default_agent: Option<String>,
+    /// The user's default agent for Agentic chats.
+    #[serde(default)]
+    pub default_agentic_agent: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
     /// What the UI calls the user ("Good morning, <display_name>").
@@ -89,6 +93,7 @@ impl Default for Prefs {
             image_search_url: DEFAULT_IMAGE_SEARCH_URL.into(),
             custom_engines: Vec::new(),
             default_agent: None,
+            default_agentic_agent: None,
             default_model: None,
             display_name: None,
             timezone: None,
@@ -165,6 +170,9 @@ impl Prefs {
         one_of("backdrop", &self.backdrop, BACKDROPS)?;
         if let Some(a) = &self.default_agent {
             crate::workspaces::check_default_agent(&m.agents(), "default_agent", a)?;
+        }
+        if let Some(a) = &self.default_agentic_agent {
+            crate::workspaces::check_agentic_default(&m.agents(), "default_agentic_agent", a)?;
         }
         if let Some(model) = &self.default_model
             && m.find_model(model).is_none()

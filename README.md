@@ -111,14 +111,14 @@ Workspaces). The last member leaving a workspace deletes it.
 
 Settings has four sections:
 
-- **Account**: your profile, appearance, search engines, default agent and
-  model, your memories, your password.
+- **Account**: your profile, appearance, search engines, default agents (one
+  for chats, one for Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
   defaults it gives, and whether your facts (your memories) are shared with
   its chats: always in Personal; in a team workspace off until you turn it
   on, for the workspace's creator too.
 - **Workspace admin** (admins and owners; not for Personal): its name, default
-  agent, the model each agent uses there (the Assistant's, `general`, is the
+  agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
 - **Server** (server admins): providers, memory recall, token savings, nodes,
   accounts, and every workspace (owners, members, making someone owner,
@@ -903,14 +903,25 @@ The built-in agents, grouped by category in the picker:
 
 | Agent (`@handle`, aliases) | Category | Runs as | Can |
 |---|---|---|---|
-| Assistant (`@general`, `@ai`), the default | General | agent | web search and fetch; your facts; project memory |
+| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory |
 | Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
 | Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory |
-| Software Developer (`@coder`, `@dev`) | IT | agent, sub-agent | read, change and search files, run commands, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
+| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
 | Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
+
+**Default agents per mode.** A chat gets the Assistant unless you pick
+another; an Agentic chat gets the Software Developer. A workspace overrides
+each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
+your own preferences override the workspace's in the picker. An agent you
+name for the chat always wins. The Agentic default must be able to change
+files or run commands: the Assistant, Smol and Researcher are refused there,
+saying why; so is an agent that runs only as a sub-agent or does not exist,
+naming the setting. An agent with file tools may be the chats' default: in a
+chat it simply has no file or command tools (a call to one gets "unknown
+tool").
 
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their

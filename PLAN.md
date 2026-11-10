@@ -94,7 +94,10 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   Developer, Researcher, Writer, Scout, Reviewer with user-visible caps on sub-agent count
   and tokens per turn; agent only), **Writer**, **Scout** (read-only code search;
   sub-agent only) and **Reviewer** (read-only review). Ultracode was replaced by the
-  Teamlead (2026-11). Users create agents and choose the default.
+  Teamlead (2026-11). Users create agents and choose the defaults: one per mode, the
+  Assistant for chats and the Software Developer for Agentic chats, each overridable per
+  workspace (`default_agent`, `default_agentic_agent`) and per user; an Agentic default
+  must have file or command tools.
 * `available_as` is enforced by the master, not only the picker: every path that picks a
   chat's or a turn's agent (session creation, `set_agent`, a prompt's `agent_id`, a
   leading `@mention`, workspace and user defaults, routines) goes through

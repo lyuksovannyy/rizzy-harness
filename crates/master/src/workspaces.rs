@@ -122,8 +122,12 @@ pub enum WsError {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSettings {
+    /// The default agent of an ordinary (chat-mode) chat.
     #[serde(default)]
     pub default_agent: Option<String>,
+    /// The default agent of an Agentic chat (none: the server's, `coder`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agentic_agent: Option<String>,
     /// Agent id -> its model and fallbacks; `general` is the workspace
     /// default model.
     #[serde(default)]
@@ -148,12 +152,32 @@ pub fn check_default_agent(
     }
 }
 
+/// Whether `id` may be the Agentic default that `field` names: a default
+/// agent (see `check_default_agent`) that can work in an Agentic chat, so
+/// one with file or command tools. The error starts with the field.
+pub fn check_agentic_default(
+    agents: &harness_agents::AgentSet,
+    field: &str,
+    id: &str,
+) -> Result<(), String> {
+    check_default_agent(agents, field, id)?;
+    match agents.get(id) {
+        Some(a) if !(a.features.edit_files || a.features.commands) => Err(format!(
+            "{field}: {} (@{id}) has no file or command tools, so it cannot work in an Agentic \
+             chat; choose an agent that can change files or run commands",
+            a.name
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The stored document, read leniently: fields this build does not know
 /// are ignored, so a later rename cannot make every workspace unreadable.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct StoredSettings {
     default_agent: Option<String>,
+    default_agentic_agent: Option<String>,
     agent_models: BTreeMap<String, StoredChain>,
 }
 
@@ -171,6 +195,7 @@ impl WorkspaceSettings {
         match serde_json::from_str::<StoredSettings>(&w.settings) {
             Ok(s) => Self {
                 default_agent: s.default_agent,
+                default_agentic_agent: s.default_agentic_agent,
                 agent_models: s
                     .agent_models
                     .into_iter()
@@ -208,6 +233,9 @@ impl WorkspaceSettings {
         if let Some(a) = &self.default_agent {
             check_default_agent(&agents, "default_agent", a)?;
         }
+        if let Some(a) = &self.default_agentic_agent {
+            check_agentic_default(&agents, "default_agentic_agent", a)?;
+        }
         let models = m.models();
         let knows = |id: &str| models.iter().any(|x| x.id == id);
         for (agent, chain) in &self.agent_models {
@@ -228,6 +256,7 @@ impl WorkspaceSettings {
         let knows = |id: &str| models.iter().any(|x| x.id == id);
         Self {
             default_agent: self.default_agent.clone(),
+            default_agentic_agent: self.default_agentic_agent.clone(),
             agent_models: self
                 .agent_models
                 .iter()

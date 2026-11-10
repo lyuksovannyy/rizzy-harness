@@ -1079,8 +1079,7 @@ async fn publish(
     file: &str,
     name: &str,
 ) -> (String, String) {
-    let mut body = json!({"profile": "agentic", "cwd": t.work, "approval_mode": "auto",
-                          "agent_id": "coder"});
+    let mut body = json!({"profile": "agentic", "cwd": t.work, "approval_mode": "auto"});
     if let Some(ws) = ws {
         body["workspace_id"] = json!(ws);
     }

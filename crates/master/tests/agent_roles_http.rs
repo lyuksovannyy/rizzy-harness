@@ -430,6 +430,47 @@ async fn unknown_agents_are_named_in_the_error() {
     assert_eq!(turn_agents(&evs), ["general"]);
 }
 
+/// The default depends on the chat's mode: a chat gets the Assistant, an
+/// Agentic chat the Software Developer; an explicit agent beats both. The
+/// agents list says both defaults.
+#[tokio::test]
+async fn the_default_agent_depends_on_the_mode() {
+    let t = start().await;
+    let cwd = t._dir.path().display().to_string();
+    let sid = chat(&t, None).await;
+    let row = get(&t, &format!("/api/sessions/{sid}")).await;
+    assert_eq!(row["agent_id"], "general");
+    let (st, v) = post(
+        &t,
+        "/api/sessions",
+        json!({"profile": "agentic", "cwd": cwd}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let agentic = v["session_id"].as_str().unwrap().to_string();
+    let row = get(&t, &format!("/api/sessions/{agentic}")).await;
+    assert_eq!(row["agent_id"], "coder");
+    let (st, v) = post(
+        &t,
+        "/api/sessions",
+        json!({"profile": "agentic", "cwd": cwd, "agent_id": "writer"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let row = get(
+        &t,
+        &format!("/api/sessions/{}", v["session_id"].as_str().unwrap()),
+    )
+    .await;
+    assert_eq!(row["agent_id"], "writer");
+    let list = get(&t, "/api/agents").await;
+    assert_eq!(list["default"], "general");
+    assert_eq!(
+        list["defaults"],
+        json!({"chat": "general", "agentic": "coder"})
+    );
+}
+
 /// Agent-only agents (the Teamlead, the Assistant) are in no roster, and a
 /// sub-agent's spec never carries delegates of its own: depth one.
 #[test]

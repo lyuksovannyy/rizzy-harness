@@ -527,12 +527,13 @@ async fn models_agents_and_new_chats_follow_the_workspace() {
     )
     .await;
     assert!(!auto(&pinned));
-    // Personal has the server's defaults.
+    // Personal has the server's defaults (an Agentic chat: the Software
+    // Developer).
     let home = new_chat(&s, &bob, &personal, json!({})).await;
     let r = row(home.clone()).await;
     assert_eq!(
         (&r["agent_id"], &r["model"]),
-        (&json!("general"), &json!("demo::mock"))
+        (&json!("coder"), &json!("demo::mock"))
     );
     assert!(auto(&home));
 
@@ -632,7 +633,7 @@ async fn agentic_work_stops_when_access_goes() {
     let (carol, carol_id) = user(&s, "carol", true).await;
     let acme = team(&s, &bob, "Acme").await;
     add(&s, &bob, &acme, "carol", "member").await;
-    let sid = new_chat(&s, &carol, &acme, json!({"agent_id": "coder"})).await;
+    let sid = new_chat(&s, &carol, &acme, json!({})).await;
     let set_role = |role: &str| {
         let (s, bob, path) = (
             &s,
@@ -758,7 +759,7 @@ async fn disabled_or_deleted_accounts_stop_their_agentic_work() {
     for (name, method) in [("carol", Method::PATCH), ("dave", Method::DELETE)] {
         let (cookie, id) = user(&s, name, true).await;
         add(&s, &bob, &acme, name, "member").await;
-        let sid = new_chat(&s, &cookie, &acme, json!({"agent_id": "coder"})).await;
+        let sid = new_chat(&s, &cookie, &acme, json!({})).await;
         let (st, v) = prompt(&s, &cookie, &sid, json!({"text": "run: echo hi"})).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         nth_event(&s, &cookie, &sid, "approval_requested", 1).await;

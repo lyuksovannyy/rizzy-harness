@@ -53,7 +53,10 @@ use harness_core::agent::{AgentSpec, Budget, ToolSelection, UiLevel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// The default agent of an ordinary (chat-mode) chat.
 pub const DEFAULT_AGENT: &str = "general";
+/// The default agent of an Agentic chat: it needs file or command tools.
+pub const DEFAULT_AGENTIC_AGENT: &str = "coder";
 /// The category of a definition that names none.
 pub const DEFAULT_CATEGORY: &str = "General";
 /// Longest category, in characters.

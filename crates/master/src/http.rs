@@ -540,9 +540,17 @@ async fn agents(
         .iter()
         .map(|a| agent_json(&m, &r, a))
         .collect();
-    Ok(Json(
-        json!({ "agents": agents, "default": r.default_agent() }),
-    ))
+    Ok(Json(json!({
+        "agents": agents,
+        // The ordinary-mode default, as before.
+        "default": r.default_agent(),
+        // The default per mode, for the picker to preselect; null when
+        // the setting names an agent that cannot work there.
+        "defaults": {
+            "chat": r.default_for(harness_core::event::Profile::Chat).ok(),
+            "agentic": r.default_for(harness_core::event::Profile::Agentic).ok(),
+        },
+    })))
 }
 
 async fn notices(

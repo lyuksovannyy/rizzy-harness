@@ -44,6 +44,16 @@ row against every tool. Scout and Reviewer are read-only by that list and the lo
 refusal of other calls, not by a sandbox. A chat or routine that named `ultracode` falls
 back like any removed agent (below).
 
+**Defaults per mode.** `Profile::Chat` chats default to `general`, Agentic ones to `coder`
+(`DEFAULT_AGENTIC_AGENT`). Workspace settings and user preferences each have `default_agent`
+(chats, the key it always had) and `default_agentic_agent`; the workspace's apply on the
+server (`Resolver::default_for`), the user's in the web picker on top, as before. Saving
+checks that the agent exists, runs as an agent, and for Agentic has file or command tools;
+a stored one that went stale is refused when a chat needs it (`BadDefault`). `GET
+/api/agents` returns `defaults: {chat, agentic}` for the picker (null when the setting cannot
+work). An agent with file tools may be the chats' default: the chat runtime has no file or
+command tools, so its calls to them fail with "unknown tool".
+
 **Aliases and categories.** `aliases` (frontmatter, and `aliases` on a custom agent) are
 more handles: `@ai`, `"agent_id": "dev"` and a definition's `delegates` resolve to the
 id, which is what events, sessions and settings store (settings take ids only). Ids and
