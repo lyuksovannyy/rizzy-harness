@@ -26,10 +26,10 @@ type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 /// records every command and acks it, and mirrors a `session_created` for
 /// each chat it is asked to create.
 fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Seen) {
-    let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (to_master, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
+    let (to_master, from_node) = mpsc::channel::<NodeToMaster>(1024);
     to_master
-        .send(NodeToMaster::Hello {
+        .try_send(NodeToMaster::Hello {
             protocol_version: PROTOCOL_VERSION,
             node_id: node_id.into(),
             hostname: "h".into(),
@@ -59,7 +59,7 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Seen) {
                     kind: "session_created".into(),
                     payload,
                 };
-                to_master.send(NodeToMaster::Event { event }).unwrap();
+                to_master.try_send(NodeToMaster::Event { event }).unwrap();
             }
             let req_id = msg.req_id().map(str::to_string);
             // Recorded before the ack, which is what the master waits for.
@@ -70,7 +70,7 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Seen) {
                     ok: true,
                     error: None,
                 };
-                to_master.send(ack).unwrap();
+                to_master.try_send(ack).unwrap();
             }
         }
     });

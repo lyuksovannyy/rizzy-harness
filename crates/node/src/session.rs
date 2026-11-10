@@ -224,7 +224,12 @@ impl Session {
             )));
         }
         *head = ev.seq;
-        self.node.publish(NodeToMaster::Event { event: ev.clone() });
+        // Still under `head`, so this session's events reach the link in
+        // seq order. A full link pauses the session here until the master
+        // reads (or the link drops; the event is in the store either way).
+        self.node
+            .publish_wait(NodeToMaster::Event { event: ev.clone() })
+            .await;
         Ok(ev)
     }
 

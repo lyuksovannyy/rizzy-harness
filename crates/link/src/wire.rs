@@ -78,13 +78,25 @@ where
             Message::Text(t) => {
                 return serde_json::from_str(t.as_str())
                     .map(Some)
-                    .map_err(|e| LinkError::Protocol(e.to_string()));
+                    .map_err(|e| bad_frame(&e));
             }
             Message::Close(_) => return Ok(None),
             _ => {}
         }
     }
     Ok(None)
+}
+
+/// A frame that does not parse, as an error that says only where and what
+/// kind: serde's own message can quote the input, which may hold a join
+/// token or anything else the peer sent.
+pub(crate) fn bad_frame(e: &serde_json::Error) -> LinkError {
+    LinkError::Protocol(format!(
+        "bad frame ({:?} error at line {} column {})",
+        e.classify(),
+        e.line(),
+        e.column()
+    ))
 }
 
 /// Master side: TLS + WebSocket accept.
@@ -94,8 +106,19 @@ pub async fn accept(tcp: TcpStream, tls: Arc<rustls::ServerConfig>) -> Result<Se
     Ok(tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?)
 }
 
-/// Node side: TLS (pinned) + WebSocket connect to `wss://host:port`.
+/// Node side: TLS (pinned) + WebSocket connect to `wss://host:port`, with
+/// the default timeouts.
 pub async fn connect(url: &str, master_fingerprint: &str) -> Result<ClientStream> {
+    connect_with(url, master_fingerprint, crate::Timing::default()).await
+}
+
+/// `connect` within `timing.connect` for TCP and `timing.handshake` for
+/// TLS plus the WebSocket upgrade, each as a whole.
+pub async fn connect_with(
+    url: &str,
+    master_fingerprint: &str,
+    timing: crate::Timing,
+) -> Result<ClientStream> {
     let rest = url
         .strip_prefix("wss://")
         .ok_or_else(|| LinkError::Protocol("master URL must start with wss://".into()))?;
@@ -105,15 +128,22 @@ pub async fn connect(url: &str, master_fingerprint: &str) -> Result<ClientStream
         .map(|(h, _)| h)
         .unwrap_or(hostport)
         .trim_matches(['[', ']']);
-    let tcp = TcpStream::connect(hostport).await?;
-    tcp.set_nodelay(true)?;
     let connector =
         tokio_rustls::TlsConnector::from(crate::pinned_client_config(master_fingerprint)?);
     let name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| LinkError::Tls(e.to_string()))?;
-    let tls = connector.connect(name, tcp).await?;
-    let (ws, _) = tokio_tungstenite::client_async_with_config(url, tls, Some(ws_config())).await?;
-    Ok(ws)
+    let tcp = tokio::time::timeout(timing.connect, TcpStream::connect(hostport))
+        .await
+        .map_err(|_| crate::timed_out("connecting to the master"))??;
+    tcp.set_nodelay(true)?;
+    tokio::time::timeout(timing.handshake, async {
+        let tls = connector.connect(name, tcp).await?;
+        let (ws, _) =
+            tokio_tungstenite::client_async_with_config(url, tls, Some(ws_config())).await?;
+        Ok(ws)
+    })
+    .await
+    .map_err(|_| crate::timed_out("TLS handshake with the master"))?
 }
 
 /// Node side of the handshake. Returns the node id the master assigned or

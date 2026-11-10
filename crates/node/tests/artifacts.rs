@@ -116,7 +116,7 @@ fn mock() -> Arc<dyn Provider> {
 
 impl Node {
     fn send(&self, m: MasterToNode) {
-        self.link.to_node.send(m).unwrap();
+        self.link.to_node.try_send(m).unwrap();
     }
 
     async fn next(&mut self) -> NodeToMaster {

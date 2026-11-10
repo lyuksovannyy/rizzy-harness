@@ -49,7 +49,7 @@ enum Mode {
 struct Fake {
     id: String,
     /// `None` once the link is closed.
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<NodeToMaster>>>>,
+    tx: Arc<Mutex<Option<mpsc::Sender<NodeToMaster>>>>,
     seen: Arc<Mutex<Vec<MasterToNode>>>,
     seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -64,9 +64,9 @@ fn fake_with(
     caps: &[&str],
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 ) -> (NodeLink, Fake) {
-    let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (tx, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
-    tx.send(NodeToMaster::Hello {
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
+    tx.try_send(NodeToMaster::Hello {
         protocol_version: PROTOCOL_VERSION,
         node_id: id.into(),
         hostname: "evil".into(),
@@ -143,7 +143,7 @@ fn created(node: &str, cwd: &str, parent: Option<SessionId>) -> EventKind {
 impl Fake {
     fn send(&self, m: NodeToMaster) {
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
-            let _ = tx.send(m);
+            let _ = tx.try_send(m);
         }
     }
 

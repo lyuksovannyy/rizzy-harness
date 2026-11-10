@@ -71,7 +71,7 @@ impl Chat {
     }
 
     fn send(&self, m: MasterToNode) {
-        self.link.to_node.send(m).unwrap();
+        self.link.to_node.try_send(m).unwrap();
     }
 
     fn prompt(&self, req_id: &str, text: &str, reply: Option<FormReply>) {
