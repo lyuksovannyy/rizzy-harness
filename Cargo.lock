@@ -1542,6 +1542,8 @@ dependencies = [
  "harness-tools",
  "harness-web",
  "hex",
+ "hyper",
+ "hyper-util",
  "infer",
  "jiff",
  "mime_guess",

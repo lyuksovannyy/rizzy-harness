@@ -54,6 +54,11 @@ genai = "=0.7.2"
 getrandom = "0.4.3"
 globset = "0.4.21"
 hex = "0.4.3"
+# The serve loop (master/src/serve.rs): header-read timeout, connection cap.
+# Both are already in the tree through axum and reqwest; HTTP/1 only, like
+# axum::serve with its default features.
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
 ignore = "0.4.34"
 # Magic-byte sniffing of stored files; no OLE parsing (std/cfb), only the
 # first 8 KiB is read.

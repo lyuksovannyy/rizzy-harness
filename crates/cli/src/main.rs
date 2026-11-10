@@ -394,6 +394,7 @@ async fn serve(
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
+    let limits = harness_master::serve::ServeConfig::default();
     if tls {
         let mut names = vec!["localhost".to_string(), "127.0.0.1".into(), hostname()];
         if !addr.ip().is_unspecified() {
@@ -415,13 +416,16 @@ async fn serve(
             names.join(", "),
             dir.join("keys/ui-cert.pem").display()
         );
-        let l = net::TlsListener::new(listener, cert.server_config()?)?;
-        axum::serve(l, harness_master::router(master))
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        harness_master::serve::serve_with(
+            listener,
+            net::tls_handshake(cert.server_config()?),
+            harness_master::router(master),
+            limits,
+            shutdown,
+        )
+        .await?;
     } else {
-        axum::serve(listener, harness_master::router(master))
-            .with_graceful_shutdown(shutdown)
+        harness_master::serve::serve(listener, harness_master::router(master), limits, shutdown)
             .await?;
     }
     Ok(())
