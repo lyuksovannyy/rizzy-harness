@@ -48,6 +48,9 @@ pub struct NativeConfig {
     pub allow_outside_workspace: bool,
     /// Folders file tools never touch (the node's data directory).
     pub protected_dirs: Arc<Vec<std::path::PathBuf>>,
+    /// How tool child processes are started (node.toml `[sandbox]`); each
+    /// session gets its own temp folder under it.
+    pub sandbox: harness_tools::sandbox::Confinement,
     pub tool_timeout: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
     pub effort: Option<Effort>,
@@ -65,6 +68,7 @@ impl Default for NativeConfig {
             secrets: Default::default(),
             allow_outside_workspace: false,
             protected_dirs: Arc::default(),
+            sandbox: Default::default(),
             tool_timeout: Duration::from_secs(600),
             effort: None,
             summarize_after_tokens: 0,
@@ -1137,6 +1141,7 @@ impl NativeBackend {
             refs: refs.clone(),
             artifacts: host.artifacts(),
             call_id: call.call_id.clone(),
+            sandbox: self.config.sandbox.for_session(&ctx.session_id.to_string()),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`
