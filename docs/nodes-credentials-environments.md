@@ -4,7 +4,13 @@ Status: **proposal, nothing built.** For after Gate 3 of `FIX_PLAN.md` (feature 
 then). Depends on pull request 4 (`integration/gate3`: the Landlock sandbox, the bounded node
 link, the PDF helper) being merged. The decisions were made by the owner on 2026-11-10, and
 the owner answered this note's open questions the same day (2026-11-10). Costs and conflicts
-with the code are stated, not argued away. One question is still open (§9).
+with the code are stated, not argued away.
+
+> **Superseded in one respect (owner, 2026-11-11).** A node may be attached to **several**
+> workspaces, and the built-in `local` node is an ordinary node under that rule. This note
+> still says "exactly one workspace" throughout (the summary, the terms, `nodes.workspace_id`
+> in §3, the workspace check in §4, phase 1 in §8). Those passages are wrong until task C.12 of
+> `ADOPTION_PLAN.md` rewrites them. Do not build from them as written.
 
 **Summary.** Today a node is global, holds its own provider key in its own `config.toml`, and
 runs every session in a folder on the host. This note makes a node belong to one workspace,
@@ -520,10 +526,16 @@ Phases 3 and 4 can run in parallel after 2, and 6 after 1.
 
 ## 9. Open questions and recorded dissent
 
-**Blocking (the one question left).** Where does the built-in in-process `local` node fit
-once nodes belong to a workspace? It is server-wide and admin-only (`PLAN.md` T11). **Working
-assumption, not yet confirmed by the owner:** it stays a server-admin node, usable in any
-workspace the admin is a member of, with grants made in-process.
+**Answered (owner, 2026-11-11): a node may be attached to several workspaces.** The question
+was where the built-in in-process `local` node fits once nodes belong to a workspace. The
+answer is wider than the working assumption this note carried: any node, not only `local`,
+may serve more than one workspace, and the design should be built around that instead of
+treating it as an exception. `local` then needs no special rule. What this costs and what it
+must guarantee (one link per node, an attachment per workspace confirmed on the node,
+separation between workspaces on one machine, a fair share of the node per workspace,
+detaching one workspace without touching the others) is task C.12 of `ADOPTION_PLAN.md`.
+Nothing is blocking now, but the passages listed at the top of this note are not yet
+rewritten.
 
 **To confirm, not blocking:**
 

@@ -1,7 +1,7 @@
 # ADOPTION PLAN: rizzy-harness
 
-**Status:** proposal, written 2026-11-11, awaiting the owner's review. No code has been
-changed for it.
+**Status:** accepted by the owner on 2026-11-11 with one change (O3: a node may serve several
+workspaces, see C.12). No code has been changed for it yet; Phase A has not started.
 
 Brings what the two-round harness study found into our own code. Inputs, by authority:
 `research/round2/final-review-ours.md` (what is true about our code; it wins every
@@ -65,21 +65,26 @@ working with an agent. Estimates, not promises.
   workspace node per turn, in memory only. A model-call proxy waits for the experimental
   per-user node.
 - Every node added to a workspace is trusted and is added by a pair code; no trust flag.
+- A node may be attached to several workspaces, each attachment by its own pair code, and the
+  design is built around that (owner, 2026-11-11; C.12). The built-in `local` node is an
+  ordinary node under this rule.
 - Environments are per workspace. Deleting one classifies its sessions, schedules when work is
   unsaved, and archives them read-only. No migration; continuing elsewhere is a fork.
 - Embeddings and voice stay server-wide.
 - Model aliases (named ordered groups of models) serve agents and auxiliary slots.
 - The built-in roster is the eight agents of pull request 6.
 
-## 3. Decisions needed from the owner
+## 3. Decisions put to the owner, and the answers
 
-The plan proceeds on the recommendation unless you say otherwise.
+**Answered on 2026-11-11.** O3 was answered differently from the recommendation: see its row.
+Every other row was accepted as recommended. The table is kept as the record of what the
+other choice would have cost.
 
 | # | Decision | Recommended | If you choose the other |
 |---|---|---|---|
 | O1 | PR 7's compaction default: 24,000 tokens as before, or the window minus a reserve | **Window minus a reserve.** At 24k a 200k model summarises after a few tool results and loses the task; summaries are lossy. Cost-sensitive operators set `summarize_after_tokens`; the README says what it costs. | 24k: cheaper per turn, many more summaries, and summary quality (A.7) becomes the main way context is lost. Set it before PR 7 merges. |
 | O2 | Does a "retrying in N s" notice justify a new event type? | **No, not now:** a schema change under the freeze, with UI that needs Node. If fix plan 4.8's ADR brings transient frames, the notice is one. | A `provider_retry` event now: a `PLAN.md` schema change, a fold change and W.5. |
-| O3 | Where the in-process `local` node fits once nodes belong to a workspace (the note's one blocking question) | **The note's working assumption:** a server-admin node, usable in any workspace the admin belongs to, grants in-process. It runs in the master, which holds every key already, so nothing new is exposed. | Personal workspace only: a simpler T10 story, but an admin's team work needs a remote node. |
+| O3 | Where the in-process `local` node fits once nodes belong to a workspace (the note's one blocking question) | Recommended was the note's working assumption: `local` alone as a server-admin node usable in the admin's workspaces. **The owner chose more: any node may be attached to several workspaces, and the logic is to be built around that.** `local` stops being a special case. | What it costs: two workspaces now share one machine, one Unix user and one link, so separation between them has to be built and tested instead of assumed (C.12). One node per workspace would have had that separation for free. |
 | O4 | seccomp beside Landlock (a new dependency) | **Yes, after Gate 3's outside review, if the dependency check passes** (candidate `seccompiler`, Apache-2.0, `unsafe` kept inside it). Only seccomp closes UDP and DNS with `network = "off"`. T.7's read-only shell needs nothing new and goes first. | No: UDP and DNS stay named residuals; T.6 is dropped. |
 | O5 | Per-user API tokens instead of the one administrator-equivalent token | **Yes, after Gate 3** (T.5, after fix plan 4.1). Until then A.13 records the bypass. Scoping the token now breaks the README's script uses. | Keep it: "chats private, for admins too" stays broken by design and the threat model says so permanently. |
 | O6 | May routines ever act unattended? | **Yes, only inside a person-created, content-hashed allow set** (C.7, T.4); anything else denied with the reason; never auto-approve. | Never: a routine reaching `ask` is denied at once; T.4 shrinks to that and idempotency. |
@@ -147,7 +152,8 @@ written into the C note or task it feeds.
 
 Each task changes `docs/nodes-credentials-environments.md` or adds a short note in `docs/`.
 **Done when, for every row: the note is merged with the owner's sign-off and names the tests
-it commits the building task to.** Every row is **S**.
+it commits the building task to.** Every row is **S** except C.12, which is **M** and comes
+before C.3, C.5 and C.6 because it changes what they are written against.
 
 | ID | Decision | What the note settles | Tests it commits to |
 |---|---|---|---|
@@ -155,16 +161,17 @@ it commits the building task to.** Every row is **S**.
 | C.2 | Fork by copy with lineage and an explicit head | First event `SessionForked { parent, root, parent_node_id, through_seq, cut, lossy }`, then inherited `history_imported` batches, then a seed-ended marker. `through_seq` is the highest contiguous mirrored `seq`; default cut the last completed turn; an open turn is closed. The child starts at `ask`, no grants, no allowance, zero counters. `session_forks` gains the hash at `through_seq`. Same-node forks may seed files from the cut's checkpoint. Explicit head only if B.6 says so. `05` §6.2; `06` §6 items 1, 2, 8. | Lineage first; no unmirrored tail; non-owner gets 404; the child asks for what the parent had allowed; no fork during a running turn. |
 | C.3 | Grant lifetime and binding | TTL in minutes, renewed while the turn lives; O10's link-loss rule. Bound to `(node_id, session_id, owner_epoch, turn req_id)`, checked on every `session.prompt`, scope checked after alias expansion; a newer grant cancels the old one's in-flight calls. Proxy bounds written now for N.8. `04` §6 item 2; `05` §6.5. | Grant for X refused for Y; expired grant refused at prompt; old in-flight call cancelled; grant absent from `env` and `/proc/*/environ` (test D10, grant case). |
 | C.4 | What "always allow" may mean, where a rule lives | Three levels: once; this exact call for this turn (A.2); a persistent rule, never a click, in a node-side file beside `node.toml` written by the node's owner (the UI may propose its text). One project root on one node; never a prefix for wrappers or interpreters (`sudo`, `env`, `bash`, `python*`, `xargs`, `find`, `git -c`); never lifts the sandbox; never covers network, escalation or MCP; no repository file adds or loosens one; the file is always-ask for the agent. `02` §6 items 2, 5. | `git status` never allows `git push`; a repository rules file changes nothing; the agent cannot write the rules file; no rule runs outside Landlock. |
-| C.5 | Credentials, pairing, aliases (note amendments) | §4.1: AES-GCM associated data binds `workspace_id` and `name` (Warp's idea, not its code). §4.2: strict fallback as `Option<Vec<_>>`; per-slot timeout and effort; slot names as validated strings; a slot failure never fails the turn; a slot on another provider needs its own grant route. §4.4: burn the code before any check; the master's code endpoint refuses foreign `Origin`, gives one failure reason, limits by peer. §9: "fallback" becomes the explicit `--systemd-creds` flag; O3 recorded, so nothing blocks. `05` §6.6; `09` §6.4. | Sealed row copied across workspaces fails to open; empty strict list fails with a reason; rejected attempt burns the code; failed title slot leaves the turn running. |
+| C.5 | Credentials, pairing, aliases (note amendments) | §4.1: AES-GCM associated data binds `workspace_id` and `name` (Warp's idea, not its code). §4.2: strict fallback as `Option<Vec<_>>`; per-slot timeout and effort; slot names as validated strings; a slot failure never fails the turn; a slot on another provider needs its own grant route. §4.4: burn the code before any check; the master's code endpoint refuses foreign `Origin`, gives one failure reason, limits by peer. §9: "fallback" becomes the explicit `--systemd-creds` flag. Pairing is written per attachment (C.12). `05` §6.6; `09` §6.4. | Sealed row copied across workspaces fails to open; empty strict list fails with a reason; rejected attempt burns the code; failed title slot leaves the turn running. |
 | C.6 | Containers, forge, deletion (note amendments) | §4.5: A.5's keys; a checkpoint budget if B.3 asks; caps a session may lower, never raise; never `extra_args`. §4.6: `--network=none` default until test D14 shows what rootless `pasta` exposes; `--ulimit core=0`; sized `nosuid,nodev,noexec` tmpfs on `/run`; argv-hash label, recreate on mismatch; 64-hex id check; mount source validated against the data directory, `$XDG_RUNTIME_DIR` and `~/.ssh`; `podman inspect` assertions; stop on actor loss; identical checks inside. Tests D14, D15 are N.4's first step. §4.7: a forge token is readable in container sessions. §4.8: deletion stops routines and bumps epochs. OpenHands read first if O7. `03` §6.1, §6.4, §6.5. | Off-list image, raised cap, unknown flag refused by the node; inspect shows label, `core=0`, no network; cancel kills inside within 2 s; a routine on a deleted environment stops. |
 | C.7 | Unattended authorisation (O6) | A per-routine allow set made by a person, content-hashed, recorded as an event, evaluated on the node (turns `ask` into a run, never a `node.toml` deny); outside it, denial with the reason. Schedule advances before dispatch; an idempotency record fsynced before the first model call; an unknown outcome pauses. Agent-made routines start `pending_approval`. Webhook keys in the database. Never auto-approve. `10` §6.1 step 1; `01` §6.7. | `10` §6.3 items 1 to 3; an allow set cannot lift a `node.toml` deny. |
 | C.8 | The `.git` residual | Landlock only adds rights and a right covers the tree, so `.git` cannot be read-only in a read-write folder. Host sessions: a named residual in `PLAN.md` with its real impact (our git ignores hooks and config; a planted hook fires when the user runs git). Containers: evaluate read-only binds over `repo.git/hooks` and `repo.git/config` in N.4. `03` §6.3 item 1. | If chosen, a container session cannot write `repo.git/hooks/post-checkout`. |
 | C.9 | Staleness guard and match ladder for `edit` | Per-session table by canonical path: SHA-256, `dev:ino:size:mtime_ns:ctime_ns`, ranges shown, a bounded snapshot on disk; checked in the per-path lock before matching; `edit` needs a read, `write` over a file needs a full read; a stale file is edited only when the matched span is byte-identical, else refused with a bounded diff; hashes in `read` events for the fold; batches match the original; the ladder stops at a one-to-one Unicode fold and reports the tier; what compaction does to "ranges shown". `08` §6.1, §6.2. | T.2's list. |
 | C.10 | seccomp (O4) and a read-only shell | `03` §6.2's rules: with network off, `socket` only for `AF_UNIX`, deny `connect`, `bind`, `listen`, `accept`, `sendto`, `sendmmsg`, `recvmmsg`; always deny `io_uring`, `AF_VSOCK`, `ptrace`, `process_vm_*`; `EPERM`, never `SIGSYS`; unknown architecture refused in `required`; `sendmsg` decided. Status and tool result show the active rules. The crate's dependency check. T.7's Landlock profile. | T.6's and T.7's lists. |
 | C.11 | Process-tree containment (only if B.1 leaks) | A per-session cgroup (needs delegation, such as a systemd user scope), a PID namespace in `sandbox-exec` (must stay free of `unsafe`; `nix`'s `fork` is not), or a `/proc` re-walk (racy). `01` §6.9; `03` §6.3 item 4. | A `setsid` child is gone 2 s after cancel; none survives `kill -9` of the node. |
+| C.12 | A node in several workspaces (O3) | Rewrites the note's "exactly one workspace" passages. **Attachment:** a `workspace_nodes(workspace_id, node_id, added_by)` table replaces `nodes.workspace_id`; each attachment is its own pair code, shown by the node's CLI and typed by that workspace's admin; the node records its attached workspaces in a file only the node's owner writes, and refuses a session for any workspace not in it, so the master cannot attach a node. **One of each per node:** key, link, link generation; every attached workspace's sessions travel on that link, each naming its workspace. **Per workspace on the node:** a data root, environments and volumes, checkpoints, and grants keyed by `(workspace, provider)`; a session's sandbox and container mounts never include another workspace's root. **Shared, with a share per workspace:** command lanes and running-container count, so one workspace cannot starve another; image layers. **Host sessions:** what two workspaces' sessions under one Unix user can still see of each other is closed in the Landlock profile or written as a residual, and `node.toml` may refuse host sessions once a node has more than one workspace. **Detach:** removing one workspace runs the deletion flow (§4.8) for that workspace's environments on that node only and bumps those sessions' epochs; revoking the node does it for all. **`local`:** attached to the first admin's Personal workspace at first start, to others only by an explicit attach. **Threat model:** a new row for a node shared between workspaces. | The node refuses a session for an unattached workspace even when the master sends it; a grant for workspace A is refused for a session of B on the same node; a session of A cannot read or write B's folder or volume, on the host and in a container; detaching A leaves B's sessions running and A's appends refused; A filling its lane share does not delay B's command beyond a bound; one reconnect resumes sessions of both. |
 
-**Gate C:** C.1 to C.10 signed off (C.11 if B.1 failed); the design note lists no blocking
-question; every T, N and X task can name its abuse tests from a merged note.
+**Gate C:** C.1 to C.10 and C.12 signed off (C.11 if B.1 failed); the design note lists no
+blocking question and no passage marked superseded; every T, N and X task can name its abuse tests from a merged note.
 
 ### Phase T: loop and tool features (after Gate 3; three to four weeks)
 
@@ -192,7 +199,7 @@ W.1.
 
 | ID | Note phase | Adds beyond the note | Abuse tests beyond the note's | Invariants | Podman / Node | Depends | Size |
 |---|---|---|---|---|---|---|---|
-| N.1 **sec** | 1 workspace nodes, pair codes | Link generation (C.1); pairing per C.5 | Superseded connection's frame dropped; rejected attempt burns the code | One writer; adding a node only narrows | No / Yes | C.1, C.5, O3 | **L** |
+| N.1 **sec** | 1 workspace nodes, pair codes | Link generation (C.1); pairing per C.5; attachment to several workspaces, the node's own attached list and the per-workspace data root (C.12) | Superseded connection's frame dropped; rejected attempt burns the code; a session for an unattached workspace refused by the node; A cannot read B's folder | One writer; adding a node only narrows; the node decides which workspaces it serves | No / Yes | C.1, C.5, C.12 | **L** |
 | N.2 **sec** | 2 BYOK, aliases, slots | AAD; strict lists; slot rules (C.5) | Row copied across workspaces fails to open; empty strict list fails | No secret in event, URL or log | No / Yes | N.1 | **L** |
 | N.3 **sec** | 3 grants | C.3 in full | C.3's tests, test D10's grant case | Node decides (`model_keys`) | No / small | N.2, C.3 | **M** |
 | N.4 **sec** | 4 environments | Tests D14, D15 first; C.6's argv and checks; C.8's binds if chosen | C.6's tests; identical behaviour inside and out | Node decides; loopback; RSS with 8 containers | **Yes** / Yes | N.2, C.6, C.8 | **L** |
@@ -201,7 +208,10 @@ W.1.
 | N.7 **sec** | 7 classification, deletion, autosave | Routines stopped, epochs bumped (C.6, C.1) | A routine on a deleted environment does not run; a late append is refused | Private chats: T10 change needs the owner's explicit yes | **Yes** / Yes | N.4, N.5, N.6, T.4 | **L** |
 | N.8 **sec** | 8 proxy, per-user node (experimental) | C.3's proxy bounds first | Note tests | Node decides | No / Yes | N.3 | **L** |
 
-N.3 and N.4 can run in parallel after N.2, and N.6 after N.1, as the note says.
+N.3 and N.4 can run in parallel after N.2, and N.6 after N.1, as the note says. C.12 also
+binds N.3 (grants keyed by workspace), N.4 (environments, volumes and the per-workspace share
+of containers) and N.7 (detaching one workspace is a deletion scoped to it); each carries
+C.12's tests for its part.
 
 **Gate N:** per task, the note's tests and the abuse tests above in CI; N.4 and N.7 on a
 runner with rootless Podman (confirm one exists before N.4 starts).
@@ -227,8 +237,8 @@ Order from `10` §6.1. Plugins, code mode and import are not planned (§6).
 Fix plan Gate 3 includes 3.10, so the freeze cannot end until W.2 lands or L14 is accepted in
 the threat model. W.1 and W.2 are on the critical path.
 
-| ID | Covers | Change | Done when | Size |
-|---|---|---|---|---|
+| ID | Covers | Change | Done when, and size |
+|---|---|---|---|
 | W.1 | Web checks not runnable here | Node 22 (CI's version) and pnpm 12.17.0 through `corepack`, plus Playwright's browsers; steps in the README's development section. Owner action. Fallback: a manually triggered CI job running one named e2e script against the built binary. | The four `pnpm` checks pass locally on `integration/gate3`, and `node web/e2e/onboard.cjs target/debug/rizzy-harness` runs. **S** |
 | W.2 **sec** | Fix plan 3.10 (L14) | Drafts cleared on logout and chat delete, never stored for incognito; `#` links only to footnote ids; temporary passwords generated by the server and shown once (Rust endpoint and test first). | 3.10's tests; `pnpm size` passes. **S** |
 | W.3 | PR 4 follow-ups | The "for this turn" button, labelled as A.2 makes it ("this exact command, for this turn"), offered after the first approval; no reconnect after close code 4401; request id on errors; messages for the new 403, 422, 429 and 503. | Component tests each; the approval e2e flow passes. **M** |
@@ -247,6 +257,7 @@ deletion dialog) travels with its N task.
 now:     A.10 ─► A.1 ─► A.2 ─► A.3 ─► A.4 ─► A.5 ─► A.8 ─► A.9 ─► A.12, A.13
          on PR 7: A.6, A.7, A.14     on PR 6: A.11     B.5 ─► A.15
          B.1..B.10 and C.1..C.10 beside A;  B.1 ─► C.11 (if it leaks)
+         C.12 ─► C.3, C.5, C.6   (a node serves several workspaces)
          W.1 ─► W.2   (Gate 3 needs 3.10)
 Gate 3 ─┬─► T.1 (A.5), T.2 (A.8, C.9), T.3 (A.11), T.4 (C.7)
         ├─► fix plan 4.1 ─► T.5
@@ -313,6 +324,7 @@ Also not done, by choice:
 | Experiments prove nothing | Predictions come from reading; a test can be written to pass | Each B test has a control that must fail. |
 | Phase C stalls | Eleven notes awaiting sign-off | Each is S and can be drafted on the recommendation, as the fix plan does with its own decisions. The building task that depends on a note does not start without the sign-off. |
 | The outside review never happens | Gate 3 asks for one outside review of `crates/link`, the approval path and the sandbox; no reviewer and no date exist | The owner names a reviewer or a date now. Until then every T, N and X task is blocked, however fast Phase A goes. |
+| A shared node leaks between workspaces | O3 puts two workspaces on one machine, one Unix user and one link; host sessions are separated only by what the sandbox denies | C.12's separation tests are N.1's and N.4's abuse tests, on the host and in a container; a node may refuse host sessions once it serves more than one workspace. |
 | Phase N eats everything | Five L tasks before environments work | T runs beside it; N.6 to N.8 wait if time is short. |
 | No machine for Podman tests | No container runtime here | Find a CI runner or a second machine before N.4; tests D14, D15 first. |
 | Short grants break long turns | Minute TTLs against A3 | O10's ceiling. |
@@ -323,7 +335,7 @@ Also not done, by choice:
 ## 8. Minimum set, if time is short
 
 A.10, A.1, A.2, A.3, A.4, A.8 and A.9 (about four days); W.1 and W.2 (two days, for Gate 3);
-B.1 and B.2 (a day); C.1, C.3 and C.5 (two days, before N.1). After Gate 3: T.4, then N.1 to
+B.1 and B.2 (a day); C.12, C.1, C.3 and C.5 (three days, before N.1). After Gate 3: T.4, then N.1 to
 N.3. That closes the fail-open log, the broad turn allowance, silent divergence, the shared
 writer folder and both ways a file is lost, and it ends the freeze. No environments, fork or
 extensibility.
@@ -382,4 +394,4 @@ extensibility.
 | Exec 8 / 9 | B.2, B.3, A.9 / C.3, C.8 | |
 | PR 4, 6, 7 UI follow-ups | W.3, W.4, W.5 | |
 | PR 7 owner questions | O1, O2 | |
-| Design note's blocking question | O3, C.5 | |
+| Design note's blocking question | O3, C.12, N.1 | Answered: a node may serve several workspaces |
