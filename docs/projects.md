@@ -61,7 +61,7 @@ mem0), told apart by the owner key. No new memory table or backend work:
 | kind | owner key | who sees and edits | recalled into |
 |---|---|---|---|
 | personal (exists) | `<user_id>` | that user only | that user's chats |
-| project (new) | `project:<project_id>` | every member of the project's workspace sees confirmed facts; writing them needs "may manage projects"; a proposal is its source chat's owner's | chats in the project |
+| project (new) | `project:<project_id>` | every member of the project's workspace sees confirmed facts; adding, rewording or deleting them needs "may manage projects"; a proposal is its source chat's owner's | chats in the project |
 | workspace **[ws]** | `workspace:<workspace_id>` | workspace members; writes need `settings` (proposal) | chats in the workspace, and in its projects when the project shares it |
 
 User ids are UUIDs, so the prefixed keys can never collide with a user, and the existing
@@ -103,7 +103,13 @@ open question below.
 - **A proposal is visible only to the owner of the chat it came from** (the source session's
   owner, looked up in the mirror). It came from a private chat, so nobody else sees its text
   until that person keeps it (any member, guests included: the project's memory grows from
-  its chats); keeping publishes it to the project, where only managers edit or forget it.
+  its chats). Confirming a proposal publishes it to every member's agent turns, so it needs
+  "may manage projects", or the project's **Members may confirm project facts** setting
+  (`members_activate_facts`, default off, set by managers): then a member confirms their own
+  proposals only. Rewording a proposal stays the owner's. Once active, a fact is edited,
+  demoted or forgotten only by managers, with the setting on or off. The agent never confirms:
+  `remember` always files a proposal, whoever's chat it is (`Master::file_proposal`); confirming
+  is a human `PATCH`. Guests are members here.
   Orphaned proposals (source chat deleted) are shown to nobody and go with the project.
 - Deleting a project, or its workspace, deletes its facts.
 
@@ -219,7 +225,8 @@ members too is open question 3.
 | see projects, instructions, confirmed facts, board | membership of the workspace (guests too) |
 | create, edit, delete a project; board and template changes; add/edit/delete confirmed project facts | `settings` ("may manage projects") |
 | put your chat into a project / take it out; link your chat to a card | membership, and the chat is yours and in the project's workspace |
-| keep, word or discard a project proposal | the source chat's owner (any member) |
+| word or discard a project proposal | the source chat's owner (any member) |
+| confirm a project proposal (make it active) | `settings`, or the source chat's owner when the project's `members_activate_facts` is on |
 | set the default node/folder | `settings`; *using* them still needs agentic access |
 
 Non-members get 404 for everything (as for workspaces), managers' actions 403 for the others.

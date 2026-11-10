@@ -122,6 +122,10 @@ pub struct ProjectSettings {
     /// The project's chats also recall the workspace's shared facts, once
     /// workspace memory exists (docs/projects.md, Memory).
     pub workspace_memory: bool,
+    /// Members may confirm their own proposals into the project's shared
+    /// memory. Off: a manager must (shared text reaches every member's
+    /// agent turns). Never lets a member add, reword or remove an active fact.
+    pub members_activate_facts: bool,
     /// Defaults for agentic chats started in the project.
     pub node_id: Option<String>,
     pub cwd: Option<String>,
@@ -131,6 +135,7 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             workspace_memory: true,
+            members_activate_facts: false,
             node_id: None,
             cwd: None,
         }
@@ -602,6 +607,7 @@ mod tests {
         );
         let s = ProjectSettings {
             workspace_memory: false,
+            members_activate_facts: false,
             node_id: Some("  ".into()),
             cwd: Some(" /src/app ".into()),
         }
