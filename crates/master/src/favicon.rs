@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use harness_web::favicon::FaviconFetcher;
 use serde::Deserialize;
@@ -57,16 +57,18 @@ pub struct FaviconQuery {
 pub async fn favicon(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Query(q): Query<FaviconQuery>,
 ) -> Response {
-    // The one request a cookie alone still authenticates (P-1): an
-    // engine's icon is drawn by an `<img>`, which cannot send the login
-    // key, and it reveals no chat and changes nothing of anyone's; the
-    // login is only there to bound who makes the server fetch.
+    // The login key, or (for the `<img>` that draws it, which cannot send
+    // one) a link minted for this login and this exact URL, like every
+    // other byte route. The cookie alone used to do: it made the server
+    // fetch from the network for whoever held it, and told them whether
+    // the login was live (Gate 3 fix review 2, R2-1).
     let who = match auth::authenticate(&m, &headers).await {
         Some(who) => who,
-        None => match auth::cookie_user(&m, &headers).await {
-            Some((user, _)) => auth::Principal::from_user(user),
+        None => match auth::link_principal(&m, &headers, &uri).await {
+            Some(who) => who,
             None => return error(StatusCode::UNAUTHORIZED, "not logged in"),
         },
     };

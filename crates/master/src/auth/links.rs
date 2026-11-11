@@ -42,6 +42,8 @@ pub fn linkable(path: &str) -> bool {
     let id = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
     match seg.as_slice() {
         ["", "api", "media", m, "content" | "thumb"] => id(m),
+        // A search engine's icon (R2-1); its `url` is in the signed query.
+        ["", "api", "favicon"] => true,
         ["", "api", "artifacts", a, "latest", "download"] => id(a),
         [
             "",
@@ -232,6 +234,7 @@ mod tests {
             "/api/artifacts/a1/versions/v1/download",
             "/api/artifacts/a1/versions/v1/preview",
             "/api/artifacts/a1/versions/v1/thumb",
+            "/api/favicon?url=x",
         ] {
             assert!(s.mint(&me, ok, 0).is_some(), "{ok}");
         }
@@ -241,7 +244,7 @@ mod tests {
             "/api/media/m1",
             "/api/media/../m1/content",
             "/api/media/m1/content/x",
-            "/api/favicon?url=x",
+            "/api/favicon/x",
             "/api/media/m1/content?",
             "/api/media/m1/content?link=1",
             "/api/media/m1/content?a=1&&b=2",

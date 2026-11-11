@@ -134,21 +134,47 @@ async fn users(t: &T) -> [(String, String); 2] {
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn try_socket(t: &T, c: &str) -> Result<Socket, WsError> {
+/// Why a socket did not open: the upgrade was refused, or the server
+/// closed it after its key (Gate 3 fix review 2, R2-1: a cookie socket is
+/// judged only once its key arrives).
+#[derive(Debug)]
+enum Refused {
+    Upgrade(#[allow(dead_code)] WsError),
+    Closed(Option<u16>),
+}
+
+async fn try_socket(t: &T, c: &str) -> Result<Socket, Refused> {
     let mut r = format!("ws://{}/api/ws", t.addr)
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
-    let (mut s, _) = tokio_tungstenite::connect_async(r).await?;
+    let (mut s, _) = tokio_tungstenite::connect_async(r)
+        .await
+        .map_err(Refused::Upgrade)?;
     s.send(Message::Text(common::socket_login(c).into()))
         .await
         .unwrap();
     // Answered: the server's loop is running.
-    s.send(Message::Text("hello".into())).await.unwrap();
-    assert_eq!(next_text(&mut s).await.unwrap()["type"], "error");
-    Ok(s)
+    let _ = s.send(Message::Text("hello".into())).await;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), s.next())
+            .await
+            .expect("socket went quiet");
+        match msg {
+            Some(Ok(Message::Text(text))) => {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["type"], "error", "{v}");
+                return Ok(s);
+            }
+            Some(Ok(Message::Close(f))) => {
+                return Err(Refused::Closed(f.map(|f| u16::from(f.code))));
+            }
+            None | Some(Err(_)) => return Err(Refused::Closed(None)),
+            Some(Ok(_)) => {}
+        }
+    }
 }
 
 async fn socket(t: &T, c: &str) -> Socket {
@@ -381,7 +407,7 @@ async fn a_ninth_socket_is_refused_until_one_closes() {
         open.push(socket(&t, &bob).await);
     }
     match try_socket(&t, &bob).await {
-        Err(WsError::Http(r)) => assert_eq!(r.status().as_u16(), 429),
+        Err(Refused::Closed(code)) => assert_eq!(code, Some(4429)),
         other => panic!("ninth socket: {:?}", other.map(|_| ())),
     }
     // Per user: alex is not affected.
