@@ -626,6 +626,11 @@ directory, be inside it, or contain it: with the default data directory
 `allow_outside_workspace = true` or through a symlink. The shell runs in a
 sandbox that cannot open it either (see "The shell sandbox" below); its
 output is still scrubbed of the API token and known keys.
+`allow_outside_workspace = true` lets `write` and `edit` change any file
+of the node's user outside the data directory, `~/.bashrc` and
+`~/.gitconfig` included, which is the same as running a command outside
+the sandbox at your next shell: leave it off unless the chats on that
+node are ones you trust like your own shell.
 
 A chat's folder is remembered as the directory it was when the chat was
 made (its real path and its identity on disk). If that folder is later
