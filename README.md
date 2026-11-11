@@ -1086,13 +1086,29 @@ readable; each needs another agent before its next message. Design notes: [docs/
 
 ## Development
 
-```bash
-cargo test --workspace
-```
+The Rust checks CI runs (`cargo deny` needs `cargo install cargo-deny`):
 
 ```bash
-cd web && pnpm test && pnpm typecheck
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
 ```
+
+The web checks CI runs, with Node 22 and the pnpm that `web/package.json`
+pins (`packageManager`, 12.17.0 today). Corepack, which ships with Node,
+provides that pnpm: run `corepack enable` once (or call `corepack pnpm …`).
+
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm typecheck && pnpm test && pnpm build && pnpm size
+```
+
+`pnpm size` fails when the first load is over its budget in
+`web/scripts/size.mjs` (a hard limit), and records what each change adds to
+the total. The Rust build embeds `web/dist`; without it, `cargo build` still
+works and the server shows "UI not built".
 
 UI dev server with hot reload (proxies `/api` to a running `rizzy-harness serve`):
 
