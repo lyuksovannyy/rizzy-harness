@@ -37,6 +37,7 @@ const api = {
   adminDeleteWorkspace: vi.fn(),
 };
 vi.mock("../../api", () => ({ api }));
+vi.mock("../../apiPages", () => ({ pageApi: api }));
 
 const { WorkspaceOverview } = await import("./WorkspaceOverview");
 const { WorkspaceGeneral } = await import("./WorkspaceGeneral");

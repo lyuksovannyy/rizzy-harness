@@ -1,7 +1,7 @@
 // How an agent looks: shape, eyes and accent, with a live preview that also
 // plays the faces it makes while it works. Opened from the agent's page.
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, AgentAvatar as Avatar, AvatarState } from "../types";
 import { AgentAvatar, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
@@ -54,7 +54,7 @@ export function AvatarEditor(props: { agent: Agent; onSaved: () => void; onClose
     setBusy(true);
     setErr(null);
     try {
-      await api.saveAgentAvatar(props.agent.id, avatar);
+      await pageApi.saveAgentAvatar(props.agent.id, avatar);
       props.onSaved();
       props.onClose();
     } catch (x) {

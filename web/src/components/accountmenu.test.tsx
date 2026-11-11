@@ -11,7 +11,7 @@ import type { Me, WorkspaceList, WorkspaceSummary } from "../types";
 import type { SidebarProps } from "./Sidebar";
 
 const createWorkspace = vi.fn();
-vi.mock("../api", () => ({ api: { createWorkspace } }));
+vi.mock("../apiPages", () => ({ pageApi: { createWorkspace } }));
 const { Sidebar } = await import("./Sidebar");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

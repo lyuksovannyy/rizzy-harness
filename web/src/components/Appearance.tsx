@@ -3,6 +3,7 @@
 // leaving the tab without saving goes back to what is saved. Every control
 // is type="button": they sit in the form. Each group is one Tab stop, and
 // the arrow keys move along it (lib/radios.ts).
+import "../lib/i18nPages";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { applyAppearance, withThemeTransition } from "../lib/appearance";

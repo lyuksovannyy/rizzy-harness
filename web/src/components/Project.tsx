@@ -18,7 +18,8 @@ import {
   projectsApi,
 } from "../lib/projects";
 import { artifactHash, type ProjectTab } from "../lib/routes";
-import { accentColor, PROJECT_ICONS, ProjectIcon } from "../lib/projectIcons";
+import { PROJECT_ICONS } from "../lib/projectIconSet";
+import { accentColor, ProjectIcon } from "../lib/projectIcons";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import { Composer, type Submission } from "./Composer";

@@ -21,6 +21,7 @@ const api = {
   saveAgentAvatar: vi.fn(),
 };
 vi.mock("../api", () => ({ api }));
+vi.mock("../apiPages", () => ({ pageApi: api }));
 
 const { default: Agents } = await import("./Agents");
 const { handleFrom, handleProblem, lastPlace, NEW_FEATURES } = await import("./AgentPage");

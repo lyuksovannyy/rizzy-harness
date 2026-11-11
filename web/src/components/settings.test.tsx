@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Agent, Me, ModelInfo, Prefs } from "../types";
 
 const saveSettings = vi.fn();
-vi.mock("../api", () => ({ api: { saveSettings } }));
+vi.mock("../apiPages", () => ({ pageApi: { saveSettings } }));
 
 const { default: Settings } = await import("./Settings");
 

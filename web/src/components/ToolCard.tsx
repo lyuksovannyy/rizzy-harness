@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight, Globe, Search } from "lucide-react";
 import { useMemo, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import type { WebGroup } from "../lib/rich";
 import { fields as fieldsOf, fmt, markedText, unseen } from "../lib/callText";
 import { showHidden, shownName, stripHidden } from "../md/hidden";
@@ -172,7 +172,7 @@ export function ToolCard({
     setBusy(true);
     setErr(null);
     try {
-      await api.approve(sessionId, item.approval.approval_id, d);
+      await pageApi.approve(sessionId, item.approval.approval_id, d);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {

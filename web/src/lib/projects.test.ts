@@ -2,7 +2,7 @@
 // agree with the server's list (the route is in routes.test.ts).
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { PROJECT_ICONS } from "./projectIcons";
+import { PROJECT_ICONS } from "./projectIconSet";
 import { type BoardColumn, dropIndex } from "./projects";
 
 describe("dropIndex", () => {

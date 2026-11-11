@@ -25,6 +25,7 @@ const api = vi.hoisted(() => ({
   deleteUser: vi.fn(),
 }));
 vi.mock("../api", () => ({ api }));
+vi.mock("../apiPages", () => ({ pageApi: api }));
 const { Users } = await import("./Users");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

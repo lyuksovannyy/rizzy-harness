@@ -7,7 +7,9 @@
 // if anything.
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
-import { modelLabel, type Plan, planProblems, resolveModel } from "../../lib/models";
+import { pageApi } from "../../apiPages";
+import { modelLabel, resolveModel } from "../../lib/models";
+import { type Plan, planProblems } from "../../lib/modelPlan";
 import { chainsOf, dropped, workspacePlan } from "../../lib/workspaceAdmin";
 import type { Agent, ProviderModel, WorkspaceDetail, WorkspaceSettings } from "../../types";
 import { ModelPicker } from "../ModelPicker";
@@ -50,7 +52,7 @@ export function WorkspaceModels(props: WorkspacePanelProps) {
     setLost([...new Set([...(sent ? dropped(sent, d.settings, names) : []), ...dropped(d.settings, mine, names)])]);
   };
   useEffect(() => {
-    api
+    pageApi
       .workspace(id)
       .then((d) => show(d))
       .catch((x) => setErr(message(x)));
@@ -102,9 +104,9 @@ export function WorkspaceModels(props: WorkspacePanelProps) {
     setErr(null);
     setMsg(null);
     try {
-      const fresh = (await api.workspace(id)).settings;
+      const fresh = (await pageApi.workspace(id)).settings;
       const settings: WorkspaceSettings = { ...fresh, agent_models: chainsOf(plan) };
-      show(await api.updateWorkspace(id, { settings }), settings);
+      show(await pageApi.updateWorkspace(id, { settings }), settings);
       setMsg("Saved.");
       props.onChanged();
     } catch (x) {

@@ -4,7 +4,8 @@
 // a plan from being saved.
 import { describe, expect, test } from "vitest";
 import type { ModelInfo, Prefs } from "../types";
-import { ago, dropModels, MAX_FALLBACKS, modelLabel, moveFallback, offeredModels, type Plan, planChanges, planFrom, planProblems, renameModel, rolesOf, savablePrefs, setMain, toggleFallback } from "./models";
+import { modelLabel, offeredModels } from "./models";
+import { ago, dropModels, MAX_FALLBACKS, moveFallback, type Plan, planChanges, planFrom, planProblems, renameModel, rolesOf, savablePrefs, setMain, toggleFallback } from "./modelPlan";
 
 const info = (id: string): ModelInfo => ({
   id,
