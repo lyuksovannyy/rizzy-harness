@@ -833,6 +833,12 @@ printed commands on the other machine (same binary). That machine needs its own
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
 
+Run each node from its own data directory. If two processes use one node's key
+(a copied data directory, a node restored from an old backup) and write the same
+chat differently, the server stops taking that chat's events, logs an error
+naming the chat and the node, and refuses new messages to it ("diverged").
+Delete the chat to clear it; the node's copy goes with it.
+
 ### Set up a node by hand
 
 On the node machine, as root (Debian/Ubuntu; adjust for others). The node runs
