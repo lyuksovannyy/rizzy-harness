@@ -1754,6 +1754,79 @@ pre.diff .del {
   padding: 0 14px 8px;
   font-size: var(--text-xs);
 }
+/* What a call will do (CallInput): every field, wrapped, never a fixed
+   height. What is not on screen is said in words (.call-cut). */
+.call-input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  min-width: 0;
+}
+.call-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0-5);
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+.call-field.call-inline {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.call-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.call-key {
+  color: var(--fg-2);
+  font-family: var(--mono);
+}
+.call-size {
+  color: var(--fg-2);
+}
+pre.term.call-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  max-height: none;
+  font-size: var(--text-xs);
+}
+pre.term.call-del {
+  background: var(--del-bg);
+}
+pre.term.call-add {
+  background: var(--add-bg);
+}
+.hidden-mark {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border-radius: 3px;
+}
+.call-cut {
+  display: block;
+  margin: 6px 0;
+  padding: 4px 8px;
+  border: 1px dashed var(--warn);
+  border-radius: var(--r-sm);
+  white-space: normal;
+  font-family: var(--sans);
+}
+.call-cut-text {
+  color: var(--warn);
+}
+.call-notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+.call-unseen {
+  color: var(--warn);
+  font-size: var(--text-sm);
+  font-weight: var(--w-semibold);
+}
 /* Web tools: one line in the harness's words instead of a tool card. */
 .tool-web .tool-head,
 .tool-group-head {

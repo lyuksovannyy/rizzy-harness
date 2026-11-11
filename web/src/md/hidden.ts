@@ -1,37 +1,20 @@
-// Hidden characters: bidi controls (U+061C, U+200E-200F, U+202A-202E,
-// U+2066-2069), zero-width characters (U+200B-200D, U+2060-2064), the BOM,
-// private-use characters, and the default-ignorable code points no script
-// needs: deprecated format characters (U+2065-206F), unassigned specials
-// (U+FFF0-FFF8), musical beam controls (U+1D173-1D17A) and the whole tag and
-// variation-selector plane (U+E0000-E0FFF). They hide or reorder text, so
-// what the user reads (and what Copy gives them) would differ from what is
-// there; tag characters and variation selectors are the usual carriers for
-// invisible prompt-injection text. The soft hyphen and the BMP variation
-// selectors (emoji style) shape real text and stay. clean_text in Rust
-// strips the same set.
+// The hidden-character sets and their codes live in hiddenChars.ts (small,
+// on the first screen); this adds the strip, before and after Markdown
+// parsing.
 import type { HastNode } from "./hast";
+import { HIDDEN_SRC } from "./hiddenChars";
 
-const HIDDEN =
-  /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFF0-\uFFF8\uE000-\uF8FF\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu;
+export { showHidden, shownName } from "./hiddenChars";
+
+const HIDDEN = new RegExp(HIDDEN_SRC, "gu");
+const ANY_HIDDEN = new RegExp(HIDDEN_SRC, "u");
 
 export function stripHidden(text: string): string {
   return text.replace(HIDDEN, "");
 }
 
-const ANY_HIDDEN = new RegExp(HIDDEN.source, "u");
-
 export function hasHidden(text: string): boolean {
   return ANY_HIDDEN.test(text);
-}
-
-// The hidden set plus control characters other than tab and newline.
-const SHOWN = new RegExp(`${HIDDEN.source}|[\\x00-\\x08\\x0B-\\x1F\\x7F-\\x9F]`, "gu");
-
-/** Hidden and control characters as visible codes (`<U+202E>`), for text
- * the user has to check as it really is: what a web call sends, what a
- * page said to the model. Stripping them would hide exactly what to see. */
-export function showHidden(text: string): string {
-  return text.replace(SHOWN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}>`);
 }
 
 /**

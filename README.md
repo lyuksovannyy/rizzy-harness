@@ -595,6 +595,16 @@ same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
 
+**Approving a call.** In `ask` mode a command, a write, an edit or a publish
+waits on a card that shows the whole call: every argument, the full path (and
+whether it is absolute or outside the chat's folder), long text with its size,
+beginning and end and a "show all" for the middle, runs of blanks as counted
+markers, and hidden or look-alike characters as codes. "Allow once" runs this
+call; "Allow this exact call for this turn" also lets the identical call run
+again without asking until the turn ends (any other call still asks); "Deny"
+refuses it. If you allow while part of the input is collapsed, the card says how
+many characters you have not expanded.
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 

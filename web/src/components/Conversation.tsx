@@ -22,6 +22,7 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
+import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
 import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
@@ -290,7 +291,7 @@ export default function Conversation(props: {
       )}
       <header className="conv-head">
         <div className="conv-title">
-          <h1 className="ellipsis">{meta?.title ?? props.row?.title ?? "…"}</h1>
+          <h1 className="ellipsis">{shownName(meta?.title ?? props.row?.title ?? "…")}</h1>
           <div className="conv-meta">
             <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
               {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
@@ -298,7 +299,7 @@ export default function Conversation(props: {
             </span>
             <span className="muted">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
-            {agentic && <span className="mono muted ellipsis">{meta?.cwd}</span>}
+            {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
             {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
               <span
                 className="muted meter"
@@ -388,6 +389,7 @@ export default function Conversation(props: {
                       sessionId={sessionId}
                       group={web}
                       blocked={!!blocked}
+                      cwd={meta?.cwd}
                       tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
                     />
                   );
@@ -490,20 +492,20 @@ export default function Conversation(props: {
                     return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
                     return (
-                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} />
+                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} cwd={meta?.cwd} />
                     );
                   case "artifact":
                     return <SavedItem key={i} staged={it.staged} />;
                   case "artifact_failed":
                     return (
                       <div key={i} className="msg error">
-                        Couldn't save {it.path}: {it.error}
+                        Couldn't save {showHidden(it.path)}: {showHidden(it.error)}
                       </div>
                     );
                   case "error":
                     return (
                       <div key={i} className="msg error">
-                        {it.message}
+                        {showHidden(it.message)}
                       </div>
                     );
                   case "agent_changed":
