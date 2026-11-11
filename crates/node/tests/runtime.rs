@@ -1152,3 +1152,122 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
     assert!(h.ws.join("f1.txt").exists());
     assert!(!h.ws.join("f2.txt").exists() && !h.ws.join("f3.txt").exists());
 }
+
+/// The log is written first (PLAN.md §2): when the store cannot append, the
+/// tool does not run and the turn ends, even when the events that end it
+/// cannot be written either. The store is broken from outside, as a full
+/// disk would break it: a trigger on the real database refuses every event
+/// from the tool's start on. Once it is fixed, the session works again.
+#[tokio::test]
+async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        ..Default::default()
+    })
+    .await;
+    let sid = h.create().await;
+    let db = rusqlite::Connection::open(h._dir.path().join("node.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER break_log BEFORE INSERT ON events
+         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message')
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+    let marker = h.ws.join("marker");
+    let prompt = |h: &Harness, id: &str, text: String| {
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: id.into(),
+            session_id: sid,
+            text,
+            images: vec![],
+        })
+    };
+    // The ack for `id`, collecting events on the way.
+    async fn ack(h: &mut Harness, id: &str) -> Result<(), String> {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+                .await
+                .expect("timed out waiting for ack")
+                .expect("link closed");
+            match msg {
+                NodeToMaster::Event { event } => h.seen.push(event),
+                NodeToMaster::Ack {
+                    req_id, ok, error, ..
+                } if req_id == id => {
+                    return if ok {
+                        Ok(())
+                    } else {
+                        Err(error.unwrap_or_default())
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    prompt(&h, "p1", format!("run: touch {}", marker.display()));
+    ack(&mut h, "p1")
+        .await
+        .expect("the turn starts: its first events are written");
+    h.until(|k| matches!(k, EventKind::AssistantMessage(_)))
+        .await;
+    // The turn is over once the session takes a prompt again; while the log
+    // is broken that prompt is refused for the log, not for a running turn.
+    let mut refused = Ok(());
+    for i in 0..100 {
+        let id = format!("q{i}");
+        prompt(&h, &id, "hello".into());
+        match ack(&mut h, &id).await {
+            Err(e) if e.contains("already running") => {
+                tokio::time::sleep(Duration::from_millis(50)).await
+            }
+            other => {
+                refused = other;
+                break;
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !marker.exists(),
+        "the tool ran although its start was not logged"
+    );
+    let refused = refused.expect_err("a broken log must refuse the prompt");
+    assert!(refused.contains("log could not be written"), "{refused}");
+
+    // Fixed: the session closes the stopped turn and runs the next one.
+    db.execute_batch("DROP TRIGGER break_log;").unwrap();
+    let mark = h.seen.len();
+    prompt(&h, "p2", "hello".into());
+    ack(&mut h, "p2")
+        .await
+        .expect("works again once the store does");
+    h.until(|k| matches!(k, EventKind::TurnEnded(t) if t.reason == TurnEndReason::Completed))
+        .await;
+    let ends: Vec<TurnEndReason> = h.seen[mark..]
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::TurnEnded(t)) => Some(t.reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends,
+        [TurnEndReason::Error, TurnEndReason::Completed],
+        "the stopped turn is closed first"
+    );
+    assert!(!marker.exists());
+    let stored = h.node.store().events_after(sid, 0, 1000).unwrap();
+    let v = SessionView::fold(&stored).unwrap();
+    assert!(v.running_turn.is_none());
+    assert!(stored.iter().all(|e| e.kind != "tool_call_started"));
+    assert!(stored.iter().any(|e| matches!(e.typed(),
+        Ok(EventKind::Error(m)) if m.message.contains("log could not be written"))));
+}

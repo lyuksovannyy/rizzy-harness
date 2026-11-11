@@ -114,9 +114,19 @@ impl Chat {
         msg
     }
 
-    /// Events until the next turn ends.
+    /// Events of the turn just prompted, until it ends. Its start and message
+    /// are written before the prompt is acked, so they may already be here.
     async fn turn(&mut self) -> Vec<EventKind> {
-        let from = self.seen.len();
+        let from = self
+            .seen
+            .iter()
+            .rposition(|k| matches!(k, EventKind::TurnStarted(_)))
+            .filter(|&i| {
+                !self.seen[i..]
+                    .iter()
+                    .any(|k| matches!(k, EventKind::TurnEnded(_)))
+            })
+            .unwrap_or(self.seen.len());
         while !matches!(self.seen.last(), Some(EventKind::TurnEnded(_))) || self.seen.len() == from
         {
             self.next().await;

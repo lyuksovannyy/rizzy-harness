@@ -49,6 +49,92 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// The turn's view of its host. The log is written first (PLAN.md §2): after
+/// the first event that could not be appended, every later one fails without
+/// reaching the host and the turn's token is cancelled, so a tool still
+/// running or a delegation running beside the one that failed stops through
+/// the usual cancel path. The loop then ends the turn: no further tool body,
+/// no further model request. Applies to every event, deltas included: a
+/// failed append is a store that is failing, and output shown live but
+/// missing from the log is output the user cannot see again.
+struct Logged<'a> {
+    host: &'a dyn harness_core::backend::TurnHost,
+    cancel: tokio_util::sync::CancellationToken,
+    failed: std::sync::Mutex<Option<harness_core::backend::LogError>>,
+}
+
+impl Logged<'_> {
+    fn failure(&self) -> Option<harness_core::backend::LogError> {
+        self.failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl harness_core::backend::TurnHost for Logged<'_> {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        if let Some(e) = self.failure() {
+            return Err(e);
+        }
+        let res = self.host.emit(kind).await;
+        if let Err(e) = &res {
+            self.failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(|| e.clone());
+            self.cancel.cancel();
+        }
+        res
+    }
+
+    async fn approve(
+        &self,
+        call_id: &str,
+        tool: &str,
+        input: &serde_json::Value,
+        risk: harness_core::policy::ToolRisk,
+    ) -> harness_core::policy::Decision {
+        if self.failure().is_some() {
+            return harness_core::policy::Decision::Deny;
+        }
+        self.host.approve(call_id, tool, input, risk).await
+    }
+
+    async fn delegate(
+        &self,
+        agent: harness_core::agent::AgentSpec,
+        task: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: tokio_util::sync::CancellationToken,
+        started: Box<dyn FnOnce(harness_core::SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        self.host
+            .delegate(agent, task, refs, observed, cancel, started)
+            .await
+    }
+
+    fn artifacts(&self) -> Option<Arc<dyn harness_core::artifacts::ArtifactSink>> {
+        self.host.artifacts()
+    }
+
+    async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
+        self.host.images(sha256).await
+    }
+}
+
+/// What the loop returns when an append failed; `run_turn` replaces the
+/// error with the log's.
+fn stopped(usage: Usage) -> TurnOutcome {
+    TurnOutcome {
+        reason: TurnEndReason::Error,
+        usage: Some(usage),
+        error: None,
+    }
+}
+
 /// The orchestration tool (handled by the loop itself, not a `Tool`).
 pub const DELEGATE: &str = "delegate";
 
@@ -302,12 +388,14 @@ impl NativeBackend {
         // Link to the child as soon as it exists, while it still works.
         let link = async {
             if let Some(sid) = rx.recv().await {
-                host.emit(EventKind::ToolOutputDelta(ToolOutputDelta {
-                    call_id: call_id.clone(),
-                    stream: OutputStream::Stdout,
-                    text: format!("session: {sid}\n"),
-                }))
-                .await;
+                // A failure cancels the turn (and so this child) by itself.
+                let _ = host
+                    .emit(EventKind::ToolOutputDelta(ToolOutputDelta {
+                        call_id: call_id.clone(),
+                        stream: OutputStream::Stdout,
+                        text: format!("session: {sid}\n"),
+                    }))
+                    .await;
             }
         };
         let (res, ()) = tokio::join!(run, link);
@@ -546,10 +634,12 @@ where
         if clean.is_empty() {
             return false;
         }
+        // A failed append cancels the turn's token, which ends this loop
+        // (or the tool, which then returns); later appends fail at once.
         if let Some(l) = lead.take() {
-            host.emit(l).await;
+            let _ = host.emit(l).await;
         }
-        host.emit(make(clean)).await;
+        let _ = host.emit(make(clean)).await;
         true
     };
     let out = loop {
@@ -621,6 +711,35 @@ impl AgentBackend for NativeBackend {
     }
 
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
+        let cancel = ctx.cancel.child_token();
+        let logged = Logged {
+            host: ctx.host,
+            cancel: cancel.clone(),
+            failed: Default::default(),
+        };
+        let out = self
+            .turn(TurnCtx {
+                host: &logged,
+                cancel,
+                ..ctx
+            })
+            .await;
+        match logged.failure() {
+            Some(e) => TurnOutcome {
+                reason: TurnEndReason::Error,
+                usage: out.usage,
+                error: Some(format!(
+                    "{e}; the turn was stopped, so nothing ran that the log does not hold"
+                )),
+            },
+            None => out,
+        }
+    }
+}
+
+impl NativeBackend {
+    /// One turn. Every append that fails ends it (see [`Logged`]).
+    async fn turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
         let host = ctx.host;
         let agent = ctx.agent.as_ref();
         let author = agent.map(|a| a.agent_id.clone());
@@ -664,12 +783,17 @@ impl AgentBackend for NativeBackend {
                 self.summarize(&ctx, summary.as_deref(), recent).await
         {
             usage.add(&u);
-            host.emit(EventKind::HistorySummarized(HistorySummarized {
-                turn_id: ctx.turn_id.clone(),
-                through_seq,
-                text: text.clone(),
-            }))
-            .await;
+            if host
+                .emit(EventKind::HistorySummarized(HistorySummarized {
+                    turn_id: ctx.turn_id.clone(),
+                    through_seq,
+                    text: text.clone(),
+                }))
+                .await
+                .is_err()
+            {
+                return stopped(usage);
+            }
             let start = recent.partition_point(|e| e.seq <= through_seq);
             recent = &recent[start..];
             summary = Some(text);
@@ -799,27 +923,34 @@ impl AgentBackend for NativeBackend {
                 }
                 Step::Done(Ok(c)) => c,
             };
-            if let Some(l) = lead.take() {
-                host.emit(l).await;
+            if let Some(l) = lead.take()
+                && host.emit(l).await.is_err()
+            {
+                return stopped(usage);
             }
             started = true;
             if let Some(u) = &completion.usage {
                 usage.add(u);
                 usage.context_tokens = u.input_tokens;
             }
-            host.emit(self.assistant_message(
-                AssistantMessage {
-                    author: author.clone(),
-                    variant: None,
-                    turn_id: ctx.turn_id.clone(),
-                    message_id,
-                    text: completion.text.clone(),
-                    tool_calls: completion.tool_calls.clone(),
-                    blocks: vec![],
-                },
-                ui,
-            ))
-            .await;
+            if host
+                .emit(self.assistant_message(
+                    AssistantMessage {
+                        author: author.clone(),
+                        variant: None,
+                        turn_id: ctx.turn_id.clone(),
+                        message_id,
+                        text: completion.text.clone(),
+                        tool_calls: completion.tool_calls.clone(),
+                        blocks: vec![],
+                    },
+                    ui,
+                ))
+                .await
+                .is_err()
+            {
+                return stopped(usage);
+            }
             messages.push(ChatMsg::Assistant {
                 text: completion.text,
                 tool_calls: completion.tool_calls.clone(),
@@ -841,14 +972,19 @@ impl AgentBackend for NativeBackend {
                 let caps = agent.and_then(|a| a.caps).unwrap_or_default();
                 let mut admitted = Vec::new();
                 for call in delegations {
-                    host.emit(EventKind::ToolCallStarted(ToolCallStarted {
-                        author: author.clone(),
-                        turn_id: ctx.turn_id.clone(),
-                        call_id: call.call_id.clone(),
-                        tool: call.tool.clone(),
-                        input: call.input.clone(),
-                    }))
-                    .await;
+                    if host
+                        .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                            author: author.clone(),
+                            turn_id: ctx.turn_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.tool.clone(),
+                            input: call.input.clone(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
                     let refusal = if subagents >= caps.max_subagents {
                         Some(format!(
                             "cap reached: at most {} sub-agents per turn",
@@ -864,15 +1000,20 @@ impl AgentBackend for NativeBackend {
                     };
                     match refusal {
                         Some(r) => {
-                            host.emit(EventKind::ToolCallFinished(ToolCallFinished {
-                                call_id: call.call_id.clone(),
-                                ok: false,
-                                output: r.clone(),
-                                exit_code: None,
-                                truncated: false,
-                                sources: vec![],
-                            }))
-                            .await;
+                            if host
+                                .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                    call_id: call.call_id.clone(),
+                                    ok: false,
+                                    output: r.clone(),
+                                    exit_code: None,
+                                    truncated: false,
+                                    sources: vec![],
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                return stopped(usage);
+                            }
                             messages.push(ChatMsg::Tool {
                                 call_id: call.call_id,
                                 content: r,
@@ -901,15 +1042,20 @@ impl AgentBackend for NativeBackend {
                     sub_tokens += u.input_tokens + u.output_tokens;
                     usage.add(&u);
                     let output = self.config.secrets.scrub(&outcome.output);
-                    host.emit(EventKind::ToolCallFinished(ToolCallFinished {
-                        call_id: call.call_id.clone(),
-                        ok: outcome.ok,
-                        output: output.clone(),
-                        exit_code: None,
-                        truncated: outcome.truncated,
-                        sources: self.scrub_sources(outcome.sources),
-                    }))
-                    .await;
+                    if host
+                        .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            call_id: call.call_id.clone(),
+                            ok: outcome.ok,
+                            output: output.clone(),
+                            exit_code: None,
+                            truncated: outcome.truncated,
+                            sources: self.scrub_sources(outcome.sources),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
                     messages.push(ChatMsg::Tool {
                         call_id: call.call_id,
                         content: output,
@@ -924,14 +1070,19 @@ impl AgentBackend for NativeBackend {
                 }
             }
             for call in calls {
-                host.emit(EventKind::ToolCallStarted(ToolCallStarted {
-                    author: author.clone(),
-                    turn_id: ctx.turn_id.clone(),
-                    call_id: call.call_id.clone(),
-                    tool: call.tool.clone(),
-                    input: call.input.clone(),
-                }))
-                .await;
+                if host
+                    .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                        author: author.clone(),
+                        turn_id: ctx.turn_id.clone(),
+                        call_id: call.call_id.clone(),
+                        tool: call.tool.clone(),
+                        input: call.input.clone(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
                 let mut observed = observed_text(&messages, &trusted, Some((user_idx, &own_words)));
                 if let Some(inh) = &ctx.extra.observed {
                     observed.splice(0..0, inh.iter().cloned());
@@ -948,15 +1099,20 @@ impl AgentBackend for NativeBackend {
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
-                host.emit(EventKind::ToolCallFinished(ToolCallFinished {
-                    call_id: call.call_id.clone(),
-                    ok: outcome.ok,
-                    output: output.clone(),
-                    exit_code: outcome.exit_code,
-                    truncated: outcome.truncated,
-                    sources: self.scrub_sources(outcome.sources),
-                }))
-                .await;
+                if host
+                    .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                        call_id: call.call_id.clone(),
+                        ok: outcome.ok,
+                        output: output.clone(),
+                        exit_code: outcome.exit_code,
+                        truncated: outcome.truncated,
+                        sources: self.scrub_sources(outcome.sources),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
                 if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
                     trusted.insert(call.call_id.clone());
                 }
@@ -1095,7 +1251,8 @@ impl NativeBackend {
                             },
                             ui,
                         ))
-                        .await;
+                        .await
+                        .map_err(|e| e.to_string())?;
                         Ok(c.usage)
                     }
                     Step::Done(Err(e)) => Err(format!("{model}: {e}")),
@@ -1332,8 +1489,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnHost for RecHost {
-        async fn emit(&self, kind: EventKind) {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
             self.events.lock().unwrap().push(kind);
+            Ok(())
         }
         async fn approve(&self, _c: &str, tool: &str, _i: &Value, risk: ToolRisk) -> Decision {
             if risk == ToolRisk::ReadOnly {
@@ -1818,7 +1976,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnHost for DelegatingHost {
-        async fn emit(&self, kind: EventKind) {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
             self.parent.emit(kind).await
         }
         async fn approve(&self, c: &str, tool: &str, i: &Value, risk: ToolRisk) -> Decision {
@@ -2187,6 +2345,231 @@ mod tests {
             .await
             .expect("a tool that ignores cancel held the turn");
         assert_eq!(out.reason, TurnEndReason::Cancelled);
+    }
+
+    /// A host whose log refuses one kind of event, as a full disk would.
+    struct FailOn {
+        rec: RecHost,
+        kind: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHost for FailOn {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+            if kind.name() == self.kind {
+                return Err(harness_core::backend::LogError(
+                    "database or disk is full".into(),
+                ));
+            }
+            self.rec.emit(kind).await
+        }
+        async fn approve(&self, c: &str, tool: &str, i: &Value, risk: ToolRisk) -> Decision {
+            self.rec.approve(c, tool, i, risk).await
+        }
+    }
+
+    /// Calls the `flag` tool once, then answers; counts its requests.
+    #[derive(Default)]
+    struct CallsFlag(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl Provider for CallsFlag {
+        fn name(&self) -> &'static str {
+            "calls-flag"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answered = matches!(req.messages.last(), Some(ChatMsg::Tool { .. }));
+            Ok(Completion {
+                text: if answered {
+                    "done".into()
+                } else {
+                    String::new()
+                },
+                tool_calls: (!answered)
+                    .then(|| ToolCallRef {
+                        call_id: new_id(),
+                        tool: "flag".into(),
+                        input: json!({}),
+                    })
+                    .into_iter()
+                    .collect(),
+                usage: None,
+            })
+        }
+    }
+
+    /// Stands in for a tool with an effect: records that its body ran.
+    struct Flag(Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Flag {
+        fn name(&self) -> &'static str {
+            "flag"
+        }
+        fn description(&self) -> &'static str {
+            "sets a flag"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::Mutating
+        }
+        async fn run(&self, _ctx: &ToolCtx, _input: Value) -> ToolOutcome {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            ToolOutcome::ok("set")
+        }
+    }
+
+    /// Runs one turn against a host that refuses `kind`. Returns the
+    /// outcome, whether the tool body ran and how many model requests went out.
+    async fn turn_failing_on(kind: &'static str) -> (TurnOutcome, bool, usize, Vec<&'static str>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(CallsFlag::default());
+        let b = NativeBackend::new(
+            provider.clone(),
+            vec![Arc::new(Flag(ran.clone()))],
+            NativeConfig::default(),
+        );
+        let host = FailOn {
+            rec: RecHost::new(Decision::Allow),
+            kind,
+        };
+        let mut c = ctx(&host.rec, "go", dir.path());
+        c.host = &host;
+        let out = b.run_turn(c).await;
+        let calls = provider.0.load(std::sync::atomic::Ordering::SeqCst);
+        (
+            out,
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            calls,
+            host.rec.kinds(),
+        )
+    }
+
+    /// The log is written first: a tool whose start could not be recorded
+    /// does not run, and the turn ends saying why.
+    #[tokio::test]
+    async fn a_tool_does_not_run_when_its_start_cannot_be_logged() {
+        let (out, ran, calls, kinds) = turn_failing_on("tool_call_started").await;
+        assert!(!ran, "the tool body ran without its start in the log");
+        assert_eq!(calls, 1, "no further model request");
+        assert_eq!(out.reason, TurnEndReason::Error);
+        let err = out.error.unwrap_or_default();
+        assert!(err.contains("log could not be written"), "{err}");
+        assert!(!kinds.contains(&"tool_call_finished"), "{kinds:?}");
+    }
+
+    /// A result that could not be recorded is not handed to the model:
+    /// the next request would carry a history the log does not hold.
+    #[tokio::test]
+    async fn no_model_request_after_a_result_cannot_be_logged() {
+        let (out, ran, calls, _) = turn_failing_on("tool_call_finished").await;
+        assert!(ran);
+        assert_eq!(calls, 1, "a model request went out after the result failed");
+        assert_eq!(out.reason, TurnEndReason::Error);
+        assert!(
+            out.error
+                .unwrap_or_default()
+                .contains("log could not be written")
+        );
+    }
+
+    /// A message whose tool calls could not be recorded runs none of them.
+    #[tokio::test]
+    async fn assistant_message_that_cannot_be_logged_runs_no_tool() {
+        let (out, ran, calls, _) = turn_failing_on("assistant_message").await;
+        assert!(!ran);
+        assert_eq!(calls, 1);
+        assert_eq!(out.reason, TurnEndReason::Error);
+    }
+
+    /// Delegations run in parallel. When one of them cannot log, the others
+    /// are cancelled through the turn's token and the turn ends within the
+    /// grace period, as an error.
+    #[tokio::test]
+    async fn a_failed_append_cancels_the_parallel_delegations() {
+        struct Parallel {
+            rec: RecHost,
+            cancelled: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl TurnHost for Parallel {
+            async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+                if kind.name() == "tool_output_delta" {
+                    return Err(harness_core::backend::LogError("disk I/O error".into()));
+                }
+                self.rec.emit(kind).await
+            }
+            async fn approve(&self, c: &str, t: &str, i: &Value, r: ToolRisk) -> Decision {
+                self.rec.approve(c, t, i, r).await
+            }
+            async fn delegate(
+                &self,
+                agent: harness_core::agent::AgentSpec,
+                _task: String,
+                _refs: SharedRefs,
+                _observed: Arc<Vec<String>>,
+                cancel: tokio_util::sync::CancellationToken,
+                started: Box<dyn FnOnce(SessionId) + Send>,
+            ) -> Result<harness_core::backend::DelegateOutcome, String> {
+                if agent.agent_id == "a" {
+                    // Only `a` reports its child, so only its link fails.
+                    started(SessionId::new());
+                }
+                cancel.cancelled().await;
+                self.cancelled
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("cancelled".into())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let host = Parallel {
+            rec: RecHost::new(Decision::Allow),
+            cancelled: Arc::default(),
+        };
+        let lead = harness_core::agent::AgentSpec {
+            agent_id: "lead".into(),
+            delegates: vec![
+                harness_core::agent::AgentSpec {
+                    agent_id: "a".into(),
+                    ..scout()
+                },
+                harness_core::agent::AgentSpec {
+                    agent_id: "b".into(),
+                    ..scout()
+                },
+            ],
+            ..scout()
+        };
+        let mut c = ctx(&host.rec, "delegate: a=one | b=two", dir.path());
+        c.agent = Some(lead);
+        c.host = &host;
+        let out = tokio::time::timeout(
+            TOOL_CANCEL_GRACE + Duration::from_secs(2),
+            backend().run_turn(c),
+        )
+        .await
+        .expect("the turn did not end after a failed append");
+        assert_eq!(
+            host.cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both delegations are cancelled"
+        );
+        assert_eq!(out.reason, TurnEndReason::Error);
+        assert!(
+            out.error
+                .unwrap_or_default()
+                .contains("log could not be written")
+        );
+        let kinds = host.rec.kinds();
+        assert!(!kinds.contains(&"tool_call_finished"), "{kinds:?}");
     }
 
     #[test]

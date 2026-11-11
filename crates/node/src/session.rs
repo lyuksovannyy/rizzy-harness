@@ -3,10 +3,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use harness_core::agent::AgentSpec;
-use harness_core::backend::{TurnCtx, TurnExtra, TurnHost};
+use harness_core::backend::{LogError, TurnCtx, TurnExtra, TurnHost};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ToolRisk};
 use harness_core::refs::SharedRefs;
@@ -46,6 +47,12 @@ pub(crate) struct Session {
     /// Tools a person approved in the running turn. "Allow for this turn"
     /// counts only once the tool is in here (cleared when a turn starts).
     turn_approved: Mutex<HashSet<String>>,
+    /// An append of the running turn failed: the rest of its appends fail
+    /// without being tried, so the turn ends (cleared when a turn starts).
+    log_failed: AtomicBool,
+    /// A turn's last events could not be written: its end is still missing
+    /// from the log, and the next prompt writes it first.
+    unclosed: AtomicBool,
 }
 
 /// What the user sent with a prompt.
@@ -108,6 +115,8 @@ impl Session {
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
             turn_approved: Mutex::new(HashSet::new()),
+            log_failed: AtomicBool::new(false),
+            unclosed: AtomicBool::new(false),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
@@ -152,47 +161,63 @@ impl Session {
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
             turn_approved: Mutex::new(HashSet::new()),
+            log_failed: AtomicBool::new(false),
+            unclosed: AtomicBool::new(false),
         }))
     }
 
     /// Close out a turn that was running when the process died (PLAN.md §2).
     pub(crate) async fn recover_interrupted(&self) {
+        let message = "The node restarted while this turn was running. Send a message to continue.";
+        if let Err(e) = self
+            .close_open_turn(message, TurnEndReason::Interrupted)
+            .await
+        {
+            // The next prompt tries again.
+            self.unclosed.store(true, Ordering::SeqCst);
+            tracing::error!(session = %self.id, error = %e, "could not close the interrupted turn");
+        }
+    }
+
+    /// End the turn the log shows running, if any: deny its pending
+    /// approvals, say why, end it. Each event is tried once.
+    async fn close_open_turn(&self, message: &str, reason: TurnEndReason) -> Result<(), String> {
         let id = self.id;
-        let Ok(events) = self
+        let events = self
             .node
             .cfg
             .store
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
             .await
-        else {
-            return;
-        };
-        let Ok(view) = SessionView::fold(&events) else {
-            return;
-        };
+            .map_err(|e| e.to_string())?;
+        let view = SessionView::fold(&events).map_err(|e| e.to_string())?;
         let Some(turn_id) = view.running_turn else {
-            return;
+            return Ok(());
         };
+        let fail = |e: StoreError| LogError(e.to_string()).to_string();
         for approval_id in view.pending_approvals {
-            self.emit(EventKind::ApprovalResolved(ApprovalResolved {
+            self.append(EventKind::ApprovalResolved(ApprovalResolved {
                 approval_id,
                 decision: Decision::Deny,
                 by: ResolvedBy::Interrupted,
             }))
-            .await;
+            .await
+            .map_err(fail)?;
         }
-        self.emit(EventKind::Error(ErrorEvent {
+        self.append(EventKind::Error(ErrorEvent {
             turn_id: Some(turn_id.clone()),
-            message: "The node restarted while this turn was running. Send a message to continue."
-                .into(),
+            message: message.into(),
         }))
-        .await;
-        self.emit(EventKind::TurnEnded(TurnEnded {
+        .await
+        .map_err(fail)?;
+        self.append(EventKind::TurnEnded(TurnEnded {
             turn_id,
-            reason: TurnEndReason::Interrupted,
+            reason,
             usage: None,
         }))
-        .await;
+        .await
+        .map_err(fail)?;
+        Ok(())
     }
 
     /// Assign the next seq, scrub, persist (fsync), then publish.
@@ -237,9 +262,47 @@ impl Session {
         Ok(ev)
     }
 
-    async fn emit(&self, kind: EventKind) {
-        if let Err(e) = self.append(kind).await {
-            tracing::error!(session = %self.id, error = %e, "failed to append event");
+    /// Append one of the running turn's events. The log is written first:
+    /// on `Err` the caller must not do what the event describes. The first
+    /// failure stops the turn (its token is cancelled) and makes the rest of
+    /// its appends fail untried; the backend then ends the turn.
+    async fn emit(&self, kind: EventKind) -> Result<(), LogError> {
+        if self.log_failed.load(Ordering::SeqCst) {
+            return Err(LogError(
+                "an earlier event of this turn was not written".into(),
+            ));
+        }
+        match self.append(kind).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.note_log_failure(&e);
+                if let Some(c) = self.current_cancel() {
+                    c.cancel();
+                }
+                Err(LogError(e.to_string()))
+            }
+        }
+    }
+
+    /// Log a failed append, once per turn. The line names the store's
+    /// error only: never the event's payload.
+    fn note_log_failure(&self, e: &StoreError) {
+        if !self.log_failed.swap(true, Ordering::SeqCst) {
+            tracing::error!(session = %self.id, error = %e, "could not write the session log; stopping the turn");
+        } else {
+            tracing::debug!(session = %self.id, error = %e, "session log still not writable");
+        }
+    }
+
+    /// Append one of the events that end a turn: tried once even after a
+    /// failure, since a turn that cannot record its end must still end.
+    async fn append_end(&self, kind: EventKind) -> bool {
+        match self.append(kind).await {
+            Ok(_) => true,
+            Err(e) => {
+                self.note_log_failure(&e);
+                false
+            }
         }
     }
 
@@ -313,6 +376,14 @@ impl Session {
                 publishes: Arc::default(),
             });
         }
+        if self.unclosed.load(Ordering::SeqCst) {
+            let message = "The session log could not be written, so this turn was stopped.";
+            if let Err(e) = self.close_open_turn(message, TurnEndReason::Error).await {
+                self.release(&turn_id);
+                return Err(e);
+            }
+            self.unclosed.store(false, Ordering::SeqCst);
+        }
         let msg = match self.user_message(turn_id.clone(), input).await {
             Ok(msg) => msg,
             Err(e) => {
@@ -324,11 +395,64 @@ impl Session {
             images: msg.images.clone(),
             ..extra
         };
+        // Recorded before the prompt is answered, so a log that cannot be
+        // written refuses the prompt itself and the sender sees why.
+        let history = match self.begin(&msg, agent.as_ref()).await {
+            Ok(h) => h,
+            Err(e) => {
+                self.release(&turn_id);
+                return Err(e);
+            }
+        };
         let this = self.clone();
         tokio::spawn(async move {
-            this.run_turn(msg, agent, compare, extra, cancel).await;
+            this.run_turn(msg, history, agent, compare, extra, cancel)
+                .await;
         });
         Ok(())
+    }
+
+    /// Start a turn in the log: read the history before it, then record
+    /// `turn_started` and the user's message. Returns the history. When an
+    /// append fails nothing has run, and whatever was written is closed.
+    async fn begin(
+        &self,
+        msg: &UserMessage,
+        agent: Option<&AgentSpec>,
+    ) -> Result<Vec<RawEvent>, String> {
+        let id = self.id;
+        let history = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.turn_approved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        self.log_failed.store(false, Ordering::SeqCst);
+        let started = self
+            .emit(EventKind::TurnStarted(TurnStarted {
+                agent: agent.map(AgentSpec::agent_ref),
+                turn_id: msg.turn_id.clone(),
+            }))
+            .await;
+        if let Err(e) = started {
+            return Err(e.to_string());
+        }
+        if let Err(e) = self.emit(EventKind::UserMessage(msg.clone())).await {
+            self.end_turn(
+                &msg.turn_id,
+                TurnEndReason::Error,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            return Err(e.to_string());
+        }
+        Ok(history)
     }
 
     /// Check a message's images and keep their bytes with the chat, before
@@ -395,9 +519,11 @@ impl Session {
         }
     }
 
+    /// Run a turn that `begin` recorded.
     async fn run_turn(
         self: Arc<Self>,
         msg: UserMessage,
+        history: Vec<RawEvent>,
         agent: Option<AgentSpec>,
         compare: Vec<String>,
         extra: TurnExtra,
@@ -405,25 +531,14 @@ impl Session {
     ) -> (TurnEndReason, Option<Usage>) {
         let turn_id = msg.turn_id.clone();
         let user_text = msg.model_text();
-        let id = self.id;
-        let history = self
-            .node
-            .cfg
-            .store
-            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
-            .await
-            .unwrap_or_default();
-        self.turn_approved
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
-        self.emit(EventKind::TurnStarted(TurnStarted {
-            agent: agent.as_ref().map(AgentSpec::agent_ref),
-            turn_id: turn_id.clone(),
-        }))
-        .await;
-        self.emit(EventKind::UserMessage(msg)).await;
         let checkpoint = self.checkpoint(&turn_id, CheckpointPhase::Before).await;
+        if self.log_failed.load(Ordering::SeqCst) {
+            // The checkpoint's event was not written: nothing else runs.
+            let error = LogError("the checkpoint could not be recorded".into()).to_string();
+            self.end_turn(&turn_id, TurnEndReason::Error, None, Some(error))
+                .await;
+            return (TurnEndReason::Error, None);
+        }
 
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
@@ -460,14 +575,9 @@ impl Session {
                 Some(format!("agent backend crashed: {e}")),
             ),
         };
-        if let Some(message) = error {
-            self.emit(EventKind::Error(ErrorEvent {
-                turn_id: Some(turn_id.clone()),
-                message,
-            }))
-            .await;
-        }
-        if let Some((root, before)) = checkpoint {
+        if let Some((root, before)) = checkpoint
+            && !self.log_failed.load(Ordering::SeqCst)
+        {
             self.checkpoint_after(&turn_id, &root, &before).await;
         }
         let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
@@ -475,14 +585,37 @@ impl Session {
         } else {
             reason
         };
-        self.emit(EventKind::TurnEnded(TurnEnded {
-            turn_id: turn_id.clone(),
-            reason,
-            usage: usage.clone(),
-        }))
-        .await;
-        self.release(&turn_id);
+        self.end_turn(&turn_id, reason, usage.clone(), error).await;
         (reason, usage)
+    }
+
+    /// Record the turn's error and end, each tried once, and free the slot.
+    /// If the end could not be written, the next prompt writes it first.
+    async fn end_turn(
+        &self,
+        turn_id: &str,
+        reason: TurnEndReason,
+        usage: Option<Usage>,
+        error: Option<String>,
+    ) {
+        if let Some(message) = error {
+            self.append_end(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message,
+            }))
+            .await;
+        }
+        let ended = self
+            .append_end(EventKind::TurnEnded(TurnEnded {
+                turn_id: turn_id.into(),
+                reason,
+                usage,
+            }))
+            .await;
+        if !ended {
+            self.unclosed.store(true, Ordering::SeqCst);
+        }
+        self.release(turn_id);
     }
 
     /// Where this session's checkpoints go, if it gets any.
@@ -503,13 +636,15 @@ impl Session {
         let r = format!("refs/harness/{}/{turn_id}/before", self.id);
         match crate::git::snapshot(&repo, &r, "harness: before turn").await {
             Ok(sha) => {
+                // On failure the caller sees `log_failed` and stops.
                 self.emit(EventKind::Checkpoint(Checkpoint {
                     turn_id: turn_id.into(),
                     phase,
                     git_ref: sha.clone(),
                     files: vec![],
                 }))
-                .await;
+                .await
+                .ok()?;
                 Some((repo, sha))
             }
             Err(e) => {
@@ -529,14 +664,17 @@ impl Session {
         .await;
         match res {
             Ok((sha, files)) => {
-                self.emit(EventKind::Checkpoint(Checkpoint {
-                    turn_id: turn_id.into(),
-                    phase: CheckpointPhase::After,
-                    git_ref: sha,
-                    files: files.into_iter().map(|(_, p)| p).collect(),
-                }))
-                .await;
-                crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
+                let recorded = self
+                    .emit(EventKind::Checkpoint(Checkpoint {
+                        turn_id: turn_id.into(),
+                        phase: CheckpointPhase::After,
+                        git_ref: sha,
+                        files: files.into_iter().map(|(_, p)| p).collect(),
+                    }))
+                    .await;
+                if recorded.is_ok() {
+                    crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
+                }
             }
             Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint failed"),
         }
@@ -652,13 +790,14 @@ impl Session {
             vec![turn_id.to_string()]
         };
         for t in targets {
-            self.emit(EventKind::Checkpoint(Checkpoint {
+            self.append(EventKind::Checkpoint(Checkpoint {
                 turn_id: t,
                 phase: CheckpointPhase::Restored,
                 git_ref: state.clone(),
                 files: files.clone(),
             }))
-            .await;
+            .await
+            .map_err(|e| LogError(e.to_string()).to_string())?;
         }
         Ok(())
     }
@@ -740,8 +879,18 @@ impl Session {
             observed: Some(observed),
             ..Default::default()
         };
+        let history = match child.begin(&msg, Some(&agent)).await {
+            Ok(h) => h,
+            Err(e) => {
+                child.release(&msg.turn_id);
+                if let Some(i) = iso {
+                    crate::git::worktree_remove(&i.root, &i.worktree).await;
+                }
+                return Err(e);
+            }
+        };
         let (reason, usage) = child
-            .run_turn(msg, Some(agent), vec![], extra, cancel)
+            .run_turn(msg, history, Some(agent), vec![], extra, cancel)
             .await;
         let merge_note = match iso {
             Some(i) => Some(self.merge_back(i, child_id).await),
@@ -905,7 +1054,7 @@ impl Session {
 
 #[async_trait::async_trait]
 impl TurnHost for Session {
-    async fn emit(&self, kind: EventKind) {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         Session::emit(self, kind).await
     }
 
@@ -973,22 +1122,26 @@ impl TurnHost for Session {
         let policy = &self.node.cfg.policy;
         if policy.denied_tools.iter().any(|t| t == tool) {
             let approval_id = new_id();
-            // Record the refusal so the user sees why.
-            self.emit(EventKind::ApprovalRequested(ApprovalRequested {
-                approval_id: approval_id.clone(),
-                call_id: call_id.into(),
-                tool: tool.into(),
-                input: input.clone(),
-                reason: format!("`{tool}` is denied by this node's policy"),
-                turn_allow: false,
-            }))
-            .await;
-            self.emit(EventKind::ApprovalResolved(ApprovalResolved {
-                approval_id,
-                decision: Decision::Deny,
-                by: ResolvedBy::Policy,
-            }))
-            .await;
+            // Record the refusal so the user sees why. Denied either way.
+            let requested = self
+                .emit(EventKind::ApprovalRequested(ApprovalRequested {
+                    approval_id: approval_id.clone(),
+                    call_id: call_id.into(),
+                    tool: tool.into(),
+                    input: input.clone(),
+                    reason: format!("`{tool}` is denied by this node's policy"),
+                    turn_allow: false,
+                }))
+                .await;
+            if requested.is_ok() {
+                let _ = self
+                    .emit(EventKind::ApprovalResolved(ApprovalResolved {
+                        approval_id,
+                        decision: Decision::Deny,
+                        by: ResolvedBy::Policy,
+                    }))
+                    .await;
+            }
             return Decision::Deny;
         }
         if !self.mode.needs_approval(risk) {
@@ -1007,15 +1160,25 @@ impl TurnHost for Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(approval_id.clone(), tx);
-        self.emit(EventKind::ApprovalRequested(ApprovalRequested {
-            approval_id: approval_id.clone(),
-            call_id: call_id.into(),
-            tool: tool.into(),
-            input: input.clone(),
-            reason: approval_reason(tool, risk),
-            turn_allow,
-        }))
-        .await;
+        let requested = self
+            .emit(EventKind::ApprovalRequested(ApprovalRequested {
+                approval_id: approval_id.clone(),
+                call_id: call_id.into(),
+                tool: tool.into(),
+                input: input.clone(),
+                reason: approval_reason(tool, risk),
+                turn_allow,
+            }))
+            .await;
+        if requested.is_err() {
+            // Nobody can see a request the log does not hold; the turn is
+            // already stopping.
+            self.approvals
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&approval_id);
+            return Decision::Deny;
+        }
         let cancel = self.current_cancel().unwrap_or_default();
         let (decision, by) = tokio::select! {
             r = rx => match r {
@@ -1033,18 +1196,23 @@ impl TurnHost for Session {
             Decision::AllowSession if !turn_allow => Decision::Allow,
             d => d,
         };
+        // An approval the log does not hold allows nothing.
+        let resolved = self
+            .emit(EventKind::ApprovalResolved(ApprovalResolved {
+                approval_id,
+                decision,
+                by,
+            }))
+            .await;
+        if resolved.is_err() {
+            return Decision::Deny;
+        }
         if decision.allows() {
             self.turn_approved
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(tool.to_string());
         }
-        self.emit(EventKind::ApprovalResolved(ApprovalResolved {
-            approval_id,
-            decision,
-            by,
-        }))
-        .await;
         decision
     }
 }
