@@ -679,11 +679,53 @@ struct WorkTree {
 /// ignored, minus nested repositories; see [`stage_without_nested`]). Used
 /// for turn checkpoints (shadow repository) and for a sub-agent's base and
 /// result (the user's own repository) alike.
+///
+/// Repair (A.16): the shadow's index caches the blob id of every file whose
+/// stat data did not change, and an id it borrowed from the user's
+/// repository can be pruned there; `write-tree` then refuses, and would for
+/// every later snapshot. So when `write-tree` fails in a shadow repository,
+/// the index is rebuilt once from the folder as it is (an empty index,
+/// staged by the same [`stage_without_nested`], so every file is hashed
+/// again and what is missing is written into the shadow) and the tree is
+/// written again. A second failure is returned. Which step failed decides,
+/// never git's message; checkpoints and their refs are not touched.
 async fn worktree_tree(repo: &Repo) -> Result<WorkTree, String> {
-    let (real, idx) = seeded_index(repo, true).await?;
+    match worktree_tree_from(repo, true).await {
+        Err(TreeError::WriteTree(e)) if repo.is_shadow() => {
+            tracing::warn!(error = %e, "checkpoint index rebuilt from the folder");
+            worktree_tree_from(repo, false)
+                .await
+                .map_err(TreeError::text)
+        }
+        r => r.map_err(TreeError::text),
+    }
+}
+
+/// Which step of [`worktree_tree_from`] failed.
+enum TreeError {
+    Stage(String),
+    WriteTree(String),
+}
+
+impl TreeError {
+    fn text(self) -> String {
+        match self {
+            Self::Stage(e) | Self::WriteTree(e) => e,
+        }
+    }
+}
+
+/// [`worktree_tree`] with the private index seeded from the repository's
+/// (`seed`) or empty.
+async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeError> {
+    let (real, idx) = seeded_index(repo, seed).await.map_err(TreeError::Stage)?;
     let res = async {
-        let nested = stage_without_nested(repo, &idx).await?;
-        let id = run(repo, &["write-tree"], Some(&idx)).await?;
+        let nested = stage_without_nested(repo, &idx)
+            .await
+            .map_err(TreeError::Stage)?;
+        let id = run(repo, &["write-tree"], Some(&idx))
+            .await
+            .map_err(TreeError::WriteTree)?;
         Ok(WorkTree { id, nested })
     }
     .await;

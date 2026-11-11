@@ -667,9 +667,26 @@ impl Session {
             }
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+                self.no_checkpoint_notice(turn_id, &e).await;
                 None
             }
         }
+    }
+
+    /// Tell the person, in the chat, that this turn has no checkpoint (so
+    /// no undo), with the reason; an `error` note, as the chat shows today.
+    /// A failed append sets `log_failed`, which ends the turn as for any
+    /// other event.
+    async fn no_checkpoint_notice(&self, turn_id: &str, reason: &str) {
+        let _ = self
+            .emit(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message: format!(
+                    "This turn has no checkpoint, so it cannot be undone: the folder could \
+                     not be saved ({reason})."
+                ),
+            }))
+            .await;
     }
 
     async fn checkpoint_after(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
@@ -696,7 +713,10 @@ impl Session {
                     crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
                 }
             }
-            Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint failed"),
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+                self.no_checkpoint_notice(turn_id, &e).await;
+            }
         }
     }
 

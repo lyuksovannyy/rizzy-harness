@@ -566,6 +566,65 @@ async fn a_checkpoint_whose_borrowed_tree_is_gone_is_refused_with_the_reason() {
     assert_eq!(rig.shadow_refs().len(), 2);
 }
 
+/// Was: a file the folder still has, unchanged, whose blob is gone (the user
+/// ran `git reset HEAD~1` and gc: the file stays, the commit and its blob go)
+/// stayed in the checkpoint repository's index, `write-tree` refused, and
+/// every later turn ran with no checkpoint (only a warning in the node's
+/// log) and every restore stopped at its pre-restore snapshot.
+///
+/// Now the index is rebuilt from the folder once: the next turn has its
+/// checkpoint and its undo works. The older checkpoint that depends on the
+/// lost content is refused with the plain reason, and is not deleted.
+#[tokio::test]
+async fn a_lost_blob_of_an_unchanged_file_is_repaired_at_the_next_snapshot() {
+    let mut rig = Rig::new().await;
+    let x = rig.base_repo();
+    // Git treats a file written in the same second as the index as possibly
+    // changed and rehashes it (which would store the blob in the checkpoint
+    // repository); wait so the file is settled, as in any real session.
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let first = rig.turn("echo ok > made.txt").await;
+    assert_eq!(first.phases, ["before", "after"]);
+    assert!(!rig.shadow_owns(&x));
+    rig.git(&["reset", "-q", "HEAD~1"]);
+    rig.expire_reflog_and_gc_now();
+    assert!(!rig.user_has(&x));
+    assert_eq!(
+        rig.read("keep.txt").as_deref(),
+        Some(X),
+        "the file is still there"
+    );
+    let refs_before = rig.shadow_refs();
+
+    let next = rig.turn("echo more > more.txt").await;
+    assert_eq!(
+        next.phases,
+        ["before", "after"],
+        "the turn has a checkpoint"
+    );
+    assert_eq!(rig.read("more.txt").as_deref(), Some("more\n"));
+    // No checkpoint was deleted by the repair.
+    for r in &refs_before {
+        assert!(rig.shadow_refs().contains(r), "{r} was deleted");
+    }
+
+    // The repaired turn undoes.
+    let r = rig.restore(next.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("more.txt"), None);
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
+
+    // The older one that needs what is gone: refused, untouched, kept, and
+    // the refusal made no ref.
+    let refs_now = rig.shadow_refs();
+    let r = rig.restore(first.id.as_deref().unwrap(), true).await;
+    assert_refused(&r, None);
+    assert_eq!(rig.shadow_refs(), refs_now);
+    for r in &refs_before {
+        assert!(rig.shadow_refs().contains(r), "{r} was deleted");
+    }
+}
+
 /// A blob the checkpoint only borrows, still present in the user's
 /// repository: the restore works, and afterwards the blob is in the
 /// checkpoint repository's own objects (it was copied before the write).
@@ -631,6 +690,52 @@ async fn a_failure_after_the_pre_restore_checkpoint_names_it_and_it_restores() {
     assert_eq!(again.result, Ok(()));
     assert_eq!(again.folder_after.get("a.txt"), Some(&b"a1\n".to_vec()));
     assert_eq!(again.folder_after.get("ro/b.txt"), Some(&b"b1\n".to_vec()));
+}
+
+/// When a turn runs without a checkpoint (here the checkpoint repository's
+/// objects cannot be written, and the one repair does not help), the person
+/// is told in the chat, not only the node's log.
+#[tokio::test]
+async fn a_turn_without_a_checkpoint_says_so_in_the_chat() {
+    let mut rig = Rig::new().await;
+    rig.write("a.txt", "a1\n");
+    let first = rig.turn("echo a2 > a.txt").await;
+    assert_eq!(first.phases, ["before", "after"]);
+    let objects = rig.shadow().join("objects");
+    let dirs: Vec<PathBuf> = walkdir::WalkDir::new(&objects)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_dir())
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    for d in &dirs {
+        set_mode(d, 0o555);
+    }
+    let enforced = read_only_is_enforced(&objects);
+    let mark = rig.seen.len();
+    let t = if enforced {
+        Some(rig.turn("echo new > new.txt").await)
+    } else {
+        None
+    };
+    for d in &dirs {
+        set_mode(d, 0o755);
+    }
+    let Some(t) = t else {
+        eprintln!("skipped: read-only folders are writable here (root?)");
+        return;
+    };
+    assert!(t.phases.is_empty(), "{:?}", t.phases);
+    assert_eq!(
+        rig.read("new.txt").as_deref(),
+        Some("new\n"),
+        "the turn ran"
+    );
+    let told = rig.seen[mark..].iter().any(|e| {
+        matches!(e.typed(), Ok(EventKind::Error(m))
+            if m.message.starts_with("This turn has no checkpoint"))
+    });
+    assert!(told, "nothing in the chat says the turn has no undo");
 }
 
 /// The window between the check and the write: the user's repository loses
