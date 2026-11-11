@@ -197,6 +197,7 @@ fn events() -> Vec<RawEvent> {
             phase: CheckpointPhase::Before,
             git_ref: "refs/x".into(),
             files: vec![],
+            excluded: vec![],
         }),
         EventKind::Error(ErrorEvent {
             turn_id: Some(t()),

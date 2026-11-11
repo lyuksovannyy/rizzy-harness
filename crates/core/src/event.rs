@@ -495,6 +495,12 @@ pub struct Checkpoint {
     /// `after`: files the turn changed; `restored`: files put back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// Git repositories inside the folder (a sub-folder holding a `.git`
+    /// directory or file) that this snapshot left out and that undo never
+    /// touches. On `restored`: the ones the restore left alone. Relative
+    /// to the checkpoint's folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

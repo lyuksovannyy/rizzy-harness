@@ -144,6 +144,11 @@ pub struct CheckpointState {
     /// Files the turn changed.
     pub files: Vec<String>,
     pub restored: bool,
+    /// Repositories inside the folder that a snapshot of this checkpoint
+    /// left out, or that its restore left alone (undo never touches them).
+    /// Sorted, no duplicates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
 }
 
 impl SessionView {
@@ -310,6 +315,11 @@ impl SessionView {
             }
             EventKind::Checkpoint(c) => {
                 let st = self.checkpoints.entry(c.turn_id).or_default();
+                if !c.excluded.is_empty() {
+                    st.excluded.extend(c.excluded);
+                    st.excluded.sort();
+                    st.excluded.dedup();
+                }
                 match c.phase {
                     // A restore's own checkpoint is undone like a turn's.
                     CheckpointPhase::Before | CheckpointPhase::BeforeRestore => {

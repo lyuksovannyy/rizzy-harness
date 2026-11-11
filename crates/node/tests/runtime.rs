@@ -2314,3 +2314,177 @@ async fn pre_restore_snapshots_obey_checkpoints_keep() {
         "v1\n"
     );
 }
+
+// ---- Nested repositories are outside checkpoints (PLAN.md T33, A.15) ----
+
+/// A committed repository at `dir` (`x.txt`), or with no commit yet.
+fn nested_repo(dir: &std::path::Path, commit: bool) {
+    std::fs::create_dir_all(dir).unwrap();
+    git_in(dir, &["init", "-q"]);
+    std::fs::write(dir.join("x.txt"), "x-1\n").unwrap();
+    if commit {
+        git_in(dir, &["add", "."]);
+        git_in(dir, &["-c", "commit.gpgSign=false", "commit", "-qm", "n"]);
+    }
+}
+
+/// Every entry under `dir`, `.git` included, with its bytes.
+fn whole(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out: Vec<_> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|e| {
+            let bytes = if e.file_type().is_file() {
+                std::fs::read(e.path()).unwrap()
+            } else {
+                vec![]
+            };
+            (e.path().to_path_buf(), bytes)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn checkpoint_events(seen: &[RawEvent]) -> Vec<Checkpoint> {
+    seen.iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The person is told what undo does not cover: each checkpoint names the
+/// nested repositories its snapshot left out, the undo's `restored` record
+/// names the ones it left alone and lists none of them among its files,
+/// and the chat gets a note naming them.
+#[tokio::test]
+async fn nested_repositories_are_named_in_checkpoints_and_after_an_undo() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    nested_repo(&h.ws.join("vendor lib"), true);
+    nested_repo(&h.ws.join("a/b/scratch"), false);
+    let sid = h.create().await;
+    let mark = h.seen.len();
+    let turn = prompt_turn(
+        &mut h,
+        sid,
+        "run: echo v2 > keep.txt; echo agent > 'vendor lib/x.txt'; echo agent > a/b/scratch/x.txt",
+    )
+    .await;
+    let want = ["a/b/scratch", "vendor lib"];
+    let cps = checkpoint_events(&h.seen[mark..]);
+    assert_eq!(cps.len(), 2, "{cps:?}");
+    for c in &cps {
+        assert_eq!(c.excluded, want, "{c:?}");
+    }
+    assert_eq!(cps[1].files, ["keep.txt"], "no nested path among the files");
+    let nested_before = (
+        whole(&h.ws.join("vendor lib")),
+        whole(&h.ws.join("a/b/scratch")),
+    );
+
+    let mark = h.seen.len();
+    restore(&mut h, sid, "r", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert_eq!(
+        (
+            whole(&h.ws.join("vendor lib")),
+            whole(&h.ws.join("a/b/scratch"))
+        ),
+        nested_before,
+        "undo touched a nested repository"
+    );
+    let restored: Vec<Checkpoint> = checkpoint_events(&h.seen[mark..])
+        .into_iter()
+        .filter(|c| c.phase == CheckpointPhase::Restored)
+        .collect();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].files, ["keep.txt"]);
+    assert_eq!(restored[0].excluded, want);
+    let notes: Vec<String> = h.seen[mark..]
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Error(e)) => Some(e.message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("`vendor lib`") && notes[0].contains("`a/b/scratch`"),
+        "{}",
+        notes[0]
+    );
+    // The fold keeps them with the checkpoint.
+    let view = SessionView::fold(&h.seen).unwrap();
+    assert_eq!(view.checkpoints[&turn].excluded, want);
+}
+
+/// A nested repository arriving with a hostile `.git/config` (fsmonitor,
+/// hooks, a filter its own `.gitattributes` asks for), with and without a
+/// commit, runs none of it when a turn is checkpointed and undone.
+#[cfg(unix)]
+#[tokio::test]
+async fn hostile_nested_repo_config_does_not_run_on_checkpoint_or_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let marks = h.ws.parent().unwrap().join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let script = |name: &str| {
+        let p = h.ws.parent().unwrap().join(format!("{name}.sh"));
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n{}\n",
+                marks.join(name).display(),
+                if name.contains("clean") || name.contains("smudge") {
+                    "cat"
+                } else {
+                    "exit 0"
+                }
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    for (dep, commit) in [("dep", true), ("unborn", false)] {
+        let d = h.ws.join(dep);
+        nested_repo(&d, commit);
+        std::fs::write(d.join(".gitattributes"), "* filter=evil\n").unwrap();
+        let cfg = |k: &str, v: &str| git_in(&d, &["config", k, v]);
+        cfg("core.fsmonitor", &script(&format!("{dep}-fsmonitor")));
+        cfg("filter.evil.clean", &script(&format!("{dep}-clean")));
+        cfg("filter.evil.smudge", &script(&format!("{dep}-smudge")));
+        cfg("filter.evil.required", "true");
+        let hooks = d.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for n in ["post-index-change", "pre-commit", "post-checkout"] {
+            let p = hooks.join(n);
+            std::fs::copy(script(&format!("{dep}-{n}")), &p).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let sid = h.create().await;
+    let turn = prompt_turn(
+        &mut h,
+        sid,
+        "run: echo v2 > keep.txt; echo agent > dep/x.txt; echo agent > unborn/x.txt",
+    )
+    .await;
+    restore(&mut h, sid, "r", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    let ran: Vec<_> = std::fs::read_dir(&marks)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(ran.is_empty(), "nested repository config ran: {ran:?}");
+}
