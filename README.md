@@ -498,10 +498,12 @@ repository the private copy borrows your committed objects instead of
 storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
-back the exact bytes. Sub-agents that can write get a temporary git
-worktree; it is refused, and the sub-agent shares the folder, if the
-repository's own config defines filter commands (git-lfs's standard ones
-are allowed). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
+a temporary git worktree, so the folder must be a git repository for
+them: elsewhere, or when the repository's own config defines filter
+commands (git-lfs's standard ones are allowed), such a sub-agent is not
+started and the agent that delegated is told why. Sub-agents that only
+read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses

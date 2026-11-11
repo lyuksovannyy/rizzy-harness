@@ -1433,6 +1433,230 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
     );
 }
 
+/// `git -C dir args...`, with an identity; panics unless it succeeds.
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A repository at `dir` with one committed file, `keep.txt`.
+fn init_repo(dir: &std::path::Path) {
+    git_in(dir, &["init", "-q"]);
+    std::fs::write(dir.join("keep.txt"), "v1\n").unwrap();
+    git_in(dir, &["add", "."]);
+    git_in(dir, &["commit", "-qm", "init"]);
+}
+
+fn agent_with(
+    id: &str,
+    tools: &[&str],
+    delegates: Vec<harness_core::agent::AgentSpec>,
+) -> harness_core::agent::AgentSpec {
+    harness_core::agent::AgentSpec {
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        ..agent(id, delegates)
+    }
+}
+
+/// Prompt `sid` as `lead` (who may delegate to `delegates`) and wait for
+/// the parent's turn to end; returns the outputs of its `delegate` calls.
+async fn delegate_as_lead(
+    h: &mut Harness,
+    sid: SessionId,
+    delegates: Vec<harness_core::agent::AgentSpec>,
+    text: &str,
+) -> Vec<String> {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: Some(agent("lead", delegates)),
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    });
+    loop {
+        h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+        if h.seen.last().is_some_and(|e| e.session_id == sid) {
+            break;
+        }
+    }
+    let stored = h.node.store().events_after(sid, 0, 10_000).unwrap();
+    let calls: Vec<String> = stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallStarted(c)) if c.tool == "delegate" => Some(c.call_id),
+            _ => None,
+        })
+        .collect();
+    stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) if calls.contains(&f.call_id) => Some(f.output),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A sub-agent that can change files gets its own worktree or is not
+/// started: in a folder that is not a repository the delegation is refused
+/// with the reason, no child session exists and nothing in the folder moved.
+#[tokio::test]
+async fn a_writing_sub_agent_is_refused_outside_a_repository() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    let sid = h.create().await;
+    let before = tree(&h.ws);
+    for tools in [&["bash"][..], &["write"], &["edit"]] {
+        let out = delegate_as_lead(
+            &mut h,
+            sid,
+            vec![agent_with("dev", tools, vec![])],
+            "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+        )
+        .await;
+        let out = out.last().expect("a delegate call");
+        assert!(
+            out.contains("not started") && out.contains("not a git repository"),
+            "{tools:?}: {out}"
+        );
+        assert!(out.contains("git init"), "{out}");
+    }
+    assert_eq!(tree(&h.ws), before, "the folder changed");
+    let sessions = h.node.store().sessions().unwrap();
+    assert_eq!(sessions.len(), 1, "a child session was created");
+}
+
+/// The same when the repository is there but its worktree cannot be made:
+/// here the folder for worktrees (`.git/harness-worktrees`) is a file.
+#[tokio::test]
+async fn a_writing_sub_agent_is_refused_when_its_worktree_cannot_be_made() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    std::fs::write(h.ws.join(".git/harness-worktrees"), "in the way\n").unwrap();
+    let sid = h.create().await;
+    let before = tree(&h.ws);
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(
+        out.contains("not started") && out.contains("worktree could not be made"),
+        "{out}"
+    );
+    assert_eq!(tree(&h.ws), before, "the folder changed");
+    assert_eq!(h.node.store().sessions().unwrap().len(), 1);
+    assert_eq!(
+        git_in(&h.ws, &["for-each-ref", "refs/harness"]),
+        "",
+        "a ref was left"
+    );
+    assert_eq!(
+        git_in(&h.ws, &["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count(),
+        1
+    );
+}
+
+/// A sub-agent that cannot change files needs no worktree: it still runs
+/// in a folder that is not a repository.
+#[tokio::test]
+async fn a_read_only_sub_agent_runs_outside_a_repository() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "hello from the folder\n").unwrap();
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent_with("scout", &["read", "grep", "glob"], vec![])],
+        "delegate: scout=read: keep.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("@scout ended (completed)"), "{out}");
+    assert!(out.contains("hello from the folder"), "{out}");
+    assert_eq!(h.node.store().sessions().unwrap().len(), 2);
+}
+
+/// In a repository a writing sub-agent works in its worktree and its
+/// changes are applied to the folder afterwards.
+#[tokio::test]
+async fn a_writing_sub_agent_changes_are_applied_from_its_worktree() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: pwd; echo v2 > keep.txt; echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(
+        out.contains("harness-worktrees"),
+        "not in a worktree: {out}"
+    );
+    assert!(out.contains("2 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("made.txt")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(git_in(&h.ws, &["worktree", "list"]).lines().count(), 1);
+}
+
+/// Two writing sub-agents delegated in one step do not see each other's
+/// uncommitted files while they run; both results are applied.
+#[tokio::test]
+async fn parallel_writing_sub_agents_do_not_see_each_other() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let task = |me: &str, other: &str| {
+        format!(
+            "{me}=run: echo {me} > {me}.txt; sleep 1; \
+             if test -e {other}.txt; then echo SAW-{other}; else echo ALONE-{me}; fi"
+        )
+    };
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("a", vec![]), agent("b", vec![])],
+        &format!("delegate: {} | {}", task("a", "b"), task("b", "a")),
+    )
+    .await;
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out.iter().any(|o| o.contains("ALONE-a")), "{out:?}");
+    assert!(out.iter().any(|o| o.contains("ALONE-b")), "{out:?}");
+    assert!(out.iter().all(|o| !o.contains("SAW-")), "{out:?}");
+    assert_eq!(std::fs::read_to_string(h.ws.join("a.txt")).unwrap(), "a\n");
+    assert_eq!(std::fs::read_to_string(h.ws.join("b.txt")).unwrap(), "b\n");
+}
+
 /// A failed append while bash runs stops it: its process tree is gone
 /// within the grace period.
 #[tokio::test]
