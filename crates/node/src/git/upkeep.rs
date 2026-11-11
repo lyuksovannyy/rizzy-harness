@@ -19,12 +19,12 @@
 //! 1,000 files, 3.3 s at 100,000 in a plain folder, on a slow disk). It
 //! runs only when due: [`GC_EVERY`] groups dropped since the last one, or
 //! git's own auto-gc thresholds for loose objects and packs; never more
-//! often than [`GC_INTERVAL`]. The state is a small file in the shadow
+//! often than [`GC_INTERVAL`], doubled per failure in a row up to
+//! [`GC_BACKOFF_MAX`]. The state is a small file in the shadow
 //! (`harness-gc`), so a restart keeps it. It runs after the turn has ended
-//! ([`gc_in_background`]), only while none of our commands that write
-//! unreferenced objects runs there ([`hold`]: snapshots, pinning, a whole
-//! restore), and prunes only objects older than its own start, so a
-//! snapshot that starts while it runs keeps what it writes.
+//! ([`gc_in_background`]) and holds the shadow alone ([`Hold`]): snapshots,
+//! copies and restores hold it shared, so they wait for a running
+//! collection and it waits for them.
 //!
 //! **Lock files.** A private index and its lock go with the call that made
 //! them, also at a timeout ([`super::IndexFiles`]); a lock older than any
@@ -62,73 +62,40 @@ const PIN: &str = "harness-pin ";
 /// The state file of the collection rule, in the shadow.
 const STATE: &str = "harness-gc";
 
-// ---- holds ----
+// ---- the shadow's lock ----
 
-#[derive(Default)]
-struct Busy {
-    holds: usize,
-    collecting: bool,
-}
+type ShadowLock = std::sync::Arc<tokio::sync::RwLock<()>>;
 
-static BUSY: std::sync::Mutex<Vec<(PathBuf, Busy)>> = std::sync::Mutex::new(Vec::new());
+/// One lock per shadow repository (an entry per folder ever checkpointed
+/// by this process; never removed, a few bytes each).
+static LOCKS: std::sync::Mutex<Vec<(PathBuf, ShadowLock)>> = std::sync::Mutex::new(Vec::new());
 
-fn with_busy<T>(dir: &Path, f: impl FnOnce(&mut Busy) -> T) -> T {
-    let mut v = BUSY.lock().unwrap_or_else(|p| p.into_inner());
-    let i = match v.iter().position(|(d, _)| d == dir) {
-        Some(i) => i,
-        None => {
-            v.push((dir.to_path_buf(), Busy::default()));
-            v.len() - 1
-        }
-    };
-    let out = f(&mut v[i].1);
-    if v[i].1.holds == 0 && !v[i].1.collecting {
-        v.swap_remove(i);
+fn lock_of(dir: &Path) -> ShadowLock {
+    let mut v = LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((_, l)) = v.iter().find(|(d, _)| d == dir) {
+        return l.clone();
     }
-    out
+    let l = ShadowLock::default();
+    v.push((dir.to_path_buf(), l.clone()));
+    l
 }
 
-/// While held, no garbage collection starts in this shadow (one already
-/// running goes on; it prunes nothing younger than its start).
-pub struct Hold(Option<PathBuf>);
+/// Shared use of a shadow: snapshots, copies and restores hold it (many at
+/// once); a garbage collection takes it alone for its whole run. So a
+/// snapshot waits for a running collection and a collection for running
+/// snapshots: git's prune can never expire an object a snapshot is about
+/// to reuse (A.18 review, F2).
+pub struct Hold(#[allow(dead_code)] Option<tokio::sync::OwnedRwLockReadGuard<()>>);
 
-/// Hold `repo`'s shadow for a command that writes objects no ref names yet,
-/// or reads a copy no `.keep` protects (a restore). Nothing for a project
-/// repository.
-pub fn hold(repo: &Repo) -> Hold {
-    Hold(repo.shadow.clone().inspect(|d| {
-        with_busy(d, |b| b.holds += 1);
-    }))
-}
-
-impl Drop for Hold {
-    fn drop(&mut self) {
-        if let Some(d) = self.0.take() {
-            with_busy(&d, |b| b.holds = b.holds.saturating_sub(1));
-        }
-    }
-}
-
-/// The right to collect in one shadow: only when nothing holds it and no
-/// other collection runs there.
-struct Collecting(PathBuf);
-
-impl Collecting {
-    fn try_start(dir: &Path) -> Option<Self> {
-        with_busy(dir, |b| {
-            if b.holds > 0 || b.collecting {
-                return false;
-            }
-            b.collecting = true;
-            true
-        })
-        .then(|| Self(dir.to_path_buf()))
-    }
-}
-
-impl Drop for Collecting {
-    fn drop(&mut self) {
-        with_busy(&self.0, |b| b.collecting = false);
+/// Hold `repo`'s shadow (see [`Hold`]); waits while a collection runs
+/// there. Nothing for a project repository. Taken by the caller around a
+/// step, never inside one (the lock is fair: a second shared hold taken
+/// while a collection waits would deadlock), and never across anything
+/// that waits on a person.
+pub async fn hold(repo: &Repo) -> Hold {
+    match &repo.shadow {
+        Some(d) => Hold(Some(lock_of(d).read_owned().await)),
+        None => Hold(None),
     }
 }
 
@@ -139,6 +106,9 @@ impl Drop for Collecting {
 pub struct Pinned {
     /// Files whose old version was already gone (sorted, for showing).
     pub missing: Names,
+    /// A tree of either snapshot was already gone, so not even the list of
+    /// changed files could be read (nothing was copied).
+    pub trees_gone: bool,
 }
 
 /// Copy into the shadow's own store what an undo of the change from
@@ -149,6 +119,8 @@ pub struct Pinned {
 /// shadow's own and gc keeps what a ref reaches). No folder scan and no gc:
 /// one tree diff, one existence check, one `pack-objects` of exactly those
 /// objects. Objects that are already gone are reported, not an error.
+/// Nothing at all when the two snapshots do not differ. The caller holds
+/// the shadow ([`hold`]).
 pub async fn pin_changed(
     repo: &Repo,
     group: &str,
@@ -158,18 +130,7 @@ pub async fn pin_changed(
     if !borrows(repo) {
         return Ok(Pinned::default());
     }
-    let _busy = hold(repo);
-    let roots = run(
-        repo,
-        &[
-            "rev-parse",
-            &format!("{before}^{{tree}}"),
-            &format!("{after}^{{tree}}"),
-        ],
-        None,
-    )
-    .await?;
-    let out = run_raw(
+    let diff = run_raw(
         repo,
         &[
             "diff-tree",
@@ -185,12 +146,36 @@ pub async fn pin_changed(
         None,
         None,
     )
+    .await;
+    let out = match diff {
+        Ok(out) => out,
+        Err(_) if super::trees_missing(repo, &[before, after]).await => {
+            return Ok(Pinned {
+                trees_gone: true,
+                ..Pinned::default()
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    let rows = super::parse_raw(&out);
+    if rows.is_empty() {
+        return Ok(Pinned::default());
+    }
+    let roots = run(
+        repo,
+        &[
+            "rev-parse",
+            &format!("{before}^{{tree}}"),
+            &format!("{after}^{{tree}}"),
+        ],
+        None,
+    )
     .await?;
     let zero = |id: &str| id.bytes().all(|b| b == b'0');
     let mut ids: Vec<String> = roots.lines().map(str::to_string).collect();
     // The old blob of each changed path, and the path to name if it is gone.
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
-    for r in super::parse_raw(&out) {
+    for r in rows {
         if r.old_mode == "040000" && !zero(&r.old_id) {
             ids.push(r.old_id.clone());
         }
@@ -199,7 +184,7 @@ pub async fn pin_changed(
         }
         let blob = matches!(r.old_mode.as_str(), "100644" | "100755" | "120000");
         if blob && !zero(&r.old_id) {
-            blobs.push((r.old_id.clone(), r.path.clone()));
+            blobs.push((r.old_id, r.path));
         }
     }
     ids.extend(blobs.iter().map(|(id, _)| id.clone()));
@@ -217,21 +202,23 @@ pub async fn pin_changed(
     )
     .await?;
     let text = String::from_utf8_lossy(&checked);
-    let present: Vec<&str> = text
+    // A set: a codemod can change 100,000 files (A.18 review, F4).
+    let present: std::collections::HashSet<&str> = text
         .lines()
         .filter(|l| !l.ends_with(" missing"))
         .filter_map(|l| l.split(' ').next())
         .collect();
     let mut missing: Vec<Vec<u8>> = blobs
         .iter()
-        .filter(|(id, _)| !present.contains(&id.as_str()))
+        .filter(|(id, _)| !present.contains(id.as_str()))
         .map(|(_, p)| p.clone())
         .collect();
     missing.sort();
     missing.dedup();
     if !present.is_empty() {
-        let list: Vec<u8> = present
+        let list: Vec<u8> = ids
             .iter()
+            .filter(|i| present.contains(i.as_str()))
             .flat_map(|i| format!("{i}\n").into_bytes())
             .collect();
         let name = copy_into_own_store(repo, list, false).await?;
@@ -239,6 +226,7 @@ pub async fn pin_changed(
     }
     Ok(Pinned {
         missing: Names::of(&missing),
+        trees_gone: false,
     })
 }
 
@@ -313,12 +301,17 @@ async fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 // ---- garbage collection (A.18) ----
 
-/// The rule's memory: when the last collection started, and how many
-/// groups were dropped since.
+/// The longest wait after failed collections (F3).
+pub(crate) const GC_BACKOFF_MAX: Duration = Duration::from_secs(24 * 3600);
+
+/// The rule's memory: when the last collection started, how many groups
+/// were dropped since the last one that succeeded, and how many failed in
+/// a row.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct GcState {
     last: u64,
     dropped: u64,
+    failures: u32,
 }
 
 impl GcState {
@@ -329,13 +322,27 @@ impl GcState {
                 s.last = v.trim().parse().unwrap_or(0);
             } else if let Some(v) = l.strip_prefix("dropped ") {
                 s.dropped = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = l.strip_prefix("failures ") {
+                s.failures = v.trim().parse().unwrap_or(0);
             }
         }
         s
     }
 
     fn text(self) -> String {
-        format!("last {}\ndropped {}\n", self.last, self.dropped)
+        format!(
+            "last {}\ndropped {}\nfailures {}\n",
+            self.last, self.dropped, self.failures
+        )
+    }
+
+    /// The minimum wait after the last start: [`GC_INTERVAL`], doubled per
+    /// failure in a row, at most [`GC_BACKOFF_MAX`].
+    fn interval(self) -> u64 {
+        let base = GC_INTERVAL.as_secs();
+        base.checked_shl(self.failures.min(20))
+            .unwrap_or(u64::MAX)
+            .min(GC_BACKOFF_MAX.as_secs())
     }
 }
 
@@ -367,7 +374,7 @@ pub(super) async fn count_dropped(dir: &Path, n: u64) {
 /// Whether a collection is due by the rule, read from the state and, only
 /// when the count of dropped groups alone does not decide, `count-objects`.
 async fn due(repo: &Repo, s: GcState, now: u64) -> bool {
-    if s.dropped == 0 || now.saturating_sub(s.last) < GC_INTERVAL.as_secs() {
+    if s.dropped == 0 || now.saturating_sub(s.last) < s.interval() {
         return false;
     }
     if s.dropped >= GC_EVERY {
@@ -385,29 +392,37 @@ async fn due(repo: &Repo, s: GcState, now: u64) -> bool {
     field("count:") >= LOOSE_LIMIT || field("packs:") >= PACK_LIMIT
 }
 
-/// Run the shadow's garbage collection if the rule says it is due and
-/// nothing holds the shadow; whether it ran. Never in a project repository.
-/// It prunes only objects older than its own start (`--prune=<start - 1>`,
-/// seconds since the epoch: git compares whole seconds), so a snapshot that
-/// starts meanwhile keeps the objects it writes; the packs it removes are
-/// those that existed when it started, so a copy made meanwhile stays.
+/// Run the shadow's garbage collection if the rule says it is due; whether
+/// it ran. Never in a project repository. It takes the shadow's lock alone
+/// for its whole run (it waits for running snapshots, copies and restores,
+/// and new ones wait for it), checks the rule again under the lock (so two
+/// callers run it once), sweeps stale locks, then runs `git gc` without
+/// the commit graph and bitmaps (the shadow needs neither, and a commit
+/// graph lock left by a killed gc made every later one fail: F1). It also
+/// prunes only objects older than its start (`--prune=<start - 1>`, whole
+/// seconds since the epoch).
 pub(crate) async fn maybe_gc(repo: &Repo) -> bool {
     let Some(dir) = repo.shadow.clone() else {
         return false;
     };
+    if !due(repo, read_state(&dir).await, now_secs()).await {
+        return false;
+    }
+    let _alone = lock_of(&dir).write_owned().await;
     let start = now_secs();
     let seen = read_state(&dir).await;
     if !due(repo, seen, start).await {
         return false;
     }
-    let Some(_running) = Collecting::try_start(&dir) else {
-        return false;
-    };
     let d = dir.clone();
     let _ = tokio::task::spawn_blocking(move || sweep_shadow(&d, STALE_AFTER)).await;
     let res = run(
         repo,
         &[
+            "-c",
+            "gc.writeCommitGraph=false",
+            "-c",
+            "repack.writeBitmaps=false",
             "gc",
             &format!("--prune={}", start.saturating_sub(1)),
             "--quiet",
@@ -417,16 +432,28 @@ pub(crate) async fn maybe_gc(repo: &Repo) -> bool {
     .await;
     let _g = ORDER.lock().await;
     let mut s = read_state(&dir).await;
-    // A failed collection (a kept checkpoint reaches an object the user's
-    // repository lost) is retried after the interval, not every turn.
     s.last = start;
-    if res.is_ok() {
-        s.dropped = s.dropped.saturating_sub(seen.dropped);
+    match &res {
+        Ok(_) => {
+            s.dropped = s.dropped.saturating_sub(seen.dropped);
+            s.failures = 0;
+        }
+        Err(e) => {
+            // A lasting failure (a kept checkpoint reaches content the
+            // user's repository lost, a damaged pack) backs off: the wait
+            // doubles per failure, up to a day (F3). One warning per run,
+            // git's first line only.
+            s.failures = s.failures.saturating_add(1);
+            tracing::warn!(
+                error = %e.lines().next().unwrap_or_default(),
+                shadow = %dir.display(),
+                failures = s.failures,
+                retry_in_s = s.interval(),
+                "checkpoint garbage collection failed"
+            );
+        }
     }
     let _ = write_atomic(&dir.join(STATE), s.text().as_bytes()).await;
-    if let Err(e) = res {
-        tracing::warn!(error = %e, shadow = %dir.display(), "checkpoint garbage collection failed");
-    }
     true
 }
 
@@ -439,6 +466,54 @@ pub fn gc_in_background(repo: Repo) {
             maybe_gc(&repo).await;
         });
     }
+}
+
+/// Check every pack our `.keep` files protect in the shadows under `base`
+/// (`git verify-pack`; they are few and small) and release the `.keep` of
+/// any that git rejects, with a warning: a copy damaged by a power loss
+/// (written without a flush) would otherwise make every collection fail
+/// until its checkpoints are pruned. Returns how many were released. Run
+/// at start-up, before any session touches the shadows.
+pub async fn check_kept_packs(base: &Path) -> usize {
+    let Ok(shadows) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    let mut released = 0;
+    for dir in shadows.filter_map(|e| e.ok()).map(|e| e.path()) {
+        if dir.extension().is_none_or(|x| x != "git") || !dir.join("HEAD").is_file() {
+            continue;
+        }
+        let packs = dir.join("objects/pack");
+        let Ok(rd) = std::fs::read_dir(&packs) else {
+            continue;
+        };
+        for keep in rd.filter_map(|e| e.ok()).map(|e| e.path()) {
+            if keep.extension().is_none_or(|x| x != "keep")
+                || !std::fs::symlink_metadata(&keep).is_ok_and(|m| m.is_file())
+            {
+                continue;
+            }
+            let ours = std::fs::read_to_string(&keep)
+                .is_ok_and(|t| !t.is_empty() && t.lines().all(|l| l.starts_with(PIN)));
+            if !ours {
+                continue;
+            }
+            let idx = keep.with_extension("idx");
+            let mut c = super::hardened(&super::git_program());
+            c.arg("--git-dir").arg(&dir).arg("verify-pack").arg(&idx);
+            let ok = super::exec(c, None, GIT_TIMEOUT)
+                .await
+                .is_ok_and(|o| o.status.success());
+            if !ok && std::fs::remove_file(&keep).is_ok() {
+                tracing::warn!(
+                    pack = %idx.display(),
+                    "a damaged checkpoint copy was released (its undo now depends on the folder's repository)"
+                );
+                released += 1;
+            }
+        }
+    }
+    released
 }
 
 // ---- lock files (A.18) ----
@@ -456,9 +531,12 @@ pub fn sweep_stale_locks(base: &Path) -> usize {
         .sum()
 }
 
-/// In one shadow: `*.lock` at its top and under `refs/`, and our private
-/// indexes (`harness-index-*`), each only if a regular file older than
-/// `older`. A younger one may belong to a running command and stays.
+/// In one shadow: `*.lock` at its top, under `refs/`, in `objects/info/`
+/// and `objects/pack/` (git's commit graph, multi-pack index and pack
+/// locks), and our private indexes (`harness-index-*`), each only if a
+/// regular file (never a link) older than `older`. A younger one may belong
+/// to a running command and stays. Run at start-up and by a collection
+/// holding the shadow alone, so nothing of ours is running there.
 fn sweep_shadow(dir: &Path, older: Duration) -> usize {
     let now = SystemTime::now();
     let stale = |p: &Path| {
@@ -483,6 +561,20 @@ fn sweep_shadow(dir: &Path, older: Duration) -> usize {
             let n = name.to_string_lossy();
             if n.ends_with(".lock") || n.starts_with("harness-index-") {
                 try_remove(&e.path());
+            }
+        }
+    }
+    for sub in ["objects/info", "objects/pack"] {
+        let d = dir.join(sub);
+        // Only a real directory of the shadow (no link out of it).
+        if !std::fs::symlink_metadata(&d).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.filter_map(|e| e.ok()) {
+                if e.file_name().to_string_lossy().ends_with(".lock") {
+                    try_remove(&e.path());
+                }
             }
         }
     }
@@ -808,11 +900,10 @@ mod tests {
         count_dropped(&dir, GC_EVERY - 1).await;
         assert!(!maybe_gc(&repo).await, "ran before it was due");
         count_dropped(&dir, 1).await;
-        let held = hold(&repo);
-        assert!(
-            !maybe_gc(&repo).await,
-            "ran while a snapshot held the shadow"
-        );
+        // While a snapshot holds the shadow the collection waits for it.
+        let held = hold(&repo).await;
+        let waited = tokio::time::timeout(Duration::from_millis(500), maybe_gc(&repo)).await;
+        assert!(waited.is_err(), "ran while a snapshot held the shadow");
         drop(held);
         assert!(maybe_gc(&repo).await, "did not run when due");
         let s = read_state(&dir).await;
@@ -1118,5 +1209,269 @@ mod tests {
         ] {
             assert!(shadow.join(kept).exists(), "{kept} was removed");
         }
+        // Git's own locks below `objects/` (F1): the commit graph's, a
+        // pack's; a young one stays.
+        std::fs::create_dir_all(shadow.join("objects/info")).unwrap();
+        make("objects/info/commit-graph.lock", true);
+        make("objects/pack/pack-2.keep.lock", true);
+        make("objects/info/young.lock", false);
+        assert_eq!(sweep_stale_locks(d.path()), 2);
+        assert!(shadow.join("objects/info/young.lock").exists());
+    }
+
+    /// A stand-in git that fails `gc` and passes every other call on.
+    fn failing_gc(dir: &Path) -> PathBuf {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let real = std::env::split_paths(&path)
+            .map(|d| d.join("git"))
+            .find(|g| g.is_file())
+            .expect("git");
+        fake_git(
+            dir,
+            &format!(
+                "for a in \"$@\"; do [ \"$a\" = gc ] && {{ echo 'fatal: bad object deadbeef' >&2; exit 128; }}; done\nexec '{}' \"$@\"",
+                real.display()
+            ),
+        )
+    }
+
+    /// Set the state's `last` to `ago` seconds before now.
+    fn last_was(dir: &Path, ago: u64) {
+        let f = dir.join(STATE);
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        let rest: String = text
+            .lines()
+            .filter(|l| !l.starts_with("last "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let when = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - ago;
+        std::fs::write(&f, format!("last {when}\n{rest}")).unwrap();
+    }
+
+    /// A.18 review F3: after a failed collection the wait doubles per
+    /// failure in a row (5, 10, 20 minutes, … at most a day); a success
+    /// resets it.
+    #[tokio::test]
+    async fn a_failing_collection_backs_off() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "a\n").unwrap();
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        let dir = repo.shadow.clone().unwrap();
+        let bin = d.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = failing_gc(&bin);
+        tokio::time::sleep(Duration::from_millis(200)).await; // see `exec_script`
+        count_dropped(&dir, GC_EVERY).await;
+        TEST_GIT.with(|g| *g.borrow_mut() = Some(fake));
+        let first = maybe_gc(&repo).await;
+        // 6 minutes later: past the plain interval, not past the doubled one.
+        last_was(&dir, 6 * 60);
+        let early = maybe_gc(&repo).await;
+        last_was(&dir, 11 * 60);
+        let second = maybe_gc(&repo).await;
+        last_was(&dir, 11 * 60);
+        let third_early = maybe_gc(&repo).await;
+        TEST_GIT.with(|g| *g.borrow_mut() = None);
+        assert!(first, "the first collection did not run");
+        assert!(!early, "retried after 6 minutes after one failure");
+        assert!(second, "not retried after 11 minutes after one failure");
+        assert!(!third_early, "retried after 11 minutes after two failures");
+        let text = std::fs::read_to_string(dir.join(STATE)).unwrap();
+        assert!(text.contains("failures 2"), "{text}");
+        // Capped at a day.
+        let s = GcState {
+            failures: 30,
+            ..GcState::default()
+        };
+        assert_eq!(s.interval(), GC_BACKOFF_MAX.as_secs());
+        // A success resets the count.
+        last_was(&dir, 25 * 3600);
+        assert!(maybe_gc(&repo).await);
+        let text = std::fs::read_to_string(dir.join(STATE)).unwrap();
+        assert!(
+            text.contains("failures 0") && text.contains("dropped 0"),
+            "{text}"
+        );
+    }
+
+    /// A.17 review F6: when the agent's prune took a tree of the turn's
+    /// snapshots, the copy says so (`trees_gone`) instead of failing.
+    #[tokio::test]
+    async fn a_lost_tree_is_reported_as_gone() {
+        let h = Hostile::new();
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        // Clean folder: the "before" root tree is the user's.
+        let before = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        sh(&h.repo, &["checkout", "-q", "--orphan", "x"]);
+        sh(&h.repo, &["commit", "-qam", "x"]);
+        sh(&h.repo, &["branch", "-qD", "main"]);
+        sh(&h.repo, &["reflog", "expire", "--expire=now", "--all"]);
+        sh(&h.repo, &["gc", "-q", "--prune=now"]);
+        let p = pin_changed(&repo, "refs/harness/s/t", &before, &after)
+            .await
+            .unwrap();
+        assert!(p.trees_gone, "{p:?}");
+    }
+
+    /// Hardening: a kept copy damaged by a power loss (its pack truncated)
+    /// is found at start-up and its `.keep` released; a sound one stays.
+    #[tokio::test]
+    async fn a_damaged_kept_pack_is_released_at_start_up() {
+        let h = Hostile::new();
+        sh(&h.repo, &["gc", "-q"]);
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        let mut before = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        let packs = repo.shadow.clone().unwrap().join("objects/pack");
+        for (i, text) in ["two\n", "three\n"].iter().enumerate() {
+            std::fs::write(h.repo.join("a.txt"), text).unwrap();
+            let after = snapshot(&repo, &format!("refs/harness/s/t{i}/after"), "a")
+                .await
+                .unwrap();
+            pin_changed(&repo, &format!("refs/harness/s/t{i}"), &before, &after)
+                .await
+                .unwrap();
+            before = after;
+        }
+        let keeps = || -> Vec<PathBuf> {
+            let mut v: Vec<PathBuf> = std::fs::read_dir(&packs)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|x| x == "keep"))
+                .collect();
+            v.sort();
+            v
+        };
+        let all = keeps();
+        assert_eq!(all.len(), 2, "{all:?}");
+        let pack = all[0].with_extension("pack");
+        let len = std::fs::metadata(&pack).unwrap().len();
+        // Packs are read-only; make it writable to truncate it.
+        let mut perm = std::fs::metadata(&pack).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        std::fs::set_permissions(&pack, perm).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&pack)
+            .unwrap()
+            .set_len(len / 2)
+            .unwrap();
+        assert_eq!(check_kept_packs(&h.base).await, 1);
+        assert_eq!(keeps(), [all[1].clone()]);
+    }
+
+    /// A kill between writing a copy's pack and its `.keep` (or during
+    /// `pack-objects`, leaving a `tmp_pack_*`): the next collection folds
+    /// the unprotected pack, removes the leftover, and the store is sound.
+    #[tokio::test]
+    async fn a_copy_killed_before_its_keep_is_collected() {
+        let h = Hostile::new();
+        sh(&h.repo, &["gc", "-q"]);
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        pin_changed(&repo, "refs/harness/s/t", &before, &after)
+            .await
+            .unwrap();
+        let packs = repo.shadow.clone().unwrap().join("objects/pack");
+        let names = || -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(&packs)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        // The kill: the `.keep` was never written; a temporary pack is left.
+        for n in names() {
+            if n.ends_with(".keep") {
+                std::fs::remove_file(packs.join(n)).unwrap();
+            }
+        }
+        let tmp = packs.join("tmp_pack_killed");
+        std::fs::write(&tmp, "partial").unwrap();
+        std::fs::File::open(&tmp)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        assert!(check_kept_packs(&h.base).await == 0);
+        make_due(&repo).await;
+        assert!(maybe_gc(&repo).await);
+        assert!(!tmp.exists(), "the leftover stayed: {:?}", names());
+        assert!(
+            !names().iter().any(|n| n.ends_with(".keep")),
+            "{:?}",
+            names()
+        );
+        run(&repo, &["fsck", "--no-dangling"], None).await.unwrap();
+    }
+
+    /// A.18 review F4: the end-of-turn copy of a turn that changed 50,000
+    /// small committed files (a codemod) is linear. Bound: 5 s on the slow
+    /// disk (measured 0.46 s in a debug build; the old code, which compared
+    /// every changed blob against every present object, took 11.4 s, all of
+    /// it on a tokio worker). Ignored for its 30 s of setup:
+    /// `cargo test -p harness-node --lib a_copy_of_50000_changed_files -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn a_copy_of_50000_changed_files_is_fast() {
+        let d = tempfile::tempdir_in(
+            std::env::var_os("A17_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
+        )
+        .unwrap();
+        let ws = d.path().join("ws");
+        for i in 0..50_000 {
+            let p = ws.join(format!("d{}/f{i}.txt", i / 500));
+            if i % 500 == 0 {
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            }
+            std::fs::write(&p, format!("v1 {i}\n")).unwrap();
+        }
+        sh(&ws, &["init", "-q", "-b", "main"]);
+        sh(&ws, &["add", "."]);
+        sh(&ws, &["commit", "-qm", "base"]);
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        for i in 0..50_000 {
+            let p = ws.join(format!("d{}/f{i}.txt", i / 500));
+            std::fs::write(&p, format!("v2 {i}\n")).unwrap();
+        }
+        let after = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        let t = std::time::Instant::now();
+        let p = pin_changed(&repo, "refs/harness/s/t", &before, &after)
+            .await
+            .unwrap();
+        let took = t.elapsed();
+        eprintln!("copy of 50,000 changed files: {took:?}");
+        assert!(p.missing.is_empty());
+        assert!(took < Duration::from_secs(5), "{took:?}");
     }
 }

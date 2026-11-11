@@ -1020,15 +1020,15 @@ pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Sna
     snapshot_within(repo, ref_name, msg, SNAPSHOT_TIMEOUT).await
 }
 
-/// [`snapshot_full`] with its time limit. While it runs, no garbage
-/// collection starts in the shadow (its objects are not referenced yet).
+/// [`snapshot_full`] with its time limit. The caller holds the shadow
+/// ([`hold`]): a garbage collection must not run while it writes objects no
+/// ref names yet.
 async fn snapshot_within(
     repo: &Repo,
     ref_name: &str,
     msg: &str,
     limit: Duration,
 ) -> Result<Snapshot, String> {
-    let _busy = hold(repo);
     tokio::time::timeout(limit, async {
         let tree = worktree_tree(repo).await?;
         let head = run(repo, &["rev-parse", "--verify", "-q", "HEAD"], None)
@@ -1066,7 +1066,7 @@ async fn snapshot_within(
     .map_err(|_| "snapshot took too long (folder too large?)".to_string())?
 }
 
-pub use upkeep::{gc_in_background, hold, pin_changed, sweep_stale_locks};
+pub use upkeep::{check_kept_packs, gc_in_background, hold, pin_changed, sweep_stale_locks};
 
 /// The line prefix in a snapshot's message that names one left-out
 /// repository.

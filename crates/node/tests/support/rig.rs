@@ -162,8 +162,23 @@ impl Rig {
 
     /// One agent turn running `cmd` in the folder; waits for the turn to end.
     pub async fn turn(&mut self, cmd: &str) -> Turn {
-        self.n += 1;
         let mark = self.seen.len();
+        self.start_turn(cmd);
+        self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+        let cps = self.checkpoints_since(mark);
+        let id = cps
+            .iter()
+            .find(|(_, p)| p == "after")
+            .map(|(t, _)| t.clone());
+        Turn {
+            id,
+            phases: cps.into_iter().map(|(_, p)| p).collect(),
+        }
+    }
+
+    /// Send the prompt of one agent turn running `cmd`; does not wait.
+    pub fn start_turn(&mut self, cmd: &str) {
+        self.n += 1;
         self.send(MasterToNode::Prompt {
             savings: None,
             context: None,
@@ -176,16 +191,6 @@ impl Rig {
             text: format!("run: {cmd}"),
             images: vec![],
         });
-        self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
-        let cps = self.checkpoints_since(mark);
-        let id = cps
-            .iter()
-            .find(|(_, p)| p == "after")
-            .map(|(t, _)| t.clone());
-        Turn {
-            id,
-            phases: cps.into_iter().map(|(_, p)| p).collect(),
-        }
     }
 
     /// Undo `turn`; returns what the caller sees and the folder around it.
