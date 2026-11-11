@@ -194,7 +194,11 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "approval_requested": {
       v.pending_approvals.push(p.approval_id);
       const t = lastTool(v, p.call_id);
-      if (t) t.approval = { approval_id: p.approval_id, reason: p.reason, decision: null, by: null };
+      if (t) {
+        t.approval = { approval_id: p.approval_id, reason: p.reason, decision: null, by: null };
+        // As the Rust view: the key only when true.
+        if (p.turn_allow === true) t.approval.turn_allow = true;
+      }
       break;
     }
     case "approval_resolved": {

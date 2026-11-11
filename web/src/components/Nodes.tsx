@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { NodeInfo, RemoteNode } from "../types";
+import { shownName } from "../md/hiddenChars";
 
 export function Nodes(props: { nodes: NodeInfo[] }) {
   const [remote, setRemote] = useState<RemoteNode[]>([]);
@@ -42,7 +43,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
             {embedded.map((n) => (
               <tr key={n.node_id}>
                 <td className="mono">{n.node_id}</td>
-                <td>{n.hostname}</td>
+                <td>{shownName(n.hostname)}</td>
                 <td>{n.connected ? "online" : "offline"} · built in ({n.profile})</td>
                 <td />
               </tr>
@@ -51,7 +52,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
               <tr key={n.node_id}>
                 <td className="mono">{n.node_id}</td>
                 <td>
-                  {n.hostname} <span className="muted small mono">{n.key_fingerprint}</span>
+                  {shownName(n.hostname)} <span className="muted small mono">{n.key_fingerprint}</span>
                 </td>
                 <td>{n.revoked ? "revoked" : n.connected ? "online" : "offline"}</td>
                 <td>

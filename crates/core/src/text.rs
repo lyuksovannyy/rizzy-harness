@@ -1,7 +1,7 @@
 //! Cleaning text that came from outside (web pages, search engines, the
 //! model) before the UI shows it as a label.
 //!
-//! The hidden set matches `web/src/md/hidden.ts`: bidi controls, zero-width
+//! The hidden set matches `web/src/md/hiddenChars.ts`: bidi controls, zero-width
 //! characters, the BOM, private-use characters, and the default-ignorable
 //! code points that no script needs (the deprecated format characters, the
 //! musical beam controls, the unassigned specials and the whole tag and

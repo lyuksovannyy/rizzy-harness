@@ -31,6 +31,7 @@ import { artifactHash, mediaHash } from "../lib/routes";
 import { when } from "../lib/when";
 import { LinkedA, LinkedImg } from "./Linked";
 import type { ArtifactsPageProps, FeaturePageProps } from "./pages";
+import { shownName } from "../md/hiddenChars";
 
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Progress lives in the server's memory: ask again this often while a version uploads. */
@@ -302,7 +303,7 @@ export function Versions(props: { a: Pick<Artifact, "artifact_id" | "mine">; ver
                     {git.dirty ? " (dirty)" : ""}
                   </span>
                 )}
-                <span>{v.node.hostname}</span>
+                <span>{shownName(v.node.hostname)}</span>
                 {chat && "title" in chat ? (
                   <a href={`#/s/${chat.session_id}`}>{chat.title || "Its chat"}</a>
                 ) : chat ? (
@@ -410,7 +411,7 @@ export function ArtifactPage(props: ArtifactsPageProps & { id: string }) {
       <div className="artifact-head">
         <ArtifactIcon a={a} />
         <div className="grow">
-          <h1 className="artifact-title">{a.name}</h1>
+          <h1 className="artifact-title">{shownName(a.name)}</h1>
           <div className="small muted row artifact-sub">
             {v && <span className="badge">v{v.seq}</span>}
             {v && chipOf(v) && <span className="tag">{chipOf(v)}</span>}
@@ -440,7 +441,7 @@ export function ArtifactPage(props: ArtifactsPageProps & { id: string }) {
           <ul className="mono small">
             {entries.map((e) => (
               <li key={e.path}>
-                <span className="ellipsis">{e.path}</span> <span className="muted">{bytes(e.size)}</span>
+                <span className="ellipsis">{shownName(e.path)}</span> <span className="muted">{bytes(e.size)}</span>
               </li>
             ))}
             {total > entries.length && <li className="muted">and {total - entries.length} more</li>}

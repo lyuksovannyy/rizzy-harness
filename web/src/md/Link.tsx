@@ -18,7 +18,7 @@ import { useAnchored } from "./anchored";
 import { MessageCtx, UiCtx } from "./context";
 import { useCopy } from "./copy";
 import { reactText } from "./hast";
-import { hostOf, linkKey, needsConfirm, parseUrl, textShowsTarget } from "./links";
+import { hostOf, leavesApp, linkKey, needsConfirm, parseUrl, textShowsTarget } from "./links";
 import { rt } from "./strings";
 
 type AProps = ComponentProps<"a"> & ExtraProps;
@@ -109,7 +109,10 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
   }, []);
   // With a fragment only when it is the source's own (see linkKey).
   const source = sources.has(linkKey(u));
-  const confirm = !source && needsConfirm(u, provenance);
+  // Another port of this app's host is another server: its host is always
+  // shown, with the port and a word that it is not this app, and it asks.
+  const away = leavesApp(u);
+  const confirm = away || (!source && needsConfirm(u, provenance));
   const guard = (e: React.MouseEvent) => {
     if (!confirm) return;
     e.preventDefault();
@@ -131,19 +134,25 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
       >
         {props.children}
       </a>
-      {props.showHost && (
-        <bdi dir="ltr" className="link-host">
+      {(props.showHost || away) && (
+        <bdi dir="ltr" className={away ? "link-host link-away" : "link-host"}>
           {hostOf(u)}
+          {away && ` · ${rt("linkAway")}`}
         </bdi>
       )}
-      {open && <LinkConfirm url={u.href} anchor={anchor} onClose={close} />}
+      {open && <LinkConfirm url={u.href} away={away} anchor={anchor} onClose={close} />}
     </span>
   );
 }
 
 /** The confirm is a popover in the top layer, placed under (or above) its
  * link (see useAnchored). */
-function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement | null>; onClose: (refocus: boolean) => void }) {
+function LinkConfirm(props: {
+  url: string;
+  away?: boolean;
+  anchor: RefObject<HTMLAnchorElement | null>;
+  onClose: (refocus: boolean) => void;
+}) {
   const { url, anchor, onClose } = props;
   const box = useRef<HTMLSpanElement>(null);
   const [copied, copy] = useCopy();
@@ -163,7 +172,10 @@ function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement |
   }, [onClose]);
   return (
     <span className="link-confirm" popover="manual" role="dialog" aria-label={rt("linkTitle")} ref={box}>
-      <span className="link-confirm-note">{rt("linkCheck")}</span>
+      <span className="link-confirm-note">
+        {rt("linkCheck")}
+        {props.away && ` (${rt("linkAway")})`}
+      </span>
       <span className="link-confirm-url">{url}</span>
       <span className="link-confirm-actions">
         <button

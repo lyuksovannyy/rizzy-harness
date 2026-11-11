@@ -29,6 +29,7 @@ import type { MenuView } from "./AccountMenu";
 import { NavLink } from "./NavLink";
 import { NodeBadge } from "./NodeBadge";
 import { ChatProjectMark, ProjectRows } from "./ProjectNav";
+import { shownName } from "../md/hiddenChars";
 
 // Imported ahead of the first click (pointer, focus or touch on the
 // button), so opening the menu never waits on the network.
@@ -360,10 +361,10 @@ export function Sidebar(props: SidebarProps) {
               current={s.session_id === selectedChat}
               onNavigate={onNavigate}
               className="session-item"
-              title={s.title}
+              title={shownName(s.title)}
             >
               {s.running && <span className="dot running" title="running" />}
-              <span className="ellipsis grow">{s.title || t("session.untitled")}</span>
+              <span className="ellipsis grow">{shownName(s.title) || t("session.untitled")}</span>
               <ChatProjectMark id={s.project_id} projects={props.projects} />
               {s.profile === "agentic" && <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />}
             </NavLink>

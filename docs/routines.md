@@ -128,8 +128,8 @@ Agentic routines run in `ask` or `ask_all` only (the node clamps further, T5); t
 unattended, so review-and-report routines finish on their own; `bash`, `edit`, `write` and
 `publish` park the run. A parked run is an ordinary chat with a pending approval: it shows in
 "Waiting for you" with the usual notification, the owner approves it through the normal
-endpoint, and after 24 hours it is cancelled. `allow_session` lasts one run (each run is a new
-chat).
+endpoint, and after 24 hours it is cancelled. `allow_session` ("Allow this exact call for this
+turn") covers only that call, until the run's turn ends (each run is a new chat).
 
 ### The approval seam (`runner::approval_for`)
 
