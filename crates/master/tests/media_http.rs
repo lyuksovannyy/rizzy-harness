@@ -2,6 +2,9 @@
 //! the T17 rules, thumbnails, privacy (T10), live topics, and deletion that
 //! leaves neither the file nor its key behind.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +84,7 @@ fn auth(rb: reqwest::RequestBuilder, c: &str) -> reqwest::RequestBuilder {
     if c.starts_with("Bearer ") {
         rb.header("authorization", c)
     } else {
-        rb.header("cookie", c)
+        rb.header("cookie", c).same_origin()
     }
 }
 
@@ -161,7 +164,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -245,7 +248,7 @@ fn assert_file_headers(r: &reqwest::Response) {
     );
     assert_eq!(header(r, "x-content-type-options"), "nosniff");
     assert_eq!(header(r, "cross-origin-resource-policy"), "same-origin");
-    assert_eq!(header(r, "cache-control"), "private, no-cache");
+    assert_eq!(header(r, "cache-control"), "no-store");
 }
 
 // ---- raw HTTP, for bodies that stall or stop early -------------------------
@@ -255,7 +258,8 @@ async fn raw_head(t: &T, c: &str, extra: &str) -> tokio::net::TcpStream {
     let auth = if c.starts_with("Bearer ") {
         format!("Authorization: {c}")
     } else {
-        format!("Cookie: {c}")
+        // A browser's upload: the cookie and its page's Origin.
+        format!("Cookie: {c}\r\nOrigin: http://{}", t.addr)
     };
     let head = format!(
         "POST /api/media HTTP/1.1\r\nHost: {}\r\n{auth}\r\nX-File-Name: a.png\r\n{extra}\r\n",
@@ -624,6 +628,7 @@ async fn stalled_uploads_time_out_and_slots_are_bounded() {
     let r = reqwest::Client::new()
         .post(format!("{}/api/media", t.base))
         .header("cookie", &bob)
+        .same_origin()
         .body(png(1, 1, b"third"))
         .send()
         .await
@@ -661,6 +666,7 @@ async fn thumbnails_and_hints_belong_to_the_owner() {
         let rb = reqwest::Client::new()
             .put(format!("{}{thumb_path}", t.base))
             .header("cookie", c)
+            .same_origin()
             .body(body);
         async move { rb.send().await.unwrap().status() }
     };
@@ -901,6 +907,8 @@ async fn socket(t: &T, c: &str) -> Socket {
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
+    let origin = format!("http://{}", r.uri().authority().unwrap());
+    r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     assert_eq!(next_type(&mut s).await, "error");
@@ -1127,6 +1135,7 @@ async fn the_search_provider_shows_only_the_callers_media() {
     let rb = reqwest::Client::new()
         .put(format!("{}/api/media/{sid}/thumb", t.base))
         .header("cookie", &alex)
+        .same_origin()
         .body(b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0".to_vec());
     assert_eq!(rb.send().await.unwrap().status(), StatusCode::OK);
     let (_, me) = req(&t, Method::GET, "/api/me", None, &alex).await;

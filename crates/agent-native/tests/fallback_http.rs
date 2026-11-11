@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use axum::{Router, routing::post};
 use harness_agent_native::llm::{ApiKind, LlmProvider, ModelRouter, Route};
 use harness_agent_native::{
-    ChatRequest, Completion, NativeBackend, NativeConfig, Provider, ProviderError,
+    ChatRequest, Completion, NativeBackend, NativeConfig, Provider, ProviderError, RetryPolicy,
 };
 use harness_core::agent::{AgentSpec, ToolSelection};
 use harness_core::backend::{AgentBackend, TurnCtx, TurnHost};
@@ -22,8 +22,9 @@ struct Host(Mutex<Vec<EventKind>>);
 
 #[async_trait::async_trait]
 impl TurnHost for Host {
-    async fn emit(&self, kind: EventKind) {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         self.0.lock().unwrap().push(kind);
+        Ok(())
     }
     async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
         Decision::Deny
@@ -129,8 +130,23 @@ fn backend(base: &str) -> NativeBackend {
         prefix: "loc".into(),
         provider: Arc::new(p),
     }]);
-    NativeBackend::new(Arc::new(router), Vec::new(), NativeConfig::default())
+    NativeBackend::new(
+        Arc::new(router),
+        Vec::new(),
+        NativeConfig {
+            // `busy` is retried (tests/retry.rs) before its fallback; fast
+            // here.
+            retry: RetryPolicy {
+                retries: BUSY_RETRIES,
+                base: std::time::Duration::from_millis(1),
+                max: std::time::Duration::from_millis(5),
+            },
+            ..Default::default()
+        },
+    )
 }
+
+const BUSY_RETRIES: u32 = 2;
 
 fn agent(fallbacks: &[&str], unavailable: &[&str]) -> AgentSpec {
     AgentSpec {
@@ -142,6 +158,7 @@ fn agent(fallbacks: &[&str], unavailable: &[&str]) -> AgentSpec {
         fallbacks: fallbacks.iter().map(|s| s.to_string()).collect(),
         unavailable: unavailable.iter().map(|s| s.to_string()).collect(),
         no_effort: vec![],
+        context_windows: Default::default(),
         effort: None,
         budget: Default::default(),
         ui: Default::default(),
@@ -188,7 +205,11 @@ async fn model_not_found_falls_back_in_order() {
     )
     .await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
-    assert_eq!(*seen.lock().unwrap(), ["gone", "busy", "ok"]);
+    // `gone` is not retried (404), `busy` is (429), then falls back.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["gone", "busy", "busy", "busy", "ok"]
+    );
     assert_eq!(host.answer().as_deref(), Some("answer from ok"));
     let notes = host.fallbacks();
     assert_eq!(notes.len(), 1, "one note, for the model that answered");
@@ -256,8 +277,8 @@ async fn effort_only_for_models_that_take_it() {
     a.no_effort = vec!["loc::ok".into()];
     let out = run(&b, &host, "loc::busy", a.clone()).await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
-    assert_eq!(*seen.lock().unwrap(), ["busy", "ok"]);
-    assert_eq!(*efforts.lock().unwrap(), ["high", "-"]);
+    assert_eq!(*seen.lock().unwrap(), ["busy", "busy", "busy", "ok"]);
+    assert_eq!(*efforts.lock().unwrap(), ["high", "high", "high", "-"]);
 
     // Starting on the fallback (the main model is unavailable) too.
     efforts.lock().unwrap().clear();
@@ -302,6 +323,7 @@ impl Provider for Cut {
         Err(ProviderError::Status {
             status: 503,
             body: "overloaded".into(),
+            hint: Default::default(),
         })
     }
 }

@@ -112,6 +112,22 @@ impl Writer {
     /// Start `blob_id`'s file in `tmp_dir` (0600, never over another),
     /// keeping its first `head_max` bytes for sniffing.
     pub fn create(tmp_dir: &Path, blob_id: &str, head_max: usize) -> io::Result<Self> {
+        let mut key = [0u8; 32];
+        let mut prefix = [0u8; PREFIX];
+        getrandom::fill(&mut key).map_err(|e| io::Error::other(e.to_string()))?;
+        getrandom::fill(&mut prefix).map_err(|e| io::Error::other(e.to_string()))?;
+        Self::create_with(tmp_dir, blob_id, head_max, key, prefix)
+    }
+
+    /// [`Writer::create`] with a given key and nonce prefix: the test
+    /// vectors in docs/media.md. Never reuse a (key, prefix) pair.
+    fn create_with(
+        tmp_dir: &Path,
+        blob_id: &str,
+        head_max: usize,
+        key: [u8; 32],
+        prefix: [u8; PREFIX],
+    ) -> io::Result<Self> {
         let path = tmp_dir.join(format!("{blob_id}.part"));
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -121,10 +137,6 @@ impl Writer {
             opts.mode(0o600);
         }
         let mut file = opts.open(&path)?;
-        let mut key = [0u8; 32];
-        let mut prefix = [0u8; PREFIX];
-        getrandom::fill(&mut key).map_err(|e| io::Error::other(e.to_string()))?;
-        getrandom::fill(&mut prefix).map_err(|e| io::Error::other(e.to_string()))?;
         let mut w = Self {
             blob_id: blob_id.to_string(),
             cipher: cipher(&key)?,
@@ -426,10 +438,7 @@ fn base_headers(h: &mut HeaderMap, etag: &str) {
         "cross-origin-resource-policy",
         HeaderValue::from_static("same-origin"),
     );
-    h.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if let Ok(v) = HeaderValue::from_str(etag) {
         h.insert(header::ETAG, v);
     }
@@ -755,6 +764,71 @@ mod tests {
             s.contains("filename*=UTF-8''%C3%9Cn%C3%AFc%C3%B8d%C3%A9%20%E2%98%83.png"),
             "{s}"
         );
+    }
+
+    /// The test vectors in docs/media.md ("On-disk format"), computed with
+    /// OpenSSL's AES-256-GCM rather than this code: sealing gives exactly
+    /// these bytes, and these bytes open to the plaintext. A change to the
+    /// format fails here before it can drift from the document.
+    #[test]
+    fn format_test_vectors() {
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let prefix: [u8; PREFIX] = [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6];
+        let vectors: [(Vec<u8>, &str, &str); 3] = [
+            (
+                Vec::new(),
+                "525a4231a0a1a2a3a4a5a6ec0085c3adf2159ee7fde2dab9242e17",
+                "42905681e101944ecc8852448139878b25df04d53d772a6193bac25daf195b4e",
+            ),
+            (
+                b"hello, blob".to_vec(),
+                "525a4231a0a1a2a3a4a5a61f042572d72ac0a26f0aba828067ae508f0611ad3d30eb7817cad7",
+                "23eb3dc98c5d5756a12c48f1217dc0ad1448c4df2a375416c746a17edf17d857",
+            ),
+            (
+                data(SEGMENT + 1),
+                "", // 65,580 bytes: checked by hash and its last 17 bytes
+                "fd91399c3137cab4a285044fe08c7327c500f9724e71d221836fe72df7a5290b",
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        for (n, (plain, file_hex, file_sha)) in vectors.iter().enumerate() {
+            // Sealing (blob id ID): the bytes on disk are exactly the vector.
+            let path = dir.path().join(format!("v{n}.rzb"));
+            let mut w = Writer::create_with(dir.path(), ID, 0, key, prefix).unwrap();
+            w.write(plain).unwrap();
+            std::fs::rename(w.finish().unwrap().path, &path).unwrap();
+            let file = std::fs::read(&path).unwrap();
+            assert_eq!(file.len() as u64, sealed_len(plain.len() as u64));
+            assert_eq!(hex::encode(Sha256::digest(&file)), *file_sha, "vector {n}");
+            if !file_hex.is_empty() {
+                assert_eq!(hex::encode(&file), *file_hex, "vector {n}");
+            } else {
+                assert_eq!(
+                    hex::encode(&file[file.len() - 17..]),
+                    "eccf055a305983f558fe8cf7fba75bd9ee"
+                );
+            }
+            // Opening: the fixed bytes give the plaintext back...
+            let size = plain.len() as u64;
+            assert_eq!(&read_all(&path, ID, &key, size).unwrap(), plain);
+            // ...and its last segment does not open under another id or
+            // with one bit changed. (An empty file's one segment is never
+            // read when serving: there is nothing to release.)
+            let last = segments(size) - 1;
+            let open = |id: &str| {
+                Reader::open(&path, id, &key, size)?
+                    .segment(last)
+                    .map(|_| ())
+            };
+            assert!(open(ID).is_ok());
+            let other = format!("{}0", &ID[..31]);
+            assert!(open(&other).is_err());
+            let mut bad = file.clone();
+            *bad.last_mut().unwrap() ^= 1;
+            std::fs::write(&path, &bad).unwrap();
+            assert!(open(ID).is_err());
+        }
     }
 
     #[test]

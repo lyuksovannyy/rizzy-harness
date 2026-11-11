@@ -32,6 +32,12 @@ pub struct Custom {
     pub summary: String,
     pub prompt: String,
     pub features: Features,
+    /// More `@handles`; optional, so agents saved before them still read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// The UI's grouping; none is [`crate::DEFAULT_CATEGORY`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// Every edit of one scope (today the whole server), by agent id.
@@ -67,7 +73,8 @@ impl AgentSet {
     /// then the custom agents (by name). An agent not available as a
     /// sub-agent leaves every `delegates`; a custom agent that delegates
     /// may call all the others that are. A custom agent whose id a built-in
-    /// or file agent has, or that does not build, is skipped and reported.
+    /// or file agent has, or that does not build, is skipped and reported;
+    /// one of its aliases another agent has is dropped and reported.
     pub fn with_edits(&self, edits: &Edits) -> (AgentSet, Vec<AgentError>) {
         let mut agents = self.agents.clone();
         for a in &mut agents {
@@ -101,13 +108,19 @@ impl AgentSet {
         let mut made = Vec::new();
         for (id, c) in customs {
             let delegates = subagents.iter().filter(|d| *d != id).cloned().collect();
-            match crate::custom(id, &c.name, &c.summary, &c.prompt, c.features, delegates) {
+            let built = crate::custom(id, &c.name, &c.summary, &c.prompt, c.features, delegates)
+                .and_then(|mut a| {
+                    (a.aliases, a.category) = crate::labels(id, &c.aliases, c.category.as_deref())?;
+                    Ok(a)
+                });
+            match built {
                 Ok(a) => made.push(a),
                 Err(e) => errors.push(e),
             }
         }
         made.sort_by_key(|a| a.name.to_lowercase());
         agents.extend(made);
+        errors.extend(crate::settle(&mut agents));
         (AgentSet::from_agents(agents, &self.default_id), errors)
     }
 }

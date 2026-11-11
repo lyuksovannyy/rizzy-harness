@@ -6,7 +6,15 @@ all-features = false
 [advisories]
 # RustSec advisory DB; unmaintained crates are reported for workspace deps.
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # ttf-parser is unmaintained; it arrives through pdf-extract → lopdf and
+    # parses fonts embedded in untrusted PDFs. Accepted because that code
+    # runs only in the `pdf-text` helper process: Landlock with no file and
+    # no TCP access, an address-space limit, a 20 s kill, an empty
+    # environment (FIX_PLAN 3.4, AUDIT S7, PLAN.md T20). Revisit when
+    # pdf-extract or lopdf drop it.
+    { id = "RUSTSEC-2026-0192", reason = "FIX_PLAN 3.4: only in the confined pdf-text helper" },
+]
 
 [licenses]
 # Permissive licences only. Anything else (incl. AGPL/GPL) fails CI.

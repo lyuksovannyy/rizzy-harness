@@ -113,10 +113,13 @@ impl Tool for Grep {
         };
         let res = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
+            let mut skipped = 0usize;
             'files: for entry in walker(&root, &protected).flatten() {
                 if cancel.is_cancelled() {
-                    break;
+                    return Err(());
                 }
+                // Links are not followed and FIFOs, devices and sockets are
+                // never opened; `load` checks the type again on the handle.
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }
@@ -128,8 +131,13 @@ impl Tool for Grep {
                 {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(path) else {
-                    continue;
+                let bytes = match load(path) {
+                    Load::Bytes(b) => b,
+                    Load::TooBig => {
+                        skipped += 1;
+                        continue;
+                    }
+                    Load::Unreadable => continue,
                 };
                 if bytes.iter().take(8192).any(|b| *b == 0) {
                     continue;
@@ -149,15 +157,29 @@ impl Tool for Grep {
                     }
                 }
             }
-            out
+            Ok((out, skipped))
         })
         .await;
-        match res {
-            Ok(lines) if lines.is_empty() => ToolOutcome::ok("No matches."),
-            Ok(lines) if bounded => ToolOutcome::ok(group_by_file(&lines)),
-            Ok(lines) => ToolOutcome::ok(lines.join("\n")),
-            Err(e) => ToolOutcome::err(format!("grep failed: {e}")),
+        let (lines, skipped) = match res {
+            Ok(Ok(r)) => r,
+            Ok(Err(())) => return ToolOutcome::err("[cancelled]"),
+            Err(e) => return ToolOutcome::err(format!("grep failed: {e}")),
+        };
+        let mut text = if lines.is_empty() {
+            "No matches.".to_string()
+        } else if bounded {
+            group_by_file(&lines)
+        } else {
+            lines.join("\n")
+        };
+        if skipped > 0 {
+            text.push_str(&format!(
+                "\n[skipped {skipped} file{} over {} bytes; search those with bash]",
+                if skipped == 1 { "" } else { "s" },
+                crate::MAX_GREP_FILE_BYTES
+            ));
         }
+        ToolOutcome::ok(text)
     }
 }
 
@@ -205,9 +227,13 @@ impl Tool for Glob {
         } else {
             MAX_GLOB_RESULTS
         };
+        let cancel = ctx.cancel.clone();
         let res = tokio::task::spawn_blocking(move || {
             let mut found: Vec<(SystemTime, String)> = Vec::new();
             for entry in walker(&root, &protected).flatten() {
+                if cancel.is_cancelled() {
+                    return None;
+                }
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }
@@ -224,12 +250,13 @@ impl Tool for Glob {
                 }
             }
             found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            found
+            Some(found)
         })
         .await;
         match res {
-            Ok(f) if f.is_empty() => ToolOutcome::ok("No files found."),
-            Ok(f) => {
+            Ok(None) => ToolOutcome::err("[cancelled]"),
+            Ok(Some(f)) if f.is_empty() => ToolOutcome::ok("No files found."),
+            Ok(Some(f)) => {
                 let n = f.len();
                 let mut lines: Vec<String> =
                     f.into_iter().take(max_files).map(|(_, p)| p).collect();
@@ -240,6 +267,24 @@ impl Tool for Glob {
             }
             Err(e) => ToolOutcome::err(format!("glob failed: {e}")),
         }
+    }
+}
+
+enum Load {
+    Bytes(Vec<u8>),
+    TooBig,
+    Unreadable,
+}
+
+/// One file for `grep`: a regular file (checked on the open handle too) of
+/// at most [`crate::MAX_GREP_FILE_BYTES`].
+fn load(path: &Path) -> Load {
+    match crate::read_small(path, crate::MAX_GREP_FILE_BYTES) {
+        Ok(b) => Load::Bytes(b),
+        Err(_) if std::fs::metadata(path).is_ok_and(|m| m.len() > crate::MAX_GREP_FILE_BYTES) => {
+            Load::TooBig
+        }
+        Err(_) => Load::Unreadable,
     }
 }
 
@@ -301,6 +346,75 @@ mod tests {
             .await;
         assert!(r.output.contains("src/inner/b.rs:1"));
         assert!(!r.output.contains("notes.md"));
+    }
+
+    /// AUDIT S10: FIFOs, devices, link loops and huge files cannot wedge a
+    /// search, and a cancelled one stops.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_survives_a_hostile_tree() {
+        use std::os::unix::fs::symlink;
+        let dir = fixture();
+        let p = dir.path();
+        nix::unistd::mkfifo(
+            &p.join("src/pipe.rs"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        symlink(p.join("src/pipe.rs"), p.join("src/to_pipe.rs")).unwrap();
+        symlink("/dev/zero", p.join("src/zero.rs")).unwrap();
+        symlink(p.join("src"), p.join("src/inner/loop")).unwrap();
+        let big = p.join("src/huge.rs");
+        std::fs::write(&big, "TODO in a huge file\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&big)
+            .unwrap()
+            .set_len(crate::MAX_GREP_FILE_BYTES + 1)
+            .unwrap();
+        let ctx = ToolCtx::new(p);
+        let quick = std::time::Duration::from_secs(5);
+        for root in [None, Some("src/pipe.rs"), Some("src/to_pipe.rs")] {
+            let mut input = json!({"pattern": "TODO"});
+            if let Some(r) = root {
+                input["path"] = json!(r);
+            }
+            let r = tokio::time::timeout(quick, Grep.run(&ctx, input))
+                .await
+                .expect("grep blocked");
+            assert!(!r.output.contains("huge.rs:1"), "{}", r.output);
+            if root.is_none() {
+                assert!(r.output.contains("src/a.rs:2"), "{}", r.output);
+                assert!(
+                    r.output.contains("skipped 1 file over"),
+                    "a skipped file must be said: {}",
+                    r.output
+                );
+            }
+        }
+        // Outside mode, rooted at a device.
+        let out = ToolCtx {
+            allow_outside_workspace: true,
+            ..ToolCtx::new(p)
+        };
+        let r = tokio::time::timeout(
+            quick,
+            Grep.run(&out, json!({"pattern": "x", "path": "/dev/zero"})),
+        )
+        .await
+        .expect("grep blocked on /dev/zero");
+        assert!(!r.output.contains("dev/zero:"), "{}", r.output);
+    }
+
+    #[tokio::test]
+    async fn cancelled_searches_say_so() {
+        let dir = fixture();
+        let ctx = ToolCtx::new(dir.path());
+        ctx.cancel.cancel();
+        let g = Grep.run(&ctx, json!({"pattern": "TODO"})).await;
+        assert!(!g.ok && g.output.contains("cancelled"), "{}", g.output);
+        let l = Glob.run(&ctx, json!({"pattern": "**/*"})).await;
+        assert!(!l.ok && l.output.contains("cancelled"), "{}", l.output);
     }
 
     #[tokio::test]

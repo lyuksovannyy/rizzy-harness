@@ -112,7 +112,7 @@ describe("project page", () => {
       ...garden,
       workspace_id: "w2",
       instructions: "",
-      settings: { workspace_memory: true, node_id: null, cwd: null },
+      settings: { workspace_memory: true, members_activate_facts: false, node_id: null, cwd: null },
       can_manage: true,
       created_by: null,
       created_ms: 0,

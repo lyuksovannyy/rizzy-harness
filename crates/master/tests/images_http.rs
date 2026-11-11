@@ -6,6 +6,9 @@
 //! 8 MiB frame is never reached). A Media item reports the chats that still
 //! carry it.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,9 +70,9 @@ struct T {
 /// A chat node that sees nothing of images: it announces no `images`
 /// capability, opens chats and acks, and keeps what it was sent.
 fn old_node(id: &str) -> (NodeLink, Arc<Mutex<Vec<MasterToNode>>>) {
-    let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (tx, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
-    tx.send(NodeToMaster::Hello {
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
+    tx.try_send(NodeToMaster::Hello {
         protocol_version: PROTOCOL_VERSION,
         node_id: id.into(),
         hostname: "old".into(),
@@ -104,10 +107,10 @@ fn old_node(id: &str) -> (NodeLink, Arc<Mutex<Vec<MasterToNode>>>) {
                     kind,
                     payload,
                 };
-                let _ = tx.send(NodeToMaster::Event { event });
+                let _ = tx.try_send(NodeToMaster::Event { event });
             }
             if let Some(req_id) = msg.req_id() {
-                let _ = tx.send(NodeToMaster::Ack {
+                let _ = tx.try_send(NodeToMaster::Ack {
                     req_id: req_id.into(),
                     ok: true,
                     error: None,
@@ -211,7 +214,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).send().await.unwrap();
+    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -231,6 +234,7 @@ async fn account(t: &T, name: &str) -> String {
     let r = client
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&first))
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": format!("{name}s own password")}))
         .send()
         .await
@@ -271,6 +275,7 @@ async fn upload(
     let r = reqwest::Client::new()
         .post(url)
         .header("cookie", c)
+        .same_origin()
         .header("x-file-name", name)
         .body(bytes)
         .send()
@@ -590,6 +595,7 @@ async fn a_message_over_7_mib_is_refused_before_the_link() {
         let r = reqwest::Client::new()
             .post(format!("{}/api/attachments?name=n{n}.txt", t.base))
             .header("cookie", &t.alex)
+            .same_origin()
             .body("x".repeat(100_000))
             .send()
             .await

@@ -11,8 +11,11 @@
 //!
 //! Signing and TLS use aws-lc-rs (already used by rustls here).
 
+use std::time::Duration;
+
 pub mod client;
 pub mod identity;
+mod pump;
 pub mod server;
 pub mod tls;
 pub mod wire;
@@ -39,20 +42,60 @@ pub enum LinkError {
 
 pub type Result<T> = std::result::Result<T, LinkError>;
 
-/// Largest WebSocket message accepted on the link.
-pub const MAX_MESSAGE: usize = 8 * 1024 * 1024;
+/// Largest WebSocket frame and message accepted on the link.
+pub const MAX_MESSAGE: usize = harness_protocol::MAX_FRAME;
 
 /// Both ends ping this often once the link is up...
-pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
-/// ...and drop it after this long without hearing anything (a half-open
-/// TCP connection would otherwise look connected until the OS gives up).
-pub const IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+pub const PING_EVERY: Duration = Duration::from_secs(20);
+/// ...and drop it when the peer sends nothing for this long while we are
+/// reading, or does not take a frame we are writing for this long (a
+/// half-open TCP connection would otherwise look connected until the OS
+/// gives up). Time spent not reading because our own consumer is behind
+/// does not count: a busy link is not a dead one.
+pub const IDLE_LIMIT: Duration = Duration::from_secs(60);
+/// Node side: the TCP connect to the master...
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// ...then TLS plus the WebSocket upgrade, and separately the challenge
+/// exchange, each as a whole (a peer that sends a byte a second does not
+/// extend it).
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A ticker for `PING_EVERY` whose first tick is one period away.
-pub(crate) fn ping_ticker() -> tokio::time::Interval {
-    let mut t = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    t
+/// Master side: messages from one node parsed and waiting to be stored.
+/// When full, the master stops reading that node's socket, so TCP pushes
+/// back on the node. With frames of at most `MAX_MESSAGE`, one node can
+/// hold at most `FROM_NODE_QUEUE + 2` messages in the master (the queue,
+/// the one being read, the one being stored).
+pub const FROM_NODE_QUEUE: usize = 8;
+/// Master side: commands to one node waiting to be written. When full,
+/// a new command fails at once as if the node had not answered.
+pub const TO_NODE_QUEUE: usize = 64;
+
+/// The link's timers; `Default` is the production values (tests shorten
+/// them).
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    pub ping_every: Duration,
+    pub idle_limit: Duration,
+    pub connect: Duration,
+    pub handshake: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            ping_every: PING_EVERY,
+            idle_limit: IDLE_LIMIT,
+            connect: CONNECT_TIMEOUT,
+            handshake: HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+pub(crate) fn timed_out(what: &str) -> LinkError {
+    LinkError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("{what} timed out"),
+    ))
 }
 
 /// Write a file only the owner can read.

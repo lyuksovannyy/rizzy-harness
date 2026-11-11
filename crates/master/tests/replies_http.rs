@@ -3,6 +3,9 @@
 //! carry, the node's check comes back as 409, and the answer goes to the
 //! agent that asked.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,7 +77,8 @@ async fn req(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", cookie);
+        .header("cookie", cookie)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -108,6 +112,7 @@ async fn accounts(t: &T) -> (String, String) {
     let r = c
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&r))
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
         .send()
         .await

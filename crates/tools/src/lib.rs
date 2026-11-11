@@ -3,7 +3,9 @@
 //! Every tool is cancellable through `ToolCtx::cancel`. Path-taking tools are
 //! confined to the workspace unless the node policy says otherwise.
 
+pub mod approval;
 mod bash;
+pub use bash::{DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S};
 pub mod env;
 pub mod filter;
 mod fs;
@@ -11,6 +13,7 @@ pub mod graphify;
 mod outline;
 pub mod outputs;
 mod publish;
+pub mod sandbox;
 mod search;
 pub mod stream;
 
@@ -24,6 +27,7 @@ use harness_core::refs::SharedRefs;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+pub use approval::{CallKey, call_key};
 pub use bash::Bash;
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
@@ -35,6 +39,100 @@ pub use stream::OutputSink;
 
 /// Cap on what the model sees from one tool call.
 pub const MAX_OUTPUT_CHARS: usize = 30_000;
+
+/// Bytes `read` takes from one file. It streams them line by line, so this
+/// bounds time, not memory; past it the model is told where it stopped.
+pub const MAX_READ_BYTES: u64 = 32 << 20;
+
+/// Files over this size are skipped by `grep` (it holds one file at a time
+/// in memory), and the output says how many were. `edit` and `outline`,
+/// which load the whole file too, refuse them.
+pub const MAX_GREP_FILE_BYTES: u64 = 8 << 20;
+
+/// Flags for every file a tool opens: opening a FIFO never waits for the
+/// other end, and a terminal never becomes the node's controlling one.
+/// Neither changes anything for a regular file.
+pub(crate) fn open_flags() -> i32 {
+    (nix::fcntl::OFlag::O_NONBLOCK | nix::fcntl::OFlag::O_NOCTTY).bits()
+}
+
+/// Refuse anything but a regular file (a FIFO blocks a reader forever, a
+/// device never ends or has side effects, a directory or socket is no
+/// text).
+pub(crate) fn check_regular(path: &Path, ft: std::fs::FileType) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+    if ft.is_file() {
+        return Ok(());
+    }
+    let kind = if ft.is_dir() {
+        "a directory"
+    } else if ft.is_fifo() {
+        "a FIFO"
+    } else if ft.is_socket() {
+        "a socket"
+    } else if ft.is_char_device() {
+        "a character device"
+    } else if ft.is_block_device() {
+        "a block device"
+    } else {
+        "a special file"
+    };
+    Err(format!(
+        "{}: not a regular file ({kind}); file tools only read and write regular files",
+        path.display()
+    ))
+}
+
+/// Open an existing file for reading, only if it is a regular file. The
+/// type is checked before opening (a device is never opened) and again on
+/// the opened handle (`fstat`), so a FIFO or device swapped in between is
+/// still refused; the open itself never blocks.
+pub(crate) fn open_regular(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let md = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    check_regular(path, md.file_type())?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(open_flags())
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let md = f
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    check_regular(path, md.file_type())?;
+    Ok(f)
+}
+
+/// Read a whole regular file of at most `cap` bytes (`edit`, `outline`).
+/// A larger file, or one that grows past `cap` while it is read, is
+/// refused rather than cut.
+pub(crate) fn read_small(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let f = open_regular(path)?;
+    let len = f
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if len > cap {
+        return Err(too_big(path, len, cap));
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    f.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() as u64 > cap {
+        return Err(too_big(path, bytes.len() as u64, cap));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn too_big(path: &Path, len: u64, cap: u64) -> String {
+    format!(
+        "{}: too large ({len} bytes or more; the limit is {cap}); use `read` with offset/limit, \
+         or bash",
+        path.display()
+    )
+}
 
 pub struct ToolCtx {
     pub workspace: PathBuf,
@@ -48,6 +146,9 @@ pub struct ToolCtx {
     /// user's chats). Canonical paths, from the node's policy.
     pub protected: Arc<Vec<PathBuf>>,
     pub timeout: Duration,
+    /// The longest a `bash` call may run, whatever it asks for (node.toml
+    /// `[limits] bash_timeout_max_s`).
+    pub bash_timeout_max: Duration,
     /// The environment of every child process a tool starts (an allow-list).
     pub env: ToolEnv,
     /// Text this conversation got from the user and from tools, never text
@@ -66,6 +167,9 @@ pub struct ToolCtx {
     pub artifacts: Option<Arc<dyn harness_core::artifacts::ArtifactSink>>,
     /// The call being run, for tools whose events must land on its card.
     pub call_id: String,
+    /// How child processes (bash, graphify) are started: through the
+    /// Landlock wrapper on a sandboxed node (node.toml `[sandbox]`).
+    pub sandbox: sandbox::Confinement,
 }
 
 impl ToolCtx {
@@ -77,6 +181,7 @@ impl ToolCtx {
             allow_outside_workspace: false,
             protected: Arc::default(),
             timeout: Duration::from_secs(600),
+            bash_timeout_max: Duration::from_secs(bash::DEFAULT_TIMEOUT_MAX_S),
             env: ToolEnv::default(),
             observed: Arc::default(),
             savings: Default::default(),
@@ -84,6 +189,7 @@ impl ToolCtx {
             refs: Arc::default(),
             artifacts: None,
             call_id: String::new(),
+            sandbox: Default::default(),
         }
     }
 
@@ -289,18 +395,33 @@ fn walk_links(path: &Path, ws: Option<&Path>, shown: &str, hops: usize) -> Resul
 /// Open `path` without following a symlink at its last component (`write`
 /// and `edit`): a link put there after [`ToolCtx::resolve_for_write`]
 /// checked the path fails with a clear error instead of being followed.
+///
+/// Only regular files: an existing FIFO or device is refused before it is
+/// opened, the open never blocks (`O_NONBLOCK`), and the opened handle is
+/// checked again (`fstat`) for one swapped in meanwhile.
 pub(crate) async fn open_nofollow(
     path: &Path,
     opts: &mut tokio::fs::OpenOptions,
 ) -> Result<tokio::fs::File, String> {
-    opts.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-    opts.open(path).await.map_err(|e| {
+    if let Ok(md) = tokio::fs::symlink_metadata(path).await
+        && !md.file_type().is_symlink()
+    {
+        check_regular(path, md.file_type())?;
+    }
+    opts.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits() | open_flags());
+    let f = opts.open(path).await.map_err(|e| {
         if e.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32) {
             format!("{}: is a symlink; refusing to follow it", path.display())
         } else {
             format!("{}: {e}", path.display())
         }
-    })
+    })?;
+    let md = f
+        .metadata()
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    check_regular(path, md.file_type())?;
+    Ok(f)
 }
 
 fn normalize(p: &Path) -> PathBuf {
@@ -371,6 +492,11 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     /// JSON Schema of the input object.
     fn schema(&self) -> Value;
+    /// The schema shown to the model on this node: the same, with this
+    /// node's `bash` timeout ceiling in the text that states one.
+    fn schema_for(&self, _bash_timeout_max: Duration) -> Value {
+        self.schema()
+    }
     fn risk(&self) -> ToolRisk;
     /// Offered to the model only when this returns true (tools that exist
     /// for a token-saving method are off with it).

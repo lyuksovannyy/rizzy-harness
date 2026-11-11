@@ -2,11 +2,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tokio_rustls::server::TlsStream;
+use tokio::net::TcpStream;
 
 /// The WireGuard interface that owns `ip`, if any (Linux: the kernel marks
 /// WireGuard devices with `DEVTYPE=wireguard`).
@@ -111,60 +108,13 @@ fn container_exposure(bind: SocketAddr, ifaces: &[String]) -> anyhow::Result<Exp
     Ok(Exposure::Container)
 }
 
-/// A TLS listener for `axum::serve`. Handshakes run in their own tasks with
-/// a timeout, so a slow or silent client cannot hold up the others.
-pub struct TlsListener {
-    rx: mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
-    local: SocketAddr,
-}
-
-impl TlsListener {
-    pub fn new(tcp: TcpListener, cfg: Arc<rustls::ServerConfig>) -> std::io::Result<Self> {
-        let local = tcp.local_addr()?;
-        let (tx, rx) = mpsc::channel(64);
-        let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
-        tokio::spawn(async move {
-            loop {
-                let (sock, peer) = match tcp.accept().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "accept failed");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                };
-                let (acceptor, tx) = (acceptor.clone(), tx.clone());
-                tokio::spawn(async move {
-                    match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(sock)).await
-                    {
-                        Ok(Ok(tls)) => {
-                            let _ = tx.send((tls, peer)).await;
-                        }
-                        Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
-                        Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
-                    }
-                });
-            }
-        });
-        Ok(Self { rx, local })
-    }
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = TlsStream<TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        match self.rx.recv().await {
-            Some(v) => v,
-            // The accept task never ends while the process runs.
-            None => std::future::pending().await,
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        Ok(self.local)
-    }
+/// The TLS handshake for the serve loop (`harness_master::serve::serve_with`),
+/// which gives it a connection permit and a timeout.
+pub fn tls_handshake(
+    cfg: Arc<rustls::ServerConfig>,
+) -> impl Fn(TcpStream) -> tokio_rustls::Accept<TcpStream> + Send + Sync + 'static {
+    let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
+    move |tcp| acceptor.accept(tcp)
 }
 
 #[cfg(test)]

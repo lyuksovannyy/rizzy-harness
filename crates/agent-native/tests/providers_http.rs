@@ -201,18 +201,22 @@ async fn list_models_both_kinds_and_bad_key() {
         v.into_iter().map(|m| m.id).collect::<Vec<_>>()
     };
     assert_eq!(
-        ids(list_models(ApiKind::Openai, &base, Some(&good), false)
-            .await
-            .unwrap()),
+        ids(
+            list_models(ApiKind::Openai, &base, Some(&good), false, &None)
+                .await
+                .unwrap()
+        ),
         ["model-a", "model-b"]
     );
     assert_eq!(
-        ids(list_models(ApiKind::Anthropic, &base, Some(&good), false)
-            .await
-            .unwrap()),
+        ids(
+            list_models(ApiKind::Anthropic, &base, Some(&good), false, &None)
+                .await
+                .unwrap()
+        ),
         ["model-a", "model-b"]
     );
-    let err = list_models(ApiKind::Openai, &base, Some(&bad), false)
+    let err = list_models(ApiKind::Openai, &base, Some(&bad), false, &None)
         .await
         .unwrap_err()
         .to_string();
@@ -261,9 +265,15 @@ async fn list_models_metadata_and_anthropic_pages() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let or = list_models(ApiKind::Openai, &format!("{base}/or/v1"), None, false)
-        .await
-        .unwrap();
+    let or = list_models(
+        ApiKind::Openai,
+        &format!("{base}/or/v1"),
+        None,
+        false,
+        &None,
+    )
+    .await
+    .unwrap();
     assert_eq!(or.len(), 1);
     let m = &or[0];
     assert_eq!((m.context, m.max_output), (Some(128000), Some(16384)));
@@ -272,9 +282,15 @@ async fn list_models_metadata_and_anthropic_pages() {
         (Some(true), Some(true), Some(true))
     );
 
-    let an = list_models(ApiKind::Anthropic, &format!("{base}/an/v1"), None, false)
-        .await
-        .unwrap();
+    let an = list_models(
+        ApiKind::Anthropic,
+        &format!("{base}/an/v1"),
+        None,
+        false,
+        &None,
+    )
+    .await
+    .unwrap();
     let ids: Vec<&str> = an.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, ["claude-a", "claude-b"]);
     let b = &an[1];
@@ -335,6 +351,7 @@ async fn list_models_refuses_cross_origin_redirects_and_huge_bodies() {
         &format!("{base}/r/v1"),
         Some(&key),
         false,
+        &None,
     )
     .await;
     assert!(r.is_err(), "the redirect is not followed: {r:?}");
@@ -343,10 +360,16 @@ async fn list_models_refuses_cross_origin_redirects_and_huge_bodies() {
         "the key went to another host"
     );
 
-    let err = list_models(ApiKind::Openai, &format!("{base}/big/v1"), None, false)
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = list_models(
+        ApiKind::Openai,
+        &format!("{base}/big/v1"),
+        None,
+        false,
+        &None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("too large"), "{err}");
 }
 
@@ -376,7 +399,7 @@ async fn list_models_probes_ollama_show() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let ms = list_models(ApiKind::Openai, &base, None, true)
+    let ms = list_models(ApiKind::Openai, &base, None, true, &None)
         .await
         .unwrap();
     assert_eq!(ms[0].id, "llava");
@@ -474,4 +497,205 @@ async fn anthropic_prompt_cache_markers_and_usage() {
     let _ = p.complete(&request(), tx).await;
     let (_, body) = seen.lock().unwrap().clone().unwrap();
     assert!(!body.to_string().contains("cache_control"), "{body}");
+}
+
+// Stop reasons on the wire. Shapes follow each provider's streaming
+// reference: OpenAI "Chat Completions: the chat completion chunk object"
+// (`choices[0].finish_reason`: `stop`, `length`, `tool_calls`,
+// `content_filter`), Anthropic "Messages: streaming" (`message_delta` with
+// `delta.stop_reason`: `end_turn`, `max_tokens`, `stop_sequence`,
+// `tool_use`, `pause_turn`, `refusal`), as in the tests above.
+
+fn openai_sse(args: &[&str], finish: &str) -> String {
+    let chunk = |delta: Value, finish: Value| {
+        format!(
+            "data: {}\n\n",
+            json!({"id":"c","object":"chat.completion.chunk","created":1,"model":"test-model",
+                   "choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+        )
+    };
+    let mut s = chunk(
+        json!({"role":"assistant","content":"Writing."}),
+        Value::Null,
+    );
+    for (i, a) in args.iter().enumerate() {
+        let call = if i == 0 {
+            json!({"index":0,"id":"call_1","type":"function","function":{"name":"write","arguments":a}})
+        } else {
+            json!({"index":0,"function":{"arguments":a}})
+        };
+        let last = i + 1 == args.len();
+        s += &chunk(
+            json!({"tool_calls":[call]}),
+            if last { json!(finish) } else { Value::Null },
+        );
+    }
+    s + "data: [DONE]\n\n"
+}
+
+async fn openai_complete(sse: String) -> harness_agent_native::Completion {
+    let (base, _) = serve("/v1/chat/completions", sse).await;
+    let p = LlmProvider::new(ApiKind::Openai, &format!("{base}/v1"), None).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    p.complete(&request(), tx).await.unwrap()
+}
+
+/// OpenAI: `length` with a call cut mid-JSON. genai leaves the arguments
+/// as the string they got to; the stop says why.
+#[tokio::test]
+async fn openai_length_stop_is_the_output_limit() {
+    use harness_agent_native::StopReason;
+    let c = openai_complete(openai_sse(
+        &[r#"{"path":"a.txt","#, r#""content":"half of"#],
+        "length",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::OutputLimit);
+    assert_eq!(c.text, "Writing.");
+    assert_eq!(c.tool_calls.len(), 1);
+    assert!(c.tool_calls[0].input.is_string(), "{:?}", c.tool_calls[0]);
+
+    // A call whose arguments happen to be complete when the limit hit
+    // arrives as a valid object: only the stop reason tells it apart.
+    let c = openai_complete(openai_sse(
+        &[r#"{"path":"a.txt","#, r#""content":"x"}"#],
+        "length",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::OutputLimit);
+    assert_eq!(
+        c.tool_calls[0].input,
+        json!({"path": "a.txt", "content": "x"})
+    );
+
+    let c = openai_complete(openai_sse(
+        &[r#"{"path":"a.txt","content":"x"}"#],
+        "tool_calls",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::ToolUse);
+    let c = openai_complete(openai_sse(&[r#"{"path":"a.txt","content":"x"}"#], "stop")).await;
+    assert_eq!(c.stop, StopReason::End);
+}
+
+fn anthropic_sse(partials: &[&str], stop: &str) -> String {
+    let ev = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let mut s = vec![
+        ev(
+            "message_start",
+            json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}),
+        ),
+        ev(
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        ),
+        ev(
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Writing."}}),
+        ),
+        ev(
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        ),
+        ev(
+            "content_block_start",
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"write","input":{}}}),
+        ),
+    ];
+    for p in partials {
+        s.push(ev("content_block_delta", json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":p}})));
+    }
+    s.push(ev(
+        "content_block_stop",
+        json!({"type":"content_block_stop","index":1}),
+    ));
+    s.push(ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":null},"usage":{"output_tokens":4096}})));
+    s.push(ev("message_stop", json!({"type":"message_stop"})));
+    s.concat()
+}
+
+async fn anthropic_complete(sse: String) -> harness_agent_native::Completion {
+    let (base, _) = serve("/v1/messages", sse).await;
+    let p = LlmProvider::new(
+        ApiKind::Anthropic,
+        &format!("{base}/v1"),
+        Some(Secret::new("k".into())),
+    )
+    .unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    p.complete(&request(), tx).await.unwrap()
+}
+
+/// Anthropic: `max_tokens` with a `tool_use` block cut mid-JSON.
+#[tokio::test]
+async fn anthropic_max_tokens_stop_is_the_output_limit() {
+    use harness_agent_native::StopReason;
+    let c = anthropic_complete(anthropic_sse(
+        &[r#"{"path":"a.txt","#, r#""content":"half of"#],
+        "max_tokens",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::OutputLimit);
+    assert_eq!(c.text, "Writing.");
+    assert!(c.tool_calls[0].input.is_string(), "{:?}", c.tool_calls[0]);
+
+    let c = anthropic_complete(anthropic_sse(
+        &[r#"{"path":"a.txt","content":"x"}"#],
+        "max_tokens",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::OutputLimit);
+    assert!(c.tool_calls[0].input.is_object());
+
+    let c = anthropic_complete(anthropic_sse(
+        &[r#"{"path":"a.txt","content":"x"}"#],
+        "tool_use",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::ToolUse);
+    let c = anthropic_complete(anthropic_sse(
+        &[r#"{"path":"a.txt","content":"x"}"#],
+        "end_turn",
+    ))
+    .await;
+    assert_eq!(c.stop, StopReason::End);
+}
+
+/// A call cut mid-JSON is kept in the history as a string; sent back as
+/// it is, Anthropic would refuse the next request (`input` must be an
+/// object) and the model would never read why its call was refused.
+#[tokio::test]
+async fn a_cut_call_in_the_history_is_sent_as_an_object() {
+    let (base, seen) = serve("/v1/messages", String::new()).await;
+    let p = LlmProvider::new(
+        ApiKind::Anthropic,
+        &format!("{base}/v1"),
+        Some(Secret::new("k".into())),
+    )
+    .unwrap();
+    let mut req = request();
+    req.messages.push(ChatMsg::Assistant {
+        text: "Writing.".into(),
+        tool_calls: vec![harness_core::event::ToolCallRef {
+            call_id: "toolu_1".into(),
+            tool: "write".into(),
+            input: json!(r#"{"path":"a.txt","content":"FRAGMENT"#),
+        }],
+    });
+    req.messages.push(ChatMsg::Tool {
+        call_id: "toolu_1".into(),
+        content: "not run".into(),
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = p.complete(&req, tx).await;
+    let (_, body) = seen.lock().unwrap().clone().unwrap();
+    let input = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+        .find(|b| b["type"] == "tool_use")
+        .map(|b| b["input"].clone())
+        .unwrap();
+    assert_eq!(input, json!({}), "{body}");
 }

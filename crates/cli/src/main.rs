@@ -88,6 +88,33 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GraphifyCmd,
     },
+    /// Run a command in a Landlock sandbox: apply the rules to this process,
+    /// then exec the command. The node starts bash and graphify this way
+    /// (node.toml `[sandbox]`).
+    SandboxExec {
+        /// A file or folder the command may read and change.
+        #[arg(long, value_name = "PATH")]
+        rw: Vec<PathBuf>,
+        /// A file or folder the command may read and execute.
+        #[arg(long, value_name = "PATH")]
+        ro: Vec<PathBuf>,
+        /// Deny TCP connect and bind (needs Landlock ABI 4).
+        #[arg(long)]
+        no_network: bool,
+        /// Run with whatever the kernel enforces instead of refusing.
+        #[arg(long)]
+        best_effort: bool,
+        /// Print what is enforced on stderr first.
+        #[arg(long)]
+        status: bool,
+        /// The command and its arguments.
+        #[arg(last = true, required = true, value_name = "CMD")]
+        command: Vec<std::ffi::OsString>,
+    },
+    /// Read a PDF on stdin, write its text on stdout, confined (no files, no
+    /// network, limited memory). The server starts it for PDF attachments.
+    #[command(hide = true)]
+    PdfText,
 }
 
 #[derive(Subcommand)]
@@ -204,6 +231,10 @@ async fn serve(
             "settings fixed by the environment (.env)"
         );
     }
+    // Every file holding a secret, before any is read (AUDIT L7): the API
+    // token and the claim code are checked where they are read.
+    harness_master::secrets::check_private(&dir.join("secrets.toml"))?;
+    harness_master::secrets::check_keys(dir)?;
     let cfg = Config::load_with_env(&dir.join(CONFIG_FILE), &env)?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
     let secrets = harness_core::SecretSet::default();
@@ -246,6 +277,7 @@ async fn serve(
                 child_env,
                 &secrets,
                 "local",
+                false,
             )
             .await?,
         )
@@ -309,6 +341,11 @@ async fn serve(
     // must find the blob store.
     harness_master::storage::open(&master, dir)?;
     master.set_provider_runtime(runtime);
+    // PDF attachments are read by this binary's `pdf-text`, never in here.
+    match std::env::current_exe().and_then(|e| e.canonicalize()) {
+        Ok(exe) => master.set_pdf_reader(harness_master::pdf::PdfReader::new(exe)),
+        Err(e) => tracing::warn!("PDF attachments are off: cannot find this binary: {e}"),
+    }
     master.start_incognito_purge(cfg.chat.incognito_ttl());
     master.start_maintenance();
     // Each provider's model listing: at start when older than a day, then daily.
@@ -325,7 +362,12 @@ async fn serve(
     }
     let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
     for e in &agent_errors {
-        tracing::warn!(error = %e, "skipping agent definition");
+        match e {
+            harness_agents::AgentError::AliasTaken(_) => {
+                tracing::warn!(error = %e, "dropping an agent alias")
+            }
+            _ => tracing::warn!(error = %e, "skipping agent definition"),
+        }
     }
     master.set_agents(agents);
     master.load_agent_edits().await?;
@@ -370,6 +412,7 @@ async fn serve(
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
+    let limits = harness_master::serve::ServeConfig::default();
     if tls {
         let mut names = vec!["localhost".to_string(), "127.0.0.1".into(), hostname()];
         if !addr.ip().is_unspecified() {
@@ -391,13 +434,16 @@ async fn serve(
             names.join(", "),
             dir.join("keys/ui-cert.pem").display()
         );
-        let l = net::TlsListener::new(listener, cert.server_config()?)?;
-        axum::serve(l, harness_master::router(master))
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        harness_master::serve::serve_with(
+            listener,
+            net::tls_handshake(cert.server_config()?),
+            harness_master::router(master),
+            limits,
+            shutdown,
+        )
+        .await?;
     } else {
-        axum::serve(listener, harness_master::router(master))
-            .with_graceful_shutdown(shutdown)
+        harness_master::serve::serve(listener, harness_master::router(master), limits, shutdown)
             .await?;
     }
     Ok(())
@@ -427,6 +473,7 @@ fn tool_env(
 }
 
 /// The worker runtime (embedded `local` node, or a remote node).
+#[allow(clippy::too_many_arguments)]
 async fn agentic_node(
     dir: &Path,
     cfg: &Config,
@@ -435,12 +482,15 @@ async fn agentic_node(
     tool_env: harness_tools::ToolEnv,
     secrets: &harness_core::SecretSet,
     node_id: &str,
+    refuse_without_sandbox: bool,
 ) -> anyhow::Result<(NodeRuntime, Arc<harness_tools::graphify::GraphifyState>)> {
     // No session may include this runtime's data directory (for the
     // embedded node, the master's: keys, the API token, every chat), and
     // no file tool may touch it, whatever node.toml allows (AUDIT S1).
     let mut policy = policy;
     policy.protect(dir);
+    // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once.
+    let sandbox = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
@@ -454,9 +504,12 @@ async fn agentic_node(
         NativeConfig {
             tool_env,
             tool_stream_bytes: policy.limits.tool_stream_bytes,
+            max_steps: policy.limits.max_steps,
+            bash_timeout_max: std::time::Duration::from_secs(policy.limits.bash_timeout_max_s),
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),
+            sandbox,
             // The master puts the provider's default effort on each turn's
             // spec, for models that take one.
             effort: None,
@@ -483,7 +536,39 @@ async fn agentic_node(
     Ok((rt, graphify))
 }
 
+/// Set up the shell sandbox for an agentic runtime and record the result
+/// in its policy. `node run` refuses to start without it (`required`);
+/// `serve` starts and its node refuses agentic sessions.
+fn start_sandbox(
+    dir: &Path,
+    policy: &mut NodePolicy,
+    refuse_to_start: bool,
+) -> anyhow::Result<harness_tools::sandbox::Confinement> {
+    let node_toml = dir.join("node.toml");
+    let settings = policy
+        .sandbox
+        .settings()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
+    let s = harness_tools::sandbox::start(&settings, dir, &policy.protected_dirs, &node_toml)
+        .map_err(anyhow::Error::msg)?;
+    match (&s.refusal, settings.mode) {
+        (Some(why), _) if refuse_to_start => bail!("{why}"),
+        (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
+        (None, harness_tools::sandbox::Mode::Required) => {
+            tracing::info!("shell sandbox: {}", s.summary)
+        }
+        (None, _) => tracing::warn!("shell sandbox: {}", s.summary),
+    }
+    if let Some(root) = &s.tmp_root {
+        harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
+    }
+    policy.sandbox_refusal = s.refusal;
+    policy.sandbox_tmp = s.tmp_root;
+    Ok(s.confinement)
+}
+
 async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> anyhow::Result<()> {
+    harness_master::secrets::check_keys(dir)?;
     let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
     let node_id = harness_link::client::join(url, fingerprint, token, &hostname(), &key).await?;
     let remote = RemoteToml {
@@ -505,6 +590,8 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
         &std::fs::read_to_string(dir.join("remote.toml"))
             .context("not joined yet: run `node join` first")?,
     )?;
+    harness_master::secrets::check_private(&dir.join("secrets.toml"))?;
+    harness_master::secrets::check_keys(dir)?;
     let key = harness_link::NodeKey::load_or_create(&dir.join("keys/node.key"))?;
     let cfg = Config::load(&dir.join(CONFIG_FILE))?;
     let policy = NodePolicy::load(&dir.join("node.toml"))?;
@@ -520,6 +607,7 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
         child_env,
         &secrets,
         &remote.node_id,
+        true,
     )
     .await?;
     let stop = tokio_util::sync::CancellationToken::new();
@@ -597,7 +685,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
             .map(|p| {
                 format!(
                     "max approval mode {:?}, {} workspace root(s); tool environment: {}, LC_*{}{}; \
-                     streamed output per call {} bytes",
+                     streamed output per call {} bytes; {} steps per turn; bash timeout ceiling {} s",
                     p.max_approval_mode,
                     p.workspace_roots.len(),
                     harness_tools::env::CORE_VARS.join(" "),
@@ -607,10 +695,31 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                         " + env_pass "
                     },
                     p.env_pass.join(" "),
-                    p.limits.tool_stream_bytes
+                    p.limits.tool_stream_bytes,
+                    p.limits.max_steps,
+                    p.limits.bash_timeout_max_s
                 )
             })
             .map_err(|e| e.to_string()),
+    );
+    check(
+        "shell sandbox",
+        NodePolicy::load(&dir.join("node.toml"))
+            .map_err(|e| e.to_string())
+            .and_then(|mut p| {
+                p.protect(dir);
+                let node_toml = dir.join("node.toml");
+                harness_tools::sandbox::start(
+                    &p.sandbox.settings()?,
+                    dir,
+                    &p.protected_dirs,
+                    &node_toml,
+                )
+            })
+            .and_then(|s| match s.refusal {
+                Some(_) => Err(s.summary),
+                None => Ok(s.summary),
+            }),
     );
     #[cfg(unix)]
     {
@@ -649,6 +758,8 @@ fn load_dotenv() -> anyhow::Result<Vec<String>> {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(".env"),
     };
+    // It holds provider keys: refused when others can read it (AUDIT L7).
+    harness_master::secrets::check_private(&path)?;
     let iter = match dotenvy::from_path_iter(&path) {
         Ok(i) => i,
         Err(e) if e.not_found() && !explicit => return Ok(Vec::new()),
@@ -668,6 +779,34 @@ fn load_dotenv() -> anyhow::Result<Vec<String>> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The sandbox wrapper runs first: no `.env`, no data directory, no
+    // threads (Landlock confines the calling thread, then `exec`).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref())
+        && let Cmd::SandboxExec {
+            rw,
+            ro,
+            no_network,
+            best_effort,
+            status,
+            command,
+        } = Cli::parse().cmd
+    {
+        std::process::exit(harness_tools::sandbox::exec(
+            harness_tools::sandbox::ExecRequest {
+                rw,
+                ro,
+                no_network,
+                best_effort,
+                status,
+                command,
+            },
+        ));
+    }
+    // The PDF helper too: one thread, no `.env`, no runtime (its memory
+    // limit covers every mapping, thread stacks included).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_master::pdf::SUBCOMMAND.as_ref()) {
+        std::process::exit(harness_master::pdf::helper_main());
+    }
     let loaded = load_dotenv()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -746,6 +885,14 @@ async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
             ),
         },
         Cmd::Doctor => doctor(&dir),
+        Cmd::SandboxExec { .. } => bail!(
+            "{} must be the first argument",
+            harness_tools::sandbox::SUBCOMMAND
+        ),
+        Cmd::PdfText => bail!(
+            "{} must be the first argument",
+            harness_master::pdf::SUBCOMMAND
+        ),
         Cmd::Node {
             cmd:
                 NodeCmd::Join {

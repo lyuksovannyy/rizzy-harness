@@ -54,20 +54,28 @@ genai = "=0.7.2"
 getrandom = "0.4.3"
 globset = "0.4.21"
 hex = "0.4.3"
+# The serve loop (master/src/serve.rs): header-read timeout, connection cap.
+# Both are already in the tree through axum and reqwest; HTTP/1 only, like
+# axum::serve with its default features.
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
 ignore = "0.4.34"
 # Magic-byte sniffing of stored files; no OLE parsing (std/cfb), only the
 # first 8 KiB is read.
 infer = { version = "0.22.0", default-features = false }
 # Bundled tz database: containers often lack /usr/share/zoneinfo.
+# The Landlock project's own crate (MIT OR Apache-2.0): the shell sandbox
+# (FIX_PLAN 2.7). Pinned exactly: every ABI it adds changes what is enforced.
+landlock = "=0.4.7"
 jiff = { version = "0.2.39", features = ["tzdb-bundle-always"] }
 mime_guess = "2.0.5"
-nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs"] }
+nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs", "resource"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "multipart"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 serde-saphyr = "=2.0.0"
 sha2 = "0.11.1"
 subtle = "2.6.1"

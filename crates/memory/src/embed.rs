@@ -49,7 +49,7 @@ const MAX_DETAIL: usize = 200;
 
 /// Redirects only within the same origin: reqwest strips `Authorization`
 /// on a cross-origin hop but not `x-api-key`, so the key would follow.
-fn same_origin_redirects() -> reqwest::redirect::Policy {
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|a| {
         let same = a.previous().last().is_some_and(|prev| {
             prev.scheme() == a.url().scheme()
@@ -87,6 +87,18 @@ impl Embedder {
             key,
             style: ApiStyle::Openai,
         }
+    }
+
+    /// Connect through `dns` (the master's public-only resolver for an
+    /// admin's test of an unlisted host, AUDIT L3).
+    pub fn with_resolver(mut self, dns: std::sync::Arc<dyn reqwest::dns::Resolve>) -> Self {
+        self.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(same_origin_redirects())
+            .dns_resolver(dns)
+            .build()
+            .expect("static client config");
+        self
     }
 
     pub fn with_style(mut self, style: ApiStyle) -> Self {

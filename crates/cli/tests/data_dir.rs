@@ -153,16 +153,97 @@ async fn sessions_and_tools_stay_out_of_the_data_dir() {
     assert!(out.contains("data directory"), "{out}");
     assert!(!out.contains(&token), "{out}");
 
-    // bash is not sandboxed yet (task 2.7): it can still print the file,
-    // but the token is scrubbed from what is stored and shown.
+    // bash runs in the Landlock sandbox (FIX_PLAN 2.7): the data directory
+    // does not exist for it. (Before 2.7 the file was printed and only the
+    // token itself was scrubbed.)
     let sid = s.session(&ws).await;
     let (out, all) = s
         .tool_output(&sid, "run: cat ../data/api-token; echo; echo done")
         .await;
     assert!(out.contains("done"), "{out}");
-    assert!(out.contains("[REDACTED]"), "{out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(!out.contains("[REDACTED]"), "the file was read: {out}");
     assert!(
         !all.contains(&token),
         "the API token is in the events: {all}"
     );
+}
+
+/// The shell's view of the home directory: a private key next to the
+/// project is not readable, the project itself is (FIX_PLAN 2.7).
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_cannot_read_keys_beside_the_project() {
+    let (dir, data, ws) = setup();
+    let ssh = dir.path().join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE-KEY-CANARY\n").unwrap();
+    std::fs::write(ws.join("notes.txt"), "project-file-ok\n").unwrap();
+    let s = start(&data);
+    let sid = s.session(&ws).await;
+    let (out, _) = s
+        .tool_output(
+            &sid,
+            "run: cat ../.ssh/id_ed25519; cat notes.txt; echo built > out.txt && cat out.txt",
+        )
+        .await;
+    assert!(!out.contains("PRIVATE-KEY-CANARY"), "{out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(out.contains("project-file-ok"), "{out}");
+    assert!(out.contains("built"), "{out}");
+}
+
+/// AUDIT L7: a file holding a secret that group or others can read stops
+/// `serve` before it is read, naming the file and the `chmod`. Each in a
+/// fresh data directory; a symlink is judged by its target.
+#[cfg(unix)]
+#[test]
+fn open_secret_files_stop_the_server() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+    let cases: [(&str, &str); 4] = [
+        ("api-token", "api-token"),
+        ("secrets.toml", "secrets.toml"),
+        ("keys/ui-key.der", "ui-key.der"),
+        ("link", "api-token"),
+    ];
+    for (file, named) in cases {
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("keys")).unwrap();
+        if file == "link" {
+            // api-token -> elsewhere/token (0640): the target counts.
+            let target = data.path().join("token-target");
+            std::fs::write(&target, "a".repeat(64)).unwrap();
+            mode(&target, 0o640).unwrap();
+            std::os::unix::fs::symlink(&target, data.path().join("api-token")).unwrap();
+        } else {
+            let path = data.path().join(file);
+            std::fs::write(&path, "x").unwrap();
+            mode(&path, 0o644).unwrap();
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rizzy-harness"))
+            .args(["--data-dir", data.path().to_str().unwrap()])
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .env("HARNESS_LOG", "error")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn harness");
+        let started = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{file}: the server started with a readable secret file");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let mut err = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+        assert!(!status.success(), "{file}");
+        assert!(err.contains("chmod 600"), "{file}: {err}");
+        assert!(err.contains(named), "{file}: {err}");
+    }
 }

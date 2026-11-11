@@ -30,12 +30,77 @@ pub struct NodePolicy {
     pub env_pass: Vec<String>,
     /// Resource limits (`[limits]`).
     pub limits: LimitsPolicy,
+    /// The shell sandbox (`[sandbox]`, FIX_PLAN 2.7).
+    pub sandbox: SandboxPolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
     /// read from node.toml. Canonical paths.
     #[serde(skip)]
     pub protected_dirs: Vec<PathBuf>,
+    /// Set by the runtime when `[sandbox] mode = "required"` and the sandbox
+    /// does not work here: every agentic session is refused with this text
+    /// (at create, before every turn and restore). Never read from node.toml.
+    #[serde(skip)]
+    pub sandbox_refusal: Option<String>,
+    /// Where the runtime keeps per-session temp folders (removed with the
+    /// session). Never read from node.toml.
+    #[serde(skip)]
+    pub sandbox_tmp: Option<PathBuf>,
+}
+
+/// `[sandbox]` in node.toml: what the agent's shell (and graphify) may
+/// touch. Nothing the master sends can change it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxPolicy {
+    /// `"required"` (default: refuse agentic sessions where Landlock does
+    /// not work), `"best-effort"` or `"off"`.
+    pub mode: harness_tools::sandbox::Mode,
+    /// `"on"` (default) or `"off"`: deny TCP connect and bind.
+    pub network: harness_tools::sandbox::Network,
+    /// More read-only folders (toolchains: `~/.cargo`, `~/.rustup`, ...).
+    /// `~/` is the node user's home.
+    pub read: Vec<PathBuf>,
+    /// More read-write folders (caches: `~/.cache`, `~/.npm`, ...).
+    pub write: Vec<PathBuf>,
+}
+
+impl SandboxPolicy {
+    /// The settings with `~/` expanded; relative entries are an error.
+    pub fn settings(&self) -> Result<harness_tools::sandbox::Settings, String> {
+        let home = dirs::home_dir();
+        let expand = |key: &str, list: &[PathBuf]| -> Result<Vec<PathBuf>, String> {
+            list.iter()
+                .map(|p| {
+                    let p = match (p.strip_prefix("~"), &home) {
+                        (Ok(rest), Some(h)) => h.join(rest),
+                        (Ok(_), None) => {
+                            return Err(format!(
+                                "[sandbox] {key}: {} uses ~ but there is no home directory",
+                                p.display()
+                            ));
+                        }
+                        (Err(_), _) => p.clone(),
+                    };
+                    if p.is_absolute() {
+                        Ok(p)
+                    } else {
+                        Err(format!(
+                            "[sandbox] {key}: {} must be absolute (or start with ~/)",
+                            p.display()
+                        ))
+                    }
+                })
+                .collect()
+        };
+        Ok(harness_tools::sandbox::Settings {
+            mode: self.mode,
+            network: self.network,
+            read: expand("read", &self.read)?,
+            write: expand("write", &self.write)?,
+        })
+    }
 }
 
 /// `[artifacts]` in node.toml: the node's own switch and limits for files
@@ -76,12 +141,20 @@ pub struct LimitsPolicy {
     /// Bytes one tool call may stream live (stored as events and sent to
     /// the master); the rest is read and dropped after one marker.
     pub tool_stream_bytes: usize,
+    /// Model calls one turn may make. Each sub-agent's turn has the same cap
+    /// of its own; the caps do not add up into one budget.
+    pub max_steps: usize,
+    /// The longest a `bash` call may run, in seconds, whatever the model
+    /// asks for.
+    pub bash_timeout_max_s: u64,
 }
 
 impl Default for LimitsPolicy {
     fn default() -> Self {
         Self {
             tool_stream_bytes: harness_tools::stream::DEFAULT_STREAM_BYTES,
+            max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
+            bash_timeout_max_s: harness_tools::DEFAULT_TIMEOUT_MAX_S,
         }
     }
 }
@@ -98,7 +171,10 @@ impl Default for NodePolicy {
             artifacts: ArtifactsPolicy::default(),
             env_pass: Vec::new(),
             limits: LimitsPolicy::default(),
+            sandbox: SandboxPolicy::default(),
             protected_dirs: Vec::new(),
+            sandbox_refusal: None,
+            sandbox_tmp: None,
         }
     }
 }
@@ -139,6 +215,27 @@ impl NodePolicy {
                 "[limits] tool_stream_bytes = {n}: must be between {min} and {max}"
             ));
         }
+        let n = self.limits.max_steps;
+        let (min, max) = (
+            harness_core::policy::MIN_MAX_STEPS,
+            harness_core::policy::MAX_MAX_STEPS,
+        );
+        if !(min..=max).contains(&n) {
+            return Err(format!(
+                "[limits] max_steps = {n}: must be between {min} and {max}"
+            ));
+        }
+        let n = self.limits.bash_timeout_max_s;
+        let (min, max) = (
+            harness_tools::MIN_TIMEOUT_MAX_S,
+            harness_tools::MAX_TIMEOUT_MAX_S,
+        );
+        if !(min..=max).contains(&n) {
+            return Err(format!(
+                "[limits] bash_timeout_max_s = {n}: must be between {min} and {max}"
+            ));
+        }
+        self.sandbox.settings()?;
         Ok(())
     }
 
@@ -153,6 +250,9 @@ impl NodePolicy {
 
     /// Validate and canonicalize a requested session cwd.
     pub fn check_cwd(&self, cwd: &str) -> Result<PathBuf, String> {
+        if let Some(why) = &self.sandbox_refusal {
+            return Err(why.clone());
+        }
         let p = Path::new(cwd)
             .canonicalize()
             .map_err(|e| format!("cwd {cwd}: {e}"))?;
@@ -173,6 +273,16 @@ impl NodePolicy {
                 p.display()
             ))
         }
+    }
+
+    /// What is checked again before every turn and restore of an agentic
+    /// session: the sandbox still works here (see [`Self::sandbox_refusal`])
+    /// and the folder does not include a protected one.
+    pub fn check_session(&self, cwd: &Path) -> Result<(), String> {
+        if let Some(why) = &self.sandbox_refusal {
+            return Err(why.clone());
+        }
+        self.check_protected(cwd)
     }
 
     /// Add `dir` to [`Self::protected_dirs`] (canonicalized; a folder that
@@ -307,6 +417,55 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_settings_parse_and_validate() {
+        use harness_tools::sandbox::{Mode, Network};
+        let d = NodePolicy::default();
+        assert_eq!(d.sandbox.mode, Mode::Required, "fail closed by default");
+        assert_eq!(d.sandbox.network, Network::On, "Q6: on by default");
+        let p: NodePolicy = toml::from_str(
+            "[sandbox]\nmode = \"best-effort\"\nnetwork = \"off\"\n\
+             read = [\"~/.cargo\", \"/opt/x\"]\nwrite = [\"~/.cache\"]\n",
+        )
+        .unwrap();
+        assert_eq!(p.sandbox.mode, Mode::BestEffort);
+        assert_eq!(p.sandbox.network, Network::Off);
+        let s = p.sandbox.settings().unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(s.read, [home.join(".cargo"), PathBuf::from("/opt/x")]);
+        assert_eq!(s.write, [home.join(".cache")]);
+        for bad in [
+            "[sandbox]\nmode = \"maybe\"\n",
+            "[sandbox]\nnetwork = \"udp\"\n",
+            "[sandbox]\nreads = []\n",
+            "sandbox = \"off\"\n",
+        ] {
+            assert!(toml::from_str::<NodePolicy>(bad).is_err(), "{bad}");
+        }
+        let p: NodePolicy = toml::from_str("[sandbox]\nread = [\"relative/dir\"]\n").unwrap();
+        assert!(p.validate().unwrap_err().contains("absolute"));
+        // The runtime-only fields cannot come from node.toml.
+        assert!(toml::from_str::<NodePolicy>("sandbox_refusal = \"x\"\n").is_err());
+        assert!(toml::from_str::<NodePolicy>("sandbox_tmp = \"/x\"\n").is_err());
+    }
+
+    /// Without a working sandbox (mode `required`), no agentic session is
+    /// created, continued or restored.
+    #[test]
+    fn a_sandbox_refusal_refuses_every_session() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = NodePolicy {
+            workspace_roots: vec![root.path().into()],
+            ..Default::default()
+        };
+        assert!(p.check_cwd(root.path().to_str().unwrap()).is_ok());
+        assert!(p.check_session(root.path()).is_ok());
+        p.sandbox_refusal = Some("set [sandbox] mode in node.toml".into());
+        let e = p.check_cwd(root.path().to_str().unwrap()).unwrap_err();
+        assert!(e.contains("[sandbox] mode"), "{e}");
+        assert!(p.check_session(root.path()).is_err());
+    }
+
+    #[test]
     fn parses_toml_and_rejects_unknown_keys() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("node.toml");
@@ -350,6 +509,10 @@ mod tests {
             "env_pass = [\"A=B\"]\n",
             "env_pass = [\"\"]\n",
             "[limits]\ntool_stream_bytes = 10\n",
+            "[limits]\nmax_steps = 0\n",
+            "[limits]\nmax_steps = 1001\n",
+            "[limits]\nbash_timeout_max_s = 0\n",
+            "[limits]\nbash_timeout_max_s = 3601\n",
             "[limits]\ntool_bytes = 65536\n",
         ] {
             std::fs::write(&f, bad).unwrap();
@@ -359,5 +522,37 @@ mod tests {
         std::fs::write(&f, "env_pass = [\"CARGO_[\"]\n").unwrap();
         let e = NodePolicy::load(&f).unwrap_err().to_string();
         assert!(e.contains("env_pass") && e.contains("CARGO_["), "{e}");
+    }
+
+    #[test]
+    fn loop_limits_default_to_todays_values_and_stop_the_node_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("node.toml");
+        let d = NodePolicy::load(&f).unwrap();
+        assert_eq!(d.limits.max_steps, 50);
+        assert_eq!(d.limits.bash_timeout_max_s, 3600);
+        std::fs::write(&f, "[limits]\nmax_steps = 2\nbash_timeout_max_s = 1\n").unwrap();
+        let p = NodePolicy::load(&f).unwrap();
+        assert_eq!((p.limits.max_steps, p.limits.bash_timeout_max_s), (2, 1));
+        std::fs::write(
+            &f,
+            "[limits]\nmax_steps = 1000\nbash_timeout_max_s = 3600\n",
+        )
+        .unwrap();
+        assert!(NodePolicy::load(&f).is_ok(), "the range ends are valid");
+        for (bad, key, range) in [
+            ("max_steps = 0", "max_steps", "1 and 1000"),
+            ("max_steps = 1001", "max_steps", "1 and 1000"),
+            ("bash_timeout_max_s = 0", "bash_timeout_max_s", "1 and 3600"),
+            (
+                "bash_timeout_max_s = 3601",
+                "bash_timeout_max_s",
+                "1 and 3600",
+            ),
+        ] {
+            std::fs::write(&f, format!("[limits]\n{bad}\n")).unwrap();
+            let e = NodePolicy::load(&f).unwrap_err().to_string();
+            assert!(e.contains(key) && e.contains(range), "{bad}: {e}");
+        }
     }
 }

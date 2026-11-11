@@ -32,6 +32,50 @@ struct CreateArgs {
 
 /// Max events per `session.snapshot` batch.
 const SNAPSHOT_BATCH: usize = 500;
+/// ...and at most this many bytes of serialized events, a quarter of the
+/// link's frame limit, so a batch always fits in a frame. A single event
+/// larger than this still goes, alone in its batch.
+pub const SNAPSHOT_BYTES: usize = harness_protocol::MAX_FRAME / 4;
+
+/// Messages to the master waiting for the link to send them. Past this,
+/// event publishers wait (see `Inner::publish_wait`).
+const OUT_QUEUE: usize = 256;
+/// Commands from the master waiting for the command loop. Past this, the
+/// link stops reading the master's socket.
+const IN_QUEUE: usize = 64;
+
+/// Commands that may wait for one session while its lane is busy; past
+/// this the master gets a refusal at once.
+const LANE_DEPTH: usize = 64;
+
+/// The command queue of each session with a lane (see `NodeRuntime::lane`).
+type Lanes = Arc<Mutex<HashMap<SessionId, mpsc::Sender<LaneCmd>>>>;
+
+enum LaneCmd {
+    Msg(Box<MasterToNode>),
+    /// Cancel whatever runs by now, unacked: the tail of a cancel that was
+    /// answered inline (see `NodeRuntime::attach`).
+    Cancel,
+}
+
+/// The session whose lane runs `msg`, for commands that go to a lane.
+fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
+    match msg {
+        MasterToNode::Resume { session_id, .. }
+        | MasterToNode::Create { session_id, .. }
+        | MasterToNode::SelectVariant { session_id, .. }
+        | MasterToNode::Restore { session_id, .. }
+        | MasterToNode::Delete { session_id, .. }
+        | MasterToNode::Prompt { session_id, .. }
+        | MasterToNode::SetAgent { session_id, .. }
+        | MasterToNode::ArtifactStage { session_id, .. }
+        | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
+        MasterToNode::Welcome { .. }
+        | MasterToNode::Cancel { .. }
+        | MasterToNode::ApprovalRespond { .. }
+        | MasterToNode::ArtifactFetch { .. } => None,
+    }
+}
 
 pub struct NodeConfig {
     pub node_id: String,
@@ -59,16 +103,21 @@ pub struct NodeConfig {
 
 /// Both ends of a link as seen from the master: commands in, messages out.
 /// In-process for the embedded node; bridged over WSS for remote nodes.
+/// Both directions are bounded, so neither end can make the other buffer
+/// without limit.
 pub struct NodeLink {
-    pub to_node: mpsc::UnboundedSender<MasterToNode>,
-    pub from_node: mpsc::UnboundedReceiver<NodeToMaster>,
+    pub to_node: mpsc::Sender<MasterToNode>,
+    pub from_node: mpsc::Receiver<NodeToMaster>,
 }
 
 pub(crate) struct Inner {
     pub(crate) cfg: NodeConfig,
     pub(crate) sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
+    /// Folders (real paths) a restore is running in: no turn starts in an
+    /// overlapping folder meanwhile, and no second restore (`session.rs`).
+    pub(crate) restoring: Mutex<Vec<std::path::PathBuf>>,
     /// The current link to the master, if connected.
-    link: Mutex<Option<mpsc::UnboundedSender<NodeToMaster>>>,
+    link: Mutex<Option<mpsc::Sender<NodeToMaster>>>,
     /// Where published files are staged; `None` when this runtime does not
     /// publish (the chat runtime, or `[artifacts] enabled = false`).
     pub(crate) stages: Option<Arc<artifacts::Stages>>,
@@ -83,14 +132,42 @@ impl Inner {
             .cloned()
     }
 
+    /// Send without waiting, for replies that are not part of the log
+    /// (artifact chunks). When the queue is full the reply is dropped and
+    /// the master's transfer times out and asks again; events never go
+    /// this way.
     pub(crate) fn publish(&self, msg: NodeToMaster) {
         let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(tx) = link.as_ref()
-            && tx.send(msg).is_err()
-        {
-            // Master side went away; events stay in the store and are
-            // replayed on the next connection.
-            *link = None;
+        let Some(tx) = link.as_ref() else { return };
+        match tx.try_send(msg) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("link to the master is full; dropped a reply");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => *link = None,
+        }
+    }
+
+    /// Send, waiting while the link's queue is full: the caller (a
+    /// session appending an event, the command loop) pauses until the
+    /// master reads, which is the back-pressure. Waiting ends when the link
+    /// closes (the link gives up on a peer that reads nothing for
+    /// `IDLE_LIMIT`); then the message is dropped and, for events, the next
+    /// connection's hello and `resume` replay it from the store.
+    pub(crate) async fn publish_wait(&self, msg: NodeToMaster) {
+        let tx = {
+            let link = self.link.lock().unwrap_or_else(|p| p.into_inner());
+            match link.as_ref() {
+                Some(tx) => tx.clone(),
+                None => return,
+            }
+        };
+        if tx.send(msg).await.is_err() {
+            let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
+            // Only if no newer link replaced it meanwhile.
+            if link.as_ref().is_some_and(|cur| cur.same_channel(&tx)) {
+                *link = None;
+            }
         }
     }
 }
@@ -110,6 +187,7 @@ impl NodeRuntime {
         let inner = Arc::new(Inner {
             cfg,
             sessions: Mutex::new(HashMap::new()),
+            restoring: Mutex::new(Vec::new()),
             link: Mutex::new(None),
             stages,
         });
@@ -160,8 +238,8 @@ impl NodeRuntime {
     /// Connect a (new) master link. Any previous link is replaced. `hello` is
     /// queued before any event so the master always sees it first.
     pub async fn attach(&self) -> NodeLink {
-        let (out_tx, out_rx) = mpsc::unbounded_channel();
-        let (in_tx, mut in_rx) = mpsc::unbounded_channel::<MasterToNode>();
+        let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
+        let (in_tx, mut in_rx) = mpsc::channel::<MasterToNode>(IN_QUEUE);
         let heads = self
             .inner
             .cfg
@@ -182,7 +260,8 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
-            let _ = out_tx.send(NodeToMaster::Hello {
+            // A fresh queue: there is room.
+            let _ = out_tx.try_send(NodeToMaster::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 node_id: self.inner.cfg.node_id.clone(),
                 hostname: self.inner.cfg.hostname.clone(),
@@ -200,11 +279,12 @@ impl NodeRuntime {
         }
         let this = self.clone();
         tokio::spawn(async move {
+            let lanes = Lanes::default();
             while let Some(msg) = in_rx.recv().await {
-                // A fetch is answered from a task of its own, before the
-                // command loop: a transfer never waits behind a command,
-                // nor a command behind a disk read.
                 match msg {
+                    // A fetch is answered from a task of its own: a transfer
+                    // never waits behind a command, nor a command behind a
+                    // disk read.
                     MasterToNode::ArtifactFetch {
                         req_id,
                         session_id,
@@ -212,7 +292,35 @@ impl NodeRuntime {
                         offset,
                         len,
                     } => this.fetch(req_id, session_id, stage_id, offset, len),
-                    other => this.handle(other).await,
+                    // Answered here, at once: they must not wait behind a
+                    // slow restore or delete (AUDIT S10). Neither awaits
+                    // anything (their audit line is written from a task of
+                    // its own).
+                    //
+                    // A cancel stops the running turn now, and also leaves a
+                    // marker in the lane so a prompt sent before it, still
+                    // queued, is stopped too: a cancel covers everything
+                    // sent before it, as when the loop was serial. For a
+                    // session that does not exist yet (its create is still
+                    // queued) the cancel waits its turn in the lane.
+                    MasterToNode::Cancel { session_id, .. }
+                        if this.session(session_id).is_none() =>
+                    {
+                        this.enqueue(&lanes, session_id, LaneCmd::Msg(Box::new(msg)))
+                    }
+                    MasterToNode::Cancel { session_id, .. } => {
+                        this.handle(msg).await;
+                        this.mark_cancel(&lanes, session_id);
+                    }
+                    m @ (MasterToNode::ApprovalRespond { .. } | MasterToNode::Welcome { .. }) => {
+                        this.handle(m).await
+                    }
+                    // Everything else goes to its session's lane: in order
+                    // for that session, concurrently with other sessions.
+                    other => match lane_of(&other) {
+                        Some(sid) => this.enqueue(&lanes, sid, LaneCmd::Msg(Box::new(other))),
+                        None => this.handle(other).await,
+                    },
                 }
             }
         });
@@ -224,6 +332,94 @@ impl NodeRuntime {
 
     fn session(&self, sid: SessionId) -> Option<Arc<Session>> {
         self.inner.session(sid)
+    }
+
+    /// Queue `msg` on its session's lane, starting the lane if there is
+    /// none. A full lane refuses the command at once (a nack, never a
+    /// silent drop, never a wait that would hold up other sessions).
+    fn enqueue(&self, lanes: &Lanes, sid: SessionId, cmd: LaneCmd) {
+        let mut map = lanes.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tx) = map.get(&sid) else {
+            return self.start_lane(lanes, &mut map, sid, cmd);
+        };
+        let cmd = match tx.try_send(cmd) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Full(cmd)) => {
+                drop(map);
+                if let LaneCmd::Msg(msg) = cmd
+                    && let Some(req_id) = msg.req_id()
+                {
+                    self.inner.publish(NodeToMaster::Ack {
+                        req_id: req_id.to_string(),
+                        ok: false,
+                        error: Some(format!(
+                            "this session already has {LANE_DEPTH} commands waiting; try again"
+                        )),
+                    });
+                }
+                return;
+            }
+            // The lane's task ended without removing itself (it panicked):
+            // nothing of its queue is left, so a new lane keeps the order.
+            Err(mpsc::error::TrySendError::Closed(cmd)) => cmd,
+        };
+        self.start_lane(lanes, &mut map, sid, cmd);
+    }
+
+    fn start_lane(
+        &self,
+        lanes: &Lanes,
+        map: &mut HashMap<SessionId, mpsc::Sender<LaneCmd>>,
+        sid: SessionId,
+        first: LaneCmd,
+    ) {
+        let (tx, rx) = mpsc::channel(LANE_DEPTH);
+        let _ = tx.try_send(first);
+        map.insert(sid, tx);
+        tokio::spawn(self.clone().lane(lanes.clone(), sid, rx));
+    }
+
+    /// After an inline cancel: stop whatever the lane starts from commands
+    /// queued before it. No lane, nothing queued, nothing to do; a full
+    /// lane gets no marker (the turn already running was cancelled; a
+    /// prompt among the 64 waiting commands may still start).
+    fn mark_cancel(&self, lanes: &Lanes, sid: SessionId) {
+        let map = lanes.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tx) = map.get(&sid) {
+            let _ = tx.try_send(LaneCmd::Cancel);
+        }
+    }
+
+    /// One session's commands, one at a time, in the order they came. Ends
+    /// as soon as its queue is empty, so lanes exist only for sessions with
+    /// a command in progress (a master that names many sessions cannot pile
+    /// up idle tasks). The check that the queue is empty and the lane's
+    /// removal happen under the map's lock, so no command can be queued on
+    /// a lane that is ending.
+    async fn lane(self, lanes: Lanes, sid: SessionId, mut rx: mpsc::Receiver<LaneCmd>) {
+        loop {
+            let cmd = match rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(_) => {
+                    let mut map = lanes.lock().unwrap_or_else(|p| p.into_inner());
+                    match rx.try_recv() {
+                        Ok(cmd) => cmd,
+                        Err(_) => {
+                            map.remove(&sid);
+                            return;
+                        }
+                    }
+                }
+            };
+            match cmd {
+                LaneCmd::Msg(msg) => self.handle(*msg).await,
+                LaneCmd::Cancel => {
+                    if let Some(s) = self.session(sid) {
+                        s.cancel();
+                    }
+                }
+            }
+        }
     }
 
     /// Answer `artifact.fetch` (never acked: the chunk is the answer).
@@ -278,14 +474,22 @@ impl NodeRuntime {
                 kind_hint: None,
                 call_id: None,
             };
+            let mut stage_id = None;
             let kind = match stages.stage(req, src, Default::default()).await {
-                Ok(staged) => EventKind::ArtifactStaged(Box::new(staged)),
+                Ok(staged) => {
+                    stage_id = Some(staged.stage_id.clone());
+                    EventKind::ArtifactStaged(Box::new(staged))
+                }
                 Err(error) => {
                     EventKind::ArtifactStageFailed(ArtifactStageFailed { path, name, error })
                 }
             };
             if let Err(e) = s.record(kind).await {
                 tracing::error!(session = %sid, error = %e, "could not record a staged file");
+                // No event names the copy: drop it.
+                if let Some(id) = stage_id {
+                    let _ = stages.release(sid, &id);
+                }
             }
         });
         Ok(())
@@ -308,6 +512,13 @@ impl NodeRuntime {
             .store
             .call(move |s| s.audit(kind, &detail))
             .await;
+    }
+
+    /// [`Self::audit`] from a task of its own, for commands that must be
+    /// answered without waiting for the store.
+    fn audit_later(&self, kind: &'static str, sid: SessionId) {
+        let this = self.clone();
+        tokio::spawn(async move { this.audit(kind, sid).await });
     }
 
     /// Handle one message from the master.
@@ -418,7 +629,7 @@ impl NodeRuntime {
                 }
             }
             MasterToNode::Cancel { session_id, .. } => {
-                self.audit("session.cancel", session_id).await;
+                self.audit_later("session.cancel", session_id);
                 match self.session(session_id) {
                     Some(s) => {
                         s.cancel();
@@ -433,7 +644,7 @@ impl NodeRuntime {
                 decision,
                 ..
             } => {
-                self.audit("approval.respond", session_id).await;
+                self.audit_later("approval.respond", session_id);
                 match self.session(session_id) {
                     Some(s) => s.respond(&approval_id, decision),
                     None => Err("unknown session".into()),
@@ -465,11 +676,13 @@ impl NodeRuntime {
             } => self.release(session_id, &stage_id),
         };
         if let Some(req_id) = req_id {
-            self.inner.publish(NodeToMaster::Ack {
-                req_id,
-                ok: result.is_ok(),
-                error: result.err(),
-            });
+            self.inner
+                .publish_wait(NodeToMaster::Ack {
+                    req_id,
+                    ok: result.is_ok(),
+                    error: result.err(),
+                })
+                .await;
         }
     }
 
@@ -550,6 +763,10 @@ impl NodeRuntime {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&sid);
+        // The session's sandbox temp folder (TMPDIR) goes with it.
+        if let Some(root) = &self.inner.cfg.policy.sandbox_tmp {
+            let _ = std::fs::remove_dir_all(root.join(sid.to_string()));
+        }
         let existed = self
             .inner
             .cfg
@@ -563,7 +780,8 @@ impl NodeRuntime {
             .map_err(|e| e.to_string())?;
         if existed {
             self.inner
-                .publish(NodeToMaster::Deleted { session_id: sid });
+                .publish_wait(NodeToMaster::Deleted { session_id: sid })
+                .await;
         }
         Ok(())
     }
@@ -597,26 +815,47 @@ impl NodeRuntime {
                     Ok::<_, harness_store::StoreError>((head, evs))
                 })
                 .await;
-            let (head, events) = match res {
+            let (head, mut events) = match res {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(%sid, error = %e, "replay failed");
                     return;
                 }
             };
+            let mut done = events.len() < SNAPSHOT_BATCH;
+            let keep = within_bytes(&events);
+            if keep < events.len() {
+                events.truncate(keep);
+                done = false;
+            }
             let last = events.last().map(|e| e.seq);
-            let done = events.len() < SNAPSHOT_BATCH;
-            self.inner.publish(NodeToMaster::Snapshot {
-                session_id: sid,
-                head_seq: head,
-                events,
-            });
+            self.inner
+                .publish_wait(NodeToMaster::Snapshot {
+                    session_id: sid,
+                    head_seq: head,
+                    events,
+                })
+                .await;
             match last {
                 Some(l) if !done => after = l,
                 _ => return,
             }
         }
     }
+}
+
+/// How many of `events` (at least one) fit in one snapshot of
+/// `SNAPSHOT_BYTES`, the envelope included.
+fn within_bytes(events: &[harness_core::RawEvent]) -> usize {
+    const ENVELOPE: usize = 256;
+    let mut total = ENVELOPE;
+    for (i, e) in events.iter().enumerate() {
+        total += serde_json::to_vec(e).map_or(0, |v| v.len()) + 1;
+        if total > SNAPSHOT_BYTES {
+            return i.max(1);
+        }
+    }
+    events.len()
 }
 
 /// The stage, when this runtime publishes: a worker node with

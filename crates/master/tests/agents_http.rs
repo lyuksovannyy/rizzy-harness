@@ -127,7 +127,19 @@ async fn chat_sessions_agents_and_mentions() {
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["general", "coder", "writer", "scout", "ultracode"]);
+    assert_eq!(
+        ids,
+        [
+            "general",
+            "smol",
+            "researcher",
+            "coder",
+            "teamlead",
+            "writer",
+            "scout",
+            "reviewer"
+        ]
+    );
     assert!(
         v["agents"][0].get("spec").is_none(),
         "prompts are not exposed in the list"
@@ -187,13 +199,13 @@ async fn chat_sessions_agents_and_mentions() {
         &t,
         "POST",
         &format!("/api/sessions/{sid}/agent"),
-        Some(json!({"agent_id": "scout"})),
+        Some(json!({"agent_id": "reviewer"})),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
     events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "agent_changed")).await;
     let (_, row) = call(&t, "GET", &format!("/api/sessions/{sid}"), None).await;
-    assert_eq!(row["agent_id"], "scout");
+    assert_eq!(row["agent_id"], "reviewer");
 
     // Unknown agents are rejected; an unknown @mention is just text.
     let (st, _) = call(
@@ -216,7 +228,7 @@ async fn chat_sessions_agents_and_mentions() {
         Ok(EventKind::TurnStarted(s)) => s.agent.map(|a| a.agent_id),
         _ => None,
     });
-    assert_eq!(last_agent.as_deref(), Some("scout"));
+    assert_eq!(last_agent.as_deref(), Some("reviewer"));
 
     // Agentic sessions go to the worker node.
     let (st, v) = call(

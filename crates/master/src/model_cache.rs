@@ -117,8 +117,14 @@ impl Master {
         let (key, _) =
             crate::providers::resolve_key(&p, rt.data_dir()).map_err(|e| format!("{e:#}"))?;
         let ollama = p.preset == "ollama";
-        let models =
-            crate::providers::list_models(p.kind, &p.base_url, key.as_ref(), ollama).await?;
+        let models = crate::providers::list_models(
+            p.kind,
+            &p.base_url,
+            key.as_ref(),
+            ollama,
+            &self.outbound(),
+        )
+        .await?;
         self.record_listing(id, p.kind, &p.base_url, models)
             .await
             .map_err(|e| format!("{e:#}"))

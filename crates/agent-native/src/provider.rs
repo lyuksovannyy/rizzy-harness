@@ -83,6 +83,55 @@ pub struct Completion {
     pub text: String,
     pub tool_calls: Vec<ToolCallRef>,
     pub usage: Option<Usage>,
+    /// Why the model stopped.
+    pub stop: StopReason,
+}
+
+/// Why a model stopped writing, normalised from each provider's own value
+/// (`llm::stop_reason`). A value we do not know is `Other`, never `End`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StopReason {
+    /// The answer is complete.
+    End,
+    /// The model stopped to call tools.
+    ToolUse,
+    /// The answer reached the output-token limit and was cut: a tool call
+    /// in it may be incomplete, whether or not its arguments parse.
+    OutputLimit,
+    /// Anything else, or the provider did not say.
+    #[default]
+    Other,
+}
+
+/// What a failed response said about trying again (its headers).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetryHint {
+    /// `retry-after-ms` or `retry-after` (seconds; an HTTP date is ignored).
+    pub after: Option<std::time::Duration>,
+    /// `x-should-retry: false` (Anthropic, OpenAI): the provider says a
+    /// retry will fail too.
+    pub no_retry: bool,
+}
+
+impl RetryHint {
+    /// The hint in a response's headers.
+    pub fn from_headers(h: &reqwest::header::HeaderMap) -> Self {
+        let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+        let secs = |s: &str| {
+            s.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .map(|v| std::time::Duration::from_secs_f64(v.min(86_400.0)))
+        };
+        let after = get("retry-after-ms")
+            .and_then(secs)
+            .map(|d| d / 1000)
+            .or_else(|| get("retry-after").and_then(secs));
+        Self {
+            after,
+            no_retry: get("x-should-retry").is_some_and(|v| v.eq_ignore_ascii_case("false")),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -90,7 +139,11 @@ pub enum ProviderError {
     #[error("http: {0}")]
     Http(String),
     #[error("provider returned {status}: {body}")]
-    Status { status: u16, body: String },
+    Status {
+        status: u16,
+        body: String,
+        hint: RetryHint,
+    },
     #[error("bad stream: {0}")]
     Stream(String),
     #[error("no provider serves model {0:?}")]
@@ -102,9 +155,14 @@ impl ProviderError {
     /// content: the model is unknown or gone, rate-limited, the provider
     /// fails or cannot be reached. Another model may answer instead.
     pub fn is_model_level(&self) -> bool {
+        // "This model's maximum context length is ..." names the model but
+        // is this request's size: compacting fixes it, another model may not.
+        if self.is_context_overflow() {
+            return false;
+        }
         match self {
             ProviderError::UnknownModel(_) | ProviderError::Http(_) => true,
-            ProviderError::Status { status, body } => match status {
+            ProviderError::Status { status, body, .. } => match status {
                 404 | 408 | 429 | 500..=599 => true,
                 400 => body.to_ascii_lowercase().contains("model"),
                 _ => false,
@@ -112,6 +170,125 @@ impl ProviderError {
             ProviderError::Stream(_) => false,
         }
     }
+
+    /// Whether the same request may succeed if sent again after a wait: a
+    /// rate limit (not an exhausted quota or billing limit), an overloaded
+    /// or failing server, a connection that failed or a stream that broke.
+    /// Never authentication, permission or a bad request. The caller makes
+    /// sure no output of the failed attempt reached the user.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            ProviderError::Http(_) | ProviderError::Stream(_) => true,
+            ProviderError::UnknownModel(_) => false,
+            ProviderError::Status { status, body, hint } => {
+                !hint.no_retry
+                    && match status {
+                        429 => !quota_exhausted(body),
+                        500 | 502 | 503 | 504 | 529 => true,
+                        _ => false,
+                    }
+            }
+        }
+    }
+
+    /// The provider refused the request for being longer than the model's
+    /// context window. Gated on the status (400 or 413), then the error's
+    /// code where the provider sends one: `context_length_exceeded`
+    /// (OpenAI, Groq, Azure, LiteLLM), `request_too_large` (Anthropic
+    /// 413). Without a code, the message the provider is known to send:
+    /// Anthropic `prompt is too long`, OpenAI-compatible servers (vLLM,
+    /// DeepSeek, OpenRouter, Mistral, Together) `maximum context length`,
+    /// Gemini `input token count ... exceeds`, llama.cpp `exceeds the
+    /// available context size`, Ollama `exceeds the context length`.
+    pub fn is_context_overflow(&self) -> bool {
+        let ProviderError::Status { status, body, .. } = self else {
+            return false;
+        };
+        if !matches!(status, 400 | 413) {
+            return false;
+        }
+        let codes = error_codes(body);
+        if codes.iter().any(|c| {
+            matches!(
+                c.as_str(),
+                "context_length_exceeded"
+                    | "request_too_large"
+                    | "model_context_window_exceeded"
+                    | "exceed_context_size_error"
+            )
+        }) {
+            return true;
+        }
+        let msg = error_message(body).to_ascii_lowercase();
+        let exceeds =
+            msg.contains("exceed") || msg.contains("too large") || msg.contains("too long");
+        msg.contains("prompt is too long")
+            || msg.contains("maximum context length")
+            || msg.contains("context_length_exceeded")
+            || (exceeds
+                && (msg.contains("context length")
+                    || msg.contains("context window")
+                    || msg.contains("context size")
+                    || msg.contains("input token count")))
+    }
+
+    /// How long the provider asked to wait before trying again.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            ProviderError::Status { hint, .. } => hint.after,
+            _ => None,
+        }
+    }
+
+    /// The error for a log line: the status or the kind of failure, never
+    /// the provider's response body or a URL (either may carry a key or
+    /// the user's text).
+    pub fn log_line(&self) -> String {
+        match self {
+            ProviderError::Http(_) => "connection failed".into(),
+            ProviderError::Stream(_) => "stream failed".into(),
+            ProviderError::Status { status, .. } => format!("status {status}"),
+            ProviderError::UnknownModel(_) => "unknown model".into(),
+        }
+    }
+}
+
+/// The `error.code` / `error.type` of a JSON error body, lowercased
+/// (OpenAI and compatible servers: `{"error": {"code", "type"}}`;
+/// Anthropic: `{"type": "error", "error": {"type"}}`).
+fn error_codes(body: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
+    ["/error/code", "/error/type", "/code"]
+        .iter()
+        .filter_map(|p| v.pointer(p).and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// The human-readable message of an error body (`error.message`,
+/// `message`, `detail`), or the body itself when it is not JSON.
+fn error_message(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    ["/error/message", "/message", "/detail", "/error"]
+        .iter()
+        .find_map(|p| v.pointer(p).and_then(Value::as_str))
+        .unwrap_or(body)
+        .to_string()
+}
+
+/// A 429 that waiting a minute will not fix: the account's quota or
+/// credit is used up (OpenAI `insufficient_quota`, billing errors).
+fn quota_exhausted(body: &str) -> bool {
+    error_codes(body).iter().any(|c| {
+        matches!(
+            c.as_str(),
+            "insufficient_quota" | "billing_error" | "billing_hard_limit_reached"
+        )
+    })
 }
 
 #[async_trait::async_trait]
@@ -149,4 +326,78 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
         })
         .sum();
     (chars / 4) as u64 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(status: u16, body: &str) -> ProviderError {
+        ProviderError::Status {
+            status,
+            body: body.into(),
+            hint: RetryHint::default(),
+        }
+    }
+
+    #[test]
+    fn context_overflow_is_recognised_per_provider() {
+        let yes = [
+            // OpenAI (and Groq, Azure): the code.
+            (
+                400,
+                r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#,
+            ),
+            // Anthropic: a generic type, so the message.
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 211000 tokens > 200000 maximum"}}"#,
+            ),
+            // Anthropic, over the request size limit.
+            (
+                413,
+                r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#,
+            ),
+            // vLLM / DeepSeek: a numeric code.
+            (
+                400,
+                r#"{"object":"error","message":"This model's maximum context length is 4096 tokens. However, you requested 5000 tokens.","type":"BadRequestError","param":null,"code":400}"#,
+            ),
+            // Gemini's OpenAI-compatible endpoint (an array).
+            (
+                400,
+                r#"[{"error":{"code":400,"message":"The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}]"#,
+            ),
+            // llama.cpp server.
+            (
+                400,
+                r#"{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}"#,
+            ),
+            // Mistral.
+            (
+                400,
+                r#"{"object":"error","message":"Prompt contains 40000 tokens, too large for model with 32768 maximum context length","type":"invalid_request_error"}"#,
+            ),
+        ];
+        for (s, b) in yes {
+            let e = status(s, b);
+            assert!(e.is_context_overflow(), "{s} {b}");
+            assert!(!e.is_model_level(), "not a reason to switch models: {b}");
+            assert!(!e.is_retryable(), "the same request fails again: {b}");
+        }
+        let no = [
+            (
+                400,
+                r#"{"error":{"message":"max_tokens is too large: 100000"}}"#,
+            ),
+            (400, r#"{"error":{"message":"Invalid model: gpt-9"}}"#),
+            (401, r#"{"error":{"message":"prompt is too long"}}"#),
+            (429, r#"{"error":{"code":"context_length_exceeded"}}"#),
+            (500, "maximum context length"),
+        ];
+        for (s, b) in no {
+            assert!(!status(s, b).is_context_overflow(), "{s} {b}");
+        }
+        assert!(!ProviderError::Http("context length exceeded".into()).is_context_overflow());
+    }
 }

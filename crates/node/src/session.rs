@@ -3,10 +3,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use harness_core::agent::AgentSpec;
-use harness_core::backend::{TurnCtx, TurnExtra, TurnHost};
+use harness_core::backend::{LogError, TurnCtx, TurnExtra, TurnHost};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ToolRisk};
 use harness_core::refs::SharedRefs;
@@ -43,6 +44,15 @@ pub(crate) struct Session {
     parent_session: Option<SessionId>,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
+    /// An append of the running turn failed: the rest of its appends fail
+    /// without being tried, so the turn ends (cleared when a turn starts).
+    log_failed: AtomicBool,
+    /// A turn's last events could not be written: its end is still missing
+    /// from the log, and the next prompt writes it first.
+    unclosed: AtomicBool,
+    /// Approvals of the running turn whose request is in the log and whose
+    /// answer is not: the turn's end denies them.
+    unresolved: Mutex<Vec<String>>,
 }
 
 /// What the user sent with a prompt.
@@ -104,6 +114,9 @@ impl Session {
             parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            log_failed: AtomicBool::new(false),
+            unclosed: AtomicBool::new(false),
+            unresolved: Mutex::new(Vec::new()),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
@@ -147,47 +160,64 @@ impl Session {
             parent_session: meta.parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            log_failed: AtomicBool::new(false),
+            unclosed: AtomicBool::new(false),
+            unresolved: Mutex::new(Vec::new()),
         }))
     }
 
     /// Close out a turn that was running when the process died (PLAN.md §2).
     pub(crate) async fn recover_interrupted(&self) {
+        let message = "The node restarted while this turn was running. Send a message to continue.";
+        if let Err(e) = self
+            .close_open_turn(message, TurnEndReason::Interrupted)
+            .await
+        {
+            // The next prompt tries again.
+            self.unclosed.store(true, Ordering::SeqCst);
+            tracing::error!(session = %self.id, error = %e, "could not close the interrupted turn");
+        }
+    }
+
+    /// End the turn the log shows running, if any: deny its pending
+    /// approvals, say why, end it. Each event is tried once.
+    async fn close_open_turn(&self, message: &str, reason: TurnEndReason) -> Result<(), String> {
         let id = self.id;
-        let Ok(events) = self
+        let events = self
             .node
             .cfg
             .store
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
             .await
-        else {
-            return;
-        };
-        let Ok(view) = SessionView::fold(&events) else {
-            return;
-        };
+            .map_err(|e| e.to_string())?;
+        let view = SessionView::fold(&events).map_err(|e| e.to_string())?;
         let Some(turn_id) = view.running_turn else {
-            return;
+            return Ok(());
         };
+        let fail = |e: StoreError| LogError(e.to_string()).to_string();
         for approval_id in view.pending_approvals {
-            self.emit(EventKind::ApprovalResolved(ApprovalResolved {
+            self.append(EventKind::ApprovalResolved(ApprovalResolved {
                 approval_id,
                 decision: Decision::Deny,
                 by: ResolvedBy::Interrupted,
             }))
-            .await;
+            .await
+            .map_err(fail)?;
         }
-        self.emit(EventKind::Error(ErrorEvent {
+        self.append(EventKind::Error(ErrorEvent {
             turn_id: Some(turn_id.clone()),
-            message: "The node restarted while this turn was running. Send a message to continue."
-                .into(),
+            message: message.into(),
         }))
-        .await;
-        self.emit(EventKind::TurnEnded(TurnEnded {
+        .await
+        .map_err(fail)?;
+        self.append(EventKind::TurnEnded(TurnEnded {
             turn_id,
-            reason: TurnEndReason::Interrupted,
+            reason,
             usage: None,
         }))
-        .await;
+        .await
+        .map_err(fail)?;
+        Ok(())
     }
 
     /// Assign the next seq, scrub, persist (fsync), then publish.
@@ -195,11 +225,10 @@ impl Session {
         let mut head = self.head.lock().await;
         let (kind, mut payload) = kind.into_parts();
         if !self.node.cfg.secrets.is_empty() {
-            let raw = payload.to_string();
-            let clean = self.node.cfg.secrets.scrub(&raw);
-            if clean != raw {
-                payload = serde_json::from_str(&clean).unwrap_or(Value::Null);
-            }
+            // The string fields, not the serialized text: a secret holding a
+            // quote or backslash is escaped there, and a replacement can
+            // break the JSON.
+            self.node.cfg.secrets.scrub_value(&mut payload);
         }
         let ev = RawEvent {
             session_id: self.id,
@@ -224,13 +253,56 @@ impl Session {
             )));
         }
         *head = ev.seq;
-        self.node.publish(NodeToMaster::Event { event: ev.clone() });
+        // Still under `head`, so this session's events reach the link in
+        // seq order. A full link pauses the session here until the master
+        // reads (or the link drops; the event is in the store either way).
+        self.node
+            .publish_wait(NodeToMaster::Event { event: ev.clone() })
+            .await;
         Ok(ev)
     }
 
-    async fn emit(&self, kind: EventKind) {
-        if let Err(e) = self.append(kind).await {
-            tracing::error!(session = %self.id, error = %e, "failed to append event");
+    /// Append one of the running turn's events. The log is written first:
+    /// on `Err` the caller must not do what the event describes. The first
+    /// failure stops the turn (its token is cancelled) and makes the rest of
+    /// its appends fail untried; the backend then ends the turn.
+    pub(crate) async fn emit(&self, kind: EventKind) -> Result<(), LogError> {
+        if self.log_failed.load(Ordering::SeqCst) {
+            return Err(LogError(
+                "an earlier event of this turn was not written".into(),
+            ));
+        }
+        match self.append(kind).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.note_log_failure(&e);
+                if let Some(c) = self.current_cancel() {
+                    c.cancel();
+                }
+                Err(LogError(e.to_string()))
+            }
+        }
+    }
+
+    /// Log a failed append, once per turn. The line names the store's
+    /// error only: never the event's payload.
+    fn note_log_failure(&self, e: &StoreError) {
+        if !self.log_failed.swap(true, Ordering::SeqCst) {
+            tracing::error!(session = %self.id, error = %e, "could not write the session log; stopping the turn");
+        } else {
+            tracing::debug!(session = %self.id, error = %e, "session log still not writable");
+        }
+    }
+
+    /// Append one of the events that end a turn: tried once even after a
+    /// failure, since a turn that cannot record its end must still end.
+    async fn append_end(&self, kind: EventKind) -> bool {
+        match self.append(kind).await {
+            Ok(_) => true,
+            Err(e) => {
+                self.note_log_failure(&e);
+                false
+            }
         }
     }
 
@@ -256,7 +328,7 @@ impl Session {
         if self.profile != Profile::Agentic {
             return Ok(());
         }
-        self.node.cfg.policy.check_protected(&self.cwd)
+        self.node.cfg.policy.check_session(&self.cwd)
     }
 
     /// Record a change of the session's active agent.
@@ -292,17 +364,19 @@ impl Session {
         self.check_cwd_still_allowed()?;
         let turn_id = new_id();
         let cancel = CancellationToken::new();
-        {
-            let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
-            if t.is_some() {
-                return Err("a turn is already running".into());
+        self.claim_turn(RunningTurn {
+            turn_id: turn_id.clone(),
+            cancel: cancel.clone(),
+            savings: extra.savings.clone(),
+            publishes: Arc::default(),
+        })?;
+        if self.unclosed.load(Ordering::SeqCst) {
+            let message = "The session log could not be written, so this turn was stopped.";
+            if let Err(e) = self.close_open_turn(message, TurnEndReason::Error).await {
+                self.release(&turn_id);
+                return Err(e);
             }
-            *t = Some(RunningTurn {
-                turn_id: turn_id.clone(),
-                cancel: cancel.clone(),
-                savings: extra.savings.clone(),
-                publishes: Arc::default(),
-            });
+            self.unclosed.store(false, Ordering::SeqCst);
         }
         let msg = match self.user_message(turn_id.clone(), input).await {
             Ok(msg) => msg,
@@ -315,11 +389,64 @@ impl Session {
             images: msg.images.clone(),
             ..extra
         };
+        // Recorded before the prompt is answered, so a log that cannot be
+        // written refuses the prompt itself and the sender sees why.
+        let history = match self.begin(&msg, agent.as_ref()).await {
+            Ok(h) => h,
+            Err(e) => {
+                self.release(&turn_id);
+                return Err(e);
+            }
+        };
         let this = self.clone();
         tokio::spawn(async move {
-            this.run_turn(msg, agent, compare, extra, cancel).await;
+            this.run_turn(msg, history, agent, compare, extra, cancel)
+                .await;
         });
         Ok(())
+    }
+
+    /// Start a turn in the log: read the history before it, then record
+    /// `turn_started` and the user's message. Returns the history. When an
+    /// append fails nothing has run, and whatever was written is closed.
+    async fn begin(
+        &self,
+        msg: &UserMessage,
+        agent: Option<&AgentSpec>,
+    ) -> Result<Vec<RawEvent>, String> {
+        let id = self.id;
+        let history = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.log_failed.store(false, Ordering::SeqCst);
+        self.unresolved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        let started = self
+            .emit(EventKind::TurnStarted(TurnStarted {
+                agent: agent.map(AgentSpec::agent_ref),
+                turn_id: msg.turn_id.clone(),
+            }))
+            .await;
+        if let Err(e) = started {
+            return Err(e.to_string());
+        }
+        if let Err(e) = self.emit(EventKind::UserMessage(msg.clone())).await {
+            self.end_turn(
+                &msg.turn_id,
+                TurnEndReason::Error,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            return Err(e.to_string());
+        }
+        Ok(history)
     }
 
     /// Check a message's images and keep their bytes with the chat, before
@@ -386,9 +513,11 @@ impl Session {
         }
     }
 
+    /// Run a turn that `begin` recorded.
     async fn run_turn(
         self: Arc<Self>,
         msg: UserMessage,
+        history: Vec<RawEvent>,
         agent: Option<AgentSpec>,
         compare: Vec<String>,
         extra: TurnExtra,
@@ -396,21 +525,14 @@ impl Session {
     ) -> (TurnEndReason, Option<Usage>) {
         let turn_id = msg.turn_id.clone();
         let user_text = msg.model_text();
-        let id = self.id;
-        let history = self
-            .node
-            .cfg
-            .store
-            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
-            .await
-            .unwrap_or_default();
-        self.emit(EventKind::TurnStarted(TurnStarted {
-            agent: agent.as_ref().map(AgentSpec::agent_ref),
-            turn_id: turn_id.clone(),
-        }))
-        .await;
-        self.emit(EventKind::UserMessage(msg)).await;
         let checkpoint = self.checkpoint(&turn_id, CheckpointPhase::Before).await;
+        if self.log_failed.load(Ordering::SeqCst) {
+            // The checkpoint's event was not written: nothing else runs.
+            let error = LogError("the checkpoint could not be recorded".into()).to_string();
+            self.end_turn(&turn_id, TurnEndReason::Error, None, Some(error))
+                .await;
+            return (TurnEndReason::Error, None);
+        }
 
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
@@ -447,14 +569,9 @@ impl Session {
                 Some(format!("agent backend crashed: {e}")),
             ),
         };
-        if let Some(message) = error {
-            self.emit(EventKind::Error(ErrorEvent {
-                turn_id: Some(turn_id.clone()),
-                message,
-            }))
-            .await;
-        }
-        if let Some((root, before)) = checkpoint {
+        if let Some((root, before)) = checkpoint
+            && !self.log_failed.load(Ordering::SeqCst)
+        {
             self.checkpoint_after(&turn_id, &root, &before).await;
         }
         let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
@@ -462,14 +579,53 @@ impl Session {
         } else {
             reason
         };
-        self.emit(EventKind::TurnEnded(TurnEnded {
-            turn_id: turn_id.clone(),
-            reason,
-            usage: usage.clone(),
-        }))
-        .await;
-        self.release(&turn_id);
+        self.end_turn(&turn_id, reason, usage.clone(), error).await;
         (reason, usage)
+    }
+
+    /// Record the turn's error and end, each tried once, and free the slot.
+    /// If the end could not be written, the next prompt writes it first.
+    async fn end_turn(
+        &self,
+        turn_id: &str,
+        reason: TurnEndReason,
+        usage: Option<Usage>,
+        error: Option<String>,
+    ) {
+        if let Some(message) = error {
+            self.append_end(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message,
+            }))
+            .await;
+        }
+        // An approval whose answer was not written would stay pending in
+        // the log after the turn: deny it first. If that cannot be written
+        // either, the turn stays open for the next prompt to close.
+        let unresolved =
+            std::mem::take(&mut *self.unresolved.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut closed = true;
+        for approval_id in unresolved {
+            closed &= self
+                .append_end(EventKind::ApprovalResolved(ApprovalResolved {
+                    approval_id,
+                    decision: Decision::Deny,
+                    by: ResolvedBy::Cancelled,
+                }))
+                .await;
+        }
+        let ended = closed
+            && self
+                .append_end(EventKind::TurnEnded(TurnEnded {
+                    turn_id: turn_id.into(),
+                    reason,
+                    usage,
+                }))
+                .await;
+        if !ended {
+            self.unclosed.store(true, Ordering::SeqCst);
+        }
+        self.release(turn_id);
     }
 
     /// Where this session's checkpoints go, if it gets any.
@@ -488,44 +644,79 @@ impl Session {
     ) -> Option<(crate::git::Repo, String)> {
         let repo = self.checkpoint_repo().await?;
         let r = format!("refs/harness/{}/{turn_id}/before", self.id);
-        match crate::git::snapshot(&repo, &r, "harness: before turn").await {
-            Ok(sha) => {
-                self.emit(EventKind::Checkpoint(Checkpoint {
-                    turn_id: turn_id.into(),
-                    phase,
-                    git_ref: sha.clone(),
-                    files: vec![],
-                }))
-                .await;
+        match crate::git::snapshot_full(&repo, &r, "harness: before turn").await {
+            Ok(snap) => {
+                let sha = snap.sha;
+                // On failure the caller sees `log_failed` and stops; the
+                // ref no event names goes.
+                let recorded = self
+                    .emit(EventKind::Checkpoint(Checkpoint {
+                        turn_id: turn_id.into(),
+                        phase,
+                        git_ref: sha.clone(),
+                        files: vec![],
+                        excluded: snap.nested.shown,
+                        excluded_more: snap.nested.more as u64,
+                    }))
+                    .await;
+                if recorded.is_err() {
+                    crate::git::delete_ref(&repo, &r).await;
+                    return None;
+                }
                 Some((repo, sha))
             }
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+                self.no_checkpoint_notice(turn_id, &e).await;
                 None
             }
         }
     }
 
+    /// Tell the person, in the chat, that this turn has no checkpoint (so
+    /// no undo), with the reason; an `error` note, as the chat shows today.
+    /// A failed append sets `log_failed`, which ends the turn as for any
+    /// other event.
+    async fn no_checkpoint_notice(&self, turn_id: &str, reason: &str) {
+        let _ = self
+            .emit(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message: format!(
+                    "This turn has no checkpoint, so it cannot be undone: the folder could \
+                     not be saved ({reason})."
+                ),
+            }))
+            .await;
+    }
+
     async fn checkpoint_after(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
         let r = format!("refs/harness/{}/{turn_id}/after", self.id);
         let res = async {
-            let sha = crate::git::snapshot(repo, &r, "harness: after turn").await?;
-            let files = crate::git::changed(repo, before, &sha).await?;
-            Ok::<_, String>((sha, files))
+            let snap = crate::git::snapshot_full(repo, &r, "harness: after turn").await?;
+            let files = crate::git::changed(repo, before, &snap.sha).await?;
+            Ok::<_, String>((snap, files))
         }
         .await;
         match res {
-            Ok((sha, files)) => {
-                self.emit(EventKind::Checkpoint(Checkpoint {
-                    turn_id: turn_id.into(),
-                    phase: CheckpointPhase::After,
-                    git_ref: sha,
-                    files: files.into_iter().map(|(_, p)| p).collect(),
-                }))
-                .await;
-                crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
+            Ok((snap, files)) => {
+                let recorded = self
+                    .emit(EventKind::Checkpoint(Checkpoint {
+                        turn_id: turn_id.into(),
+                        phase: CheckpointPhase::After,
+                        git_ref: snap.sha,
+                        files: files.into_iter().map(|(_, p)| p).collect(),
+                        excluded: snap.nested.shown,
+                        excluded_more: snap.nested.more as u64,
+                    }))
+                    .await;
+                if recorded.is_ok() {
+                    crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
+                }
             }
-            Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint failed"),
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
+                self.no_checkpoint_notice(turn_id, &e).await;
+            }
         }
     }
 
@@ -563,7 +754,21 @@ impl Session {
     }
 
     /// Undo one turn's file changes, or rewind: undo it and every later
-    /// turn (see `git::restore`). Records the new state as a snapshot.
+    /// turn (see `git::restore_plan`). In order:
+    /// 1. the diff is read (a checkpoint whose tree is gone is refused);
+    /// 2. the folder as it is now is snapshotted (the ref only);
+    /// 3. the plan is made (the unforced checks), and exactly the blobs it
+    ///    writes are checked and made safe (`git::secure_blobs`); a
+    ///    refusal in 1 to 3 deletes the ref and logs nothing;
+    /// 4. the snapshot is recorded as a `before_restore` checkpoint (so a
+    ///    forced restore loses nothing);
+    /// 5. the files are written; the restored state is recorded as that
+    ///    checkpoint's `after` and as each undone turn's `restored`.
+    ///
+    /// Restoring the `before_restore` checkpoint's id undoes the restore.
+    /// If the restore failed after step 2, that checkpoint has no `after`:
+    /// restoring it then puts back the paths its event lists to their
+    /// saved content, over the folder as it is (see `interrupted`).
     pub(crate) async fn restore(
         &self,
         turn_id: &str,
@@ -587,9 +792,30 @@ impl Session {
             .checkpoints
             .get(turn_id)
             .ok_or("this turn has no checkpoint")?;
-        let (Some(before), Some(after)) = (cp.before.clone(), cp.after.clone()) else {
-            return Err("this turn's checkpoint is incomplete".into());
+        let incomplete = || "this turn's checkpoint is incomplete".to_string();
+        let before = cp.before.clone().ok_or_else(incomplete)?;
+        // A restore that failed after saving the folder: its
+        // `before_restore` event lists the paths it may have written. (A
+        // turn without its `after` stays incomplete: nothing says what it
+        // changed.)
+        let interrupted: Option<Vec<String>> = match &cp.after {
+            Some(_) => None,
+            None => Some(
+                events
+                    .iter()
+                    .find_map(|e| match e.typed() {
+                        Ok(EventKind::Checkpoint(c))
+                            if c.turn_id == turn_id
+                                && c.phase == CheckpointPhase::BeforeRestore =>
+                        {
+                            Some(c.files)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(incomplete)?,
+            ),
         };
+        let after = cp.after.clone().unwrap_or_default();
         // Turns from this one on, in order, and the latest recorded state.
         let mut later: Vec<String> = Vec::new();
         let mut latest = after.clone();
@@ -602,7 +828,10 @@ impl Session {
                 if seen && c.phase == CheckpointPhase::After && !later.contains(&c.turn_id) {
                     later.push(c.turn_id.clone());
                 }
-                if c.phase != CheckpointPhase::Before {
+                if !matches!(
+                    c.phase,
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore
+                ) {
                     latest = c.git_ref.clone();
                 }
             }
@@ -614,8 +843,15 @@ impl Session {
             .checkpoint_repo()
             .await
             .ok_or("checkpoints are not available for this folder any more")?;
-        let expected = if rewind { latest } else { after };
-        for sha in [&before, &expected] {
+        // Held until this restore ends, on every path.
+        let _claim = self.claim_folder(&repo.root)?;
+        // `None`: an interrupted restore, put back over the folder as it is.
+        let expected = match (&interrupted, rewind) {
+            (Some(_), _) => None,
+            (None, true) => Some(latest),
+            (None, false) => Some(after),
+        };
+        for sha in std::iter::once(&before).chain(expected.as_ref()) {
             if !crate::git::exists(&repo, sha).await {
                 return Err(format!(
                     "this checkpoint is no longer kept (only the latest {} changes are)",
@@ -623,14 +859,95 @@ impl Session {
                 ));
             }
         }
-        let files = crate::git::restore(&repo, &before, &expected, force).await?;
-        let state = crate::git::snapshot(
+        // The diff, read before the folder is saved: a checkpoint whose
+        // tree is gone is refused here, leaving nothing behind.
+        let checked = match &expected {
+            Some(e) => Some(crate::git::restore_diff(&repo, &before, e).await?),
+            None => None,
+        };
+        // The folder as it is, saved first: its own checkpoint, counted
+        // against `checkpoints_keep` like a turn's. The same scan serves
+        // the unforced check.
+        let saved = format!("restore-{}", harness_core::new_id());
+        let saved_ref = format!("refs/harness/{}/{saved}/before", self.id);
+        let now = crate::git::snapshot_full(&repo, &saved_ref, "harness: before restore")
+            .await
+            .map_err(|e| {
+                format!("nothing was restored: the folder could not be saved first ({e})")
+            })?;
+        let planned = async {
+            let diff = match (checked, &interrupted) {
+                (Some(d), _) => d,
+                (None, files) => {
+                    // An interrupted restore: back to its saved state, for
+                    // the paths it may have written, over the folder now.
+                    // Its "changed since" check compares the folder with
+                    // itself, so it never refuses: edits made after the
+                    // failed restore are overwritten without asking. They
+                    // are in the snapshot just taken, which the note after
+                    // the restore names.
+                    let mut d = crate::git::restore_diff(&repo, &before, &now.sha).await?;
+                    d.only(files.as_deref().unwrap_or_default());
+                    d
+                }
+            };
+            let plan = crate::git::restore_plan(&repo, &diff, &now.sha, !force).await?;
+            // Exactly the blobs the plan writes (it knows the folder's
+            // nested repositories only from the snapshot just taken).
+            crate::git::secure_blobs(&repo, &plan).await?;
+            Ok::<_, String>(plan)
+        }
+        .await;
+        let plan = match planned {
+            Ok(t) => t,
+            Err(e) => {
+                crate::git::delete_ref(&repo, &saved_ref).await;
+                return Err(e);
+            }
+        };
+        let files: Vec<String> = plan.touched.iter().map(|(_, p)| p.clone()).collect();
+        if let Err(e) = self
+            .append(EventKind::Checkpoint(Checkpoint {
+                turn_id: saved.clone(),
+                phase: CheckpointPhase::BeforeRestore,
+                git_ref: now.sha,
+                files: files.clone(),
+                excluded: now.nested.shown,
+                excluded_more: now.nested.more as u64,
+            }))
+            .await
+        {
+            crate::git::delete_ref(&repo, &saved_ref).await;
+            return Err(format!("nothing was restored: {}", LogError(e.to_string())));
+        }
+        // From here on the saved state is in the log; say so on failure.
+        let kept = |e: String| {
+            format!(
+                "{e}; the folder as it was before this restore is saved as \
+                 checkpoint {saved} (ref {saved_ref})"
+            )
+        };
+        crate::git::restore_paths(&repo, &plan)
+            .await
+            .map_err(kept)?;
+        let state = crate::git::snapshot_full(
             &repo,
-            &format!("refs/harness/{}/{turn_id}/restored", self.id),
+            &format!("refs/harness/{}/{saved}/after", self.id),
             "harness: restored",
         )
-        .await?;
-        let targets: Vec<String> = if rewind {
+        .await
+        .map_err(kept)?;
+        self.append(EventKind::Checkpoint(Checkpoint {
+            turn_id: saved.clone(),
+            phase: CheckpointPhase::After,
+            git_ref: state.sha.clone(),
+            files: files.clone(),
+            excluded: state.nested.shown,
+            excluded_more: state.nested.more as u64,
+        }))
+        .await
+        .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
+        let targets: Vec<String> = if rewind && interrupted.is_none() {
             later
                 .into_iter()
                 .filter(|t| view.checkpoints.get(t).is_some_and(|c| !c.restored))
@@ -639,14 +956,107 @@ impl Session {
             vec![turn_id.to_string()]
         };
         for t in targets {
-            self.emit(EventKind::Checkpoint(Checkpoint {
+            self.append(EventKind::Checkpoint(Checkpoint {
                 turn_id: t,
                 phase: CheckpointPhase::Restored,
-                git_ref: state.clone(),
+                git_ref: state.sha.clone(),
                 files: files.clone(),
+                excluded: plan.nested.shown.clone(),
+                excluded_more: plan.nested.more as u64,
             }))
-            .await;
+            .await
+            .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
+        // Only when something about repositories changed, in words the
+        // chat shows today (pre-existing ones are in `excluded` alone).
+        let safety = interrupted.as_ref().map(|_| saved.as_str());
+        if let Some(message) = restore_notice(files.len(), &plan, safety) {
+            self.append(EventKind::Error(ErrorEvent {
+                turn_id: None,
+                message,
+            }))
+            .await
+            .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
+        }
+        crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
+        Ok(())
+    }
+
+    /// Register a restore of `root` (the checkpoint's folder: the
+    /// repository's top for a folder inside one) in the node's registry of
+    /// folders being restored, refusing while another session has a turn
+    /// running in an overlapping folder (the same, a containing or a
+    /// contained one, by real path) or another restore of an overlapping
+    /// folder is registered. Check and insert happen under the registry's
+    /// lock, which a turn's start also takes (see [`Self::claim_turn`]), so
+    /// no turn starts there while the restore runs. The entry goes when the
+    /// returned guard drops, on every path. This session's own running turn
+    /// (and so its sub-agents, which run inside it) is refused before this.
+    /// Another session's sub-agent works in a worktree under
+    /// `<root>/.git/harness-worktrees`, inside that repository's folder, so
+    /// it overlaps a restore there (as its parent's turn does).
+    fn claim_folder(&self, root: &std::path::Path) -> Result<RestoreClaim, String> {
+        let root = real_path(root);
+        // Real paths before the lock: no file system call under it.
+        let others: Vec<Arc<Session>> = self
+            .node
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .filter(|s| s.id != self.id)
+            .cloned()
+            .collect();
+        let others: Vec<(Arc<Session>, PathBuf)> = others
+            .into_iter()
+            .map(|s| {
+                let cwd = real_path(&s.cwd);
+                (s, cwd)
+            })
+            .collect();
+        let mut reg = self
+            .node
+            .restoring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if reg.iter().any(|r| overlaps(r, &root)) {
+            return Err(UNDO_RUNNING.into());
+        }
+        if others
+            .iter()
+            .any(|(s, cwd)| overlaps(cwd, &root) && s.is_running())
+        {
+            return Err(
+                "another chat is working in this folder right now; wait for it to finish \
+                 or cancel it"
+                    .into(),
+            );
+        }
+        reg.push(root.clone());
+        Ok(RestoreClaim {
+            node: self.node.clone(),
+            root,
+        })
+    }
+
+    /// Take this session's turn slot for `turn`, unless a turn holds it or
+    /// a restore of an overlapping folder is running (checked under the
+    /// registry's lock, under which a restore registers).
+    fn claim_turn(&self, turn: RunningTurn) -> Result<(), String> {
+        let cwd = real_path(&self.cwd);
+        let reg = self
+            .node
+            .restoring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if reg.iter().any(|r| overlaps(r, &cwd)) {
+            return Err(UNDO_RUNNING.into());
+        }
+        let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+        if t.is_some() {
+            return Err("a turn is already running".into());
+        }
+        *t = Some(turn);
         Ok(())
     }
 
@@ -656,22 +1066,16 @@ impl Session {
         agent: AgentSpec,
         task: String,
         refs: SharedRefs,
+        observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         let child_id = SessionId::new();
         let short: String = task.chars().take(60).collect();
         // A sub-agent that can change files works in its own git worktree,
-        // so parallel sub-agents do not trample each other.
-        let (iso, iso_note) = match self.isolate(&agent, child_id).await {
-            Ok(i) => (i, None),
-            Err(e) => (
-                None,
-                Some(format!(
-                    "no separate worktree ({e}); it worked in the shared folder"
-                )),
-            ),
-        };
+        // so parallel sub-agents do not trample each other and a child whose
+        // log failed leaves the folder alone; without one it is not started.
+        let iso = self.isolate(&agent, child_id).await?;
         let cwd = iso
             .as_ref()
             .map(|i| i.cwd.clone())
@@ -706,12 +1110,17 @@ impl Session {
             .as_ref()
             .map(|t| t.savings.clone())
             .unwrap_or_default();
-        *child.turn.lock().unwrap_or_else(|p| p.into_inner()) = Some(RunningTurn {
+        if let Err(e) = child.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: savings.clone(),
             publishes: Arc::default(),
-        });
+        }) {
+            if let Some(i) = iso {
+                crate::git::worktree_remove(&i.root, &i.worktree).await;
+            }
+            return Err(e);
+        }
         // A sub-agent gets its task as text only, never the images.
         let msg = UserMessage {
             turn_id,
@@ -723,14 +1132,31 @@ impl Session {
         let extra = TurnExtra {
             savings,
             refs: Some(refs),
+            observed: Some(observed),
             ..Default::default()
         };
+        let history = match child.begin(&msg, Some(&agent)).await {
+            Ok(h) => h,
+            Err(e) => {
+                child.release(&msg.turn_id);
+                if let Some(i) = iso {
+                    crate::git::worktree_remove(&i.root, &i.worktree).await;
+                }
+                return Err(e);
+            }
+        };
         let (reason, usage) = child
-            .run_turn(msg, Some(agent), vec![], extra, cancel)
+            .clone()
+            .run_turn(msg, history, Some(agent), vec![], extra, cancel)
             .await;
+        // Each session's log gates its own effects: the parent's turn goes
+        // on, but nothing of a child whose log failed (or whose parent's
+        // did) reaches the parent's folder, since no event would record it.
+        let log_failed =
+            child.log_failed.load(Ordering::SeqCst) || self.log_failed.load(Ordering::SeqCst);
         let merge_note = match iso {
-            Some(i) => Some(self.merge_back(i, child_id).await),
-            None => iso_note,
+            Some(i) => Some(self.merge_back(i, child_id, !log_failed).await),
+            None => None,
         };
         let log = self
             .node
@@ -749,6 +1175,11 @@ impl Session {
             .unwrap_or_default();
         // Whatever the answer cites, the parent resolves through these.
         let sources = harness_core::refs::sources_in(&log);
+        let text = if child.log_failed.load(Ordering::SeqCst) {
+            "The sub-agent stopped because its session log could not be written.".to_string()
+        } else {
+            text
+        };
         let text = match merge_note {
             Some(n) => format!("{text}\n\n[{n}]"),
             None => text,
@@ -762,39 +1193,51 @@ impl Session {
         })
     }
 
-    /// Prepare a worktree for a sub-agent with write access, seeded with the
-    /// current working state (uncommitted edits included). `Ok(None)`: no
-    /// worktree is wanted (read-only agent, no repository); `Err`: one was
-    /// wanted but could not be made, and the sub-agent shares the folder.
+    /// Whether a sub-agent can change files here: its tools, narrowed by
+    /// its own denials and by this node's policy, include `write`, `edit` or
+    /// `bash` (no shell on a node is read-only).
+    fn can_change_files(&self, agent: &AgentSpec) -> bool {
+        let denied = &self.node.cfg.policy.denied_tools;
+        self.profile == Profile::Agentic
+            && ["write", "edit", "bash"]
+                .iter()
+                .any(|t| agent.allows_tool(t) && !denied.iter().any(|d| d == t))
+    }
+
+    /// Prepare a worktree for a sub-agent that can change files, seeded with
+    /// the current working state (uncommitted edits included). `Ok(None)`:
+    /// the sub-agent cannot change files and works in this folder; `Err`: it
+    /// can, and no worktree could be made, so it must not start. The text
+    /// is the delegation's result, for the parent model.
     async fn isolate(
         &self,
         agent: &AgentSpec,
         child: SessionId,
     ) -> Result<Option<Isolation>, String> {
-        if self.profile != Profile::Agentic
-            || !["write", "edit", "bash"]
-                .iter()
-                .any(|t| agent.allows_tool(t))
-        {
+        if !self.can_change_files(agent) {
             return Ok(None);
         }
+        let who = &agent.agent_id;
         let Some(root) = crate::git::repo_root(&self.cwd).await else {
-            return Ok(None);
+            return Err(format!(
+                "@{who} was not started: it can change files (write, edit or bash), and a \
+                 sub-agent that changes files works in its own git worktree, but this folder \
+                 is not a git repository. Make the change yourself, delegate to a sub-agent \
+                 that only reads, or ask the user to run `git init` in this folder."
+            ));
         };
         let project = crate::git::Repo::project(&root);
+        let base_ref = format!("refs/harness/{child}/base");
+        let mut made: Option<PathBuf> = None;
         let res = async {
             // Before anything runs in the user's repository: its own config
             // must not define commands that `add`/checkout would run.
             crate::git::check_worktree_safe(&root).await?;
-            let base = crate::git::snapshot(
-                &project,
-                &format!("refs/harness/{child}/base"),
-                "harness: sub-agent base",
-            )
-            .await?;
+            let base = crate::git::snapshot(&project, &base_ref, "harness: sub-agent base").await?;
             let wt = crate::git::worktrees_dir(&root)
                 .await?
                 .join(child.to_string());
+            made = Some(wt.clone());
             crate::git::worktree_add(&root, &wt, &base).await?;
             let rel = self
                 .cwd
@@ -802,10 +1245,7 @@ impl Session {
                 .unwrap_or(std::path::Path::new(""));
             let cwd = wt.join(rel);
             // The node's policy still decides where sessions may work.
-            if let Err(e) = self.node.cfg.policy.check_cwd(&cwd.display().to_string()) {
-                crate::git::worktree_remove(&root, &wt).await;
-                return Err(e);
-            }
+            self.node.cfg.policy.check_cwd(&cwd.display().to_string())?;
             Ok::<_, String>(Isolation {
                 root: root.clone(),
                 worktree: wt,
@@ -817,14 +1257,25 @@ impl Session {
         match res {
             Ok(i) => Ok(Some(i)),
             Err(e) => {
-                tracing::warn!(session = %self.id, error = %e, "no worktree for sub-agent; sharing the folder");
-                Err(e)
+                // Leave nothing behind: no half-made worktree, no base ref.
+                if let Some(wt) = made {
+                    crate::git::worktree_remove(&root, &wt).await;
+                }
+                crate::git::delete_ref(&project, &base_ref).await;
+                tracing::warn!(session = %self.id, error = %e, "no worktree for a sub-agent that changes files; not started");
+                Err(format!(
+                    "@{who} was not started: it can change files (write, edit or bash), and its \
+                     own git worktree could not be made ({e}). Make the change yourself, or \
+                     delegate to a sub-agent that only reads."
+                ))
             }
         }
     }
 
     /// Bring a sub-agent's changes back into the main working directory.
-    async fn merge_back(&self, iso: Isolation, child: SessionId) -> String {
+    /// `apply: false` keeps the result as a ref and changes nothing in the
+    /// folder.
+    async fn merge_back(&self, iso: Isolation, child: SessionId, apply: bool) -> String {
         let result_ref = format!("refs/harness/{child}/result");
         let note = match crate::git::snapshot(
             &crate::git::Repo::project(&iso.worktree),
@@ -834,6 +1285,11 @@ impl Session {
         .await
         {
             Err(e) => format!("its changes could not be collected: {e}"),
+            Ok(result) if !apply => format!(
+                "its changes were not applied, because a session log could not be written; \
+                 to apply by hand: git diff {} {result} | git apply",
+                iso.base
+            ),
             Ok(result) => match crate::git::apply(&iso.root, &iso.base, &result).await {
                 Ok(0) => "no file changes".to_string(),
                 Ok(n) => format!("{n} changed file(s) applied to the folder"),
@@ -853,6 +1309,26 @@ impl Session {
         )
         .await;
         note
+    }
+
+    /// Record an approval's answer; `false` if the log refused it (the
+    /// approval then stays in `unresolved` for the turn's end to deny).
+    async fn resolve(&self, approval_id: String, decision: Decision, by: ResolvedBy) -> bool {
+        let written = self
+            .emit(EventKind::ApprovalResolved(ApprovalResolved {
+                approval_id: approval_id.clone(),
+                decision,
+                by,
+            }))
+            .await
+            .is_ok();
+        if written {
+            self.unresolved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|a| *a != approval_id);
+        }
+        written
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -890,7 +1366,7 @@ impl Session {
 
 #[async_trait::async_trait]
 impl TurnHost for Session {
-    async fn emit(&self, kind: EventKind) {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         Session::emit(self, kind).await
     }
 
@@ -899,10 +1375,12 @@ impl TurnHost for Session {
         agent: AgentSpec,
         task: String,
         refs: SharedRefs,
+        observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
-        self.run_child(agent, task, refs, cancel, started).await
+        self.run_child(agent, task, refs, observed, cancel, started)
+            .await
     }
 
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
@@ -952,44 +1430,73 @@ impl TurnHost for Session {
         }))
     }
 
+    fn tool_denied(&self, tool: &str) -> bool {
+        self.node.cfg.policy.denied_tools.iter().any(|t| t == tool)
+    }
+
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
         let policy = &self.node.cfg.policy;
         if policy.denied_tools.iter().any(|t| t == tool) {
             let approval_id = new_id();
-            // Record the refusal so the user sees why.
-            self.emit(EventKind::ApprovalRequested(ApprovalRequested {
-                approval_id: approval_id.clone(),
-                call_id: call_id.into(),
-                tool: tool.into(),
-                input: input.clone(),
-                reason: format!("`{tool}` is denied by this node's policy"),
-            }))
-            .await;
-            self.emit(EventKind::ApprovalResolved(ApprovalResolved {
-                approval_id,
-                decision: Decision::Deny,
-                by: ResolvedBy::Policy,
-            }))
-            .await;
+            // Record the refusal so the user sees why. Denied either way.
+            let requested = self
+                .emit(EventKind::ApprovalRequested(ApprovalRequested {
+                    approval_id: approval_id.clone(),
+                    call_id: call_id.into(),
+                    tool: tool.into(),
+                    input: input.clone(),
+                    reason: format!("`{tool}` is denied by this node's policy"),
+                    turn_allow: false,
+                }))
+                .await;
+            if requested.is_ok() {
+                self.unresolved
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(approval_id.clone());
+                self.resolve(approval_id, Decision::Deny, ResolvedBy::Policy)
+                    .await;
+            }
             return Decision::Deny;
         }
         if !self.mode.needs_approval(risk) {
             return Decision::Allow;
         }
+        // "For this turn" is offered on every request a person answers: it
+        // covers only this exact call, the one on the card (the loop keys it
+        // with `harness_tools::call_key`, PLAN.md T4). The answer reaches
+        // only this call: the approval id is bound to this one waiting
+        // request, and the loop records the key of the call it is running.
         let approval_id = new_id();
         let (tx, rx) = oneshot::channel();
         self.approvals
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(approval_id.clone(), tx);
-        self.emit(EventKind::ApprovalRequested(ApprovalRequested {
-            approval_id: approval_id.clone(),
-            call_id: call_id.into(),
-            tool: tool.into(),
-            input: input.clone(),
-            reason: approval_reason(tool, risk),
-        }))
-        .await;
+        let requested = self
+            .emit(EventKind::ApprovalRequested(ApprovalRequested {
+                approval_id: approval_id.clone(),
+                call_id: call_id.into(),
+                tool: tool.into(),
+                input: input.clone(),
+                reason: approval_reason(tool, risk),
+                turn_allow: true,
+            }))
+            .await;
+        if requested.is_ok() {
+            self.unresolved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(approval_id.clone());
+        } else {
+            // Nobody can see a request the log does not hold; the turn is
+            // already stopping.
+            self.approvals
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&approval_id);
+            return Decision::Deny;
+        }
         let cancel = self.current_cancel().unwrap_or_default();
         let (decision, by) = tokio::select! {
             r = rx => match r {
@@ -1002,14 +1509,102 @@ impl TurnHost for Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&approval_id);
-        self.emit(EventKind::ApprovalResolved(ApprovalResolved {
-            approval_id,
-            decision,
-            by,
-        }))
-        .await;
+        // An approval the log does not hold allows nothing.
+        if !self.resolve(approval_id, decision, by).await {
+            return Decision::Deny;
+        }
         decision
     }
+}
+
+/// Refusal while a restore of an overlapping folder runs.
+const UNDO_RUNNING: &str = "an undo is running in this folder; try again in a moment";
+
+/// A folder registered as being restored; unregistered when dropped.
+struct RestoreClaim {
+    node: Arc<Inner>,
+    root: PathBuf,
+}
+
+impl Drop for RestoreClaim {
+    fn drop(&mut self) {
+        let mut reg = self
+            .node
+            .restoring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = reg.iter().position(|r| *r == self.root) {
+            reg.swap_remove(i);
+        }
+    }
+}
+
+/// Where `p` really is (as given when it cannot be resolved).
+fn real_path(p: &std::path::Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The same folder, or one inside the other.
+fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// The chat's note after an undo, only when repositories inside the folder
+/// appeared or went away during the undone turn, or a `.git` sits in a
+/// folder the undo wrote into. It starts with what was restored, so it does
+/// not read as a failure. `None`: nothing to say (stable nested
+/// repositories are in the checkpoint's `excluded` alone).
+///
+/// Also when a forced undo deleted files no checkpoint holds, and after a
+/// restore of an interrupted restore (`safety`: the checkpoint that saved
+/// the folder first), which overwrote its paths without checking for
+/// later edits.
+fn restore_notice(
+    files: usize,
+    plan: &crate::git::RestorePlan,
+    safety: Option<&str>,
+) -> Option<String> {
+    if plan.changed_repos.is_empty()
+        && plan.git_inside.is_empty()
+        && plan.unsaved.is_empty()
+        && safety.is_none()
+    {
+        return None;
+    }
+    let mut s = format!(
+        "Undo restored {files} file{}.",
+        if files == 1 { "" } else { "s" }
+    );
+    if let Some(id) = safety {
+        s.push_str(&format!(
+            " They were put back as saved before the failed undo, over any later edits; \
+             the folder as it was just before is saved as checkpoint {id}."
+        ));
+    }
+    if !plan.unsaved.is_empty() {
+        s.push_str(&format!(
+            " These files were deleted and were not saved (they are in no checkpoint, and \
+             a file replaced the folder that held them): {}.",
+            plan.unsaved.listed()
+        ));
+    }
+    if !plan.git_inside.is_empty() {
+        s.push_str(&format!(
+            " {} now hold a `.git` (a repository made there, or a stray `.git`) that no \
+             checkpoint covers: the files the checkpoint holds there were restored and the \
+             `.git` was left as it is.",
+            plan.git_inside.listed()
+        ));
+    }
+    if !plan.changed_repos.is_empty() {
+        s.push_str(&format!(
+            " Git repositories inside the folder appeared or went away during the turn and \
+             were left alone ({}): undo never covers a repository inside your folder; use \
+             git in it to undo changes there.",
+            plan.changed_repos.listed()
+        ));
+    }
+    Some(s)
 }
 
 /// What an approval card says the tool would do. Publishing changes nothing

@@ -1065,6 +1065,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1387,6 +1407,7 @@ dependencies = [
  "clap",
  "dirs",
  "dotenvy",
+ "flate2",
  "futures",
  "harness-agent-native",
  "harness-agents",
@@ -1441,6 +1462,7 @@ dependencies = [
  "hex",
  "serde",
  "serde-saphyr",
+ "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "thiserror",
@@ -1522,6 +1544,8 @@ dependencies = [
  "harness-tools",
  "harness-web",
  "hex",
+ "hyper",
+ "hyper-util",
  "infer",
  "jiff",
  "mime_guess",
@@ -1578,6 +1602,7 @@ dependencies = [
  "harness-tools",
  "hex",
  "nix",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1623,10 +1648,12 @@ dependencies = [
  "harness-codemap",
  "harness-core",
  "ignore",
+ "landlock",
  "nix",
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2185,6 +2212,17 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror",
 ]
 
 [[package]]

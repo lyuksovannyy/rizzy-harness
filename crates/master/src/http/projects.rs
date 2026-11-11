@@ -975,13 +975,19 @@ async fn add_memory(
 /// A project fact the caller may change: a confirmed one needs "may
 /// manage"; a proposal is its source chat's owner's to keep, word or
 /// discard (any member: the project's memory grows from its chats), and
-/// nobody else even sees it.
+/// nobody else even sees it. Also whether the caller may confirm it (a
+/// proposal becomes shared text for every member's agent: "may manage", or
+/// the project's `members_activate_facts` switch).
 async fn own_project_fact(
     m: &Master,
     headers: &HeaderMap,
     id: &str,
     fact: &str,
-) -> ApiResult<(Principal, std::sync::Arc<dyn harness_memory::MemoryStore>)> {
+) -> ApiResult<(
+    Principal,
+    std::sync::Arc<dyn harness_memory::MemoryStore>,
+    bool,
+)> {
     let (who, row, a) = visible(m, headers, id).await?;
     let mem = memory_store(m)?;
     let f = mem.get(fact).await.map_err(memory_err)?;
@@ -999,7 +1005,9 @@ async fn own_project_fact(
     if f.status == harness_memory::Status::Active && !p::may_manage(&a) {
         return Err(may_not_change(&a, "project memory"));
     }
-    Ok((who, mem))
+    let may_activate =
+        p::may_manage(&a) || ProjectSettings::read(&row.settings).members_activate_facts;
+    Ok((who, mem, may_activate))
 }
 
 #[derive(Deserialize)]
@@ -1018,7 +1026,13 @@ async fn update_memory(
     Path((id, fact)): Path<(String, String)>,
     Json(b): Json<FactPatch>,
 ) -> ApiResult<Json<Value>> {
-    let (who, mem) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (who, mem, may_activate) = own_project_fact(&m, &headers, &id, &fact).await?;
+    if b.status == Some(harness_memory::Status::Active) && !may_activate {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "a project manager confirms facts into the project's memory".into(),
+        ));
+    }
     let f = mem
         .update(&fact, b.text, b.status)
         .await
@@ -1034,7 +1048,7 @@ async fn delete_memory(
     headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (_, mem) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (_, mem, _) = own_project_fact(&m, &headers, &id, &fact).await?;
     mem.delete(&fact).await.map_err(memory_err)?;
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(json!({ "ok": true })))

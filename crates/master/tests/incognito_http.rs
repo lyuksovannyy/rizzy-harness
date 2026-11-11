@@ -1,6 +1,9 @@
 //! Incognito chats and deleting chats: nothing may be left behind, not even
 //! in free pages or the WAL of either database.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +81,12 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", cookie).send().await.unwrap();
+    let r = rb
+        .header("cookie", cookie)
+        .same_origin()
+        .send()
+        .await
+        .unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -237,6 +245,7 @@ async fn upload(t: &T, cookie: &str, name: &str, body: &[u8]) -> (StatusCode, Va
     let r = reqwest::Client::new()
         .post(format!("{}/api/attachments?name={name}", t.base))
         .header("cookie", cookie)
+        .same_origin()
         .body(body.to_vec())
         .send()
         .await
@@ -281,6 +290,7 @@ async fn attachments_are_owned_and_used_once() {
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", &bob)
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
         .send()
         .await

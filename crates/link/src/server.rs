@@ -1,84 +1,56 @@
 //! Master side: after the handshake, pump protocol frames between the
-//! WebSocket and a pair of channels (the same shape as an in-process link).
+//! WebSocket and a pair of bounded channels (the same shape as an
+//! in-process link).
 
-use futures::{SinkExt, StreamExt};
 use harness_protocol::{MasterToNode, NodeToMaster};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::wire::ServerStream;
+use crate::{FROM_NODE_QUEUE, TO_NODE_QUEUE, Timing};
 
 /// Bridge an authenticated connection. The first node message must be a
 /// `node.hello` for `node_id`; anything else closes the link (a node can
 /// only speak as itself). `stop` closes it from the master side (revoke).
+///
+/// At most `FROM_NODE_QUEUE` messages from the node wait for the master;
+/// past that the node's socket is not read until the master catches up.
 pub fn bridge(
     ws: ServerStream,
     node_id: String,
     stop: CancellationToken,
-) -> (
-    mpsc::UnboundedSender<MasterToNode>,
-    mpsc::UnboundedReceiver<NodeToMaster>,
-) {
-    let (to_node_tx, mut to_node_rx) = mpsc::unbounded_channel::<MasterToNode>();
-    let (from_node_tx, from_node_rx) = mpsc::unbounded_channel::<NodeToMaster>();
-    let (mut sink, mut stream) = ws.split();
+) -> (mpsc::Sender<MasterToNode>, mpsc::Receiver<NodeToMaster>) {
+    bridge_with(ws, node_id, stop, Timing::default())
+}
+
+/// `bridge` with other timers (tests).
+pub fn bridge_with(
+    ws: ServerStream,
+    node_id: String,
+    stop: CancellationToken,
+    timing: Timing,
+) -> (mpsc::Sender<MasterToNode>, mpsc::Receiver<NodeToMaster>) {
+    let (to_node_tx, mut to_node_rx) = mpsc::channel::<MasterToNode>(TO_NODE_QUEUE);
+    let (from_node_tx, from_node_rx) = mpsc::channel::<NodeToMaster>(FROM_NODE_QUEUE);
     tokio::spawn(async move {
         let mut first = true;
-        let mut ping = crate::ping_ticker();
-        let mut heard = tokio::time::Instant::now();
-        loop {
-            tokio::select! {
-                _ = stop.cancelled() => break,
-                _ = ping.tick() => {
-                    if heard.elapsed() > crate::IDLE_LIMIT {
-                        tracing::info!(node = %node_id, "node link idle; closing");
-                        break;
-                    }
-                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
-                        break;
-                    }
+        let check = |msg: &NodeToMaster| {
+            let hello = matches!(msg, NodeToMaster::Hello { .. });
+            if std::mem::take(&mut first) {
+                match msg {
+                    NodeToMaster::Hello { node_id: id, .. } if *id == node_id => Ok(()),
+                    _ => Err("hello missing or for another node".to_string()),
                 }
-                out = to_node_rx.recv() => match out {
-                    Some(m) => {
-                        let Ok(t) = serde_json::to_string(&m) else { continue };
-                        if sink.send(Message::text(t)).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
-                },
-                inc = stream.next() => match inc.inspect(|_| heard = tokio::time::Instant::now()) {
-                    Some(Ok(Message::Text(t))) => {
-                        let msg: NodeToMaster = match serde_json::from_str(t.as_str()) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!(node = %node_id, error = %e, "bad frame; closing");
-                                break;
-                            }
-                        };
-                        if first {
-                            first = false;
-                            match &msg {
-                                NodeToMaster::Hello { node_id: id, .. } if *id == node_id => {}
-                                _ => {
-                                    tracing::warn!(node = %node_id, "hello missing or for another node; closing");
-                                    break;
-                                }
-                            }
-                        } else if matches!(msg, NodeToMaster::Hello { .. }) {
-                            break;
-                        }
-                        if from_node_tx.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                    Some(Ok(_)) => {}
-                },
+            } else if hello {
+                Err("second hello".to_string())
+            } else {
+                Ok(())
             }
+        };
+        let res = crate::pump::pump(ws, timing, &stop, &mut to_node_rx, &from_node_tx, check).await;
+        if let Err(e) = res {
+            tracing::info!(node = %node_id, error = %e, "node link closed");
         }
-        let _ = sink.send(Message::Close(None)).await;
     });
     (to_node_tx, from_node_rx)
 }

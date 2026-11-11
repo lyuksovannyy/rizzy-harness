@@ -1,12 +1,16 @@
 //! The native agent loop: stream a completion, run requested tools (through the
 //! host's approval gate), feed results back, repeat until the model stops.
 
+pub mod compact;
+#[cfg(test)]
+mod delegate_availability_tests;
 pub mod images;
 pub mod llm;
 pub mod mask;
 pub mod mock;
 pub mod models;
 pub mod provider;
+pub mod retry;
 pub mod style;
 
 use std::collections::HashSet;
@@ -16,21 +20,136 @@ use std::time::Duration;
 use harness_core::backend::{AgentBackend, TurnCtx, TurnOutcome};
 use harness_core::event::*;
 use harness_core::refs::{RefBook, SharedRefs};
-use harness_core::{RawEvent, new_id};
+use harness_core::secret::StreamScrubber;
+use harness_core::{RawEvent, SecretSet, new_id};
 use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
 pub use provider::{
-    ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, ToolSpec,
-    estimate_tokens,
+    ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, RetryHint,
+    StopReason, ToolSpec, estimate_tokens,
 };
+pub use retry::RetryPolicy;
 
 /// Flush coalesced deltas at least this often...
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
 /// ...or when this many bytes are buffered.
 pub const FLUSH_BYTES: usize = 2048;
 
-const MAX_STEPS: usize = 50;
+/// After a cancel, how long a tool has to return on its own before the turn
+/// stops waiting for it. Longer than bash needs to end a group that ignores
+/// SIGTERM (2 s to SIGKILL, up to 2 s draining its pipes), so a normal
+/// cancel still reports its output; a dropped bash call kills its group
+/// anyway.
+pub const TOOL_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// The result of every tool call in a message that stopped on the output
+/// limit. It names the cause and the way out, never the cut arguments.
+pub const CUT_BY_OUTPUT_LIMIT: &str = "This tool call was not run: your answer reached the \
+     output limit before the call was complete. Split the change into smaller calls (for \
+     `write`, write the file in parts or use `edit`).";
+
+/// Messages in a row cut by the output limit after which the turn ends.
+pub const MAX_CUT_STEPS: u32 = 3;
+
+/// Aborts a helper task when the call that started it ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The turn's view of its host. The log is written first (PLAN.md §2): after
+/// the first event that could not be appended, every later one fails without
+/// reaching the host and the turn's token is cancelled, so a tool still
+/// running or a delegation running beside the one that failed stops through
+/// the usual cancel path. The loop then ends the turn: no further tool body,
+/// no further model request. Applies to every event, deltas included: a
+/// failed append is a store that is failing, and output shown live but
+/// missing from the log is output the user cannot see again.
+struct Logged<'a> {
+    host: &'a dyn harness_core::backend::TurnHost,
+    cancel: tokio_util::sync::CancellationToken,
+    failed: std::sync::Mutex<Option<harness_core::backend::LogError>>,
+}
+
+impl Logged<'_> {
+    fn failure(&self) -> Option<harness_core::backend::LogError> {
+        self.failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl harness_core::backend::TurnHost for Logged<'_> {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        if let Some(e) = self.failure() {
+            return Err(e);
+        }
+        let res = self.host.emit(kind).await;
+        if let Err(e) = &res {
+            self.failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(|| e.clone());
+            self.cancel.cancel();
+        }
+        res
+    }
+
+    async fn approve(
+        &self,
+        call_id: &str,
+        tool: &str,
+        input: &serde_json::Value,
+        risk: harness_core::policy::ToolRisk,
+    ) -> harness_core::policy::Decision {
+        if self.failure().is_some() {
+            return harness_core::policy::Decision::Deny;
+        }
+        self.host.approve(call_id, tool, input, risk).await
+    }
+
+    fn tool_denied(&self, tool: &str) -> bool {
+        self.host.tool_denied(tool)
+    }
+
+    async fn delegate(
+        &self,
+        agent: harness_core::agent::AgentSpec,
+        task: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: tokio_util::sync::CancellationToken,
+        started: Box<dyn FnOnce(harness_core::SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        self.host
+            .delegate(agent, task, refs, observed, cancel, started)
+            .await
+    }
+
+    fn artifacts(&self) -> Option<Arc<dyn harness_core::artifacts::ArtifactSink>> {
+        self.host.artifacts()
+    }
+
+    async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
+        self.host.images(sha256).await
+    }
+}
+
+/// What the loop returns when an append failed; `run_turn` replaces the
+/// error with the log's.
+fn stopped(usage: Usage) -> TurnOutcome {
+    TurnOutcome {
+        reason: TurnEndReason::Error,
+        usage: Some(usage),
+        error: None,
+    }
+}
 
 /// The orchestration tool (handled by the loop itself, not a `Tool`).
 pub const DELEGATE: &str = "delegate";
@@ -48,12 +167,25 @@ pub struct NativeConfig {
     pub allow_outside_workspace: bool,
     /// Folders file tools never touch (the node's data directory).
     pub protected_dirs: Arc<Vec<std::path::PathBuf>>,
+    /// How tool child processes are started (node.toml `[sandbox]`); each
+    /// session gets its own temp folder under it.
+    pub sandbox: harness_tools::sandbox::Confinement,
     pub tool_timeout: Duration,
+    /// Model calls one turn (and each sub-agent's turn) may make (node.toml
+    /// `[limits] max_steps`).
+    pub max_steps: usize,
+    /// The longest a `bash` call may run (node.toml `[limits]
+    /// bash_timeout_max_s`).
+    pub bash_timeout_max: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
     pub effort: Option<Effort>,
-    /// Summarise older turns once the history is estimated above this many
-    /// tokens (0 = never).
-    pub summarize_after_tokens: usize,
+    /// Summarise older turns once the history is above this many tokens
+    /// (0 = never). `None`: the model's context window less a reserve
+    /// (`compact::threshold`), or 24k when the window is unknown.
+    pub summarize_after_tokens: Option<usize>,
+    /// Retries of a model call that failed for a passing reason, before
+    /// the agent's fallbacks.
+    pub retry: retry::RetryPolicy,
 }
 
 impl Default for NativeConfig {
@@ -65,9 +197,13 @@ impl Default for NativeConfig {
             secrets: Default::default(),
             allow_outside_workspace: false,
             protected_dirs: Arc::default(),
+            sandbox: Default::default(),
             tool_timeout: Duration::from_secs(600),
+            max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
+            bash_timeout_max: Duration::from_secs(harness_tools::DEFAULT_TIMEOUT_MAX_S),
             effort: None,
-            summarize_after_tokens: 0,
+            summarize_after_tokens: None,
+            retry: Default::default(),
         }
     }
 }
@@ -79,6 +215,26 @@ preferences; drop pleasantries. Write at most 300 words in the conversation's la
 
 /// Turns kept verbatim after a summary.
 const KEEP_TURNS: usize = 2;
+
+/// Compaction failures (a failed request, or a summary that was empty or
+/// did not shrink the history) after which a turn stops trying.
+const MAX_COMPACT_FAILURES: u32 = 2;
+
+/// A summary is kept only if it is at most this many tenths of what it
+/// replaces: a summary barely smaller than its input costs a request and
+/// loses detail for nothing, and the next step would compact again.
+const SUMMARY_MAX_TENTHS: u64 = 9;
+
+fn note_compact_failure(failures: &mut u32, model: &str) {
+    *failures += 1;
+    if *failures == MAX_COMPACT_FAILURES {
+        tracing::warn!(
+            model,
+            failures = *failures,
+            "compaction keeps failing; not trying again this turn"
+        );
+    }
+}
 
 /// The latest summary in a history, and the events after it.
 pub fn split_summary(history: &[RawEvent]) -> (Option<String>, &[RawEvent]) {
@@ -168,6 +324,7 @@ impl NativeBackend {
         &self,
         agent: Option<&harness_core::agent::AgentSpec>,
         savings: &harness_core::savings::Savings,
+        host: &dyn harness_core::backend::TurnHost,
     ) -> Vec<ToolSpec> {
         let mut specs: Vec<ToolSpec> = self
             .tools
@@ -177,15 +334,24 @@ impl NativeBackend {
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
-                schema: t.schema(),
+                schema: t.schema_for(self.config.bash_timeout_max),
             })
             .collect();
-        if let Some(a) = agent.filter(|a| !a.delegates.is_empty())
+        // A delegate with nothing to work with here is left out; a call to
+        // it by name is still refused with the reason (`run_delegate`).
+        let offered: Vec<&harness_core::agent::AgentSpec> = agent
+            .map(|a| {
+                a.delegates
+                    .iter()
+                    .filter(|d| self.delegate_gap(d, savings, host).is_none())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(a) = agent.filter(|_| !offered.is_empty())
             && !a.deny_tools.iter().any(|t| t == DELEGATE)
         {
             let caps = a.caps.unwrap_or_default();
-            let roster: Vec<String> = a
-                .delegates
+            let roster: Vec<String> = offered
                 .iter()
                 .map(|d| format!("{} ({})", d.agent_id, d.name))
                 .collect();
@@ -204,7 +370,7 @@ impl NativeBackend {
                     "properties": {
                         "agent": {
                             "type": "string",
-                            "enum": a.delegates.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
+                            "enum": offered.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
                         },
                         "task": { "type": "string", "description": "Everything the specialist needs to know" }
                     },
@@ -213,6 +379,49 @@ impl NativeBackend {
             });
         }
         specs
+    }
+
+    /// Why `d` cannot be started here, if it declared tools and none of them
+    /// is registered on this node, enabled, allowed to it and not denied by
+    /// the node's policy: it would run with no tools while the parent
+    /// believes the work was done. An agent that declares no tools at all
+    /// (`tools: []`, like Smol) or takes `all` is never refused here.
+    fn delegate_gap(
+        &self,
+        d: &harness_core::agent::AgentSpec,
+        savings: &harness_core::savings::Savings,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> Option<String> {
+        let harness_core::agent::ToolSelection::List(declared) = &d.tools else {
+            return None;
+        };
+        if declared.is_empty() {
+            return None;
+        }
+        let usable = |name: &str| {
+            d.allows_tool(name)
+                && !host.tool_denied(name)
+                && self
+                    .tools
+                    .iter()
+                    .any(|t| t.name() == name && t.enabled(savings))
+        };
+        if declared.iter().any(|n| usable(n)) {
+            return None;
+        }
+        let names: Vec<String> = declared
+            .iter()
+            .map(|n| match n.as_str() {
+                "remember" => "memory".to_string(),
+                n => n.replace('_', " "),
+            })
+            .collect();
+        Some(format!(
+            "@{} was not started: none of its tools ({}) are available on this node. \
+             Do the work another way or tell the user.",
+            d.agent_id,
+            names.join(", ")
+        ))
     }
 
     /// Scrubbed like the output, so a source never shows what the output
@@ -236,6 +445,7 @@ impl NativeBackend {
         host: &dyn harness_core::backend::TurnHost,
         call: &ToolCallRef,
         refs: &SharedRefs,
+        observed: &Arc<Vec<String>>,
     ) -> (ToolOutcome, Usage) {
         let none = Usage::default();
         let Some(agent) = ctx.agent.as_ref() else {
@@ -264,6 +474,10 @@ impl NativeBackend {
         if task.is_empty() {
             return (ToolOutcome::err("`task` must describe the sub-task"), none);
         }
+        // Before any child session exists.
+        if let Some(why) = self.delegate_gap(spec, &ctx.extra.savings, host) {
+            return (ToolOutcome::err(why), none);
+        }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
             let _ = tx.send(sid);
@@ -272,6 +486,7 @@ impl NativeBackend {
             spec.clone(),
             task,
             refs.clone(),
+            observed.clone(),
             ctx.cancel.child_token(),
             started,
         );
@@ -279,12 +494,14 @@ impl NativeBackend {
         // Link to the child as soon as it exists, while it still works.
         let link = async {
             if let Some(sid) = rx.recv().await {
-                host.emit(EventKind::ToolOutputDelta(ToolOutputDelta {
-                    call_id: call_id.clone(),
-                    stream: OutputStream::Stdout,
-                    text: format!("session: {sid}\n"),
-                }))
-                .await;
+                // A failure cancels the turn (and so this child) by itself.
+                let _ = host
+                    .emit(EventKind::ToolOutputDelta(ToolOutputDelta {
+                        call_id: call_id.clone(),
+                        stream: OutputStream::Stdout,
+                        text: format!("session: {sid}\n"),
+                    }))
+                    .await;
             }
         };
         let (res, ()) = tokio::join!(run, link);
@@ -389,14 +606,60 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
     out
 }
 
-/// What the user and tools said in this conversation (not the model, not
-/// the system prompt): the provenance set for network tools.
-fn observed_text(messages: &[ChatMsg]) -> Vec<String> {
+/// Tools whose successful output may vouch for a URL (`web_fetch`
+/// provenance). Not `bash` (a `curl` error or an `echo` can plant any
+/// string), not `tool_output` (replays bash), not `grep`/`glob`/`outline`,
+/// not memory, not a sub-agent's answer. A failed call never vouches: some
+/// errors echo model-chosen strings.
+const URL_SOURCES: [&str; 3] = ["web_search", "web_fetch", "read"];
+
+/// Call ids in `history` that finished ok and ran a [`URL_SOURCES`] tool.
+fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
+    let mut tool_of: std::collections::HashMap<String, String> = Default::default();
+    let mut out = HashSet::new();
+    for e in history {
+        match e.typed() {
+            Ok(EventKind::AssistantMessage(m)) => {
+                for c in m.tool_calls {
+                    tool_of.insert(c.call_id, c.tool);
+                }
+            }
+            Ok(EventKind::ToolCallFinished(f))
+                if f.ok
+                    && tool_of
+                        .get(&f.call_id)
+                        .is_some_and(|t| URL_SOURCES.contains(&t.as_str())) =>
+            {
+                out.insert(f.call_id);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What the user and trusted tool results said in this conversation (not
+/// the model, not the system prompt, not memory or page context, not bash,
+/// not errors): the provenance set for network tools. `current` is the
+/// index of this turn's user message in `messages` and the user's own words
+/// for it (empty for a sub-agent, whose "user" message is its parent model's
+/// task); the message itself also carries the per-turn context block.
+fn observed_text(
+    messages: &[ChatMsg],
+    trusted: &HashSet<String>,
+    current: Option<(usize, &str)>,
+) -> Vec<String> {
     messages
         .iter()
-        .filter_map(|m| match m {
-            ChatMsg::Tool { content, .. } => Some(content.clone()),
-            other => other.user_text().map(str::to_string),
+        .enumerate()
+        .filter_map(|(i, m)| match m {
+            ChatMsg::Tool { call_id, content } => {
+                trusted.contains(call_id).then(|| content.clone())
+            }
+            other => other.user_text().map(|t| match current {
+                Some((idx, own)) if idx == i => own.to_string(),
+                _ => t.to_string(),
+            }),
         })
         .collect()
 }
@@ -438,22 +701,29 @@ async fn coalesce<T, F>(
     rx: impl Chunks,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
+    secrets: &SecretSet,
     make: impl Fn(String) -> EventKind + Send + Sync,
 ) -> Step<T>
 where
     F: std::future::Future<Output = T>,
 {
-    coalesce_led(fut, rx, cancel, host, &mut None, make).await.0
+    coalesce_led(fut, rx, cancel, host, &mut None, secrets, make)
+        .await
+        .0
 }
 
 /// `coalesce`, emitting `lead` (taken) just before the first batch. Also
-/// says whether any batch was emitted.
+/// says whether any batch was emitted. Batches go through a
+/// [`StreamScrubber`], so a secret split across two flushes is still
+/// replaced; the held-back tail is released with the last batch, whether
+/// the stream ended, was cancelled or was cut by its budget.
 async fn coalesce_led<T, F>(
     fut: F,
     mut rx: impl Chunks,
     cancel: &tokio_util::sync::CancellationToken,
     host: &dyn harness_core::backend::TurnHost,
     lead: &mut Option<EventKind>,
+    secrets: &SecretSet,
     make: impl Fn(String) -> EventKind + Send + Sync,
 ) -> (Step<T>, bool)
 where
@@ -461,14 +731,22 @@ where
 {
     tokio::pin!(fut);
     let mut buf = String::new();
+    let mut scrubber = StreamScrubber::new(secrets.clone());
     let mut emitted = false;
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let flush = async |buf: String, lead: &mut Option<EventKind>| {
-        if let Some(l) = lead.take() {
-            host.emit(l).await;
+    // `clean` is already scrubbed; an empty one (all held back) is not sent.
+    let flush = async |clean: String, lead: &mut Option<EventKind>| -> bool {
+        if clean.is_empty() {
+            return false;
         }
-        host.emit(make(buf)).await;
+        // A failed append cancels the turn's token, which ends this loop
+        // (or the tool, which then returns); later appends fail at once.
+        if let Some(l) = lead.take() {
+            let _ = host.emit(l).await;
+        }
+        let _ = host.emit(make(clean)).await;
+        true
     };
     let out = loop {
         tokio::select! {
@@ -478,14 +756,14 @@ where
             Some(d) = rx.next() => {
                 buf.push_str(&d);
                 if buf.len() >= FLUSH_BYTES {
-                    flush(std::mem::take(&mut buf), lead).await;
-                    emitted = true;
+                    let clean = scrubber.push(&std::mem::take(&mut buf));
+                    emitted |= flush(clean, lead).await;
                 }
             }
             _ = tick.tick() => {
                 if !buf.is_empty() {
-                    flush(std::mem::take(&mut buf), lead).await;
-                    emitted = true;
+                    let clean = scrubber.push(&std::mem::take(&mut buf));
+                    emitted |= flush(clean, lead).await;
                 }
             }
         }
@@ -493,10 +771,9 @@ where
     while let Some(d) = rx.try_next() {
         buf.push_str(&d);
     }
-    if !buf.is_empty() {
-        flush(buf, lead).await;
-        emitted = true;
-    }
+    let mut clean = scrubber.push(&buf);
+    clean.push_str(&scrubber.finish());
+    emitted |= flush(clean, lead).await;
     (out, emitted)
 }
 
@@ -540,6 +817,35 @@ impl AgentBackend for NativeBackend {
     }
 
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
+        let cancel = ctx.cancel.child_token();
+        let logged = Logged {
+            host: ctx.host,
+            cancel: cancel.clone(),
+            failed: Default::default(),
+        };
+        let out = self
+            .turn(TurnCtx {
+                host: &logged,
+                cancel,
+                ..ctx
+            })
+            .await;
+        match logged.failure() {
+            Some(e) => TurnOutcome {
+                reason: TurnEndReason::Error,
+                usage: out.usage,
+                error: Some(format!(
+                    "{e}; the turn was stopped, so nothing ran that the log does not hold"
+                )),
+            },
+            None => out,
+        }
+    }
+}
+
+impl NativeBackend {
+    /// One turn. Every append that fails ends it (see [`Logged`]).
+    async fn turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
         let host = ctx.host;
         let agent = ctx.agent.as_ref();
         let author = agent.map(|a| a.agent_id.clone());
@@ -547,7 +853,7 @@ impl AgentBackend for NativeBackend {
             .map(|a| a.system_prompt.as_str())
             .unwrap_or(&self.config.system_prompt);
         let sv = &ctx.extra.savings;
-        let keep = sv.keep_tool_outputs.map(|k| k as usize);
+        let mut keep = sv.keep_tool_outputs.map(|k| k as usize);
         let mut system = if ctx.cwd.as_os_str().is_empty() {
             base_prompt.to_string()
         } else {
@@ -569,36 +875,68 @@ impl AgentBackend for NativeBackend {
         }
         let mut usage = Usage::default();
         let (mut summary, mut recent) = split_summary(&ctx.history);
-        let limit = self.config.summarize_after_tokens;
-        let history_tokens = |events: &[RawEvent]| {
+        // The model answering this turn. Until the turn has any output, a
+        // model-level failure moves on to the next of the agent's fallbacks;
+        // the note saying so goes out just before the answer.
+        let mut chain = std::collections::VecDeque::from(model_chain(&ctx.model, agent));
+        let mut model = chain.pop_front().unwrap_or_else(|| ctx.model.clone());
+        let window_of = |m: &str| agent.and_then(|a| a.context_windows.get(m).copied());
+        // Compaction is keyed to the answering model's window, unless a
+        // trigger is configured (0 = never summarise).
+        let configured = self.config.summarize_after_tokens;
+        let limit = compact::threshold(configured, window_of(&model));
+        // Failed or useless summaries this turn; two stop further attempts.
+        let mut compact_failures = 0u32;
+        let estimate = |events: &[RawEvent]| {
             let mut m = history_to_messages(events);
             if let Some(k) = keep {
                 mask::mask_old_outputs(&mut m, k);
             }
-            provider::estimate_tokens(&m) as usize
+            provider::estimate_tokens(&m)
         };
-        if limit > 0
-            && history_tokens(recent) > limit
-            && let Some((text, through_seq, u)) =
-                self.summarize(&ctx, summary.as_deref(), recent).await
-        {
-            usage.add(&u);
-            host.emit(EventKind::HistorySummarized(HistorySummarized {
-                turn_id: ctx.turn_id.clone(),
-                through_seq,
-                text: text.clone(),
-            }))
-            .await;
-            let start = recent.partition_point(|e| e.seq <= through_seq);
-            recent = &recent[start..];
-            summary = Some(text);
+        if limit > 0 && compact::history_tokens(recent, estimate) as usize > limit {
+            // A summary whose event could not be appended is not used: the
+            // turn ends (`compact` says so with `Err`).
+            let Ok(compacted) = self
+                .compact(
+                    &ctx,
+                    &model,
+                    window_of(&model),
+                    summary.as_deref(),
+                    recent,
+                    limit / 4,
+                    &mut usage,
+                    &mut compact_failures,
+                )
+                .await
+            else {
+                return stopped(usage);
+            };
+            if let Some((text, through_seq)) = compacted {
+                let start = recent.partition_point(|e| e.seq <= through_seq);
+                recent = &recent[start..];
+                summary = Some(text);
+            }
         }
-        let system = match &summary {
-            Some(t) => format!("{system}\n\nSummary of the earlier conversation:\n{t}"),
-            None => system,
+        if ctx.cancel.is_cancelled() {
+            return TurnOutcome {
+                reason: TurnEndReason::Cancelled,
+                usage: Some(usage),
+                error: None,
+            };
+        }
+        // System prompt (with the summary) and the history before this turn.
+        let base_system = system;
+        let history_msgs = |summary: Option<&str>, recent: &[RawEvent]| {
+            let system = match summary {
+                Some(t) => format!("{base_system}\n\nSummary of the earlier conversation:\n{t}"),
+                None => base_system.clone(),
+            };
+            let mut m = vec![ChatMsg::System(system)];
+            m.extend(history_to_messages(recent));
+            m
         };
-        let mut messages = vec![ChatMsg::System(system)];
-        messages.extend(history_to_messages(recent));
+        let mut messages = history_msgs(summary.as_deref(), recent);
         // Per-turn context sits after the history: the system prompt and the
         // history stay byte-identical from turn to turn (prompt cache).
         let user_text = match &ctx.extra.context {
@@ -606,6 +944,7 @@ impl AgentBackend for NativeBackend {
             None => ctx.user_text.clone(),
         };
         messages.push(images::user_msg(user_text, &ctx.extra.images));
+        let mut user_idx = messages.len() - 1;
         let wanted = images::wanted(&messages);
         let loaded = if wanted.is_empty() {
             Vec::new()
@@ -616,13 +955,24 @@ impl AgentBackend for NativeBackend {
         if !ctx.compare.is_empty() {
             return self.compare(&ctx, messages, usage, author, ui).await;
         }
-        let tools = self.tool_specs(agent, sv);
+        let tools = self.tool_specs(agent, sv, host);
         // The master only puts an effort on the spec when the model supports it.
         let effort = agent
             .and_then(|a| a.effort.as_deref())
             .and_then(parse_effort)
             .or(self.config.effort);
-        let mut allowed_for_session: HashSet<String> = HashSet::new();
+        // Calls a person allowed "for this turn": each exact call, never a
+        // tool as a whole (PLAN.md T4). New for every turn and every
+        // sub-agent.
+        let mut allowed_this_turn: HashSet<harness_tools::CallKey> = HashSet::new();
+        let mut trusted = trusted_results(recent);
+        // A sub-agent's "user" message is its parent model's task: not the
+        // user's words.
+        let own_words = if ctx.parent_session.is_some() {
+            String::new()
+        } else {
+            ctx.user_text.clone()
+        };
         let (mut subagents, mut sub_tokens) = (0u32, 0u64);
         // Citation labels continue from the whole log (not only the part
         // after a summary), so `[S3]` names one page for the whole session.
@@ -634,11 +984,6 @@ impl AgentBackend for NativeBackend {
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history))));
 
-        // The model answering this turn. Until the turn has any output, a
-        // model-level failure moves on to the next of the agent's fallbacks;
-        // the note saying so goes out just before the answer.
-        let mut chain = std::collections::VecDeque::from(model_chain(&ctx.model, agent));
-        let mut model = chain.pop_front().unwrap_or_else(|| ctx.model.clone());
         // Why the turn's own model is not the one answering: it is
         // unavailable, or the first error it gave; a later fallback's own
         // failure only goes to the log.
@@ -647,7 +992,12 @@ impl AgentBackend for NativeBackend {
             .clone()
             .map(|r| fallback_event(&ctx.turn_id, &model, &ctx.model, r));
         let mut started = false;
-        for _ in 0..MAX_STEPS {
+        // A request the provider refused as too long is compacted and sent
+        // again once per turn; a second refusal ends the turn.
+        let mut overflowed = false;
+        // Messages in a row whose tool calls were cut by the output limit.
+        let mut cut_steps = 0;
+        for _ in 0..self.config.max_steps {
             let message_id = new_id();
             let mut sent = messages.clone();
             if let Some(k) = keep {
@@ -661,26 +1011,50 @@ impl AgentBackend for NativeBackend {
                 effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
                 cache: sv.prompt_cache,
             };
-            let (tx, rx) = mpsc::unbounded_channel();
-            let turn_id = ctx.turn_id.clone();
-            let mid = message_id.clone();
-            let (step, emitted) = coalesce_led(
-                self.provider.complete(&req, tx),
-                rx,
-                &ctx.cancel,
-                host,
-                &mut lead,
-                |text| {
-                    EventKind::AssistantDelta(AssistantDelta {
-                        author: author.clone(),
-                        variant: None,
-                        turn_id: turn_id.clone(),
-                        message_id: mid.clone(),
-                        text,
-                    })
-                },
-            )
-            .await;
+            // A passing failure is retried (bounded, with backoff) before
+            // the fallbacks, but only while this attempt has shown nothing:
+            // a partial answer is never repeated.
+            let mut retries = 0;
+            let (step, emitted) = loop {
+                let (tx, rx) = mpsc::unbounded_channel();
+                let turn_id = ctx.turn_id.clone();
+                let mid = message_id.clone();
+                let r = coalesce_led(
+                    self.provider.complete(&req, tx),
+                    rx,
+                    &ctx.cancel,
+                    host,
+                    &mut lead,
+                    &self.config.secrets,
+                    |text| {
+                        EventKind::AssistantDelta(AssistantDelta {
+                            author: author.clone(),
+                            variant: None,
+                            turn_id: turn_id.clone(),
+                            message_id: mid.clone(),
+                            text,
+                        })
+                    },
+                )
+                .await;
+                if let (Step::Done(Err(e)), false) = &r
+                    && let Some(wait) = self.config.retry.delay(e, retries)
+                {
+                    retries += 1;
+                    tracing::warn!(
+                        model = %model,
+                        error = %e.log_line(),
+                        retry = retries,
+                        wait_ms = wait.as_millis() as u64,
+                        "model call failed; retrying"
+                    );
+                    if !retry::wait(wait, &ctx.cancel).await {
+                        break (Step::Cancelled, false);
+                    }
+                    continue;
+                }
+                break r;
+            };
             started |= emitted;
             let completion = match step {
                 Step::Cancelled => {
@@ -690,10 +1064,102 @@ impl AgentBackend for NativeBackend {
                         error: None,
                     };
                 }
+                Step::Done(Err(e)) if !emitted && e.is_context_overflow() => {
+                    // `tried`: compaction failed or did not shrink anything
+                    // this turn, which the error then says.
+                    let fail = |usage: Usage, what: &str, tried: u32| TurnOutcome {
+                        reason: TurnEndReason::Error,
+                        usage: Some(usage),
+                        error: Some(format!(
+                            "The conversation is too long for the context window of {model}{what}{}. \
+                             Start a new chat, or switch to a model with a larger context window. \
+                             (provider: {})",
+                            if tried > 0 {
+                                "; summarising older turns was tried and did not help"
+                            } else {
+                                ""
+                            },
+                            e.log_line()
+                        )),
+                    };
+                    if overflowed {
+                        return fail(
+                            usage,
+                            if compact_failures > 0 {
+                                ", even after hiding old tool output"
+                            } else {
+                                ", even after summarising older turns and hiding old tool output"
+                            },
+                            compact_failures,
+                        );
+                    }
+                    overflowed = true;
+                    tracing::warn!(model = %model, error = %e.log_line(), "context overflow; compacting");
+                    let before = {
+                        let mut m = messages.clone();
+                        if let Some(k) = keep {
+                            mask::mask_old_outputs(&mut m, k);
+                        }
+                        provider::estimate_tokens(&m)
+                    };
+                    // Older turns into the summary (unless summarising is
+                    // switched off), then this turn's large tool outputs
+                    // but the newest hidden for the rest of the turn.
+                    let compacted = if configured == Some(0) {
+                        None
+                    } else {
+                        // A summary that could not be logged is not used,
+                        // and the request is not sent again.
+                        let Ok(c) = self
+                            .compact(
+                                &ctx,
+                                &model,
+                                window_of(&model),
+                                summary.as_deref(),
+                                recent,
+                                0,
+                                &mut usage,
+                                &mut compact_failures,
+                            )
+                            .await
+                        else {
+                            return stopped(usage);
+                        };
+                        c
+                    };
+                    if let Some((text, through_seq)) = compacted {
+                        let start = recent.partition_point(|ev| ev.seq <= through_seq);
+                        recent = &recent[start..];
+                        summary = Some(text);
+                        let this_turn = messages.split_off(user_idx);
+                        messages = history_msgs(summary.as_deref(), recent);
+                        user_idx = messages.len();
+                        messages.extend(this_turn);
+                        images::attach(&mut messages, &loaded);
+                    }
+                    if ctx.cancel.is_cancelled() {
+                        return TurnOutcome {
+                            reason: TurnEndReason::Cancelled,
+                            usage: Some(usage),
+                            error: None,
+                        };
+                    }
+                    keep = Some(1);
+                    let after = {
+                        let mut m = messages.clone();
+                        mask::mask_old_outputs(&mut m, 1);
+                        provider::estimate_tokens(&m)
+                    };
+                    if after >= before {
+                        // Nothing to shrink: the same request would fail again.
+                        return fail(usage, "", compact_failures);
+                    }
+                    continue;
+                }
                 Step::Done(Err(e)) if !started && e.is_model_level() && !chain.is_empty() => {
                     let next = chain.pop_front().unwrap_or_default();
                     let why = self.config.secrets.scrub(&e.to_string());
-                    tracing::warn!(failed = %model, next = %next, error = %why, "model failed; trying a fallback");
+                    tracing::warn!(failed = %model, next = %next, error = %e.log_line(), "model failed; trying a fallback");
                     let reason = from_reason.get_or_insert(why).clone();
                     lead = Some(fallback_event(&ctx.turn_id, &next, &ctx.model, reason));
                     model = next;
@@ -703,32 +1169,44 @@ impl AgentBackend for NativeBackend {
                     return TurnOutcome {
                         reason: TurnEndReason::Error,
                         usage: Some(usage),
-                        error: Some(e.to_string()),
+                        error: Some(
+                            self.config
+                                .retry
+                                .explain(&e, &model)
+                                .unwrap_or_else(|| e.to_string()),
+                        ),
                     };
                 }
                 Step::Done(Ok(c)) => c,
             };
-            if let Some(l) = lead.take() {
-                host.emit(l).await;
+            if let Some(l) = lead.take()
+                && host.emit(l).await.is_err()
+            {
+                return stopped(usage);
             }
             started = true;
             if let Some(u) = &completion.usage {
                 usage.add(u);
                 usage.context_tokens = u.input_tokens;
             }
-            host.emit(self.assistant_message(
-                AssistantMessage {
-                    author: author.clone(),
-                    variant: None,
-                    turn_id: ctx.turn_id.clone(),
-                    message_id,
-                    text: completion.text.clone(),
-                    tool_calls: completion.tool_calls.clone(),
-                    blocks: vec![],
-                },
-                ui,
-            ))
-            .await;
+            if host
+                .emit(self.assistant_message(
+                    AssistantMessage {
+                        author: author.clone(),
+                        variant: None,
+                        turn_id: ctx.turn_id.clone(),
+                        message_id,
+                        text: completion.text.clone(),
+                        tool_calls: completion.tool_calls.clone(),
+                        blocks: vec![],
+                    },
+                    ui,
+                ))
+                .await
+                .is_err()
+            {
+                return stopped(usage);
+            }
             messages.push(ChatMsg::Assistant {
                 text: completion.text,
                 tool_calls: completion.tool_calls.clone(),
@@ -740,6 +1218,57 @@ impl AgentBackend for NativeBackend {
                     error: None,
                 };
             }
+            // A message cut by the output limit: none of its calls runs,
+            // even one whose arguments parse (a server may have closed
+            // them), and the model is told why instead of being shown
+            // its fragment.
+            if completion.stop == StopReason::OutputLimit {
+                cut_steps += 1;
+                for call in completion.tool_calls {
+                    if host
+                        .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                            author: author.clone(),
+                            turn_id: ctx.turn_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.tool.clone(),
+                            input: call.input,
+                        }))
+                        .await
+                        .is_err()
+                        || host
+                            .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                call_id: call.call_id.clone(),
+                                ok: false,
+                                output: CUT_BY_OUTPUT_LIMIT.into(),
+                                exit_code: None,
+                                truncated: false,
+                                sources: vec![],
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        return stopped(usage);
+                    }
+                    messages.push(ChatMsg::Tool {
+                        call_id: call.call_id,
+                        content: CUT_BY_OUTPUT_LIMIT.into(),
+                    });
+                }
+                if cut_steps >= MAX_CUT_STEPS {
+                    return TurnOutcome {
+                        reason: TurnEndReason::Error,
+                        usage: Some(usage),
+                        error: Some(format!(
+                            "The model's answer reached its output limit {MAX_CUT_STEPS} times \
+                             in a row in the middle of a tool call, so nothing was run. Ask \
+                             for the change in smaller steps, or use a model with a larger \
+                             output limit."
+                        )),
+                    };
+                }
+                continue;
+            }
+            cut_steps = 0;
 
             // Delegations of this step run in parallel, within the caps.
             let (delegations, calls): (Vec<_>, Vec<_>) = completion
@@ -750,14 +1279,19 @@ impl AgentBackend for NativeBackend {
                 let caps = agent.and_then(|a| a.caps).unwrap_or_default();
                 let mut admitted = Vec::new();
                 for call in delegations {
-                    host.emit(EventKind::ToolCallStarted(ToolCallStarted {
-                        author: author.clone(),
-                        turn_id: ctx.turn_id.clone(),
-                        call_id: call.call_id.clone(),
-                        tool: call.tool.clone(),
-                        input: call.input.clone(),
-                    }))
-                    .await;
+                    if host
+                        .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                            author: author.clone(),
+                            turn_id: ctx.turn_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.tool.clone(),
+                            input: call.input.clone(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
                     let refusal = if subagents >= caps.max_subagents {
                         Some(format!(
                             "cap reached: at most {} sub-agents per turn",
@@ -773,15 +1307,20 @@ impl AgentBackend for NativeBackend {
                     };
                     match refusal {
                         Some(r) => {
-                            host.emit(EventKind::ToolCallFinished(ToolCallFinished {
-                                call_id: call.call_id.clone(),
-                                ok: false,
-                                output: r.clone(),
-                                exit_code: None,
-                                truncated: false,
-                                sources: vec![],
-                            }))
-                            .await;
+                            if host
+                                .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                    call_id: call.call_id.clone(),
+                                    ok: false,
+                                    output: r.clone(),
+                                    exit_code: None,
+                                    truncated: false,
+                                    sources: vec![],
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                return stopped(usage);
+                            }
                             messages.push(ChatMsg::Tool {
                                 call_id: call.call_id,
                                 content: r,
@@ -793,25 +1332,37 @@ impl AgentBackend for NativeBackend {
                         }
                     }
                 }
+                // What the parent may fetch, the child may too: the user's
+                // words and trusted results, never the task text.
+                let inherited = Arc::new(observed_text(
+                    &messages,
+                    &trusted,
+                    Some((user_idx, &own_words)),
+                ));
                 let results = futures::future::join_all(
                     admitted
                         .iter()
-                        .map(|c| self.run_delegate(&ctx, host, c, &refs)),
+                        .map(|c| self.run_delegate(&ctx, host, c, &refs, &inherited)),
                 )
                 .await;
                 for (call, (outcome, u)) in admitted.into_iter().zip(results) {
                     sub_tokens += u.input_tokens + u.output_tokens;
                     usage.add(&u);
                     let output = self.config.secrets.scrub(&outcome.output);
-                    host.emit(EventKind::ToolCallFinished(ToolCallFinished {
-                        call_id: call.call_id.clone(),
-                        ok: outcome.ok,
-                        output: output.clone(),
-                        exit_code: None,
-                        truncated: outcome.truncated,
-                        sources: self.scrub_sources(outcome.sources),
-                    }))
-                    .await;
+                    if host
+                        .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            call_id: call.call_id.clone(),
+                            ok: outcome.ok,
+                            output: output.clone(),
+                            exit_code: None,
+                            truncated: outcome.truncated,
+                            sources: self.scrub_sources(outcome.sources),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
                     messages.push(ChatMsg::Tool {
                         call_id: call.call_id,
                         content: output,
@@ -826,36 +1377,45 @@ impl AgentBackend for NativeBackend {
                 }
             }
             for call in calls {
-                host.emit(EventKind::ToolCallStarted(ToolCallStarted {
-                    author: author.clone(),
-                    turn_id: ctx.turn_id.clone(),
-                    call_id: call.call_id.clone(),
-                    tool: call.tool.clone(),
-                    input: call.input.clone(),
-                }))
-                .await;
-                let observed = observed_text(&messages);
+                if host
+                    .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                        author: author.clone(),
+                        turn_id: ctx.turn_id.clone(),
+                        call_id: call.call_id.clone(),
+                        tool: call.tool.clone(),
+                        input: call.input.clone(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
+                let mut observed = observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                if let Some(inh) = &ctx.extra.observed {
+                    observed.splice(0..0, inh.iter().cloned());
+                }
                 let outcome = self
-                    .run_tool(
-                        &ctx,
-                        host,
-                        &call,
-                        &mut allowed_for_session,
-                        &observed,
-                        &refs,
-                    )
+                    .run_tool(&ctx, host, &call, &mut allowed_this_turn, &observed, &refs)
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
-                host.emit(EventKind::ToolCallFinished(ToolCallFinished {
-                    call_id: call.call_id.clone(),
-                    ok: outcome.ok,
-                    output: output.clone(),
-                    exit_code: outcome.exit_code,
-                    truncated: outcome.truncated,
-                    sources: self.scrub_sources(outcome.sources),
-                }))
-                .await;
+                if host
+                    .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                        call_id: call.call_id.clone(),
+                        ok: outcome.ok,
+                        output: output.clone(),
+                        exit_code: outcome.exit_code,
+                        truncated: outcome.truncated,
+                        sources: self.scrub_sources(outcome.sources),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
+                if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
+                    trusted.insert(call.call_id.clone());
+                }
                 messages.push(ChatMsg::Tool {
                     call_id: call.call_id,
                     content: output,
@@ -872,7 +1432,10 @@ impl AgentBackend for NativeBackend {
         TurnOutcome {
             reason: TurnEndReason::Error,
             usage: Some(usage),
-            error: Some(format!("stopped after {MAX_STEPS} steps")),
+            error: Some(format!(
+                "stopped after {} steps (`max_steps` in node.toml)",
+                self.config.max_steps
+            )),
         }
     }
 }
@@ -953,29 +1516,45 @@ impl NativeBackend {
                     effort: None,
                     cache: ctx.extra.savings.prompt_cache,
                 };
-                let (tx, rx) = mpsc::unbounded_channel();
-                let (turn_id, mid, v2, a2) = (
-                    ctx.turn_id.clone(),
-                    message_id.clone(),
-                    variant.clone(),
-                    author.clone(),
-                );
-                let step = coalesce(
-                    self.provider.complete(&req, tx),
-                    rx,
-                    &ctx.cancel,
-                    host,
-                    |text| {
-                        EventKind::AssistantDelta(AssistantDelta {
-                            author: a2.clone(),
-                            variant: Some(v2.clone()),
-                            turn_id: turn_id.clone(),
-                            message_id: mid.clone(),
-                            text,
-                        })
-                    },
-                )
-                .await;
+                let mut retries = 0;
+                let step = loop {
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let (turn_id, mid, v2, a2) = (
+                        ctx.turn_id.clone(),
+                        message_id.clone(),
+                        variant.clone(),
+                        author.clone(),
+                    );
+                    let (step, emitted) = coalesce_led(
+                        self.provider.complete(&req, tx),
+                        rx,
+                        &ctx.cancel,
+                        host,
+                        &mut None,
+                        &self.config.secrets,
+                        |text| {
+                            EventKind::AssistantDelta(AssistantDelta {
+                                author: a2.clone(),
+                                variant: Some(v2.clone()),
+                                turn_id: turn_id.clone(),
+                                message_id: mid.clone(),
+                                text,
+                            })
+                        },
+                    )
+                    .await;
+                    if let (Step::Done(Err(e)), false) = (&step, emitted)
+                        && let Some(wait) = self.config.retry.delay(e, retries)
+                    {
+                        retries += 1;
+                        tracing::warn!(model = %model, error = %e.log_line(), retry = retries, "model call failed; retrying");
+                        if !retry::wait(wait, &ctx.cancel).await {
+                            break Step::Cancelled;
+                        }
+                        continue;
+                    }
+                    break step;
+                };
                 match step {
                     Step::Done(Ok(c)) => {
                         host.emit(self.assistant_message(
@@ -990,10 +1569,14 @@ impl NativeBackend {
                             },
                             ui,
                         ))
-                        .await;
+                        .await
+                        .map_err(|e| e.to_string())?;
                         Ok(c.usage)
                     }
-                    Step::Done(Err(e)) => Err(format!("{model}: {e}")),
+                    Step::Done(Err(e)) => Err(match self.config.retry.explain(&e, model) {
+                        Some(m) => m,
+                        None => format!("{model}: {e}"),
+                    }),
                     Step::Cancelled => Err("cancelled".into()),
                 }
             }
@@ -1029,52 +1612,168 @@ impl NativeBackend {
         }
     }
 
-    /// Summarise everything before the last `KEEP_TURNS` turns. Returns the
-    /// summary, the last seq it covers and the call's usage; `None` when
-    /// there is nothing old enough or the call fails (the turn then simply
-    /// sends the full history).
-    async fn summarize(
+    /// One model call whose text is not streamed to the user (summaries),
+    /// with the same retries as a turn's calls. `Err(None)` when cancelled.
+    async fn complete_quietly(
+        &self,
+        req: &ChatRequest,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Completion, Option<ProviderError>> {
+        let mut retries = 0;
+        loop {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let r = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(None),
+                r = self.provider.complete(req, tx) => r,
+            };
+            match r {
+                Err(e) => match self.config.retry.delay(&e, retries) {
+                    Some(wait) => {
+                        retries += 1;
+                        tracing::warn!(model = %req.model, error = %e.log_line(), retry = retries, "summary call failed; retrying");
+                        if !retry::wait(wait, cancel).await {
+                            return Err(None);
+                        }
+                    }
+                    None => return Err(Some(e)),
+                },
+                Ok(c) => return Ok(c),
+            }
+        }
+    }
+
+    /// Summarise everything before the last `KEEP_TURNS` turns with
+    /// `model`, whose context window is `window` when known. The old part
+    /// is read in pieces at turn boundaries that each fit the window (with
+    /// the summary so far), so no part of it is dropped unread; a single
+    /// turn larger than the window stops it there. Each piece's summary
+    /// covers everything up to its `through_seq` and is emitted at once,
+    /// so a cancel or failure midway leaves the last one valid. Skipped
+    /// when the old part is under `min_old` tokens. Returns the newest
+    /// summary and the last seq it covers; `None` when nothing was
+    /// summarised (the turn then sends the history as it is). `Err` when a
+    /// summary's event could not be appended: that summary is not returned,
+    /// no further summary request is made, and the caller ends the turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn compact(
         &self,
         ctx: &TurnCtx<'_>,
+        model: &str,
+        window: Option<u64>,
         prev: Option<&str>,
         recent: &[RawEvent],
-    ) -> Option<(String, u64, Usage)> {
-        let starts: Vec<u64> = recent
+        min_old: usize,
+        usage: &mut Usage,
+        failures: &mut u32,
+    ) -> Result<Option<(String, u64)>, harness_core::backend::LogError> {
+        if *failures >= MAX_COMPACT_FAILURES {
+            return Ok(None);
+        }
+        let starts: Vec<usize> = recent
             .iter()
-            .filter(|e| e.kind == "turn_started")
-            .map(|e| e.seq)
+            .enumerate()
+            .filter(|(_, e)| e.kind == "turn_started")
+            .map(|(i, _)| i)
             .collect();
         if starts.len() <= KEEP_TURNS {
-            return None;
+            return Ok(None);
         }
-        let through = starts[starts.len() - KEEP_TURNS] - 1;
-        let old = &recent[..recent.partition_point(|e| e.seq <= through)];
+        let old = &recent[..starts[starts.len() - KEEP_TURNS]];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
         let old_tokens = provider::estimate_tokens(&history_to_messages(old)) as usize;
-        if old_tokens < self.config.summarize_after_tokens / 4 {
-            return None;
+        if old.is_empty() || old_tokens < min_old {
+            return Ok(None);
         }
-        let req = ChatRequest {
-            model: ctx.model.clone(),
-            messages: vec![
-                ChatMsg::System(SUMMARY_PROMPT.into()),
-                ChatMsg::User(transcript(prev, old)),
-            ],
-            tools: vec![],
-            effort: None,
-            cache: false,
+        let budget = window.map(|w| w.saturating_sub(compact::SUMMARY_OVERHEAD));
+        let fits = |prev: Option<&str>, part: &[RawEvent]| {
+            budget.is_none_or(|b| {
+                provider::estimate_tokens(&[ChatMsg::User(transcript(prev, part))]) <= b
+            })
         };
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let c = tokio::select! {
-            r = self.provider.complete(&req, tx) => r.ok()?,
-            _ = ctx.cancel.cancelled() => return None,
-        };
-        let text = c.text.trim().to_string();
-        if text.is_empty() {
-            return None;
+        // Where a piece may end: the start of each later turn, or the end.
+        let ends: Vec<usize> = starts
+            .iter()
+            .copied()
+            .filter(|&i| i > 0 && i < old.len())
+            .chain(std::iter::once(old.len()))
+            .collect();
+        let mut prev = prev.map(str::to_string);
+        let mut done = None;
+        let mut from = 0;
+        while from < old.len() {
+            // The longest piece that fits (pieces only grow by whole turns).
+            let Some(end) = ends
+                .iter()
+                .copied()
+                .filter(|&e| e > from)
+                .take_while(|&e| fits(prev.as_deref(), &old[from..e]))
+                .last()
+            else {
+                tracing::warn!(
+                    model,
+                    "a turn is larger than the summarising model's context window; not summarised"
+                );
+                break;
+            };
+            let req = ChatRequest {
+                model: model.to_string(),
+                messages: vec![
+                    ChatMsg::System(SUMMARY_PROMPT.into()),
+                    ChatMsg::User(transcript(prev.as_deref(), &old[from..end])),
+                ],
+                tools: vec![],
+                effort: None,
+                cache: false,
+            };
+            let c = match self.complete_quietly(&req, &ctx.cancel).await {
+                Ok(c) => c,
+                Err(e) => {
+                    // Cancelled (`None`) is not a failure of compaction.
+                    if let Some(e) = e {
+                        tracing::warn!(model, error = %e.log_line(), "summary call failed");
+                        note_compact_failure(failures, model);
+                    }
+                    break;
+                }
+            };
+            usage.add(&c.usage.unwrap_or_default());
+            let text = c.text.trim().to_string();
+            // What the summary replaces: the summary so far and this piece,
+            // counted as they sit in the request, by the same estimate that
+            // sizes `old` above. Each piece is checked on its own, because
+            // each is its own event: the log never holds a summary that
+            // grew the history, and a later piece's rejection leaves the
+            // earlier ones in force.
+            let replaced = provider::estimate_tokens(&history_to_messages(&old[from..end]))
+                + prev.as_deref().map_or(0, |p| {
+                    provider::estimate_tokens(&[ChatMsg::System(p.into())])
+                });
+            let got = provider::estimate_tokens(&[ChatMsg::System(text.clone())]);
+            if text.is_empty() || got * 10 > replaced * SUMMARY_MAX_TENTHS {
+                tracing::warn!(
+                    model,
+                    summary_tokens = got,
+                    replaced_tokens = replaced,
+                    "summary does not shrink the history; discarded"
+                );
+                note_compact_failure(failures, model);
+                break;
+            }
+            let through_seq = old[end - 1].seq;
+            ctx.host
+                .emit(EventKind::HistorySummarized(HistorySummarized {
+                    turn_id: ctx.turn_id.clone(),
+                    through_seq,
+                    text: text.clone(),
+                }))
+                .await?;
+            prev = Some(text.clone());
+            done = Some((text, through_seq));
+            from = end;
         }
-        Some((text, through, c.usage.unwrap_or_default()))
+        Ok(done)
     }
 
     async fn run_tool(
@@ -1082,7 +1781,7 @@ impl NativeBackend {
         ctx: &TurnCtx<'_>,
         host: &dyn harness_core::backend::TurnHost,
         call: &ToolCallRef,
-        allowed_for_session: &mut HashSet<String>,
+        allowed_this_turn: &mut HashSet<harness_tools::CallKey>,
         observed: &[String],
         refs: &SharedRefs,
     ) -> ToolOutcome {
@@ -1101,7 +1800,8 @@ impl NativeBackend {
                 call.input
             ));
         }
-        if !allowed_for_session.contains(tool.name()) {
+        let key = harness_tools::call_key(&ctx.cwd, tool.name(), &call.input);
+        if !allowed_this_turn.contains(&key) {
             let decision = host
                 .approve(&call.call_id, tool.name(), &call.input, tool.risk())
                 .await;
@@ -1115,7 +1815,7 @@ impl NativeBackend {
                     });
                 }
                 harness_core::policy::Decision::AllowSession => {
-                    allowed_for_session.insert(tool.name().to_string());
+                    allowed_this_turn.insert(key);
                 }
                 harness_core::policy::Decision::Allow => {}
             }
@@ -1130,6 +1830,7 @@ impl NativeBackend {
             allow_outside_workspace: self.config.allow_outside_workspace,
             protected: self.config.protected_dirs.clone(),
             timeout: self.config.tool_timeout,
+            bash_timeout_max: self.config.bash_timeout_max,
             env: self.config.tool_env.clone(),
             observed: Arc::new(observed.to_vec()),
             savings: ctx.extra.savings.clone(),
@@ -1137,6 +1838,7 @@ impl NativeBackend {
             refs: refs.clone(),
             artifacts: host.artifacts(),
             call_id: call.call_id.clone(),
+            sandbox: self.config.sandbox.for_session(&ctx.session_id.to_string()),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`
@@ -1144,19 +1846,32 @@ impl NativeBackend {
         // room in the channel is always woken by the next drain.
         let call_id = call.call_id.clone();
         let secrets = &self.config.secrets;
-        // The tool itself observes cancellation (and kills its process group),
-        // so we must not abandon its future: use a token that never fires here.
-        let never = tokio_util::sync::CancellationToken::new();
+        // The tool itself observes cancellation (bash kills its process
+        // group), so its future is not dropped at once: it gets
+        // `TOOL_CANCEL_GRACE` to return on its own. A tool still running
+        // then (stuck in a syscall, a bug) is abandoned so the turn ends
+        // (AUDIT S10); a blocking thread it left keeps running detached.
+        let abandon = tokio_util::sync::CancellationToken::new();
+        let watch = {
+            let (cancel, abandon) = (ctx.cancel.clone(), abandon.clone());
+            tokio::spawn(async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(TOOL_CANCEL_GRACE).await;
+                abandon.cancel();
+            })
+        };
+        let _stop_watch = AbortOnDrop(watch);
         let step = coalesce(
             tool.run(&tctx, call.input.clone()),
             rx,
-            &never,
+            &abandon,
             host,
+            secrets,
             |text| {
                 EventKind::ToolOutputDelta(ToolOutputDelta {
                     call_id: call_id.clone(),
                     stream: OutputStream::Stdout,
-                    text: secrets.scrub(&text),
+                    text,
                 })
             },
         )
@@ -1213,8 +1928,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnHost for RecHost {
-        async fn emit(&self, kind: EventKind) {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
             self.events.lock().unwrap().push(kind);
+            Ok(())
         }
         async fn approve(&self, _c: &str, tool: &str, _i: &Value, risk: ToolRisk) -> Decision {
             if risk == ToolRisk::ReadOnly {
@@ -1262,6 +1978,7 @@ mod tests {
             fallbacks: vec![],
             unavailable: vec![],
             no_effort: vec![],
+            context_windows: Default::default(),
             effort: None,
             budget: Default::default(),
             ui: Default::default(),
@@ -1281,7 +1998,11 @@ mod tests {
         let mut c = ctx(&host, "run: touch hacked", dir.path());
         c.agent = Some(scout());
         let b = backend();
-        assert_eq!(b.tool_specs(c.agent.as_ref(), &Default::default()).len(), 1);
+        assert_eq!(
+            b.tool_specs(c.agent.as_ref(), &Default::default(), &host)
+                .len(),
+            1
+        );
         b.run_turn(c).await;
         assert!(!dir.path().join("hacked").exists());
         assert!(host.asked.lock().unwrap().is_empty(), "never even asked");
@@ -1386,6 +2107,142 @@ mod tests {
             EventKind::ToolCallFinished(f) if !f.ok && f.output.contains("denied"))));
     }
 
+    /// Answers with the completions given, in order, then "done".
+    struct Script(Mutex<std::collections::VecDeque<Completion>>);
+
+    impl Script {
+        fn backend(steps: Vec<Completion>) -> NativeBackend {
+            NativeBackend::new(
+                Arc::new(Script(Mutex::new(steps.into()))),
+                harness_tools::builtin(),
+                NativeConfig::default(),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Script {
+        fn name(&self) -> &'static str {
+            "script"
+        }
+        async fn complete(
+            &self,
+            _req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            Ok(self.0.lock().unwrap().pop_front().unwrap_or(Completion {
+                text: "done".into(),
+                stop: StopReason::End,
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// A message with one `write` call that stopped for `stop`.
+    fn write_call(input: Value, stop: StopReason) -> Completion {
+        Completion {
+            text: "Writing the file.".into(),
+            tool_calls: vec![ToolCallRef {
+                call_id: new_id(),
+                tool: "write".into(),
+                input,
+            }],
+            usage: None,
+            stop,
+        }
+    }
+
+    fn refusals(host: &RecHost) -> Vec<String> {
+        host.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallFinished(f) if !f.ok => Some(f.output.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `write` cut mid-JSON by the output limit: not run, and the model is
+    /// told why and what to do, without its fragment echoed back.
+    #[tokio::test]
+    async fn a_call_cut_by_the_output_limit_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let cut = json!(r#"{"path":"a.txt","content":"FRAGMENT-1f3a half of the fi"#);
+        let out = Script::backend(vec![write_call(cut, StopReason::OutputLimit)])
+            .run_turn(ctx(&host, "write a.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "never offered for approval"
+        );
+        let r = refusals(&host);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("output limit"), "{}", r[0]);
+        assert!(r[0].contains("smaller"), "{}", r[0]);
+        assert!(!r[0].contains("FRAGMENT"), "{}", r[0]);
+        assert!(!r[0].contains("a.txt"), "{}", r[0]);
+        // The text before the cut is kept.
+        let ev = host.events.lock().unwrap();
+        assert!(ev.iter().any(|e| matches!(e,
+            EventKind::AssistantMessage(m) if m.text == "Writing the file.")));
+    }
+
+    /// The dangerous case: a call from a message cut by the output limit
+    /// whose arguments still parse (a provider or server that completes
+    /// them) does not run either.
+    #[tokio::test]
+    async fn a_complete_call_in_a_cut_message_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let whole = json!({"path": "b.txt", "content": "maybe only half"});
+        let out = Script::backend(vec![write_call(whole, StopReason::OutputLimit)])
+            .run_turn(ctx(&host, "write b.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert!(!dir.path().join("b.txt").exists(), "the write ran");
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "never offered for approval"
+        );
+        let r = refusals(&host);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("output limit"), "{}", r[0]);
+        assert!(!r[0].contains("maybe only half"), "{}", r[0]);
+    }
+
+    /// Three cut messages in a row end the turn, naming the cause; two,
+    /// then a step that stops normally, start the count again.
+    #[tokio::test]
+    async fn three_cut_messages_in_a_row_end_the_turn() {
+        let cut = || write_call(json!(r#"{"path":"c.txt","con"#), StopReason::OutputLimit);
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let out = Script::backend(vec![cut(), cut(), cut()])
+            .run_turn(ctx(&host, "write c.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Error);
+        let e = out.error.unwrap_or_default();
+        assert!(e.contains("output limit") && e.contains('3'), "{e}");
+        assert_eq!(refusals(&host).len(), 3, "every cut call has its result");
+
+        let host = RecHost::new(Decision::Allow);
+        let ok = write_call(
+            json!({"path": "d.txt", "content": "x"}),
+            StopReason::ToolUse,
+        );
+        let out = Script::backend(vec![cut(), cut(), ok, cut(), cut()])
+            .run_turn(ctx(&host, "write d.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert!(dir.path().join("d.txt").exists(), "the normal step ran");
+        assert_eq!(refusals(&host).len(), 4);
+    }
+
     #[tokio::test]
     async fn secrets_are_scrubbed_from_tool_output() {
         let dir = tempfile::tempdir().unwrap();
@@ -1422,6 +2279,49 @@ mod tests {
         assert!(all.contains("[REDACTED]"));
     }
 
+    /// A secret that straddles two flushes (the stream sleeps past
+    /// FLUSH_INTERVAL between pieces) is replaced, the held tail comes out
+    /// when the stream ends, and nothing is lost or repeated.
+    #[tokio::test]
+    async fn secret_split_across_flushes_is_scrubbed() {
+        let secret = "sk-supersecret-123";
+        let text = format!("start {secret} end é");
+        for at in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            let host = RecHost::new(Decision::Allow);
+            let (tx, rx) = mpsc::unbounded_channel::<String>();
+            let (a, b) = (text[..at].to_string(), text[at..].to_string());
+            let fut = async move {
+                for piece in [a, b] {
+                    tx.send(piece).unwrap();
+                    tokio::time::sleep(FLUSH_INTERVAL * 3).await;
+                }
+            };
+            let secrets = SecretSet::new(vec![harness_core::Secret::new(secret.into())]);
+            let never = tokio_util::sync::CancellationToken::new();
+            coalesce(fut, rx, &never, &host, &secrets, |text| {
+                EventKind::AssistantDelta(AssistantDelta {
+                    author: Default::default(),
+                    variant: None,
+                    turn_id: "t".into(),
+                    message_id: "m".into(),
+                    text,
+                })
+            })
+            .await;
+            let all: String = host
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::AssistantDelta(d) => Some(d.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(all, "start [REDACTED] end é", "split at {at}");
+        }
+    }
+
     /// `run: <cmd>` calls bash, `out: <id>` calls tool_output; after a tool
     /// result it stops.
     struct Scripted;
@@ -1440,6 +2340,7 @@ mod tests {
                 text: "done".into(),
                 tool_calls: vec![],
                 usage: None,
+                stop: Default::default(),
             };
             if matches!(req.messages.last(), Some(ChatMsg::Tool { .. })) {
                 return Ok(done);
@@ -1465,6 +2366,7 @@ mod tests {
                     input,
                 }],
                 usage: None,
+                stop: Default::default(),
             })
         }
     }
@@ -1656,7 +2558,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnHost for DelegatingHost {
-        async fn emit(&self, kind: EventKind) {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
             self.parent.emit(kind).await
         }
         async fn approve(&self, c: &str, tool: &str, i: &Value, risk: ToolRisk) -> Decision {
@@ -1667,6 +2569,7 @@ mod tests {
             agent: harness_core::agent::AgentSpec,
             task: String,
             refs: SharedRefs,
+            observed: Arc<Vec<String>>,
             cancel: tokio_util::sync::CancellationToken,
             started: Box<dyn FnOnce(SessionId) + Send>,
         ) -> Result<harness_core::backend::DelegateOutcome, String> {
@@ -1674,7 +2577,9 @@ mod tests {
             started(child);
             let mut c = ctx(&self.child, &task, &self.cwd);
             c.agent = Some(agent);
+            c.parent_session = Some(SessionId::new());
             c.extra.refs = Some(refs);
+            c.extra.observed = Some(observed);
             c.cancel = cancel;
             let out = self.backend.run_turn(c).await;
             let ev = self.child.events.lock().unwrap();
@@ -1701,6 +2606,157 @@ mod tests {
                 usage: out.usage,
                 sources,
             })
+        }
+    }
+
+    /// Parent calls `parent` (fixed-result tools), then delegates `task` to
+    /// a child whose one call is the `web_fetch` probe on `U`. Returns what
+    /// the child's probe saw.
+    async fn child_probe(
+        parent: Vec<(&'static str, Value)>,
+        tools: Vec<Arc<dyn harness_tools::Tool>>,
+        user: &str,
+        task: &str,
+    ) -> String {
+        struct Split(Vec<(&'static str, Value)>, Value);
+        #[async_trait::async_trait]
+        impl Provider for Split {
+            fn name(&self) -> &'static str {
+                "split"
+            }
+            async fn complete(
+                &self,
+                req: &ChatRequest,
+                _deltas: mpsc::UnboundedSender<String>,
+            ) -> Result<Completion, ProviderError> {
+                let is_parent = req.tools.iter().any(|t| t.name == "delegate");
+                let since = req
+                    .messages
+                    .iter()
+                    .rposition(|m| m.user_text().is_some())
+                    .map_or(0, |i| i + 1);
+                let done = req.messages[since..]
+                    .iter()
+                    .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                    .count();
+                let next = if is_parent {
+                    match self.0.get(done) {
+                        Some((t, i)) => Some((*t, i.clone())),
+                        None if done == self.0.len() => Some(("delegate", self.1.clone())),
+                        None => None,
+                    }
+                } else if done == 0 {
+                    Some(("web_fetch", json!({"url": U})))
+                } else {
+                    None
+                };
+                Ok(Completion {
+                    text: "done".into(),
+                    tool_calls: next
+                        .map(|(t, i)| ToolCallRef {
+                            call_id: new_id(),
+                            tool: t.into(),
+                            input: i,
+                        })
+                        .into_iter()
+                        .collect(),
+                    usage: None,
+                    stop: Default::default(),
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(NativeBackend::new(
+            Arc::new(Split(parent, json!({"agent": "researcher", "task": task}))),
+            tools,
+            NativeConfig::default(),
+        ));
+        let host = DelegatingHost {
+            parent: RecHost::new(Decision::Allow),
+            child: RecHost::new(Decision::Allow),
+            backend: backend.clone(),
+            cwd: dir.path().to_path_buf(),
+        };
+        let researcher = harness_core::agent::AgentSpec {
+            agent_id: "researcher".into(),
+            tools: harness_core::agent::ToolSelection::List(vec!["web_fetch".into()]),
+            ..scout()
+        };
+        let lead = harness_core::agent::AgentSpec {
+            agent_id: "lead".into(),
+            tools: harness_core::agent::ToolSelection::List(vec![
+                "web_search".into(),
+                "bash".into(),
+                "read".into(),
+            ]),
+            delegates: vec![researcher],
+            ..scout()
+        };
+        let mut c = ctx(&host.parent, user, dir.path());
+        c.agent = Some(lead);
+        let parent_host: &dyn TurnHost = &host;
+        c.host = parent_host;
+        backend.run_turn(c).await;
+        let ev = host.child.events.lock().unwrap();
+        ev.iter()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+                _ => None,
+            })
+            .expect("child probe ran")
+    }
+
+    fn probe_tools() -> Vec<Arc<dyn harness_tools::Tool>> {
+        vec![
+            Arc::new(Probe),
+            fixed("web_search", true, "found https://laundered.example/path"),
+            fixed("bash", true, "https://laundered.example/path"),
+            fixed("read", false, "error https://laundered.example/path"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn child_inherits_url_from_the_parents_user_message() {
+        let seen = child_probe(
+            vec![],
+            probe_tools(),
+            "summarise https://laundered.example/path",
+            "fetch the page",
+        )
+        .await;
+        assert_eq!(seen, "seen=true");
+    }
+
+    #[tokio::test]
+    async fn url_only_in_the_childs_task_is_refused_in_the_child() {
+        let seen = child_probe(
+            vec![],
+            probe_tools(),
+            "hello",
+            "fetch https://laundered.example/path?q=SECRET and https://laundered.example/path",
+        )
+        .await;
+        assert_eq!(seen, "seen=false");
+    }
+
+    #[tokio::test]
+    async fn child_inherits_url_from_a_successful_parent_search() {
+        let seen = child_probe(
+            vec![("web_search", json!({}))],
+            probe_tools(),
+            "hello",
+            "fetch the first hit",
+        )
+        .await;
+        assert_eq!(seen, "seen=true");
+    }
+
+    #[tokio::test]
+    async fn child_does_not_inherit_urls_from_parent_bash_or_errors() {
+        for call in ["bash", "read"] {
+            let seen =
+                child_probe(vec![(call, json!({}))], probe_tools(), "hello", "fetch it").await;
+            assert_eq!(seen, "seen=false", "{call}");
         }
     }
 
@@ -1828,6 +2884,276 @@ mod tests {
         });
         let out = backend().run_turn(c).await;
         assert_eq!(out.reason, TurnEndReason::Cancelled);
+    }
+
+    /// A tool that ignores its cancellation token (stuck in a syscall, a
+    /// bug) still cannot hold the turn past the grace period (AUDIT S10).
+    #[tokio::test]
+    async fn cancel_ends_the_turn_even_if_a_tool_ignores_it() {
+        struct Stuck;
+        #[async_trait::async_trait]
+        impl harness_tools::Tool for Stuck {
+            fn name(&self) -> &'static str {
+                "read"
+            }
+            fn description(&self) -> &'static str {
+                "never returns"
+            }
+            fn schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn risk(&self) -> ToolRisk {
+                ToolRisk::ReadOnly
+            }
+            async fn run(&self, _ctx: &ToolCtx, _input: Value) -> ToolOutcome {
+                std::future::pending().await
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let c = ctx(&host, "read: x", dir.path());
+        let cancel = c.cancel.clone();
+        let b = NativeBackend::new(
+            Arc::new(mock::Mock {
+                delay: Duration::from_millis(1),
+            }),
+            vec![Arc::new(Stuck)],
+            NativeConfig::default(),
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.cancel();
+        });
+        let out = tokio::time::timeout(TOOL_CANCEL_GRACE + Duration::from_secs(2), b.run_turn(c))
+            .await
+            .expect("a tool that ignores cancel held the turn");
+        assert_eq!(out.reason, TurnEndReason::Cancelled);
+    }
+
+    /// A host whose log refuses one kind of event, as a full disk would.
+    struct FailOn {
+        rec: RecHost,
+        kind: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHost for FailOn {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+            if kind.name() == self.kind {
+                return Err(harness_core::backend::LogError(
+                    "database or disk is full".into(),
+                ));
+            }
+            self.rec.emit(kind).await
+        }
+        async fn approve(&self, c: &str, tool: &str, i: &Value, risk: ToolRisk) -> Decision {
+            self.rec.approve(c, tool, i, risk).await
+        }
+    }
+
+    /// Calls the `flag` tool once, then answers; counts its requests.
+    #[derive(Default)]
+    struct CallsFlag(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl Provider for CallsFlag {
+        fn name(&self) -> &'static str {
+            "calls-flag"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answered = matches!(req.messages.last(), Some(ChatMsg::Tool { .. }));
+            Ok(Completion {
+                text: if answered {
+                    "done".into()
+                } else {
+                    String::new()
+                },
+                tool_calls: (!answered)
+                    .then(|| ToolCallRef {
+                        call_id: new_id(),
+                        tool: "flag".into(),
+                        input: json!({}),
+                    })
+                    .into_iter()
+                    .collect(),
+                usage: None,
+                stop: Default::default(),
+            })
+        }
+    }
+
+    /// Stands in for a tool with an effect: records that its body ran.
+    struct Flag(Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Flag {
+        fn name(&self) -> &'static str {
+            "flag"
+        }
+        fn description(&self) -> &'static str {
+            "sets a flag"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::Mutating
+        }
+        async fn run(&self, _ctx: &ToolCtx, _input: Value) -> ToolOutcome {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            ToolOutcome::ok("set")
+        }
+    }
+
+    /// Runs one turn against a host that refuses `kind`. Returns the
+    /// outcome, whether the tool body ran and how many model requests went out.
+    async fn turn_failing_on(kind: &'static str) -> (TurnOutcome, bool, usize, Vec<&'static str>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(CallsFlag::default());
+        let b = NativeBackend::new(
+            provider.clone(),
+            vec![Arc::new(Flag(ran.clone()))],
+            NativeConfig::default(),
+        );
+        let host = FailOn {
+            rec: RecHost::new(Decision::Allow),
+            kind,
+        };
+        let mut c = ctx(&host.rec, "go", dir.path());
+        c.host = &host;
+        let out = b.run_turn(c).await;
+        let calls = provider.0.load(std::sync::atomic::Ordering::SeqCst);
+        (
+            out,
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            calls,
+            host.rec.kinds(),
+        )
+    }
+
+    /// The log is written first: a tool whose start could not be recorded
+    /// does not run, and the turn ends saying why.
+    #[tokio::test]
+    async fn a_tool_does_not_run_when_its_start_cannot_be_logged() {
+        let (out, ran, calls, kinds) = turn_failing_on("tool_call_started").await;
+        assert!(!ran, "the tool body ran without its start in the log");
+        assert_eq!(calls, 1, "no further model request");
+        assert_eq!(out.reason, TurnEndReason::Error);
+        let err = out.error.unwrap_or_default();
+        assert!(err.contains("log could not be written"), "{err}");
+        assert!(!kinds.contains(&"tool_call_finished"), "{kinds:?}");
+    }
+
+    /// A result that could not be recorded is not handed to the model:
+    /// the next request would carry a history the log does not hold.
+    #[tokio::test]
+    async fn no_model_request_after_a_result_cannot_be_logged() {
+        let (out, ran, calls, _) = turn_failing_on("tool_call_finished").await;
+        assert!(ran);
+        assert_eq!(calls, 1, "a model request went out after the result failed");
+        assert_eq!(out.reason, TurnEndReason::Error);
+        assert!(
+            out.error
+                .unwrap_or_default()
+                .contains("log could not be written")
+        );
+    }
+
+    /// A message whose tool calls could not be recorded runs none of them.
+    #[tokio::test]
+    async fn assistant_message_that_cannot_be_logged_runs_no_tool() {
+        let (out, ran, calls, _) = turn_failing_on("assistant_message").await;
+        assert!(!ran);
+        assert_eq!(calls, 1);
+        assert_eq!(out.reason, TurnEndReason::Error);
+    }
+
+    /// Delegations run in parallel. When one of them cannot log, the others
+    /// are cancelled through the turn's token and the turn ends within the
+    /// grace period, as an error.
+    #[tokio::test]
+    async fn a_failed_append_cancels_the_parallel_delegations() {
+        struct Parallel {
+            rec: RecHost,
+            cancelled: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl TurnHost for Parallel {
+            async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+                if kind.name() == "tool_output_delta" {
+                    return Err(harness_core::backend::LogError("disk I/O error".into()));
+                }
+                self.rec.emit(kind).await
+            }
+            async fn approve(&self, c: &str, t: &str, i: &Value, r: ToolRisk) -> Decision {
+                self.rec.approve(c, t, i, r).await
+            }
+            async fn delegate(
+                &self,
+                agent: harness_core::agent::AgentSpec,
+                _task: String,
+                _refs: SharedRefs,
+                _observed: Arc<Vec<String>>,
+                cancel: tokio_util::sync::CancellationToken,
+                started: Box<dyn FnOnce(SessionId) + Send>,
+            ) -> Result<harness_core::backend::DelegateOutcome, String> {
+                if agent.agent_id == "a" {
+                    // Only `a` reports its child, so only its link fails.
+                    started(SessionId::new());
+                }
+                cancel.cancelled().await;
+                self.cancelled
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("cancelled".into())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let host = Parallel {
+            rec: RecHost::new(Decision::Allow),
+            cancelled: Arc::default(),
+        };
+        let lead = harness_core::agent::AgentSpec {
+            agent_id: "lead".into(),
+            delegates: vec![
+                harness_core::agent::AgentSpec {
+                    agent_id: "a".into(),
+                    ..scout()
+                },
+                harness_core::agent::AgentSpec {
+                    agent_id: "b".into(),
+                    ..scout()
+                },
+            ],
+            ..scout()
+        };
+        let mut c = ctx(&host.rec, "delegate: a=one | b=two", dir.path());
+        c.agent = Some(lead);
+        c.host = &host;
+        let out = tokio::time::timeout(
+            TOOL_CANCEL_GRACE + Duration::from_secs(2),
+            backend().run_turn(c),
+        )
+        .await
+        .expect("the turn did not end after a failed append");
+        assert_eq!(
+            host.cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both delegations are cancelled"
+        );
+        assert_eq!(out.reason, TurnEndReason::Error);
+        assert!(
+            out.error
+                .unwrap_or_default()
+                .contains("log could not be written")
+        );
+        let kinds = host.rec.kinds();
+        assert!(!kinds.contains(&"tool_call_finished"), "{kinds:?}");
     }
 
     #[test]
@@ -1980,7 +3306,7 @@ mod tests {
             rec.clone(),
             vec![],
             NativeConfig {
-                summarize_after_tokens: 300,
+                summarize_after_tokens: Some(300),
                 ..Default::default()
             },
         );
@@ -2033,6 +3359,142 @@ mod tests {
         let (sum, recent) = split_summary(&history2);
         assert_eq!(sum.as_deref(), Some("Summary of 2 earlier messages."));
         assert_eq!(recent.first().map(|e| e.seq), Some(10));
+    }
+
+    /// With the breaker open, `compact` makes no request at all.
+    #[tokio::test]
+    async fn an_open_breaker_makes_no_summary_request() {
+        let sid = SessionId::new();
+        let mut seq = 1;
+        let mut history = vec![];
+        for n in 1..=6 {
+            history.extend(turn_events(sid, &mut seq, n));
+        }
+        let rec = Arc::new(Rec {
+            inner: mock::Mock {
+                delay: Duration::from_millis(0),
+            },
+            reqs: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(rec.clone(), vec![], NativeConfig::default());
+        let host = RecHost::new(Decision::Allow);
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(&host, "next", dir.path());
+        let mut usage = Usage::default();
+        let mut failures = MAX_COMPACT_FAILURES;
+        let res = b
+            .compact(
+                &c,
+                "mock",
+                None,
+                None,
+                &history,
+                0,
+                &mut usage,
+                &mut failures,
+            )
+            .await;
+        assert!(matches!(res, Ok(None)));
+        assert!(rec.reqs.lock().unwrap().is_empty());
+        let mut failures = 0;
+        let res = b
+            .compact(
+                &c,
+                "mock",
+                None,
+                None,
+                &history,
+                0,
+                &mut usage,
+                &mut failures,
+            )
+            .await;
+        assert!(matches!(res, Ok(Some(_))), "{res:?}");
+        assert_eq!(failures, 0);
+    }
+
+    /// The log is written first, for summaries too: a summary whose event
+    /// could not be appended does not replace the history, no further
+    /// summary request is made, and the turn makes no model request.
+    #[tokio::test]
+    async fn a_summary_that_cannot_be_logged_is_not_used() {
+        let sid = SessionId::new();
+        let mut seq = 1;
+        let mut history = vec![];
+        for n in 1..=6 {
+            history.extend(turn_events(sid, &mut seq, n));
+        }
+        let rec = Arc::new(Rec {
+            inner: mock::Mock {
+                delay: Duration::from_millis(0),
+            },
+            reqs: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(
+            rec.clone(),
+            vec![],
+            NativeConfig {
+                summarize_after_tokens: Some(300),
+                ..Default::default()
+            },
+        );
+        let host = FailOn {
+            rec: RecHost::new(Decision::Allow),
+            kind: "history_summarized",
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        // `compact` itself, against the bare host: a small window makes the
+        // old part two pieces, so going on after the failure would show as
+        // a second request.
+        let mut c = ctx(&host.rec, "next", dir.path());
+        c.host = &host;
+        let one_turn = estimate_tokens(&[ChatMsg::User(transcript(None, &history[..4]))]);
+        let window = compact::SUMMARY_OVERHEAD + one_turn * 3;
+        let mut usage = Usage::default();
+        let res = b
+            .compact(
+                &c,
+                "mock",
+                Some(window),
+                None,
+                &history,
+                0,
+                &mut usage,
+                &mut 0,
+            )
+            .await;
+        assert!(res.is_err(), "an unlogged summary was returned: {res:?}");
+        assert_eq!(
+            rec.reqs.lock().unwrap().len(),
+            1,
+            "a summary request after the failure"
+        );
+        drop(c);
+
+        // The whole turn: it ends as an error, with no model request after
+        // the summariser's and nothing answered.
+        rec.reqs.lock().unwrap().clear();
+        let mut c = ctx(&host.rec, "next", dir.path());
+        c.history = history;
+        c.host = &host;
+        let out = b.run_turn(c).await;
+        assert_eq!(out.reason, TurnEndReason::Error);
+        let err = out.error.unwrap_or_default();
+        assert!(err.contains("log could not be written"), "{err}");
+        let reqs = rec.reqs.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "a model request after the summary failed to log"
+        );
+        assert_eq!(
+            reqs[0].messages.len(),
+            2,
+            "the one request is the summariser's"
+        );
+        let kinds = host.rec.kinds();
+        assert!(!kinds.contains(&"assistant_message"), "{kinds:?}");
     }
 
     #[tokio::test]
@@ -2113,5 +3575,434 @@ mod tests {
             payload,
         });
         assert_eq!(texts(&raw), ["[mock-big] You said: hello"]);
+    }
+
+    // ---- web_fetch provenance (audit L11) --------------------------------
+
+    /// A stand-in tool: fixed result, named like the real one.
+    struct Fixed {
+        name: &'static str,
+        ok: bool,
+        output: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Fixed {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn description(&self) -> &'static str {
+            "fixed"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, _: &ToolCtx, _: Value) -> ToolOutcome {
+            if self.ok {
+                ToolOutcome::ok(self.output)
+            } else {
+                ToolOutcome::err(self.output)
+            }
+        }
+    }
+
+    /// Stands in for `web_fetch`: says whether `url` is in the provenance set.
+    struct Probe;
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Probe {
+        fn name(&self) -> &'static str {
+            "web_fetch"
+        }
+        fn description(&self) -> &'static str {
+            "probe"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+            let url = input["url"].as_str().unwrap_or("");
+            ToolOutcome::ok(format!(
+                "seen={}",
+                ctx.observed.iter().any(|t| t.contains(url))
+            ))
+        }
+    }
+
+    /// Calls the listed tools one per request, in order, then stops.
+    struct Chain(Vec<(&'static str, Value)>);
+
+    #[async_trait::async_trait]
+    impl Provider for Chain {
+        fn name(&self) -> &'static str {
+            "chain"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            let since = req
+                .messages
+                .iter()
+                .rposition(|m| m.user_text().is_some())
+                .map_or(0, |i| i + 1);
+            let done = req.messages[since..]
+                .iter()
+                .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                .count();
+            let tool_calls = self
+                .0
+                .get(done)
+                .map(|(t, i)| ToolCallRef {
+                    call_id: new_id(),
+                    tool: (*t).into(),
+                    input: i.clone(),
+                })
+                .into_iter()
+                .collect();
+            Ok(Completion {
+                text: "done".into(),
+                tool_calls,
+                usage: None,
+                stop: Default::default(),
+            })
+        }
+    }
+
+    const U: &str = "https://laundered.example/path";
+
+    fn fixed(name: &'static str, ok: bool, output: &'static str) -> Arc<dyn harness_tools::Tool> {
+        Arc::new(Fixed { name, ok, output })
+    }
+
+    fn fetch_call() -> (&'static str, Value) {
+        ("web_fetch", json!({"url": U}))
+    }
+
+    /// Run `calls` (the last one is the probe) and return what the probe saw.
+    async fn probe_after(
+        tools: Vec<Arc<dyn harness_tools::Tool>>,
+        calls: Vec<(&'static str, Value)>,
+        user: &str,
+        context: Option<&str>,
+        parent: bool,
+    ) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let b = NativeBackend::new(Arc::new(Chain(calls)), tools, NativeConfig::default());
+        let mut c = ctx(&host, user, dir.path());
+        c.extra.context = context.map(str::to_string);
+        if parent {
+            c.parent_session = Some(SessionId::new());
+        }
+        b.run_turn(c).await;
+        let ev = host.events.lock().unwrap();
+        ev.iter()
+            .rev()
+            .find_map(|e| match e {
+                EventKind::ToolCallFinished(f) if f.output.starts_with("seen=") => {
+                    Some(f.output.clone())
+                }
+                _ => None,
+            })
+            .expect("probe ran")
+    }
+
+    #[tokio::test]
+    async fn url_only_in_a_tool_error_is_not_observed() {
+        for name in ["web_search", "read"] {
+            let seen = probe_after(
+                vec![
+                    fixed(
+                        name,
+                        false,
+                        "error: cannot open https://laundered.example/path",
+                    ),
+                    Arc::new(Probe),
+                ],
+                vec![(name, json!({})), fetch_call()],
+                "hello",
+                None,
+                false,
+            )
+            .await;
+            assert_eq!(seen, "seen=false", "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn url_only_in_bash_output_is_not_observed() {
+        let seen = probe_after(
+            vec![
+                fixed("bash", true, "https://laundered.example/path"),
+                Arc::new(Probe),
+            ],
+            vec![("bash", json!({})), fetch_call()],
+            "hello",
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(seen, "seen=false");
+    }
+
+    #[tokio::test]
+    async fn url_in_a_successful_search_or_read_is_observed() {
+        for name in ["web_search", "read"] {
+            let seen = probe_after(
+                vec![
+                    fixed(name, true, "result https://laundered.example/path"),
+                    Arc::new(Probe),
+                ],
+                vec![(name, json!({})), fetch_call()],
+                "hello",
+                None,
+                false,
+            )
+            .await;
+            assert_eq!(seen, "seen=true", "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn url_in_the_user_message_counts_but_not_context_or_a_task() {
+        let user = "read https://laundered.example/path please";
+        let tools = || -> Vec<Arc<dyn harness_tools::Tool>> { vec![Arc::new(Probe)] };
+        let seen = async |user: &str, context: Option<&str>, parent: bool| {
+            probe_after(tools(), vec![fetch_call()], user, context, parent).await
+        };
+        assert_eq!(seen(user, None, false).await, "seen=true");
+        // Memory recall and page context ride on the user message but are
+        // not the user's words.
+        assert_eq!(
+            seen("hello", Some(&format!("memory: {U}")), false).await,
+            "seen=false"
+        );
+        // A sub-agent's "user" message is the parent model's task text.
+        assert_eq!(seen(user, None, true).await, "seen=false");
+    }
+
+    #[test]
+    fn only_ok_search_fetch_read_results_in_history_count() {
+        let sid = SessionId::new();
+        let mut seq = 0;
+        let mut history = vec![];
+        for (id, tool, ok) in [
+            ("c1", "bash", true),
+            ("c2", "read", false),
+            ("c3", "web_search", true),
+        ] {
+            for kind in [
+                EventKind::AssistantMessage(AssistantMessage {
+                    turn_id: "t0".into(),
+                    message_id: format!("m{id}"),
+                    text: String::new(),
+                    tool_calls: vec![ToolCallRef {
+                        call_id: id.into(),
+                        tool: tool.into(),
+                        input: json!({}),
+                    }],
+                    author: None,
+                    variant: None,
+                    blocks: vec![],
+                }),
+                EventKind::ToolCallFinished(ToolCallFinished {
+                    call_id: id.into(),
+                    ok,
+                    output: format!("{id} https://laundered.example/path"),
+                    exit_code: None,
+                    truncated: false,
+                    sources: vec![],
+                }),
+            ] {
+                seq += 1;
+                let (kind, payload) = kind.into_parts();
+                history.push(RawEvent {
+                    session_id: sid,
+                    seq,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                });
+            }
+        }
+        let observed = observed_text(
+            &history_to_messages(&history),
+            &trusted_results(&history),
+            None,
+        );
+        assert_eq!(observed.len(), 1, "{observed:?}");
+        assert!(observed[0].starts_with("c3 "));
+    }
+
+    // ---- "allow for this turn" covers the exact call (ADOPTION_PLAN A.2) --
+
+    /// Answers every approval "for this turn" and records what it was asked.
+    struct TurnAllowHost {
+        asked: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHost for TurnAllowHost {
+        async fn emit(&self, _kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+            Ok(())
+        }
+        async fn approve(&self, _c: &str, _t: &str, input: &Value, _r: ToolRisk) -> Decision {
+            self.asked.lock().unwrap().push(input.clone());
+            Decision::AllowSession
+        }
+    }
+
+    /// A mutating stand-in that does nothing.
+    struct Noop;
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "noop"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::Mutating
+        }
+        async fn run(&self, _: &ToolCtx, _: Value) -> ToolOutcome {
+            ToolOutcome::ok("ok")
+        }
+    }
+
+    /// Run `calls` in one turn, every approval answered "for this turn";
+    /// returns the inputs a person was asked about.
+    async fn asked_in_one_turn(
+        dir: &std::path::Path,
+        calls: Vec<(&'static str, Value)>,
+    ) -> Vec<Value> {
+        let host = TurnAllowHost {
+            asked: Mutex::new(vec![]),
+        };
+        let mut tools = harness_tools::builtin();
+        tools.push(Arc::new(Noop));
+        let b = NativeBackend::new(Arc::new(Chain(calls)), tools, NativeConfig::default());
+        let out = b
+            .run_turn(TurnCtx {
+                session_id: harness_core::SessionId::new(),
+                turn_id: "t".into(),
+                history: vec![],
+                user_text: "go".into(),
+                cwd: dir.to_path_buf(),
+                model: "mock".into(),
+                agent: None,
+                compare: vec![],
+                parent_session: None,
+                extra: Default::default(),
+                cancel: Default::default(),
+                host: &host,
+            })
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed);
+        host.asked.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_for_one_command_does_not_cover_another() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("x")).unwrap();
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                ("bash", json!({"command": "ls"})),
+                ("bash", json!({"command": "rm -rf x"})),
+            ],
+        )
+        .await;
+        assert_eq!(asked.len(), 2, "rm -rf x ran without asking: {asked:?}");
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_covers_the_identical_command_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                ("bash", json!({"command": "ls"})),
+                ("bash", json!({"command": "ls"})),
+                // Byte for byte: one more space is another command.
+                ("bash", json!({"command": "ls "})),
+                // So is the same command with another timeout.
+                ("bash", json!({"command": "ls", "timeout_secs": 5})),
+            ],
+        )
+        .await;
+        assert_eq!(
+            asked,
+            [
+                json!({"command": "ls"}),
+                json!({"command": "ls "}),
+                json!({"command": "ls", "timeout_secs": 5}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_for_a_file_change_is_that_change_to_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        std::fs::write(dir.path().join("a/f.txt"), "one two\n").unwrap();
+        let w = |p: &str, c: &str| ("write", json!({"path": p, "content": c}));
+        let e = |p: &str, o: &str, n: &str| {
+            ("edit", json!({"path": p, "old_string": o, "new_string": n}))
+        };
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                w("a/f.txt", "one two\n"),
+                // Other spellings of the same file, same content: covered.
+                w("a/../a/f.txt", "one two\n"),
+                w("./a/f.txt", "one two\n"),
+                // Another file: asked.
+                w("a/g.txt", "one two\n"),
+                // The same file, other content: asked.
+                w("a/f.txt", "three\n"),
+                e("a/f.txt", "three", "four"),
+                e("a/./f.txt", "three", "four"),
+                // A different edit to the same file: asked.
+                e("a/f.txt", "four", "five"),
+            ],
+        )
+        .await;
+        let paths: Vec<&str> = asked.iter().map(|i| i["path"].as_str().unwrap()).collect();
+        assert_eq!(
+            paths,
+            ["a/f.txt", "a/g.txt", "a/f.txt", "a/f.txt", "a/f.txt"],
+            "{asked:?}"
+        );
+        assert_eq!(asked[2]["content"], "three\n");
+        assert_eq!(asked[3]["new_string"], "four");
+        assert_eq!(asked[4]["new_string"], "five");
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_for_another_tool_is_its_input_in_any_key_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let a: Value = serde_json::from_str(r#"{"a": 1, "b": {"c": 2, "d": 3}}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"b": {"d": 3, "c": 2}, "a": 1}"#).unwrap();
+        let other = json!({"a": 1, "b": {"c": 2, "d": 4}});
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![("noop", a.clone()), ("noop", b), ("noop", other.clone())],
+        )
+        .await;
+        assert_eq!(asked, [a, other]);
     }
 }
