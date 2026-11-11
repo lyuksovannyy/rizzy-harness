@@ -296,3 +296,69 @@ async fn a_reconnect_that_resends_acknowledged_events_carries_on() {
         .collect();
     assert_eq!(texts, ["d2", "d3", "d4", "d5", "d6", "d7"]);
 }
+
+// --- What a node may set in a chat's row (Gate 3 review L-1 to L-3) ---
+
+fn created_by(sid: SessionId, seq: u64, parent: Option<SessionId>) -> RawEvent {
+    let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        profile: Profile::Agentic,
+        agent_id: None,
+        incognito: false,
+        parent_session: parent,
+        title: "t".into(),
+        cwd: "/w".into(),
+        model: "m".into(),
+        backend: "native".into(),
+        node_id: "n1".into(),
+        approval_mode: Default::default(),
+    })
+    .into_parts();
+    RawEvent {
+        session_id: sid,
+        seq,
+        ts_ms: seq as i64,
+        kind,
+        payload,
+    }
+}
+
+/// Wait for a `session.cancel` of `sid` on `c`.
+async fn cancelled(c: &mut mpsc::Receiver<MasterToNode>, sid: SessionId) -> bool {
+    for _ in 0..200 {
+        match c.try_recv() {
+            Ok(MasterToNode::Cancel { session_id, .. }) if session_id == sid => return true,
+            Ok(_) => {}
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_second_session_created_moves_nothing_and_freezes_the_chat() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (alice, bob) = (SessionId::new(), SessionId::new());
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    send(&tx, created_by(alice, 1, None)).await;
+    send(&tx, created_by(bob, 1, None)).await;
+    barrier(&store, &tx).await;
+    store.claim_session(alice, Some("alice"), None).unwrap();
+    store.claim_session(bob, Some("bob"), None).unwrap();
+
+    // Alice's chat names Bob's as its parent: under the old rule it became
+    // Bob's.
+    send(&tx, created_by(alice, 2, Some(bob))).await;
+    barrier(&store, &tx).await;
+    let row = store.session(alice).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("alice"));
+    assert_eq!(row.parent_id, None);
+    assert_eq!(row.head_seq, 1, "the event is not stored");
+    assert_eq!(store.diverged_seq(alice).unwrap(), Some(2));
+    assert!(cancelled(&mut c, alice).await, "the node is told to stop");
+    // Bob's chat is untouched and still takes events.
+    send(&tx, event(bob, 2, "fine")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.head_seq(bob).unwrap(), 2);
+}

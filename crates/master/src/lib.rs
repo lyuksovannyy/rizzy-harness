@@ -376,8 +376,8 @@ pub enum CommandError {
 }
 
 /// Why a command to a diverged session is refused (PLAN.md §3).
-const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key \
-     (see the server log); delete the chat to clear it";
+const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key, \
+     or its node sent an event the server refuses (see the server log); delete the chat to clear it";
 
 /// The session a command would make its node write to. Cancel and delete
 /// are left out on purpose: they are how a diverged session is stopped.
@@ -1041,6 +1041,9 @@ impl Master {
                 }
                 self.stop_diverged(node_id, e.session_id);
             }
+            Ok(AppendOutcome::Refused { seq, reason }) => {
+                self.refuse(node_id, e.session_id, seq, reason).await
+            }
             Ok(AppendOutcome::Revoked) => {
                 tracing::warn!(node = %node_id, session = %e.session_id, seq = e.seq, "dropped a frame from a revoked node");
             }
@@ -1048,6 +1051,29 @@ impl Master {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
         }
+    }
+
+    /// An in-order event the mirror does not take (`AppendOutcome::Refused`):
+    /// the session is frozen as a diverged one is, and its node is told to
+    /// stop it. The log line names the rule, never the event's content.
+    async fn refuse(&self, node_id: &str, sid: SessionId, seq: u64, reason: &'static str) {
+        let node = node_id.to_string();
+        match self
+            .inner
+            .mirror
+            .call(move |s| s.freeze(sid, &node, seq))
+            .await
+        {
+            Ok(true) => {
+                tracing::error!(node = %node_id, session = %sid, seq, reason, "refused an event from a node; this session's mirror is frozen until it is deleted");
+                let _ = self.inner.live.send(Live::SessionsChanged);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(node = %node_id, session = %sid, error = %err, "could not freeze a session")
+            }
+        }
+        self.stop_diverged(node_id, sid);
     }
 
     async fn send_command(

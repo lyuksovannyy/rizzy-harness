@@ -578,3 +578,82 @@ fn a_revoked_nodes_frames_are_refused_at_append() {
         AppendOutcome::Applied
     );
 }
+
+// --- What a node may set in the sessions row (Gate 3 review L-1, L-2, L-3) ---
+
+fn raw(sid: SessionId, seq: u64, kind: &str, payload: serde_json::Value) -> RawEvent {
+    RawEvent {
+        session_id: sid,
+        seq,
+        ts_ms: seq as i64,
+        kind: kind.into(),
+        payload,
+    }
+}
+
+fn created_json(title: &str, parent: Option<SessionId>) -> serde_json::Value {
+    let mut p = json!({"title": title, "cwd": "/w", "model": "m", "backend": "native",
+        "node_id": "n1", "profile": "agentic", "approval_mode": "ask"});
+    if let Some(parent) = parent {
+        p["parent_session"] = json!(parent);
+    }
+    p
+}
+
+/// A chat on node `node`, created through the master by `owner`.
+fn chat_of(s: &Store, node: &str, owner: &str) -> SessionId {
+    let sid = SessionId::new();
+    assert_eq!(
+        s.append(
+            node,
+            &raw(sid, 1, "session_created", created_json("t", None))
+        )
+        .unwrap(),
+        AppendOutcome::Applied
+    );
+    s.claim_session(sid, Some(owner), None).unwrap();
+    sid
+}
+
+/// L-2. The row is set by the session's first event only. A second
+/// `session_created` from the node (here naming another user's chat on the
+/// same node as parent, then an unknown parent) is not applied: the owner,
+/// the parent, `incognito` and `profile` stay what the creation set.
+#[test]
+fn the_row_is_set_at_seq_1_and_its_owner_never_changes() {
+    let s = Store::open_in_memory().unwrap();
+    let alice = chat_of(&s, "n1", "alice");
+    let bob = chat_of(&s, "n1", "bob");
+    let mut moved = created_json("t", Some(bob));
+    moved["incognito"] = json!(true);
+    moved["profile"] = json!("chat");
+    let out = s
+        .append("n1", &raw(alice, 2, "session_created", moved))
+        .unwrap();
+    assert_ne!(
+        out,
+        AppendOutcome::Applied,
+        "a second session_created is refused"
+    );
+    let row = s.session(alice).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("alice"));
+    assert_eq!(row.parent_id, None);
+    assert!(!row.incognito);
+    assert_eq!(row.profile.as_deref(), Some("agentic"));
+    let out = s
+        .append(
+            "n1",
+            &raw(
+                bob,
+                2,
+                "session_created",
+                created_json("t", Some(SessionId::new())),
+            ),
+        )
+        .unwrap();
+    assert_ne!(out, AppendOutcome::Applied);
+    assert_eq!(
+        s.session(bob).unwrap().unwrap().owner_id.as_deref(),
+        Some("bob")
+    );
+}

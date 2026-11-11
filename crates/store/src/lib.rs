@@ -74,6 +74,15 @@ pub enum AppendOutcome {
     /// The writer is a revoked node (refused even for frames queued before
     /// the revoke).
     Revoked,
+    /// The next event in order, but not one the log takes (`reason` says
+    /// which rule it breaks; it names no content). Nothing is stored. An
+    /// honest node's own log refuses it first, so on a mirror it means a
+    /// broken or hostile node: the master freezes the session
+    /// (`Store::freeze`) as it does a diverged one.
+    Refused {
+        seq: u64,
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,6 +628,16 @@ impl Store {
         if e.seq != head + 1 {
             return Ok(AppendOutcome::Gap { head });
         }
+        // The row is a session's creation record: set once, by its first
+        // event. A later `session_created` would rewrite the owner (through
+        // its parent), `incognito` and `profile` on a node's word alone
+        // (Gate 3 review L-2), and no node writes one.
+        if e.kind == "session_created" && e.seq != 1 {
+            return Ok(AppendOutcome::Refused {
+                seq: e.seq,
+                reason: "session_created after the session's first event",
+            });
+        }
         tx.execute(
             "INSERT INTO events (session_id, seq, ts_ms, kind, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![sid, e.seq as i64, e.ts_ms, e.kind, serde_json::to_string(&e.payload)?],
@@ -654,9 +673,10 @@ impl Store {
                 )?;
                 // A sub-agent's session belongs to whoever owns its parent
                 // (same node only: a node cannot adopt another node's chats).
+                // Only into an empty owner: no event changes one once set.
                 if let Some(parent) = opt("parent_session") {
                     tx.execute(
-                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2 AND p.node_id = ?3) WHERE session_id = ?1",
+                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2 AND p.node_id = ?3) WHERE session_id = ?1 AND owner_id IS NULL",
                         params![sid, parent, owner],
                     )?;
                     // ...and lives in its parent's workspace, under the same
@@ -901,6 +921,26 @@ impl Store {
             )
             .optional()?;
         Ok(v.flatten().map(|s| s as u64))
+    }
+
+    /// Freeze `node`'s session `sid` at `seq` after a `Refused` append: from
+    /// now on every append is refused as for a diverged session (PLAN.md
+    /// §3), since the mirror can no longer hold a contiguous copy. A session
+    /// refused at its first event gets an empty frozen row, so its later
+    /// frames are refused too instead of asking for it again and again.
+    /// Another node's session is left alone. Returns whether this call froze it.
+    pub fn freeze(&self, sid: SessionId, node: &str, seq: u64) -> Result<bool> {
+        let conn = self.lock();
+        let id = sid.to_string();
+        let now = harness_core::now_ms();
+        let n = conn.execute(
+            "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, diverged_seq)
+             VALUES (?1, ?2, ?3, ?3, 0, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET diverged_seq = ?4
+             WHERE sessions.node_id = ?2 AND sessions.diverged_seq IS NULL",
+            params![id, node, now, seq as i64],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn is_deleted(&self, sid: SessionId) -> Result<bool> {
