@@ -479,6 +479,11 @@ pub enum CheckpointPhase {
     After,
     /// The turn's file changes were undone (back to its `before` snapshot).
     Restored,
+    /// The folder as it was just before a restore, written before the
+    /// restore changes any file. `turn_id` names the restore, not a turn:
+    /// its `after` event (the folder once restored) follows, so restoring
+    /// that id undoes the restore. `files`: the paths the restore writes.
+    BeforeRestore,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

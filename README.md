@@ -499,7 +499,12 @@ back the exact bytes. Sub-agents that can write get a temporary git
 worktree; it is refused, and the sub-agent shares the folder, if the
 repository's own config defines filter commands (git-lfs's standard ones
 are allowed). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it.
+in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
+undo or rewind changes a file it saves the folder as it is, your own edits
+since the turn included, as a checkpoint of its own, so "Undo anyway" loses
+nothing: restoring that checkpoint (its id is in the chat's log, phase
+`before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
+the undo. The chat has no button for it yet.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
