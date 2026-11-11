@@ -109,8 +109,10 @@ describe("safety", () => {
   });
   test("footnotes stay in-page links", () => {
     const out = md("Note[^1].\n\n[^1]: The note.");
-    expect(out).toContain('href="#user-content-fn-1"');
-    expect(out).not.toMatch(/href="#user-content-fn-1"[^>]*target/);
+    // The message's own prefix, not remark-rehype's shared `user-content-`.
+    expect(out).toMatch(/href="#m\d+-fn-1"/);
+    expect(out).not.toContain("user-content-");
+    expect(out).not.toMatch(/href="#m\d+-fn-1"[^>]*target/);
   });
 });
 

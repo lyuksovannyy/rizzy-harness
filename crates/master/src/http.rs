@@ -19,6 +19,7 @@ mod projects;
 mod providers;
 mod routines;
 mod storage;
+mod users;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
@@ -129,11 +130,15 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             "/api/admin/workspaces/{id}/members",
             get(workspaces::admin_members),
         )
-        .route("/api/users", get(list_users).post(create_user))
+        .route(
+            "/api/users",
+            get(users::list_users).post(users::create_user),
+        )
         .route(
             "/api/users/{id}",
-            axum::routing::patch(update_user).delete(delete_user),
+            axum::routing::patch(users::update_user).delete(users::delete_user),
         )
+        .route("/api/users/{id}/password", post(users::reset_password))
         .route("/api/nodes", get(nodes))
         .route("/api/admin/nodes", get(admin_nodes))
         .route("/api/admin/nodes/join", post(node_join_token))
@@ -825,180 +830,6 @@ fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRun
             "provider is not managed by this server".into(),
         )
     })
-}
-
-fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
-    json!({
-        "user_id": u.user_id,
-        "username": u.username,
-        "role": u.role,
-        "disabled": u.disabled,
-        "can_agentic": u.role == harness_store::Role::Admin || u.can_agentic,
-        "must_change_password": u.must_change_password,
-        "created_ms": u.created_ms,
-    })
-}
-
-async fn list_users(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let users = m.inner.mirror.call(|s| s.list_users()).await?;
-    Ok(Json(
-        json!({ "users": users.iter().map(user_json).collect::<Vec<_>>() }),
-    ))
-}
-
-#[derive(Deserialize)]
-struct NewUserBody {
-    username: String,
-    /// Temporary; the user must change it at first login.
-    password: String,
-    #[serde(default = "member")]
-    role: harness_store::Role,
-    #[serde(default)]
-    can_agentic: bool,
-}
-
-fn member() -> harness_store::Role {
-    harness_store::Role::Member
-}
-
-async fn create_user(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<NewUserBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let u = auth::create_account(
-        &m.inner.mirror,
-        m.inner.auth.hasher(),
-        b.username.trim().to_ascii_lowercase(),
-        b.password,
-        b.role,
-        b.can_agentic,
-        true,
-    )
-    .await?;
-    Ok(Json(user_json(&u)))
-}
-
-#[derive(Deserialize)]
-struct UserPatchBody {
-    #[serde(default)]
-    role: Option<harness_store::Role>,
-    #[serde(default)]
-    disabled: Option<bool>,
-    #[serde(default)]
-    can_agentic: Option<bool>,
-    /// New temporary password; forces a change at next login.
-    #[serde(default)]
-    password: Option<String>,
-}
-
-/// Refuse changes that would lock everyone out or edit your own access.
-async fn guard_admin_change(
-    m: &Master,
-    who: &auth::Principal,
-    target: &harness_store::UserRow,
-    removes_admin: bool,
-) -> ApiResult<()> {
-    if who.user_id.as_deref() == Some(target.user_id.as_str()) {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "you cannot change your own role or access, or delete yourself".into(),
-        ));
-    }
-    if removes_admin && target.role == harness_store::Role::Admin && !target.disabled {
-        let admins = m.inner.mirror.call(|s| s.active_admin_count()).await?;
-        if admins <= 1 {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "this is the last active admin".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn load_user(m: &Master, id: &str) -> ApiResult<harness_store::UserRow> {
-    let id = id.to_string();
-    m.inner
-        .mirror
-        .call(move |s| s.user_by_id(&id))
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "unknown user".into()))
-}
-
-async fn update_user(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(b): Json<UserPatchBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
-    let target = load_user(&m, &id).await?;
-    let changes_access = b.role.is_some() || b.disabled.is_some() || b.can_agentic.is_some();
-    if changes_access {
-        let removes_admin = b.disabled == Some(true) || b.role == Some(harness_store::Role::Member);
-        guard_admin_change(&m, &who, &target, removes_admin).await?;
-        let patch = harness_store::UserPatch {
-            role: b.role,
-            disabled: b.disabled,
-            can_agentic: b.can_agentic,
-        };
-        let uid = target.user_id.clone();
-        let disable = b.disabled == Some(true);
-        m.inner
-            .mirror
-            .call(move |s| {
-                s.update_user(&uid, &patch)?;
-                if disable {
-                    s.ui_sessions_delete_for_user(&uid)?;
-                }
-                Ok::<_, harness_store::StoreError>(())
-            })
-            .await?;
-        if disable {
-            auth::close_sockets(&m, &target.user_id);
-        }
-        // Disabled owners stop counting as owners, and whether the user may
-        // drive their agentic chats (`blocked`) may have changed: running
-        // ones that lost their access stop.
-        let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
-        let _ = m.inner.live.send(crate::Live::SessionsChanged);
-        ws::sweep_revoked(&m, vec![target.user_id.clone()]);
-    }
-    if let Some(pw) = b.password {
-        auth::set_password(&m, &target.user_id, pw, true).await?;
-    }
-    Ok(Json(user_json(&load_user(&m, &id).await?)))
-}
-
-async fn delete_user(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
-    let target = load_user(&m, &id).await?;
-    guard_admin_change(&m, &who, &target, true).await?;
-    let uid = target.user_id.clone();
-    // Refused (409) while they are the only owner of a team workspace with
-    // other members; their chats leave every team workspace. The projects of
-    // the workspaces that go with them go too, and their facts.
-    let projects = crate::projects::ids(&m).await;
-    m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
-    auth::close_sockets(&m, &target.user_id);
-    // Their stored files lost their rows with the account; unlink them.
-    crate::storage::on_user_deleted(&m).await;
-    crate::projects::forget_gone(&m, projects).await;
-    let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
-    let _ = m.inner.live.send(crate::Live::SessionsChanged);
-    // Their running agentic chats stop (the account is gone).
-    ws::sweep_revoked(&m, vec![target.user_id]);
-    Ok(Json(json!({ "ok": true })))
 }
 
 /// A chat as the UI lists it. `blocked`: why the caller may not make this

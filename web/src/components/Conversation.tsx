@@ -3,6 +3,7 @@
 import { FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
+import { dropDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
 import { fallbackNote } from "../lib/models";
@@ -224,16 +225,18 @@ export default function Conversation(props: {
   // Whether each question or form can be answered now, and what the agent
   // read before asking it. It changes with what progressSlots watches and
   // when a web result arrives.
+  const rowIncognito = props.row?.incognito;
   const inputs = useMemo((): Inputs => {
     const byMessage = new Map<string, InputInfo>();
     if (view) {
+      const incognito = !!(view.meta?.incognito ?? rowIncognito);
       items.forEach((it, i) => {
         if (it.type !== "assistant" || !inputBlock(it)) return;
-        byMessage.set(it.message_id, { state: inputState(items, i, view), notice: webNotice(items, i) });
+        byMessage.set(it.message_id, { state: inputState(items, i, view), notice: webNotice(items, i), incognito });
       });
     }
     return { sessionId, byMessage };
-  }, [view, progressSig, citeSig, sessionId]);
+  }, [view, progressSig, citeSig, sessionId, rowIncognito]);
   // Runs of web tool calls show as one "Researched" row; the rest of a run
   // is rendered by its first item.
   const webGroups = groupWeb(items);
@@ -249,6 +252,12 @@ export default function Conversation(props: {
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
   const incognito = !!(meta?.incognito ?? props.row?.incognito);
+  // A draft only once the chat is known not to be incognito; an incognito
+  // chat loses one it had (AUDIT L14).
+  const keepsDraft = !!(meta || props.row) && !incognito;
+  useEffect(() => {
+    if (incognito) dropDraft(sessionId);
+  }, [incognito, sessionId]);
   // Why the viewer cannot drive this agentic chat here: approvals offer Deny
   // only and the reply box is read-only.
   const blocked = props.row?.blocked ?? null;
@@ -569,7 +578,7 @@ export default function Conversation(props: {
             agenticBlocked={null}
             readOnly={blocked}
             running={running}
-            draftKey={`harness.draft.${sessionId}`}
+            draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
             onStop={() => void api.cancel(sessionId)}
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}

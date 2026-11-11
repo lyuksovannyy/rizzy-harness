@@ -101,11 +101,18 @@ async fn accounts(t: &T) -> (String, String) {
         .await
         .unwrap();
     let alex = cookie(&r);
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    req(t, Method::POST, "/api/users", Some(body.clone()), &alex).await;
+    let (_, made) = req(
+        t,
+        Method::POST,
+        "/api/users",
+        Some(json!({"username": "bob"})),
+        &alex,
+    )
+    .await;
+    let pw = made["password"].as_str().unwrap();
     let r = c
         .post(format!("{}/api/login", t.base))
-        .json(&body)
+        .json(&json!({"username": "bob", "password": pw}))
         .send()
         .await
         .unwrap();
@@ -113,7 +120,7 @@ async fn accounts(t: &T) -> (String, String) {
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&r))
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
+        .json(&json!({"current": pw, "new": "bobs own password"}))
         .send()
         .await
         .unwrap();

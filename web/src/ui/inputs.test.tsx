@@ -125,6 +125,23 @@ describe("Choices", () => {
     expect(h).toMatch(/class="primary ui-send" disabled/);
   });
 
+  test("an incognito chat's card keeps no answer, and drops one it had (AUDIT L14)", async () => {
+    const removed: string[] = [];
+    const set = vi.fn();
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => JSON.stringify({ selected: ["red"], other: "" }),
+      setItem: set,
+      removeItem: (k: string) => removed.push(k),
+    });
+    const { loadDraft, saveDraft } = await import("./Input");
+    const p = { ...props(), info: { state: { kind: "open" }, notice: [], incognito: true } } satisfies InputProps;
+    expect(loadDraft(p)).toBeNull();
+    saveDraft(p, { selected: ["blue"], other: "" }, false);
+    expect(set).not.toHaveBeenCalled();
+    expect(removed).toEqual(["harness.ui.m#b", "harness.ui.m#b"]);
+    expect(loadDraft(props())).toEqual({ selected: ["red"], other: "" });
+  });
+
   test("the options are a group named by the question, single or multiple", () => {
     for (const spec of [colours, { ...colours, multi: true, min: 1, max: 2 }]) {
       const h = choices(spec);

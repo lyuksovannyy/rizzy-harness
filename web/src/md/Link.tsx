@@ -15,7 +15,7 @@ import {
 } from "react";
 import type { ExtraProps } from "react-markdown";
 import { useAnchored } from "./anchored";
-import { MessageCtx } from "./context";
+import { MessageCtx, UiCtx } from "./context";
 import { useCopy } from "./copy";
 import { reactText } from "./hast";
 import { hostOf, linkKey, needsConfirm, parseUrl, textShowsTarget } from "./links";
@@ -24,18 +24,24 @@ import { rt } from "./strings";
 type AProps = ComponentProps<"a"> & ExtraProps;
 
 export function Link({ href = "", children, id, "aria-describedby": describedBy, "aria-label": label }: AProps) {
-  // GFM footnotes: in-page links. The app routes on the URL hash, so scroll
-  // to the target instead of navigating.
+  const { fn } = useContext(UiCtx);
+  // In-page links work only between this message's GFM footnotes and their
+  // references, whose ids the renderer gave this message's prefix (AUDIT
+  // L14). Any other fragment (an app route, a button's or field's id,
+  // another message's footnote) is text. The app routes on the URL hash, so
+  // a footnote link scrolls instead of navigating.
   if (href.startsWith("#")) {
+    const target = href.slice(1);
+    if (!fn || !target.startsWith(fn) || !/^fn(ref)?-/.test(target.slice(fn.length)))
+      return <span className="link-off">{children}</span>;
     return (
       <a
         href={href}
         id={id}
-        aria-describedby={describedBy}
+        aria-describedby={describedBy && fn + describedBy}
         aria-label={label}
         onClick={(e) => {
           e.preventDefault();
-          const target = decodeSafe(href.slice(1));
           e.currentTarget
             .closest(".md")
             ?.querySelector(`[id="${CSS.escape(target)}"]`)
@@ -179,12 +185,4 @@ function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement |
       </span>
     </span>
   );
-}
-
-function decodeSafe(s: string): string {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
 }

@@ -66,3 +66,21 @@ describe("Live.onTopic", () => {
     live.close();
   });
 });
+
+describe("Live.onLoginEnded", () => {
+  // 4401: the server ended this socket's login (logout elsewhere, a password
+  // change or reset, a disabled account). The shell checks /api/me and signs
+  // out (clearing drafts) when the login is really gone.
+  test("is told when the server closes the socket for an ended login, not otherwise", () => {
+    const live = new Live();
+    const ended = vi.fn();
+    live.onLoginEnded = ended;
+    const close = (code: number) => (FakeSocket.all.at(-1)!.onclose as unknown as (e: { code: number }) => void)({ code });
+    close(1006);
+    expect(ended).not.toHaveBeenCalled();
+    vi.runOnlyPendingTimers();
+    close(4401);
+    expect(ended).toHaveBeenCalledTimes(1);
+    live.close();
+  });
+});

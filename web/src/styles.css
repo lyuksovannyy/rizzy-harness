@@ -4080,6 +4080,12 @@ a.icon.rail-item.active {
   width: min(360px, calc(100vw - 32px));
   padding: var(--space-3);
 }
+/* Shown once (Users): one click selects all of it. */
+.temp-password {
+  font-size: 1.1em;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
 .workspace-dialog::backdrop,
 .search-panel::backdrop {
   background: var(--scrim);

@@ -221,13 +221,14 @@ async fn req(
 
 /// A member account, signed in with its own password.
 async fn account(t: &T, name: &str) -> String {
-    let body = json!({"username": name, "password": "temporary pw"});
+    let body = json!({"username": name});
     let (st, v) = req(t, Method::POST, "/api/users", Some(body), &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let pw = v["password"].as_str().unwrap().to_string();
     let client = reqwest::Client::new();
     let first = client
         .post(format!("{}/api/login", t.base))
-        .json(&json!({"username": name, "password": "temporary pw"}))
+        .json(&json!({"username": name, "password": pw}))
         .send()
         .await
         .unwrap();
@@ -235,7 +236,7 @@ async fn account(t: &T, name: &str) -> String {
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&first))
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": format!("{name}s own password")}))
+        .json(&json!({"current": pw, "new": format!("{name}s own password")}))
         .send()
         .await
         .unwrap();

@@ -31,6 +31,10 @@ export class Live {
   /** Workspaces, members, roles or the policy changed (content-free). */
   onWorkspacesChanged: () => void = () => {};
   onProjectsChanged: () => void = () => {};
+  /** The server closed the socket for an ended login (4401, PLAN T2). It
+   * also does so for this browser's own password change, which keeps its
+   * login, so the listener checks before signing out. */
+  onLoginEnded: () => void = () => {};
 
   constructor() {
     this.connect();
@@ -120,8 +124,9 @@ export class Live {
       this.opened = true;
     };
     ws.onmessage = (m) => this.onMessage(JSON.parse(m.data as string));
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       this.ws = null;
+      if (e?.code === 4401) this.onLoginEnded();
       this.setState("offline");
       if (!this.closed) {
         setTimeout(() => this.connect(), this.backoff);

@@ -269,7 +269,7 @@ async fn admin_creates_member_who_must_change_password() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         None,
     )
     .await;
@@ -278,7 +278,7 @@ async fn admin_creates_member_who_must_change_password() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "Bob", "password": "temporary pw"})),
+        Some(json!({"username": "Bob"})),
         Some(&admin),
     )
     .await;
@@ -288,18 +288,19 @@ async fn admin_creates_member_who_must_change_password() {
     assert_eq!(bob["can_agentic"], false);
     assert_eq!(bob["must_change_password"], true);
     assert!(bob.get("password_hash").is_none());
+    let pw = bob["password"].as_str().unwrap().to_string();
     let (st, _, _) = req(
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 
     // First login: everything but /api/me* is blocked until the password changes.
-    let (st, bc) = login(&s, "bob", "temporary pw").await;
+    let (st, bc) = login(&s, "bob", &pw).await;
     assert_eq!(st, StatusCode::OK);
     let bc = bc.unwrap();
     let (_, me) = get(&s, "/api/me", Some(&bc), None).await;
@@ -321,7 +322,7 @@ async fn admin_creates_member_who_must_change_password() {
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc),
     )
     .await;
@@ -354,17 +355,18 @@ async fn agentic_needs_grant_and_chats_are_private() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     let bob_id = bob["user_id"].as_str().unwrap().to_string();
-    let (_, bc) = login(&s, "bob", "temporary pw").await;
+    let pw = bob["password"].as_str().unwrap().to_string();
+    let (_, bc) = login(&s, "bob", &pw).await;
     let (_, bc, _) = req(
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;
@@ -458,12 +460,13 @@ async fn disable_reset_delete_and_last_admin_guard() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     let bob_id = bob["user_id"].as_str().unwrap().to_string();
-    let (_, bc) = login(&s, "bob", "temporary pw").await;
+    let pw = bob["password"].as_str().unwrap().to_string();
+    let (_, bc) = login(&s, "bob", &pw).await;
     let bc = bc.unwrap();
 
     // Disabling logs bob out at once and blocks new logins.
@@ -480,10 +483,7 @@ async fn disable_reset_delete_and_last_admin_guard() {
         get(&s, "/api/me", Some(&bc), None).await.0,
         StatusCode::UNAUTHORIZED
     );
-    assert_eq!(
-        login(&s, "bob", "temporary pw").await.0,
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(login(&s, "bob", &pw).await.0, StatusCode::UNAUTHORIZED);
     req(
         &s,
         Method::PATCH,
@@ -496,15 +496,16 @@ async fn disable_reset_delete_and_last_admin_guard() {
     // Admin password reset forces another change.
     let (st, _, v) = req(
         &s,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"password": "another temp pw"})),
+        Method::POST,
+        &format!("/api/users/{bob_id}/password"),
+        None,
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v["must_change_password"], true);
-    assert_eq!(login(&s, "bob", "another temp pw").await.0, StatusCode::OK);
+    let again = v["password"].as_str().unwrap().to_string();
+    assert_eq!(login(&s, "bob", &again).await.0, StatusCode::OK);
 
     // You cannot demote, disable or delete yourself, and the last admin stays.
     for (m, body) in [
@@ -528,7 +529,7 @@ async fn disable_reset_delete_and_last_admin_guard() {
         &s,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "another temp pw"})),
+        Some(json!({"username": "bob", "password": again})),
         None,
     )
     .await;
@@ -536,7 +537,7 @@ async fn disable_reset_delete_and_last_admin_guard() {
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "another temp pw", "new": "bobs own password"})),
+        Some(json!({"current": again, "new": "bobs own password"})),
         Some(&bc2.unwrap()),
     )
     .await;
@@ -603,14 +604,15 @@ async fn admin_and_bob(s: &Server) -> (String, String, [String; 2]) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{bob}");
     let bob_id = bob["user_id"].as_str().unwrap().to_string();
-    let a = login(s, "bob", "temporary pw").await.1.unwrap();
-    let b = login(s, "bob", "temporary pw").await.1.unwrap();
+    let pw = bob["password"].as_str().unwrap().to_string();
+    let a = login(s, "bob", &pw).await.1.unwrap();
+    let b = login(s, "bob", &pw).await.1.unwrap();
     assert_ne!(a, b, "each login is its own session");
     for c in [&a, &b] {
         assert_eq!(me_status(s, c).await, StatusCode::OK);
@@ -726,15 +728,16 @@ async fn disabling_a_user_ends_every_session_of_theirs() {
 async fn a_password_reset_ends_every_session_of_that_user() {
     let s = start().await;
     let (admin, bob_id, bobs) = admin_and_bob(&s).await;
-    let (st, _, _) = req(
+    let (st, _, v) = req(
         &s,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"password": "another temp pw"})),
+        Method::POST,
+        &format!("/api/users/{bob_id}/password"),
+        None,
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+    let again = v["password"].as_str().unwrap().to_string();
     for c in &bobs {
         unauthorized(me_status(&s, c).await);
     }
@@ -742,13 +745,13 @@ async fn a_password_reset_ends_every_session_of_that_user() {
 
     // Changing your own password: every other browser is signed out and
     // this one gets a new session.
-    let one = login(&s, "bob", "another temp pw").await.1.unwrap();
-    let other = login(&s, "bob", "another temp pw").await.1.unwrap();
+    let one = login(&s, "bob", &again).await.1.unwrap();
+    let other = login(&s, "bob", &again).await.1.unwrap();
     let (st, fresh, _) = req(
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "another temp pw", "new": "bobs own password"})),
+        Some(json!({"current": again, "new": "bobs own password"})),
         Some(&one),
     )
     .await;
