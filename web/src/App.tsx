@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { api, HttpError } from "./api";
+import { clearDrafts, setDraftOwner } from "./lib/drafts";
 import type { Me, WorkspaceSummary } from "./types";
 import { Shell } from "./components/Shell";
 
@@ -45,6 +46,14 @@ export function App() {
   useEffect(() => {
     void load(true);
   }, [load]);
+  // Signed out, however it happened (logout, a 401, a fresh load without a
+  // login): no one's unsent drafts stay in this browser (AUDIT L14). Signed
+  // in: the drafts read and written are this user's. Set while rendering,
+  // since the reply box reads its draft in its first render.
+  useEffect(() => {
+    if (me === null) clearDrafts();
+  }, [me]);
+  if (me) setDraftOwner(me.user_id);
   if (me === undefined) return <div className="splash" />;
   if (me === null)
     return (

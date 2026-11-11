@@ -46,8 +46,14 @@ const I3_KB = 0;
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I4_KB = 0;
 
+// Fix plan 3.10 (audit L14), measured 361.9 (initial 103.4): drafts kept per
+// user and cleared at sign-out, with the chat and for incognito chats (first
+// load, +0.5); the server-made temporary password's dialog and per-message
+// footnote ids (lazy, +0.4).
+const L14_KB = 0.9;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

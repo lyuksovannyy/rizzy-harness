@@ -155,17 +155,18 @@ async fn member(s: &Server, name: &str) -> (String, String) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "password": "temporary pw", "can_agentic": true})),
+        Some(json!({"username": name, "can_agentic": true})),
         &s.admin,
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let pw = v["password"].as_str().unwrap().to_string();
     let id = v["user_id"].as_str().unwrap().to_string();
     let (_, temp, _) = send(
         s,
         Method::POST,
         "/api/login",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name, "password": pw})),
         None,
     )
     .await;
@@ -173,7 +174,7 @@ async fn member(s: &Server, name: &str) -> (String, String) {
         s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "a password of my own"})),
+        Some(json!({"current": pw, "new": "a password of my own"})),
         temp.as_deref(),
     )
     .await;

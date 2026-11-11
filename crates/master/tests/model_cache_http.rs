@@ -701,10 +701,11 @@ async fn member(t: &T, name: &str) -> String {
         t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let pw = v["password"].as_str().unwrap().to_string();
     let cookie = |r: &reqwest::Response| {
         r.headers()["set-cookie"]
             .to_str()
@@ -716,7 +717,7 @@ async fn member(t: &T, name: &str) -> String {
     };
     let r = reqwest::Client::new()
         .post(format!("{}/api/login", t.base))
-        .json(&json!({"username": name, "password": "temporary pw"}))
+        .json(&json!({"username": name, "password": pw}))
         .send()
         .await
         .unwrap();
@@ -725,7 +726,7 @@ async fn member(t: &T, name: &str) -> String {
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", &first)
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": "a password of my own"}))
+        .json(&json!({"current": pw, "new": "a password of my own"}))
         .send()
         .await
         .unwrap();

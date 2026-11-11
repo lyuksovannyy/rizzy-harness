@@ -210,12 +210,13 @@ async fn alex(t: &T) -> (String, String) {
 
 /// A member account `name` made by `admin`, signed in with its own password.
 async fn account(t: &T, admin: &str, name: &str, agentic: bool) -> (String, String) {
-    let body = json!({"username": name, "password": "temporary pw", "can_agentic": agentic});
+    let body = json!({"username": name, "can_agentic": agentic});
     let (st, v) = req(t, Method::POST, "/api/users", Some(body), admin).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let login = json!({"username": name, "password": "temporary pw"});
+    let pw = v["password"].as_str().unwrap().to_string();
+    let login = json!({"username": name, "password": pw});
     let first = post_anon(t, "/api/login", login, None).await;
-    let change = json!({"current": "temporary pw", "new": format!("{name}s own password")});
+    let change = json!({"current": pw, "new": format!("{name}s own password")});
     let c = cookie(&post_anon(t, "/api/me/password", change, Some(&cookie(&first))).await);
     let id = user_id(t, &c).await;
     (c, id)

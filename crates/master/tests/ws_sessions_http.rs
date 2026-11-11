@@ -108,17 +108,16 @@ async fn users(t: &T) -> [(String, String); 2] {
         )
         .await,
     );
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    assert_eq!(
-        req(t, Method::POST, "/api/users", Some(body), &alex).await,
-        StatusCode::OK
-    );
-    let first = login(t, "bob", "temporary pw").await;
+    let made = post(t, "/api/users", json!({"username": "bob"}), Some(&alex)).await;
+    assert_eq!(made.status(), StatusCode::OK);
+    let made: Value = made.json().await.unwrap();
+    let pw = made["password"].as_str().unwrap();
+    let first = login(t, "bob", pw).await;
     let bob = cookie(
         &post(
             t,
             "/api/me/password",
-            json!({"current": "temporary pw", "new": "bobs own password"}),
+            json!({"current": pw, "new": "bobs own password"}),
             Some(&first),
         )
         .await,
@@ -279,9 +278,9 @@ async fn an_admin_password_reset_closes_the_users_sockets() {
     let mut b = socket(&t, &bob).await;
     let st = req(
         &t,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"password": "new temporary"})),
+        Method::POST,
+        &format!("/api/users/{bob_id}/password"),
+        None,
         &alex,
     )
     .await;

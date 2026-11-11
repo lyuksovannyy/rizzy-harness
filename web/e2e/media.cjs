@@ -212,18 +212,20 @@ async function imagesInChats(p) {
     // Bob, another account, sees none of it.
     await p.goto(`${URL_}#/settings/server/users`);
     await p.fill('input[placeholder="username"]', 'bob');
-    await p.fill('input[placeholder="temporary password (10+)"]', 'temporary pw');
     await p.click('form >> button:has-text("Create")');
+    // The server makes the temporary password; the dialog shows it once.
+    const temp = (await p.innerText('dialog .temp-password')).trim();
+    await p.click('dialog button:has-text("Done")');
     await p.waitForSelector('td:has-text("bob")');
     const q = await (await b.newContext({ viewport: { width: 1280, height: 860 } })).newPage();
     q.on('pageerror', (e) => errors.push(`bob: ${e.message}`));
     await q.goto(URL_);
     await q.fill('input[placeholder="username"]', 'bob');
-    await q.fill('input[type=password]', 'temporary pw');
+    await q.fill('input[type=password]', temp);
     await q.click('button:has-text("Log in")');
     await q.waitForSelector('text=Choose your password');
     const pw = q.locator('input[type=password]');
-    await pw.nth(0).fill('temporary pw');
+    await pw.nth(0).fill(temp);
     await pw.nth(1).fill('bobs own password');
     await pw.nth(2).fill('bobs own password');
     await q.click('text=Save password');
