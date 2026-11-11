@@ -1,24 +1,31 @@
 # Undo and stash: design note
 
 Status: **proposal, nothing built.** Task C.13 of `ADOPTION_PLAN.md`, answering decision O11.
-For after Gate 3 of `FIX_PLAN.md` (feature freeze), except the pure fix named in §7. The
-direction is the owner's (2026-11-11 and 2026-11-12); every other decision is marked as a
-recommendation awaiting the owner's yes. Experiment B.3 has not published its numbers
-(`exp/B.3-checkpoint-cost` has no `docs/checkpoint-cost.md`), so costs that need them say "to be
-filled from experiment B.3".
+For after Gate 3 of `FIX_PLAN.md` (feature freeze), except task A.17 (§2.4), a fix to built
+behaviour that may land earlier. The direction is the owner's (2026-11-11 and 2026-11-12, revised
+the same day); what the owner left to us is marked as a recommendation awaiting their yes. Costs
+come from experiment B.3 (`git show exp/B.3-checkpoint-cost:docs/checkpoint-cost.md`, cited as
+"B.3"). **B.3 measured on a rotational USB hard disk under a load average of 10 to 14, warm cache
+only: they are slow-disk numbers, and no SSD or quiet machine was measured.**
 
 **Summary.** Most of the direction is already built under other names: each turn's `before`
 snapshot captures the person's edits made between turns, the pre-restore snapshot (A.9) is a
 saved copy of the folder taken before every undo, borrowing keeps committed content out of the
-shadow repository, and A.16 refuses a restore whose content is gone. Three things are new.
-(1) **A commit ends undo, per file:** a file whose committed content changed after a turn is left
-to git, and the result names the commit. Undo never moves HEAD, a branch, the index or the
-reflog. (2) **A stash:** when the person changed files an undo would overwrite, they are asked;
-"stash" keeps exactly those files, outside checkpoint pruning, until the person deletes them.
-(3) **Unstash** is a three-way merge per file; a conflict needs a second approval and then writes
-the stashed file beside the original as `name-1.py`, never over anything. The agent can list and
-read its own chat's stashes and unstash through the approval path; it can never create, change or
-delete one.
+shadow repository, and A.16 refuses a restore whose content is gone. What is new:
+
+1. **Undo stays available after a commit, by anyone.** It restores the turn's working files and
+   never touches history: no HEAD, branch, index or reflog moves, and no `git revert` or
+   `git reset` runs. If a restored file is held by a commit made since, the result names the
+   commit and says it is still in history.
+2. **Undo no longer depends on the user's repository keeping old content (A.17).** At the end of
+   each turn, the old versions of the files that turn changed are copied into the shadow's own
+   store and kept with the turn's checkpoint.
+3. **A stash.** An undo over the person's changes keeps exactly those files in a stash. A stash
+   expires at the first local midnight after it is 30 days old, and can be deleted earlier by the
+   person or by the agent.
+4. **Unstash** is a three-way merge per file. Clean files go back with no further step. For a
+   conflicting file, whoever unstashes chooses: skip it, write it beside as `name-1.py`, or have
+   the agent merge it.
 
 Terms used below:
 
@@ -29,294 +36,406 @@ Terms used below:
 - **Expected state:** what an undo assumes the folder holds now: `after(T)` for an undo, the
   latest recorded state for a rewind (`crates/node/src/session.rs`, `restore`).
 - **`Hb(T)`, `Ha(T)`:** the commit the user's HEAD named at T's before and after.
-- **Gap:** an interval in which no turn of this chat runs: `Ha(T)` to `Hb(T+1)`, and `Ha(last)`
-  to now.
-- **Side file:** a stashed file written under a new name beside the original (§3.4).
+- **Pin:** a pack of objects in the shadow's own store with a `.keep` file, so gc never drops it
+  in favour of the user's copies.
+- **Side file:** a stashed file written under a new name beside the original (§3.5).
 
 Short paths: `git.rs` and `session.rs` are in `crates/node/src/`, `event.rs` and `view.rs` in
 `crates/core/src/`. All refer to `main` as of 2026-11-12.
 
-## 1. What exists and what is new
+## 1. What exists, what is new, what changed
 
 ### 1.1 Built on `main`
 
 | Piece | Where | What it does |
 |---|---|---|
-| Turn snapshots | `session.rs`, `checkpoint`, `checkpoint_after`; `git.rs`, `snapshot_full` | A shadow commit of the folder's tree before and after each agentic turn, `refs/harness/<session>/<turn>/{before,after}`; plain folders too. |
+| Turn snapshots | `session.rs`, `checkpoint`, `checkpoint_after`; `git.rs`, `snapshot_full` | Before and after every agentic turn, a shadow commit of the folder's tree under `refs/harness/<session>/<turn>/{before,after}`. Plain folders are included. |
 | Borrowing | `git.rs`, `repo_for_with` | The shadow reads the user's objects through `objects/info/alternates`. |
-| Dropping duplicates | `git.rs`, `prune` (`gc --prune=now`); comment on `secure_blobs` | gc repacks with `-l`: shadow copies of objects the user's repository has are dropped. |
-| Pre-restore snapshot (A.9) | `session.rs`, `restore`; `CheckpointPhase::BeforeRestore` in `crates/core/src/event.rs` | Every undo first saves the folder as `restore-<id>`; restoring that id undoes the undo. Pruned under `checkpoints_keep`. |
-| Unforced check and `force` | `git.rs`, `restore_plan`; `MasterToNode::Restore` in `crates/protocol/src/lib.rs`; "Undo anyway" in `web/src/components/Conversation.tsx` | Refuses when a file the undo writes changed since the expected state; `force` skips that. |
-| All or nothing (A.16) | `git.rs`, `restore_diff`, `secure_blobs`, `worktree_tree` | Blobs to write are checked and copied first; a missing one refuses; a broken shadow index is rebuilt. |
+| Dropping duplicates | `git.rs`, `prune` (`gc --prune=now`); comment on `secure_blobs` | gc repacks with `-l`, so shadow copies of objects the user's repository has are dropped. |
+| Pre-restore snapshot (A.9) | `session.rs`, `restore`; `CheckpointPhase::BeforeRestore` in `event.rs` | Every undo first saves the folder as `restore-<id>`; restoring that id undoes the undo. Pruned under `checkpoints_keep`. |
+| Unforced check and `force` | `git.rs`, `restore_plan`; `MasterToNode::Restore` in `crates/protocol/src/lib.rs`; "Undo anyway" in `web/src/components/Conversation.tsx` | Refuses when a file the undo writes changed since the expected state; `force` skips the check. |
+| All or nothing (A.16) | `git.rs`, `restore_diff`, `secure_blobs`, `worktree_tree` | The blobs a restore writes are checked and copied first; a missing one refuses the restore; a broken shadow index is rebuilt. |
 | Nested repositories (A.15) | `git.rs`, `stage_without_nested`, `restore_plan` | Never snapshotted, never touched. |
-| Busy folders | `session.rs`, `claim_folder`, `claim_turn` | No undo while another chat's turn runs in the folder, and the reverse. |
+| Busy folders | `session.rs`, `claim_folder`, `claim_turn` | No undo while another chat's turn runs in the folder, and no turn while an undo runs. |
+| Periodic node tasks | `crates/node/src/lib.rs`, the loops started at node start (`artifacts::EXPIRE_EVERY`, `purge_incognito`) | Staged artifacts and idle incognito chats expire there. |
 
-Not built: a chat button to undo an undo (`web/src/fold.ts` ignores `before_restore`), any record
-of the user's HEAD, any notion of a committed turn.
+Not built: a chat button to undo an undo (`web/src/fold.ts` ignores `before_restore`), and any
+record of the user's HEAD.
 
 ### 1.2 The owner's six points
 
 | # | Point | State | Missing |
 |---|---|---|---|
-| 1 | The shadow keeps only what is not committed; after a commit those files go back with git | **Partly.** Blob storage already works this way (borrowing plus `repack -l`); trees are always local and small. | The meaning: committed files stop being undoable (§2). Nothing has to be deleted to save space. |
-| 2 | After each turn the shadow records the present state, folders without a repository included | **Already true.** | Nothing. |
-| 3 | The person's edits are tracked | **Partly.** Edits between turns are in `before(T)`, edits after the last turn in the pre-restore snapshot. | Attribution (one tree diff `after(T-1)..before(T)`, no scan). Edits made during a turn count as the turn's (§4.4). |
-| 4 | An undo over the person's changes asks whether to stash; the agent can view a stash | **Partly.** Refusal, then "Undo anyway" with a copy in the pre-restore snapshot, pruned after 10 changes and shown nowhere. | The question, a kept and listed stash, unstash, agent tools (§3). |
-| 5 | Borrowing stays | **Already true.** | Its remaining cost: §5, first rows. |
-| 6 | After a commit undo is unavailable; unstash by the person or the agent; a conflict needs another approval and returns as `filename-1.py` | **New.** | §2, §3.4, §3.5. |
+| 1 | The shadow holds only fresh edits; committed content is git's | **Already true as a storage rule** (§2.3). | Nothing, apart from A.17's pins, which deliberately keep old versions of changed files. |
+| 2 | After each turn the shadow records the present state, including folders without a repository | **Already true.** | Nothing. |
+| 3 | The person's edits are tracked | **Partly.** Edits between turns are in `before(T)`; edits after the last turn are in the pre-restore snapshot. | Attribution: one tree diff `after(T-1)..before(T)`, no scan. Edits made during a turn count as the turn's (§4.4). |
+| 4 | An undo over the person's changes asks about a stash; the agent can view one | **Partly.** Today: a refusal, then "Undo anyway" with a copy that is pruned after 10 changes and shown nowhere. | The question, a listed stash with a 30-day life, unstash, agent tools (§3). |
+| 5 | Borrowing stays | **Already true.** | A.17 removes the main thing borrowing still cost undo (§2.4). |
+| 6 | Undo stays available after a commit; unstash; conflict choices; 30-day expiry | **New.** | §2, §3. |
 
-### 1.3 How others do it
+### 1.3 What changed since the first version of this note
+
+- **The owner reversed "after a commit, undo is unavailable"** (2026-11-12). The per-file
+  "committed since" rule, its gaps, its unavailability and its tests are gone. This is also the
+  safer rule. Under the old rule, any agent could switch off undo for its own turn with
+  `git commit`; the first version already said that undoing a committed file is safe, because it
+  only leaves an uncommitted change and the commit stays in history.
+- Former Q1 (agent commits) no longer arises. Q2 (retention) is answered with 30 days, ending at
+  midnight. Q4 is answered: merge, with a choice per conflicting file. Q5 is decided yes, as
+  A.17.
+- Stashes can be deleted by the agent too, through the approval path.
+- Recommended now: no "undo without a stash" choice (§3.3, Q1).
+
+### 1.4 How others do it
 
 From `research/round2/synth/06-sessions-fork-checkpoints.md`, §2 and §3.3:
 
-- **Zed** ("What replaced it"): edits the user commits in Git are auto-accepted, the owner's rule;
-  but its log knows only tool edits and is lost on restart.
 - **Cline** ("Restore: a transaction with a head guard and compare-and-swap",
   `checkpoint-restore.ts` L50-L154): refuses unless HEAD is the checkpoint's commit, then moves
-  HEAD and runs `reset --hard`. We never move HEAD and decide per file.
+  HEAD and runs `reset --hard`. We never move HEAD, and a moved HEAD does not stop an undo.
+- **Zed** ("What replaced it"): edits the user commits in Git are auto-accepted. That was the
+  owner's first rule; the owner has dropped it.
 - **Hermes** ("Restore with a write ledger"): skips files the user edited, judged by a ledger of
   its own writes, so shell edits are missed. We ask, and judge by tree.
-- **Pi** (example `git-checkpoint.ts`): `git stash create` in the user's repository. Ours never
-  touches the user's refs. **OpenCode** (§3.3 table) overwrites user edits.
+- **Pi** (example `git-checkpoint.ts`): `git stash create` in the user's repository. Our stash
+  never touches the user's refs. **OpenCode** (§3.3 table) overwrites user edits.
 
-No project in the input unstashes by merging or returns a conflict as a side file.
+No project in the input unstashes by merging, or offers skip, write-beside and merge for a
+conflict.
 
-## 2. "Committed" and what it does to undo
+## 2. Undo and commits
 
-### 2.1 Recording HEAD
+### 2.1 The rule (direction from the owner and coordinator, 2026-11-12)
 
-Each `before`, `after` and `before_restore` event gets a field `head`: a commit id, `"unborn"`
-(no commit yet) or `"unknown"` (unreadable); absent outside a repository. **Schema change** to
-`Checkpoint` (`crates/core/src/event.rs`) and `CheckpointState` (`crates/core/src/view.rs`), in
-place before the first tag, with `PLAN.md`'s event table.
+An undo of turn T always puts the files the turn changed back to their `before(T)` content. It
+does so whether or not those changes were committed since, by the agent or by the person.
+**Undo, rewind and unstash never move HEAD, a branch, a tag, the index or the reflog, never run
+`git revert` or `git reset`, and never write anything in the user's repository.** They write
+working files only. This is already true on `main`: `git.rs`, `restore_paths` writes through a
+private index in the shadow.
 
-It is read with one `git -C <root> rev-parse -q --verify HEAD^{commit}` under the hardened base
-(`git.rs`, `hardened`: cleared environment, no system or global config, `core.fsmonitor=false`,
-`core.hooksPath=/dev/null`, `protocol.allow=never`, `GIT_NO_LAZY_FETCH=1`), the call `git.rs`,
-`describe` already makes. It reads `.git/config`, `HEAD`, the ref store and one commit, and runs
-no hook, filter, fsmonitor or transport. It is the only new call in the user's repository: the
-trees of those commits are read in the shadow, through the alternates (in the user's repository,
-same base, only when the object formats differ and there are no alternates).
+"Revert to the previous commit" is therefore not something the harness offers. After an undo
+over a committed change, the working tree differs from the newer commit, git shows that as
+uncommitted changes, and the person decides in git what to do with the commit.
 
-### 2.2 The rule (recommendation implementing the owner's decision)
+**What the person is told.** For each restored path p whose entry in HEAD now differs from p in
+`Hb(T)`, the path is held by a commit made since. The note after the undo names the newest commit
+in `Hb(T)..HEAD` that changed p, found with `rev-list -1 --full-history`, and says whether it was
+made during the turn (reachable from `Ha(T)`) or later. Example: "Undo restored 3 files.
+`src/a.py` is also in commit 1a2b3c4 ("Fix parser"), which the agent made during this turn; the
+commit was left in history, so git now shows the undo as an uncommitted change." When the commit
+cannot be found (HEAD no longer descends from `Hb(T)`, or history was pruned), the note says
+"HEAD moved from X to Y since this turn". This is one `diff-tree` limited to the restored paths,
+plus one `rev-list` per path that is held by a commit. It runs in the shadow, at undo time only.
 
-A path p that an undo would write is **committed since the turn** when p's entry (mode and blob,
-or absence) in HEAD changed in any gap after the turn: p in `Ha(T)` against p in `Hb(T+1)`, and so
-on, ending with p in `Ha(last)` against p in HEAD now. One `git diff-tree -r --no-renames
---name-only <a> <b> -- <paths>` per gap, in the shadow.
+**Rewind** (this turn and every later one) follows the same rule, with `Hb` of the first rewound
+turn.
 
-- A committed path is **not undone**; the turn's other paths are. The result names the newest
-  commit in `Ha(T)..HEAD` that changed p, or says "HEAD moved from X to Y" when HEAD no longer
-  descends from `Ha(T)`.
-- **Per file:** of three changed files with one committed, two are undone and the third is named.
-- **It follows HEAD as it is now:** a commit undone with `git reset` or `git revert` makes p
-  undoable again.
-- **Movements inside a turn do not count** (§2.3).
-- A gap with an unknown end (a turn without a checkpoint, `head: "unknown"`) merges with its
-  neighbours. A wrong guess makes undo unavailable; it never writes over a commit.
+### 2.2 Recording HEAD
 
-Why not "a commit after the turn contains the path": every commit contains every tracked path.
-Comparing entries across gaps needs no history walk and stays right for a branch switch, reset,
-amend or revert; walking commits by date would not (dates are what the committer wrote).
+The message needs HEAD, so each `before`, `after` and `before_restore` event gets a field `head`.
+It is a commit id, `"unborn"` (a repository with no commit yet) or `"unknown"` (unreadable), and
+it is absent outside a repository. This is a **schema change** to `Checkpoint` (`event.rs`) and
+`CheckpointState` (`view.rs`). It is made in place, before the first tag, together with
+`PLAN.md`'s event table.
 
-### 2.3 A commit made by the agent inside its turn (Q1)
+HEAD is read with one `git -C <root> rev-parse -q --verify HEAD^{commit}` under the hardened
+base (`git.rs`, `hardened`: cleared environment, no system or global config,
+`core.fsmonitor=false`, `core.hooksPath=/dev/null`, `protocol.allow=never`,
+`GIT_NO_LAZY_FETCH=1`). It is the call `git.rs`, `describe` already makes. It reads `.git/config`,
+`HEAD`, the ref store and one commit, and it runs no hook, filter, fsmonitor or transport. It is
+the only new call in the user's repository: the trees of those commits are read in the shadow,
+through the alternates.
 
-If it counted, any agent could switch off undo for its own turn with `git commit -am x`, the same
-class of problem as the planted `.git` fixed this week (A.15). **Recommendation:** movements
-between `Hb(T)` and `Ha(T)` are not acceptance. Undo restores the files, leaves HEAD and the index,
-and says "The agent committed during this turn (HEAD moved from X to Y); the files are restored,
-the commit is still in history: `git log X..Y`." The same applies to a later turn's agent
-committing an earlier turn's file, which is why the rule counts gaps, not everything after
-`Ha(T)`. This departs from the owner's words "after commit, revert is unavailable", so it is Q1.
-If agent commits are to count, the rule starts at `Hb(T)` and the abuse becomes a residual.
+### 2.3 The storage rule: the shadow holds only fresh edits
 
-### 2.4 Undo never moves a ref
+The shadow stores only content the user's repository does not hold (borrowing). After a commit,
+the shadow's copies of the newly committed content are dropped at its next gc (`repack -l`). The
+shadow's own store therefore shrinks to what is uncommitted. Whether loose duplicates are dropped
+as well is not established (§9).
 
-**Rule:** undo, rewind and unstash never move HEAD, a branch, a tag, the index or the reflog, and
-never write anything in the user's repository. They write working files only. True on `main`
-already (`git.rs`, `restore_paths` writes through a private index in the shadow); the note makes
-it a stated rule with a test (T1).
+At 100,000 files, a committed repository's shadow is 9.7 MiB after the first snapshot with
+borrowing and 478 MiB without. The first snapshot takes 1.9 s with borrowing and 5.7 s without
+(B.3, "Disk" and "Snapshots"; slow disk, loaded machine). A.17's pins are the deliberate exception
+to the rule: old versions of changed files only.
 
-### 2.5 Rewind
+### 2.4 A.17: pin the old versions at the end of each turn (decided)
 
-The same rule per path, over the gaps after the first rewound turn. Committed paths stay; the
-rest go back to `before(T)`; each rewound turn gets `restored`.
+Undo must keep working after commits and after history is rewritten. So the content an undo
+writes must not depend on the user's repository keeping it. Today it does: B.2 showed that a
+rewrite plus pruning makes an older checkpoint unrestorable. A.16 makes that safe (refused, folder
+untouched) but does not keep the undo working.
 
-### 2.6 What "the shadow drops it" means
+**What is pinned.** In `checkpoint_after`, after the `after` snapshot:
 
-- **Storage:** nothing new; gc's `repack -l` already drops shadow blobs a commit now holds.
-  Whether loose duplicates go too is not established (§9).
-- **Older checkpoints** are unusable for committed paths, by design. A.16 treated a missing
-  object as damage; the two fit by order: the committed test runs before `secure_blobs`, so a
-  committed path is reported as "committed in 1a2b3c4 after this turn; undo leaves it to git",
-  never as missing content. A.16's refusal remains for uncommitted paths whose borrowed blobs
-  were pruned.
-- **The cost of the owner's decision, plainly:** undoing a committed file would be safe (an
-  uncommitted revert; the commit stays). Forbidding it is a clarity choice, not a safety need. It
-  is followed as decided.
+1. `git diff-tree -r -t --no-renames before(T) after(T)` lists the paths the turn changed. With
+   `-t` it also lists the trees on those paths, giving the old-side and new-side ids.
+2. The pin set is: those old-side blobs, the trees on the changed paths on both sides, and both
+   root trees. The commits are always the shadow's own, so they are already in its store.
+   - Old-side blobs are what the undo writes.
+   - The trees are what `restore_diff` and the unforced check read. A tree equal to one the user
+     committed is borrowed too.
+3. `cat-file --batch-check` checks that every object in the set is present.
+4. One `pack-objects` writes the present objects into `objects/pack/` with a `.keep` file. The
+   pack is recorded against the turn's checkpoint group.
+5. When `prune` drops that group, it deletes the pack and its `.keep`.
+6. Only in a borrowing shadow. A plain folder's shadow already stores everything.
 
-### 2.7 Folders without a repository
+**What this fixes.** Once a turn is pinned, a later rewrite plus `gc --prune=now` in the user's
+repository can no longer defeat that turn's undo. This holds whether the person or an agent does
+it in a later turn. It also covers the rewind, because each turn pins its own changes. The
+`before_restore` snapshot gets the same pin, so an undo of an undo survives as well. In the
+restore, `secure_blobs` (A.16) mostly turns into a check, because the blobs are already local.
 
-No HEAD, nothing is ever committed: undo works as today.
+**What stays exposed** (said plainly, because the direction claimed more):
 
-### 2.8 A base commit that is gone (B.2)
+- **An agent that prunes inside its own turn.** The pin runs at the end of the turn. An agent
+  that rewrites the user's history, expires the reflog and runs `gc --prune=now` during the turn
+  destroys the borrowed old versions before they are pinned. Pinning cannot fix this. Only not
+  borrowing tracked content would, and O11 keeps borrowing. A.17 detects it instead: objects
+  missing at step 3 produce a chat note saying which files of this turn can no longer be undone.
+  This is Q3.
+- **Turns older than `checkpoints_keep`.** Their checkpoints and pins are gone, as today.
+- **Files the turn did not change.** They are not pinned. Their undo is not needed, because undo
+  writes only changed paths.
 
-If a commit a gap needs cannot be read (history rewritten and pruned), a path that HEAD tracks now
-is treated as committed ("history was rewritten since this turn, so the harness cannot tell
-whether you committed it; use git"); a path HEAD does not track stays undoable.
+**Cost.** Pinning adds one `diff-tree` (B.3 puts `changed`, a tree diff, at 3 to 4 ms), one
+`cat-file --batch-check` and one `pack-objects`, and only on turns that changed something.
+- **Disk:** the compressed old versions of the changed files, which is tiny next to 478 MiB.
+- **Time:** in the restore, B.3 measured the same `pack-objects` step through the alternates at
+  170 to 400 ms, even for one file ("Restore"). A restore of 10 files costs 0.5 to 1.3 s in a
+  repository folder. Pinning moves most of that cost from the undo to every changing turn.
+- **Scheduling:** to keep it off the turn's visible end, the pin runs after `turn_ended` is
+  written. The session's next turn and any restore wait for it.
+
+A.17 is a fix to built behaviour, security code, and its own task that may land before Gate 3
+(§7, `ADOPTION_PLAN.md` A.17).
+
+### 2.5 Folders without a repository
+
+There is no HEAD and no borrowing, so undo works as it does today.
 
 ## 3. The stash
 
 ### 3.1 The object (recommendation)
 
-**Contents:** for each path the undo writes **and** whose content differs from the expected
-state, the whole file just before the undo (the person's version) and the same path in the
-expected state (the merge base). A deletion by the person is an absent file. Not the whole
-folder: the undo does not touch the other paths, the pre-restore snapshot already holds the whole
-folder for undoing the undo, and a small stash is one a person can read and keep.
+**Contents.** The stash holds the paths the undo writes **and** whose content differs from the
+expected state. For each, it holds the whole file just before the undo (the person's version) and
+the same path in the expected state (the merge base). A deletion by the person is an absent file.
 
-**Place:** a commit in the shadow at `refs/harness-stash/<session>/<stash-id>`, outside
-`refs/harness/`, so `prune` (`for-each-ref refs/harness/`) never sees it and gc keeps what it
-reaches. Its tree holds the stashed files; its parent's tree holds the base versions; trailers
-name the turn, the rewound turns and HEAD.
+It does not hold the whole folder: the undo does not touch the other paths. The direction said
+the pre-restore copy "becomes" the stash; that is true only of the person's changed files. The
+A.9 snapshot of the whole folder is still taken, still pruned under `checkpoints_keep`, and still
+what undoes an undo. The person's own edits, which today last only ten further changes, now last
+30 days in the stash.
 
-**Self-contained:** its blobs go into a pack of their own with a `.keep` file, so gc's
-`repack -l` does not drop them in favour of the user's copies, and a later history rewrite cannot
-take them. Deleting the stash removes ref, pack and `.keep`. That gc honours `.keep` here is
-proven by T6.
+**Place.** A commit in the shadow at `refs/harness-stash/<session>/<stash-id>`.
+- It sits outside `refs/harness/`, so `prune` (`for-each-ref refs/harness/`) never sees it, and gc
+  keeps what it reaches.
+- Its tree holds the stashed files; its parent's tree holds the base versions.
+- Its blobs are pinned in a pack of their own, so the stash is self-contained and survives a
+  history rewrite.
+- Trailers name the turn, the rewound turns, HEAD and the expiry instant.
 
-**Shown as:** "Stash of 12 Nov 14:03, before undoing *Fix the parser*, 3 files, 18 KB"; the id
-`stash-<id>` is used by the API and the tools.
+**Shown as.** "Stash of 12 Nov 14:03, before undoing *Fix the parser*, 3 files, 18 KB, expires
+13 Dec 00:00". The id `stash-<id>` is used by the API and the tools.
 
-**Event:** a new kind `stash { stash_id, phase: created | applied | deleted, turn_id, files,
-bytes, by }`, paths and sizes only, folded into `SessionView.stashes`. **Schema change**; the UI is
-a fold over the log, so a stash must be in it.
+**Event.** A new kind `stash { stash_id, phase: created | applied | deleted, turn_id, files, bytes,
+expires_at, by, reason }`. It carries paths and sizes only, never content. `reason` is
+`person | agent | expired | empty | chat_deleted`. It is folded into `SessionView.stashes`. This is
+a **schema change**; the UI is a fold over the log, so a stash must be in it.
 
-### 3.2 Lifetime (Q2)
+### 3.2 Lifetime: 30 days, ending at midnight (owner's decision)
 
-**Recommendation:** never pruned automatically; it holds the person's own work. Deleted by the
-person from a list showing each size and the total, or with its chat (the delete confirmation
-counts them); an incognito chat's stashes go when it expires (`crates/node/src/lib.rs`,
-`purge_incognito`). **Alternative:** a generous cap (90 days, or 1 GiB per folder, oldest first).
-Risk: it deletes someone's only copy of their edits, months later, without their action.
+**Rule.** A stash expires at the first local midnight (00:00) that falls at or after its creation
+plus 30 × 24 hours. It always lives at least 30 days and always disappears at 00:00, never in the
+middle of a day. In a time zone that skips 00:00 at a daylight-saving change, "midnight" is the
+first instant of that local day.
 
-### 3.3 The question at undo
+**Clock.** The node holds the stash, so the node computes the instant once, at creation, from its
+own clock and time zone. It is stored as an absolute instant in the event and the commit trailer,
+so a later time-zone change on the node does not move it.
+- The calculation uses `jiff`, already a workspace dependency (`crates/master/Cargo.toml`,
+  `crates/memory/Cargo.toml`), with the system time-zone database. Without one it falls back to
+  UTC, and the list says so.
+- A system clock set wrong makes the stash expire early or late.
 
-The node plans first. If nothing is committed and nothing the undo writes changed, the undo runs
-at once, as today. Otherwise nothing is written and the node returns the plan: paths it will
-undo, committed paths with their commits, changed paths, and files that would be deleted unsaved
-(`RestorePlan.unsaved`). The choices:
+**Removal.** A check runs at node start and then every five minutes, as a loop beside the
+incognito purge in `crates/node/src/lib.rs`.
+- It removes every expired stash: ref, pin pack and `.keep`. It records `stash{deleted,
+  reason: expired}` through the owning session's actor (one writer per session), plus a note in
+  the chat.
+- A node that was off at that midnight removes the stash at its next start.
+- **An expired stash is never usable, even if it is still on disk:** every list, show and apply
+  checks `expires_at` first and refuses.
 
-| Choice | Honest label | Effect |
+**What the person sees.** Every stash shows its expiry date; a stash removed by expiry leaves a
+note in the chat.
+
+**Said plainly:** this deletes someone's saved edits without their action after 30 days. It is
+the owner's decision. Earlier deletion:
+- The person deletes from the list, with one confirmation.
+- The agent deletes through a tool (§3.6).
+- Deleting a chat deletes its stashes; the confirmation counts them.
+- An incognito chat's stashes go with it (`purge_incognito`).
+
+### 3.3 The question at undo (recommendation, Q1)
+
+The node plans first. If nothing the undo writes changed since the expected state, the undo runs
+at once, as today. Otherwise nothing is written, and the node returns the plan:
+- the paths it will undo;
+- the changed paths that will be stashed;
+- the paths held by a commit made since (§2.1);
+- files that would be deleted and cannot be kept (`RestorePlan.unsaved`: ignored files in a
+  folder the undo replaces by a file).
+
+The choices:
+
+| Choice | Label | Effect |
 |---|---|---|
-| Stash | "Keep my changes in a stash, then undo" (default) | Builds and records the stash, then undoes. |
-| Drop | "Undo without a stash (my changes stay with the checkpoints for the next 10 changes)" | Undoes; the pre-restore snapshot still holds them, pruned as today. |
+| Stash | "Undo and keep my changes in a stash for 30 days" | Builds and records the stash, then undoes. Any unsaved files are listed on the card as deleted. |
 | Cancel | "Cancel" | Nothing written; the snapshot ref is deleted, as on any refusal today. |
 
-**Recommendation:** keep the pre-restore snapshot for every restore, "Drop" included. The check
-needs that scan anyway (`session.rs`, `restore`), so it costs nothing extra, and it is what lets
-an undo be undone. "Drop" therefore does not discard at once, and the label must say so (Q3).
+**Why no "undo without a stash".** With a stash that expires anyway, dropping saves nothing: the
+check needs the scan in any case (`session.rs`, `restore`). Dropping would only make a misclick
+final, and the person can delete the stash a second later.
 
-**Mechanism (recommendation):** the existing refuse-then-retry round trip, not the approval path.
+**Mechanism.** The existing refuse-then-retry round trip, not the approval path.
 `ApprovalRequested` belongs to a tool call in a running turn and is denied when the turn ends
-(`session.rs`, `end_turn`); an undo runs with no turn. `session.restore` replaces `force: bool`
-with `changes: "ask" | "stash" | "drop"` (absent is `ask`) and `seen`, a hash of the plan's inputs
-(paths, blob ids, HEAD) returned by the ask. The answer re-plans from a fresh snapshot and asks
-again if the hash differs. **Protocol change** (`crates/protocol/src/lib.rs`) and HTTP body change
-(`crates/master/src/http.rs`, `restore_turn`).
+(`session.rs`, `end_turn`); an undo runs with no turn.
+- `session.restore` replaces `force: bool` with `changes: "ask" | "stash"` (absent means `ask`)
+  and `seen`, a hash of the plan's inputs (paths, blob ids, HEAD) that the ask call returned.
+- The answer re-plans from a fresh snapshot and asks again if the hash differs. A restart between
+  question and answer loses nothing, because the node keeps no state between the two calls.
+- This is a **protocol change** (`crates/protocol/src/lib.rs`) and an HTTP body change
+  (`crates/master/src/http.rs`, `restore_turn`).
+- With no person present (an API call, a script), a call that does not choose gets the plan and
+  changes nothing. Routines have no undo tool. Never a silent choice.
 
-**No person present** (an API call, a script): a call that does not choose gets the plan and
-changes nothing. Routines have no undo tool. Never a silent choice.
+**Order.** Snapshot, plan, `secure_blobs`, stash commit and pin, stash ref, `before_restore`
+event, `stash{created}` event, writes, `after`, `restored`. If an append fails before the writes,
+the stash ref and pin are deleted and nothing is written.
 
-**Order with "stash":** snapshot, plan, `secure_blobs`, stash commit and kept pack, stash ref,
-`before_restore` event, `stash{created}` event, writes, `after`, `restored`. If an append fails
-before the writes, the stash ref and pack are deleted and nothing is written.
+### 3.4 Unstash
 
-### 3.4 Unstash by the person
+A stashed file is the agent's change with the person's edits on top. Writing it back whole would
+bring the undone change back. So unstash stays a **three-way merge per file**:
+- base B: the file as the turn left it, from the stash's parent;
+- current C: the file now;
+- stashed S: the file in the stash.
 
-A stashed file is the agent's change with the person's edits on top; writing it back whole would
-bring the undone change back. So unstash is a **three-way merge per file**: base B (the file as
-the turn left it, from the stash's parent), current C (the file now), stashed S. It runs
-`git merge-file -p` on three temporary files in a private directory under the data directory,
-with `--git-dir <shadow>` and the hardened base. `merge-file` calls git's merge code directly:
-no merge driver, no attributes, and only `merge.conflictStyle` from config, which here is the
-harness's. T12 proves it with a hostile `merge.<x>.driver` and `.gitattributes`. The result is
-written to the shadow with `hash-object -w`.
+**The merge.** It runs `git merge-file -p` on three temporary files in a private directory under
+the data directory, with `--git-dir <shadow>` and the hardened base.
+- `merge-file` calls git's merge code directly. It uses no merge driver and no attributes, and it
+  reads only `merge.conflictStyle` from config, which here is the harness's.
+- Test 12 proves this with a hostile `merge.<x>.driver` and `.gitattributes`.
+- The result goes into the shadow with `hash-object -w`.
 
-Unstash claims the folder (`claim_folder`) and first takes the same pre-write snapshot as a
-restore, so it can be undone. It writes through a private index and `checkout-index`, as `git.rs`,
-`restore_paths` does: no symlink in a leading path is followed, no filter applies.
+**Writing.** Unstash claims the folder (`claim_folder`) and first takes the same pre-write
+snapshot as a restore, so it can itself be undone. It writes through a private index and
+`checkout-index`, as `git.rs`, `restore_paths` does: no symlink in a leading path is followed, and
+no filter applies.
 
 | Case | Result |
 |---|---|
-| S equals B, or C equals S | Nothing to do for this file. |
+| S equals B, or C equals S | Nothing to write; the file leaves the stash. |
 | C equals B | S written in place. |
 | Text, clean merge | Merge written in place: the person's edit kept, the agent's change still undone. |
-| Text with conflicts; binary (merge-file refuses); symlink differing | **Conflict.** |
-| C absent (deleted since, or the undo removed a file the turn created) | Conflict: S carries the turn's content. On approval written under its own name, as nothing is there. |
-| B absent (the turn deleted it, the person recreated it), C present and not S | Conflict. |
-| S absent (the person had deleted it) | Reported, never applied: unstash never deletes a file. |
-| p committed since the turn | No difference: unstash works on files and never reads HEAD. |
+| Text with conflicts; binary (merge-file refuses); a symlink that differs | **Conflict.** |
+| C absent (deleted since, or the undo removed a file the turn created) | Conflict: S carries the turn's content. |
+| B absent (the turn deleted the file, the person recreated it), C present and not equal to S | Conflict. |
+| S absent (the person had deleted the file) | Reported, never applied: unstash never deletes a file. The entry leaves the stash. |
 
-**Conflict (owner's rule):** nothing of that unstash is written until the person approves a
-second time, seeing the conflicting files and their side-file names; the approval carries `seen`.
-Then clean merges go in place and each conflicting file's stashed version is written as a side
-file. Nothing is written over an existing entry and no conflict markers go into the person's file.
-Note: the side file is the person's whole stashed file, so it contains the agent's change too;
-that is what they had, and they take lines from it.
+**No conflict is seamless (owner's decision).** A clean file is written with no step beyond the
+unstash itself. For the person, pressing unstash is the approval. For the agent, the tool call's
+normal approval covers the clean files.
 
-**Side-file name.** On the last path component N, as bytes:
+**A conflict is a choice per file**, made by whoever is unstashing:
 
-1. The extension starts at the last `.` that is neither N's first nor its last byte; the stem is
-   what precedes it. With no such dot the stem is N and the extension is empty.
+1. **Skip.** Nothing is written; the file stays in the stash.
+2. **Beside.** The stashed version is written next to the file under the name rule in §3.5
+   (`filename.txt` becomes `filename-1.txt`). Nothing is written over an existing entry, and no
+   conflict markers go into the person's file. If C is absent, nothing is there to protect, so S
+   is written under its own name.
+3. **Merge by the agent.** This is not a mechanism of its own.
+   - The agent reads B, C and S through `stash_show` and writes a merged file with its ordinary
+     `edit` or `write` tool.
+   - That write goes through the ordinary approval and is checkpointed like any change, so the
+     person can undo it.
+   - The file stays in the stash until it is deleted or expires; the harness cannot tell when the
+     agent's merge is "done".
+
+The side file is the person's whole stashed file, so it contains the agent's change too. That is
+what the person had, and they take lines from it.
+
+**When the agent unstashes and hits a conflict**, it does not choose for the person. The node puts
+one approval card to a person, listing the conflicting files, each with the three choices and its
+side-file name. The approval carries `seen`, so it applies only to the plan shown. In a routine,
+or wherever no person can answer, conflicts are skipped and reported: nothing is written beside
+and nothing is merged. The direction allowed "unless the person already said which they want";
+see Q2.
+
+**Afterwards.** Files written in place or beside leave the stash, and so do files with nothing to
+write. Skipped files stay. The stash ref moves to a commit without the files that left, and the
+pin is repacked to match. A stash with nothing left is removed (`reason: empty`).
+
+### 3.5 Side-file name
+
+The rule works on the last path component N, as bytes:
+
+1. The extension starts at the last `.` that is neither N's first byte nor its last. The stem is
+   what precedes it. With no such dot, the stem is N and the extension is empty.
 2. Candidate k is `stem-k` followed by the extension, for k = 1 to 999.
-3. The first candidate with nothing at that name (`lstat`: a file, directory, symlink or dangling
-   symlink all count; a case-insensitive file system matches any case) and not taken by another
-   side file of the same unstash wins. `checkout-index` runs without `-f`, so a name that appeared
-   meanwhile fails the write and the unstash is planned again.
-4. Over 255 bytes, the stem is cut at a character boundary (a byte boundary if not UTF-8). An
-   empty stem, a path over 4,096 bytes, or k past 999 refuses that file with the reason.
-5. The stashed mode is kept (executable bit; a symlink stays a symlink).
+3. The first candidate wins if nothing exists at that name and no other side file of the same
+   unstash takes it.
+   - The check uses `lstat`, so a file, a directory, a symlink and a dangling symlink all count. On
+     a case-insensitive file system it matches any case.
+   - `checkout-index` runs without `-f`, so a name that appears meanwhile fails the write, and the
+     unstash is planned again.
+4. A name over 255 bytes is shortened by cutting the stem at a character boundary (a byte
+   boundary if the name is not UTF-8). That file is refused, with the reason, if the stem would be
+   empty, the path would exceed 4,096 bytes, or k passes 999.
+5. The stashed mode is kept: the executable bit, and a symlink stays a symlink.
 
 | Name | Side file |
 |---|---|
-| `name.py` | `name-1.py`, then `name-2.py` |
+| `filename.txt` | `filename-1.txt`, then `filename-2.txt` |
 | `archive.tar.gz` | `archive.tar-1.gz` |
 | `Makefile` | `Makefile-1` |
 | `.env` | `.env-1` |
 | `.eslintrc.json` | `.eslintrc-1.json` |
 | `name.` | `name.-1` |
-| `name-1.py` conflicting | `name-1-1.py` |
+| `name-1.py` (itself conflicting) | `name-1-1.py` |
 
-The last dot keeps the final extension, so editors still know the type; the cost is
-`archive.tar-1.gz`.
+The last dot keeps the final extension, so editors still know the file type. The cost is
+`archive.tar-1.gz` for a double extension.
 
-**Partial unstash:** the person picks files. `stash{applied}` names the files applied and side
-files written. The stash stays until deleted, marked "applied" once every file was; applying it
-again finds C equal to S and writes nothing.
+### 3.6 The agent's tools
 
-### 3.5 The agent and stashes
-
-| Tool | Risk | Does |
+| Tool | Risk | What it does |
 |---|---|---|
-| `stash_list` | read-only | This chat's stashes: id, date, turn, files, applied marks, size. |
-| `stash_show` | read-only | One stashed file, or its diff against the base or the file now; `read`'s size limits. |
-| `stash_apply` | mutating | Unstash files of one stash, exactly as §3.4. |
+| `stash_list` | read-only | This chat's unexpired stashes: id, date, turn, files, size, expiry. |
+| `stash_show` | read-only | One file of a stash as base, stashed or current version, or a diff between two of them. Same size limits as `read`. |
+| `stash_apply` | mutating, approval | Unstash files of one stash, exactly as §3.4; conflicts go to a person. |
+| `stash_delete` | mutating, approval | Delete one stash. The card says what is lost: how many files, from when, the turn. It cannot be undone. |
 
-- Only stashes of the agent's own chat, in its folder.
-- **No tool creates, changes or deletes a stash.** Only an undo the person chose makes one; only
-  the person deletes one.
-- `stash_apply` goes through the approval path like `write` (`TurnHost::approve`,
-  `crates/core/src/backend.rs`). A conflict asks again, always a person whatever the approval
-  mode, with `turn_allow` false, and is denied when no person can answer (O6). Whether the fold
-  and UI take two approvals under one `call_id` is not established; if not, the second gets a
-  derived id.
-- The shadow is in the data directory: the file tools refuse paths there
-  (`crates/tools/src/lib.rs`, `refuse_protected`) and the enforced sandbox gives the shell no
-  access (`crates/tools/src/sandbox.rs`, module comment, `exposes`). With `[sandbox] mode = "off"`
-  or best-effort without Landlock it is reachable, like every checkpoint today (`PLAN.md` R2).
-- A stash holds text anyone may have written; `stash_show` carries the risk of `read`, no more.
-- Served through `TurnHost`, implemented by `Session`, as `delegate` is.
+- The tools reach only the stashes of the agent's own chat, in its folder.
+- **No tool creates a stash or changes its contents.** Only an undo the person chose creates one.
+- Both mutating tools go through the approval path like `write` (`TurnHost::approve`,
+  `crates/core/src/backend.rs`).
+  - The conflict card always goes to a person, whatever the approval mode, with `turn_allow`
+    false. It is denied when no person can answer (O6).
+  - Whether the fold and the UI accept two approvals under one `call_id` is not established. If
+    they do not, the second approval gets a derived id.
+- The shadow is in the data directory, and the agent cannot reach it there by other means.
+  - The file tools refuse paths in it (`crates/tools/src/lib.rs`, `refuse_protected`).
+  - The enforced sandbox gives the shell no access to it (`crates/tools/src/sandbox.rs`, module
+    comment and `exposes`).
+  - With `[sandbox] mode = "off"`, or best-effort without Landlock, the shell can reach it, as it
+    can every checkpoint today (`PLAN.md` R2).
+- A stash holds text anyone may have written. `stash_show` carries the same risk as `read`, and
+  no more.
+- The tools are served through `TurnHost` and implemented by `Session`, as `delegate` is.
 
 ## 4. What changes in the code
 
@@ -324,134 +443,152 @@ again finds C equal to S and writes nothing.
 
 | Piece | Verdict | How |
 |---|---|---|
-| `before`/`after` snapshots | Changes | Add `head`. Optionally `before.files` = the person's edits since `after(T-1)`. |
-| `before_restore` (A.9) | Stays | For every restore and every unstash; under `checkpoints_keep`. |
-| `restored` | Stays | Lists only what was undone; committed paths go into the note (`session.rs`, `restore_notice`). |
-| Unforced check (`restore_plan`) | Changes | Becomes the plan of `changes: "ask"`, with committed paths and `seen`. |
+| `before`/`after` snapshots | Change | Add `head`; `after` adds the A.17 pin. Optionally `before.files` lists the person's edits since `after(T-1)`. |
+| `before_restore` (A.9) | Stays | Taken for every restore and every unstash, pinned, and pruned under `checkpoints_keep`. |
+| `restored` and the note after an undo | Stay, extended | The note names commits that hold restored files and the stash that was made (`session.rs`, `restore_notice`). |
+| Unforced check (`restore_plan`) | Changes | Becomes the plan returned for `changes: "ask"`, with `seen`. |
 | `force` | Goes | Replaced by `changes`. |
-| `secure_blobs` | Stays, reused | Also for stash blobs, into a kept pack. |
+| `secure_blobs` (A.16) | Stays | Mostly a check once turns are pinned; the copy remains for unpinned (older) checkpoints. |
 | Index rebuild, nested-repository exclusion, interrupted-restore path, `claim_folder` | Stay | Unstash also claims the folder. |
-| `checkpoints_keep` pruning (`git::prune`) | Stays | Stash refs are outside `refs/harness/`. |
-| Borrowing | Stays | Stashes do not rely on it. |
+| `checkpoints_keep` pruning (`git::prune`) | Changes | Also deletes the pins of dropped groups. Stash refs are outside `refs/harness/`. |
+| Borrowing | Stays | Neither undo of a pinned turn nor a stash relies on it. |
 
 ### 4.2 New pieces
 
 | Piece | Where |
 |---|---|
-| HEAD per checkpoint | `git.rs`, `session.rs`, `event.rs`, `view.rs`, `web/src/fold.ts` |
-| Committed-since test over gaps | `git.rs`; called in `session.rs`, `restore`, before `restore_diff` |
-| Stash commit, kept pack, list, delete; `stash` event and fold | `git.rs`, `session.rs`, `event.rs`, `view.rs`, `web/src/fold.ts` |
+| A.17 pin per turn and per restore; pin deletion in `prune` | `session.rs`, `checkpoint_after`, `restore`; `git.rs` |
+| HEAD per checkpoint; "held by a commit made since" in the note | `git.rs`, `session.rs`, `event.rs`, `view.rs`, `web/src/fold.ts` |
+| Stash commit and pin, list, delete, shrink on apply; `stash` event and fold | `git.rs`, `session.rs`, `event.rs`, `view.rs`, `web/src/fold.ts` |
+| Expiry: instant at creation, check at start and every 5 minutes | `crates/node/src/lib.rs`, beside the `purge_incognito` loop |
 | `changes`/`seen` on `session.restore`; `session.stash.apply`, `.delete`, `.show` | `crates/protocol/src/lib.rs`, `crates/node/src/lib.rs`; HTTP in a new `crates/master/src/http/stashes.rs` |
-| Merge and side-file naming (naming as a pure function) | `git.rs` |
-| `stash_list`, `stash_show`, `stash_apply` | `crates/tools`, `TurnHost` |
-| Secure at `after` (Q5): a kept pack per turn, deleted when `prune` drops that turn | `session.rs`, `checkpoint_after`; `git.rs`, `prune` |
+| Merge, conflict choices, side-file naming (as a pure function) | `git.rs`, `session.rs` |
+| `stash_list`, `stash_show`, `stash_apply`, `stash_delete` | `crates/tools`, `TurnHost` |
 
-**The UI needs** (no screens here): the plan with its three choices; a per-chat stash list; a
-stash file view (diff against the base); unstash with file selection and a conflict confirmation
-naming side files; delete; the stash total per folder; stashes counted in the chat delete
-confirmation.
+Gone from the first version: the "committed since" test and its gaps.
+
+**What the UI needs** (no screens designed here):
+- the undo card with its two choices;
+- a per-chat stash list with expiry dates;
+- a stash file view (a diff against the base);
+- unstash with file selection, and a conflict card offering the three choices per file;
+- delete with confirmation;
+- the stash total per folder;
+- stashes counted in the chat delete confirmation.
 
 ### 4.3 Cost per turn
 
-Recording HEAD: one `rev-parse` per checkpoint that reads no file of the folder; milliseconds,
-no scan. The committed test runs only at undo: one `diff-tree` per gap over the turn's paths, at
-most one per kept checkpoint. Unstash adds one folder snapshot: to be filled from experiment B.3.
-Q5 adds one `cat-file --batch-check` and one `pack-objects` over the old versions of the turn's
-changed files, so it scales with the change, not the folder; its disk use is to be filled from
-experiment B.3.
+From B.3 ("A whole turn"; slow disk, loaded machine, warm cache only): a turn's checkpoints
+without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,000.
+- `prune` runs `git gc --prune=now` on every turn once ten checkpoints exist. It is the largest
+  cost of a turn: 0.26 s at 1,000 files and 3.3 s at 100,000 in a plain folder. That is being
+  fixed as its own task.
+- **The additions proposed here must not add to that cost and must not run gc.**
+  - Recording HEAD is one `rev-parse` that reads no file of the folder: milliseconds.
+  - Pinning (§2.4) adds `diff-tree`, `cat-file` and `pack-objects` on changing turns only, about
+    170 to 400 ms by B.3's `secure_blobs` figure. It runs after `turn_ended`, and the restore
+    saves most of it in return.
+  - Stash creation adds a `pack-objects` of the stashed files only at undo time.
+- Unstash adds one folder snapshot: B.3's unchanged repeat is 11 ms at 1,000 files, 25 ms at
+  10,000 and 166 to 201 ms at 100,000.
+- "Held by a commit since" runs only at undo.
 
-### 4.4 What it does not fix
+### 4.4 What this does not fix
 
-- **A restore is not atomic across files** (T33 residual); unstash shares this. Both name the
-  pre-write checkpoint on failure.
-- **Uncommitted work inside a nested repository** is in no checkpoint and no stash.
-- **Two chats in one folder:** chat B's agent edits look like the person's to chat A's undo (and
-  are stashed under A, unseen by B's agent); B's agent commits look like the person's in A's
-  gaps. Turns are still not serialised.
+- **A restore is not atomic across files** (a T33 residual), and unstash shares this. Both name
+  the pre-write checkpoint on failure.
+- **Uncommitted work inside a nested repository** is in no checkpoint and in no stash.
+- **Two chats in one folder.** Chat B's agent edits look like the person's edits to chat A's undo.
+  They are stashed under A, unseen by B's agent. Turns are still not serialised.
 - **The person's edits made during a turn** are part of `after(T)`, so undo overwrites them
-  without asking; they survive only in the pre-restore snapshot. Fixing that needs per-write
-  attribution, which the shell does not give.
-- **An agent that prunes its own turn's base** (§5), unless Q5.
-- **A process that outlives its turn** (B.1) can commit in a gap and switch off undo for those
-  files. C.11 fixes the process; the rule cannot tell.
+  without asking. They survive only in the pre-restore snapshot, under `checkpoints_keep`.
+  Fixing that needs per-write attribution, which the shell does not give.
+- **An agent that prunes inside its own turn** (§2.4) is detected and reported, but not
+  prevented.
+- **Large plain folders.** A first snapshot of a 250,000-file plain folder did not finish within
+  the 60 s snapshot or the 120 s git timeout (B.3, "Does the 60-second snapshot timeout get
+  close?"). Such a folder has no checkpoint, so no undo and no stash.
 
 ## 5. How it breaks
 
 | Case | What happens |
 |---|---|
-| Injected agent runs `git commit` | In-turn movement, ignored (if Q1). Files restored, HEAD left, the commit named. |
-| Agent amends or rebases the person's commits | Same. HEAD is not moved back; the note gives the old HEAD id from the harness's log, which outlives `reflog expire` (the commit object may not). |
-| Agent runs `git stash` or `git checkout <branch>` | The file changes are the turn's and are undone. The agent's stash entry and the branch stay; the note says HEAD moved and from where. |
-| Agent deletes stashes or checkpoints through the shell | Unreachable with the enforced sandbox and the file tools (§3.5); reachable with the sandbox off, an existing residual. |
-| Agent rewrites history and runs `gc --prune=now` in its turn | The `before` snapshot's borrowed blobs vanish and A.16 refuses the undo: the agent made its turn un-undoable. The user's `.git` lies in the writable folder and Landlock cannot carve it out; borrowing (O11) keeps this open. **Q5:** at `after`, copy the old versions of the changed files into a kept pack (then no later rewrite takes them) and say in the chat which ones are already gone. |
-| Person commits, then changes their mind | `git reset` or `git revert` makes the file undoable again; otherwise git is the way back. |
-| History rewritten after a stash was taken | Unaffected: kept pack. |
-| Restart between question and answer | No state is kept between them; the answer re-plans and asks again if `seen` differs. |
-| Very large stash | Costs its files' compressed size once, shown in the list and total; no cap (Q2). Building it is bounded by the 60 s snapshot limit (`git.rs`, `SNAPSHOT_TIMEOUT`). |
-| Stash holding a secret (an edited `.env`) | File content on the node's disk, the same exposure as the checkpoint store. Events carry paths and sizes only. Content leaves the node only when viewed (to the master, like a file view) or read by the agent (to the provider, like `read`). |
-| Routine, no person | No undo tool; `stash_apply` and every conflict denied without a person. |
-| Hostile repository config | The only new call in the user's repository is `rev-parse` (§2.1), which runs nothing; the merge runs in the shadow. |
+| An injected agent commits its change | Undo restores the files; HEAD stays; the note names the commit as made during the turn. The attack fails. |
+| The agent amends or rebases the person's commits | The files are restored; HEAD is not moved back. The note gives the old HEAD id from the harness's log, which outlives `reflog expire` (the commit object may not). The undo works; restoring the history is git's job, and the agent's rewrite of it remains. |
+| The agent runs `git stash` or `git checkout <branch>` | The file changes are the turn's and are undone. The agent's stash entry and the branch switch stay; the note says HEAD moved and from where. |
+| The agent rewrites history and prunes **in a later turn**, or the person does | Fails against kept turns: pinned (A.17). |
+| The agent rewrites history and prunes **inside its own turn** | **Remains:** the borrowed old versions are gone before the pin; A.17 reports which files cannot be undone (Q3). |
+| A background process that outlives its turn commits | Fails: commits no longer matter. If it prunes after the turn, the pin holds. If it edits files, its edits look like the person's and are stashed. C.11 is still needed for other reasons. |
+| The agent deletes a stash through its tool | Only with the person's approval; the card says what is lost. |
+| The agent deletes stashes or checkpoints through the shell | Unreachable with the enforced sandbox and the file tools (§3.6). Reachable with the sandbox off, an existing residual. |
+| The person commits, then changes their mind | Undo works as always; git handles the commit. |
+| History rewritten after a stash was taken | No effect: the stash is pinned. |
+| A restart between question and answer | Nothing is lost; the answer re-plans (§3.3). |
+| The node is off at a stash's expiry midnight | Removed at the next start. Unusable from the expiry instant on. |
+| A very large stash | Costs its files' compressed size for up to 30 days, shown in the list and the total. Building it is bounded by the 60 s snapshot limit (`git.rs`, `SNAPSHOT_TIMEOUT`). |
+| A stash holding a secret (an edited `.env`) | File content on the node's disk, with the same exposure as the checkpoint store, for up to 30 days. Events carry paths and sizes only. |
+| A routine, with no person | No undo tool. `stash_apply` and `stash_delete` are denied without approval. Conflicts are always skipped. |
+| Hostile repository config | The only new call in the user's repository is `rev-parse`, which runs nothing; the merge runs in the shadow. |
 
 ## 6. Tests the build is committed to
 
-1. `undo_after_the_person_committed_moves_no_ref_and_names_the_commit`: HEAD, branches, the index
-   file and the reflog byte-identical, the file unchanged, the commit named.
-2. `a_commit_made_by_the_agent_in_its_turn_does_not_switch_off_undo` (if Q1): files back to
-   `before`, HEAD still at the agent's commit, which the note names.
-3. `one_of_three_files_committed_the_other_two_are_undone`.
-4. `a_later_turns_agent_commit_is_not_acceptance`: turn 2's agent commits turn 1's file; undo of
-   turn 1 still restores it.
-5. `reset_after_a_commit_makes_undo_available_again`.
-6. `a_stash_survives_pruning_and_a_history_rewrite`: after 20 turns, a rewrite and
-   `gc --prune=now`, every stashed file reads back byte-identical.
-7. `declining_the_question_changes_nothing`: folder, shadow refs and log as before; no stash.
-8. `a_folder_changed_between_question_and_answer_is_asked_again`: nothing written.
-9. `clean_unstash_keeps_the_persons_edit_and_not_the_agents_change`.
-10. `a_conflict_writes_nothing_until_approved_then_a_side_file`: before approval every file
-    byte-identical; after it `name-1.py` equals the stash and `name.py` is byte-identical.
-11. `side_file_names_follow_the_rule`: §3.4's table, taken names, 255-byte and non-UTF-8 names, a
-    dangling symlink in the way.
+1. `undo_after_the_person_committed_restores_the_files_moves_no_ref_and_names_the_commit`: HEAD,
+   branches, the index file and the reflog are byte-identical; the files are back to `before`; the
+   note names the commit as made later.
+2. `undo_after_the_agent_committed_in_its_turn_does_the_same`, with the commit named as made
+   during the turn.
+3. `undo_of_a_kept_turn_works_after_history_was_rewritten_and_pruned` (A.17): every file is
+   restored; the pin holds only the turn's changed files; nothing is written in the user's
+   repository.
+4. `a_turn_that_pruned_its_own_base_says_which_files_cannot_be_undone`.
+5. `a_stash_is_gone_at_the_first_midnight_after_30_days_and_not_before`, with a fixed clock and
+   time zone, including a daylight-saving change.
+6. `an_expired_stash_cannot_be_listed_shown_or_applied_even_if_still_on_disk`.
+7. `a_stash_survives_pruning_and_a_history_rewrite_until_it_expires`.
+8. `declining_the_question_changes_nothing`: folder, shadow refs and log as before; no stash.
+9. `a_folder_changed_between_question_and_answer_is_asked_again`.
+10. `a_clean_unstash_asks_nothing_further_and_does_not_bring_the_agents_change_back`.
+11. `a_conflict_offers_skip_beside_and_merge`: skip writes nothing; beside writes `name-1.py` equal
+    to the stash and leaves `name.py` byte-identical; merge leaves the file in the stash and
+    changes nothing until the agent's own `write`.
 12. `no_git_call_in_undo_or_unstash_runs_a_hook_or_reads_user_config`: hooks, fsmonitor, filters,
     a merge driver named in `.gitattributes` and a global config set as markers; none fires.
-13. `the_agent_reads_its_stashes_and_cannot_create_change_or_delete_one`: list and show work for
-    its chat and not another's; no tool or sandboxed shell reaches the refs or packs.
-14. `the_agents_unstash_asks_and_a_conflict_asks_again`: the second approval is denied in a
-    routine.
-15. `unstash_never_deletes_a_file`: a stashed deletion is reported, the file stays.
-16. `a_turn_that_pruned_its_own_base_says_so` (if Q5).
+13. `side_file_names_follow_the_rule`: §3.5's table, taken names, 255-byte and non-UTF-8 names, a
+    dangling symlink in the way.
+14. `the_agent_reads_and_deletes_only_its_own_chats_stashes_and_cannot_create_or_change_one`.
+15. `the_agents_delete_asks_for_approval_and_names_what_is_lost`.
+16. `the_agents_unstash_puts_conflicts_to_a_person_and_a_routine_skips_them`.
+17. `a_stash_with_nothing_left_is_removed`.
 
 ## 7. Build order and size
 
-S: a day or less, M: a few days, L: a week or more, for one person with an agent.
+S means a day or less, M a few days, L a week or more, for one person with an agent.
 
 | # | Task | Size | When |
 |---|---|---|---|
-| 1 | Record HEAD per checkpoint, fold, `PLAN.md` | S | After Gate 3 |
-| 2 | Secure at `after`, report a pruned base (Q5) | S | **A pure fix: may go before Gate 3** (narrows B.2's residual) |
-| 3 | Committed-since test, per-file undo and rewind, notes | M | After 1 |
-| 4 | Stash object, kept pack, `stash` event, `changes`/`seen`, the question | M | After 3 |
-| 5 | Unstash by the person: merge, naming, conflict approval | M | After 4 |
-| 6 | Agent tools | S | After 5 |
-| 7 | Web UI | M | With 4 to 6 |
-| 8 | `PLAN.md` T33 and event table, `README.md` undo section | S | With each task |
+| 1 | A.17: pin old versions at the end of each turn and restore; report pruned bases; `prune` deletes pins | S to M | **A fix to built behaviour: may land before Gate 3** |
+| 2 | Record HEAD; "held by a commit made since" in the note | S | After Gate 3 |
+| 3 | Stash object, pin, `stash` event, expiry loop, `changes`/`seen`, the question | M | After 2 |
+| 4 | Unstash by the person: merge, conflict choices, side files | M | After 3 |
+| 5 | Agent tools (four) | S | After 4 |
+| 6 | Web UI | M | With 3 to 5 |
+| 7 | `PLAN.md` T33 and event table, `README.md` undo section | S | With each task |
 
 Together about **L** (two to three weeks). It changes built behaviour and adds surface, so it
-waits for Gate 3, except task 2.
+waits for Gate 3, except task 1.
 
 ## 8. Questions for the owner
 
 | # | Question | Recommendation | If the other answer |
 |---|---|---|---|
-| Q1 | Does a commit made inside a turn make that turn's files un-undoable? | **No:** only commits in gaps count; undo restores the files and names the agent's commit. | Any agent switches off undo for its own turn with one command; documented as a residual. |
-| Q2 | How long is a stash kept? | **Until the person deletes it or its chat;** sizes always shown. | A cap deletes someone's only copy of their edits without their action. |
-| Q3 | Does "undo without a stash" still keep the pre-restore copy? | **Yes,** labelled as kept for the next 10 changes. Or offer only "stash, then undo" and "cancel". | A true discard saves no work (the scan runs anyway) and makes a misclick final. |
-| Q4 | Should unstash merge, or always write beside? | **Merge,** side file only on conflict. | Every unstash brings the agent's change back in a side file the person cleans up by hand. |
-| Q5 | At each `after`, copy the old versions of the changed files into a kept pack, and say when they are already gone? | **Yes.** It closes B.2 for kept turns and exposes an agent that pruned its own base; disk cost to be filled from experiment B.3. | Recent undos stay exposed to any history rewrite plus gc, by the person or an injected agent. |
+| Q1 | When an undo meets the person's changes, offer only "undo and keep my changes in a stash for 30 days" and "cancel"? | **Yes.** Dropping saves nothing and makes a misclick final; the stash can be deleted a second later. | A third choice, "undo without a stash", must say that the pre-restore copy still keeps the changes for ten more changes. |
+| Q2 | When the agent unstashes and hits a conflict, may anything but a person's card decide? | **No, always the card.** "The person already said which they want" in chat is text the model relays, and injected text can say the same. A per-chat setting that the person sets in the UI is the only safe alternative, and only later. | A prompt-injected instruction chooses "beside" or "merge" for the person. |
+| Q3 | An agent that prunes the user's history inside its own turn still defeats that turn's undo: accept that, with detection? | **Accept, with A.17's report.** Closing it means not borrowing tracked content. At 100,000 files that is 478 MiB instead of 9.7 MiB, and a first snapshot of 5.7 s instead of 1.9 s (B.3; slow disk). | O11 is reopened, and every repository's shadow stores a full copy of its tracked files. |
 
 ## 9. Not settled
 
-- B.3's numbers: the unstash snapshot's time, Q5's disk use.
-- Whether gc drops loose shadow objects the alternate also has (§2.6), and that `.keep` keeps a
-  stash's pack through `repack -l` (test 6).
-- Whether two approvals under one `call_id` fold and render (§3.5).
-- The exit status of `checkout-index` without `-f` on an existing file (tests 10 and 11).
+- Whether gc drops loose shadow objects that the alternate also has (§2.3), and that `.keep`
+  holds a pin through `repack -l` (tests 3 and 7).
+- Whether two approvals under one `call_id` fold and render (§3.6).
+- The exit status of `checkout-index` without `-f` on an existing file (tests 11 and 13).
+- Pin times on an SSD or an idle machine: B.3 measured neither.
