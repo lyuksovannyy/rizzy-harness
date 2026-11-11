@@ -492,7 +492,10 @@ the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
-written into your folder or your `.git`, and your repository's own git
+written into your folder, no objects, refs, index or config are ever written
+into your `.git` (git may update the timestamps of existing object files
+there when a checkpoint reads content your repository already has), and
+your repository's own git
 config, hooks and filters are never run for a checkpoint or an undo (in a
 repository the private copy borrows your committed objects instead of
 storing them again, and honours `.gitignore`, `.git/info/exclude` and your
@@ -515,7 +518,10 @@ repository no longer has (after you rewrote history and `git gc` cleaned
 it up), the undo is refused with that reason and your folder is left
 exactly as it was. If writing fails partway (a full disk, a read-only
 folder), the error names the checkpoint that holds your folder as it was;
-restoring it puts the folder back. If a checkpoint cannot be taken, the
+restoring it puts the folder back. If an undo would replace a folder by a
+file and that folder holds files no checkpoint has (build output your
+`.gitignore` skips, say), it is refused and names the folder; "Undo
+anyway" deletes them and says which. If a checkpoint cannot be taken, the
 chat says that turn cannot be undone.
 A git repository inside your
 folder (a sub-folder git treats as its own repository: a clone, a

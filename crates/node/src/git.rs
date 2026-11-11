@@ -687,15 +687,20 @@ struct WorkTree {
 /// the index is rebuilt once from the folder as it is (an empty index,
 /// staged by the same [`stage_without_nested`], so every file is hashed
 /// again and what is missing is written into the shadow) and the tree is
-/// written again. A second failure is returned. Which step failed decides,
-/// never git's message; checkpoints and their refs are not touched.
+/// written again. A second failure is returned with the first one's text.
+/// Which step failed decides, never git's message, so a `write-tree` that
+/// failed for another reason (a full disk) also costs one rehash of the
+/// folder; checkpoints and their refs are not touched.
 async fn worktree_tree(repo: &Repo) -> Result<WorkTree, String> {
     match worktree_tree_from(repo, true).await {
-        Err(TreeError::WriteTree(e)) if repo.is_shadow() => {
-            tracing::warn!(error = %e, "checkpoint index rebuilt from the folder");
-            worktree_tree_from(repo, false)
-                .await
-                .map_err(TreeError::text)
+        Err(TreeError::WriteTree(first)) if repo.is_shadow() => {
+            tracing::warn!(error = %first, "checkpoint index rebuilt from the folder");
+            worktree_tree_from(repo, false).await.map_err(|again| {
+                format!(
+                    "{}; before that, with the kept index: {first}",
+                    again.text()
+                )
+            })
         }
         r => r.map_err(TreeError::text),
     }
@@ -1087,6 +1092,10 @@ pub struct RestorePlan {
     /// repository made over files the turn's checkpoint holds, or a `.git`
     /// git does not accept): their files are restored, the `.git` stays.
     pub git_inside: Names,
+    /// Files a forced restore deletes that no checkpoint holds (ignored
+    /// files, say): they are inside a directory the restore replaces by a
+    /// file. An unforced restore is refused instead.
+    pub unsaved: Names,
     /// What [`restore_paths`] writes: `from`'s mode, blob and path for each
     /// path it puts back, and the paths `from` does not have (deleted).
     writes: Vec<(String, String, Vec<u8>)>,
@@ -1111,9 +1120,9 @@ pub async fn restore_report(
     force: bool,
 ) -> Result<Restored, String> {
     let diff = restore_diff(repo, from, expected).await?;
-    secure_blobs(repo, &diff).await?;
     let now = snapshot(repo, "refs/harness/test/now/before", "now").await?;
     let plan = restore_plan(repo, &diff, &now, !force).await?;
+    secure_blobs(repo, &plan).await?;
     let files = restore_paths(repo, &plan).await?;
     Ok(Restored {
         files,
@@ -1233,22 +1242,13 @@ pub struct RestoreDiff {
 }
 
 impl RestoreDiff {
-    /// Keep only `files` (paths as an event names them).
+    /// Keep only `files` (paths as an event names them). Events carry paths
+    /// as lossy UTF-8, so matching is on that form: a name that is not
+    /// UTF-8 matches, and so does any other name with the same lossy form.
     pub fn only(&mut self, files: &[String]) {
         let keep: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
         self.rows
             .retain(|r| keep.contains(String::from_utf8_lossy(&r.path).as_ref()));
-    }
-
-    /// `from`'s blob and path for every file a restore may write (a
-    /// superset of what [`restore_plan`] keeps: the folder's own nested
-    /// repositories are not known yet).
-    fn blobs(&self) -> Vec<(&str, &[u8])> {
-        self.rows
-            .iter()
-            .filter(|r| !r.gitlink && r.status != 'A')
-            .map(|r| (r.old_id.as_str(), r.path.as_slice()))
-            .collect()
     }
 }
 
@@ -1324,21 +1324,29 @@ pub async fn restore_diff(repo: &Repo, from: &str, expected: &str) -> Result<Res
     }
 }
 
-/// Make every blob a restore may write safe before anything is touched:
-/// each must be readable (else the restore is refused, in plain words,
-/// naming the files), and when the checkpoint repository borrows from the
-/// user's, they are all copied into its own object store, so nothing done
-/// in the user's repository between this check and the write can take them
-/// away. Only the blobs this restore writes are read, never a whole tree.
+/// Make every blob the plan writes safe before the folder is touched: each
+/// must be readable (else the restore is refused, in plain words, naming
+/// the files), and when the checkpoint repository borrows from the user's,
+/// they are all copied into its own object store, so nothing done in the
+/// user's repository between this check and the write can take them away.
+/// Exactly the blobs the plan writes are read (not those of paths it skips,
+/// such as inside a nested repository), never a whole tree.
 ///
 /// `cat-file --batch-check` answers per object (`<id> missing`); the copy
 /// is one `pack-objects` that writes a pack straight into the shadow's own
 /// `objects/pack` (a borrowed object is read through the alternates, the
 /// new pack is written locally, and nothing is written or touched in the
 /// user's repository; `hash-object -w` would not do: an object the
-/// alternate has is "freshened" there and not written locally).
-pub async fn secure_blobs(repo: &Repo, diff: &RestoreDiff) -> Result<(), String> {
-    let blobs = diff.blobs();
+/// alternate has is "freshened" there and not written locally). A copy that
+/// fails leaves none of its files behind. The pack lives until the shadow's
+/// next `gc` (run by [`prune`] whenever a checkpoint is dropped), which
+/// folds it into one pack and drops what the user's repository still has.
+pub async fn secure_blobs(repo: &Repo, plan: &RestorePlan) -> Result<(), String> {
+    let blobs: Vec<(&str, &[u8])> = plan
+        .writes
+        .iter()
+        .map(|(_, id, p)| (id.as_str(), p.as_slice()))
+        .collect();
     if blobs.is_empty() {
         return Ok(());
     }
@@ -1372,18 +1380,58 @@ pub async fn secure_blobs(repo: &Repo, diff: &RestoreDiff) -> Result<(), String>
         return Err(lost_content(repo, &paths));
     }
     if let (true, Some(dir)) = (borrows(repo), &repo.shadow) {
-        let base = dir.join("objects/pack/pack");
+        let packs = dir.join("objects/pack");
+        let had = pack_dir_names(&packs).await;
+        let base = packs.join("pack");
         let base = base.to_string_lossy();
-        run_raw(
+        let res = run_raw(
             repo,
             &["pack-objects", "-q", "--window=0", &base],
             None,
             Some(list),
         )
-        .await
-        .map_err(|e| format!("nothing was changed: {e}"))?;
+        .await;
+        if let Err(e) = res {
+            remove_failed_copy(&packs, &had).await;
+            return Err(format!("nothing was changed: {e}"));
+        }
     }
     Ok(())
+}
+
+/// The names in the shadow's pack directory.
+async fn pack_dir_names(packs: &Path) -> std::collections::HashSet<std::ffi::OsString> {
+    let mut names = std::collections::HashSet::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(packs).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            names.insert(e.file_name());
+        }
+    }
+    names
+}
+
+/// After a failed `pack-objects`: remove what it may have left, and only
+/// that: names that were not there before the call and that it writes
+/// (`tmp_pack_*`, `tmp_idx_*`, `tmp_rev_*`, and a `pack-*` whose `.idx` is
+/// missing, so git never used it). The folder is claimed for the restore,
+/// so no other git process of ours writes packs in this shadow meanwhile.
+async fn remove_failed_copy(packs: &Path, had: &std::collections::HashSet<std::ffi::OsString>) {
+    for name in pack_dir_names(packs).await {
+        if had.contains(&name) {
+            continue;
+        }
+        let s = name.to_string_lossy();
+        let ours = s.starts_with("tmp_pack_")
+            || s.starts_with("tmp_idx_")
+            || s.starts_with("tmp_rev_")
+            || (s.starts_with("pack-")
+                && Path::new(&*s)
+                    .file_stem()
+                    .is_some_and(|stem| !packs.join(stem).with_extension("idx").exists()));
+        if ours {
+            let _ = tokio::fs::remove_file(packs.join(&name)).await;
+        }
+    }
 }
 
 /// The paths a restore of `diff` (`from` over `expected`) writes, with
@@ -1472,17 +1520,138 @@ pub async fn restore_plan(
             ));
         }
     }
-    Ok(RestorePlan {
+    let unsaved = unsaved_in_replaced_dirs(repo, &written, now).await?;
+    if !unsaved.is_empty() {
+        let (mut dirs, files): (Vec<Vec<u8>>, Vec<Vec<u8>>) = unsaved.into_iter().unzip();
+        dirs.dedup(); // sorted by directory first
+        let in_dirs = Names::of(&dirs).listed();
+        if files
+            .iter()
+            .any(|f| f.split(|b| *b == b'/').any(|c| c == b".git"))
+        {
+            return Err(format!(
+                "nothing was changed: undo would replace the folder {in_dirs} by a file, and it \
+                 holds a git repository, which undo never deletes; move it away first"
+            ));
+        }
+        if check {
+            return Err(format!(
+                "nothing was changed: undo would replace the folder {in_dirs} by a file, and it \
+                 holds files that are in no checkpoint and would be deleted: {}; \
+                 \"Undo anyway\" deletes them",
+                Names::of(&files).listed()
+            ));
+        }
+        return Ok(RestorePlan {
+            unsaved: Names::of(&files),
+            ..plan_of(
+                touched,
+                &nested,
+                &changed_repos,
+                git_inside,
+                &written,
+                &deleted,
+            )
+        });
+    }
+    Ok(plan_of(
         touched,
-        nested: Names::of(&nested),
-        changed_repos: Names::of(&changed_repos),
+        &nested,
+        &changed_repos,
+        git_inside,
+        &written,
+        &deleted,
+    ))
+}
+
+fn plan_of(
+    touched: Vec<(char, String)>,
+    nested: &[Vec<u8>],
+    changed_repos: &[Vec<u8>],
+    git_inside: std::collections::BTreeSet<Vec<u8>>,
+    written: &[&DiffRow],
+    deleted: &[&DiffRow],
+) -> RestorePlan {
+    RestorePlan {
+        touched,
+        nested: Names::of(nested),
+        changed_repos: Names::of(changed_repos),
         git_inside: Names::of(&outermost(git_inside)),
+        unsaved: Names::default(),
         writes: written
             .iter()
             .map(|r| (r.old_mode.clone(), r.old_id.clone(), r.path.clone()))
             .collect(),
         deletes: deleted.iter().map(|r| r.path.clone()).collect(),
+    }
+}
+
+/// Directories in the folder where the restore writes a file (so
+/// `checkout-index -f` removes the directory and everything in it), and in
+/// them the files the folder's snapshot `now` does not hold (ignored ones,
+/// say), as `(directory, file)`, both relative. Only those directories are
+/// walked, without following links.
+async fn unsaved_in_replaced_dirs(
+    repo: &Repo,
+    written: &[&DiffRow],
+    now: &str,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+    let root = repo.root.clone();
+    let paths: Vec<Vec<u8>> = written.iter().map(|r| r.path.clone()).collect();
+    let on_disk: Vec<(Vec<u8>, Vec<Vec<u8>>)> = tokio::task::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter(|p| std::fs::symlink_metadata(root.join(rel_path(p))).is_ok_and(|m| m.is_dir()))
+            .map(|p| {
+                let dir = root.join(rel_path(&p));
+                let files = walkdir::WalkDir::new(&dir)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| !e.file_type().is_dir())
+                    .filter_map(|e| {
+                        let rel = e.path().strip_prefix(&root).ok()?;
+                        Some(path_bytes(rel))
+                    })
+                    .collect();
+                (p, files)
+            })
+            .collect()
     })
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for (dir, files) in on_disk {
+        let shown_dir = String::from_utf8_lossy(&dir).into_owned();
+        let held = run_raw(
+            repo,
+            &["ls-tree", "-r", "-z", "--name-only", now, "--", &shown_dir],
+            None,
+            None,
+        )
+        .await?;
+        let held: std::collections::HashSet<&[u8]> =
+            held.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+        for f in files {
+            if !held.contains(f.as_slice()) {
+                out.push((dir.clone(), f));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// A relative path as git's bytes.
+#[cfg(unix)]
+fn path_bytes(p: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    p.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(p: &Path) -> Vec<u8> {
+    p.to_string_lossy().replace('\\', "/").into_bytes()
 }
 
 /// Write the plan's files into the folder (`from`'s version of each, from
@@ -1496,8 +1665,37 @@ pub async fn restore_plan(
 /// full disk, a path that became something git cannot replace) leaves the
 /// earlier ones written; the caller names the checkpoint that holds the
 /// folder as it was.
+///
+/// Deletes go first, then the writes. A path the turn added is a file or a
+/// link in the folder (the folder was just snapshotted); deleting it first
+/// empties a directory that a restored file replaces (file `d` over the
+/// turn's `d/f`), and a removed file `d` leaves room for a restored `d/f`.
+/// A path to delete is already gone when it is not there as a file or link
+/// any more: missing, its parent no longer a directory (`ENOTDIR`), or now
+/// a directory (someone replaced it; not this entry, left alone). Any other
+/// failure to delete is an error.
 pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String>, String> {
     let paths: Vec<String> = plan.touched.iter().map(|(_, p)| p.clone()).collect();
+    for p in &plan.deletes {
+        let full = repo.root.join(rel_path(p));
+        match tokio::fs::symlink_metadata(&full).await {
+            Ok(m) if m.is_dir() => continue,
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::NotADirectory =>
+            {
+                continue;
+            }
+            Err(e) => return Err(format!("could not delete {}: {e}", shown(p))),
+        }
+        match tokio::fs::remove_file(&full).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("could not delete {}: {e}", shown(p)));
+            }
+            _ => {}
+        }
+    }
     if !plan.writes.is_empty() {
         let idx = fresh_index(repo).await?;
         let res = async {
@@ -1531,14 +1729,6 @@ pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String
         .await;
         let _ = tokio::fs::remove_file(&idx).await;
         res?;
-    }
-    for p in &plan.deletes {
-        match tokio::fs::remove_file(repo.root.join(rel_path(p))).await {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(format!("could not delete {}: {e}", shown(p)));
-            }
-            _ => {}
-        }
     }
     Ok(paths)
 }
@@ -1998,7 +2188,8 @@ mod tests {
         let user_git = dir_state(&h.repo.join(".git"));
         tokio::time::sleep(Duration::from_millis(20)).await;
         let diff = restore_diff(&repo, &before, &after).await.unwrap();
-        secure_blobs(&repo, &diff).await.unwrap();
+        let plan = restore_plan(&repo, &diff, &after, false).await.unwrap();
+        secure_blobs(&repo, &plan).await.unwrap();
         assert!(owns(one).await, "a.txt's blob was not copied");
         assert!(
             dir_state(&h.repo.join(".git")) == user_git,
@@ -2020,11 +2211,100 @@ mod tests {
         let after = snapshot(&repo, "refs/harness/s/t/after", "after")
             .await
             .unwrap();
-        let mut diff = restore_diff(&repo, &before, &after).await.unwrap();
-        diff.rows[0].old_id = "1".repeat(40);
-        let e = secure_blobs(&repo, &diff).await.unwrap_err();
+        let diff = restore_diff(&repo, &before, &after).await.unwrap();
+        let mut plan = restore_plan(&repo, &diff, &after, false).await.unwrap();
+        plan.writes[0].1 = "1".repeat(40);
+        let e = secure_blobs(&repo, &plan).await.unwrap_err();
         assert!(e.starts_with("nothing was changed:"), "{e}");
         assert!(e.contains("missing: `a.txt`"), "{e}");
+    }
+
+    /// A `write-tree` that fails for a reason a rebuild does not fix (the
+    /// object directories are read-only): one rebuild and retry, and the
+    /// error carries both failures.
+    #[tokio::test]
+    async fn a_snapshot_that_fails_after_the_rebuild_reports_both_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "a\n").unwrap();
+        std::fs::write(ws.join("b.txt"), "b\n").unwrap();
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        // A new tree is needed, no new blob.
+        std::fs::remove_file(ws.join("b.txt")).unwrap();
+        let objects = repo.shadow.clone().unwrap().join("objects");
+        let dirs: Vec<PathBuf> = walkdir::WalkDir::new(&objects)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_dir())
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        let mode = |m| {
+            for p in &dirs {
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+            }
+        };
+        mode(0o555);
+        if std::fs::write(objects.join("probe"), "").is_ok() {
+            mode(0o755);
+            eprintln!("SKIPPED: read-only folders are writable here (root?)");
+            return;
+        }
+        let e = snapshot(&repo, "refs/harness/s/u/before", "b").await;
+        mode(0o755);
+        let e = e.unwrap_err();
+        assert!(
+            e.contains("before that, with the kept index: git write-tree"),
+            "{e}"
+        );
+    }
+
+    /// After a failed copy, only what `pack-objects` leaves behind goes:
+    /// new temporary files and a new pack without its index. Older files,
+    /// and a complete new pack, stay.
+    #[tokio::test]
+    async fn a_failed_copy_removes_only_its_own_leftovers() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        for f in ["pack-old.pack", "pack-old.idx", "tmp_pack_old", "other"] {
+            std::fs::write(p.join(f), "").unwrap();
+        }
+        let had = pack_dir_names(p).await;
+        for f in [
+            "tmp_pack_ab12",
+            "tmp_idx_cd34",
+            "tmp_rev_ef56",
+            "pack-half.pack",
+            "pack-half.rev",
+            "pack-whole.pack",
+            "pack-whole.idx",
+            "unrelated",
+        ] {
+            std::fs::write(p.join(f), "").unwrap();
+        }
+        remove_failed_copy(p, &had).await;
+        let mut left: Vec<String> = pack_dir_names(p)
+            .await
+            .into_iter()
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "other",
+                "pack-old.idx",
+                "pack-old.pack",
+                "pack-whole.idx",
+                "pack-whole.pack",
+                "tmp_pack_old",
+                "unrelated"
+            ]
+        );
     }
 
     #[tokio::test]

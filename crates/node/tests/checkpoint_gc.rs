@@ -668,7 +668,7 @@ async fn a_failure_after_the_pre_restore_checkpoint_names_it_and_it_restores() {
     set_mode(&rig.ws.join("ro"), 0o555);
     if !read_only_is_enforced(&rig.ws.join("ro")) {
         set_mode(&rig.ws.join("ro"), 0o755);
-        eprintln!("skipped: read-only folders are writable here (root?)");
+        eprintln!("SKIPPED: read-only folders are writable here (root?)");
         return;
     }
     let r = rig.restore(t.id.as_deref().unwrap(), false).await;
@@ -681,10 +681,19 @@ async fn a_failure_after_the_pre_restore_checkpoint_names_it_and_it_restores() {
     assert_eq!(r.folder_after.get("a.txt"), Some(&b"a1\n".to_vec()));
     assert_eq!(r.folder_after.get("ro/b.txt"), Some(&b"b2\n".to_vec()));
 
+    let mark = rig.seen.len();
     let back = rig.restore(&saved, false).await;
     assert_eq!(back.result, Ok(()));
     assert_eq!(back.folder_after, r.folder_before, "not back to before");
     assert_eq!(back.phases, ["before_restore", "after", "restored"]);
+    // Restoring an interrupted restore does not check for edits made since;
+    // the chat names the checkpoint that holds what it overwrote.
+    let safety = back.saved.clone().unwrap();
+    let notes = notes_since(&rig, mark);
+    assert!(
+        notes.iter().any(|n| n.contains(&safety)),
+        "no note names {safety}: {notes:?}"
+    );
     // And the turn itself can still be undone once the folder is writable.
     let again = rig.restore(t.id.as_deref().unwrap(), false).await;
     assert_eq!(again.result, Ok(()));
@@ -722,7 +731,7 @@ async fn a_turn_without_a_checkpoint_says_so_in_the_chat() {
         set_mode(d, 0o755);
     }
     let Some(t) = t else {
-        eprintln!("skipped: read-only folders are writable here (root?)");
+        eprintln!("SKIPPED: read-only folders are writable here (root?)");
         return;
     };
     assert!(t.phases.is_empty(), "{:?}", t.phases);
@@ -1068,4 +1077,197 @@ async fn reclone_scenario(pushed: bool) -> (Cloned, Restore) {
     the_turns_result_is_back(&rig);
     let r = rig.restore(t.id.as_deref().unwrap(), false).await;
     (Cloned { user_has_x }, r)
+}
+
+// ---- the write path (A.16 review) ----
+
+/// The chat notes (`error` events) seen since `mark`.
+fn notes_since(rig: &Rig, mark: usize) -> Vec<String> {
+    rig.seen[mark..]
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Error(m)) => Some(m.message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Undo of a turn that replaced a directory by a file of the same name:
+/// the file goes, the directory and its file come back.
+#[tokio::test]
+async fn undo_of_a_directory_replaced_by_a_file_puts_the_directory_back() {
+    let mut rig = Rig::new().await;
+    std::fs::create_dir(rig.ws.join("d")).unwrap();
+    rig.write("d/f", "f1\n");
+    let t = rig.turn("rm -r d; echo x > d").await;
+    assert_eq!(t.phases, ["before", "after"]);
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()), "{:?}", r.phases);
+    assert_eq!(r.phases, ["before_restore", "after", "restored"]);
+    assert_eq!(r.folder_after.get("d/f"), Some(&b"f1\n".to_vec()));
+}
+
+/// Undo of a turn that replaced a file by a directory of the same name;
+/// then, if it failed, the named pre-restore checkpoint.
+#[tokio::test]
+async fn undo_of_a_file_replaced_by_a_directory_puts_the_file_back() {
+    let mut rig = Rig::new().await;
+    rig.write("d", "d1\n");
+    let t = rig.turn("rm d; mkdir d; echo y > d/f").await;
+    assert_eq!(t.phases, ["before", "after"]);
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    if let Err(e) = &r.result {
+        eprintln!("undo failed: {e}; folder now {:?}", r.folder_after.keys());
+        let saved = r.saved.clone().unwrap();
+        let back = rig.restore(&saved, false).await;
+        eprintln!(
+            "restore of {saved}: {:?}; folder now {:?}",
+            back.result,
+            back.folder_after.keys()
+        );
+    }
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.phases, ["before_restore", "after", "restored"]);
+    assert_eq!(r.folder_after.get("d"), Some(&b"d1\n".to_vec()));
+}
+
+/// The same two swaps two levels deep: file `a` against `a/b/c`.
+#[tokio::test]
+async fn undo_of_swaps_two_levels_deep_works_both_ways() {
+    let mut rig = Rig::new().await;
+    rig.write("a", "a1\n");
+    let t = rig.turn("rm a; mkdir -p a/b; echo c > a/b/c").await;
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("a"), Some(&b"a1\n".to_vec()));
+    assert_eq!(r.folder_after.len(), 1, "{:?}", r.folder_after.keys());
+
+    let mut rig = Rig::new().await;
+    std::fs::create_dir_all(rig.ws.join("a/b")).unwrap();
+    rig.write("a/b/c", "c1\n");
+    let t = rig.turn("rm -r a; echo a > a").await;
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("a/b/c"), Some(&b"c1\n".to_vec()));
+    assert_eq!(r.folder_after.len(), 1, "{:?}", r.folder_after.keys());
+}
+
+/// A file the turn turned into a directory, where the user's build then
+/// wrote an ignored file: the undo would replace the directory by the
+/// file and delete what no checkpoint holds. Unforced, it is refused,
+/// naming the directory, and nothing changes.
+#[tokio::test]
+async fn an_unforced_undo_refuses_to_delete_files_no_checkpoint_holds() {
+    let mut rig = Rig::new().await;
+    rig.write(".gitignore", "*.o\n");
+    rig.write("d", "d1\n");
+    let t = rig.turn("rm d; mkdir d; echo y > d/f").await;
+    assert_eq!(t.phases, ["before", "after"]);
+    rig.write("d/cache.o", "build output\n");
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    let e = r.result.clone().unwrap_err();
+    assert!(
+        e.starts_with("nothing was changed:") && e.contains("`d`") && e.contains("no checkpoint"),
+        "{e}"
+    );
+    assert_eq!(r.folder_after, r.folder_before);
+    assert!(r.phases.is_empty(), "{:?}", r.phases);
+    assert_eq!(
+        r.folder_after.get("d/cache.o"),
+        Some(&b"build output\n".to_vec()),
+        "an ignored file was deleted by an unforced undo"
+    );
+}
+
+/// The forced case: the undo proceeds, and the chat says which files were
+/// deleted without being saved.
+#[tokio::test]
+async fn a_forced_undo_says_which_unsaved_files_it_deleted() {
+    let mut rig = Rig::new().await;
+    rig.write(".gitignore", "*.o\n");
+    rig.write("d", "d1\n");
+    let t = rig.turn("rm d; mkdir d; echo y > d/f").await;
+    rig.write("d/cache.o", "build output\n");
+    let mark = rig.seen.len();
+    let r = rig.restore(t.id.as_deref().unwrap(), true).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("d"), Some(&b"d1\n".to_vec()));
+    let notes = notes_since(&rig, mark);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("`d/cache.o`") && n.contains("not saved")),
+        "{notes:?}"
+    );
+}
+
+/// A blob of a path the restore skips (inside a repository that appeared
+/// in the folder after the turn) is neither needed nor checked: its loss
+/// does not refuse the restore.
+#[tokio::test]
+async fn a_lost_blob_under_a_skipped_nested_repository_does_not_refuse_the_restore() {
+    let mut rig = Rig::new().await;
+    rig.git(&["init", "-q", "-b", "main"]);
+    rig.write("other.txt", "base\n");
+    rig.git(&["add", "."]);
+    rig.git(&["commit", "-qm", "base"]);
+    std::fs::create_dir(rig.ws.join("sub")).unwrap();
+    rig.write("sub/keep.txt", X);
+    rig.git(&["add", "."]);
+    rig.git(&["commit", "-qm", "adds sub/keep.txt"]);
+    let x = rig.git(&["hash-object", "sub/keep.txt"]);
+    // Untracked, so the checkpoint's `sub` tree is its own (only the blob
+    // is borrowed; a borrowed tree that is gone is refused at the diff).
+    rig.write("sub/extra.txt", SCRATCH);
+    let t = rig.turn("rm -r sub").await;
+    assert_eq!(t.phases, ["before", "after"]);
+    assert!(!rig.shadow_owns(&x));
+    rig.git(&["commit", "-qa", "--amend", "--allow-empty", "-m", "amended"]);
+    rig.expire_reflog_and_gc_now();
+    assert!(!rig.user_has(&x));
+    // A repository appears where the turn removed the files.
+    std::fs::create_dir(rig.ws.join("sub")).unwrap();
+    rig.git_in(&rig.ws.join("sub"), &["init", "-q"]);
+    rig.write("sub/mine.txt", "the other repository's work\n");
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("sub/keep.txt"), None, "written into it");
+    assert_eq!(
+        r.folder_after.get("sub/mine.txt"),
+        Some(&b"the other repository's work\n".to_vec())
+    );
+}
+
+/// Modes, symlinks, an empty file and a new file in a new directory.
+#[tokio::test]
+async fn undo_restores_modes_symlinks_and_empty_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut rig = Rig::new().await;
+    rig.write("run.sh", "#!/bin/sh\n");
+    set_mode(&rig.ws.join("run.sh"), 0o755);
+    rig.write("a.txt", "a\n");
+    std::os::unix::fs::symlink("a.txt", rig.ws.join("link")).unwrap();
+    std::os::unix::fs::symlink("nowhere", rig.ws.join("dangling")).unwrap();
+    rig.write("empty", "");
+    let t = rig
+        .turn("chmod 644 run.sh; rm link; echo z > link; rm dangling; rm empty; mkdir -p 'new dir' && echo n > 'new dir/x'")
+        .await;
+    assert_eq!(t.phases, ["before", "after"]);
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    let m = std::fs::metadata(rig.ws.join("run.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(m & 0o111, 0o111, "exec bit lost: {m:o}");
+    assert_eq!(
+        std::fs::read_link(rig.ws.join("link")).unwrap(),
+        Path::new("a.txt")
+    );
+    assert_eq!(
+        std::fs::read_link(rig.ws.join("dangling")).unwrap(),
+        Path::new("nowhere")
+    );
+    assert_eq!(rig.read("empty").as_deref(), Some(""));
+    assert!(!rig.ws.join("new dir/x").exists());
 }
