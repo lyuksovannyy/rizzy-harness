@@ -3,8 +3,9 @@
 //! picks an agent, a model or its fallbacks for a chat goes through one, so
 //! the lists the UI shows and the turns the server runs agree.
 
-use harness_agents::{Agent, AgentSet, DEFAULT_AGENT};
+use harness_agents::{Agent, AgentSet, DEFAULT_AGENT, DEFAULT_AGENTIC_AGENT};
 use harness_core::agent::AgentSpec;
+use harness_core::event::Profile;
 use harness_core::savings::TokenSavings;
 
 use crate::config::{AgentChain, Config};
@@ -20,8 +21,17 @@ pub struct Resolver {
     /// The listed models, `default` flagged for this scope.
     models: Vec<ModelInfo>,
     agents: AgentSet,
-    /// The workspace's default agent while it exists, else the server's.
+    /// The agent chats get when nobody chose one: the workspace's setting,
+    /// else the server's. Kept even when it cannot run (see
+    /// `default_problem`), so the setting to fix can be named.
     default_agent: String,
+    /// Why `default_agent` cannot run a chat (the setting names a missing
+    /// or sub-agent-only agent), in words that name the setting.
+    default_problem: Option<String>,
+    /// The same for Agentic chats: the workspace's `default_agentic_agent`,
+    /// else the server's (`coder`).
+    agentic_default: String,
+    agentic_problem: Option<String>,
 }
 
 /// Put a workspace's chains on the server's config. Chains whose main model
@@ -80,15 +90,49 @@ impl Master {
                 m.default = default.as_deref() == Some(m.id.as_str());
             }
         }
-        let default_agent = ws
-            .and_then(|w| w.default_agent.clone())
-            .filter(|a| agents.get(a).is_some())
-            .unwrap_or_else(|| agents.default_id().to_string());
+        // A workspace default that went away, or that runs only as a
+        // sub-agent, is an error when a chat needs it: no silent stand-in.
+        let (default_agent, default_problem) = match ws.and_then(|w| w.default_agent.clone()) {
+            Some(id) => {
+                let problem = crate::workspaces::check_default_agent(&agents, "default_agent", &id)
+                    .err()
+                    .map(|e| format!("this workspace's {e}: change its default agent in the workspace's settings"));
+                (id, problem)
+            }
+            None => (agents.default_id().to_string(), None),
+        };
+        let (agentic_default, agentic_problem) = match ws
+            .and_then(|w| w.default_agentic_agent.clone())
+        {
+            Some(id) => {
+                let problem =
+                    crate::workspaces::check_agentic_default(&agents, "default_agentic_agent", &id)
+                        .err()
+                        .map(|e| {
+                            format!("this workspace's {e}: change it in the workspace's settings")
+                        });
+                (id, problem)
+            }
+            None => {
+                let id = DEFAULT_AGENTIC_AGENT.to_string();
+                let problem = crate::workspaces::check_agentic_default(
+                    &agents,
+                    "the server's Agentic default agent",
+                    &id,
+                )
+                .err()
+                .map(|e| format!("{e}: set default_agentic_agent, or name an agent for the chat"));
+                (id, problem)
+            }
+        };
         Resolver {
             cfg,
             models,
             agents,
             default_agent,
+            default_problem,
+            agentic_default,
+            agentic_problem,
         }
     }
 
@@ -138,9 +182,62 @@ impl Resolver {
         self.models.iter().find(|m| m.default).map(|m| m.id.clone())
     }
 
-    /// The agent chats get when nobody chose one.
+    /// The agent chats get when nobody chose one, as configured (it may
+    /// be unable to run: see `default_problem`).
     pub fn default_agent(&self) -> &str {
         &self.default_agent
+    }
+
+    /// Why the default agent cannot run a chat, if it cannot.
+    pub fn default_problem(&self) -> Option<&str> {
+        self.default_problem.as_deref()
+    }
+
+    /// The agent a chat of `profile` gets when nobody chose one: the
+    /// ordinary default for chats, the Agentic default for Agentic ones. A
+    /// setting that cannot work is `BadDefault`, naming the setting.
+    pub fn default_for(&self, profile: Profile) -> Result<&str, CommandError> {
+        let (id, problem) = match profile {
+            Profile::Chat => (&self.default_agent, &self.default_problem),
+            Profile::Agentic => (&self.agentic_default, &self.agentic_problem),
+        };
+        match problem {
+            Some(why) => Err(CommandError::BadDefault(why.clone())),
+            None => Ok(id),
+        }
+    }
+
+    /// The agent `handle` (an id or an alias) names, when it may run a chat
+    /// (as the chat's agent or for one turn); its id is what gets stored. Every path that picks the agent of a chat or
+    /// a turn comes through here: unknown is `UnknownAgent`, an agent that
+    /// runs only as a sub-agent is `SubagentOnly`.
+    pub fn top_level(&self, handle: &str) -> Result<&Agent, CommandError> {
+        let a = self
+            .agents
+            .resolve(handle)
+            .ok_or_else(|| CommandError::UnknownAgent(handle.into()))?;
+        if !a.features.as_agent {
+            return Err(CommandError::SubagentOnly {
+                id: a.id.clone(),
+                name: a.name.clone(),
+            });
+        }
+        Ok(a)
+    }
+
+    /// The agent a chat that stored `stored` as its agent runs as: that one
+    /// while it may run a chat. One that is gone is `AgentGone`, one that
+    /// became sub-agent-only `SubagentOnly`: refused, never a stand-in that
+    /// may be more capable than the one named. The chat stays readable, and
+    /// `set_agent` to another agent makes it usable again. `None` (nothing
+    /// stored): the default applies.
+    pub fn session_agent(&self, stored: Option<&str>) -> Result<Option<String>, CommandError> {
+        let Some(id) = stored else { return Ok(None) };
+        match self.top_level(id) {
+            Ok(a) => Ok(Some(a.id.clone())),
+            Err(CommandError::UnknownAgent(_)) => Err(CommandError::AgentGone(id.into())),
+            Err(e) => Err(e),
+        }
     }
 
     /// The model assigned to `agent_id` here, if one is.
@@ -257,12 +354,14 @@ impl Resolver {
         }
         let set = &self.agents;
         let agent = match agent_id {
-            Some(id) => set
-                .get(id)
-                .ok_or_else(|| CommandError::UnknownAgent(id.into()))?,
-            None => set
-                .get(&self.default_agent)
-                .ok_or_else(|| CommandError::UnknownAgent("(default)".into()))?,
+            Some(id) => self.top_level(id)?,
+            None => {
+                if let Some(why) = &self.default_problem {
+                    return Err(CommandError::BadDefault(why.clone()));
+                }
+                set.get(&self.default_agent)
+                    .ok_or_else(|| CommandError::UnknownAgent("(default)".into()))?
+            }
         };
         let mut spec = agent.spec.clone();
         if let Some(e) = effort {
@@ -294,11 +393,14 @@ impl Resolver {
         }
         // Sub-agents travel with the spec (nodes keep no definitions). Their
         // own delegates stay empty: delegation is one level deep. One with an
-        // assigned model uses it; the rest inherit the parent's.
+        // assigned model uses it; the rest inherit the parent's. Only agents
+        // available as sub-agents (the set already drops the others from
+        // every roster; this holds for any set).
         spec.delegates = agent
             .delegates
             .iter()
             .filter_map(|d| set.get(d))
+            .filter(|d| d.features.as_subagent)
             .map(|d| {
                 let mut c = d.spec.clone();
                 c.effort = None;
@@ -374,13 +476,145 @@ mod tests {
             (spec.agent_id.as_str(), spec.model.as_deref()),
             ("coder", Some("p::b"))
         );
-        // Stale references change nothing.
+        // A stale chain changes nothing; a stale default agent is an error
+        // when a chat needs it, naming the setting and the id.
         ws.agent_models
             .insert(DEFAULT_AGENT.into(), AgentChain::new("p::gone"));
         ws.default_agent = Some("nobody".into());
         let r = m.resolver(Some(&ws));
         assert_eq!(r.default_model().as_deref(), Some("p::a"));
-        assert_eq!(r.default_agent(), DEFAULT_AGENT);
+        let e = r.agent_spec_with(None, None, None).unwrap_err().to_string();
+        assert!(
+            e.contains("default_agent") && e.contains("\"nobody\""),
+            "{e}"
+        );
+    }
+
+    /// The built-ins plus `helper`, which runs only as a sub-agent.
+    fn with_helper(m: &Master) {
+        let mut all = harness_agents::builtins();
+        all.push(
+            harness_agents::parse(
+                "helper",
+                "---\nname: Helper\ntools: [read]\navailable_as: [subagent]\n---\nHelp.\n",
+                false,
+            )
+            .unwrap(),
+        );
+        m.set_agents(AgentSet::from_agents(all, DEFAULT_AGENT));
+    }
+
+    /// A sub-agent-only agent is no default: refused when saved, dropped
+    /// when a stored one is read, never the agent a chat gets.
+    #[test]
+    fn a_subagent_only_agent_is_no_default() {
+        let m = master();
+        with_helper(&m);
+        let e = WorkspaceSettings::parse(serde_json::json!({"default_agent": "helper"}), &m)
+            .unwrap_err();
+        assert!(e.contains("sub-agent"), "{e}");
+        let stored = WorkspaceSettings {
+            default_agent: Some("helper".into()),
+            ..Default::default()
+        };
+        // Kept as stored, so the setting to fix shows; refused when used.
+        assert_eq!(
+            stored.normalized(&m).default_agent.as_deref(),
+            Some("helper")
+        );
+        let r = m.resolver(Some(&stored));
+        let e = r.agent_spec_with(None, None, None).unwrap_err().to_string();
+        assert!(
+            e.contains("default_agent") && e.contains("sub-agent"),
+            "{e}"
+        );
+        assert!(matches!(
+            r.agent_spec_with(Some("helper"), None, None),
+            Err(CommandError::SubagentOnly { .. })
+        ));
+        // A user's own default agent, the same.
+        let prefs = crate::prefs::Prefs {
+            default_agent: Some("helper".into()),
+            ..Default::default()
+        };
+        assert!(prefs.validate(&m).unwrap_err().contains("sub-agent"));
+    }
+
+    /// Each mode has its default (the Assistant for chats, the Software
+    /// Developer for Agentic), a workspace overrides each, and saving one
+    /// that cannot work there is refused naming the field.
+    #[test]
+    fn defaults_per_mode() {
+        use harness_core::event::Profile;
+        let m = master();
+        with_helper(&m);
+        let r = m.resolver(None);
+        assert_eq!(r.default_for(Profile::Chat).unwrap(), "general");
+        assert_eq!(r.default_for(Profile::Agentic).unwrap(), "coder");
+        let ws = WorkspaceSettings::parse(
+            serde_json::json!({"default_agent": "writer", "default_agentic_agent": "teamlead"}),
+            &m,
+        )
+        .unwrap();
+        let r = m.resolver(Some(&ws));
+        assert_eq!(r.default_for(Profile::Chat).unwrap(), "writer");
+        assert_eq!(r.default_for(Profile::Agentic).unwrap(), "teamlead");
+        // The ordinary default may be an agent with file tools (a chat
+        // simply has none to offer it).
+        assert!(
+            WorkspaceSettings::parse(serde_json::json!({"default_agent": "coder"}), &m).is_ok()
+        );
+        for (id, why) in [
+            ("general", "no file or command tools"),
+            ("smol", "no file or command tools"),
+            ("researcher", "no file or command tools"),
+            ("helper", "sub-agent"),
+            ("nope", "unknown agent"),
+        ] {
+            let doc = serde_json::json!({"default_agentic_agent": id});
+            let e = WorkspaceSettings::parse(doc, &m).unwrap_err();
+            assert!(
+                e.contains("default_agentic_agent") && e.contains(why),
+                "{id}: {e}"
+            );
+            let prefs = crate::prefs::Prefs {
+                default_agentic_agent: Some(id.into()),
+                ..Default::default()
+            };
+            let e = prefs.validate(&m).unwrap_err();
+            assert!(
+                e.contains("default_agentic_agent") && e.contains(why),
+                "{id}: {e}"
+            );
+        }
+        // A stored one that went stale is refused when a chat needs it.
+        let stale = WorkspaceSettings {
+            default_agentic_agent: Some("gone".into()),
+            ..Default::default()
+        };
+        let r = m.resolver(Some(&stale));
+        let e = r.default_for(Profile::Agentic).unwrap_err().to_string();
+        assert!(
+            e.contains("default_agentic_agent") && e.contains("\"gone\""),
+            "{e}"
+        );
+        assert_eq!(r.default_for(Profile::Chat).unwrap(), "general");
+    }
+
+    /// A routine naming a sub-agent-only agent is refused when saved and
+    /// blocked when it fires: it never runs it as the chat's agent.
+    #[tokio::test]
+    async fn a_routine_never_runs_a_subagent_only_agent() {
+        let m = master();
+        with_helper(&m);
+        let spec = crate::routines::spec::RoutineSpec::parse(serde_json::json!({
+            "profile": "chat", "agent_id": "helper", "prompt": "hi"
+        }))
+        .unwrap();
+        let why = crate::routines::spec::missing(&m, "no-such-workspace", &spec)
+            .await
+            .unwrap();
+        assert!(why.contains("sub-agent"), "{why}");
     }
 
     /// With a config, workspace chains replace the server's, General's sets

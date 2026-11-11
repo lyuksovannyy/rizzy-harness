@@ -567,8 +567,10 @@ fn members_and_workspace_fields_can_change() {
             bob.disabled,
             bob.use_memory
         ),
-        ("bob", "member", false, true)
+        ("bob", "member", false, false)
     );
+    assert!(s.set_use_memory(&team, "b1", true).unwrap());
+    assert!(s.member(&team, "b1").unwrap().unwrap().use_memory);
     assert!(s.set_use_memory(&team, "b1", false).unwrap());
     assert!(!s.member(&team, "b1").unwrap().unwrap().use_memory);
     assert!(!s.memberships("b1").unwrap()[1].use_memory);
@@ -587,4 +589,48 @@ fn members_and_workspace_fields_can_change() {
     assert_eq!(w.settings, r#"{"default_agent":"coder"}"#);
     assert!(!w.personal());
     assert!(!s.rename_workspace("nope", "x").unwrap());
+}
+
+/// Sharing your facts with a team workspace is your choice, off until you
+/// make it: for the creator and for everyone added later. Personal stays
+/// on, and rows saved before this default keep their value.
+#[test]
+fn facts_are_shared_with_a_team_only_when_the_member_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("master.db");
+    let s = Store::open(&path, harness_store::Durability::Normal).unwrap();
+    for (id, name) in [("a1", "alex"), ("b1", "bob"), ("c1", "carol")] {
+        s.create_user(&user(id, name)).unwrap();
+    }
+    let personal = s.personal_workspace("a1").unwrap();
+    assert!(s.member(&personal, "a1").unwrap().unwrap().use_memory);
+    let team = s.create_workspace("Team", "a1").unwrap().workspace_id;
+    assert!(s.add_member(&team, "b1", "member").unwrap());
+    assert!(
+        !s.member(&team, "a1").unwrap().unwrap().use_memory,
+        "creator"
+    );
+    assert!(
+        !s.member(&team, "b1").unwrap().unwrap().use_memory,
+        "member"
+    );
+    // A healed Personal membership is on too.
+    raw(
+        &path,
+        &format!("DELETE FROM workspace_members WHERE workspace_id = '{personal}';"),
+    );
+    s.ensure_personal_workspaces().unwrap();
+    assert!(s.member(&personal, "a1").unwrap().unwrap().use_memory);
+    // A row an earlier build saved as on stays on, also after reopening.
+    assert!(s.add_member(&team, "c1", "member").unwrap());
+    raw(
+        &path,
+        &format!(
+            "UPDATE workspace_members SET use_memory = 1 WHERE workspace_id = '{team}' AND user_id = 'c1';"
+        ),
+    );
+    drop(s);
+    let s = Store::open(&path, harness_store::Durability::Normal).unwrap();
+    assert!(s.member(&team, "c1").unwrap().unwrap().use_memory);
+    assert!(!s.member(&team, "b1").unwrap().unwrap().use_memory);
 }

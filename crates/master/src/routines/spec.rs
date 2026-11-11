@@ -222,8 +222,15 @@ pub async fn check(m: &Master, a: &Access, spec: &RoutineSpec) -> Result<(), Str
 /// The first thing `spec` names that workspace `ws` does not have now.
 pub(crate) async fn missing(m: &Master, ws: &str, spec: &RoutineSpec) -> Option<String> {
     let r = m.resolver_for(Some(ws)).await;
-    if r.agents().get(&spec.agent_id).is_none() {
-        return Some(format!("the agent {:?} no longer exists", spec.agent_id));
+    // A routine runs its agent as the chat's agent; one that went away or
+    // runs only as a sub-agent blocks it rather than running another agent
+    // unattended.
+    match r.top_level(&spec.agent_id) {
+        Ok(_) => {}
+        Err(crate::CommandError::UnknownAgent(_)) => {
+            return Some(format!("the agent {:?} no longer exists", spec.agent_id));
+        }
+        Err(e) => return Some(e.to_string()),
     }
     if let Some(model) = &spec.model
         && r.find_model(model).is_none()

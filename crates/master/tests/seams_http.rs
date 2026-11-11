@@ -241,7 +241,7 @@ async fn untrusted_turns_get_no_memory_no_web_tools_and_a_note() {
     let ask = "when are the beds watered at dawn?";
     // An agent with sub-agents, so the delegates are checked too.
     let opts = |untrusted| PromptOpts {
-        agent_id: Some("ultracode".into()),
+        agent_id: Some("teamlead".into()),
         untrusted,
         ..Default::default()
     };

@@ -356,8 +356,11 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     role_id      TEXT NOT NULL,          -- owner | admin | member | guest
     joined_ms    INTEGER NOT NULL,
-    -- The member's own choice: recall and propose their personal memory in this workspace's chats.
-    use_memory   INTEGER NOT NULL DEFAULT 1,
+    -- The member's own choice to share their facts (personal memory) with this
+    -- workspace's chats: recall and proposals. Every insert says it (1 in
+    -- Personal, 0 elsewhere); the default only covers an insert that forgets,
+    -- and then it shares nothing.
+    use_memory   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS workspace_members_user ON workspace_members(user_id);
@@ -1755,16 +1758,20 @@ impl Store {
 
     // ---- workspaces (master only) ----
 
+    /// A membership row. `use_memory` is whether the member shares their
+    /// facts with the workspace: on in Personal, off in a team workspace
+    /// (the creator's own membership included) until they turn it on.
     fn insert_member(
         conn: &Connection,
         ws: &str,
         user_id: &str,
         role_id: &str,
         now: i64,
+        use_memory: bool,
     ) -> rusqlite::Result<usize> {
         conn.execute(
-            "INSERT INTO workspace_members (workspace_id, user_id, role_id, joined_ms) VALUES (?1, ?2, ?3, ?4)",
-            params![ws, user_id, role_id, now],
+            "INSERT INTO workspace_members (workspace_id, user_id, role_id, joined_ms, use_memory) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ws, user_id, role_id, now, use_memory],
         )
     }
 
@@ -1775,7 +1782,7 @@ impl Store {
             "INSERT INTO workspaces (workspace_id, name, personal_owner, created_ms) VALUES (?1, ?2, ?3, ?4)",
             params![ws, PERSONAL_NAME, user_id, now],
         )?;
-        Self::insert_member(conn, &ws, user_id, OWNER, now)?;
+        Self::insert_member(conn, &ws, user_id, OWNER, now, true)?;
         Ok(ws)
     }
 
@@ -1801,8 +1808,8 @@ impl Store {
             Self::insert_personal(&tx, user_id, now)?;
         }
         let healed = tx.execute(
-            "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role_id, joined_ms)
-             SELECT w.workspace_id, w.personal_owner, ?1, ?2 FROM workspaces w
+            "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role_id, joined_ms, use_memory)
+             SELECT w.workspace_id, w.personal_owner, ?1, ?2, 1 FROM workspaces w
              WHERE w.personal_owner IS NOT NULL",
             params![OWNER, now],
         )?;
@@ -1826,7 +1833,7 @@ impl Store {
         let ws = match existing {
             Some(ws) => {
                 tx.execute(
-                    "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role_id, joined_ms) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role_id, joined_ms, use_memory) VALUES (?1, ?2, ?3, ?4, 1)",
                     params![ws, user_id, OWNER, now],
                 )?;
                 ws
@@ -2010,7 +2017,7 @@ impl Store {
             "INSERT INTO workspaces (workspace_id, name, created_ms, settings) VALUES (?1, ?2, ?3, ?4)",
             params![w.workspace_id, w.name, w.created_ms, w.settings],
         )?;
-        Self::insert_member(&tx, &w.workspace_id, owner, OWNER, w.created_ms)?;
+        Self::insert_member(&tx, &w.workspace_id, owner, OWNER, w.created_ms, false)?;
         tx.commit()?;
         Ok(w)
     }
@@ -2067,7 +2074,7 @@ impl Store {
         let Some(username) = username else {
             return Ok(false);
         };
-        match Self::insert_member(&tx, ws, user_id, role_id, harness_core::now_ms()) {
+        match Self::insert_member(&tx, ws, user_id, role_id, harness_core::now_ms(), false) {
             Ok(_) => {}
             Err(e)
                 if e.sqlite_error().map(|e| e.extended_code)

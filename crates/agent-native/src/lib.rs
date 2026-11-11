@@ -2,6 +2,8 @@
 //! host's approval gate), feed results back, repeat until the model stops.
 
 pub mod compact;
+#[cfg(test)]
+mod delegate_availability_tests;
 pub mod images;
 pub mod llm;
 pub mod mask;
@@ -110,6 +112,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
             return harness_core::policy::Decision::Deny;
         }
         self.host.approve(call_id, tool, input, risk).await
+    }
+
+    fn tool_denied(&self, tool: &str) -> bool {
+        self.host.tool_denied(tool)
     }
 
     async fn delegate(
@@ -318,6 +324,7 @@ impl NativeBackend {
         &self,
         agent: Option<&harness_core::agent::AgentSpec>,
         savings: &harness_core::savings::Savings,
+        host: &dyn harness_core::backend::TurnHost,
     ) -> Vec<ToolSpec> {
         let mut specs: Vec<ToolSpec> = self
             .tools
@@ -330,12 +337,21 @@ impl NativeBackend {
                 schema: t.schema_for(self.config.bash_timeout_max),
             })
             .collect();
-        if let Some(a) = agent.filter(|a| !a.delegates.is_empty())
+        // A delegate with nothing to work with here is left out; a call to
+        // it by name is still refused with the reason (`run_delegate`).
+        let offered: Vec<&harness_core::agent::AgentSpec> = agent
+            .map(|a| {
+                a.delegates
+                    .iter()
+                    .filter(|d| self.delegate_gap(d, savings, host).is_none())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(a) = agent.filter(|_| !offered.is_empty())
             && !a.deny_tools.iter().any(|t| t == DELEGATE)
         {
             let caps = a.caps.unwrap_or_default();
-            let roster: Vec<String> = a
-                .delegates
+            let roster: Vec<String> = offered
                 .iter()
                 .map(|d| format!("{} ({})", d.agent_id, d.name))
                 .collect();
@@ -354,7 +370,7 @@ impl NativeBackend {
                     "properties": {
                         "agent": {
                             "type": "string",
-                            "enum": a.delegates.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
+                            "enum": offered.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
                         },
                         "task": { "type": "string", "description": "Everything the specialist needs to know" }
                     },
@@ -363,6 +379,49 @@ impl NativeBackend {
             });
         }
         specs
+    }
+
+    /// Why `d` cannot be started here, if it declared tools and none of them
+    /// is registered on this node, enabled, allowed to it and not denied by
+    /// the node's policy: it would run with no tools while the parent
+    /// believes the work was done. An agent that declares no tools at all
+    /// (`tools: []`, like Smol) or takes `all` is never refused here.
+    fn delegate_gap(
+        &self,
+        d: &harness_core::agent::AgentSpec,
+        savings: &harness_core::savings::Savings,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> Option<String> {
+        let harness_core::agent::ToolSelection::List(declared) = &d.tools else {
+            return None;
+        };
+        if declared.is_empty() {
+            return None;
+        }
+        let usable = |name: &str| {
+            d.allows_tool(name)
+                && !host.tool_denied(name)
+                && self
+                    .tools
+                    .iter()
+                    .any(|t| t.name() == name && t.enabled(savings))
+        };
+        if declared.iter().any(|n| usable(n)) {
+            return None;
+        }
+        let names: Vec<String> = declared
+            .iter()
+            .map(|n| match n.as_str() {
+                "remember" => "memory".to_string(),
+                n => n.replace('_', " "),
+            })
+            .collect();
+        Some(format!(
+            "@{} was not started: none of its tools ({}) are available on this node. \
+             Do the work another way or tell the user.",
+            d.agent_id,
+            names.join(", ")
+        ))
     }
 
     /// Scrubbed like the output, so a source never shows what the output
@@ -414,6 +473,10 @@ impl NativeBackend {
         };
         if task.is_empty() {
             return (ToolOutcome::err("`task` must describe the sub-task"), none);
+        }
+        // Before any child session exists.
+        if let Some(why) = self.delegate_gap(spec, &ctx.extra.savings, host) {
+            return (ToolOutcome::err(why), none);
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
@@ -892,7 +955,7 @@ impl NativeBackend {
         if !ctx.compare.is_empty() {
             return self.compare(&ctx, messages, usage, author, ui).await;
         }
-        let tools = self.tool_specs(agent, sv);
+        let tools = self.tool_specs(agent, sv, host);
         // The master only puts an effort on the spec when the model supports it.
         let effort = agent
             .and_then(|a| a.effort.as_deref())
@@ -1935,7 +1998,11 @@ mod tests {
         let mut c = ctx(&host, "run: touch hacked", dir.path());
         c.agent = Some(scout());
         let b = backend();
-        assert_eq!(b.tool_specs(c.agent.as_ref(), &Default::default()).len(), 1);
+        assert_eq!(
+            b.tool_specs(c.agent.as_ref(), &Default::default(), &host)
+                .len(),
+            1
+        );
         b.run_turn(c).await;
         assert!(!dir.path().join("hacked").exists());
         assert!(host.asked.lock().unwrap().is_empty(), "never even asked");

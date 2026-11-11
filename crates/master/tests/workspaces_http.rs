@@ -1081,19 +1081,24 @@ async fn workspace_settings_and_memory_switch() {
     let (_, d) = call(&s, Method::GET, &path, None, &carol).await;
     assert_eq!(d["settings"], settings, "every member reads the defaults");
 
-    // The memory switch is each member's own.
+    // The memory switch is each member's own, and off until they turn it
+    // on (the creator's too).
+    assert_eq!(
+        call(&s, Method::GET, &path, None, &carol).await.1["use_memory"],
+        false
+    );
     let (st, d) = call(
         &s,
         Method::PUT,
         &format!("{path}/memory"),
-        Some(json!({"use_memory": false})),
+        Some(json!({"use_memory": true})),
         &carol,
     )
     .await;
-    assert_eq!((st, &d["use_memory"]), (StatusCode::OK, &json!(false)));
+    assert_eq!((st, &d["use_memory"]), (StatusCode::OK, &json!(true)));
     assert_eq!(
         call(&s, Method::GET, &path, None, &bob).await.1["use_memory"],
-        true
+        false
     );
 
     // The API token acts as an owner of any workspace.

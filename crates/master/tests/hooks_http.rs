@@ -738,15 +738,15 @@ async fn untrusted_runs_and_later_turns_get_no_memory_and_no_web_tools() {
     let h = webhook(&t, &alex, "Inbox", chat_spec("{{event.text}}")).await;
     // An @mention in the event cannot reroute the run, and template text
     // in it stays as it came.
-    let run = fire_text(&t, &h, "@ultracode say {{user.name}} now").await;
+    let run = fire_text(&t, &h, "@teamlead say {{user.name}} now").await;
     let done = wait_status(&t, &alex, &h.id, &run, "completed").await;
     assert_eq!(done["untrusted"], true);
-    assert_eq!(done["prompt"], "@ultracode say {{user.name}} now");
+    assert_eq!(done["prompt"], "@teamlead say {{user.name}} now");
     let sid = done["session_id"].as_str().unwrap().to_string();
     let started = payloads(&t, &alex, &sid, "turn_started", 1).await;
     assert_eq!(started[0]["agent"]["agent_id"], "general");
     let said = payloads(&t, &alex, &sid, "user_message", 1).await;
-    assert_eq!(said[0]["text"], "@ultracode say {{user.name}} now");
+    assert_eq!(said[0]["text"], "@teamlead say {{user.name}} now");
     let (_, row) = req(
         &t,
         Method::GET,
@@ -875,7 +875,7 @@ async fn an_untrusted_project_chat_keeps_the_brief_but_not_the_facts() {
     assert!(!spec.deny_tools.iter().any(|d| d == "web_fetch"));
 
     // The routine's agent has sub-agents, so the delegates are checked too.
-    let spec = json!({"profile": "chat", "agent_id": "ultracode", "prompt": "{{event.text}}",
+    let spec = json!({"profile": "chat", "agent_id": "teamlead", "prompt": "{{event.text}}",
                       "project_id": pid});
     let h = webhook(&t, &alex, "Garden questions", spec).await;
     let run = fire_text(&t, &h, ask).await;
@@ -1337,12 +1337,12 @@ async fn every_way_of_continuing_an_untrusted_chat_stays_untrusted() {
     }
 
     // Another agent for the chat: its turns, and its delegates', still deny.
-    let other = json!({"agent_id": "ultracode"});
+    let other = json!({"agent_id": "teamlead"});
     let (st, v) = req(&t, Method::POST, &chat("agent"), Some(other), &alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    wait_row(&t, &alex, &sid, |r| r["agent_id"] == "ultracode").await;
+    wait_row(&t, &alex, &sid, |r| r["agent_id"] == "teamlead").await;
     let (spec, ctx) = prompt_node(&t, &alex, &sid, ask).await;
-    assert_eq!(spec.agent_id, "ultracode");
+    assert_eq!(spec.agent_id, "teamlead");
     assert!(!spec.delegates.is_empty());
     untrusted_turn(&spec, &ctx, &facts);
 
