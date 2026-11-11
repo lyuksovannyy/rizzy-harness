@@ -744,7 +744,12 @@ impl Session {
     }
 
     /// Undo one turn's file changes, or rewind: undo it and every later
-    /// turn (see `git::restore`). Records the new state as a snapshot.
+    /// turn (see `git::restore_plan`). The log is written first: the
+    /// folder as it is now is snapshotted and recorded as a
+    /// `before_restore` checkpoint before any file changes (so a forced
+    /// restore loses nothing), then the restored state is recorded as that
+    /// checkpoint's `after` and as each undone turn's `restored`. Restoring
+    /// the `before_restore` checkpoint's id undoes the restore.
     pub(crate) async fn restore(
         &self,
         turn_id: &str,
@@ -783,7 +788,10 @@ impl Session {
                 if seen && c.phase == CheckpointPhase::After && !later.contains(&c.turn_id) {
                     later.push(c.turn_id.clone());
                 }
-                if c.phase != CheckpointPhase::Before {
+                if !matches!(
+                    c.phase,
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore
+                ) {
                     latest = c.git_ref.clone();
                 }
             }
@@ -804,13 +812,68 @@ impl Session {
                 ));
             }
         }
-        let files = crate::git::restore(&repo, &before, &expected, force).await?;
+        // The folder as it is, saved first: its own checkpoint, counted
+        // against `checkpoints_keep` like a turn's. The same scan serves
+        // the unforced check.
+        let saved = format!("restore-{}", harness_core::new_id());
+        let saved_ref = format!("refs/harness/{}/{saved}/before", self.id);
+        let now = crate::git::snapshot(&repo, &saved_ref, "harness: before restore")
+            .await
+            .map_err(|e| {
+                format!("nothing was restored: the folder could not be saved first ({e})")
+            })?;
+        let touched = match crate::git::restore_plan(
+            &repo,
+            &before,
+            &expected,
+            (!force).then_some(now.as_str()),
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                crate::git::delete_ref(&repo, &saved_ref).await;
+                return Err(e);
+            }
+        };
+        let files: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
+        if let Err(e) = self
+            .append(EventKind::Checkpoint(Checkpoint {
+                turn_id: saved.clone(),
+                phase: CheckpointPhase::BeforeRestore,
+                git_ref: now,
+                files: files.clone(),
+            }))
+            .await
+        {
+            crate::git::delete_ref(&repo, &saved_ref).await;
+            return Err(format!("nothing was restored: {}", LogError(e.to_string())));
+        }
+        // From here on the saved state is in the log; say so on failure.
+        let kept = |e: String| {
+            format!(
+                "{e}; the folder as it was before this restore is saved as \
+                 checkpoint {saved} (ref {saved_ref})"
+            )
+        };
+        crate::git::restore_paths(&repo, &before, &touched)
+            .await
+            .map_err(kept)?;
         let state = crate::git::snapshot(
             &repo,
-            &format!("refs/harness/{}/{turn_id}/restored", self.id),
+            &format!("refs/harness/{}/{saved}/after", self.id),
             "harness: restored",
         )
-        .await?;
+        .await
+        .map_err(kept)?;
+        self.append(EventKind::Checkpoint(Checkpoint {
+            turn_id: saved.clone(),
+            phase: CheckpointPhase::After,
+            git_ref: state.clone(),
+            files: files.clone(),
+        }))
+        .await
+        .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         let targets: Vec<String> = if rewind {
             later
                 .into_iter()
@@ -827,8 +890,9 @@ impl Session {
                 files: files.clone(),
             }))
             .await
-            .map_err(|e| LogError(e.to_string()).to_string())?;
+            .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
+        crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
         Ok(())
     }
 
