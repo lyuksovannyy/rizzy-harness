@@ -1,7 +1,6 @@
 //! What a person's "allow for this turn" covers: this exact call (PLAN.md
-//! T4). The loop, which skips asking again, and the node, which decides
-//! when the choice is offered, both key the allowance with [`call_key`], so
-//! the two can never disagree about what was approved.
+//! T4). The loop records [`call_key`] of the call a person answered "for
+//! this turn" and skips asking again only for a call with the same key.
 //!
 //! - `bash` and every tool not named below: the tool's name and its whole
 //!   input as canonical JSON (object keys sorted, nothing else changed). For
