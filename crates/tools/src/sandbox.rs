@@ -149,6 +149,18 @@ impl Sandbox {
         tmp_root: Option<PathBuf>,
         protected: &[PathBuf],
     ) -> Result<Self, String> {
+        // Every grant is passed to the wrapper, which runs in the session
+        // folder: a relative path there would name a folder inside it (and
+        // a link planted there could lead anywhere, R.1 S-4).
+        for p in tmp_root.iter().chain(protected) {
+            if !p.is_absolute() {
+                return Err(format!(
+                    "the sandbox needs absolute paths for the harness's own folders; {} is \
+                     relative (start the harness with an absolute --data-dir)",
+                    p.display()
+                ));
+            }
+        }
         let mut read: Vec<PathBuf> = SYSTEM_READ
             .iter()
             .map(PathBuf::from)
@@ -303,18 +315,37 @@ pub struct Grants {
     pub read: Vec<PathBuf>,
 }
 
-/// The git directory of a sub-agent worktree, when `cwd` is inside one:
-/// `<repo>/.git/harness-worktrees/<id>/…` → `<repo>/.git`. Judged from the
-/// path alone, never from a `.git` file's contents (repository content
-/// could name any folder there).
-pub fn worktree_git_dir(cwd: &Path) -> Option<PathBuf> {
+/// Where a sub-agent worktree keeps its git metadata in the main
+/// repository: `<repo>/.git/harness-worktrees/<id>/…` gives the main
+/// `<repo>/.git` and the worktree's own admin folder
+/// `<repo>/.git/worktrees/<id>` (the node checks, when it makes the
+/// worktree, that git named it so). Judged from the path alone, never from
+/// a `.git` file's contents (repository content could name any folder
+/// there).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeGit {
+    /// The main repository's git directory.
+    pub git: PathBuf,
+    /// This worktree's folder in it (`HEAD`, `index`, its reflog).
+    pub admin: PathBuf,
+    /// The worktree's top folder (`<git>/harness-worktrees/<id>`).
+    pub top: PathBuf,
+}
+
+/// The [`WorktreeGit`] of `cwd`, when it is inside a sub-agent worktree.
+pub fn worktree_git(cwd: &Path) -> Option<WorktreeGit> {
     let mut p = cwd;
     while let Some(parent) = p.parent() {
         if parent.file_name() == Some(OsStr::new("harness-worktrees"))
             && let Some(git) = parent.parent()
             && git.file_name() == Some(OsStr::new(".git"))
+            && let Some(id) = p.file_name()
         {
-            return Some(git.to_path_buf());
+            return Some(WorktreeGit {
+                git: git.to_path_buf(),
+                admin: git.join("worktrees").join(id),
+                top: p.to_path_buf(),
+            });
         }
         p = parent;
     }
@@ -335,16 +366,30 @@ impl Confinement {
     }
 
     /// `program args…` in `workspace`, with exactly the allow-listed
-    /// environment `env`, confined as this says.
+    /// environment `env`, confined as this says. With `pin` (the session's
+    /// folder as pinned at its creation), a folder that is no longer that
+    /// directory is refused before anything is granted or started; the
+    /// command then starts in the checked real path.
+    #[allow(clippy::too_many_arguments)]
     pub fn command(
         &self,
         program: &OsStr,
         args: &[&OsStr],
         workspace: &Path,
+        pin: Option<&harness_core::folder::FolderPin>,
         env: &crate::ToolEnv,
         protected: &[PathBuf],
         grants: Grants,
     ) -> Result<tokio::process::Command, String> {
+        if let Self::Refused(why) = self {
+            return Err(why.to_string());
+        }
+        let ws = match pin {
+            Some(p) => p.check()?,
+            None => workspace
+                .canonicalize()
+                .map_err(|e| format!("workspace {}: {e}", workspace.display()))?,
+        };
         let std_cmd = match self {
             Self::Refused(why) => return Err(why.to_string()),
             Self::Unconfined => {
@@ -353,9 +398,6 @@ impl Confinement {
                 c
             }
             Self::Confined { sandbox, tmp } => {
-                let ws = workspace
-                    .canonicalize()
-                    .map_err(|e| format!("workspace {}: {e}", workspace.display()))?;
                 let all: Vec<PathBuf> =
                     sandbox.protected.iter().chain(protected).cloned().collect();
                 let mut rw = grants.owned_write.clone();
@@ -365,10 +407,21 @@ impl Confinement {
                 if grants.workspace_write {
                     rw.push(ws.clone());
                     // A sub-agent's worktree keeps its git metadata in the
-                    // main repository's `.git`: `git status`/`commit` need it.
-                    if let Some(git) = worktree_git_dir(&ws) {
-                        checked.push(git.clone());
-                        rw.push(git);
+                    // main repository's `.git`. Its own git (`status`, `add`,
+                    // `commit`) needs to write only the object store and the
+                    // worktree's own admin folder; the rest of `.git` (the
+                    // config, hooks, `info`, refs, `packed-refs`, and the
+                    // folder that holds the worktree) is read-only, so the
+                    // child can neither configure commands for anyone's git
+                    // nor move its own folder away (R.1, PLAN.md T32).
+                    // Landlock only adds rights per subtree: the read-only
+                    // rule covers all of `.git`, the two read-write rules
+                    // add writing beneath `objects` and `worktrees/<id>`.
+                    if let Some(wt) = worktree_git(&ws) {
+                        checked.push(wt.git.clone());
+                        rw.push(wt.git.join("objects"));
+                        rw.push(wt.admin);
+                        ro.push(wt.git);
                     }
                 } else {
                     ro.push(ws.clone());
@@ -397,7 +450,7 @@ impl Confinement {
             }
         };
         let mut c = tokio::process::Command::from(std_cmd);
-        c.args(args).current_dir(workspace);
+        c.args(args).current_dir(&ws);
         Ok(c)
     }
 }
@@ -438,6 +491,12 @@ pub fn start(
     protected: &[PathBuf],
     node_toml: &Path,
 ) -> Result<Started, String> {
+    if !data_dir.is_absolute() {
+        return Err(format!(
+            "the data directory {} is a relative path; the sandbox needs it absolute",
+            data_dir.display()
+        ));
+    }
     let tmp_root = data_dir.join("sandbox-tmp");
     if settings.mode == Mode::Off {
         return Ok(Started {
@@ -729,24 +788,58 @@ mod tests {
     }
 
     #[test]
-    fn worktree_git_dir_comes_from_the_path_only() {
+    fn worktree_git_comes_from_the_path_only() {
+        let wt = WorktreeGit {
+            git: PathBuf::from("/r/.git"),
+            admin: PathBuf::from("/r/.git/worktrees/abc"),
+            top: PathBuf::from("/r/.git/harness-worktrees/abc"),
+        };
         assert_eq!(
-            worktree_git_dir(Path::new("/r/.git/harness-worktrees/abc/sub")),
-            Some(PathBuf::from("/r/.git"))
+            worktree_git(Path::new("/r/.git/harness-worktrees/abc/sub")),
+            Some(wt.clone())
         );
         assert_eq!(
-            worktree_git_dir(Path::new("/r/.git/harness-worktrees/abc")),
-            Some(PathBuf::from("/r/.git"))
+            worktree_git(Path::new("/r/.git/harness-worktrees/abc")),
+            Some(wt)
         );
-        assert_eq!(
-            worktree_git_dir(Path::new("/r/.git/harness-worktrees")),
-            None
-        );
-        assert_eq!(
-            worktree_git_dir(Path::new("/r/harness-worktrees/abc")),
-            None
-        );
-        assert_eq!(worktree_git_dir(Path::new("/r/src")), None);
+        assert_eq!(worktree_git(Path::new("/r/.git/harness-worktrees")), None);
+        assert_eq!(worktree_git(Path::new("/r/harness-worktrees/abc")), None);
+        assert_eq!(worktree_git(Path::new("/r/src")), None);
+    }
+
+    /// S-4: the wrapper runs in the session folder, so a relative data
+    /// directory would make the temp root (and the protected folder) a path
+    /// inside it. Refused in every mode, before anything runs.
+    #[test]
+    fn a_relative_data_dir_is_refused_in_every_mode() {
+        for mode in [Mode::Required, Mode::BestEffort, Mode::Off] {
+            let s = Settings {
+                mode,
+                ..Default::default()
+            };
+            let e = start(
+                &s,
+                Path::new("data"),
+                &[PathBuf::from("/abs/data")],
+                Path::new("/abs/node.toml"),
+            )
+            .unwrap_err();
+            assert!(e.contains("relative"), "{mode:?}: {e}");
+        }
+        for (tmp, protected) in [
+            (
+                Some(PathBuf::from("data/sandbox-tmp")),
+                PathBuf::from("/abs/data"),
+            ),
+            (
+                Some(PathBuf::from("/abs/data/sandbox-tmp")),
+                PathBuf::from("data"),
+            ),
+        ] {
+            let e = Sandbox::new("/bin/true".into(), &Settings::default(), tmp, &[protected])
+                .unwrap_err();
+            assert!(e.contains("relative"), "{e}");
+        }
     }
 
     #[test]
@@ -757,6 +850,7 @@ mod tests {
                 OsStr::new("true"),
                 &[],
                 Path::new("/"),
+                None,
                 &Default::default(),
                 &[],
                 Grants::default(),

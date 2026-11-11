@@ -1839,6 +1839,7 @@ impl NativeBackend {
             artifacts: host.artifacts(),
             call_id: call.call_id.clone(),
             sandbox: self.config.sandbox.for_session(&ctx.session_id.to_string()),
+            pin: host.folder_pin(),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`

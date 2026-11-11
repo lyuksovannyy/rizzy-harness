@@ -465,9 +465,10 @@ impl NodeRuntime {
             .clone()
             .ok_or("publishing is off on this node")?;
         let s = self.session(sid).ok_or("unknown session")?;
-        let cwd = s
-            .publish_cwd()
+        s.publish_cwd()
             .ok_or("this chat cannot save files as artifacts")?;
+        // Pinned folder and node policy, as before a turn (R.1, T4).
+        let cwd = s.checked_folder()?;
         let name = name
             .map(|n| harness_core::artifacts::check_name(&n))
             .transpose()?;
@@ -877,7 +878,7 @@ fn open_stages(
         return None;
     }
     match artifacts::Stages::open(sc, &cfg.policy, hosted) {
-        Ok(s) => Some(Arc::new(s)),
+        Ok(s) => Some(Arc::new(s.with_checkpoints(cfg.checkpoints_dir.clone()))),
         Err(e) => {
             tracing::warn!(error = %e, dir = %sc.stage_dir.display(), "cannot open the artifact stage; publishing is off");
             None

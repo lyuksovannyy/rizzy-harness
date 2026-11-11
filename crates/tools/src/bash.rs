@@ -156,6 +156,7 @@ impl Tool for Bash {
             "bash".as_ref(),
             &["-c".as_ref(), command.as_ref()],
             &ctx.workspace,
+            ctx.pin.as_ref(),
             &ctx.env,
             &ctx.protected,
             crate::sandbox::Grants {

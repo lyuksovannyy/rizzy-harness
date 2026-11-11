@@ -2678,15 +2678,234 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
     std::fs::write(moved.join("notes.txt"), "v0\n").unwrap();
     let a = create_in(&mut h, &moved).await;
     let turn = prompt_turn(&mut h, a, "run: echo v1 > notes.txt").await;
-    start_long_turn(&mut h, b).await;
-    let err = restore(&mut h, a, "r", &turn, false)
-        .await
-        .expect_err("same folder through a link");
-    assert!(err.contains(BUSY), "{err}");
-    stop_turn(&mut h, b).await;
+    // Since R.1 (S-2) a folder is pinned when its chat is made: B's folder
+    // was replaced by a link, so B cannot start a turn at all, and so is
+    // never busy in A's folder through it.
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: format!("p-{b}"),
+        session_id: b,
+        text: "run: sleep 30".into(),
+        images: vec![],
+    });
+    let err = ack_for(&mut h, &format!("p-{b}")).await.unwrap_err();
+    assert!(err.contains("folder was replaced"), "{err}");
     restore(&mut h, a, "r2", &turn, false).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(moved.join("notes.txt")).unwrap(),
         "v0\n"
     );
+}
+
+// ---- The node's own git never runs what a session wrote (R.1, S-1, S-2) ----
+
+/// S-1: a sub-agent's shell defines a clean filter in the shared
+/// `.git/config` and asks for it in its worktree's `.gitattributes`. The
+/// node's own git (the result snapshot, applying it to the folder) is not
+/// sandboxed, and it never runs that filter; the change still arrives.
+#[tokio::test]
+async fn a_filter_a_sub_agent_defines_never_runs_in_the_nodes_git() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let marker = h._dir.path().join("ran-outside-the-sandbox");
+    let cmd = format!(
+        "pwd; G=$(git rev-parse --path-format=absolute --git-common-dir); \
+         printf '#!/bin/sh\\ntr \"\\\\0\" \" \" < /proc/$PPID/cmdline > {m}\\ncat\\n' > $G/f.sh; \
+         chmod +x $G/f.sh; git config filter.x.clean $G/f.sh; \
+         echo '* filter=x' > .gitattributes; echo hi > new.txt",
+        m = marker.display()
+    );
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        &format!("delegate: dev=run: {cmd}"),
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(
+        out.contains("harness-worktrees"),
+        "not in a worktree: {out}"
+    );
+    assert!(
+        !marker.exists(),
+        "the node's own git ran the sub-agent's filter: {}",
+        std::fs::read_to_string(&marker).unwrap_or_default()
+    );
+    assert!(out.contains("2 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("new.txt")).unwrap(),
+        "hi\n"
+    );
+}
+
+/// S-1: hostile configuration in the main repository's `.git/config` (what
+/// the session's own shell may write there, PLAN.md R2) and attributes that
+/// ask for it: a clean/smudge filter, `core.fsmonitor`, `core.hooksPath`
+/// with hooks, `core.sshCommand`, an `include.path` that defines another
+/// filter and a pager, an alias, `diff.external`, a pager, an editor and a
+/// signing program. None of it runs in the node's own git through a turn's
+/// checkpoints, a whole delegation (worktree made, the child changes files,
+/// its changes applied to the folder) and an undo.
+#[cfg(unix)]
+#[tokio::test]
+async fn hostile_config_in_the_main_repository_never_runs_in_the_nodes_git() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let top = h._dir.path().to_path_buf();
+    let marks = top.join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let script = |name: &str| {
+        let p = top.join(format!("{name}.sh"));
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", marks.join(name).display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    let hooks = top.join("hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    for n in [
+        "post-checkout",
+        "pre-commit",
+        "post-commit",
+        "post-index-change",
+        "reference-transaction",
+    ] {
+        let p = hooks.join(n);
+        std::fs::copy(script(n), &p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let included = top.join("included.cfg");
+    std::fs::write(
+        &included,
+        format!(
+            "[filter \"inc\"]\n\tclean = {}\n\tsmudge = {}\n[core]\n\tpager = {}\n",
+            script("inc-clean"),
+            script("inc-smudge"),
+            script("inc-pager")
+        ),
+    )
+    .unwrap();
+    for (k, v) in [
+        ("filter.evil.clean", script("clean")),
+        ("filter.evil.smudge", script("smudge")),
+        ("core.fsmonitor", script("fsmonitor")),
+        ("core.hooksPath", hooks.display().to_string()),
+        ("core.sshCommand", script("ssh")),
+        ("include.path", included.display().to_string()),
+        ("alias.st", format!("!{}", script("alias"))),
+        ("diff.external", script("diff-external")),
+        ("core.pager", script("pager")),
+        ("core.editor", script("editor")),
+        ("gpg.program", script("gpg")),
+        ("commit.gpgSign", "true".into()),
+    ] {
+        git_in(&h.ws, &["config", k, &v]);
+    }
+    std::fs::write(
+        h.ws.join(".gitattributes"),
+        "* filter=evil\n*.md filter=inc\n",
+    )
+    .unwrap();
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt; echo doc > a.md").await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo '* filter=evil' > .gitattributes; echo child > child.txt; \
+         echo m > b.md",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("3 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("child.txt")).unwrap(),
+        "child\n"
+    );
+    restore(&mut h, sid, "r", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert!(!h.ws.join("a.md").exists());
+    let ran: Vec<_> = std::fs::read_dir(&marks)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        ran.is_empty(),
+        "repository config ran in the node's git: {ran:?}"
+    );
+}
+
+/// S-2: a session's folder is pinned when the session is created (its real
+/// path, device and inode). Replaced afterwards (by a link to a folder
+/// outside the workspace roots, by a link to another folder inside them, by
+/// a new directory of the same name), the session refuses its next turn and
+/// its undo, and nothing of the other folder reaches the chat.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_whose_folder_was_replaced_refuses_to_work() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "mine\n").unwrap();
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt").await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+    let inside = h._dir.path().join("other");
+    std::fs::create_dir(&inside).unwrap();
+    std::fs::write(inside.join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+    std::fs::rename(&h.ws, h._dir.path().join("ws.moved")).unwrap();
+    for (i, target) in [
+        Some(outside.path().to_path_buf()),
+        Some(inside.clone()),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let _ = std::fs::remove_file(&h.ws);
+        let _ = std::fs::remove_dir_all(&h.ws);
+        match &target {
+            Some(t) => std::os::unix::fs::symlink(t, &h.ws).unwrap(),
+            None => {
+                std::fs::create_dir(&h.ws).unwrap();
+                std::fs::write(h.ws.join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+            }
+        }
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: format!("p{i}"),
+            session_id: sid,
+            text: "read: id_ed25519".into(),
+            images: vec![],
+        });
+        let e = ack_for(&mut h, &format!("p{i}")).await.unwrap_err();
+        assert!(e.contains("folder was replaced"), "{target:?}: {e}");
+        let e = restore(&mut h, sid, &format!("r{i}"), &turn, false)
+            .await
+            .unwrap_err();
+        assert!(e.contains("folder was replaced"), "{target:?}: {e}");
+    }
+    let leaked = h
+        .seen
+        .iter()
+        .any(|e| e.payload.to_string().contains("SSH-KEY-CANARY"));
+    assert!(!leaked, "the other folder's file reached the chat");
 }

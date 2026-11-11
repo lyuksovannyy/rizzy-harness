@@ -18,7 +18,7 @@ pub struct Glob;
 fn root(ctx: &ToolCtx, input: &Value) -> Result<PathBuf, String> {
     match input.get("path").and_then(|v| v.as_str()) {
         Some(p) => ctx.resolve(p),
-        None => Ok(ctx.workspace.clone()),
+        None => ctx.workspace_dir(),
     }
 }
 
@@ -102,7 +102,9 @@ impl Tool for Grep {
             },
             None => None,
         };
-        let ws = ctx.workspace.clone();
+        let ws = ctx
+            .workspace_dir()
+            .unwrap_or_else(|_| ctx.workspace.clone());
         let protected = ctx.protected.clone();
         let cancel = ctx.cancel.clone();
         let bounded = ctx.savings.bounded_reads;
@@ -220,7 +222,9 @@ impl Tool for Glob {
             Ok(g) => g.compile_matcher(),
             Err(e) => return ToolOutcome::err(format!("bad glob: {e}")),
         };
-        let ws = ctx.workspace.clone();
+        let ws = ctx
+            .workspace_dir()
+            .unwrap_or_else(|_| ctx.workspace.clone());
         let protected = ctx.protected.clone();
         let max_files = if ctx.savings.bounded_reads {
             BOUNDED_GLOB_RESULTS

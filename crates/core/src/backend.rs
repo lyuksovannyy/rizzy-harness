@@ -56,6 +56,14 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// This session's folder as pinned when the session was created
+    /// ([`crate::folder::FolderPin`]): every tool call checks it before it
+    /// reads, writes or starts anything there. `None` where no folder is
+    /// pinned (chat sessions, tests).
+    fn folder_pin(&self) -> Option<crate::folder::FolderPin> {
+        None
+    }
+
     /// The bytes of this session's images among `sha256` (those it has; an
     /// image it lacks is named to the model instead of shown).
     async fn images(&self, _sha256: &[String]) -> Vec<ImageData> {

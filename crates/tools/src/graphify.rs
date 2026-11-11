@@ -160,6 +160,7 @@ async fn run(
         bin.as_os_str(),
         &args,
         &ctx.workspace,
+        ctx.pin.as_ref(),
         &ctx.env,
         &ctx.protected,
         crate::sandbox::Grants {

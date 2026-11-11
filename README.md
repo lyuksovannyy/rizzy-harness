@@ -531,10 +531,16 @@ storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
 back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
-a temporary git worktree, so the folder must be a git repository for
-them: elsewhere, or when the repository's own config defines filter
-commands (git-lfs's standard ones are allowed), such a sub-agent is not
-started and the agent that delegated is told why. Sub-agents that only
+a temporary git worktree, so the folder must be a git repository (inside
+the node's `workspace_roots`) for them: elsewhere such a sub-agent is not
+started and the agent that delegated is told why. The worktree holds the
+folder as it is, your uncommitted work included (its own `git status`
+shows that work as changes against `HEAD`), as bytes: your repository's
+filters are not applied (an LFS repository's files arrive as the real
+files). When the sub-agent ends, the files it changed are written into
+the folder; if you or another sub-agent changed one of them meanwhile,
+nothing is written and the agent is told. None of this runs your
+repository's config, hooks, filters or attributes. Sub-agents that only
 read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
@@ -586,6 +592,14 @@ directory, be inside it, or contain it: with the default data directory
 sandbox that cannot open it either (see "The shell sandbox" below); its
 output is still scrubbed of the API token and known keys.
 
+A chat's folder is remembered as the directory it was when the chat was
+made (its real path and its identity on disk). If that folder is later
+replaced, by a link to somewhere else or by another directory of the same
+name (deleted and cloned again, say), the chat refuses to work there
+("this session's folder was replaced"): start a new chat in the folder.
+Every turn also checks the folder against `workspace_roots` again, so
+narrowing node.toml applies to existing chats.
+
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
@@ -620,7 +634,10 @@ starts the command. A command may:
 Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
 `~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
 users' folders, not `/dev/tty`. A sub-agent's git worktree also gets the
-repository's `.git`, so `git status` and `git commit` work there. Programs
+repository's `.git` read-only, and read-write only its object store and
+the worktree's own entry in it, so `git status`, `git add`, `git diff` and
+`git commit` work there, while `git config`, hooks, branches and the
+folder that holds the worktree stay out of its reach. Programs
 cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
 fail inside the sandbox. From Linux 6.12 the shell also cannot signal
 processes outside it, and from Linux 7.1 it cannot connect to Unix sockets

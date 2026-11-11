@@ -74,7 +74,8 @@ async fn setup_with(
         secrets: Default::default(),
         profile: Profile::Agentic,
         incognito_ttl: None,
-        checkpoints_dir: None,
+        // Sub-agent worktrees need the checkpoint store (R.1).
+        checkpoints_dir: Some(dir.path().join("checkpoints")),
         artifacts: None,
     })
     .await
