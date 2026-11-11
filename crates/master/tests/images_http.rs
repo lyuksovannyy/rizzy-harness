@@ -7,7 +7,7 @@
 //! carry it.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -181,7 +181,7 @@ async fn start() -> T {
         .send()
         .await
         .unwrap();
-    let alex = cookie(&r);
+    let alex = cookie(r).await;
     T {
         base,
         master,
@@ -193,14 +193,9 @@ async fn start() -> T {
     }
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn req(
@@ -214,7 +209,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
+    let r = rb.login(c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -234,13 +229,13 @@ async fn account(t: &T, name: &str) -> String {
         .unwrap();
     let r = client
         .post(format!("{}/api/me/password", t.base))
-        .header("cookie", cookie(&first))
+        .login(&cookie(first).await)
         .same_origin()
         .json(&json!({"current": pw, "new": format!("{name}s own password")}))
         .send()
         .await
         .unwrap();
-    cookie(&r)
+    cookie(r).await
 }
 
 /// A PNG header of `w`×`h` and then `tail` (the master reads headers only).
@@ -275,7 +270,7 @@ async fn upload(
     }
     let r = reqwest::Client::new()
         .post(url)
-        .header("cookie", c)
+        .login(c)
         .same_origin()
         .header("x-file-name", name)
         .body(bytes)
@@ -595,7 +590,7 @@ async fn a_message_over_7_mib_is_refused_before_the_link() {
     for n in 0..5 {
         let r = reqwest::Client::new()
             .post(format!("{}/api/attachments?name=n{n}.txt", t.base))
-            .header("cookie", &t.alex)
+            .login(&t.alex)
             .same_origin()
             .body("x".repeat(100_000))
             .send()

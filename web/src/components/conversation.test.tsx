@@ -7,6 +7,7 @@
 // "removed from Media"), the bar's images, and deleting the chat with or
 // without the Media files that came from it.
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
@@ -200,7 +201,7 @@ describe("media", () => {
     );
     await show([user([ref(1), ref(2)])], sessionRow());
     const pictures = [...host.querySelectorAll<HTMLButtonElement>(".bubble-image")];
-    expect(pictures.map((b) => b.querySelector("img")!.getAttribute("src"))).toEqual([`/api/media/${ref(1).media_id}/content`, `/api/media/${ref(2).media_id}/content`]);
+    expect(pictures.map((b) => b.querySelector("img")!.getAttribute("src"))).toEqual([linked(`/api/media/${ref(1).media_id}/content`), linked(`/api/media/${ref(2).media_id}/content`)]);
     await act(async () => pictures[0]!.click());
     await until(() => host.querySelector("dialog.media-preview"));
     expect(host.querySelector("dialog.media-preview")!.getAttribute("aria-label")).toBe("p1.webp");

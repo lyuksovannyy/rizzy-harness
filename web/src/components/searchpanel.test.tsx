@@ -6,6 +6,7 @@
 // the next page loads at the end of a tab, Close closes, and file rows show
 // their thumbnail (same-origin only) until it fails to load.
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { SearchKind, SearchResponse, SearchResult } from "../types";
@@ -245,7 +246,7 @@ describe("search panel", () => {
     await render(all);
     await settle();
     const thumbs = () => rows().map((r) => r.querySelector("img.search-thumb")?.getAttribute("src") ?? null);
-    expect(thumbs()).toEqual(["/api/media/m1/thumb", "/api/artifacts/a1/versions/v1/thumb", null, null, null]);
+    expect(thumbs()).toEqual([linked("/api/media/m1/thumb"), linked("/api/artifacts/a1/versions/v1/thumb"), null, null, null]);
     expect(rows().map((r) => r.querySelector(".search-icon svg") !== null)).toEqual([false, false, true, true, true]);
     expect(rows()[1]!.textContent).toContain("harness · Program");
     expect(rows()[4]!.textContent).toContain("· Document");

@@ -39,4 +39,21 @@ async function keywordsOnly(p) {
   await p.waitForSelector('h2:has-text("About you")');
 }
 
-module.exports = { claimCode, createOwner, keywordsOnly };
+/** Gate 3 P-1: the login cookie alone authenticates nothing. The scripts'
+ * own in-page `fetch('/api/…')` calls send the login key as the app does
+ * (it keeps it in localStorage, `harness.login`). Call on a context or a
+ * page before its first navigation. */
+async function keyed(target) {
+  await target.addInitScript(() => {
+    const f = window.fetch.bind(window);
+    window.fetch = (u, o = {}) => {
+      const k = localStorage.getItem('harness.login');
+      if (!k || !String(u).startsWith('/api/')) return f(u, o);
+      const h = new Headers(o.headers);
+      if (!h.has('x-harness-login')) h.set('x-harness-login', k);
+      return f(u, { ...o, headers: h });
+    };
+  });
+}
+
+module.exports = { claimCode, createOwner, keywordsOnly, keyed };

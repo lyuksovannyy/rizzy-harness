@@ -10,6 +10,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Bar, Picture } from "../lib/downscale";
+import { linked } from "../lib/links.setup";
 import type { ModelInfo } from "../types";
 import type { Submission } from "./Composer";
 
@@ -140,7 +141,8 @@ describe("attaching", () => {
     expect(host.querySelector<HTMLButtonElement>("button.send")!.disabled).toBe(true);
     act(() => lastBar().set([picture(1)]));
     expect(chips()[0]!.textContent).toBe("p1.webp");
-    expect(chips()[0]!.querySelector("img")!.getAttribute("src")).toBe(`/api/media/${picture(1).media_id}/content`);
+    // Its own chunk, through a link (P-1).
+    await vi.waitFor(() => expect(chips()[0]!.querySelector("img")?.getAttribute("src")).toBe(linked(`/api/media/${picture(1).media_id}/content`)));
     act(() => lastBar().fail("p2.png: This browser can't read this image."));
     expect(error()).toBe("p2.png: This browser can't read this image.");
     await send();

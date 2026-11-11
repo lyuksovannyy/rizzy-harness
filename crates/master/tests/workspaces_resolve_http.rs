@@ -4,7 +4,7 @@
 //! chats announced after stamping; and each member's memory switch.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -180,7 +180,7 @@ async fn send(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -188,7 +188,11 @@ async fn send(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn call(
@@ -669,7 +673,7 @@ async fn agentic_work_stops_when_access_goes() {
 
     let r = reqwest::Client::new()
         .post(format!("{}/api/attachments?name=notes.txt", s.base))
-        .header("cookie", &carol)
+        .login(&carol)
         .same_origin()
         .body("tram timetable".as_bytes().to_vec())
         .send()

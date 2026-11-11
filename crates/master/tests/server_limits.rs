@@ -3,7 +3,7 @@
 //! timeout. Timeouts are shortened so each test takes about a second.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::future::pending;
 use std::net::SocketAddr;
@@ -412,15 +412,19 @@ async fn master_server() -> (Server, String) {
     else {
         panic!("the claim code is right and the server is unclaimed");
     };
-    let id = create_ui_session(&store, &admin.user_id).await.unwrap();
+    let login = create_ui_session(&store, &admin.user_id).await.unwrap();
     let cookie = auth
-        .session_cookie(&id)
+        .session_cookie(login.cookie.expose())
         .to_str()
         .unwrap()
         .split(';')
         .next()
         .unwrap()
         .to_string();
+    common::remember(
+        &cookie,
+        &serde_json::json!({"login_key": login.key.expose()}),
+    );
     let master = Master::new(store, auth);
     let app = router_with(
         master,
@@ -457,6 +461,9 @@ async fn a_websocket_outlives_the_request_timeout_and_does_not_hold_shutdown() {
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(r).await.unwrap();
+    ws.send(Message::Text(common::socket_login(&cookie).into()))
+        .await
+        .unwrap();
     tokio::time::sleep(REQUEST * 3).await;
     ws.send(Message::Text("hello".into())).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), ws.next())
@@ -483,7 +490,7 @@ async fn a_slow_upload_through_the_real_router_is_not_cut() {
     });
     let r = reqwest::Client::new()
         .post(format!("http://{}/api/attachments", srv.addr))
-        .header("cookie", cookie)
+        .login(&cookie)
         .same_origin()
         .header("content-type", "multipart/form-data; boundary=b")
         .body(reqwest::Body::wrap_stream(body))

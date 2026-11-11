@@ -14,6 +14,7 @@ use crate::{CommandError, Master, auth};
 mod agent_edits;
 mod artifacts;
 mod hooks;
+mod links;
 mod media;
 mod projects;
 mod providers;
@@ -197,6 +198,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(media::routes())
         .merge(artifacts::routes())
         .merge(storage::routes())
+        .merge(links::routes())
         // Matched routes only (the embedded UI files are not handlers); which
         // routes get which limit is the table in `limits.rs`.
         .route_layer(axum::middleware::from_fn_with_state(
@@ -381,12 +383,17 @@ async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<R
     session_response(&m, &user.user_id).await
 }
 
-/// A new login for `user_id`: the session cookie.
+/// A new login for `user_id`: the session cookie, and the login key in
+/// the body, this once (P-1, `auth`). Login, the first-run claim and a
+/// password change are the only callers.
 async fn session_response(m: &Master, user_id: &str) -> ApiResult<Response> {
-    let id = auth::create_ui_session(&m.inner.mirror, user_id).await?;
+    let login = auth::create_ui_session(&m.inner.mirror, user_id).await?;
     Ok((
-        [(header::SET_COOKIE, m.inner.auth.session_cookie(&id))],
-        Json(json!({"ok": true})),
+        [(
+            header::SET_COOKIE,
+            m.inner.auth.session_cookie(login.cookie.expose()),
+        )],
+        Json(json!({"ok": true, "login_key": login.key.expose()})),
     )
         .into_response())
 }
@@ -412,7 +419,12 @@ async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<R
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
     // The session row goes, so a copy of the cookie is useless from now on.
-    if let Some(id) = auth::cookie_value(&headers) {
+    // Only with the login key: the cookie alone (another port's server has
+    // it, P-1) cannot end the person's login. The browser's cookie is
+    // cleared either way.
+    if let Some(id) = auth::cookie_value(&headers)
+        && auth::holds_login(&m, &headers).await
+    {
         auth::delete_ui_session(&m, &id).await;
     }
     (
@@ -596,9 +608,11 @@ async fn change_password(
         .await?
         .map(|u| u.password_hash);
     let hasher = m.inner.auth.hasher();
+    // 403, not 401: a 401 means "not logged in", which signs the page out
+    // and forgets its login key.
     if !auth::verify_password(hasher, b.current, phc).await? {
         return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
             "current password is wrong".into(),
         ));
     }
@@ -1252,7 +1266,9 @@ async fn cancel(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
+    // Stopping work is always allowed, even before a pending password
+    // change (Gate 3 review P-7): only the owner's own chat, as ever.
+    let who = require_any(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     m.cancel(sid).await?;
     Ok(Json(json!({ "ok": true })))
@@ -1286,10 +1302,14 @@ async fn approval(
     Path((id, approval_id)): Path<(String, String)>,
     Json(b): Json<ApprovalBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
     // Allowing makes the chat do work; denying stops it, like cancel, so a
-    // user who lost access can still refuse.
+    // user who lost access, or must change their password first, can
+    // still refuse (Gate 3 review P-7).
+    let who = match b.decision.allows() {
+        true => require(&m, &headers).await?,
+        false => require_any(&m, &headers).await?,
+    };
+    let row = visible_session(&m, &who, &id).await?;
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
     }

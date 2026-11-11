@@ -3,7 +3,7 @@
 // without asking (labels, sizes, whether an image is safe to decode). Kept
 // out of api.ts and types.ts so the page's code stays in its lazy chunk; the
 // Storage settings tab shares the size and storage calls.
-import { call, HttpError } from "../api";
+import { call, HttpError, keyed, seen } from "../api";
 import { artifactsApi } from "./artifacts";
 import type { MediaFilter } from "./routes";
 
@@ -103,9 +103,10 @@ export const mediaApi = {
     const res = await fetch(`${item(id)}/thumb`, {
       method: "PUT",
       credentials: "same-origin",
-      headers: { "content-type": thumb.type },
+      headers: keyed({ "content-type": thumb.type }),
       body: thumb,
     });
+    seen(res.status, null);
     if (!res.ok) throw new HttpError(res.status, `${res.status} ${res.statusText}`);
   },
 };
@@ -212,6 +213,7 @@ export function upload(
     xhr.withCredentials = true;
     xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
     xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+    for (const [k, v] of Object.entries(keyed())) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onerror = () => reject(new HttpError(0, "The upload was cut off."));
     xhr.onload = () => {
@@ -221,6 +223,7 @@ export function upload(
       } catch {
         /* not JSON */
       }
+      seen(xhr.status, data);
       if (xhr.status === 429 && tries > 1) {
         const wait = Number(xhr.getResponseHeader("retry-after")) || 5;
         setTimeout(() => upload(file, workspace, onProgress, origin, tries - 1).then(resolve, reject), wait * 1000);

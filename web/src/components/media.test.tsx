@@ -6,6 +6,7 @@
 // fallbacks to Download (an image too large to decode, a HEIC or MOV the
 // browser cannot show).
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
@@ -141,7 +142,7 @@ describe("grid", () => {
       expect.stringMatching(/^song\.mp3, Audio, 3\.9 KB, added /),
       expect.stringMatching(/^film\.mkv, File, 2\.3 MB, added /),
     ]);
-    expect(tiles()[0]!.querySelector("img")!.getAttribute("src")).toBe(`/api/media/${id(1)}/thumb`);
+    expect(tiles()[0]!.querySelector("img")!.getAttribute("src")).toBe(linked(`/api/media/${id(1)}/thumb`));
     expect(tiles()[1]!.querySelector(".media-badge")!.textContent).toBe(" 1:23");
     expect(tiles()[2]!.textContent).toBe("song.mp33:20");
     expect(tiles()[3]!.textContent).toBe("film.mkvMKV");
@@ -323,7 +324,7 @@ describe("preview", () => {
     await show({ id: id(2) });
     const dialog = host.querySelector<HTMLDialogElement>("dialog.media-preview")!;
     expect(dialog.getAttribute("aria-label")).toBe("photo2.jpg");
-    expect(dialog.querySelector("img")!.getAttribute("src")).toBe(`/api/media/${id(2)}/content`);
+    expect(dialog.querySelector("img")!.getAttribute("src")).toBe(linked(`/api/media/${id(2)}/content`));
     key(dialog, "ArrowRight");
     expect(location.hash).toBe(`#/media/${id(3)}`);
     key(dialog, "ArrowLeft");
@@ -423,7 +424,7 @@ describe("preview", () => {
     const stage = () => host.querySelector(".media-stage")!;
     expect(stage().querySelector("img")).toBeNull();
     expect(stage().textContent).toContain("This image is too large to show here safely.");
-    expect(stage().querySelector("a")!.getAttribute("href")).toBe(`/api/media/${id(1)}/content?download=1`);
+    expect(stage().querySelector("a")!.getAttribute("href")).toBe(linked(`/api/media/${id(1)}/content?download=1`));
 
     await show({ id: id(2) });
     act(() => stage().querySelector("img")!.dispatchEvent(new Event("error")));

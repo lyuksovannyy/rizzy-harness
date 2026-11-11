@@ -1,7 +1,7 @@
 //! Per-user preferences (`/api/me/settings`) and per-message effort.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -96,7 +96,7 @@ async fn req(
         rb = rb.json(&b);
     }
     rb = match cookie {
-        Some(c) => rb.header("cookie", c).same_origin(),
+        Some(c) => rb.login(c).same_origin(),
         None => rb.bearer_auth("tok"),
     };
     let r = rb.send().await.unwrap();
@@ -105,7 +105,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, c, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &c {
+        common::remember(c, &body);
+    }
+    (status, c, body)
 }
 
 #[tokio::test]

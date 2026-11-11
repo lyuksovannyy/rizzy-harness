@@ -6,6 +6,7 @@
 // failure, sha256 and its hint, pin and delete for the owner), the ⋯ menu,
 // and the detail page (notes, facts, files in the pack, the preview rules).
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
@@ -145,7 +146,7 @@ describe("list", () => {
     const [mine, theirs] = rows();
     expect(mine!.querySelector(".artifact-line")!.textContent).toBe("app1v712 MBx86_64-unknown-linux-gnu");
     expect(mine!.querySelector(".agent-info .muted")!.textContent).toMatch(/^from ‘Build the CLI’ · /);
-    expect(mine!.querySelector<HTMLAnchorElement>("a.button-like")!.getAttribute("href")).toBe(`/api/artifacts/${id(1)}/latest/download`);
+    expect(mine!.querySelector<HTMLAnchorElement>("a.button-like")!.getAttribute("href")).toBe(linked(`/api/artifacts/${id(1)}/latest/download`));
     expect(theirs!.querySelector(".artifact-line")!.textContent).toContain("ELFShared");
     expect(theirs!.querySelector(".agent-info .muted")!.textContent).toMatch(/^by bob · /);
     // A colleague's shared artifact: no menu for a member without Settings.
@@ -361,7 +362,7 @@ describe("detail", () => {
     const clip = version({ kind: "video", format: "mp4", display: "inline", meta: {} });
     artifactsApi.get.mockResolvedValue(detail(artifact(1, { kind: "video", latest: clip }), [clip]));
     await show({ id: id(1) });
-    expect(host.querySelector("video")!.getAttribute("src")).toBe(`/api/artifacts/${id(1)}/versions/v7/preview`);
+    expect(host.querySelector("video")!.getAttribute("src")).toBe(linked(`/api/artifacts/${id(1)}/versions/v7/preview`));
 
     const png = version({ kind: "image", format: "png", display: "inline", meta: {} });
     const img = artifact(2, { kind: "image", latest: png, media_id: id(5) });
@@ -375,14 +376,14 @@ describe("detail", () => {
     act(() => root.unmount());
     root = createRoot(host);
     await show({ id: id(2) });
-    expect(host.querySelector("img.artifact-preview")!.getAttribute("src")).toBe(`/api/artifacts/${id(2)}/versions/v7/preview`);
+    expect(host.querySelector("img.artifact-preview")!.getAttribute("src")).toBe(linked(`/api/artifacts/${id(2)}/versions/v7/preview`));
   });
 
   test("an image version's own header size decides, without asking Media", async () => {
     const png = version({ kind: "image", format: "png", display: "inline", meta: {}, width: 800, height: 600 });
     artifactsApi.get.mockResolvedValue(detail(artifact(2, { kind: "image", latest: png, media_id: id(5) }), [png]));
     await show({ id: id(2) });
-    expect(host.querySelector("img.artifact-preview")!.getAttribute("src")).toBe(`/api/artifacts/${id(2)}/versions/v7/preview`);
+    expect(host.querySelector("img.artifact-preview")!.getAttribute("src")).toBe(linked(`/api/artifacts/${id(2)}/versions/v7/preview`));
     // Over 40 MP: never decoded, whatever Media says.
     const bomb = version({ kind: "image", format: "png", display: "inline", meta: {}, width: 20_000, height: 20_000 });
     artifactsApi.get.mockResolvedValue(detail(artifact(3, { kind: "image", latest: bomb, media_id: id(6) }), [bomb]));

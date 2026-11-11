@@ -351,10 +351,14 @@ CREATE TABLE IF NOT EXISTS users (
     can_agentic   INTEGER NOT NULL DEFAULT 0,
     must_change_password INTEGER NOT NULL DEFAULT 0
 );
--- Browser logins. `token_hash` is the SHA-256 of the cookie value, so a
--- leaked database does not leak logins. `expires_ms` slides forward on use.
+-- Browser logins. `token_hash` is the SHA-256 of the cookie value and
+-- `bind_hash` the SHA-256 of the login key the page keeps in its own
+-- origin's storage and sends as a header (Gate 3 P-1: the cookie alone
+-- reaches every port of the host), so a leaked database leaks neither.
+-- `expires_ms` slides forward on use.
 CREATE TABLE IF NOT EXISTS ui_sessions (
     token_hash   TEXT PRIMARY KEY,
+    bind_hash    TEXT NOT NULL,
     user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     created_ms   INTEGER NOT NULL,
     last_seen_ms INTEGER NOT NULL,
@@ -1527,6 +1531,18 @@ impl Store {
         rows.map(|r| Self::finish_session(r?)).collect()
     }
 
+    /// The sessions of `node_id` the mirror shows running: what the
+    /// revocation sweep looks at when the node's link comes up (Gate 3
+    /// review P-3). Filtered in SQL.
+    pub fn running_on(&self, node_id: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&Self::session_query(
+            "WHERE s.node_id = ?1 AND s.running = 1 ORDER BY s.updated_ms DESC",
+        ))?;
+        let rows = stmt.query_map(params![node_id], Self::session_from_row)?;
+        rows.map(|r| Self::finish_session(r?)).collect()
+    }
+
     pub fn session(&self, sid: SessionId) -> Result<Option<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&Self::session_query("WHERE s.session_id = ?1"))?;
@@ -1877,12 +1893,14 @@ impl Store {
         self.user_where("user_id = ?1", user_id)
     }
 
-    /// Store a UI session that lasts until `expires_ms`. Only a hash of
-    /// the cookie value is kept. Expired sessions (anyone's) are removed
-    /// here, so the table does not grow without a timer.
+    /// Store a UI session that lasts until `expires_ms`. Only hashes of
+    /// the cookie value and of the login key are kept. Expired sessions
+    /// (anyone's) are removed here, so the table does not grow without a
+    /// timer.
     pub fn ui_session_create(
         &self,
         token_hash: &str,
+        bind_hash: &str,
         user_id: &str,
         now_ms: i64,
         expires_ms: i64,
@@ -1893,27 +1911,35 @@ impl Store {
             params![now_ms],
         )?;
         conn.execute(
-            "INSERT INTO ui_sessions (token_hash, user_id, created_ms, last_seen_ms, expires_ms)
-             VALUES (?1, ?2, ?3, ?3, ?4)",
-            params![token_hash, user_id, now_ms, expires_ms],
+            "INSERT INTO ui_sessions (token_hash, bind_hash, user_id, created_ms, last_seen_ms, expires_ms)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            params![token_hash, bind_hash, user_id, now_ms, expires_ms],
         )?;
         Ok(())
     }
 
-    /// The user behind a UI session, if it exists, `now_ms < expires_ms`
-    /// and the user is not disabled: one indexed lookup. A session in use
-    /// slides: its expiry moves to `now_ms + ttl_ms`, written at most once
-    /// per `UI_SESSION_TOUCH_MS`, not on every request.
+    /// The user behind a UI session, if it exists, `now_ms < expires_ms`,
+    /// the user is not disabled and `bound` accepts the stored `bind_hash`
+    /// (the caller compares it in constant time): one indexed lookup. Only
+    /// a session that passes all of that is used: it slides, its expiry
+    /// moving to `now_ms + ttl_ms`, written at most once per
+    /// `UI_SESSION_TOUCH_MS`, not on every request.
     pub fn ui_session_user(
         &self,
         token_hash: &str,
         now_ms: i64,
         ttl_ms: i64,
+        bound: impl FnOnce(&str) -> bool,
     ) -> Result<Option<UserRow>> {
         let conn = self.lock();
-        let Some((user, last_seen_ms)) = Self::ui_session_lookup(&conn, token_hash, now_ms)? else {
+        let Some((user, last_seen_ms, bind_hash)) =
+            Self::ui_session_lookup(&conn, token_hash, now_ms)?
+        else {
             return Ok(None);
         };
+        if !bound(&bind_hash) {
+            return Ok(None);
+        }
         if now_ms - last_seen_ms >= UI_SESSION_TOUCH_MS {
             conn.execute(
                 "UPDATE ui_sessions SET last_seen_ms = ?2, expires_ms = ?3 WHERE token_hash = ?1",
@@ -1923,36 +1949,44 @@ impl Store {
         Ok(Some(user))
     }
 
-    /// [`Self::ui_session_user`] without using the session: nothing is
-    /// written, so the expiry stays where it is. For a WebSocket's re-check
-    /// of its login, which must not keep an idle tab's login alive.
+    /// Whether a UI session is live, by its cookie alone, without using
+    /// it: nothing is written, so the expiry stays where it is. Never an
+    /// authentication by itself, since the login key is not checked: for a
+    /// WebSocket that has yet to present its key or re-checks a login it
+    /// already verified (which must not keep an idle tab's login alive),
+    /// and for the login a download link is bound to.
     pub fn ui_session_check(&self, token_hash: &str, now_ms: i64) -> Result<Option<UserRow>> {
         let conn = self.lock();
         match Self::ui_session_lookup(&conn, token_hash, now_ms)? {
-            Some((user, _)) => Ok(Some(user)),
+            Some((user, _, _)) => Ok(Some(user)),
             None => Ok(None),
         }
     }
 
-    /// The live, enabled session's user and when it was last used.
+    /// The live, enabled session's user, when it was last used, and the
+    /// hash of its login key.
     fn ui_session_lookup(
         conn: &Connection,
         token_hash: &str,
         now_ms: i64,
-    ) -> Result<Option<(UserRow, i64)>> {
+    ) -> Result<Option<(UserRow, i64, String)>> {
         let sql = format!(
-            "SELECT u.{}, s.last_seen_ms FROM ui_sessions s
+            "SELECT u.{}, s.last_seen_ms, s.bind_hash FROM ui_sessions s
              JOIN users u ON u.user_id = s.user_id
              WHERE s.token_hash = ?1 AND s.expires_ms > ?2 AND u.disabled = 0",
             Self::USER_COLS.replace(", ", ", u.")
         );
         let found = conn
             .query_row(&sql, params![token_hash, now_ms], |r| {
-                Ok((Self::user_from_row(r)?, r.get::<_, i64>(8)?))
+                Ok((
+                    Self::user_from_row(r)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, String>(9)?,
+                ))
             })
             .optional()?;
         found
-            .map(|(user, last_seen_ms)| Ok((Self::finish_user(user)?, last_seen_ms)))
+            .map(|(user, seen, bind)| Ok((Self::finish_user(user)?, seen, bind)))
             .transpose()
     }
 

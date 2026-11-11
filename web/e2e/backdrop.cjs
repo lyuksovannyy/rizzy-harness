@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { log, check, sleep, contrast } = require('./rich/lib.cjs');
-const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2eb-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -74,6 +74,7 @@ async function savePrefs(p, pick) {
     const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 860 }, colorScheme: 'dark' });
+    await keyed(ctx);
     const p = await ctx.newPage();
     PAGE = p;
     const errors = [];

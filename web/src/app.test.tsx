@@ -19,7 +19,13 @@ type ShellProps = {
 const me = vi.fn();
 const shells: ShellProps[] = [];
 let signIn: (() => void) | null = null;
-vi.mock("./api", () => ({ api: { me }, HttpError: class extends Error {} }));
+// The login key (P-1) is forgotten as the real api.ts does it.
+vi.mock("./api", () => ({
+  api: { me },
+  HttpError: class extends Error {},
+  login: { ended: () => {} },
+  forgetLogin: () => localStorage.removeItem("harness.login"),
+}));
 vi.mock("./components/Shell", () => ({
   Shell: (p: ShellProps) => {
     shells.push(p);
@@ -107,6 +113,7 @@ describe("drafts at sign-out (AUDIT L14)", () => {
     localStorage.setItem("harness.draft.u.s1", "alex's unsent words");
     sessionStorage.setItem("harness.ui.m1#b1", '{"other":"an answer"}');
     localStorage.setItem("harness.sidebarCollapsed", "1");
+    localStorage.setItem("harness.login", "k".repeat(64));
   };
 
   test("logging out clears every draft in this browser", async () => {
@@ -123,6 +130,15 @@ describe("drafts at sign-out (AUDIT L14)", () => {
     const { HttpError } = await import("./api");
     me.mockRejectedValue(Object.assign(new HttpError(401, "not logged in"), { status: 401 }));
     await act(() => shell().onMeChanged());
+    expect(signIn).not.toBeNull();
+    expect(stored()).toEqual(["harness.sidebarCollapsed"]);
+  });
+
+  test("so does a 401 from any request (P-1: the login key is gone with it)", async () => {
+    await start(ws("p", { personal: true }));
+    seed();
+    const { login } = await import("./api");
+    await act(async () => login.ended());
     expect(signIn).not.toBeNull();
     expect(stored()).toEqual(["harness.sidebarCollapsed"]);
   });

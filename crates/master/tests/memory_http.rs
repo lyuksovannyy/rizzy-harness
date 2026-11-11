@@ -2,7 +2,7 @@
 //! next prompt; incognito neither writes nor reads; other users see nothing.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -116,19 +116,14 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
+    let r = rb.login(c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn login(t: &T) -> String {
@@ -138,7 +133,7 @@ async fn login(t: &T) -> String {
         .send()
         .await
         .unwrap();
-    cookie(&r)
+    cookie(r).await
 }
 
 async fn turn(t: &T, c: &str, text: &str, incognito: bool) -> String {
@@ -353,13 +348,13 @@ async fn propose_confirm_recall() {
         .unwrap();
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
-        .header("cookie", cookie(&r))
+        .login(&cookie(r).await)
         .same_origin()
         .json(&json!({"current": pw, "new": "bobs own password"}))
         .send()
         .await
         .unwrap();
-    let bob = cookie(&r);
+    let bob = cookie(r).await;
     assert!(memories(&t, &bob).await.is_empty());
     let (st, _) = req(&t, Method::DELETE, &format!("/api/memory/{id}"), None, &bob).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
@@ -481,7 +476,7 @@ async fn start_cfg(setup: impl FnOnce(&std::path::Path)) -> C {
         .await
         .unwrap();
     C {
-        admin: cookie(&r),
+        admin: cookie(r).await,
         base,
         dir,
         mem,
@@ -493,12 +488,7 @@ async fn call(c: &C, method: Method, path: &str, body: Option<Value>) -> (Status
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb
-        .header("cookie", &c.admin)
-        .same_origin()
-        .send()
-        .await
-        .unwrap();
+    let r = rb.login(&c.admin).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }

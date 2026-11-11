@@ -26,6 +26,7 @@ import { type MediaFilter, mediaHash } from "../lib/routes";
 import { queueThumb, wantsThumb } from "../lib/thumbs";
 import { when } from "../lib/when";
 import type { MediaPageProps } from "./pages";
+import { LinkedImg } from "./Linked";
 import { Seg } from "./Seg";
 
 const MediaPreview = lazy(() => import("./MediaPreview"));
@@ -509,7 +510,7 @@ export function Tile({ m }: { m: MediaItem }) {
       <>
         {agent}
         {pictured ? (
-          <img src={thumbUrl(m.media_id)} alt="" loading="lazy" onError={() => setBroken(true)} />
+          <LinkedImg url={thumbUrl(m.media_id)} alt="" loading="lazy" onError={() => setBroken(true)} />
         ) : (
           <span className="media-icon" aria-hidden="true">
             {m.kind === "image" ? <ImageIcon size={28} /> : <Film size={28} />}

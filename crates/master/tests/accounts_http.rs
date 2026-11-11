@@ -2,7 +2,7 @@
 //! and per-user visibility.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,7 +97,7 @@ async fn post(
         .post(format!("{}{path}", s.base))
         .json(&body);
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -105,7 +105,11 @@ async fn post(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn get(
@@ -116,7 +120,7 @@ async fn get(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new().get(format!("{}{path}", s.base));
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     if let Some(b) = bearer {
         rb = rb.bearer_auth(b);
@@ -140,7 +144,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -148,7 +152,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn claim_admin(s: &Server) -> String {
@@ -317,7 +325,11 @@ async fn admin_creates_member_who_must_change_password() {
         Some(&bc),
     )
     .await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a wrong password is not a lost login"
+    );
     let (st, nc, _) = req(
         &s,
         Method::POST,
@@ -640,6 +652,7 @@ async fn login_sets_one_opaque_session_cookie() {
     assert_eq!(set.len(), 1, "{set:?}");
     let name = harness_master::auth::cookie_name();
     let (pair, attrs) = set[0].split_once("; ").unwrap();
+    common::remember(pair, &r.json::<Value>().await.unwrap());
     assert_eq!(attrs, "HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000");
     let id = pair.strip_prefix(&format!("{name}=")).unwrap();
     assert_eq!(id.len(), 64, "256 bits, hex");
@@ -649,8 +662,18 @@ async fn login_sets_one_opaque_session_cookie() {
     let store = s.master.inner_mirror();
     let hash = harness_master::auth::sha256_hex(id);
     let now = harness_core::now_ms();
-    assert!(store.ui_session_user(&hash, now, 0).unwrap().is_some());
-    assert!(store.ui_session_user(id, now, 0).unwrap().is_none());
+    assert!(
+        store
+            .ui_session_user(&hash, now, 0, |_| true)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .ui_session_user(id, now, 0, |_| true)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         me_status(&s, &format!("{name}={hash}")).await,
         StatusCode::UNAUTHORIZED,
@@ -795,7 +818,13 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     // Ran out a second ago.
     let expired = "e1".repeat(32);
     store
-        .ui_session_create(&sha256_hex(&expired), &uid, now - 31 * day, now - 1000)
+        .ui_session_create(
+            &sha256_hex(&expired),
+            &sha256_hex("k"),
+            &uid,
+            now - 31 * day,
+            now - 1000,
+        )
         .unwrap();
     unauthorized(me_status(&s, &format!("{}={expired}", cookie_name())).await);
 
@@ -803,13 +832,16 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     // days from now, and /api/me sends the cookie again so the browser's
     // copy lasts as long.
     let old = "0a".repeat(32);
+    let key = "0b".repeat(32);
     let hash = sha256_hex(&old);
     store
-        .ui_session_create(&hash, &uid, now - 29 * day, now + day)
+        .ui_session_create(&hash, &sha256_hex(&key), &uid, now - 29 * day, now + day)
         .unwrap();
+    let old_cookie = format!("{}={old}", cookie_name());
+    common::remember(&old_cookie, &json!({"login_key": key}));
     let r = reqwest::Client::new()
         .get(format!("{}/api/me", s.base))
-        .header("cookie", format!("{}={old}", cookie_name()))
+        .login(&old_cookie)
         .same_origin()
         .send()
         .await
@@ -825,7 +857,7 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     let later = now + 2 * day;
     assert!(
         store
-            .ui_session_user(&hash, later, SESSION_TTL_MS)
+            .ui_session_user(&hash, later, SESSION_TTL_MS, |_| true)
             .unwrap()
             .is_some(),
         "still valid after its first expiry"
