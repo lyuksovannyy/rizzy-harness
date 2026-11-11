@@ -531,6 +531,8 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
+max_steps = 50                       # model calls one turn may make (1 .. 1000)
+bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -628,6 +630,14 @@ ends with `[output truncated: further output is not shown or stored]`; the
 command keeps running until it exits, times out or is cancelled, and the
 rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
+
+**Step and time limits.** A turn ends after `[limits] max_steps` model calls
+(default 50, 1 to 1000; a sub-agent's turn has the same cap) with the message
+"stopped after N steps (`max_steps` in node.toml)". `bash` runs at most
+`[limits] bash_timeout_max_s` seconds (default 3600, 1 to 3600): a call that
+asks for more is cut at that value, and the tool description the model sees
+states it. Neither an agent definition, a prompt nor the master can raise
+either; a value outside its range stops the node at start.
 
 **File limits.** The file tools only open regular files: a FIFO, a device
 (`/dev/zero`), a socket or a directory is refused at once, also through a
