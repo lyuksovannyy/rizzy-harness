@@ -1,9 +1,10 @@
 //! Checkpoints and undo with a git repository nested in the folder
 //! (experiment B.5, fixed by task A.15 in ADOPTION_PLAN.md).
 //!
-//! The rule (PLAN.md §checkpoints, T33): a nested repository (a directory
-//! below the folder holding a `.git` directory, a `.git` file as worktrees
-//! and submodules have, or a `.git` symlink) is left out of every snapshot,
+//! The rule (PLAN.md §checkpoints, T33): a nested repository (what git
+//! itself treats as one: a directory its walk will not enter because it
+//! holds a valid `.git` directory, gitfile or link to one) is left out of
+//! every snapshot,
 //! never recorded as a gitlink and never as files, and its presence never
 //! stops the snapshot of the rest of the folder. An undo never touches one:
 //! it does not delete, recreate, empty it or move its HEAD, never lists it
@@ -237,8 +238,8 @@ async fn take_turn(fx: &Fx, repo: &Repo, mutate: impl FnOnce(&Path)) -> Result<T
     Ok(Turn {
         before: before.sha,
         after: after.sha,
-        before_nested: before.nested,
-        after_nested: after.nested,
+        before_nested: before.nested.shown,
+        after_nested: after.nested.shown,
     })
 }
 
@@ -334,7 +335,7 @@ async fn a_nested_repository_with_a_commit_is_left_out_of_snapshots() {
         let s = snapshot_full(&repo, "refs/harness/s/t/before", "b")
             .await
             .unwrap();
-        assert_eq!(s.nested, ["dep"], "outer_git={outer}");
+        assert_eq!(s.nested.shown, ["dep"], "outer_git={outer}");
         let e = entries(&repo, &s.sha).await;
         assert_absent(&e, "dep", &format!("outer_git={outer}"));
         assert!(
@@ -350,7 +351,7 @@ async fn a_nested_repository_with_a_commit_is_left_out_of_snapshots() {
         let s = snapshot_full(&r, "refs/harness/s/t/before", "b")
             .await
             .unwrap();
-        assert!(s.nested.is_empty(), "control: {:?}", s.nested);
+        assert!(s.nested.shown.is_empty(), "control: {:?}", s.nested);
         let e = entries(&r, &s.sha).await;
         assert!(
             e.keys().any(|(m, p)| m == "100644" && p == "dep/x.txt"),
@@ -382,7 +383,7 @@ async fn a_nested_repository_without_a_commit_does_not_stop_the_snapshot() {
         let s = snapshot_full(&repo, "refs/harness/s/t/before", "b")
             .await
             .unwrap();
-        assert_eq!(s.nested, ["dep"], "outer_git={outer}");
+        assert_eq!(s.nested.shown, ["dep"], "outer_git={outer}");
         let e = entries(&repo, &s.sha).await;
         assert_absent(&e, "dep", &format!("outer_git={outer}"));
         assert!(e.keys().any(|(_, p)| p == "ctl/c.txt"), "{:?}", paths(&e));
@@ -404,7 +405,7 @@ async fn a_nested_repository_without_a_commit_does_not_stop_the_snapshot() {
         let s = snapshot_full(&repo, "refs/harness/s/t2/before", "b")
             .await
             .unwrap();
-        assert_eq!(s.nested, ["dep"]);
+        assert_eq!(s.nested.shown, ["dep"]);
         assert_absent(&entries(&repo, &s.sha).await, "dep", "committed later");
 
         // Control: the same files in an ordinary folder snapshot fine.
@@ -672,7 +673,7 @@ async fn a_registered_submodule_is_left_out_of_snapshots_like_a_nested_repositor
     let s = snapshot_full(&repo, "refs/harness/s/t/before", "b")
         .await
         .unwrap();
-    assert_eq!(s.nested, ["dep"]);
+    assert_eq!(s.nested.shown, ["dep"]);
     let e = entries(&repo, &s.sha).await;
     assert_absent(&e, "dep", "submodule");
     assert!(e.keys().any(|(m, p)| m == "100644" && p == ".gitmodules"));
@@ -828,12 +829,13 @@ async fn an_unborn_nested_repository_does_not_stop_undo_and_is_left_untouched() 
     }
 }
 
-/// Detection: nested at depth three, a name with a space, a non-UTF-8
-/// name, a `.git` that is a symlink (to a real repository, or dangling;
-/// treated as nested and never followed), a `.git` that is an empty
-/// directory or a file git would not accept (still nested: the rule is a
-/// `.git` entry, not git's opinion of it). A repository inside an ignored
-/// folder is ignored anyway and not reported. Everything else is captured.
+/// Detection is git's: nested at depth three, a name with a space, a
+/// non-UTF-8 name, a `.git` symlink to a real repository (nested; the link
+/// is not followed by us, and nothing outside changes). A `.git` git does
+/// not accept (a dangling symlink, an empty directory, a junk file) makes
+/// nothing nested: the folder's files are captured, the `.git` entry is
+/// not (git never stages a `.git`). A repository inside an ignored folder
+/// is ignored anyway and not reported.
 #[cfg(unix)]
 #[tokio::test]
 async fn nested_repositories_are_found_at_any_depth_and_odd_spelling_and_never_followed() {
@@ -873,26 +875,26 @@ async fn nested_repositories_are_found_at_any_depth_and_odd_spelling_and_never_f
             .unwrap();
         let mut want = vec![
             "a/b/deep".to_string(),
-            "dangling".into(),
-            "emptygit".into(),
-            "junkfile".into(),
             "lnk".into(),
             String::from_utf8_lossy(b"odd\xffname").into_owned(),
             "with space/repo".into(),
         ];
         want.sort();
-        assert_eq!(s.nested, want, "outer_git={outer}");
+        assert_eq!(s.nested.shown, want, "outer_git={outer}");
         let e = entries(&repo, &s.sha).await;
-        for n in [
-            "a/b/deep",
-            "dangling",
-            "emptygit",
-            "junkfile",
-            "lnk",
-            "with space/repo",
-        ] {
+        for n in ["a/b/deep", "lnk", "with space/repo"] {
             assert_absent(&e, n, &format!("outer_git={outer}"));
         }
+        for f in ["dangling/f.txt", "emptygit/f.txt", "junkfile/f.txt"] {
+            assert!(e.keys().any(|(_, p)| p == f), "{f}: {:?}", paths(&e));
+        }
+        assert!(
+            !paths(&e)
+                .iter()
+                .any(|p| p.ends_with("/.git") || p.contains("/.git/")),
+            "no .git entry is ever captured: {:?}",
+            paths(&e)
+        );
         assert!(
             !paths(&e).iter().any(|p| p.starts_with("odd")),
             "{:?}",
@@ -911,13 +913,13 @@ async fn nested_repositories_are_found_at_any_depth_and_odd_spelling_and_never_f
 }
 
 /// A folder that was ordinary in the turn's snapshots and became a
-/// repository afterwards (the user ran `git init` in it): the undo leaves
-/// it alone instead of writing the turn's old files into another
-/// repository's work tree. And the reverse: a repository whose `.git` the
-/// turn removed is still left alone by the undo (its "before" is not in the
-/// snapshot), so the undo deletes none of its files.
+/// repository afterwards (the user ran `git init` in it): its files are in
+/// the checkpoints, so the undo restores them, leaves the new `.git` as it
+/// is and says the folder holds one. And the reverse: a repository whose
+/// `.git` the turn removed is still left alone by the undo (its "before" is
+/// not in the snapshot), so the undo deletes none of its files.
 #[tokio::test]
-async fn undo_never_writes_into_a_folder_that_is_or_was_a_repository() {
+async fn undo_restores_checkpointed_files_and_never_files_no_checkpoint_knows() {
     for outer in BOTH {
         let fx = Fx::new(outer, Nested::PlainFolder);
         let repo = fx.repo().await;
@@ -928,13 +930,16 @@ async fn undo_never_writes_into_a_folder_that_is_or_was_a_repository() {
         .unwrap();
         // After the turn the user makes dep a repository.
         sh(&fx.dep(), &["init", "-q", "-b", "main"]);
-        let as_is = digest(&fx.dep());
+        let git_dir = digest(&fx.dep().join(".git"));
         let r = restore_report(&repo, &t.before, &t.after, false)
             .await
             .unwrap();
-        assert_left_alone(&r, &format!("became, outer_git={outer}"));
+        assert_eq!(r.files, ["ctl/c.txt", "ctl/new.txt", "dep/x.txt"]);
+        assert!(r.nested.is_empty(), "{:?}", r.nested);
+        assert_eq!(r.plan.git_inside.shown, ["dep"]);
         assert_control_restored(&fx.ws);
-        assert_eq!(digest(&fx.dep()), as_is);
+        assert_eq!(read(&fx.dep().join("x.txt")), "x-1\n");
+        assert_eq!(digest(&fx.dep().join(".git")), git_dir, "the .git stays");
 
         let fx = Fx::new(outer, Nested::Committed);
         let repo = fx.repo().await;
@@ -951,7 +956,222 @@ async fn undo_never_writes_into_a_folder_that_is_or_was_a_repository() {
         assert_control_restored(&fx.ws);
         assert_eq!(read(&fx.dep().join("x.txt")), "x-1\n", "not deleted");
         assert_eq!(read(&fx.dep().join("y.txt")), "y-1\n", "not deleted");
+        assert_eq!(r.plan.changed_repos.shown, ["dep"], "it went away");
     }
+}
+
+/// What a turn plants in `src/`, after changing files the checkpoint holds
+/// there.
+#[derive(Clone, Copy, Debug)]
+enum Plant {
+    EmptyDir,
+    JunkFile,
+    Init,
+    InitAndCommit,
+}
+
+/// G1, G2, G4: a `.git` made inside a folder during a turn, of any kind,
+/// does not hide the turn's changes there or stop the undo: the change
+/// list says modified, deleted and added as they were, and the undo puts
+/// back every file the "before" checkpoint holds there, byte for byte,
+/// deletes what the turn added, and leaves the `.git` exactly as it is
+/// (and names the folder). For a real repository this also records what
+/// git does: it enters a repository made over files the index tracks.
+#[tokio::test]
+async fn a_dot_git_made_during_a_turn_does_not_stop_undo_of_files_under_it() {
+    for outer in BOTH {
+        for plant in [
+            Plant::EmptyDir,
+            Plant::JunkFile,
+            Plant::Init,
+            Plant::InitAndCommit,
+        ] {
+            let ctx = format!("outer_git={outer} {plant:?}");
+            let fx = Fx::new(outer, Nested::None);
+            let ws = fx.ws.clone();
+            write(&ws.join("src/main.rs"), "good\n");
+            write(&ws.join("src/lib.rs"), "good lib\n");
+            write(&ws.join("src/deep/mod.rs"), "good mod\n");
+            if outer {
+                sh(&ws, &["add", "."]);
+                sh(&ws, &["commit", "-qm", "src"]);
+            }
+            let held = digest(&ws.join("src"));
+            let repo = fx.repo().await;
+            let t = take_turn(&fx, &repo, |ws| {
+                let src = ws.join("src");
+                write(&src.join("main.rs"), "EVIL\n");
+                std::fs::remove_file(src.join("lib.rs")).unwrap();
+                write(&src.join("deep/mod.rs"), "EVIL mod\n");
+                write(&src.join("added.rs"), "new\n");
+                match plant {
+                    Plant::EmptyDir => std::fs::create_dir(src.join(".git")).unwrap(),
+                    Plant::JunkFile => write(&src.join(".git"), "x"),
+                    Plant::Init | Plant::InitAndCommit => {
+                        sh(&src, &["init", "-q", "-b", "main"]);
+                        if matches!(plant, Plant::InitAndCommit) {
+                            sh(&src, &["add", "-A"]);
+                            sh(&src, &["commit", "-qm", "agent"]);
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            assert!(t.after_nested.is_empty(), "{ctx}: {:?}", t.after_nested);
+            let mut ch = changed(&repo, &t.before, &t.after).await.unwrap();
+            ch.retain(|(_, p)| p.starts_with("src/"));
+            assert_eq!(
+                ch,
+                [
+                    ('A', "src/added.rs".to_string()),
+                    ('M', "src/deep/mod.rs".to_string()),
+                    ('D', "src/lib.rs".to_string()),
+                    ('M', "src/main.rs".to_string()),
+                ],
+                "{ctx}"
+            );
+            let git_entry = std::fs::symlink_metadata(ws.join("src/.git"))
+                .map(|m| m.is_dir())
+                .unwrap();
+            let dot_git = if git_entry {
+                digest(&ws.join("src/.git"))
+            } else {
+                BTreeMap::from([(
+                    ".git".to_string(),
+                    std::fs::read(ws.join("src/.git")).unwrap(),
+                )])
+            };
+            let r = restore_report(&repo, &t.before, &t.after, false)
+                .await
+                .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            assert_control_restored(&ws);
+            let mut now = digest(&ws.join("src"));
+            now.retain(|k, _| !k.starts_with(".git"));
+            assert_eq!(now, held, "{ctx}: every held file is back, nothing added");
+            let dot_git_now = if git_entry {
+                digest(&ws.join("src/.git"))
+            } else {
+                BTreeMap::from([(
+                    ".git".to_string(),
+                    std::fs::read(ws.join("src/.git")).unwrap(),
+                )])
+            };
+            assert_eq!(dot_git_now, dot_git, "{ctx}: the .git is left as it is");
+            assert!(r.nested.is_empty(), "{ctx}");
+            assert_eq!(r.plan.git_inside.shown, ["src"], "{ctx}");
+        }
+    }
+}
+
+/// G3: a repository there before the turn (with or without a commit) stays
+/// out, and a turn that adds a `.git` elsewhere does not change that; an
+/// undo writes nothing into it.
+#[tokio::test]
+async fn a_repository_there_before_the_turn_stays_out_of_undo() {
+    for outer in BOTH {
+        for nested in [Nested::Committed, Nested::Unborn] {
+            let fx = Fx::new(outer, nested);
+            let repo = fx.repo().await;
+            let t = take_turn(&fx, &repo, |ws| {
+                write(&ws.join("dep/x.txt"), "x-agent\n");
+                std::fs::create_dir(ws.join("ctl/.git")).unwrap();
+            })
+            .await
+            .unwrap();
+            assert_eq!(t.before_nested, ["dep"]);
+            assert_eq!(t.after_nested, ["dep"]);
+            let as_left = digest(&fx.dep());
+            let r = restore_report(&repo, &t.before, &t.after, false)
+                .await
+                .unwrap();
+            assert_left_alone(&r, &format!("outer_git={outer} {nested:?}"));
+            assert!(r.plan.changed_repos.is_empty());
+            assert_control_restored(&fx.ws);
+            assert_eq!(digest(&fx.dep()), as_left);
+            assert!(
+                fx.ws.join("ctl/.git").is_dir(),
+                "an undo never deletes a .git"
+            );
+        }
+    }
+}
+
+/// G2: a tracked file the turn replaced by a repository of the same name
+/// is not reported deleted: the change list leaves it out and the
+/// checkpoint names it as not recorded (left out); the undo leaves the
+/// repository alone.
+#[tokio::test]
+async fn a_file_replaced_by_a_repository_is_not_reported_deleted() {
+    for outer in BOTH {
+        let fx = Fx::new(outer, Nested::None);
+        write(&fx.dep(), "a file\n");
+        if outer {
+            sh(&fx.ws, &["add", "."]);
+            sh(&fx.ws, &["commit", "-qm", "dep file"]);
+        }
+        let repo = fx.repo().await;
+        let t = take_turn(&fx, &repo, |ws| {
+            std::fs::remove_file(ws.join("dep")).unwrap();
+            make_repo(&ws.join("dep"), Nested::Unborn);
+        })
+        .await
+        .unwrap();
+        assert_eq!(t.after_nested, ["dep"]);
+        let ch = changed(&repo, &t.before, &t.after).await.unwrap();
+        assert!(!ch.iter().any(|(_, p)| p == "dep"), "{ch:?}");
+        let as_left = digest(&fx.dep());
+        let r = restore_report(&repo, &t.before, &t.after, false)
+            .await
+            .unwrap();
+        assert_left_alone(&r, &format!("outer_git={outer}"));
+        assert_eq!(r.plan.changed_repos.shown, ["dep"]);
+        assert_eq!(digest(&fx.dep()), as_left);
+    }
+}
+
+/// Names shown in events and notes: at most 50, the rest counted, control
+/// characters replaced; the snapshot itself still knows every one, so the
+/// undo leaves all of them alone.
+#[cfg(unix)]
+#[tokio::test]
+async fn shown_names_are_capped_and_cleaned_but_every_repository_stays_out() {
+    let fx = Fx::new(false, Nested::None);
+    for i in 0..60 {
+        make_repo(&fx.ws.join(format!("r{i:02}")), Nested::Unborn);
+    }
+    let evil = fx.ws.join("zz\u{1b}[31m\nred");
+    make_repo(&evil, Nested::Unborn);
+    let repo = fx.repo().await;
+    let s = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert_eq!(s.nested.shown.len(), SHOWN_MAX);
+    assert_eq!(s.nested.more, 11);
+    assert_eq!(nested_in(&repo, &s.sha).await.len(), 61);
+    let names = Names::of(&nested_in(&repo, &s.sha).await);
+    let last = Names::of(&nested_in(&repo, &s.sha).await[60..]);
+    assert_eq!(last.shown, ["zz\u{FFFD}[31m\u{FFFD}red"]);
+    assert!(
+        names.listed().ends_with("and 11 more"),
+        "{}",
+        names.listed()
+    );
+    // The 61st (not shown) is still left alone by an undo.
+    let t = take_turn(&fx, &repo, |_| {
+        std::fs::remove_dir_all(evil.join(".git")).unwrap();
+    })
+    .await
+    .unwrap();
+    let r = restore_report(&repo, &t.before, &t.after, false)
+        .await
+        .unwrap();
+    assert!(
+        r.files.iter().all(|f| !f.starts_with("zz")),
+        "{:?}",
+        r.files
+    );
+    assert!(evil.join("x.txt").exists(), "not deleted");
 }
 
 /// A shadow repository written before A.15 holds gitlinks: in its index
@@ -980,7 +1200,7 @@ async fn a_gitlink_from_an_older_snapshot_is_dropped_and_never_restored() {
     let s = snapshot_full(&repo, "refs/harness/s/t/before", "b")
         .await
         .unwrap();
-    assert_eq!(s.nested, ["dep"]);
+    assert_eq!(s.nested.shown, ["dep"]);
     assert_absent(&entries(&repo, &s.sha).await, "dep", "next snapshot");
 
     // The repository goes; undoing back to the old snapshot creates no
@@ -1035,4 +1255,241 @@ async fn bench_nested_detection_100k_files() {
         eprintln!("round {round}: add -A {old:?}; A.15 staging {new:?}");
         std::fs::write(ws.join("d0/e0/f0/f0.txt"), format!("edit {round}\n")).unwrap();
     }
+}
+
+// ------------------------------------------- review proofs (A.15 review)
+
+/// `git add -A` into `legacy`'s own index (as before A.15), tree id.
+async fn legacy_tree(legacy: &Repo) -> Result<String, String> {
+    let idx = legacy.shadow.clone().unwrap().join("index");
+    let mut c = command(legacy, Some(&idx));
+    c.args(["add", "-A", "--", "."]);
+    let o = exec(c, None, GIT_TIMEOUT).await?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).into_owned());
+    }
+    run(legacy, &["write-tree"], Some(&idx)).await
+}
+
+async fn ls_tree(repo: &Repo, tree: &str) -> String {
+    run(repo, &["ls-tree", "-r", tree], None).await.unwrap()
+}
+
+type Step = (&'static str, Box<dyn Fn(&Path)>);
+
+/// (Review proof.) The staging must build the same tree as `add -A` for a
+/// folder without nested repositories, step after step (the index carries
+/// over, as in real use).
+#[tokio::test]
+async fn staging_builds_the_same_tree_as_add_all_without_nested_repositories() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for outer in BOTH {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        write(&ws.join("a.txt"), "a\n");
+        write(&ws.join("sub/b.txt"), "b\n");
+        write(&ws.join("exec.sh"), "echo\n");
+        write(&ws.join("f2"), "file then dir\n");
+        write(&ws.join("d2/in.txt"), "dir then file\n");
+        write(&ws.join("Readme"), "case\n");
+        write(&ws.join("t/x"), "t\n");
+        write(&ws.join("tracked-then-ignored.txt"), "x\n");
+        write(&ws.join(".gitignore"), "*.log\n");
+        write(&ws.join("sub/.gitignore"), "*.tmp\n");
+        write(&ws.join("ignored.log"), "log\n");
+        write(&ws.join("sub/c.tmp"), "tmp\n");
+        if outer {
+            sh(&ws, &["init", "-q", "-b", "main"]);
+            sh(&ws, &["add", "."]);
+            sh(&ws, &["commit", "-qm", "outer"]);
+        }
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        let legacy = repo_for(&ws, Some(&d.path().join("cp-legacy")))
+            .await
+            .unwrap();
+        let steps: Vec<Step> = vec![
+            ("initial", Box::new(|_| {})),
+            (
+                "odd names, symlinks, long path, x.git",
+                Box::new(|ws| {
+                    write(&ws.join("-dash"), "d\n");
+                    write(&ws.join("with space"), "s\n");
+                    write(&ws.join("nl\nname"), "n\n");
+                    std::fs::write(ws.join(std::ffi::OsStr::from_bytes(b"bad\xff\xfe")), "u")
+                        .unwrap();
+                    let long = "x".repeat(200);
+                    write(&ws.join(format!("{long}/{long}/{long}/f")), "l\n");
+                    write(&ws.join("x.git/f"), "in x.git\n");
+                    symlink("a.txt", ws.join("link")).unwrap();
+                    symlink("nowhere", ws.join("dangling")).unwrap();
+                    symlink("a.txt", ws.join("link2")).unwrap();
+                }),
+            ),
+            (
+                "delete, mode, file<->dir, symlink->file, case rename, dir->symlink",
+                Box::new(|ws| {
+                    std::fs::remove_file(ws.join("a.txt")).unwrap();
+                    std::fs::set_permissions(
+                        ws.join("exec.sh"),
+                        std::fs::Permissions::from_mode(0o755),
+                    )
+                    .unwrap();
+                    std::fs::remove_file(ws.join("f2")).unwrap();
+                    write(&ws.join("f2/inner"), "now dir\n");
+                    std::fs::remove_dir_all(ws.join("d2")).unwrap();
+                    write(&ws.join("d2"), "now file\n");
+                    std::fs::remove_file(ws.join("link2")).unwrap();
+                    write(&ws.join("link2"), "now a file\n");
+                    std::fs::rename(ws.join("Readme"), ws.join("README")).unwrap();
+                    std::fs::remove_dir_all(ws.join("t")).unwrap();
+                    write(&ws.join("elsewhere/x"), "t2\n");
+                    symlink("elsewhere", ws.join("t")).unwrap();
+                    std::fs::create_dir_all(ws.join("empty/dir")).unwrap();
+                }),
+            ),
+            (
+                ".gitignore changed",
+                Box::new(|ws| {
+                    write(&ws.join(".gitignore"), "tracked-then-ignored.txt\n");
+                    write(&ws.join("tracked-then-ignored.txt"), "changed\n");
+                    write(&ws.join("sub/.gitignore"), "\n");
+                }),
+            ),
+        ];
+        for (name, step) in steps {
+            step(&ws);
+            let old = legacy_tree(&legacy).await;
+            let new = worktree_tree(&repo).await.map(|t| t.id);
+            match (&old, &new) {
+                (Ok(o), Ok(n)) if o != n => panic!(
+                    "outer={outer} step {name:?}: trees differ\nadd -A:\n{}\nnew:\n{}",
+                    ls_tree(&legacy, o).await,
+                    ls_tree(&repo, n).await
+                ),
+                (Ok(_), Ok(_)) => {}
+                _ => panic!("outer={outer} step {name:?}: add -A {old:?}, new {new:?}"),
+            }
+        }
+        // An unreadable new file: both must agree on failing (or not).
+        write(&ws.join("secret"), "s\n");
+        std::fs::set_permissions(ws.join("secret"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let old = legacy_tree(&legacy).await;
+        let new = worktree_tree(&repo).await.map(|t| t.id);
+        std::fs::set_permissions(ws.join("secret"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        eprintln!("outer={outer} unreadable: add -A {old:?}, new {new:?}");
+        assert_eq!(
+            old.is_ok(),
+            new.is_ok(),
+            "unreadable: add -A {old:?}, new {new:?}"
+        );
+    }
+}
+
+/// (Review proof.) An agent that plants an empty `src/.git` after changing
+/// files under `src/` cannot stop the undo of those changes.
+#[tokio::test]
+async fn a_planted_empty_dot_git_does_not_defeat_undo() {
+    for outer in BOTH {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        write(&ws.join("src/main.rs"), "good\n");
+        write(&ws.join("src/lib.rs"), "good lib\n");
+        if outer {
+            sh(&ws, &["init", "-q", "-b", "main"]);
+            sh(&ws, &["add", "."]);
+            sh(&ws, &["commit", "-qm", "outer"]);
+        }
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        let before = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        // The turn: wreck src/, then plant an empty `.git` directory.
+        write(&ws.join("src/main.rs"), "EVIL\n");
+        std::fs::remove_file(ws.join("src/lib.rs")).unwrap();
+        std::fs::create_dir(ws.join("src/.git")).unwrap();
+        let after = snapshot_full(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        let files = changed(&repo, &before.sha, &after.sha).await.unwrap();
+        eprintln!(
+            "outer={outer} after.nested={:?} turn files={files:?}",
+            after.nested
+        );
+        let r = restore_report(&repo, &before.sha, &after.sha, false)
+            .await
+            .unwrap();
+        eprintln!(
+            "outer={outer} restored={:?} left alone={:?}",
+            r.files, r.nested
+        );
+        assert_eq!(
+            read(&ws.join("src/main.rs")),
+            "good\n",
+            "outer={outer}: undo must restore src/main.rs"
+        );
+        assert_eq!(read(&ws.join("src/lib.rs")), "good lib\n", "outer={outer}");
+    }
+}
+
+/// `--data-dir` is used as given (crates/cli/src/main.rs:156,525),
+/// so the shadow's `--git-dir` can be relative to the node's working
+/// directory. Git runs in the folder's top, so a relative one would
+/// resolve against the folder (review proof; it did, and every snapshot failed).
+#[tokio::test]
+async fn a_relative_checkpoint_dir_still_snapshots() {
+    let d = tempfile::tempdir().unwrap();
+    let ws = d.path().join("ws");
+    write(&ws.join("a.txt"), "a\n");
+    // A relative base, as `--data-dir data` gives.
+    let base_abs = tempfile::tempdir_in(".").unwrap();
+    let rel = base_abs
+        .path()
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap()
+        .join("checkpoints");
+    assert!(rel.is_relative());
+    let repo = repo_for(&ws, Some(&rel)).await.unwrap();
+    let s = snapshot_full(&repo, "refs/harness/s/t/before", "b").await;
+    assert!(s.is_ok(), "snapshot with a relative data dir: {s:?}");
+}
+
+/// Context: before A.15, `add -A` captured files under a
+/// folder holding an empty `.git` directory, so undo covered them.
+#[tokio::test]
+async fn add_all_captured_files_beside_an_empty_dot_git() {
+    let d = tempfile::tempdir().unwrap();
+    let ws = d.path().join("ws");
+    write(&ws.join("src/main.rs"), "good\n");
+    std::fs::create_dir(ws.join("src/.git")).unwrap();
+    let legacy = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+    let t = legacy_tree(&legacy).await.unwrap();
+    assert!(ls_tree(&legacy, &t).await.contains("src/main.rs"));
+}
+
+/// (Review proof.) A one-byte `.git` file planted in `src/` does not make the turn's
+/// change list say it deleted `src/main.rs`, which it modified.
+#[tokio::test]
+async fn a_planted_dot_git_file_does_not_falsify_the_turn_files() {
+    let d = tempfile::tempdir().unwrap();
+    let ws = d.path().join("ws");
+    write(&ws.join("src/main.rs"), "good\n");
+    let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+    let before = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    write(&ws.join("src/main.rs"), "EVIL\n");
+    write(&ws.join("src/.git"), "x");
+    let after = snapshot_full(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let files = changed(&repo, &before.sha, &after.sha).await.unwrap();
+    assert_eq!(
+        files,
+        vec![('M', "src/main.rs".to_string())],
+        "the turn modified src/main.rs; nested={:?}",
+        after.nested
+    );
 }

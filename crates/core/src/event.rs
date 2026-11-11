@@ -499,8 +499,12 @@ pub struct Checkpoint {
     /// directory or file) that this snapshot left out and that undo never
     /// touches. On `restored`: the ones the restore left alone. Relative
     /// to the checkpoint's folder.
+    /// At most 50 names, control characters replaced; `excluded_more`
+    /// counts the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub excluded_more: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

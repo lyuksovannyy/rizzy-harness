@@ -553,7 +553,10 @@ async fn global_excludes(dir: &Path, env: &UserGitEnv) -> Vec<u8> {
 }
 
 async fn repo_for_with(cwd: &Path, shadow_base: Option<&Path>, user: &UserGitEnv) -> Option<Repo> {
-    let base = shadow_base?;
+    // Absolute: git runs in the folder's top, so a relative data directory
+    // (`--data-dir data`) would resolve against the user's folder.
+    let base = std::path::absolute(shadow_base?).ok()?;
+    let base = base.as_path();
     let cwd = cwd.canonicalize().ok()?;
     let info = repo_info(&cwd).await;
     if let Some(i) = &info
@@ -667,18 +670,13 @@ struct WorkTree {
 }
 
 /// Tree of the working directory as it is now (tracked + untracked, minus
-/// ignored). In a shadow repository nested repositories are left out (see
-/// [`stage_without_nested`]); the user's own repository (a sub-agent's
-/// base and result) is staged with `add -A` as before.
+/// ignored, minus nested repositories; see [`stage_without_nested`]). Used
+/// for turn checkpoints (shadow repository) and for a sub-agent's base and
+/// result (the user's own repository) alike.
 async fn worktree_tree(repo: &Repo) -> Result<WorkTree, String> {
     let (real, idx) = temp_index(repo).await?;
     let res = async {
-        let nested = if repo.is_shadow() {
-            stage_without_nested(repo, &idx).await?
-        } else {
-            run(repo, &["add", "-A", "--", "."], Some(&idx)).await?;
-            Vec::new()
-        };
+        let nested = stage_without_nested(repo, &idx).await?;
         let id = run(repo, &["write-tree"], Some(&idx)).await?;
         Ok(WorkTree { id, nested })
     }
@@ -696,22 +694,25 @@ async fn worktree_tree(repo: &Repo) -> Result<WorkTree, String> {
 /// Stage the folder into `idx` without nested repositories; returns them
 /// (relative, minimal: none inside another, sorted).
 ///
-/// A nested repository is a directory below the folder holding a `.git`
-/// entry of any kind. It is never staged, not as a gitlink and not as
-/// files, and it never makes staging fail (plain `add -A` fails outright
-/// on one without a commit). The folder is walked once, by git
-/// (`ls-files -o`, which already stops at a repository it recognises and
-/// lists it as `dir/`); every directory that holds a path this snapshot
-/// would take is then checked for `.git` with one `lstat` (this catches
-/// what git does not recognise: an empty or broken `.git`, a dangling
-/// symlink, a folder that was ordinary in the last snapshot). No git runs
-/// inside a nested repository and nothing in it is opened.
+/// A nested repository is what git itself treats as one: a directory git's
+/// walk will not enter (`ls-files -o` lists it as `dir/`; git checks for a
+/// valid `.git` directory, gitfile or symlink to one, and opens nothing
+/// else), or a gitlink an older snapshot left in the index. It is never
+/// staged, not as a gitlink and not as files, and never makes staging fail
+/// (plain `add -A` fails outright on one without a commit). A `.git` entry
+/// git does not accept (an empty directory, a junk file, a dangling link)
+/// changes nothing: the folder is an ordinary one, and git never stages an
+/// entry named `.git`, so no snapshot holds one and no restore writes one.
+/// A repository made inside a folder whose files the index already tracks
+/// is entered by git (the index has paths there), so those files stay
+/// recorded and undoable. The folder is walked once, by git; nothing is run
+/// or opened inside a nested repository.
 async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, String> {
     use std::collections::{BTreeSet, HashSet};
     let staged = run_raw(repo, &["ls-files", "-z", "--stage"], Some(idx), None).await?;
     let (tracked, gitlinks) = split_stage(&staged);
-    // A gitlink an older snapshot left in the shadow's index goes first,
-    // so the walk below sees that folder afresh.
+    // A gitlink an older snapshot left in the index goes first, so the
+    // walk below sees that folder afresh.
     let gitlinks: Vec<Vec<u8>> = gitlinks.into_iter().map(<[u8]>::to_vec).collect();
     force_remove(repo, idx, &gitlinks).await?;
     let others = run_raw(
@@ -733,26 +734,10 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
             None => untracked.push(p),
         }
     }
-    let mut dirs: HashSet<&[u8]> = HashSet::new();
-    dirs_above(&tracked, &mut dirs);
-    dirs_above(&untracked, &mut dirs);
-    let dirs: Vec<Vec<u8>> = dirs
-        .into_iter()
-        .chain(gitlinks.iter().map(Vec::as_slice))
-        .filter(|d| !nested.contains(*d))
-        .map(<[u8]>::to_vec)
-        .collect();
-    let root = repo.root.clone();
-    let found = tokio::task::spawn_blocking(move || {
-        dirs.into_iter()
-            .filter(|d| has_git_entry(&root.join(rel_path(d))))
-            .collect::<Vec<_>>()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    nested.extend(found);
-    let nested = outermost(nested);
     let set: HashSet<&[u8]> = nested.iter().map(Vec::as_slice).collect();
+    // A tracked file replaced by a repository of the same name: out of the
+    // index, or `add -u` would stage a gitlink (or fail on one without a
+    // commit).
     let (gone, _) = split_within(&tracked, &set);
     let gone: Vec<Vec<u8>> = gone.into_iter().map(<[u8]>::to_vec).collect();
     force_remove(repo, idx, &gone).await?;
@@ -774,24 +759,38 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
         )
         .await?;
     }
+    let after = run_raw(repo, &["ls-files", "-z", "--stage"], Some(idx), None).await?;
+    let (kept, late) = split_stage(&after);
     // A folder that became a repository between the walk and the add
-    // (or a tracked file replaced by one) would have been staged as a
-    // gitlink: take it out again.
-    let late = staged_gitlinks(repo, idx).await?;
+    // would have been staged as a gitlink: take it out again.
+    let late: Vec<Vec<u8>> = late.into_iter().map(<[u8]>::to_vec).collect();
     force_remove(repo, idx, &late).await?;
-    let mut nested: BTreeSet<Vec<u8>> = nested.into_iter().collect();
     nested.extend(late);
+    // A tracked file replaced by a repository of the same name: git counts
+    // the name as tracked, so its walk neither enters nor reports it, and
+    // `add -u` drops it as if deleted. It is not deleted, it is not
+    // recorded: say so (left out), so no change list calls it deleted.
+    let kept: HashSet<&[u8]> = kept.into_iter().collect();
+    let entered: HashSet<&[u8]> = untracked.iter().flat_map(|p| parents(p)).collect();
+    let dropped: Vec<Vec<u8>> = tracked
+        .iter()
+        .filter(|p| !kept.contains(*p) && !entered.contains(*p))
+        .map(|p| p.to_vec())
+        .collect();
+    let root = repo.root.clone();
+    let replaced: Vec<Vec<u8>> = tokio::task::spawn_blocking(move || {
+        dropped
+            .into_iter()
+            .filter(|p| {
+                let dir = root.join(rel_path(p));
+                std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) && has_git_entry(&dir)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    nested.extend(replaced);
     Ok(outermost(nested))
-}
-
-/// Paths `idx` stages as gitlinks.
-async fn staged_gitlinks(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, String> {
-    let out = run_raw(repo, &["ls-files", "-z", "--stage"], Some(idx), None).await?;
-    Ok(split_stage(&out)
-        .1
-        .into_iter()
-        .map(<[u8]>::to_vec)
-        .collect())
 }
 
 /// `ls-files -z --stage` output (`mode id stage TAB path`), as the paths of
@@ -810,25 +809,6 @@ fn split_stage(out: &[u8]) -> (Vec<&[u8]>, Vec<&[u8]>) {
         }
     }
     (files, gitlinks)
-}
-
-/// Add every directory above `paths` to `out`. `paths` come sorted from
-/// git, so a run of files in one directory costs one lookup.
-fn dirs_above<'a>(paths: &[&'a [u8]], out: &mut std::collections::HashSet<&'a [u8]>) {
-    let mut last: Option<&[u8]> = None;
-    for p in paths {
-        let Some(slash) = p.iter().rposition(|b| *b == b'/') else {
-            continue;
-        };
-        let dir = &p[..slash];
-        if last == Some(dir) {
-            continue;
-        }
-        last = Some(dir);
-        if out.insert(dir) {
-            out.extend(parents(dir));
-        }
-    }
 }
 
 /// `paths` split into those at or below one of `dirs` and the rest, in
@@ -899,13 +879,51 @@ pub async fn snapshot(repo: &Repo, ref_name: &str, msg: &str) -> Result<String, 
     snapshot_full(repo, ref_name, msg).await.map(|s| s.sha)
 }
 
+/// The most names of nested repositories put into an event or a note; the
+/// rest are counted.
+pub const SHOWN_MAX: usize = 50;
+
+/// Names for an event or a note: at most [`SHOWN_MAX`], control characters
+/// replaced, and how many more there were.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Names {
+    pub shown: Vec<String>,
+    pub more: usize,
+}
+
+impl Names {
+    fn of(paths: &[Vec<u8>]) -> Self {
+        Self {
+            shown: paths.iter().take(SHOWN_MAX).map(|p| shown(p)).collect(),
+            more: paths.len().saturating_sub(SHOWN_MAX),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.shown.is_empty()
+    }
+
+    /// "`a`, `b` and 3 more".
+    pub fn listed(&self) -> String {
+        let mut s = self
+            .shown
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.more > 0 {
+            s.push_str(&format!(" and {} more", self.more));
+        }
+        s
+    }
+}
+
 /// A snapshot and the nested repositories it left out.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub sha: String,
-    /// Relative to the checkpoint's folder, sorted (lossy for a name that
-    /// is not UTF-8).
-    pub nested: Vec<String>,
+    /// Relative to the checkpoint's folder, sorted, for showing.
+    pub nested: Names,
 }
 
 /// Snapshot the working directory into a commit stored at `ref_name`, and
@@ -916,8 +934,9 @@ pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Sna
         let head = run(repo, &["rev-parse", "--verify", "-q", "HEAD"], None)
             .await
             .ok();
-        // The left-out repositories travel with the snapshot (hex: any
-        // bytes, one per line), so a later restore knows them too.
+        // The left-out repositories travel with the snapshot, all of them
+        // (a restore needs every one to leave them alone; this is never
+        // shown), as hex: any bytes, one per line.
         let mut message = msg.to_string();
         if !tree.nested.is_empty() {
             message.push('\n');
@@ -940,7 +959,7 @@ pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Sna
         record_order(repo, ref_name).await;
         Ok(Snapshot {
             sha,
-            nested: tree.nested.iter().map(|n| shown(n)).collect(),
+            nested: Names::of(&tree.nested),
         })
     })
     .await
@@ -951,8 +970,8 @@ pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Sna
 /// repository.
 const NESTED_TRAILER: &str = "harness-nested: ";
 
-/// The nested repositories snapshot `sha` left out (none for a tree, or a
-/// snapshot taken before A.15).
+/// The nested repositories snapshot `sha` left out (none for a snapshot
+/// taken before A.15).
 async fn nested_in(repo: &Repo, sha: &str) -> Vec<Vec<u8>> {
     run(repo, &["cat-file", "commit", sha], None)
         .await
@@ -963,9 +982,13 @@ async fn nested_in(repo: &Repo, sha: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A relative path from git's `-z` output, for display.
+/// A relative path from git's `-z` output, for showing: lossy UTF-8, and
+/// control characters (a newline, an escape sequence) replaced.
 fn shown(p: &[u8]) -> String {
-    String::from_utf8_lossy(p).into_owned()
+    String::from_utf8_lossy(p)
+        .chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
 }
 
 /// A relative path from git's `-z` output, as a path (any bytes on Unix).
@@ -977,12 +1000,13 @@ fn rel_path(p: &[u8]) -> PathBuf {
 
 #[cfg(not(unix))]
 fn rel_path(p: &[u8]) -> PathBuf {
-    PathBuf::from(shown(p))
+    PathBuf::from(String::from_utf8_lossy(p).into_owned())
 }
 
-/// Whether `dir` holds a `.git` entry of any kind: a directory, a file (a
-/// worktree's or submodule's), a symlink (not followed), or something git
-/// itself would not accept. One `lstat`; nothing inside is read.
+/// Whether `dir` holds a `.git` entry of any kind (one `lstat`, nothing
+/// followed or read). Used to tell the person, and to name a tracked file
+/// replaced by a repository (which git drops without a word); never to
+/// leave out files a snapshot would otherwise hold.
 fn has_git_entry(dir: &Path) -> bool {
     std::fs::symlink_metadata(dir.join(".git")).is_ok()
 }
@@ -1005,9 +1029,16 @@ fn within(p: &[u8], dirs: &std::collections::HashSet<&[u8]>) -> bool {
 pub struct RestorePlan {
     /// The paths it writes, with git's status letter.
     pub touched: Vec<(char, String)>,
-    /// Nested repositories it leaves alone: those either snapshot left out,
-    /// an older snapshot's gitlinks, and folders that hold a `.git` now.
-    pub nested: Vec<String>,
+    /// Nested repositories it leaves alone: those a snapshot (before, after
+    /// or the folder now) left out, and gitlinks of an older snapshot.
+    pub nested: Names,
+    /// Nested repositories that appeared or went away between `from` and
+    /// `expected` (during the undone turn), all left alone.
+    pub changed_repos: Names,
+    /// Folders it writes into that hold a `.git` no snapshot left out (a
+    /// repository made over files the turn's checkpoint holds, or a `.git`
+    /// git does not accept): their files are restored, the `.git` stays.
+    pub git_inside: Names,
 }
 
 /// What a test restore did.
@@ -1016,9 +1047,10 @@ pub struct RestorePlan {
 pub struct Restored {
     pub files: Vec<String>,
     pub nested: Vec<String>,
+    pub plan: RestorePlan,
 }
 
-/// [`restore`], also naming the nested repositories it left alone.
+/// [`restore`], also saying what it left alone.
 #[cfg(test)]
 pub async fn restore_report(
     repo: &Repo,
@@ -1026,16 +1058,13 @@ pub async fn restore_report(
     expected: &str,
     force: bool,
 ) -> Result<Restored, String> {
-    let now = if force {
-        None
-    } else {
-        Some(worktree_tree(repo).await?.id)
-    };
-    let plan = restore_plan(repo, from, expected, now.as_deref()).await?;
+    let now = snapshot(repo, "refs/harness/test/now/before", "now").await?;
+    let plan = restore_plan(repo, from, expected, &now, !force).await?;
     let files = restore_paths(repo, from, &plan.touched).await?;
     Ok(Restored {
         files,
-        nested: plan.nested,
+        nested: plan.nested.shown.clone(),
+        plan,
     })
 }
 
@@ -1076,15 +1105,19 @@ async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, Vec<u8>, b
         .collect())
 }
 
-/// Paths that differ between two snapshots, with git's status letter. A
-/// gitlink (from a snapshot taken before nested repositories were left
-/// out) is not a file and is never listed.
+/// Paths that differ between two snapshots, with git's status letter.
+/// Nothing at or below a repository either snapshot left out is listed
+/// (its files are not recorded, so no letter would be true; the checkpoint
+/// names it in `excluded` instead), and a gitlink is not a file.
 pub async fn changed(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, String)>, String> {
+    let mut out = nested_in(repo, a).await;
+    out.extend(nested_in(repo, b).await);
+    let set: std::collections::HashSet<&[u8]> = out.iter().map(Vec::as_slice).collect();
     Ok(diff_raw(repo, a, b)
         .await?
         .into_iter()
-        .filter(|(_, _, gitlink)| !gitlink)
-        .map(|(st, p, _)| (st, shown(&p)))
+        .filter(|(_, p, gitlink)| !gitlink && !within(p, &set))
+        .map(|(st, p, _)| (st, String::from_utf8_lossy(&p).into_owned()))
         .collect())
 }
 
@@ -1119,23 +1152,32 @@ pub async fn restore(
 }
 
 /// The paths a restore of `from` over `expected` writes, with their status
-/// letter, and the nested repositories it leaves alone. With `now` (a tree
-/// or snapshot of the folder as it is), refuses, listing them, if any of
-/// those files differ there from `expected`.
+/// letter, and what it leaves alone. `now` is a snapshot of the folder as
+/// it is; with `check`, refuses, listing them, if any of those files differ
+/// there from `expected`.
 ///
-/// A restore never writes, deletes or creates anything at or below a
-/// nested repository: one that `from` or `expected` left out, a gitlink an
-/// older snapshot recorded, or a folder that holds a `.git` entry now (one
-/// `lstat` per directory of a path it would write).
+/// A restore skips only what a snapshot recorded as left out (`from`,
+/// `expected` or `now`) and gitlinks of an older snapshot: it never writes,
+/// deletes or creates anything at or below those. Everything else the
+/// checkpoints hold is restored, also inside a folder that holds a `.git`
+/// the snapshots did not leave out; no snapshot holds a `.git`, so a
+/// restore never writes or deletes one.
 pub async fn restore_plan(
     repo: &Repo,
     from: &str,
     expected: &str,
-    now: Option<&str>,
+    now: &str,
+    check: bool,
 ) -> Result<RestorePlan, String> {
     use std::collections::{BTreeSet, HashSet};
-    let mut nested: BTreeSet<Vec<u8>> = nested_in(repo, from).await.into_iter().collect();
-    nested.extend(nested_in(repo, expected).await);
+    let in_from: BTreeSet<Vec<u8>> = nested_in(repo, from).await.into_iter().collect();
+    let in_expected: BTreeSet<Vec<u8>> = nested_in(repo, expected).await.into_iter().collect();
+    let changed_repos: Vec<Vec<u8>> = in_from
+        .symmetric_difference(&in_expected)
+        .cloned()
+        .collect();
+    let mut nested: BTreeSet<Vec<u8>> = in_from.union(&in_expected).cloned().collect();
+    nested.extend(nested_in(repo, now).await);
     let mut candidates: Vec<(char, Vec<u8>)> = Vec::new();
     for (st, p, gitlink) in diff_raw(repo, from, expected).await? {
         if gitlink {
@@ -1144,20 +1186,25 @@ pub async fn restore_plan(
             candidates.push((st, p));
         }
     }
-    // A folder that holds a `.git` now, at or above a path to write.
+    let nested = outermost(nested);
+    let set: HashSet<&[u8]> = nested.iter().map(Vec::as_slice).collect();
+    let candidates: Vec<(char, Vec<u8>)> = candidates
+        .into_iter()
+        .filter(|(_, p)| !within(p, &set))
+        .collect();
+    // Folders written into that hold a `.git` (to tell the person).
     let root = repo.root.clone();
     let paths: Vec<Vec<u8>> = candidates.iter().map(|(_, p)| p.clone()).collect();
-    let found: Vec<Vec<u8>> = tokio::task::spawn_blocking(move || {
+    let git_inside: BTreeSet<Vec<u8>> = tokio::task::spawn_blocking(move || {
         let mut seen: std::collections::HashMap<Vec<u8>, bool> = Default::default();
-        let mut found = Vec::new();
+        let mut found = BTreeSet::new();
         for p in &paths {
-            for d in parents(p).chain([p.as_slice()]) {
+            for d in parents(p) {
                 let hit = *seen
                     .entry(d.to_vec())
                     .or_insert_with(|| has_git_entry(&root.join(rel_path(d))));
                 if hit {
-                    found.push(d.to_vec());
-                    break;
+                    found.insert(d.to_vec());
                 }
             }
         }
@@ -1165,16 +1212,11 @@ pub async fn restore_plan(
     })
     .await
     .map_err(|e| e.to_string())?;
-    nested.extend(found);
-    let nested = outermost(nested);
-    let set: HashSet<&[u8]> = nested.iter().map(Vec::as_slice).collect();
     let touched: Vec<(char, String)> = candidates
         .iter()
-        .filter(|(_, p)| !within(p, &set))
-        .map(|(st, p)| (*st, shown(p)))
+        .map(|(st, p)| (*st, String::from_utf8_lossy(p).into_owned()))
         .collect();
-    let nested: Vec<String> = nested.iter().map(|n| shown(n)).collect();
-    if let Some(now) = now.filter(|_| !touched.is_empty()) {
+    if check && !touched.is_empty() {
         let mut args = vec![
             "diff",
             "--no-ext-diff",
@@ -1193,7 +1235,12 @@ pub async fn restore_plan(
             ));
         }
     }
-    Ok(RestorePlan { touched, nested })
+    Ok(RestorePlan {
+        touched,
+        nested: Names::of(&nested),
+        changed_repos: Names::of(&changed_repos),
+        git_inside: Names::of(&outermost(git_inside)),
+    })
 }
 
 /// Write `from`'s version of every path in `touched` (from

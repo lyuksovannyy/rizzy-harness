@@ -149,6 +149,13 @@ pub struct CheckpointState {
     /// Sorted, no duplicates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded: Vec<String>,
+    /// The most any of its events said it did not name.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub excluded_more: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl SessionView {
@@ -320,6 +327,7 @@ impl SessionView {
                     st.excluded.sort();
                     st.excluded.dedup();
                 }
+                st.excluded_more = st.excluded_more.max(c.excluded_more);
                 match c.phase {
                     // A restore's own checkpoint is undone like a turn's.
                     CheckpointPhase::Before | CheckpointPhase::BeforeRestore => {

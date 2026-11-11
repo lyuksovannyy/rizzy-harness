@@ -364,18 +364,12 @@ impl Session {
         self.check_cwd_still_allowed()?;
         let turn_id = new_id();
         let cancel = CancellationToken::new();
-        {
-            let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
-            if t.is_some() {
-                return Err("a turn is already running".into());
-            }
-            *t = Some(RunningTurn {
-                turn_id: turn_id.clone(),
-                cancel: cancel.clone(),
-                savings: extra.savings.clone(),
-                publishes: Arc::default(),
-            });
-        }
+        self.claim_turn(RunningTurn {
+            turn_id: turn_id.clone(),
+            cancel: cancel.clone(),
+            savings: extra.savings.clone(),
+            publishes: Arc::default(),
+        })?;
         if self.unclosed.load(Ordering::SeqCst) {
             let message = "The session log could not be written, so this turn was stopped.";
             if let Err(e) = self.close_open_turn(message, TurnEndReason::Error).await {
@@ -661,7 +655,8 @@ impl Session {
                         phase,
                         git_ref: sha.clone(),
                         files: vec![],
-                        excluded: snap.nested,
+                        excluded: snap.nested.shown,
+                        excluded_more: snap.nested.more as u64,
                     }))
                     .await;
                 if recorded.is_err() {
@@ -693,7 +688,8 @@ impl Session {
                         phase: CheckpointPhase::After,
                         git_ref: snap.sha,
                         files: files.into_iter().map(|(_, p)| p).collect(),
-                        excluded: snap.nested,
+                        excluded: snap.nested.shown,
+                        excluded_more: snap.nested.more as u64,
                     }))
                     .await;
                 if recorded.is_ok() {
@@ -797,7 +793,8 @@ impl Session {
             .checkpoint_repo()
             .await
             .ok_or("checkpoints are not available for this folder any more")?;
-        self.check_folder_idle(&repo.root)?;
+        // Held until this restore ends, on every path.
+        let _claim = self.claim_folder(&repo.root)?;
         let expected = if rewind { latest } else { after };
         for sha in [&before, &expected] {
             if !crate::git::exists(&repo, sha).await {
@@ -817,13 +814,7 @@ impl Session {
             .map_err(|e| {
                 format!("nothing was restored: the folder could not be saved first ({e})")
             })?;
-        let plan = match crate::git::restore_plan(
-            &repo,
-            &before,
-            &expected,
-            (!force).then_some(now.sha.as_str()),
-        )
-        .await
+        let plan = match crate::git::restore_plan(&repo, &before, &expected, &now.sha, !force).await
         {
             Ok(t) => t,
             Err(e) => {
@@ -831,12 +822,6 @@ impl Session {
                 return Err(e);
             }
         };
-        // Every nested repository this restore leaves alone: the ones the
-        // two snapshots and the folder as it is now have.
-        let mut left_alone = plan.nested.clone();
-        left_alone.extend(now.nested.iter().cloned());
-        left_alone.sort();
-        left_alone.dedup();
         let files: Vec<String> = plan.touched.iter().map(|(_, p)| p.clone()).collect();
         if let Err(e) = self
             .append(EventKind::Checkpoint(Checkpoint {
@@ -844,7 +829,8 @@ impl Session {
                 phase: CheckpointPhase::BeforeRestore,
                 git_ref: now.sha,
                 files: files.clone(),
-                excluded: now.nested,
+                excluded: now.nested.shown,
+                excluded_more: now.nested.more as u64,
             }))
             .await
         {
@@ -873,7 +859,8 @@ impl Session {
             phase: CheckpointPhase::After,
             git_ref: state.sha.clone(),
             files: files.clone(),
-            excluded: state.nested,
+            excluded: state.nested.shown,
+            excluded_more: state.nested.more as u64,
         }))
         .await
         .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
@@ -891,16 +878,18 @@ impl Session {
                 phase: CheckpointPhase::Restored,
                 git_ref: state.sha.clone(),
                 files: files.clone(),
-                excluded: left_alone.clone(),
+                excluded: plan.nested.shown.clone(),
+                excluded_more: plan.nested.more as u64,
             }))
             .await
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
-        // What undo did not cover, in words the chat shows today.
-        if !left_alone.is_empty() {
+        // Only when something about repositories changed, in words the
+        // chat shows today (pre-existing ones are in `excluded` alone).
+        if let Some(message) = restore_notice(files.len(), &plan) {
             self.append(EventKind::Error(ErrorEvent {
                 turn_id: None,
-                message: left_alone_notice(&left_alone),
+                message,
             }))
             .await
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
@@ -909,16 +898,23 @@ impl Session {
         Ok(())
     }
 
-    /// Refuse a restore while another session on this node has a turn
-    /// running in the folder the restore writes (`root`, the checkpoint's
-    /// folder: the repository's top for a folder inside one), in a folder
-    /// containing it, or in one inside it. Folders are compared by their
-    /// real paths. This session's own running turn (and so its sub-agents,
-    /// which run inside it) is refused before this; a sub-agent of another
-    /// session works in its own worktree and blocks only a restore of that.
-    /// Only restore is guarded: a turn that starts after this check is not.
-    fn check_folder_idle(&self, root: &std::path::Path) -> Result<(), String> {
-        let sessions: Vec<Arc<Session>> = self
+    /// Register a restore of `root` (the checkpoint's folder: the
+    /// repository's top for a folder inside one) in the node's registry of
+    /// folders being restored, refusing while another session has a turn
+    /// running in an overlapping folder (the same, a containing or a
+    /// contained one, by real path) or another restore of an overlapping
+    /// folder is registered. Check and insert happen under the registry's
+    /// lock, which a turn's start also takes (see [`Self::claim_turn`]), so
+    /// no turn starts there while the restore runs. The entry goes when the
+    /// returned guard drops, on every path. This session's own running turn
+    /// (and so its sub-agents, which run inside it) is refused before this.
+    /// Another session's sub-agent works in a worktree under
+    /// `<root>/.git/harness-worktrees`, inside that repository's folder, so
+    /// it overlaps a restore there (as its parent's turn does).
+    fn claim_folder(&self, root: &std::path::Path) -> Result<RestoreClaim, String> {
+        let root = real_path(root);
+        // Real paths before the lock: no file system call under it.
+        let others: Vec<Arc<Session>> = self
             .node
             .sessions
             .lock()
@@ -927,21 +923,57 @@ impl Session {
             .filter(|s| s.id != self.id)
             .cloned()
             .collect();
-        let real = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-        let root = real(root);
-        let busy = sessions.iter().filter(|s| s.is_running()).any(|s| {
-            let cwd = real(&s.cwd);
-            cwd.starts_with(&root) || root.starts_with(&cwd)
-        });
-        if busy {
-            Err(
+        let others: Vec<(Arc<Session>, PathBuf)> = others
+            .into_iter()
+            .map(|s| {
+                let cwd = real_path(&s.cwd);
+                (s, cwd)
+            })
+            .collect();
+        let mut reg = self
+            .node
+            .restoring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if reg.iter().any(|r| overlaps(r, &root)) {
+            return Err(UNDO_RUNNING.into());
+        }
+        if others
+            .iter()
+            .any(|(s, cwd)| overlaps(cwd, &root) && s.is_running())
+        {
+            return Err(
                 "another chat is working in this folder right now; wait for it to finish \
                  or cancel it"
                     .into(),
-            )
-        } else {
-            Ok(())
+            );
         }
+        reg.push(root.clone());
+        Ok(RestoreClaim {
+            node: self.node.clone(),
+            root,
+        })
+    }
+
+    /// Take this session's turn slot for `turn`, unless a turn holds it or
+    /// a restore of an overlapping folder is running (checked under the
+    /// registry's lock, under which a restore registers).
+    fn claim_turn(&self, turn: RunningTurn) -> Result<(), String> {
+        let cwd = real_path(&self.cwd);
+        let reg = self
+            .node
+            .restoring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if reg.iter().any(|r| overlaps(r, &cwd)) {
+            return Err(UNDO_RUNNING.into());
+        }
+        let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+        if t.is_some() {
+            return Err("a turn is already running".into());
+        }
+        *t = Some(turn);
+        Ok(())
     }
 
     /// Run a delegated sub-task in a new child session and wait for it.
@@ -994,12 +1026,17 @@ impl Session {
             .as_ref()
             .map(|t| t.savings.clone())
             .unwrap_or_default();
-        *child.turn.lock().unwrap_or_else(|p| p.into_inner()) = Some(RunningTurn {
+        if let Err(e) = child.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: savings.clone(),
             publishes: Arc::default(),
-        });
+        }) {
+            if let Some(i) = iso {
+                crate::git::worktree_remove(&i.root, &i.worktree).await;
+            }
+            return Err(e);
+        }
         // A sub-agent gets its task as text only, never the images.
         let msg = UserMessage {
             turn_id,
@@ -1392,14 +1429,68 @@ impl TurnHost for Session {
     }
 }
 
-/// The chat's note after an undo that left nested repositories alone.
-fn left_alone_notice(nested: &[String]) -> String {
-    let names: Vec<String> = nested.iter().map(|n| format!("`{n}`")).collect();
-    format!(
-        "Undo did not touch these git repositories inside the folder: {}. Undo never \
-         covers a git repository inside your folder; use git in it to undo changes there.",
-        names.join(", ")
-    )
+/// Refusal while a restore of an overlapping folder runs.
+const UNDO_RUNNING: &str = "an undo is running in this folder; try again in a moment";
+
+/// A folder registered as being restored; unregistered when dropped.
+struct RestoreClaim {
+    node: Arc<Inner>,
+    root: PathBuf,
+}
+
+impl Drop for RestoreClaim {
+    fn drop(&mut self) {
+        let mut reg = self
+            .node
+            .restoring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = reg.iter().position(|r| *r == self.root) {
+            reg.swap_remove(i);
+        }
+    }
+}
+
+/// Where `p` really is (as given when it cannot be resolved).
+fn real_path(p: &std::path::Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The same folder, or one inside the other.
+fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// The chat's note after an undo, only when repositories inside the folder
+/// appeared or went away during the undone turn, or a `.git` sits in a
+/// folder the undo wrote into. It starts with what was restored, so it does
+/// not read as a failure. `None`: nothing to say (stable nested
+/// repositories are in the checkpoint's `excluded` alone).
+fn restore_notice(files: usize, plan: &crate::git::RestorePlan) -> Option<String> {
+    if plan.changed_repos.is_empty() && plan.git_inside.is_empty() {
+        return None;
+    }
+    let mut s = format!(
+        "Undo restored {files} file{}.",
+        if files == 1 { "" } else { "s" }
+    );
+    if !plan.git_inside.is_empty() {
+        s.push_str(&format!(
+            " {} now hold a `.git` (a repository made there, or a stray `.git`) that no \
+             checkpoint covers: the files the checkpoint holds there were restored and the \
+             `.git` was left as it is.",
+            plan.git_inside.listed()
+        ));
+    }
+    if !plan.changed_repos.is_empty() {
+        s.push_str(&format!(
+            " Git repositories inside the folder appeared or went away during the turn and \
+             were left alone ({}): undo never covers a repository inside your folder; use \
+             git in it to undo changes there.",
+            plan.changed_repos.listed()
+        ));
+    }
+    Some(s)
 }
 
 /// What an approval card says the tool would do. Publishing changes nothing

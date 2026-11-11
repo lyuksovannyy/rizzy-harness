@@ -198,6 +198,7 @@ fn events() -> Vec<RawEvent> {
             git_ref: "refs/x".into(),
             files: vec![],
             excluded: vec![],
+            excluded_more: 0,
         }),
         EventKind::Error(ErrorEvent {
             turn_id: Some(t()),

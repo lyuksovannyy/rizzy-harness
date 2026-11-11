@@ -2406,22 +2406,78 @@ async fn nested_repositories_are_named_in_checkpoints_and_after_an_undo() {
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].files, ["keep.txt"]);
     assert_eq!(restored[0].excluded, want);
-    let notes: Vec<String> = h.seen[mark..]
-        .iter()
+    // Repositories that were there all along: named in `excluded` only,
+    // no note in the chat.
+    assert_eq!(notes(&h.seen[mark..]), Vec::<String>::new());
+    // The fold keeps them with the checkpoint.
+    let view = SessionView::fold(&h.seen).unwrap();
+    assert_eq!(view.checkpoints[&turn].excluded, want);
+
+    // A turn that makes a repository: its undo leaves it and says so,
+    // starting with what it restored.
+    let turn = prompt_turn(
+        &mut h,
+        sid,
+        "run: echo v3 > keep.txt; mkdir made && cd made && git init -q && echo m > m.txt",
+    )
+    .await;
+    let mark = h.seen.len();
+    restore(&mut h, sid, "r2", &turn, false).await.unwrap();
+    assert!(h.ws.join("made/.git").is_dir());
+    let notes = notes(&h.seen[mark..]);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("Undo restored 1 file.") && notes[0].contains("`made`"),
+        "{}",
+        notes[0]
+    );
+}
+
+/// The chat notes (`error` events) among `seen`.
+fn notes(seen: &[RawEvent]) -> Vec<String> {
+    seen.iter()
         .filter_map(|e| match e.typed() {
             Ok(EventKind::Error(e)) => Some(e.message),
             _ => None,
         })
-        .collect();
-    assert_eq!(notes.len(), 1, "{notes:?}");
-    assert!(
-        notes[0].contains("`vendor lib`") && notes[0].contains("`a/b/scratch`"),
-        "{}",
-        notes[0]
+        .collect()
+}
+
+/// A restore that fails after it registered its folder unregisters it: a
+/// turn and a restore of the same folder run afterwards.
+#[tokio::test]
+async fn a_failed_restore_does_not_keep_the_folder_busy() {
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    restore(&mut h, sid, "r1", &turn, false)
+        .await
+        .expect_err("refused: the user's edits");
+    let ws = h.ws.clone();
+    let other = create_in(&mut h, &ws).await;
+    prompt_turn(&mut h, other, "run: echo hi > other.txt").await;
+    restore(&mut h, sid, "r2", &turn, true).await.unwrap();
+}
+
+/// A sub-agent's base snapshot leaves nested repositories out too: one
+/// without a commit no longer stops a delegation.
+#[tokio::test]
+async fn a_writing_sub_agent_runs_beside_a_nested_repository_without_a_commit() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    nested_repo(&h.ws.join("scratch"), false);
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo v2 > keep.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("1 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v2\n"
     );
-    // The fold keeps them with the checkpoint.
-    let view = SessionView::fold(&h.seen).unwrap();
-    assert_eq!(view.checkpoints[&turn].excluded, want);
 }
 
 /// A nested repository arriving with a hostile `.git/config` (fsmonitor,
