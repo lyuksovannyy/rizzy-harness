@@ -428,7 +428,18 @@ mod tests {
         ctx.output = Some(sink);
         let cancel = ctx.cancel.clone();
         let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": "yes"})).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Wait for the state the test needs (the bounded channel is full, so
+        // the producer is blocked on the stuck consumer), not for a fixed
+        // time: a loaded machine can take far longer than 300 ms to get there.
+        let full_by = Instant::now() + Duration::from_secs(60);
+        while rx.len() < STREAM_CHANNEL {
+            assert!(
+                Instant::now() < full_by,
+                "channel never filled: {}",
+                rx.len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let started = Instant::now();
         cancel.cancel();
         let r = tokio::time::timeout(Duration::from_secs(10), h)
