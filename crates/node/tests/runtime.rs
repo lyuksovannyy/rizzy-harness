@@ -3031,3 +3031,272 @@ async fn redirects_in_the_sessions_git_never_reach_another_repository() {
         );
     }
 }
+
+/// Prompt `sid` as `lead` with `spec` and keep reading until the parent's
+/// turn ends, answering any approval request a person would see with
+/// `answer` (a delegation's own one, under `ask_all`).
+async fn lead_turn(
+    h: &mut Harness,
+    sid: SessionId,
+    spec: harness_core::agent::AgentSpec,
+    text: &str,
+    answer: Decision,
+) {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: Some(spec),
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    });
+    loop {
+        let k = h
+            .until(|k| matches!(k, EventKind::TurnEnded(_) | EventKind::ApprovalRequested(_)))
+            .await;
+        let last = h.seen.last().unwrap().session_id;
+        match k {
+            EventKind::ApprovalRequested(a) if !a.reason.contains("denied by this node") => {
+                h.send(MasterToNode::ApprovalRespond {
+                    req_id: "a".into(),
+                    session_id: last,
+                    approval_id: a.approval_id,
+                    decision: answer,
+                })
+            }
+            EventKind::TurnEnded(_) if last == sid => break,
+            _ => {}
+        }
+    }
+}
+
+fn children_of(h: &Harness, sid: SessionId) -> usize {
+    h.seen
+        .iter()
+        .filter(|e| {
+            matches!(e.typed(), Ok(EventKind::SessionCreated(c)) if c.parent_session == Some(sid))
+        })
+        .count()
+}
+
+/// The approval requests of `sid`, as (tool, reason).
+fn asked_in(h: &Harness, sid: SessionId) -> Vec<(String, String)> {
+    h.seen
+        .iter()
+        .filter(|e| e.session_id == sid)
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ApprovalRequested(a)) => Some((a.tool, a.reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalMode) -> SessionId {
+    let sid = SessionId::new();
+    h.send(MasterToNode::Create {
+        req_id: "c".into(),
+        session_id: sid,
+        title: "t".into(),
+        cwd: h.ws.display().to_string(),
+        model: None,
+        approval_mode: Some(mode),
+        profile: None,
+        agent: None,
+        incognito: false,
+    });
+    h.until(|k| matches!(k, EventKind::SessionCreated(_))).await;
+    sid
+}
+
+/// Gate 3 review P-2, the review's proof (`review_p2_…`) inverted:
+/// `delegate` reaches the approval path like any tool, so a node whose
+/// node.toml denies it refuses it with the policy's reason, in `ask_all`
+/// too, before any child session exists.
+#[tokio::test]
+async fn a_node_that_denies_delegate_refuses_it_before_any_child_exists() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        denied_tools: vec!["delegate".into()],
+        ..Default::default()
+    })
+    .await;
+    let sid = create_with_mode(&mut h, harness_core::policy::ApprovalMode::AskAll).await;
+    let scout = agent_with("scout", &["read"], vec![]);
+    lead_turn(
+        &mut h,
+        sid,
+        agent("lead", vec![scout]),
+        "delegate: scout=hello",
+        Decision::Allow,
+    )
+    .await;
+    assert_eq!(children_of(&h, sid), 0, "the denied delegation ran");
+    let asked = asked_in(&h, sid);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].0, "delegate");
+    assert!(
+        asked[0].1.contains("denied by this node's policy"),
+        "{asked:?}"
+    );
+}
+
+/// Gate 3 review P-2: `ask_all` ("every tool call needs approval") asks for
+/// a delegation before the child exists; a denial leaves no child, an
+/// allow starts it. Under `ask` a delegation is not mutating by itself and
+/// runs without asking (the child's own calls are gated as ever).
+#[tokio::test]
+async fn ask_all_asks_before_a_delegation_and_ask_does_not() {
+    use harness_core::policy::ApprovalMode;
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: ApprovalMode::Auto,
+        ..Default::default()
+    })
+    .await;
+    let lead = || agent("lead", vec![agent_with("scout", &["read"], vec![])]);
+
+    let sid = create_with_mode(&mut h, ApprovalMode::AskAll).await;
+    lead_turn(&mut h, sid, lead(), "delegate: scout=hello", Decision::Deny).await;
+    let asked = asked_in(&h, sid);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].0, "delegate");
+    assert_eq!(children_of(&h, sid), 0, "denied, yet a child started");
+
+    let sid = create_with_mode(&mut h, ApprovalMode::AskAll).await;
+    lead_turn(
+        &mut h,
+        sid,
+        lead(),
+        "delegate: scout=hello",
+        Decision::Allow,
+    )
+    .await;
+    assert_eq!(asked_in(&h, sid)[0].0, "delegate");
+    assert_eq!(children_of(&h, sid), 1);
+
+    let sid = create_with_mode(&mut h, ApprovalMode::Ask).await;
+    lead_turn(&mut h, sid, lead(), "delegate: scout=hello", Decision::Deny).await;
+    assert!(asked_in(&h, sid).is_empty(), "{:?}", asked_in(&h, sid));
+    assert_eq!(children_of(&h, sid), 1);
+}
+
+/// Gate 3 review P-2: node.toml `[limits]` bounds delegation. A master spec
+/// that asks for more sub-agents per turn than the node allows is clamped
+/// to the node's number; with a depth of 0 nothing is delegated at all.
+#[tokio::test]
+async fn node_limits_clamp_the_masters_delegation_caps_and_depth() {
+    use harness_core::agent::DelegateCaps;
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.limits.max_subagents = 1;
+        p
+    })
+    .await;
+    let sid = h.create().await;
+    let mut lead = agent(
+        "lead",
+        vec![
+            agent_with("a", &["read"], vec![]),
+            agent_with("b", &["read"], vec![]),
+        ],
+    );
+    lead.caps = Some(DelegateCaps {
+        max_subagents: 10,
+        max_tokens: 1_000_000,
+    });
+    let outs = delegate_outputs(&mut h, sid, lead.clone(), "delegate: a=one | b=two").await;
+    assert_eq!(outs.len(), 2, "{outs:?}");
+    let capped = outs
+        .iter()
+        .filter(|o| o.contains("cap reached: at most 1 sub-agents"))
+        .count();
+    assert_eq!(capped, 1, "{outs:?}");
+    assert_eq!(children_of(&h, sid), 1);
+
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.limits.max_delegation_depth = 0;
+        p
+    })
+    .await;
+    let sid = h.create().await;
+    let outs = delegate_outputs(&mut h, sid, lead, "delegate: a=one").await;
+    assert_eq!(children_of(&h, sid), 0, "{outs:?}");
+}
+
+/// [`lead_turn`], then the outputs of the parent's `delegate` calls.
+async fn delegate_outputs(
+    h: &mut Harness,
+    sid: SessionId,
+    spec: harness_core::agent::AgentSpec,
+    text: &str,
+) -> Vec<String> {
+    lead_turn(h, sid, spec, text, Decision::Allow).await;
+    let stored = h.node.store().events_after(sid, 0, 10_000).unwrap();
+    let calls: Vec<String> = stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallStarted(c)) if c.tool == "delegate" => Some(c.call_id),
+            _ => None,
+        })
+        .collect();
+    stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) if calls.contains(&f.call_id) => Some(f.output),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A nested delegation, with node.toml allowing two levels (R.2's
+/// `max_delegation_depth`) and R.1's rule that a sub-agent's own
+/// sub-agents may only read: a writing child's read-only sub-agent runs in
+/// the child's node-owned folder and sees its files; a writing sub-agent
+/// of the child is refused before any session exists for it; the child's
+/// own change is still applied.
+#[tokio::test]
+async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.limits.max_delegation_depth = 2;
+        p
+    })
+    .await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let dev = |inner: harness_core::agent::AgentSpec| agent("dev", vec![inner]);
+    // The child's read-only sub-agent reads a file of the child's folder.
+    let outs = delegate_outputs(
+        &mut h,
+        sid,
+        agent("lead", vec![dev(agent_with("scout", &["read"], vec![]))]),
+        "delegate: dev=delegate: scout=read: keep.txt",
+    )
+    .await;
+    let out = outs.last().expect("a delegate call");
+    assert!(
+        out.contains("v1"),
+        "the scout did not read the child's folder: {out}"
+    );
+    // The child's writing sub-agent is refused; nothing is written.
+    let before = tree(&h.ws);
+    let outs = delegate_outputs(
+        &mut h,
+        sid,
+        agent("lead", vec![dev(agent("coder", vec![]))]),
+        "delegate: dev=delegate: coder=run: echo nested > nested.txt",
+    )
+    .await;
+    let out = outs.last().expect("a delegate call");
+    assert!(
+        out.contains("@coder was not started") && out.contains("may only read"),
+        "{out}"
+    );
+    assert_eq!(tree(&h.ws), before, "the nested writer changed the folder");
+    assert!(!h.ws.join("nested.txt").exists());
+}

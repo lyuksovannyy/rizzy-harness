@@ -395,10 +395,12 @@ pub enum CommandError {
 const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key, \
      or its node sent an event the server refuses (see the server log); delete the chat to clear it";
 
-/// The session a command would make its node write to. Cancel and delete
-/// are left out on purpose: they are how a diverged session is stopped.
+/// The session a command would make its node write to. Cancel, delete and
+/// a deny are left out on purpose: they are how a diverged session is
+/// stopped (Gate 3 review P-7).
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
+        MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
         MasterToNode::Prompt { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
@@ -941,6 +943,12 @@ impl Master {
         let this = self.clone();
         let nid = node_id.clone();
         tokio::spawn(async move { artifacts::on_node_up(&this, &nid).await });
+
+        // A turn whose owner lost access while this node was away is
+        // cancelled now (Gate 3 review P-3).
+        let this = self.clone();
+        let nid = node_id.clone();
+        tokio::spawn(async move { workspaces::cancel_revoked_on(&this, &nid).await });
 
         let this = self.clone();
         let nid = node_id.clone();

@@ -38,5 +38,7 @@ export default defineConfig({
   worker: { format: "es", plugins: () => [noEntityDecoding, smallHast] },
   // theme.test.ts reads the stylesheet as text (`?raw`); vitest otherwise
   // turns every CSS import into an empty string.
-  test: { css: { include: [/styles\.css/] } },
+  // links.setup.ts stands in for the server's links (P-1) in every test but
+  // links.test.ts.
+  test: { css: { include: [/styles\.css/] }, setupFiles: ["src/lib/links.setup.ts"] },
 });

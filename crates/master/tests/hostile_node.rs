@@ -7,7 +7,7 @@
 //! capability are never sent `artifact.*`.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -337,13 +337,7 @@ async fn start_with(edit: impl FnOnce(&mut Config)) -> T {
         .send()
         .await
         .unwrap();
-    let alex = r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
+    let alex = common::signed_in(r).await;
     let mut t = T {
         base,
         master,
@@ -368,7 +362,7 @@ async fn start() -> T {
 async fn req(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", &t.alex)
+        .login(&t.alex)
         .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -453,7 +447,7 @@ async fn an_honest_transfer_arrives_byte_for_byte() {
     );
     let r = reqwest::Client::new()
         .get(format!("{}{path}", t.base))
-        .header("cookie", &t.alex)
+        .login(&t.alex)
         .same_origin()
         .send()
         .await

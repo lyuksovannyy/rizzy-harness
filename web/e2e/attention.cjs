@@ -8,7 +8,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2ea-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -39,6 +39,7 @@ let PAGE = null;
     const code = await claimCode();
     const b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 860 }, permissions: ['notifications'] });
+    await keyed(ctx);
     // Record notifications instead of showing them.
     await ctx.addInitScript(() => {
       window.__notes = [];

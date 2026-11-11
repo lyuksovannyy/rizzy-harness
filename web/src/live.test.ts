@@ -14,7 +14,10 @@ class FakeSocket {
   constructor(public url: string) {
     FakeSocket.all.push(this);
   }
-  send() {}
+  sent: string[] = [];
+  send(m: string) {
+    this.sent.push(m);
+  }
   close() {
     this.onclose?.();
   }
@@ -82,5 +85,29 @@ describe("Live.onLoginEnded", () => {
     close(4401);
     expect(ended).toHaveBeenCalledTimes(1);
     live.close();
+  });
+});
+
+describe("the login key (Gate 3 P-1)", () => {
+  test("is the first thing every socket sends, before any subscribe, and never in its URL", () => {
+    const key = "c".repeat(64);
+    localStorage.setItem("harness.login", key);
+    const live = new Live();
+    const ws = FakeSocket.all[0]!;
+    ws.readyState = 0; // still connecting, as a real socket is here
+    live.watch("s1");
+    ws.readyState = 1;
+    ws.onopen!();
+    expect(ws.sent.map((m) => JSON.parse(m).type)).toEqual(["login", "subscribe"]);
+    expect(JSON.parse(ws.sent[0]!)).toEqual({ type: "login", key });
+    expect(ws.url).not.toContain(key);
+    // A reconnect sends it again, first.
+    ws.close();
+    vi.advanceTimersByTime(600);
+    const again = FakeSocket.all[1]!;
+    again.onopen!();
+    expect(JSON.parse(again.sent[0]!)).toEqual({ type: "login", key });
+    live.close();
+    localStorage.clear();
   });
 });

@@ -1,5 +1,5 @@
 import { ArrowUp, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { pickable } from "../lib/agents";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
@@ -14,6 +14,10 @@ import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import type { Agent, AvatarState, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+
+// An attached image's chip loads through a link (P-1); its own chunk, so
+// the first load does not carry the link code.
+const LinkedImg = lazy(() => import("./Linked"));
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -493,7 +497,13 @@ export function Composer(props: {
           <ul className="chips" aria-label={t("composer.attachments")}>
             {pictures.map((x) => (
               <li key={x.key} className="chip image-chip">
-                {x.media_id ? <img src={`/api/media/${x.media_id}/content`} alt="" /> : <Loader2 size={14} className="spin" />}
+                {x.media_id ? (
+                  <Suspense fallback={null}>
+                    <LinkedImg url={`/api/media/${x.media_id}/content`} alt="" />
+                  </Suspense>
+                ) : (
+                  <Loader2 size={14} className="spin" />
+                )}
                 {x.name}
                 <button type="button" className="link" aria-label={`${t("composer.remove")} ${x.name}`} onClick={() => setPictures((p) => p.filter((y) => y !== x))}>
                   <X size={14} />

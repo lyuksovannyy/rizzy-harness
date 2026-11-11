@@ -546,11 +546,31 @@ pub async fn cancel_revoked(m: &Master, users: &[String]) {
             }
         }
     }
-    let running = rows.into_iter().filter(|r| {
-        r.running
-            && r.profile.as_deref() != Some("chat")
-            && r.owner_id.as_ref().is_some_and(|o| users.contains(o))
-    });
+    let running = rows
+        .into_iter()
+        .filter(|r| r.owner_id.as_ref().is_some_and(|o| users.contains(o)));
+    cancel_blocked(m, running).await;
+}
+
+/// The sweep again for the running sessions of `node_id`, once its link is
+/// up (after its hello): a turn whose owner lost access while the node was
+/// away, or while its cancel could not be sent, is cancelled now (Gate 3
+/// review P-3, T11).
+pub async fn cancel_revoked_on(m: &Master, node_id: &str) {
+    let node = node_id.to_string();
+    match m.inner.mirror.call(move |s| s.running_on(&node)).await {
+        Ok(rows) => cancel_blocked(m, rows.into_iter()).await,
+        Err(e) => {
+            tracing::warn!(node = %node_id, error = %e, "revocation sweep: could not list sessions")
+        }
+    }
+}
+
+/// Cancel every running agentic session in `rows` whose owner may no
+/// longer drive it.
+async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
+    let running =
+        rows.filter(|r| r.running && r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
     for row in running {
         let owner = row.owner_id.clone().unwrap_or_default();
         let blocked = match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
@@ -563,10 +583,47 @@ pub async fn cancel_revoked(m: &Master, users: &[String]) {
         };
         let Some(why) = blocked else { continue };
         tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
-        if let Err(e) = m.cancel(row.session_id).await {
-            tracing::warn!(session = %row.session_id, error = %e, "revocation sweep: cancel failed");
-        }
+        cancel_retrying(m, row.session_id).await;
     }
+}
+
+/// Attempts at a revocation cancel the node's queue had no room for (or
+/// did not acknowledge); the first wait, doubled after each.
+const CANCEL_TRIES: u32 = 5;
+const CANCEL_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Cancel `sid`; a cancel that could not be queued or was not acknowledged
+/// is tried again in the background (Gate 3 review P-3). A node that is
+/// offline gets it from the sweep at its next hello.
+async fn cancel_retrying(m: &Master, sid: harness_core::SessionId) {
+    match m.cancel(sid).await {
+        Err(crate::CommandError::Timeout) => {}
+        Err(crate::CommandError::NodeOffline(_)) => {
+            tracing::info!(session = %sid, "revocation sweep: node offline; cancelled when it is back");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(session = %sid, error = %e, "revocation sweep: cancel failed");
+            return;
+        }
+        Ok(()) => return,
+    }
+    let m = m.clone();
+    tokio::spawn(async move {
+        let mut wait = CANCEL_RETRY;
+        for attempt in 2..=CANCEL_TRIES {
+            tokio::time::sleep(wait).await;
+            wait *= 2;
+            match m.cancel(sid).await {
+                Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {}
+                Err(e) => {
+                    tracing::warn!(session = %sid, error = %e, attempt, "revocation sweep: cancel failed");
+                    return;
+                }
+                Ok(()) => return,
+            }
+        }
+    });
 }
 
 #[cfg(test)]

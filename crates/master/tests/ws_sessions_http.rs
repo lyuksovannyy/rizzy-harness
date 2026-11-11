@@ -4,7 +4,7 @@
 //! most 64 KiB, and a user has at most 8 sockets.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::time::Duration;
 
@@ -57,22 +57,12 @@ async fn req(t: &T, method: Method, path: &str, body: Option<Value>, c: &str) ->
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    rb.header("cookie", c)
-        .same_origin()
-        .send()
-        .await
-        .unwrap()
-        .status()
+    rb.login(c).same_origin().send().await.unwrap().status()
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -80,7 +70,7 @@ async fn post(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Respo
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -94,39 +84,41 @@ async fn login(t: &T, user: &str, pw: &str) -> String {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK);
-    cookie(&r)
+    cookie(r).await
 }
 
 /// The admin "alex" and a member "bob": (cookie, user id) each.
 async fn users(t: &T) -> [(String, String); 2] {
     let alex = cookie(
-        &post(
+        post(
             t,
             "/api/setup",
             json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}),
             None,
         )
         .await,
-    );
+    )
+    .await;
     let made = post(t, "/api/users", json!({"username": "bob"}), Some(&alex)).await;
     assert_eq!(made.status(), StatusCode::OK);
     let made: Value = made.json().await.unwrap();
     let pw = made["password"].as_str().unwrap();
     let first = login(t, "bob", pw).await;
     let bob = cookie(
-        &post(
+        post(
             t,
             "/api/me/password",
             json!({"current": pw, "new": "bobs own password"}),
             Some(&first),
         )
         .await,
-    );
+    )
+    .await;
     let mut out = Vec::new();
     for c in [alex, bob] {
         let me: Value = reqwest::Client::new()
             .get(format!("{}/api/me", t.base))
-            .header("cookie", &c)
+            .login(&c)
             .same_origin()
             .send()
             .await
@@ -150,6 +142,9 @@ async fn try_socket(t: &T, c: &str) -> Result<Socket, WsError> {
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await?;
+    s.send(Message::Text(common::socket_login(c).into()))
+        .await
+        .unwrap();
     // Answered: the server's loop is running.
     s.send(Message::Text("hello".into())).await.unwrap();
     assert_eq!(next_text(&mut s).await.unwrap()["type"], "error");
@@ -308,7 +303,7 @@ async fn changing_your_password_closes_all_your_sockets() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK);
-    let fresh = cookie(&r);
+    let fresh = cookie(r).await;
     assert_eq!(ended(&mut b, SECOND).await, SIGNED_OUT);
     assert_eq!(ended(&mut b2, SECOND).await, SIGNED_OUT);
     alive(&mut a).await;
@@ -322,12 +317,20 @@ async fn an_expired_login_closes_its_socket_on_the_timer() {
     let t = start(Duration::from_millis(100)).await;
     let [(_, alex_id), _] = users(&t).await;
     let id = "ab".repeat(32);
+    let key = "cd".repeat(32);
     let now = harness_core::now_ms();
     t.master
         .inner_mirror()
-        .ui_session_create(&auth::sha256_hex(&id), &alex_id, now, now + 1_500)
+        .ui_session_create(
+            &auth::sha256_hex(&id),
+            &auth::sha256_hex(&key),
+            &alex_id,
+            now,
+            now + 1_500,
+        )
         .unwrap();
     let c = format!("{}={id}", auth::cookie_name());
+    common::remember(&c, &json!({"login_key": key}));
     let mut s = socket(&t, &c).await;
     alive(&mut s).await;
     assert_eq!(ended(&mut s, Duration::from_secs(4)).await, SIGNED_OUT);

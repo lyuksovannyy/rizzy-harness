@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -18,6 +18,7 @@ use harness_store::artifacts::{ArtifactQuery, ArtifactRow, VersionRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::links::require_bytes;
 use super::{ApiError, ApiResult, agentic_gate, query_flag, require, visible_session};
 use crate::auth::Principal;
 use crate::workspaces::{self as ws, Perm};
@@ -482,13 +483,16 @@ async fn remove(
 }
 
 /// 302 to the newest ready version's download (scripts: `curl -L` with the
-/// API token).
+/// API token). Reached by link (a browser download), the redirect carries
+/// a fresh link of its own.
 async fn latest_download(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
+    let by_link = crate::auth::authenticate(&m, &headers).await.is_none();
+    let who = require_bytes(&m, &headers, &uri).await?;
     let row = visible(&m, &who, &id).await?;
     let aid = row.artifact_id.clone();
     let latest = m
@@ -503,6 +507,10 @@ async fn latest_download(
         "/api/artifacts/{}/versions/{}/download",
         row.artifact_id, latest.version_id
     );
+    let to = match by_link {
+        true => crate::auth::relink(&m, &headers, &to).ok_or_else(unknown)?,
+        false => to,
+    };
     Ok((StatusCode::FOUND, [(header::LOCATION, to)]).into_response())
 }
 
@@ -621,9 +629,10 @@ async fn send(
 async fn download(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
+    let who = require_bytes(&m, &headers, &uri).await?;
     let (_, v) = visible_version(&m, &who, &id, &vid).await?;
     send(&m, &headers, &v, false).await
 }
@@ -633,9 +642,10 @@ async fn download(
 async fn preview(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
+    let who = require_bytes(&m, &headers, &uri).await?;
     let (_, v) = visible_version(&m, &who, &id, &vid).await?;
     let shown = v
         .blob
@@ -669,9 +679,10 @@ fn blob_owner(who: &Principal, v: &VersionRow) -> ApiResult<String> {
 async fn thumb(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
+    let who = require_bytes(&m, &headers, &uri).await?;
     let (_, v) = visible_version(&m, &who, &id, &vid).await?;
     let blob = v
         .blob

@@ -1292,7 +1292,7 @@ impl NativeBackend {
                     {
                         return stopped(usage);
                     }
-                    let refusal = if subagents >= caps.max_subagents {
+                    let mut refusal = if subagents >= caps.max_subagents {
                         Some(format!(
                             "cap reached: at most {} sub-agents per turn",
                             caps.max_subagents
@@ -1305,6 +1305,40 @@ impl NativeBackend {
                     } else {
                         None
                     };
+                    // Through the approval path like any tool call (Gate 3
+                    // review P-2), before any child exists: a node that
+                    // denies `delegate` refuses it with its policy's reason,
+                    // and `ask_all` asks. Starting a sub-agent changes
+                    // nothing by itself (its own calls are gated), so under
+                    // `ask` it is not asked about.
+                    if refusal.is_none() {
+                        let key = harness_tools::call_key(&ctx.cwd, DELEGATE, &call.input);
+                        if !allowed_this_turn.contains(&key) {
+                            match host
+                                .approve(
+                                    &call.call_id,
+                                    DELEGATE,
+                                    &call.input,
+                                    harness_core::policy::ToolRisk::ReadOnly,
+                                )
+                                .await
+                            {
+                                harness_core::policy::Decision::Deny => {
+                                    refusal = Some(if ctx.cancel.is_cancelled() {
+                                        "[cancelled before approval]".to_string()
+                                    } else {
+                                        "The user denied this tool call. Ask how to proceed or \
+                                         try something else."
+                                            .to_string()
+                                    });
+                                }
+                                harness_core::policy::Decision::AllowSession => {
+                                    allowed_this_turn.insert(key);
+                                }
+                                harness_core::policy::Decision::Allow => {}
+                            }
+                        }
+                    }
                     match refusal {
                         Some(r) => {
                             if host

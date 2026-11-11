@@ -8,7 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e9-'));
 const D = `${S}/data`, R = `${S}/repo`;
@@ -52,6 +52,7 @@ const whisper = http.createServer((req, res) => {
     const code = await claimCode(`${D}/claim-code`, URL_);
     const b = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
     const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, permissions: ['microphone'] });
+    await keyed(ctx);
     const p = await ctx.newPage();
     PAGE = p;
     const errors = [];

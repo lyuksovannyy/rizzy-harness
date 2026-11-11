@@ -53,7 +53,18 @@ once with a copy button, and the user must change it at first login. Nobody choo
 temporary password, and it is never shown again; a reset also signs the user out
 everywhere. Scripts do the same with `POST /api/users` (`{"username": …}`) and
 `POST /api/users/{id}/password`; each answer carries the password in its `password` field. Everyone sees only their own
-chats. Agentic sessions run shell commands on a worker node, so an admin has
+chats.
+
+Scripts use the API token (`rizzy-harness token`) as `Authorization: Bearer …`, as before. A
+browser login's cookie alone no longer authenticates anything. Browsers send a cookie to every
+port of its host, so a server the agent starts on your machine (a dev server on
+`127.0.0.1:8000`, say) would receive it when you open that page. Each login therefore also has a
+login key. It comes in the body of the login answer (`login_key`) and must go with the cookie
+as the `x-harness-login` header, or as a WebSocket's first message
+(`{"type":"login","key":…}`). The web UI keeps the key in this origin's local storage, so a new
+tab stays signed in; signing out forgets it. A file the browser fetches by itself (a picture, a
+video, a download) gets a short-lived link from the UI for that one address. Copied out of the
+browser, such a link does nothing without the login. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
 
 ```bash
@@ -617,7 +628,7 @@ narrowing node.toml applies to existing chats.
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
-denied_tools = []                    # e.g. ["bash"]
+denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
 graphify = false                     # let agents query a graphify knowledge graph (see below)
 env_pass = []                        # extra variables the agent's shell gets (see below)
@@ -626,6 +637,8 @@ env_pass = []                        # extra variables the agent's shell gets (s
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
 max_steps = 50                       # model calls one turn may make (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
+max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
+max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off

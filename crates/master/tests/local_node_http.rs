@@ -5,7 +5,7 @@
 //! local_node_users = "granted"` lets everyone with the grant in.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,7 +126,7 @@ async fn send(
     }
     match auth {
         Some(TOKEN) => rb = rb.bearer_auth(TOKEN),
-        Some(c) => rb = rb.header("cookie", c).same_origin(),
+        Some(c) => rb = rb.login(c).same_origin(),
         None => {}
     }
     let r = rb.send().await.unwrap();
@@ -135,7 +135,11 @@ async fn send(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn call(

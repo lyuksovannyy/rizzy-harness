@@ -25,9 +25,11 @@ import {
   versionThumbUrl,
 } from "../lib/artifacts";
 import { bytes } from "../lib/bytes";
+import { useLink } from "../lib/links";
 import { mediaApi, safeToDecode } from "../lib/media";
 import { artifactHash, mediaHash } from "../lib/routes";
 import { when } from "../lib/when";
+import { LinkedA, LinkedImg } from "./Linked";
 import type { ArtifactsPageProps, FeaturePageProps } from "./pages";
 
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -68,7 +70,7 @@ export function ArtifactIcon({ a }: { a: Pick<Artifact, "artifact_id" | "kind" |
   const [broken, setBroken] = useState(false);
   const v = a.latest;
   if (v?.has_thumb && !broken) {
-    return <img className="artifact-thumb" src={versionThumbUrl(a.artifact_id, v.version_id)} alt="" onError={() => setBroken(true)} />;
+    return <LinkedImg className="artifact-thumb" url={versionThumbUrl(a.artifact_id, v.version_id)} alt="" onError={() => setBroken(true)} />;
   }
   const Icon = ICONS[a.kind ?? ""] ?? File;
   return (
@@ -152,9 +154,9 @@ export function ArtifactActions(props: { a: Artifact | ArtifactWithVersions; can
       ) : (
         <>
           {a.latest?.status === "ready" && (
-            <a className="button-like" href={latestUrl(a.artifact_id)} download>
+            <LinkedA className="button-like" url={latestUrl(a.artifact_id)} download>
               Download
-            </a>
+            </LinkedA>
           )}
           {a.media_id && can.media && (
             <a className="link small" href={mediaHash(null, a.media_id)}>
@@ -273,9 +275,9 @@ export function Versions(props: { a: Pick<Artifact, "artifact_id" | "mine">; ver
                 </button>
                 <span className="grow" />
                 {v.status === "ready" && (
-                  <a className="link small" href={downloadUrl(a.artifact_id, v.version_id)} download>
+                  <LinkedA className="link small" url={downloadUrl(a.artifact_id, v.version_id)} download>
                     Download
-                  </a>
+                  </LinkedA>
                 )}
                 {a.mine && v.status === "ready" && (
                   <button type="button" className="link small" onClick={() => void act(() => artifactsApi.pin(a.artifact_id, v.version_id, !v.pinned))}>
@@ -340,12 +342,13 @@ function Preview({ a, v }: { a: ArtifactWithVersions; v: ArtifactVersion }) {
       .catch(() => {});
   }, [mediaId, v.version_id, v.kind, own]);
   const safe = own ?? vouched;
+  // A link: a player or picture cannot send the login key (P-1).
+  const src = useLink(previewUrl(a.artifact_id, v.version_id));
   if (broken) return <p className="muted small">This browser can't show this file; download it instead.</p>;
-  const src = previewUrl(a.artifact_id, v.version_id);
   if (v.kind === "video") return <video className="artifact-preview" src={src} controls preload="metadata" onError={() => setBroken(true)} />;
   if (v.kind === "audio") return <audio src={src} controls preload="metadata" onError={() => setBroken(true)} />;
   if (safe) return <img className="artifact-preview" src={src} alt={a.name} onError={() => setBroken(true)} />;
-  return v.has_thumb ? <img className="artifact-thumb large" src={versionThumbUrl(a.artifact_id, v.version_id)} alt={a.name} /> : null;
+  return v.has_thumb ? <LinkedImg className="artifact-thumb large" url={versionThumbUrl(a.artifact_id, v.version_id)} alt={a.name} /> : null;
 }
 
 /** What the node reported about a version, as label and value pairs. */
