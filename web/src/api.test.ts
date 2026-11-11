@@ -4,6 +4,7 @@
 // origin finds it in localStorage; no other port ever can.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, call, forgetLogin, keyed, login, loginKey } from "./api";
+import { pageApi } from "./apiPages";
 
 const KEY = "a".repeat(64);
 let answers: { status: number; body: unknown }[] = [];
@@ -27,10 +28,10 @@ describe("the login key", () => {
     await api.me().catch(() => {});
     expect(sent(0)).toBeNull();
     answers = [{ status: 200, body: { ok: true, login_key: KEY } }];
-    await api.login("alex", "admin password");
+    await pageApi.login("alex", "admin password");
     expect(loginKey()).toBe(KEY);
     await api.me();
-    await api.approve("s1", "a1", "deny");
+    await pageApi.approve("s1", "a1", "deny");
     await api.events("s1");
     expect([sent(2), sent(3), sent(4)]).toEqual([KEY, KEY, KEY]);
     // A JSON body keeps its type beside the key.
@@ -40,7 +41,7 @@ describe("the login key", () => {
   test("a password change's new login replaces it", async () => {
     localStorage.setItem("harness.login", KEY);
     answers = [{ status: 200, body: { ok: true, login_key: "b".repeat(64) } }];
-    await api.changePassword("old", "a new password");
+    await pageApi.changePassword("old", "a new password");
     expect(sent(0)).toBe(KEY);
     expect(loginKey()).toBe("b".repeat(64));
   });

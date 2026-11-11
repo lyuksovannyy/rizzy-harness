@@ -73,6 +73,11 @@ const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB 
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
 // form moved to its own chunk. The rest is for the Phase C image attach in
 // the composer (~0.4). Still under the long-standing 110 KB first-load budget.
+// Three security fixes had brought it back to 103.9. On 2026-11-11 what only
+// lazy pages use left the first load (the page-only API calls, the model plan
+// helpers, the page-only English strings, 19 of the project icons: 4.6 KB), so
+// the initial load measured 99.3. The ceiling stays 104: the room is for the
+// next fixes, not for features.
 const PROGRAM_INITIAL_KB = 104;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");

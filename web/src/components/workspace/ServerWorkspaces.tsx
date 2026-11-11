@@ -4,7 +4,7 @@
 // the owners are gone or locked out) or to delete it. Server admins see who
 // is in a workspace, never its chats.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../../api";
+import { pageApi } from "../../apiPages";
 import { t } from "../../lib/i18n";
 import { workspaceName } from "../../lib/workspaces";
 import type { AdminWorkspace, AdminWorkspaceMember, Me } from "../../types";
@@ -17,7 +17,7 @@ function Members(props: { me: Me; w: AdminWorkspace; onChanged: () => void }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
-    api
+    pageApi
       .adminWorkspaceMembers(w.workspace_id)
       .then((r) => setMembers(r.members))
       .catch((x) => setErr(message(x)));
@@ -28,7 +28,7 @@ function Members(props: { me: Me; w: AdminWorkspace; onChanged: () => void }) {
     setBusy(true);
     setErr(null);
     try {
-      await api.setWorkspaceOwner(w.workspace_id, m.user_id);
+      await pageApi.setWorkspaceOwner(w.workspace_id, m.user_id);
       load();
       props.onChanged();
     } catch (x) {
@@ -83,7 +83,7 @@ export function ServerWorkspaces(props: { me: Me; onChanged?: () => void }) {
   const changed = props.onChanged ?? (() => {});
 
   const load = useCallback(() => {
-    api
+    pageApi
       .adminWorkspaces()
       .then((r) => {
         setList(r.workspaces);
@@ -108,7 +108,7 @@ export function ServerWorkspaces(props: { me: Me; onChanged?: () => void }) {
   const remove = (w: AdminWorkspace) => {
     if (!confirm(`Delete ${w.name}? Its members' chats go back to their Personal workspaces; none is deleted.`)) return;
     void run(async () => {
-      await api.adminDeleteWorkspace(w.workspace_id);
+      await pageApi.adminDeleteWorkspace(w.workspace_id);
       if (open === w.workspace_id) setOpen(null);
       load();
     });
@@ -125,7 +125,7 @@ export function ServerWorkspaces(props: { me: Me; onChanged?: () => void }) {
             disabled={busy}
             onChange={(e) => {
               const on = e.target.checked;
-              void run(async () => setPolicy((await api.saveWorkspacePolicy(on)).members_can_create));
+              void run(async () => setPolicy((await pageApi.saveWorkspacePolicy(on)).members_can_create));
             }}
           />
           Members can create workspaces

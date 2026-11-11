@@ -36,6 +36,7 @@ const api = {
   graphify: vi.fn(() => Promise.resolve(status)),
 };
 vi.mock("../api", () => ({ api, HttpError: class extends Error {} }));
+vi.mock("../apiPages", () => ({ pageApi: api }));
 const { SavingsSettings } = await import("./Savings");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

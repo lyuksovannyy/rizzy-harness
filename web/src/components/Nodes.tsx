@@ -1,6 +1,6 @@
 // Settings → Nodes (admin): worker machines, adding one, revoking one.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import type { NodeInfo, RemoteNode } from "../types";
 import { shownName } from "../md/hiddenChars";
 
@@ -10,7 +10,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
   const [join, setJoin] = useState<{ token: string; port: number; fingerprint: string; expires_in_s: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const load = useCallback(() => {
-    api
+    pageApi
       .remoteNodes()
       .then((r) => {
         setRemote(r.nodes);
@@ -62,7 +62,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
                       className="danger"
                       onClick={async () => {
                         if (!confirm(`Revoke ${n.node_id}? It is disconnected and its key stops working.`)) return;
-                        await api.revokeNode(n.node_id).catch((x) => setErr(String(x)));
+                        await pageApi.revokeNode(n.node_id).catch((x) => setErr(String(x)));
                         load();
                       }}
                     >
@@ -99,7 +99,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
                   type="button"
                   className="primary"
                   onClick={() =>
-                    api
+                    pageApi
                       .joinToken()
                       .then(setJoin)
                       .catch((x) => setErr(String(x)))

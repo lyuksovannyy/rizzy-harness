@@ -3,7 +3,7 @@
 // A step once shown stays mounted (hidden while another is current), so
 // going Back finds every field, selection and search as it was left.
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import { browserTimeZone } from "../lib/greeting";
 import type { Me, Prefs } from "../types";
 import { ProfileFields, SearchEngineFields } from "./forms";
@@ -51,7 +51,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   const finish = async () => {
     setErr(null);
     try {
-      props.onDone(await api.saveSettings({ ...prefs, onboarded: true }));
+      props.onDone(await pageApi.saveSettings({ ...prefs, onboarded: true }));
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     }

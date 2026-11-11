@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 
 /** Self-service password change; `forced` after an admin-set temporary password. */
 export function ChangePassword(props: { forced: boolean; onDone: () => void; onCancel?: () => void }) {
@@ -18,7 +18,7 @@ export function ChangePassword(props: { forced: boolean; onDone: () => void; onC
     setBusy(true);
     setErr(null);
     try {
-      await api.changePassword(current, next);
+      await pageApi.changePassword(current, next);
       props.onDone();
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));

@@ -16,8 +16,8 @@ const saveAgentModels = vi.fn();
 const providerModels = vi.fn();
 const refreshProviderModels = vi.fn();
 const removeProviderModel = vi.fn();
-vi.mock("../api", () => ({
-  api: { testProvider, saveProvider, saveAgentModels, providerModels, refreshProviderModels, removeProviderModel },
+vi.mock("../apiPages", () => ({
+  pageApi: { testProvider, saveProvider, saveAgentModels, providerModels, refreshProviderModels, removeProviderModel },
 }));
 
 const { nameFromUrl, ProviderForm, useCountdown } = await import("./ProviderForm");

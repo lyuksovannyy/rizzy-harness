@@ -1,6 +1,6 @@
 import { APP_TITLE } from "../lib/brand";
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import { useCopy } from "../md/copy";
 import { Eye, EyeOff } from "lucide-react";
 import { MIN_PASSWORD, passwordStrength } from "../lib/password";
@@ -26,7 +26,7 @@ export function Login({ onDone }: { onDone: () => void }) {
   const againRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    api
+    pageApi
       .setupStatus()
       .then((r) => setClaimed(r.claimed))
       .catch(() => setClaimed(true));
@@ -43,8 +43,8 @@ export function Login({ onDone }: { onDone: () => void }) {
     setBusy(true);
     setErr(null);
     try {
-      if (claimed) await api.login(username.trim(), password);
-      else await api.setup(code.trim(), username.trim().toLowerCase(), password);
+      if (claimed) await pageApi.login(username.trim(), password);
+      else await pageApi.setup(code.trim(), username.trim().toLowerCase(), password);
       onDone();
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));

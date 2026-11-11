@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import type { Me, Role, User } from "../types";
 
 /** A temporary password the server just made (AUDIT L14). It lives only in
@@ -51,7 +51,7 @@ export function Users({ me }: { me: Me }) {
   const [shown, setShown] = useState<Shown | null>(null);
 
   const load = useCallback(() => {
-    api
+    pageApi
       .users()
       .then((r) => setUsers(r.users))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
@@ -71,7 +71,7 @@ export function Users({ me }: { me: Me }) {
   const create = (e: React.FormEvent) => {
     e.preventDefault();
     void run(async () => {
-      const u = await api.createUser({ username: username.trim(), role, can_agentic: agentic });
+      const u = await pageApi.createUser({ username: username.trim(), role, can_agentic: agentic });
       setShown({ username: u.username, password: u.password });
       setUsername("");
       setAgentic(false);
@@ -112,7 +112,7 @@ export function Users({ me }: { me: Me }) {
                     aria-label={`Server role of ${u.username}`}
                     value={u.role}
                     disabled={self}
-                    onChange={(e) => run(() => api.updateUser(u.user_id, { role: e.target.value as Role }))}
+                    onChange={(e) => run(() => pageApi.updateUser(u.user_id, { role: e.target.value as Role }))}
                   >
                     <option value="member">User</option>
                     <option value="admin">Server admin</option>
@@ -124,7 +124,7 @@ export function Users({ me }: { me: Me }) {
                     aria-label={`agentic access for ${u.username}`}
                     checked={u.can_agentic}
                     disabled={self || u.role === "admin"}
-                    onChange={(e) => run(() => api.updateUser(u.user_id, { can_agentic: e.target.checked }))}
+                    onChange={(e) => run(() => pageApi.updateUser(u.user_id, { can_agentic: e.target.checked }))}
                   />
                 </td>
                 <td>
@@ -137,21 +137,21 @@ export function Users({ me }: { me: Me }) {
                         onClick={() => {
                           if (!confirm(`Reset ${u.username}'s password? They are signed out everywhere.`)) return;
                           void run(async () => {
-                            const r = await api.resetPassword(u.user_id);
+                            const r = await pageApi.resetPassword(u.user_id);
                             setShown({ username: r.username, password: r.password });
                           });
                         }}
                       >
                         Reset password
                       </button>
-                      <button onClick={() => run(() => api.updateUser(u.user_id, { disabled: !u.disabled }))}>
+                      <button onClick={() => run(() => pageApi.updateUser(u.user_id, { disabled: !u.disabled }))}>
                         {u.disabled ? "Enable" : "Disable"}
                       </button>
                       <button
                         className="danger"
                         onClick={() => {
                           if (confirm(`Delete ${u.username}? Their chats stay on disk but become inaccessible.`))
-                            void run(() => api.deleteUser(u.user_id));
+                            void run(() => pageApi.deleteUser(u.user_id));
                         }}
                       >
                         Delete

@@ -21,6 +21,7 @@ const api = {
   demoProvider: vi.fn(),
 };
 vi.mock("../api", () => ({ api }));
+vi.mock("../apiPages", () => ({ pageApi: api }));
 vi.mock("./forms", () => ({ ProfileFields: () => <div>profile fields</div>, SearchEngineFields: () => <div>engines</div> }));
 
 const { default: Onboarding } = await import("./Onboarding");

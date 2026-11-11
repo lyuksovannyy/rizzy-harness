@@ -3,7 +3,7 @@
 // start from, and the two choices that are the member's own in a team
 // workspace: whether their memory is used there, and leaving.
 import { useEffect, useState } from "react";
-import { api } from "../../api";
+import { pageApi } from "../../apiPages";
 import { t } from "../../lib/i18n";
 import { modelLabel } from "../../lib/models";
 import { roleSummary } from "../../lib/workspaceAdmin";
@@ -24,9 +24,9 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
   // left or was moved, here or by another admin).
   useEffect(() => {
     const fail = (x: unknown) => setErr({ at: "load", text: message(x) });
-    api.workspace(id).then(setDetail).catch(fail);
+    pageApi.workspace(id).then(setDetail).catch(fail);
     // Personal has only its owner.
-    if (!ws.personal) api.workspaceMembers(id).then((r) => setMembers(r.members)).catch(fail);
+    if (!ws.personal) pageApi.workspaceMembers(id).then((r) => setMembers(r.members)).catch(fail);
   }, [id, ws.personal, ws.members, ws.role]);
 
   const run = async (at: Where, f: () => Promise<void>) => {
@@ -50,7 +50,7 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
       : `Leave ${ws.name}?`;
     if (!self || !confirm(`${what} Your chats here go back to your Personal workspace.`)) return;
     void run("leave", async () => {
-      await api.removeWorkspaceMember(id, self);
+      await pageApi.removeWorkspaceMember(id, self);
       props.onLeft();
     });
   };
@@ -132,7 +132,7 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
               disabled={!detail || busy}
               onChange={(e) => {
                 const on = e.target.checked;
-                void run("memory", async () => setDetail(await api.setWorkspaceMemory(id, on)));
+                void run("memory", async () => setDetail(await pageApi.setWorkspaceMemory(id, on)));
               }}
             />
             Use my memory in this workspace

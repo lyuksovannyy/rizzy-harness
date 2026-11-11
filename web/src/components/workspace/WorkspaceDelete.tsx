@@ -2,7 +2,7 @@
 // unlocks it. Chats are never deleted with it: each member's go back to
 // their Personal workspace. Then the app goes home, in Personal.
 import { useState } from "react";
-import { api } from "../../api";
+import { pageApi } from "../../apiPages";
 import { message, type WorkspacePanelProps } from "./panel";
 
 export function WorkspaceDelete(props: WorkspacePanelProps) {
@@ -15,7 +15,7 @@ export function WorkspaceDelete(props: WorkspacePanelProps) {
     setBusy(true);
     setErr(null);
     try {
-      await api.deleteWorkspace(ws.workspace_id);
+      await pageApi.deleteWorkspace(ws.workspace_id);
       props.onLeft();
     } catch (x) {
       setErr(message(x));

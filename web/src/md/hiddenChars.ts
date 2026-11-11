@@ -17,14 +17,42 @@
 export const HIDDEN_SRC =
   "[\\u061C\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u206F\\uFEFF\\uFFF0-\\uFFF8\\uE000-\\uF8FF\\u{1D173}-\\u{1D17A}\\u{E0000}-\\u{E0FFF}]";
 
-/** What showHidden marks, as a regex source: the hidden set; control
- * characters other than tab and newline (so a carriage return too); spaces
- * that are not the plain space and blanks that render as nothing (no-break
- * and typographic spaces, the line and paragraph separators, the soft
- * hyphen, the combining grapheme joiner, the Hangul fillers, the Khmer and
- * Mongolian invisible vowels); and the BMP variation selectors except
- * right after a pictograph, where they pick the emoji's style. */
-export const SHOWN_SRC = `${HIDDEN_SRC}|[\\x00-\\x08\\x0B-\\x1F\\x7F-\\x9F\\u00A0\\u00AD\\u034F\\u115F\\u1160\\u1680\\u17B4\\u17B5\\u180E\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u3164\\uFFA0]|(?<!\\p{Extended_Pictographic})[\\uFE00-\\uFE0F]`;
+/** Characters that render as nothing or as a blank, or only change how their
+ * neighbours are laid out, but are letters, symbols or marks by category and
+ * so a rule by category would pass them: the braille blank, the Hangul and
+ * Khmer fillers, the combining grapheme joiner, a musical null notehead and
+ * the object replacement character. Most are also default-ignorable; they
+ * are named so that an engine with older Unicode tables still marks them. */
+export const NAMED_BLANKS = [
+  "͏", // combining grapheme joiner
+  "ᅟ", // Hangul choseong filler
+  "ᅠ", // Hangul jungseong filler
+  "឴", // Khmer inherent vowel Aq
+  "឵", // Khmer inherent vowel Aa
+  "⠀", // braille pattern blank
+  "ㅤ", // Hangul filler
+  "ﾠ", // halfwidth Hangul filler
+  "￼", // object replacement character
+  "\u{1D159}", // musical symbol null notehead
+];
+
+/** What showHidden marks, as a regex source. A rule, not a list: every
+ * character that is invisible or blank when drawn, by Unicode category (an
+ * engine that has the property escapes, ES2018, which every browser the
+ * build targets does): control (Cc; a tab and a line feed stay, they are how
+ * text is laid out, and the card counts their runs), format (Cf: bidi
+ * controls, zero-width characters, the soft hyphen, the interlinear
+ * annotation marks, shorthand and Egyptian format controls), private use
+ * (Co, every plane), unassigned and noncharacter (Cn), lone surrogates (Cs),
+ * every space but the plain one (Zs), line and paragraph separators (Zl,
+ * Zp), and the default-ignorable code points (Hangul fillers, variation
+ * selectors, tags, the combining grapheme joiner), plus NAMED_BLANKS. This
+ * contains the strip's set above. A variation selector right after a
+ * pictograph picks the emoji's style and is not marked. */
+export const SHOWN_SRC =
+  "(?![ \\t\\n\\uFE00-\\uFE0F])[\\p{Cc}\\p{Cf}\\p{Co}\\p{Cn}\\p{Cs}\\p{Zs}\\p{Zl}\\p{Zp}\\p{Default_Ignorable_Code_Point}" +
+  NAMED_BLANKS.join("") +
+  "]|(?<!\\p{Extended_Pictographic})[\\uFE00-\\uFE0F]";
 const SHOWN = new RegExp(SHOWN_SRC, "gu");
 
 /** `<U+202E>` for one character. */
