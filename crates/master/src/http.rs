@@ -898,7 +898,12 @@ async fn list_sessions(
         Some(a) => r.workspace_id.as_deref() == Some(a.id()),
         None => true,
     };
-    let rows = m.inner.mirror.call(|s| s.sessions()).await?;
+    let owner = who.user_id.clone();
+    let rows = m
+        .inner
+        .mirror
+        .call(move |s| s.sessions_of(owner.as_deref()))
+        .await?;
     let links = crate::projects::links(&m).await?;
     let mut list: Vec<serde_json::Value> = rows
         .iter()

@@ -530,13 +530,22 @@ pub fn sweep_revoked(m: &Master, users: Vec<String>) {
 /// server grant, or their account was disabled or deleted. Failures are
 /// logged, never returned.
 pub async fn cancel_revoked(m: &Master, users: &[String]) {
-    let rows = match m.inner.mirror.call(|s| s.sessions()).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "revocation sweep: could not list sessions");
-            return;
+    let mut rows = Vec::new();
+    for user in users {
+        let user = user.clone();
+        match m
+            .inner
+            .mirror
+            .call(move |s| s.sessions_of(Some(&user)))
+            .await
+        {
+            Ok(r) => rows.extend(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "revocation sweep: could not list sessions");
+                return;
+            }
         }
-    };
+    }
     let running = rows.into_iter().filter(|r| {
         r.running
             && r.profile.as_deref() != Some("chat")

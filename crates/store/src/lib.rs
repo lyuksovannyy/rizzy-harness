@@ -74,6 +74,29 @@ pub enum AppendOutcome {
     /// The writer is a revoked node (refused even for frames queued before
     /// the revoke).
     Revoked,
+    /// The next event in order, but not one the log takes (`reason` says
+    /// which rule it breaks; it names no content). Nothing is stored. An
+    /// honest node's own log refuses it first, so on a mirror it means a
+    /// broken or hostile node: the master freezes the session
+    /// (`Store::freeze`) as it does a diverged one.
+    Refused {
+        seq: u64,
+        reason: &'static str,
+    },
+}
+
+/// A session a node lists in its hello, as the mirror sees it
+/// (`Store::hello_states`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelloState {
+    /// Mirrored up to this `seq` (0: not mirrored yet).
+    Head(u64),
+    /// Deleted here: the node is told again.
+    Deleted,
+    /// Diverged or refused: nothing is asked for.
+    Frozen,
+    /// Another node's session: nothing is revealed or sent.
+    Foreign,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +278,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- §3): every later append is refused until the session is deleted.
     diverged_seq INTEGER
 );
+-- Listings are per owner (`Store::sessions_of`).
+CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner_id, updated_ms);
 -- How far each user has looked at each chat (questions stop needing
 -- attention once seen).
 CREATE TABLE IF NOT EXISTS seen (
@@ -275,7 +300,10 @@ CREATE TABLE IF NOT EXISTS events (
 -- that was offline during the delete cannot resurrect them.
 CREATE TABLE IF NOT EXISTS deleted_sessions (
     session_id TEXT PRIMARY KEY,
-    ts_ms      INTEGER NOT NULL
+    ts_ms      INTEGER NOT NULL,
+    -- The node that owned it, so only that node is told it was deleted
+    -- (NULL when the mirror never had a row for it).
+    node_id    TEXT
 );
 -- Uploaded documents waiting to be sent with a message (text extracted).
 -- Consumed (deleted) when the message is sent: the text then lives in the
@@ -437,11 +465,82 @@ pub struct SearchHit {
     pub updated_ms: i64,
 }
 
+/// The largest event the log takes: its payload as JSON plus its kind
+/// (Gate 3 review L-3). Half the link's 8 MiB frame, so one event always
+/// fits a frame with its envelope. The largest legitimate event today is a
+/// `user_message`: the prompt text (the HTTP body limit is 2 MB) plus up to
+/// five attachments of 100,000 characters, about 2.5 MB of JSON in a
+/// realistic worst case; `Master::prompt` refuses a message that would not
+/// fit. Everything else is far smaller (tool output is cut to 30,000
+/// characters, model output by its token limit).
+pub const MAX_EVENT_BYTES: usize = 4 << 20;
+/// A session title in the row (and the search index) is cut to this many
+/// characters; the event keeps it whole. Sub-agent titles are under 100.
+pub const MAX_TITLE_CHARS: usize = 200;
+/// Identifiers and paths a node supplies for the row are refused past
+/// these lengths rather than cut: a cut one would name something else.
+/// `PATH_MAX` on Linux.
+pub const MAX_CWD_BYTES: usize = 4096;
+pub const MAX_MODEL_BYTES: usize = 256;
+/// Agent ids are at most 32 characters (`harness_agents::valid_id`).
+pub const MAX_AGENT_ID_BYTES: usize = 64;
+const MAX_KIND_BYTES: usize = 64;
+
+/// A title as the row stores it: at most `MAX_TITLE_CHARS` characters, cut
+/// on a character boundary.
+fn row_title(t: &str) -> String {
+    match t.char_indices().nth(MAX_TITLE_CHARS) {
+        Some((at, _)) => t[..at].to_string(),
+        None => t.to_string(),
+    }
+}
+
+/// Why the log does not take `e`, the next event in order with a payload of
+/// `payload_len` bytes of JSON; `None` when it does. The reasons name the
+/// rule only, never content.
+fn refusal(e: &RawEvent, payload_len: usize) -> Option<&'static str> {
+    if e.kind.len() > MAX_KIND_BYTES {
+        return Some("event kind too long");
+    }
+    if payload_len + e.kind.len() > MAX_EVENT_BYTES {
+        return Some("event too large");
+    }
+    let longer = |v: Option<&serde_json::Value>, max: usize| {
+        v.and_then(|v| v.as_str()).is_some_and(|s| s.len() > max)
+    };
+    let p = &e.payload;
+    match e.kind.as_str() {
+        // The row is a session's creation record: set once, by its first
+        // event. A later `session_created` would rewrite the owner (through
+        // its parent), `incognito` and `profile` on a node's word alone
+        // (Gate 3 review L-2), and no node writes one.
+        "session_created" if e.seq != 1 => Some("session_created after the session's first event"),
+        "session_created" if longer(p.get("cwd"), MAX_CWD_BYTES) => Some("cwd too long"),
+        "session_created" if longer(p.get("model"), MAX_MODEL_BYTES) => Some("model too long"),
+        "session_created" if longer(p.get("agent_id"), MAX_AGENT_ID_BYTES) => {
+            Some("agent id too long")
+        }
+        "session_created"
+            if !matches!(p.get("profile"), None | Some(serde_json::Value::Null))
+                && !matches!(
+                    p.get("profile").and_then(|v| v.as_str()),
+                    Some("chat" | "agentic")
+                ) =>
+        {
+            Some("unknown profile")
+        }
+        "agent_changed" if longer(p.pointer("/agent/agent_id"), MAX_AGENT_ID_BYTES) => {
+            Some("agent id too long")
+        }
+        _ => None,
+    }
+}
+
 /// What a newly appended event contributes to the search index.
 fn index_text(kind: &str, payload: &serde_json::Value) -> Option<(&'static str, String)> {
     let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
     match kind {
-        "session_created" => text("title").map(|t| ("title", t)),
+        "session_created" => text("title").map(|t| ("title", row_title(&t))),
         "user_message" | "assistant_message" => text("text")
             .filter(|t| !t.trim().is_empty())
             .map(|t| ("body", t)),
@@ -572,13 +671,25 @@ impl Store {
             )
             .optional()?;
         if existing.is_none() {
-            let deleted: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM deleted_sessions WHERE session_id = ?1)",
-                params![sid],
-                |r| r.get(0),
-            )?;
-            if deleted {
-                return Ok(AppendOutcome::Deleted);
+            let deleted: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT node_id FROM deleted_sessions WHERE session_id = ?1",
+                    params![sid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match deleted {
+                // Another node's deleted session: refused as for a live one,
+                // without saying it was deleted (Gate 3 review L-6).
+                Some(Some(node)) if node != owner => {
+                    return Err(StoreError::WrongOwner {
+                        session_id: e.session_id,
+                        owner: node,
+                        claimed: owner.to_string(),
+                    });
+                }
+                Some(_) => return Ok(AppendOutcome::Deleted),
+                None => {}
             }
         }
         let head = match &existing {
@@ -619,9 +730,13 @@ impl Store {
         if e.seq != head + 1 {
             return Ok(AppendOutcome::Gap { head });
         }
+        let payload = serde_json::to_string(&e.payload)?;
+        if let Some(reason) = refusal(e, payload.len()) {
+            return Ok(AppendOutcome::Refused { seq: e.seq, reason });
+        }
         tx.execute(
             "INSERT INTO events (session_id, seq, ts_ms, kind, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![sid, e.seq as i64, e.ts_ms, e.kind, serde_json::to_string(&e.payload)?],
+            params![sid, e.seq as i64, e.ts_ms, e.kind, payload],
         )?;
         if existing.is_none() {
             tx.execute(
@@ -648,25 +763,44 @@ impl Store {
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
                 };
+                // A parent is kept only when it is another session of the
+                // same node (Gate 3 review L-1): a node cannot attach its
+                // session to another node's chat and so reach that chat's
+                // project. Anything else is dropped and the session is an
+                // ordinary top-level one.
+                let parent = match opt("parent_session") {
+                    Some(p) => tx
+                        .query_row(
+                            "SELECT p.session_id FROM sessions p
+                             WHERE p.session_id = ?1 AND p.node_id = ?2 AND p.session_id != ?3",
+                            params![p, owner, sid],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()?,
+                    None => None,
+                };
+                // Every listing loads the title: cut, never refused (it is
+                // free text; the event keeps the whole of it).
+                let title = row_title(&s("title"));
                 tx.execute(
                     "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8 WHERE session_id = ?1",
-                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), opt("parent_session")],
+                    params![sid, title, s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent],
                 )?;
-                // A sub-agent's session belongs to whoever owns its parent
-                // (same node only: a node cannot adopt another node's chats).
-                if let Some(parent) = opt("parent_session") {
+                // A sub-agent's session belongs to whoever owns its parent,
+                // so the two have the same owner by construction; only into
+                // an empty owner: no event changes one once set.
+                if let Some(parent) = &parent {
                     tx.execute(
-                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2 AND p.node_id = ?3) WHERE session_id = ?1",
-                        params![sid, parent, owner],
+                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2) WHERE session_id = ?1 AND owner_id IS NULL",
+                        params![sid, parent],
                     )?;
-                    // ...and lives in its parent's workspace, under the same
-                    // rule (no rows on a node: it never maps chats).
+                    // ...and lives in its parent's workspace (no rows on a
+                    // node: it never maps chats).
                     tx.execute(
                         "INSERT OR IGNORE INTO session_workspaces (session_id, workspace_id)
                          SELECT ?1, sw.workspace_id FROM session_workspaces sw
-                         JOIN sessions p ON p.session_id = sw.session_id
-                         WHERE sw.session_id = ?2 AND p.node_id = ?3",
-                        params![sid, parent, owner],
+                         WHERE sw.session_id = ?2",
+                        params![sid, parent],
                     )?;
                 }
             }
@@ -856,6 +990,13 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let id = sid.to_string();
+        let node: Option<String> = tx
+            .query_row(
+                "SELECT node_id FROM sessions WHERE session_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
         tx.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
         let indexed = tx.execute("DELETE FROM chat_fts WHERE session_id = ?1", params![id])?;
         if indexed > 0 {
@@ -877,8 +1018,10 @@ impl Store {
         )?;
         if tombstone {
             tx.execute(
-                "INSERT OR REPLACE INTO deleted_sessions (session_id, ts_ms) VALUES (?1, ?2)",
-                params![id, harness_core::now_ms()],
+                "INSERT INTO deleted_sessions (session_id, ts_ms, node_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET ts_ms = ?2,
+                     node_id = COALESCE(?3, deleted_sessions.node_id)",
+                params![id, harness_core::now_ms(), node],
             )?;
         }
         // Rows that name the chat without a foreign key (it is deleted on
@@ -901,6 +1044,26 @@ impl Store {
             )
             .optional()?;
         Ok(v.flatten().map(|s| s as u64))
+    }
+
+    /// Freeze `node`'s session `sid` at `seq` after a `Refused` append: from
+    /// now on every append is refused as for a diverged session (PLAN.md
+    /// §3), since the mirror can no longer hold a contiguous copy. A session
+    /// refused at its first event gets an empty frozen row, so its later
+    /// frames are refused too instead of asking for it again and again.
+    /// Another node's session is left alone. Returns whether this call froze it.
+    pub fn freeze(&self, sid: SessionId, node: &str, seq: u64) -> Result<bool> {
+        let conn = self.lock();
+        let id = sid.to_string();
+        let now = harness_core::now_ms();
+        let n = conn.execute(
+            "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, diverged_seq)
+             VALUES (?1, ?2, ?3, ?3, 0, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET diverged_seq = ?4
+             WHERE sessions.node_id = ?2 AND sessions.diverged_seq IS NULL",
+            params![id, node, now, seq as i64],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn is_deleted(&self, sid: SessionId) -> Result<bool> {
@@ -1008,6 +1171,16 @@ impl Store {
     }
 
     /// The pinned key of a node that is not revoked.
+    /// Whether `node_id` is a registered node that was revoked (one indexed
+    /// read; an id with no row, such as the embedded node, is not).
+    pub fn node_is_revoked(&self, node_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_ms IS NOT NULL)",
+            params![node_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn node_key(&self, node_id: &str) -> Result<Option<String>> {
         Ok(self
             .lock()
@@ -1339,6 +1512,21 @@ impl Store {
         rows.map(|r| Self::finish_session(r?)).collect()
     }
 
+    /// `owner`'s sessions, newest first (`None`: everyone's, for the API
+    /// token). Filtered in SQL, so listing one account's chats never loads
+    /// every other account's rows (Gate 3 review L-3).
+    pub fn sessions_of(&self, owner: Option<&str>) -> Result<Vec<SessionRow>> {
+        let Some(owner) = owner else {
+            return self.sessions();
+        };
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&Self::session_query(
+            "WHERE s.owner_id = ?1 ORDER BY s.updated_ms DESC",
+        ))?;
+        let rows = stmt.query_map(params![owner], Self::session_from_row)?;
+        rows.map(|r| Self::finish_session(r?)).collect()
+    }
+
     pub fn session(&self, sid: SessionId) -> Result<Option<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&Self::session_query("WHERE s.session_id = ?1"))?;
@@ -1346,6 +1534,41 @@ impl Store {
             .optional()?
             .map(Self::finish_session)
             .transpose()
+    }
+
+    /// What the mirror knows of each of `sids`, as `node` should see it in
+    /// its hello (one read for the batch). Another node's session, live or
+    /// deleted, is `Foreign`: nothing about it is revealed or sent
+    /// (Gate 3 review L-6).
+    pub fn hello_states(&self, node: &str, sids: &[SessionId]) -> Result<Vec<HelloState>> {
+        let conn = self.lock();
+        let mut live = conn.prepare_cached(
+            "SELECT node_id, head_seq, diverged_seq IS NOT NULL FROM sessions WHERE session_id = ?1",
+        )?;
+        let mut gone =
+            conn.prepare_cached("SELECT node_id FROM deleted_sessions WHERE session_id = ?1")?;
+        let mut out = Vec::with_capacity(sids.len());
+        for sid in sids {
+            let id = sid.to_string();
+            let row: Option<(String, i64, bool)> = live
+                .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?;
+            let state = match row {
+                Some((n, _, _)) if n != node => HelloState::Foreign,
+                Some((_, _, true)) => HelloState::Frozen,
+                Some((_, head, false)) => HelloState::Head(head as u64),
+                None => match gone
+                    .query_row(params![id], |r| r.get::<_, Option<String>>(0))
+                    .optional()?
+                {
+                    Some(Some(n)) if n != node => HelloState::Foreign,
+                    Some(_) => HelloState::Deleted,
+                    None => HelloState::Head(0),
+                },
+            };
+            out.push(state);
+        }
+        Ok(out)
     }
 
     /// `(session_id, head_seq)` for every session, ordered by id.
@@ -1421,6 +1644,26 @@ impl Store {
                 .optional()?
                 .flatten(),
         };
+        // A parent is kept only under the same node and the same owner
+        // (Gate 3 review L-1). `append` checked the node; the owner is known
+        // only now, as the master recorded it for the create, and a node
+        // that named another user's chat on itself as parent loses that
+        // parent here, with the workspace mapping it inherited from it.
+        let dropped = tx.execute(
+            "UPDATE sessions SET parent_id = NULL
+             WHERE session_id = ?1 AND parent_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM sessions p
+                               WHERE p.session_id = sessions.parent_id
+                                 AND p.node_id = sessions.node_id
+                                 AND p.owner_id IS sessions.owner_id)",
+            params![id],
+        )?;
+        if dropped > 0 {
+            tx.execute(
+                "DELETE FROM session_workspaces WHERE session_id = ?1",
+                params![id],
+            )?;
+        }
         let mapped = match workspace {
             Some(ws) => {
                 tx.execute(

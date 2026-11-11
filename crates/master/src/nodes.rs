@@ -61,9 +61,21 @@ impl Master {
             .mirror
             .call(move |s| s.node_revoke(&id, harness_core::now_ms()))
             .await?;
+        if done {
+            // Under `nodes`, as `add_link` reads it: a link registered
+            // before this is taken down here, one after it is refused there
+            // (Gate 3 review L-4).
+            let mut nodes = lock(&self.inner.nodes);
+            lock(&self.inner.revoked).insert(node_id.to_string());
+            if let Some(n) = nodes.get_mut(node_id) {
+                n.tx = None;
+                n.info.connected = false;
+            }
+        }
         if let Some(stop) = lock(&self.inner.remote_stops).remove(node_id) {
             stop.cancel();
         }
+        let _ = self.inner.live.send(crate::Live::NodesChanged);
         let id = node_id.to_string();
         let _ = self
             .inner
@@ -209,6 +221,23 @@ impl Master {
                     lock(&self.inner.remote_stops).insert(node_id.clone(), stop.clone())
                 {
                     old.cancel();
+                }
+                // A revoke that ran between the key check and the line above
+                // found no token to cancel: look again now that it is there
+                // (Gate 3 review L-4). `add_link` refuses it as well.
+                let id = node_id.clone();
+                if self
+                    .inner
+                    .mirror
+                    .call(move |s| s.node_is_revoked(&id))
+                    .await?
+                {
+                    stop.cancel();
+                    let mut stops = lock(&self.inner.remote_stops);
+                    if stops.get(&node_id).is_some_and(|s| s.is_cancelled()) {
+                        stops.remove(&node_id);
+                    }
+                    return Ok(());
                 }
                 let (to_node, from_node) = harness_link::server::bridge(ws, node_id.clone(), stop);
                 self.add_link(NodeLink { to_node, from_node }, false)

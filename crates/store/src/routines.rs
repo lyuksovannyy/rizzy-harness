@@ -1092,7 +1092,9 @@ impl Store {
             .optional()?)
     }
 
-    /// The run whose chat delegated to sub-agent session `child`.
+    /// The run whose chat delegated to sub-agent session `child` (a parent
+    /// of the same node and owner only, as every place that follows
+    /// `parent_id`).
     pub fn run_by_child_session(&self, child: SessionId) -> Result<Option<RunRow>> {
         let conn = self.lock();
         Ok(conn
@@ -1100,6 +1102,8 @@ impl Store {
                 &format!(
                     "SELECT {RUN_COLS} FROM routine_runs r
                      JOIN sessions s ON s.parent_id = r.session_id
+                     JOIN sessions p ON p.session_id = s.parent_id
+                         AND p.node_id = s.node_id AND p.owner_id IS s.owner_id
                      WHERE s.session_id = ?1"
                 ),
                 params![child.to_string()],
@@ -1109,12 +1113,15 @@ impl Store {
     }
 
     /// Approvals waiting in chat `sid` and in the sub-agent sessions it
-    /// delegated to.
+    /// delegated to (children of the same node and owner only, as every
+    /// place that follows `parent_id`).
     pub fn pending_approvals_with_children(&self, sid: SessionId) -> Result<i64> {
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT COALESCE(SUM(pending_approvals), 0) FROM sessions
-             WHERE session_id = ?1 OR parent_id = ?1",
+            "SELECT COALESCE(SUM(c.pending_approvals), 0) FROM sessions c
+             JOIN sessions p ON p.session_id = ?1
+             WHERE c.session_id = ?1
+                OR (c.parent_id = ?1 AND c.node_id = p.node_id AND c.owner_id IS p.owner_id)",
             params![sid.to_string()],
             |r| r.get(0),
         )?)
