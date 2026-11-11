@@ -1843,3 +1843,294 @@ async fn ack_time_on_a_long_session() {
         println!("ack after {n} events: {:?}", t.elapsed());
     }
 }
+
+// ---- A restore first saves the folder as it is (PLAN.md T33) ----
+
+/// A checkpoint's phase as the log spells it.
+fn phase(c: &Checkpoint) -> String {
+    serde_json::to_value(c.phase)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// The ack for `id`, collecting the events on the way.
+async fn ack_for(h: &mut Harness, id: &str) -> Result<(), String> {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .expect("timed out waiting for ack")
+            .expect("link closed");
+        match msg {
+            NodeToMaster::Event { event } => h.seen.push(event),
+            NodeToMaster::Ack {
+                req_id, ok, error, ..
+            } if req_id == id => {
+                return if ok {
+                    Ok(())
+                } else {
+                    Err(error.unwrap_or_default())
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn restore(
+    h: &mut Harness,
+    sid: SessionId,
+    id: &str,
+    turn: &str,
+    force: bool,
+) -> Result<(), String> {
+    h.send(MasterToNode::Restore {
+        req_id: id.into(),
+        session_id: sid,
+        turn_id: turn.into(),
+        force,
+        rewind: false,
+    });
+    ack_for(h, id).await
+}
+
+async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    });
+    let EventKind::Checkpoint(after) = h
+        .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
+        .await
+    else {
+        unreachable!()
+    };
+    h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    after.turn_id
+}
+
+/// A git repository, one turn that edits `keep.txt` and creates `made.txt`,
+/// then the user's own work between turns: an edit to the tracked file,
+/// their own `made.txt` and a new untracked binary file.
+async fn turn_then_user_work() -> (Harness, SessionId, String) {
+    let mut h = Harness::new(auto_policy).await;
+    run_git(&h.ws, &["init", "-q"]);
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    run_git(&h.ws, &["add", "."]);
+    run_git(
+        &h.ws,
+        &["-c", "commit.gpgSign=false", "commit", "-qm", "init"],
+    );
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt; echo new > made.txt").await;
+    std::fs::write(h.ws.join("keep.txt"), "the user's edit\n").unwrap();
+    std::fs::write(h.ws.join("made.txt"), "the user's own version\n").unwrap();
+    std::fs::write(h.ws.join("extra.bin"), [0u8, 159, 255, 10, 13]).unwrap();
+    (h, sid, turn)
+}
+
+fn pre_restore_snapshots(seen: &[RawEvent]) -> Vec<Checkpoint> {
+    seen.iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) if phase(&c) == "before_restore" => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A forced restore overwrites work no turn checkpoint holds; it saves the
+/// folder first, and restoring to that snapshot brings the work back.
+#[tokio::test]
+async fn a_forced_restore_can_be_undone() {
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    let mine = tree(&h.ws);
+    let mark = h.seen.len();
+    restore(&mut h, sid, "r1", &turn, false)
+        .await
+        .expect_err("an unforced restore over the user's edits is refused");
+    assert_eq!(tree(&h.ws), mine);
+    assert!(
+        pre_restore_snapshots(&h.seen[mark..]).is_empty(),
+        "a refused restore records nothing"
+    );
+
+    restore(&mut h, sid, "r2", &turn, true).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert!(!h.ws.join("made.txt").exists());
+    let pre = pre_restore_snapshots(&h.seen[mark..]);
+    assert_eq!(pre.len(), 1, "one snapshot before the restore");
+    // It is in the log before the restore's own events.
+    let phases: Vec<String> = h.seen[mark..]
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) => Some(phase(&c)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        phases.first().map(String::as_str),
+        Some("before_restore"),
+        "{phases:?}"
+    );
+
+    // Undo the restore: an ordinary restore of the snapshot's checkpoint.
+    restore(&mut h, sid, "r3", &pre[0].turn_id, false)
+        .await
+        .unwrap();
+    assert_eq!(tree(&h.ws), mine, "the user's work is back, byte for byte");
+}
+
+/// The snapshot's event is written before any file changes: when it
+/// cannot be appended, nothing is restored and the reason comes back.
+#[tokio::test]
+async fn a_restore_whose_snapshot_cannot_be_logged_changes_nothing() {
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    let mine = tree(&h.ws);
+    let db = rusqlite::Connection::open(h._dir.path().join("node.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER break_log BEFORE INSERT ON events
+         WHEN NEW.kind = 'checkpoint' AND json_extract(NEW.payload, '$.phase') = 'before_restore'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+    let err = restore(&mut h, sid, "r1", &turn, true)
+        .await
+        .expect_err("a restore whose snapshot is not in the log must not run");
+    assert!(err.contains("log could not be written"), "{err}");
+    assert!(err.contains("nothing was restored"), "{err}");
+    assert_eq!(tree(&h.ws), mine, "the folder changed");
+    let stored = h.node.store().events_after(sid, 0, 1000).unwrap();
+    assert!(
+        !stored.iter().any(|e| matches!(e.typed(),
+            Ok(EventKind::Checkpoint(c)) if c.phase == CheckpointPhase::Restored)),
+        "a restore was recorded"
+    );
+
+    // Fixed: the same restore runs.
+    db.execute_batch("DROP TRIGGER break_log;").unwrap();
+    restore(&mut h, sid, "r2", &turn, true).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+}
+
+/// When the folder cannot be saved (here a file the node cannot read, so
+/// `git add -A` fails), the restore is refused with the reason and the
+/// folder is left as it is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restore_whose_snapshot_fails_changes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    let locked = h.ws.join("locked.txt");
+    std::fs::write(&locked, "private\n").unwrap();
+    let mine = tree(&h.ws);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&locked).is_ok() {
+        eprintln!("skipped: this user can read a mode 000 file (root?)");
+        return;
+    }
+    let res = restore(&mut h, sid, "r1", &turn, true).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let err = res.expect_err("a restore that could not save the folder must not run");
+    assert!(err.contains("nothing was restored"), "{err}");
+    assert!(
+        err.contains("locked.txt"),
+        "the reason names the file: {err}"
+    );
+    assert_eq!(tree(&h.ws), mine, "the folder changed");
+}
+
+/// Pre-restore snapshots are checkpoints like a turn's: each counts as one
+/// against `checkpoints_keep`, the oldest go, the newest stays usable.
+#[tokio::test]
+async fn pre_restore_snapshots_obey_checkpoints_keep() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        checkpoints_keep: 2,
+        ..Default::default()
+    })
+    .await;
+    std::fs::write(h.ws.join("notes.txt"), "v0\n").unwrap();
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v1 > notes.txt").await;
+    // Undo the turn, undo that undo, and so on: three restores.
+    let mut target = turn;
+    let mut snaps = vec![];
+    for i in 0..3 {
+        let mark = h.seen.len();
+        restore(&mut h, sid, &format!("r{i}"), &target, false)
+            .await
+            .unwrap();
+        let pre = pre_restore_snapshots(&h.seen[mark..]);
+        assert_eq!(pre.len(), 1);
+        target = pre[0].turn_id.clone();
+        snaps.push(pre[0].clone());
+    }
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("notes.txt")).unwrap(),
+        "v0\n"
+    );
+    let shadow = std::fs::read_dir(h._dir.path().join("checkpoints"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "git"))
+        .expect("a shadow repository");
+    let refs = run_git(
+        &h.ws,
+        &[
+            "--git-dir",
+            &shadow.display().to_string(),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/harness/",
+        ],
+    );
+    let groups: std::collections::BTreeSet<String> = refs
+        .lines()
+        .map(|r| r.rsplit_once('/').unwrap().0.to_string())
+        .collect();
+    let want: std::collections::BTreeSet<String> = snaps[1..]
+        .iter()
+        .map(|c| format!("refs/harness/{sid}/{}", c.turn_id))
+        .collect();
+    assert_eq!(groups, want, "only the two newest checkpoints are kept");
+    // The newest still undoes.
+    restore(&mut h, sid, "last", &snaps[2].turn_id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("notes.txt")).unwrap(),
+        "v1\n"
+    );
+}

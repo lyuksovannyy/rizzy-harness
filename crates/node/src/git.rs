@@ -717,32 +717,47 @@ pub async fn exists(repo: &Repo, sha: &str) -> bool {
 /// differs between `from` and `expected` (what the folder should look like
 /// now). Refuses, listing them, if any of those files changed since
 /// `expected`, unless `force`. Undo: `from` = before the turn, `expected`
-/// = after it. Rewind: `expected` = the latest state.
+/// = after it. Rewind: `expected` = the latest state. (The session splits
+/// this in two, `restore_plan` and `restore_paths`, to snapshot and log
+/// between them.)
+#[cfg(test)]
 pub async fn restore(
     repo: &Repo,
     from: &str,
     expected: &str,
     force: bool,
 ) -> Result<Vec<String>, String> {
+    let now = if force {
+        None
+    } else {
+        Some(worktree_tree(repo).await?)
+    };
+    let touched = restore_plan(repo, from, expected, now.as_deref()).await?;
+    restore_paths(repo, from, &touched).await
+}
+
+/// The paths a restore of `from` over `expected` writes, with their status
+/// letter. With `now` (a tree or snapshot of the folder as it is), refuses,
+/// listing them, if any of those files differ there from `expected`.
+pub async fn restore_plan(
+    repo: &Repo,
+    from: &str,
+    expected: &str,
+    now: Option<&str>,
+) -> Result<Vec<(char, String)>, String> {
     let touched = changed(repo, from, expected).await?;
-    if touched.is_empty() {
-        return Ok(vec![]);
-    }
-    let paths: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
-    if !force {
-        let now = worktree_tree(repo).await?;
+    if let Some(now) = now.filter(|_| !touched.is_empty()) {
         let mut args = vec![
-            "diff".to_string(),
-            "--no-ext-diff".into(),
-            "--no-textconv".into(),
-            "--name-only".into(),
-            expected.into(),
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            expected,
             now,
-            "--".into(),
+            "--",
         ];
-        args.extend(paths.iter().cloned());
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let since = run(repo, &refs, None).await?;
+        args.extend(touched.iter().map(|(_, p)| p.as_str()));
+        let since = run(repo, &args, None).await?;
         if !since.is_empty() {
             return Err(format!(
                 "these files changed after the turn; undo would overwrite that: {}",
@@ -750,6 +765,20 @@ pub async fn restore(
             ));
         }
     }
+    Ok(touched)
+}
+
+/// Write `from`'s version of every path in `touched` (from
+/// `restore_plan`) into the folder; paths `from` does not have are deleted.
+pub async fn restore_paths(
+    repo: &Repo,
+    from: &str,
+    touched: &[(char, String)],
+) -> Result<Vec<String>, String> {
+    if touched.is_empty() {
+        return Ok(vec![]);
+    }
+    let paths: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
     // Write the old versions through a private index.
     let (_, idx) = temp_index(repo).await?;
     let res = async {
@@ -764,7 +793,7 @@ pub async fn restore(
             args.extend(restore);
             run(repo, &args, Some(&idx)).await?;
         }
-        for (st, p) in &touched {
+        for (st, p) in touched {
             if *st == 'A' {
                 let _ = tokio::fs::remove_file(repo.root.join(p)).await;
             }
@@ -777,8 +806,9 @@ pub async fn restore(
     Ok(paths)
 }
 
-/// A checkpoint group: a turn's refs (`.../before`, `/after`, `/restored`)
-/// or a sub-agent's (`/base`, `/result`).
+/// A checkpoint group: a turn's refs (`.../before`, `/after`), a restore's
+/// (the same two names: the folder before and after it) or a sub-agent's
+/// (`/base`, `/result`).
 fn group_of(ref_name: &str) -> &str {
     ref_name
         .rsplit_once('/')
