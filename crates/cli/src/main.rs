@@ -163,12 +163,23 @@ fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
             .context("no data directory; pass --data-dir")?
             .join(BRAND),
     };
-    std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
+    // Made 0700 from the start (never visible to others under the umask
+    // for a moment); its parents as usual. An existing one must be this
+    // user's, and is made 0700; a chmod that fails stops the start (Gate 3
+    // review N-3).
+    if let Some(parent) = d.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
+    let mut mk = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
+    match mk.create(&d) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating {}", d.display())),
+    }
+    harness_master::secrets::check_data_dir(&d)?;
     // Absolute and real, once, here: everything below (the sandbox's temp
     // folder and protected folder among it) runs in other folders, where a
     // relative path would name something else (R.1, S-4).
