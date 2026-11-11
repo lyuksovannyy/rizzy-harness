@@ -118,6 +118,51 @@ async fn ssh_key_and_api_token_are_permission_denied() {
     assert!(out.contains("end"), "{out}");
 }
 
+/// The node's private link key (`<data>/keys/node.key`, the path `node run`
+/// uses) cannot be read from the agent's shell: directly, through a `..`
+/// path, or through a symlink planted in the project folder.
+#[tokio::test]
+async fn node_key_is_unreadable_from_the_shell() {
+    let Some(_) = landlock() else { return };
+    let f = fixture();
+    let keys = f.data.join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    let key = keys.join("node.key");
+    std::fs::write(&key, "NODE-KEY-CANARY\n").unwrap();
+    std::fs::write(f.ws.join("plain.txt"), "PROJECT-FILE-CANARY\n").unwrap();
+    // Control 1: the key exists at this path and is readable without the sandbox.
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), "NODE-KEY-CANARY\n");
+    // `..` from the project folder reaches the same file.
+    let rel = Path::new("../../data/keys/node.key");
+    assert_eq!(
+        std::fs::read_to_string(f.ws.join(rel)).unwrap(),
+        "NODE-KEY-CANARY\n"
+    );
+    std::os::unix::fs::symlink(&key, f.ws.join("link-to-key")).unwrap();
+    let cmd = format!(
+        "cat plain.txt; echo c=$?; cat {key}; echo d=$?; cat {rel}; echo r=$?; \
+         cat link-to-key; echo l=$?; cat {keys}/../keys/node.key; echo t=$?; echo end",
+        key = key.display(),
+        rel = rel.display(),
+        keys = keys.display()
+    );
+    let out = f.bash(Settings::default(), &f.ws, &cmd).await;
+    assert!(!out.contains("NODE-KEY-CANARY"), "key bytes leaked: {out}");
+    // Control 2: a file in the project folder reads fine in the same shell.
+    assert!(
+        out.contains("PROJECT-FILE-CANARY") && out.contains("c=0"),
+        "{out}"
+    );
+    for tag in ["d", "r", "l", "t"] {
+        assert!(
+            out.contains(&format!("{tag}=1")),
+            "{tag} did not fail: {out}"
+        );
+    }
+    assert_eq!(out.matches("Permission denied").count(), 4, "{out}");
+    assert!(out.contains("end"), "{out}");
+}
+
 #[tokio::test]
 async fn writes_outside_the_project_are_denied() {
     let Some(_) = landlock() else { return };
