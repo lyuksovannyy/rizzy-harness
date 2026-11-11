@@ -395,10 +395,12 @@ pub enum CommandError {
 const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key, \
      or its node sent an event the server refuses (see the server log); delete the chat to clear it";
 
-/// The session a command would make its node write to. Cancel and delete
-/// are left out on purpose: they are how a diverged session is stopped.
+/// The session a command would make its node write to. Cancel, delete and
+/// a deny are left out on purpose: they are how a diverged session is
+/// stopped (Gate 3 review P-7).
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
+        MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
         MasterToNode::Prompt { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }

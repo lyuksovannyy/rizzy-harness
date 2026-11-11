@@ -252,6 +252,65 @@ async fn frames_queued_from_a_node_that_is_then_revoked_are_not_applied() {
     assert_eq!(store.head_seq(other).unwrap(), 0);
 }
 
+/// Gate 3 review P-7: on a diverged chat an allow is refused (it would
+/// make the node write a turn nobody sees), but a deny is how a person
+/// stops that turn, like cancel: it goes through.
+#[tokio::test]
+async fn a_diverged_chat_refuses_an_allow_and_takes_a_deny() {
+    use harness_core::policy::Decision;
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let sid = SessionId::new();
+    let (l1, _c1, tx1) = open_link("n1", vec![]);
+    m.add_link(l1, false).await.unwrap();
+    for seq in 1..=3 {
+        send(&tx1, event(sid, seq, "first")).await;
+    }
+    barrier(&store, &tx1).await;
+    let (l2, mut c2, tx2) = open_link(
+        "n1",
+        vec![SessionHead {
+            session_id: sid,
+            head_seq: 2,
+        }],
+    );
+    m.add_link(l2, false).await.unwrap();
+    send(&tx2, event(sid, 3, "second copy")).await;
+    barrier(&store, &tx2).await;
+    assert_eq!(store.diverged_seq(sid).unwrap(), Some(3));
+
+    let err = m
+        .respond_approval(sid, "a1".into(), Decision::Allow)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("diverged"), "{err}");
+
+    let m2 = m.clone();
+    let deny =
+        tokio::spawn(async move { m2.respond_approval(sid, "a1".into(), Decision::Deny).await });
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), c2.recv())
+            .await
+            .expect("the deny never reached the node")
+            .expect("link open");
+        if let MasterToNode::ApprovalRespond {
+            req_id, decision, ..
+        } = msg
+        {
+            assert!(!decision.allows());
+            tx2.send(NodeToMaster::Ack {
+                req_id,
+                ok: true,
+                error: None,
+            })
+            .await
+            .unwrap();
+            break;
+        }
+    }
+    deny.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn a_reconnect_that_resends_acknowledged_events_carries_on() {
     let store = Store::open_in_memory().unwrap();

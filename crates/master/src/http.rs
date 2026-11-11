@@ -1266,7 +1266,9 @@ async fn cancel(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
+    // Stopping work is always allowed, even before a pending password
+    // change (Gate 3 review P-7): only the owner's own chat, as ever.
+    let who = require_any(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     m.cancel(sid).await?;
     Ok(Json(json!({ "ok": true })))
@@ -1300,10 +1302,14 @@ async fn approval(
     Path((id, approval_id)): Path<(String, String)>,
     Json(b): Json<ApprovalBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
     // Allowing makes the chat do work; denying stops it, like cancel, so a
-    // user who lost access can still refuse.
+    // user who lost access, or must change their password first, can
+    // still refuse (Gate 3 review P-7).
+    let who = match b.decision.allows() {
+        true => require(&m, &headers).await?,
+        false => require_any(&m, &headers).await?,
+    };
+    let row = visible_session(&m, &who, &id).await?;
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
     }
