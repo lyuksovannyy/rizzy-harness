@@ -671,6 +671,12 @@ processes outside it, and from Linux 7.1 it cannot connect to Unix sockets
 outside its folders (the session bus, the Docker socket, an ssh-agent); on
 older kernels it **can**, see "Limits" below.
 
+The node's own git, which takes the checkpoints and fills a sub-agent's
+folder, runs in the same sandbox: it may read the chat's folder (and your
+repository's object store), write only its own checkpoint store, and
+nothing else. With `mode = "off"` it is not confined either; `doctor`
+says which ("checkpoint git").
+
 It needs Linux 6.2 or newer with Landlock enabled (`landlock` appears in
 `/sys/kernel/security/lsm`; `network = "off"` needs 6.7). `rizzy-harness
 doctor` shows whether it works and which Landlock version the kernel has.

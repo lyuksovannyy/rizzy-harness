@@ -76,6 +76,7 @@ async fn setup_with(
         incognito_ttl: None,
         // Sub-agent worktrees need the checkpoint store (R.1).
         checkpoints_dir: Some(dir.path().join("checkpoints")),
+        git_sandbox: None,
         artifacts: None,
     })
     .await

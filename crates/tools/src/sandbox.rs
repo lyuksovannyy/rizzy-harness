@@ -237,6 +237,46 @@ impl Sandbox {
         c
     }
 
+    /// The wrapper for one of the node's own helpers (its git for
+    /// checkpoints, R.1 R1b-2), up to and including `--`: exactly `rw` and
+    /// `ro` on top of the system folders ([`SYSTEM_READ`]) and the device
+    /// files, and none of node.toml's `[sandbox] read`/`write` (those are
+    /// for the agent's toolchains). Nothing here checks the grants against
+    /// the protected folders: the caller passes only its own folders.
+    pub fn helper(&self, rw: &[PathBuf], ro: &[PathBuf]) -> std::process::Command {
+        let mut c = std::process::Command::new(&self.exe);
+        c.arg(SUBCOMMAND);
+        if self.best_effort {
+            c.arg("--best-effort");
+        }
+        if self.network == Network::Off {
+            c.arg("--no-network");
+        }
+        for p in rw
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(DEVICES.iter().map(Path::new))
+        {
+            c.arg("--rw").arg(p);
+        }
+        for p in SYSTEM_READ
+            .iter()
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .chain(ro.iter().map(PathBuf::as_path))
+        {
+            c.arg("--ro").arg(p);
+        }
+        c.arg("--");
+        c
+    }
+
+    /// Whether this sandbox only does what the kernel enforces
+    /// (`best-effort`): on a kernel without Landlock it confines nothing.
+    pub fn is_best_effort(&self) -> bool {
+        self.best_effort
+    }
+
     /// Run a fixed check through the wrapper: a file in a granted folder
     /// must be readable, `canary` (a file this writes inside `canary_dir`,
     /// the data directory) must not. Returns the wrapper's status line.

@@ -53,6 +53,7 @@ fn layout() -> Layout {
     let bounds = Bounds {
         ceiling: Some(home.clone()),
         protected: vec![top.join("data")],
+        sandbox: None,
     };
     Layout {
         base: top.join("data/checkpoints"),

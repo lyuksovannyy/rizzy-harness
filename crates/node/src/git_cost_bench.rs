@@ -564,7 +564,9 @@ async fn restore_cycle(
     secure_blobs(&repo, &plan).await.unwrap();
     let t_secure = ms(t.elapsed());
     let t = Instant::now();
-    restore_paths(&repo, &plan).await.unwrap();
+    restore_paths(&repo, &plan, WriteLimits::UNDO)
+        .await
+        .unwrap();
     let t_write = ms(t.elapsed());
     let t = Instant::now();
     let (_s, _) = sn

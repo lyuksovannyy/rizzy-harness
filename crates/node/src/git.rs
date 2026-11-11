@@ -62,7 +62,34 @@ pub struct Repo {
     /// folder): snapshots start from an empty index and do not keep it,
     /// so the shadow's stat cache stays the folder's.
     scratch: bool,
+    /// The sandbox every git process of this repository runs in (R.1,
+    /// R1b-2): read-only on the work tree and on the borrowed object store,
+    /// read-write on the shadow; `None` where the node has no sandbox
+    /// (`[sandbox] mode = "off"`) and in tests.
+    jail: Jail,
+    /// The user's object store this shadow borrows (its alternates), for
+    /// the jail's read-only grant.
+    borrowed: Option<PathBuf>,
+    /// The work tree is written by git (filling a sub-agent's new folder,
+    /// which no session can reach yet): read-write in the jail.
+    tree_rw: bool,
 }
+
+/// The sandbox of a [`Repo`]'s git processes; equal when it is the same one.
+#[derive(Debug, Clone, Default)]
+pub struct Jail(pub Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>);
+
+impl PartialEq for Jail {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Jail {}
 
 /// Build output and dependency folders a shadow repository of a plain
 /// folder never snapshots (a repository's own ignore rules apply instead).
@@ -139,7 +166,15 @@ impl Repo {
 /// A git command with the hardened base: cleared environment, overrides,
 /// no stdin. `program` is `git` except in tests.
 fn hardened(program: &Path) -> Command {
-    let mut c = Command::new(program);
+    let mut c = hardened_std(std::process::Command::new(program));
+    overrides(&mut c);
+    Command::from(c)
+}
+
+/// The hardened environment on `c` (a `git` command, or the sandbox
+/// wrapper that will `exec` git: the environment is inherited across that
+/// `exec`).
+fn hardened_std(mut c: std::process::Command) -> std::process::Command {
     c.env_clear();
     for k in KEEP_ENV {
         if let Some(v) = std::env::var_os(k) {
@@ -158,10 +193,14 @@ fn hardened(program: &Path) -> Command {
         .env("GIT_AUTHOR_EMAIL", "harness@localhost")
         .env("GIT_COMMITTER_NAME", "harness")
         .env("GIT_COMMITTER_EMAIL", "harness@localhost");
+    c
+}
+
+/// The `-c` overrides, as arguments.
+fn overrides(c: &mut std::process::Command) {
     for o in OVERRIDES {
         c.arg("-c").arg(o);
     }
-    c
 }
 
 /// Kills a git process group when dropped (timeout, cancelled turn), so
@@ -255,8 +294,40 @@ fn git_program() -> PathBuf {
     PathBuf::from("git")
 }
 
-fn command(repo: &Repo, index: Option<&Path>) -> Command {
-    let mut c = hardened(&git_program());
+/// A git command for `repo`: in the jail when the repository has one
+/// (R.1, R1b-2). The jail grants read-only on the work tree (read-write
+/// while the node fills a sub-agent's new folder) and on the borrowed
+/// object store, read-write on the shadow (its objects, refs, index and
+/// every private index of ours, which live there), and nothing else: not
+/// the rest of the data directory, not the home folder. A link a session
+/// swaps into its folder while git walks it then leads somewhere this git
+/// cannot open, so its content never reaches a snapshot.
+fn command_std(repo: &Repo, index: Option<&Path>) -> std::process::Command {
+    let base = match (&repo.jail.0, &repo.shadow) {
+        (Some(s), Some(dir)) => {
+            let mut rw = vec![dir.clone()];
+            let mut ro = Vec::new();
+            if repo.tree_rw {
+                rw.push(repo.root.clone());
+            } else {
+                ro.push(repo.root.clone());
+            }
+            ro.extend(repo.borrowed.iter().cloned());
+            if let Some(i) = index
+                && let Some(parent) = i.parent()
+                && !parent.starts_with(dir)
+                && !(repo.tree_rw && parent.starts_with(&repo.root))
+            {
+                rw.push(parent.to_path_buf());
+            }
+            let mut c = s.helper(&rw, &ro);
+            c.arg(git_program());
+            c
+        }
+        _ => std::process::Command::new(git_program()),
+    };
+    let mut c = hardened_std(base);
+    overrides(&mut c);
     match &repo.shadow {
         Some(dir) => {
             c.arg("--git-dir")
@@ -286,6 +357,10 @@ fn command(repo: &Repo, index: Option<&Path>) -> Command {
         c.env("GIT_INDEX_FILE", i);
     }
     c
+}
+
+fn command(repo: &Repo, index: Option<&Path>) -> Command {
+    Command::from(command_std(repo, index))
 }
 
 async fn run(repo: &Repo, args: &[&str], index: Option<&Path>) -> Result<String, String> {
@@ -323,7 +398,7 @@ pub async fn describe(
     bounds: &Bounds,
 ) -> Option<(String, String, bool)> {
     let dir = dir.canonicalize().ok()?;
-    let user_repo::Found::Repo(r) = user_repo::find(&dir, bounds.ceiling.as_deref()) else {
+    let user_repo::Found::Repo(r) = find_repo(&dir, bounds).await else {
         return None;
     };
     let commit = r.head.clone()?;
@@ -363,6 +438,33 @@ impl Repo {
     }
 }
 
+/// The bytes snapshot `sha` holds at `path` (tests in `crates/cli`).
+pub(crate) async fn blob_at(repo: &Repo, sha: &str, path: &str) -> Option<Vec<u8>> {
+    run_raw(
+        repo,
+        &["cat-file", "blob", &format!("{sha}:{path}")],
+        None,
+        None,
+    )
+    .await
+    .ok()
+}
+
+/// `(mode, path)` of every entry snapshot `sha` holds (tests in
+/// `crates/cli`).
+pub(crate) async fn tree_listing(repo: &Repo, sha: &str) -> Vec<(String, String)> {
+    run_raw(repo, &["ls-tree", "-r", "-z", sha], None, None)
+        .await
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .filter_map(|e| {
+            let e = String::from_utf8_lossy(e);
+            let (meta, path) = e.split_once('\t')?;
+            Some((meta.split(' ').next()?.to_string(), path.to_string()))
+        })
+        .collect()
+}
+
 /// What may bound a checkpoint root or a sub-agent's repository: the
 /// workspace root the session folder is in (no walk goes above it) and the
 /// folders no checkpoint may hold (the node's data directory). Canonical.
@@ -372,6 +474,9 @@ pub struct Bounds {
     /// tests (the walk then goes up to `/`).
     pub ceiling: Option<PathBuf>,
     pub protected: Vec<PathBuf>,
+    /// The sandbox the node's git for this folder runs in (R1b-2); `None`
+    /// where the node has none.
+    pub sandbox: Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>,
 }
 
 impl Bounds {
@@ -382,6 +487,15 @@ impl Bounds {
             .iter()
             .find(|p| dir.starts_with(p) || p.starts_with(dir))
     }
+}
+
+/// [`user_repo::find`] off the async threads (it reads files the session
+/// may write).
+async fn find_repo(cwd: &Path, bounds: &Bounds) -> user_repo::Found {
+    let (cwd, ceiling) = (cwd.to_path_buf(), bounds.ceiling.clone());
+    tokio::task::spawn_blocking(move || user_repo::find(&cwd, ceiling.as_deref()))
+        .await
+        .unwrap_or(user_repo::Found::None)
 }
 
 /// Write `text` to `path` unless it already holds exactly that (other
@@ -567,7 +681,7 @@ async fn repo_for_with(
             p.display()
         ));
     }
-    let found = user_repo::find(&cwd, bounds.ceiling.as_deref());
+    let found = find_repo(&cwd, bounds).await;
     let (root, info) = match &found {
         // A repository whose folder holds the data directory (one at
         // `$HOME`): only the session folder is checkpointed, as a plain one.
@@ -612,7 +726,7 @@ async fn repo_for_with(
     // The user's objects are only read (content-addressed data), and only
     // when `user_repo` found them borrowable; new objects always go into
     // the shadow.
-    match info
+    let borrowed = match info
         .as_ref()
         .and_then(|i| i.objects.as_ref().map(|o| (i, o)))
     {
@@ -620,15 +734,25 @@ async fn repo_for_with(
             let mut line = objects.to_string_lossy().into_owned().into_bytes();
             line.push(b'\n');
             write_if_changed(&alternates, &line).await;
+            Some(objects.clone())
         }
         _ => {
             let _ = tokio::fs::remove_file(&alternates).await;
+            None
         }
-    }
+    };
     // Ignore patterns are data; copy them so the same files are skipped.
     let mut exclude = match &info {
         Some(i) => match &i.exclude {
-            Some(p) => read_ignore_file(p).await,
+            Some(p) => {
+                // In the session's `.git`: no link followed, bounded.
+                let p = p.clone();
+                tokio::task::spawn_blocking(move || user_repo::read_bounded(&p, 1 << 20))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            }
             None => Vec::new(),
         },
         None => SHADOW_EXCLUDES.as_bytes().to_vec(),
@@ -642,6 +766,9 @@ async fn repo_for_with(
             empty_tree: empty_tree(shadow_format.trim()),
             protected: bounds.protected.clone(),
             scratch: false,
+            jail: Jail(bounds.sandbox.clone()),
+            borrowed,
+            tree_rw: false,
         },
         found,
     )))
@@ -656,6 +783,9 @@ fn dummy_repo() -> Repo {
         empty_tree: empty_tree("sha1"),
         protected: Vec::new(),
         scratch: true,
+        jail: Jail::default(),
+        borrowed: None,
+        tree_rw: false,
     }
 }
 
@@ -850,6 +980,10 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     run(repo, &["add", "-u"], Some(idx)).await?;
     // New files, by name.
     let (_, new) = split_within(&untracked, &set);
+    // The second line behind the jail (R1b-2): a new path whose folder now
+    // really lies outside the folder (a link swapped in after git listed
+    // it) or in a protected one is left out, as the file tools refuse it.
+    let new = inside_only(repo, new.into_iter().map(<[u8]>::to_vec).collect()).await?;
     let new: Vec<u8> = new
         .iter()
         .flat_map(|p| p.iter().copied().chain([0]))
@@ -895,6 +1029,41 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     .map_err(|e| e.to_string())?;
     nested.extend(replaced);
     Ok(outermost(nested))
+}
+
+/// The paths of `paths` (relative to the folder) whose containing folder
+/// really is inside the folder and outside every protected one, judged by
+/// real path (one `canonicalize` per distinct folder).
+async fn inside_only(repo: &Repo, paths: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, String> {
+    if paths.is_empty() {
+        return Ok(paths);
+    }
+    let root = repo.root.clone();
+    let protected = repo.protected.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut seen: std::collections::HashMap<PathBuf, bool> = Default::default();
+        paths
+            .into_iter()
+            .filter(|p| {
+                let full = root.join(rel_path(p));
+                let Some(dir) = full.parent() else {
+                    return false;
+                };
+                *seen.entry(dir.to_path_buf()).or_insert_with(|| {
+                    dir.canonicalize().is_ok_and(|real| {
+                        // A protected folder that holds the folder itself (a
+                        // sub-agent's, in the sessions folder) is its own.
+                        real.starts_with(&root)
+                            && !protected
+                                .iter()
+                                .any(|d| real.starts_with(d) && !root.starts_with(d))
+                    })
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// `ls-files -z --stage` output (`mode id stage TAB path`), as the paths of
@@ -1188,7 +1357,7 @@ pub async fn restore_report(
     let now = snapshot(repo, "refs/harness/test/now/before", "now").await?;
     let plan = restore_plan(repo, &diff, &now, !force).await?;
     secure_blobs(repo, &plan).await?;
-    let files = restore_paths(repo, &plan).await?;
+    let files = restore_paths(repo, &plan, WriteLimits::UNDO).await?;
     Ok(Restored {
         files,
         nested: plan.nested.shown.clone(),
@@ -1852,12 +2021,38 @@ async fn check_inside(repo: &Repo, paths: Vec<Vec<u8>>) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// The contents of the blobs `writes` names, by id, read from the shadow
-/// with `cat-file --batch` (in groups of at most 64 MiB of content).
-async fn blob_contents(
+/// What one restore may write (R1b-1): per file and in total, checked
+/// against the blobs' sizes before anything is deleted or written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteLimits {
+    pub per_file: u64,
+    pub total: u64,
+}
+
+impl WriteLimits {
+    /// An undo or rewind puts back what the folder held, so the bound is
+    /// generous: 4 GiB a file, 16 GiB in all.
+    pub const UNDO: Self = Self {
+        per_file: 4 << 30,
+        total: 16 << 30,
+    };
+    /// A sub-agent's result is new content, applied with nobody asked:
+    /// bounded like a published file (`[artifacts] max_mb`, 200 MiB) and
+    /// the artifact stage (`stage_max_mb`, 2 GiB in all). A sparse file
+    /// counts at its full size, as it is written out.
+    pub const SUB_AGENT: Self = Self {
+        per_file: 200 << 20,
+        total: 2 << 30,
+    };
+}
+
+/// The size of each blob `writes` names, by id (`cat-file --batch-check`),
+/// refused above `limits` before anything is written.
+async fn blob_sizes(
     repo: &Repo,
     writes: &[(String, String, Vec<u8>)],
-) -> Result<std::collections::HashMap<String, Vec<u8>>, String> {
+    limits: WriteLimits,
+) -> Result<std::collections::HashMap<String, u64>, String> {
     let mut ids: Vec<&str> = writes.iter().map(|(_, id, _)| id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -1869,73 +2064,128 @@ async fn blob_contents(
         .iter()
         .flat_map(|i| format!("{i}\n").into_bytes())
         .collect();
-    let sizes = run_raw(
+    let raw = run_raw(
         repo,
-        &["cat-file", "--batch-check=%(objectname) %(objectsize)"],
+        &[
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ],
         None,
         Some(list),
     )
     .await?;
-    let sizes: Vec<(String, u64)> = String::from_utf8_lossy(&sizes)
-        .lines()
-        .filter_map(|l| {
-            let (id, n) = l.split_once(' ')?;
-            Some((id.to_string(), n.parse().ok()?))
-        })
-        .collect();
-    let mut groups: Vec<Vec<&str>> = vec![Vec::new()];
-    let mut size = 0u64;
-    for (id, n) in &sizes {
-        if size + n > 64 << 20 && !groups.last().is_some_and(Vec::is_empty) {
-            groups.push(Vec::new());
-            size = 0;
-        }
-        size += n;
-        if let Some(g) = groups.last_mut() {
-            g.push(id.as_str());
-        }
-    }
-    for g in groups.into_iter().filter(|g| !g.is_empty()) {
-        let input: Vec<u8> = g
-            .iter()
-            .flat_map(|i| format!("{i}\n").into_bytes())
-            .collect();
-        let raw = run_raw(repo, &["cat-file", "--batch"], None, Some(input)).await?;
-        // `<id> <type> <size>\n<content>\n`, per id.
-        let mut rest = raw.as_slice();
-        while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
-            let head = String::from_utf8_lossy(&rest[..nl]).into_owned();
-            let f: Vec<&str> = head.split(' ').collect();
-            let [id, "blob", n] = f[..] else {
-                return Err(format!("cat-file: {head}"));
-            };
-            let n: usize = n.parse().map_err(|_| format!("cat-file: {head}"))?;
-            let body = rest
-                .get(nl + 1..nl + 1 + n)
-                .ok_or_else(|| format!("cat-file: short output for {id}"))?;
-            out.insert(id.to_string(), body.to_vec());
-            rest = rest.get(nl + 2 + n..).unwrap_or(&[]);
+    for l in String::from_utf8_lossy(&raw).lines() {
+        if let [id, "blob", n] = l.split(' ').collect::<Vec<_>>()[..]
+            && let Ok(n) = n.parse::<u64>()
+        {
+            out.insert(id.to_string(), n);
         }
     }
     if let Some(id) = ids.iter().find(|i| !out.contains_key(**i)) {
         return Err(format!("nothing was changed: content {id} is missing"));
     }
+    let mut total = 0u64;
+    for (_, id, p) in writes {
+        let n = out[id];
+        if n > limits.per_file {
+            return Err(format!(
+                "nothing was changed: {} would be {n} bytes, over the limit of {} bytes for one \
+                 file",
+                shown(p),
+                limits.per_file
+            ));
+        }
+        total = total.saturating_add(n);
+    }
+    if total > limits.total {
+        return Err(format!(
+            "nothing was changed: {total} bytes would be written, over the limit of {} bytes for \
+             one restore",
+            limits.total
+        ));
+    }
     Ok(out)
+}
+
+/// The largest object header line `cat-file --batch` prints
+/// (`<id> <type> <size>`).
+const HEADER_MAX: u64 = 256;
+
+/// Stream each blob of `writes` from one `cat-file --batch` (in the
+/// repository's jail) into `top`, one at a time through a 64 KiB buffer,
+/// never holding a blob (R1b-1). `sizes` were checked first; a blob whose
+/// size differs now is refused. The process (and its group) is killed on
+/// every way out.
+fn stream_writes(
+    mut cmd: std::process::Command,
+    writes: &[(String, String, Vec<u8>)],
+    sizes: &std::collections::HashMap<String, u64>,
+    top: &at::Top,
+) -> Result<(), String> {
+    use std::io::{BufRead, Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
+    let _group = Group(Some(child.id()));
+    let ids: Vec<u8> = writes
+        .iter()
+        .flat_map(|(_, id, _)| format!("{id}\n").into_bytes())
+        .collect();
+    let mut stdin = child.stdin.take().ok_or("git: no stdin")?;
+    let feeder = std::thread::spawn(move || {
+        let _ = stdin.write_all(&ids);
+    });
+    let stdout = child.stdout.take().ok_or("git: no stdout")?;
+    let mut out = std::io::BufReader::with_capacity(64 << 10, stdout);
+    let res = (|| {
+        for (mode, id, p) in writes {
+            let mut head = Vec::new();
+            (&mut out)
+                .take(HEADER_MAX)
+                .read_until(b'\n', &mut head)
+                .map_err(|e| format!("git cat-file: {e}"))?;
+            let head = String::from_utf8_lossy(&head).trim_end().to_string();
+            let want = sizes.get(id).copied();
+            let n = match head.split(' ').collect::<Vec<_>>()[..] {
+                [got, "blob", n] if got == id => n.parse::<u64>().ok(),
+                _ => None,
+            };
+            if n.is_none() || n != want {
+                return Err(format!("{}: content changed or missing ({head})", shown(p)));
+            }
+            let n = n.unwrap_or_default();
+            top.write_from(&rel_path(p), mode, n, &mut out)?;
+            let mut lf = [0u8; 1];
+            out.read_exact(&mut lf)
+                .map_err(|e| format!("git cat-file: {e}"))?;
+        }
+        Ok(())
+    })();
+    drop(out);
+    let _ = feeder.join();
+    let _ = child.wait();
+    res
 }
 
 /// Write the plan's files into the folder (`from`'s version of each, from
 /// the blobs [`secure_blobs`] made safe) and delete the paths `from` does
-/// not have.
+/// not have, within `limits`.
 ///
-/// The blobs are read from the shadow by id (`cat-file --batch`), so no
-/// tree is read here and no object other than those blobs is needed. The
-/// files are written by our code, relative to the folder's top opened once
-/// and to directories opened from it without following links (`git::at`):
-/// a link a process of the session swaps in for a folder, at any moment,
-/// is never written or deleted through (R.1 follow-up). Not atomic across
-/// files: a failure partway (a read-only folder, a full disk) leaves the
-/// earlier ones written; the caller names the checkpoint that holds the
-/// folder as it was.
+/// First every blob's size is read and checked against `limits`, so a
+/// restore over them is refused before anything changes. Then the blobs
+/// are streamed from one `cat-file --batch` in the shadow, one at a time
+/// through a small buffer, into files written by our code, relative to
+/// the folder's top opened once and to directories opened from it without
+/// following links (`git::at`): a link a process of the session swaps in
+/// for a folder, at any moment, is never written or deleted through (R.1
+/// follow-up), and the node never holds a blob in memory (R1b-1). Not
+/// atomic across files: a failure partway (a read-only folder, a full
+/// disk) leaves the earlier ones written; the caller names the checkpoint
+/// that holds the folder as it was.
 ///
 /// Deletes go first, then the writes. A path the turn added is a file or a
 /// link in the folder (the folder was just snapshotted); deleting it first
@@ -1945,7 +2195,11 @@ async fn blob_contents(
 /// any more: missing, its parent no longer a directory (`ENOTDIR`), or now
 /// a directory (someone replaced it; not this entry, left alone). Any other
 /// failure to delete is an error.
-pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String>, String> {
+pub async fn restore_paths(
+    repo: &Repo,
+    plan: &RestorePlan,
+    limits: WriteLimits,
+) -> Result<Vec<String>, String> {
     let paths: Vec<String> = plan.touched.iter().map(|(_, p)| p.clone()).collect();
     // Checked again right before writing (the plan was made a moment ago).
     let all: Vec<Vec<u8>> = plan
@@ -1955,7 +2209,9 @@ pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String
         .chain(plan.writes.iter().map(|(_, _, p)| p.clone()))
         .collect();
     check_inside(repo, all).await?;
-    let blobs = blob_contents(repo, &plan.writes).await?;
+    let sizes = blob_sizes(repo, &plan.writes, limits).await?;
+    let mut cmd = command_std(repo, None);
+    cmd.args(["cat-file", "--batch"]);
     let root = repo.root.clone();
     let deletes = plan.deletes.clone();
     let writes = plan.writes.clone();
@@ -1967,13 +2223,10 @@ pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String
             top.delete(&rel_path(p))
                 .map_err(|e| format!("could not delete {}: {e}", shown(p)))?;
         }
-        for (mode, id, p) in &writes {
-            let content = blobs
-                .get(id)
-                .ok_or_else(|| format!("{}: content missing", shown(p)))?;
-            top.write(&rel_path(p), mode, content)?;
+        if writes.is_empty() {
+            return Ok(());
         }
-        Ok::<_, String>(())
+        stream_writes(cmd, &writes, &sizes, &top)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -2235,7 +2488,9 @@ impl SubRepo {
         let path = dir.join("files");
         let made = async {
             let pin = harness_core::folder::FolderPin::at(&path)?;
-            let into = self.repo.with_root(&path).scratch();
+            // The folder is new and no session can reach it: git writes it.
+            let mut into = self.repo.with_root(&path).scratch();
+            into.tree_rw = true;
             let idx = fresh_index(&into).await?;
             let _files = IndexFiles(idx.clone());
             run(&into, &["read-tree", base], Some(&idx)).await?;
@@ -2340,7 +2595,7 @@ impl SubRepo {
         }
         let plan = restore_plan(&self.repo, &diff, &now, true).await?;
         secure_blobs(&self.repo, &plan).await?;
-        restore_paths(&self.repo, &plan).await?;
+        restore_paths(&self.repo, &plan, WriteLimits::SUB_AGENT).await?;
         Ok(plan.touched.len())
     }
 
@@ -3243,3 +3498,7 @@ mod bounds_tests;
 #[cfg(test)]
 #[path = "git_child_tests.rs"]
 mod child_tests;
+
+#[cfg(test)]
+#[path = "git_restore_memory_tests.rs"]
+mod restore_memory_tests;

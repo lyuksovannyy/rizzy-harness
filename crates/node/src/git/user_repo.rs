@@ -53,15 +53,41 @@ pub(crate) enum Found {
     None,
 }
 
-/// A small regular file reached by no link (`path` is canonical by
-/// construction: every component was checked), as text.
-fn read_small(path: &Path, cap: u64) -> Option<String> {
-    let md = std::fs::symlink_metadata(path).ok()?;
-    if !md.is_file() || md.len() > cap {
+/// A small regular file, as bytes: opened with `O_NOFOLLOW | O_NONBLOCK`
+/// (a link at the last component, a FIFO or a device is never followed or
+/// waited on), checked to be a regular file on the opened descriptor, and
+/// read through `take(cap + 1)`: more than `cap` bytes, whatever the file
+/// claimed when it was opened, counts as unreadable (R1b-3). The session
+/// may write every file read here.
+pub(crate) fn read_bounded(path: &Path, cap: u64) -> Option<Vec<u8>> {
+    use nix::fcntl::OFlag;
+    use std::io::Read;
+    let fd = nix::fcntl::open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .ok()?;
+    let f = std::fs::File::from(fd);
+    if !f.metadata().ok()?.is_file() {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    let mut out = Vec::new();
+    f.take(cap + 1).read_to_end(&mut out).ok()?;
+    (out.len() as u64 <= cap).then_some(out)
 }
+
+/// [`read_bounded`] as text.
+fn read_small(path: &Path, cap: u64) -> Option<String> {
+    String::from_utf8(read_bounded(path, cap)?).ok()
+}
+
+/// The most `HEAD` and a loose ref file may hold (a ref is under 100
+/// bytes; `HEAD` names one).
+const REF_MAX: u64 = 512;
+
+/// The most `packed-refs` may hold; a bigger one makes `HEAD` unknown.
+const PACKED_REFS_MAX: u64 = 1 << 20;
 
 /// `path` exists and leads nowhere else: no link on it (its canonical form
 /// is itself).
@@ -95,7 +121,7 @@ fn branch_ref(name: &str) -> Option<&str> {
 
 /// `HEAD`'s commit and branch in the git directory `git` (canonical).
 fn head_of(git: &Path) -> (Option<String>, String) {
-    let Some(text) = read_small(&git.join("HEAD"), 4096) else {
+    let Some(text) = read_small(&git.join("HEAD"), REF_MAX) else {
         return (None, "HEAD".into());
     };
     let text = text.trim_end_matches('\n');
@@ -110,12 +136,12 @@ fn head_of(git: &Path) -> (Option<String>, String) {
     };
     let loose = git.join(name);
     if plain(&loose)
-        && let Some(id) = read_small(&loose, 4096).and_then(|t| object_id(&t))
+        && let Some(id) = read_small(&loose, REF_MAX).and_then(|t| object_id(&t))
     {
         return (Some(id), branch.into());
     }
     // `packed-refs`: `<id> <ref>` lines (`#` and `^` lines skipped).
-    let id = read_small(&git.join("packed-refs"), 64 << 20).and_then(|t| {
+    let id = read_small(&git.join("packed-refs"), PACKED_REFS_MAX).and_then(|t| {
         t.lines()
             .filter(|l| !l.starts_with('#') && !l.starts_with('^'))
             .find_map(|l| match l.split_once(' ') {
@@ -203,4 +229,43 @@ pub(crate) fn find(cwd: &Path, ceiling: Option<&Path>) -> Found {
         dir = d.parent();
     }
     Found::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R1b-3: every file read here is bounded, never followed through a
+    /// link at its last component, and never waited on.
+    #[test]
+    fn files_the_session_may_write_are_read_bounded_and_without_following() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let git = top.join(".git");
+        std::fs::create_dir_all(git.join("objects")).unwrap();
+        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+        let id = "a".repeat(40);
+        // A packed `HEAD` ref within the cap is read...
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("packed-refs"), format!("{id} refs/heads/main\n")).unwrap();
+        assert_eq!(head_of(&git).0.as_deref(), Some(id.as_str()));
+        // ...one past it makes HEAD unknown.
+        let mut big = "# pad\n".repeat((PACKED_REFS_MAX as usize) / 6 + 1);
+        big.push_str(&format!("{id} refs/heads/main\n"));
+        std::fs::write(git.join("packed-refs"), big).unwrap();
+        assert_eq!(head_of(&git).0, None);
+        std::fs::remove_file(git.join("packed-refs")).unwrap();
+        // A loose ref that is a link, or a FIFO, is not read (and the FIFO
+        // is not waited on).
+        let elsewhere = top.join("elsewhere");
+        std::fs::write(&elsewhere, format!("{id}\n")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, git.join("refs/heads/main")).unwrap();
+        assert_eq!(head_of(&git).0, None);
+        std::fs::remove_file(git.join("refs/heads/main")).unwrap();
+        nix::unistd::mkfifo(&git.join("refs/heads/main"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert_eq!(head_of(&git).0, None);
+        // An oversized HEAD is unknown too.
+        std::fs::write(git.join("HEAD"), "x".repeat(REF_MAX as usize + 1)).unwrap();
+        assert_eq!(head_of(&git).0, None);
+    }
 }

@@ -44,6 +44,7 @@ async fn start(node_ttl: Option<Duration>) -> T {
         profile: Profile::Chat,
         incognito_ttl: node_ttl,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await

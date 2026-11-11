@@ -157,6 +157,7 @@ async fn a_repository_above_the_workspace_root_is_not_used() {
     let bounds = Bounds {
         ceiling: Some(sub.clone()),
         protected: vec![],
+        sandbox: None,
     };
     let repo = checkpoint_repo(&sub, Some(&h.base), &bounds)
         .await
@@ -173,6 +174,7 @@ async fn a_repository_above_the_workspace_root_is_not_used() {
     let bounds = Bounds {
         ceiling: Some(h.home.clone()),
         protected: vec![],
+        sandbox: None,
     };
     let repo = checkpoint_repo(&sub, Some(&h.base), &bounds)
         .await
@@ -195,6 +197,7 @@ async fn a_repository_that_holds_the_data_directory_is_not_the_root() {
     let bounds = Bounds {
         ceiling: Some(h.home.clone()),
         protected: vec![data.clone()],
+        sandbox: None,
     };
     let repo = checkpoint_repo(&notes, Some(&h.base), &bounds)
         .await

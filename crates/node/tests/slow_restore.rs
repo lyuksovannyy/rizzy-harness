@@ -205,6 +205,7 @@ async fn scenario() {
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: Some(dir.path().join("checkpoints")),
+        git_sandbox: None,
         artifacts: None,
     })
     .await

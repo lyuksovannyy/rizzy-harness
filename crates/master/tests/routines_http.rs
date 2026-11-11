@@ -64,6 +64,7 @@ async fn rt(root: &Path, id: &str, profile: Profile) -> NodeRuntime {
         incognito_ttl: None,
         // Beside the workspace root: sub-agent worktrees need it (R.1).
         checkpoints_dir: root.parent().map(|p| p.join(format!("checkpoints-{id}"))),
+        git_sandbox: None,
         artifacts: None,
     })
     .await

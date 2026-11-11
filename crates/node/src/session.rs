@@ -438,6 +438,7 @@ impl Session {
         crate::git::Bounds {
             ceiling: policy.root_of(dir).ok(),
             protected: policy.protected_dirs.clone(),
+            sandbox: self.node.cfg.git_sandbox.clone(),
         }
     }
 
@@ -1208,7 +1209,7 @@ impl Session {
         };
         // The folder is still the session's own right before the write.
         self.checked_folder().map_err(kept)?;
-        crate::git::restore_paths(&repo, &plan)
+        crate::git::restore_paths(&repo, &plan, crate::git::WriteLimits::UNDO)
             .await
             .map_err(kept)?;
         let state = crate::git::snapshot_full(

@@ -145,6 +145,8 @@ pub(crate) struct Stages {
     /// has uncommitted changes is asked of its shadow there, never of
     /// `git status` in the user's repository (R.1, S-1).
     checkpoints: Option<PathBuf>,
+    /// The sandbox that git runs in (R1b-2).
+    git_sandbox: Option<Arc<harness_tools::sandbox::Sandbox>>,
 }
 
 fn private_dir(p: &Path) -> io::Result<()> {
@@ -535,8 +537,13 @@ impl Packer<'_> {
 impl Stages {
     /// Use the checkpoint store under `dir` for a published file's
     /// repository state (see [`Stages::checkpoints`]).
-    pub(crate) fn with_checkpoints(mut self, dir: Option<PathBuf>) -> Self {
+    pub(crate) fn with_checkpoints(
+        mut self,
+        dir: Option<PathBuf>,
+        sandbox: Option<Arc<harness_tools::sandbox::Sandbox>>,
+    ) -> Self {
         self.checkpoints = dir;
+        self.git_sandbox = sandbox;
         self
     }
 
@@ -563,6 +570,7 @@ impl Stages {
             index: Mutex::new(HashMap::new()),
             fetches: Arc::new(Semaphore::new(FETCHES)),
             checkpoints: None,
+            git_sandbox: None,
         };
         for entry in std::fs::read_dir(&stages.dir)?.flatten() {
             let dir = entry.path();
@@ -789,6 +797,7 @@ impl Stages {
         let bounds = crate::git::Bounds {
             ceiling: Some(ceiling),
             protected: vec![self.data_dir.clone()],
+            sandbox: self.git_sandbox.clone(),
         };
         meta.git = crate::git::describe(&dir, self.checkpoints.as_deref(), &bounds)
             .await
