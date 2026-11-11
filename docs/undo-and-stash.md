@@ -511,7 +511,7 @@ The last dot keeps the final extension, so editors still know the file type. The
 | `stash_list` | read-only | This chat's unexpired stashes: id, date, turn, files, size, expiry. |
 | `stash_show` | read-only | One file of a stash as base, stashed or current version, or a diff between two of them. Same size limits as `read`. |
 | `stash_apply` | mutating, approval | Unstash files of one stash, exactly as §3.4; conflicts as the approval mode decides. |
-| `stash_delete` | mutating, **always asks** | Delete one stash. The card says what is lost: how many files, from when, the turn. It cannot be undone. Unlike other mutating tools it asks the person in every approval mode, `Auto` included, and is refused where no person can answer: a stash is the person's own saved work, and under `Auto` an ordinary mutating tool would delete it unasked. (Set on 2026-11-12 while writing; the owner said the agent may delete a stash and has not yet confirmed this floor.) |
+| `stash_delete` | mutating, **always asks** | Delete one stash. The card says what is lost: how many files, from when, the turn. It cannot be undone. Unlike other mutating tools it asks the person in every approval mode, `Auto` included, and is refused where no person can answer: a stash is the person's own saved work, and under `Auto` an ordinary mutating tool would delete it unasked. If the person does not answer within **60 seconds** the request is denied automatically and the stash is kept; the agent is told it timed out and may ask again. (Confirmed by the owner on 2026-11-12, who added the 60-second timeout.) |
 
 - The tools reach only the stashes of the agent's own chat, in its folder.
 - **No tool creates a stash or changes its contents.** Only an undo the person chose creates one.
@@ -650,7 +650,8 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 13. `side_file_names_follow_the_rule`: §3.5's table, taken names, 255-byte and non-UTF-8 names, a
     dangling symlink in the way.
 14. `the_agent_reads_and_deletes_only_its_own_chats_stashes_and_cannot_create_or_change_one`.
-15. `the_agents_delete_asks_for_approval_and_names_what_is_lost`.
+15. `the_agents_delete_asks_in_every_approval_mode_and_names_what_is_lost` (`Auto` included).
+    `an_unanswered_delete_request_is_denied_after_60_seconds_and_the_stash_is_kept`.
 16. `the_agents_unstash_follows_the_approval_mode_on_conflicts`:
     - `Auto` decides without a card.
     - `Ask` allows skip and beside, and asks for a merge.
