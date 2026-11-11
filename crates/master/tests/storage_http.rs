@@ -100,12 +100,17 @@ async fn users(t: &T) -> [String; 2] {
         )
         .await,
     );
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    send(t, Method::POST, "/api/users", Some(body), &alex).await;
+    let body = json!({"username": "bob"});
+    let pw = send(t, Method::POST, "/api/users", Some(body), &alex)
+        .await
+        .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let first = post_anon(
         t,
         "/api/login",
-        json!({"username": "bob", "password": "temporary pw"}),
+        json!({"username": "bob", "password": pw}),
         None,
     )
     .await;
@@ -113,7 +118,7 @@ async fn users(t: &T) -> [String; 2] {
         &post_anon(
             t,
             "/api/me/password",
-            json!({"current": "temporary pw", "new": "bobs own password"}),
+            json!({"current": pw, "new": "bobs own password"}),
             Some(&cookie(&first)),
         )
         .await,

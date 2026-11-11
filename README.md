@@ -47,8 +47,12 @@ cargo build --release
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
 (so nobody else can take over a fresh server), creates your **admin**
 account, and walks you through connecting an AI provider, your name and time
-zone, and a search engine. Admins add other people under Settings → Server → **Users**; new accounts get a temporary
-password and must change it at first login. Everyone sees only their own
+zone, and a search engine. Admins add other people under Settings → Server → **Users**; the server makes each new
+account a temporary password (and a new one on **Reset password**), shows it to the admin
+once with a copy button, and the user must change it at first login. Nobody chooses a
+temporary password, and it is never shown again; a reset also signs the user out
+everywhere. Scripts do the same with `POST /api/users` (`{"username": …}`) and
+`POST /api/users/{id}/password`; each answer carries the password in its `password` field. Everyone sees only their own
 chats. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
 

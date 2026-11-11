@@ -197,6 +197,30 @@ pub fn new_claim_code() -> String {
         .join("-")
 }
 
+/// A temporary password for an account an admin creates or resets (AUDIT
+/// L14): 4 groups of 5 from Crockford's base32 in lower case, so 100 bits
+/// from the OS generator in 23 characters, with no symbol that reads as
+/// another (no `i l o u`). 32 symbols divide 256, so masking a byte leaves
+/// no bias. Guessing it before its owner logs in is hopeless even without
+/// the login throttle, and it is still short enough to read out once. It is
+/// only ever returned in the one answer that made it.
+pub fn temporary_password() -> Secret<String> {
+    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let mut buf = [0u8; 20];
+    getrandom::fill(&mut buf).expect("OS randomness");
+    let chars: Vec<char> = buf
+        .iter()
+        .map(|b| ALPHABET[(*b & 31) as usize] as char)
+        .collect();
+    Secret::new(
+        chars
+            .chunks(5)
+            .map(|c| c.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("-"),
+    )
+}
+
 fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && bool::from(a.ct_eq(b))

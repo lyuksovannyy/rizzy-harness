@@ -97,12 +97,12 @@ export const api = {
   changePassword: (current: string, next: string) =>
     call<{ ok: boolean }>("POST", "/api/me/password", { current, new: next }),
   users: () => call<{ users: User[] }>("GET", "/api/users"),
-  createUser: (b: { username: string; password: string; role: Role; can_agentic: boolean }) =>
-    call<User>("POST", "/api/users", b),
-  updateUser: (
-    id: string,
-    b: { role?: Role; disabled?: boolean; can_agentic?: boolean; password?: string },
-  ) => call<User>("PATCH", `/api/users/${id}`, b),
+  /** The answer carries the server-made temporary password, this once. */
+  createUser: (b: { username: string; role: Role; can_agentic: boolean }) =>
+    call<User & { password: string }>("POST", "/api/users", b),
+  resetPassword: (id: string) => call<User & { password: string }>("POST", `/api/users/${id}/password`),
+  updateUser: (id: string, b: { role?: Role; disabled?: boolean; can_agentic?: boolean }) =>
+    call<User>("PATCH", `/api/users/${id}`, b),
   deleteUser: (id: string) => call<{ ok: boolean }>("DELETE", `/api/users/${id}`),
   setupStatus: () => call<{ claimed: boolean }>("GET", "/api/setup"),
   setup: (claim_code: string, username: string, password: string) =>

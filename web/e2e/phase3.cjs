@@ -116,8 +116,10 @@ let srv = null;
   await p.click('.settings-sections >> text=Server');
   await p.click('.tabs >> text=Users');
   await p.fill('input[placeholder="username"]', 'bob');
-  await p.fill('input[placeholder="temporary password (10+)"]', 'temporary pw');
   await p.click('form >> button:has-text("Create")');
+  // The server makes the temporary password; the dialog shows it once.
+  const temp = (await p.innerText('dialog .temp-password')).trim();
+  await p.click('dialog button:has-text("Done")');
   await p.waitForSelector('td:has-text("bob")');
   log('bob created');
 
@@ -126,11 +128,11 @@ let srv = null;
   const q = await ctx2.newPage();
   await q.goto(URL);
   await q.fill('input[placeholder="username"]', 'bob');
-  await q.fill('input[type=password]', 'temporary pw');
+  await q.fill('input[type=password]', temp);
   await q.click('button:has-text("Log in")');
   const pw = q.locator('input[type=password]');
   await q.waitForSelector('text=Choose your password');
-  await pw.nth(0).fill('temporary pw');
+  await pw.nth(0).fill(temp);
   await pw.nth(1).fill('bobs own password');
   await pw.nth(2).fill('bobs own password');
   await q.click('text=Save password');
