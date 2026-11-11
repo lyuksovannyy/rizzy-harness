@@ -272,6 +272,24 @@ deletion dialog) travels with its N task.
 
 **Gate W:** W.1 and W.2 merged; fix plan Gate 3 can be called.
 
+### Phase R: findings of the Gate 3 security review (now; before the gate can be called)
+
+The review Gate 3 asks for was done on 2026-11-11 by an independent Fable reviewer
+(`docs/security-review/2026-11-gate3.md`, with proof tests in `docs/security-review/proofs/`).
+Its verdict: **not fit to pass**, with 1 Critical, 3 High, 4 Medium, 14 Low and 6 Note. These
+are fixes to what is built, so they are allowed now. Each task inverts the review's proof
+tests, and the fixes are read again by an independent reviewer before the gate is called.
+
+| ID | Findings | The change | Done when |
+|---|---|---|---|
+| R.1 **sec** | S-1 (Critical), S-2 (High), S-3 (High), S-4, S-6 | **Nothing the agent's shell writes may steer the node's own git or move a session's folder.** Sub-agent snapshots and the patch are taken in a harness-owned git directory with the hardened settings, never under the user's repository config; the child's grant on the main `.git` is narrowed; a session's folder is pinned by canonical path, device and inode and refused when it changed; the checkpoint root is found by walking up for `.git`, never taken from git configuration, and goes through the same checks as a session folder; a restore refuses protected folders. | The review's proofs for S-1, S-2 and S-3 fail (the attack no longer works), on the real sandbox where they need it. |
+| R.2 **sec** | P-1 (High), P-2, P-3, P-7 | **A login is bound to its origin, not only to its host.** A random value kept per origin by the page is required on every cookie-authenticated request and as the first WebSocket message, so another port on the same host cannot use the cookie. `delegate` goes through the approval path and `denied_tools`; the revocation sweep runs again on reconnect; a deny or cancel is never refused. | A request with the cookie but without the origin value is refused; the UI works; `denied_tools = ["delegate"]` is honoured. |
+| R.3 **sec** | L-1 to L-4 (Medium), L-5, L-6, L-8, L-9 | **A node's word does not move or widen anything on the master.** `session_created` takes effect only at `seq` 1 and never changes an owner; a parent is followed only under the same node and owner; node-supplied strings and event sizes are capped at append; revocation is re-read after the stop token is registered and `send_command` refuses a revoked node; `node.hello` is bounded. | The review's proofs for L-1, L-2 and L-3 fail; a node revoked during its handshake is cut. |
+| R.4 | P-4, P-5, P-6, L-7, S-5, the Notes | The remaining Low and Note findings: fixed where small, otherwise recorded in the threat table with the reason. | Each has a test or a threat-table row. |
+| R.5 | The whole of Phase R | **The fixes are read again** by an independent reviewer, as the review asks, together with the part it did not check: how the web UI renders node-controlled and model-controlled strings. | A second report with no finding above Low. |
+
+**Gate R:** R.1 to R.5 done. Only then can fix plan Gate 3 be called.
+
 ## 5. Order and dependencies
 
 ```
