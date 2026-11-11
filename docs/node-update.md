@@ -1,7 +1,7 @@
 # Node update and drain: design note
 
-Status: **revised 2026-11-12 after the owner's answers (§2); for sign-off on the two questions in
-§12.** Nothing built. Task C.14 of `ADOPTION_PLAN.md`. Two pieces fix built behaviour and may go
+Status: **revised twice on 2026-11-12 after the owner's answers (§2); for sign-off on the one
+question in §12.** Nothing built. Task C.14 of `ADOPTION_PLAN.md`. Two pieces fix built behaviour and may go
 first (task A.19): the master tells a node why it was refused, and a stop signal stops a node
 cleanly. The rest is a feature, after Gate 3 of `FIX_PLAN.md`.
 
@@ -9,9 +9,10 @@ cleanly. The rest is a feature, after Gate 3 of `FIX_PLAN.md`.
 allows it **asks its master for that build** over the authenticated node link, verifies it,
 stages it beside its binary, drains, and restarts into it. The master never sends a binary, a URL
 or a command unasked. When a node restarts, for an update or because its supervisor stops it, it
-drains (§7) and its supervisor starts it again. **The price (§6.4): a node in `auto` mode that
-trusts its master runs whatever code that master serves, as the node's user, outside the
-sandbox.** Signed releases would make the master a cache; they do not exist yet.
+drains (§7) and its supervisor starts it again. **What a node trusts is its owner's choice
+(§6.4):** with `update_trust = "release"` it checks the master's bytes against the hash in the
+project's GitHub release, so the master alone cannot run its code there; with `"master"`, the
+only choice for untagged and self-built servers, it runs whatever its master serves.
 
 Claims about code were read on `main` at `e988625`.
 
@@ -38,7 +39,8 @@ Claims about code were read on `main` at `e988625`.
 | The sandbox helper | Each shell command runs through `sandbox-exec` of the binary **at the node's own path**, resolved once at start: "a binary replaced by an upgrade is picked up at the same path". | `crates/tools/src/sandbox.rs:670-705` |
 | After a crash | `recover_interrupted` denies pending approvals (`interrupted`), writes an error, ends the turn `interrupted`. Tool processes survive a SIGKILL of the node (a known gap, C.11). | `crates/node/src/session.rs:222-232`, `:236-260`; `crates/tools/src/bash.rs:905-910` |
 | Cancel | Bash gets SIGTERM to its group, SIGKILL 2 s later; a tool running 5 s after cancel is abandoned. Sub-agents run under the parent's token. | `crates/tools/src/bash.rs:24`, `:248`; `crates/agent-native/src/lib.rs:44`; `crates/node/src/session.rs:1670`, `:1702-1712` |
-| Releases | One `x86_64-linux-gnu` tarball per tag with a `.sha256` beside it; no signature. Ed25519 verification is already linked in, for node keys. | `.github/workflows/ci.yml:114-130`; `AUDIT.md:534`; `crates/link/src/identity.rs:5` |
+| Releases | One `x86_64-linux-gnu` tarball per tag, with the tarball's SHA-256 beside it (not the binary's); no signature. The binary in it is copied out of the published image, so the image and the release hold the same file. | `.github/workflows/ci.yml:114-130`; `AUDIT.md:534` |
+| HTTP client | `reqwest` 0.13 with its `rustls` feature, which verifies certificates through `rustls-platform-verifier`: the operating system's trust store (the image copies the CA bundle in). | `Cargo.toml:74`; `Cargo.lock` (`reqwest` dependencies); `Dockerfile` (CA bundle) |
 
 **What was removed, and why this is not it.** Commit `1fa8f27` (`FIX_PLAN.md` 1.2, 1.4, Q2, Q3;
 `AUDIT.md` S13, D4, L2) deleted SSH node setup, in which **the master logged in to servers as
@@ -61,6 +63,7 @@ What is given up is stated in §6.4.
 | D4 | Before signed releases exist | Distribute a compatible build from the master via the dedicated, node-authenticated endpoint. |
 | D5 | An unanswered turn's running command at five minutes | Stopped (the command, not the turn). |
 | D6 | May the master cut off a draining node | No. A deadline applies at admission only. |
+| D7 | Guarding against a compromised master | In the owner's words: "instead of downloading releases from github, instead parse node binary hash and compare with downloaded one from master before replacing". **Reading:** the bytes still come from the master; the expected hash comes from a second, independent source, the project's GitHub release for that version, fetched by the node itself; the node installs only on a match (`update_trust = "release"`, §6.4). Signing keys are deferred (§6.5). |
 
 ## 3. Settings in `node.toml`
 
@@ -68,8 +71,8 @@ Top-level keys, beside `max_approval_mode` (`README.md:1027`), and one table:
 
 ```toml
 update_mode = "notify"     # "off" | "notify" | "restart" | "auto"
-update_trust = ""          # required with "auto": "master" | "signature"
-update_signing_key = ""    # Ed25519 public key, base64; required with "signature"
+update_trust = ""          # required with "auto": "release" | "master"
+update_release_repo = "lyuksovannyy/rizzy-harness"   # the compiled-in default; a fork sets its own
 
 [drain]
 ask_minutes = 5            # the agent has this long to answer the drain note
@@ -86,10 +89,11 @@ min_minutes_between = 60   # no new update drain within this long after one
 | `auto` | When the master requires or offers a newer compatible build: fetches, verifies, stages, preflights (§6), drains, restarts into it. Without a build for its target, as `notify`. | Yes |
 
 `restart` is `auto` with nothing to fetch and shares its code; it stays a separate value because
-it grants something different (the owner's packaging, not the master or a signature).
+it grants something different (the owner's packaging, not the master or a release).
 
-**Checked at start.** `auto` without `update_trust`, or `"signature"` without a key: `node run`
-refuses to start, naming the setting. `auto` when the node's user cannot replace its binary
+**Checked at start.** `auto` without `update_trust`, or with a value other than `"release"` or
+`"master"`: `node run` refuses to start, naming the setting. `update_release_repo` must be
+`owner/name` of letters, digits, `-`, `_` and `.`. `auto` when the node's user cannot replace its binary
 (§6.2) degrades to `notify` with the reason. `update_trust = "master"` is logged at every start
 and shown by `doctor` as "this node runs code its master serves". Durations: `ask_minutes` 1 to 30,
 `force_after_minutes` from `ask_minutes` to 1440, `hard_stop_seconds` 10 to 300. **The master
@@ -132,7 +136,7 @@ running executable cannot be rewritten in place; a rename leaves the open file i
 |---|---|
 | Where | `<data>/node-builds/<target>/rizzy-harness` and `meta.json` (identity, origin, time added), 0600, owned by the server's user. |
 | How a build is added | (a) **By the server's admin** on the server's machine: `rizzy-harness node-build add <file>`, which refuses a file whose identity is not the master's own version and build id. No HTTP route adds one (`FIX_PLAN.md` Q3). (b) **Fetched by the master** from the release for its own version, at the first request from that target, if `config.toml` has `[nodes] fetch_builds = "github"` (default `"off"`). The URL comes from a fixed repository name, the version and the target, never from a node; it passes the outbound rules (`crates/master/src/outbound.rs`), with the release and download hosts allowed by name (the download redirects off origin). |
-| Verified on arrival | The tarball's SHA-256 against the release's `.sha256`; the extracted file's identity against the master's own version and build id; with a project signing key in `config.toml`, the signature. A `.sha256` beside a tarball is integrity, not authenticity: it comes from the same place. |
+| Verified on arrival | The tarball's SHA-256 against the release's `.sha256`; the extracted file's identity against the master's own version and build id. That is integrity, not authenticity (both come from the same place). **For nodes with `update_trust = "release"` the cache needs no trust at all:** each node checks the bytes against the release hash itself, so a corrupted or tampered cache is refused at the node. |
 | Bounds | At most 4 targets, 200 MiB per file, one build per target (the master's own); a build for an older master version is deleted at start. One fetch at a time, at most 3 attempts per target per day. |
 | No build | The endpoint answers `none` with the reason; the node behaves as `notify`. |
 
@@ -152,7 +156,7 @@ authentication path, the riskier choice. Never the cookie or the API token.
 | Message | Direction | Content |
 |---|---|---|
 | `build.query { req_id }` | node to master | "what is your build for my target?" The target is the one the node's hello declared; there is no target field to ask for another. |
-| `build.info { req_id, build? }` | master to node | `{ sha256, version, build_id, target, size, signature? }`, or none with a reason. |
+| `build.info { req_id, build? }` | master to node | `{ sha256, version, build_id, target, size }`, or none with a reason. There is no field for a URL, a host or a hash source; an extra field in the JSON is ignored by the parser and reaches no code. |
 | `build.fetch { req_id, sha256, offset, len }` | node to master | A range of that build; `len` at most `MAX_CHUNK` (256 KiB, `crates/protocol/src/lib.rs:20`). |
 | `build.chunk { req_id, offset, data, eof, error? }` | master to node | Base64, as `artifact.chunk` (`crates/protocol/src/lib.rs:110-123`). |
 
@@ -168,9 +172,10 @@ Base64 adds a third; it happens once per update.
 
 1. `build.info`: its own target; newer than its own build (§4.1); at most 200 MiB; not listed in
    `<data>/update-failed` (§6.3).
-2. Fetch into `<bin dir>/.rizzy-harness.next`, mode 0600, SHA-256 checked against `build.info`.
-3. With `update_trust = "signature"`: the signature over the SHA-256 checked against
-   `update_signing_key`; no signature, or a wrong one, is refused, whatever the master says.
+2. With `update_trust = "release"`: the release hash (§6.5), compared with `build.info.sha256`
+   **before any byte is downloaded**, so a mismatch costs no transfer.
+3. Fetch into `<bin dir>/.rizzy-harness.next`, mode 0600; the SHA-256 of the bytes checked
+   against `build.info` and, with `"release"`, against the release hash again.
 4. File identity read and compared with `build.info`.
 5. Mode 0755, flushed. **Preflight:** `.rizzy-harness.next version --json`, 10 s, empty
    environment, must report the same identity. No new trust (it is about to run anyway), and a
@@ -211,26 +216,62 @@ is caught by the preflight, not here.
 
 ### 6.4 What trust this is
 
-**With `update_trust = "master"`, whoever controls the master runs code of their choice as the
-node's user, outside the sandbox, on every node in `auto` mode. Today a compromised master can
-drive agent turns only inside each node's policy and sandbox (`PLAN.md` T5, T6); this gives that
-up for those nodes, by their owners' choice.**
+Today a compromised master can drive agent turns only inside each node's policy and sandbox
+(`PLAN.md` T5, T6). `auto` changes that by the node owner's choice, to a degree set by
+`update_trust`:
 
-What limits it:
+| `update_trust` | Who must be compromised to run code on the node | Works with |
+|---|---|---|
+| `"master"` | **The master alone.** Whoever controls it runs code of their choice as the node's user, outside the sandbox, on every node in `auto` with this setting. | Any master build, tagged or not, self-built included. |
+| `"release"` | **The master and the project's GitHub releases** (the account, a workflow, or the release assets), or TLS to GitHub. | A master running a tagged release binary or the published image of that tag. |
+| `"signature"` (later, §6.5) | The master and an offline signing key. | Signed releases. |
 
-1. It is opt-in per node and never the default; `auto` refuses to start without `update_trust`;
-   the grant is logged at every start and shown by `doctor`.
-2. **The intended end state is `update_trust = "signature"`:** a release signing key whose public
-   half the node's owner pins in `node.toml`. The master is then only a cache; a build that does
-   not verify is refused. That needs tagged releases, a signing key and a signing step, a decision
-   on where the private key is kept (§12, Q2), and rotation: a new key is pinned by each node's
-   owner, and a node pinning only a revoked key stops updating rather than trusting the master.
-   None of this exists yet.
-3. Integrity whatever the trust: hash, target, identity, size, never older.
+Opt-in per node, never the default, logged at every start and shown by `doctor`. Integrity holds
+whatever the trust: hash, target, identity, size, never older.
 
-**`"master"` is a fair trade** when one person runs the master and its nodes: the master's
-compromise is already theirs. **It is not** for a node attached to someone else's master, or a
-shared node serving workspaces of people who do not run it.
+**`"release"` is the documented setting for `auto` from the first tag on.** It trusts what anyone
+who downloads the release directly trusts, the install path of every other harness's installer.
+**`"master"` is for untagged and self-built servers,** by the node owner's explicit choice: a
+fair trade when one person runs the master and its nodes, not for a node attached to someone
+else's master or a shared node serving people who do not run it.
+
+### 6.5 The release hash
+
+| Part | Decision |
+|---|---|
+| The URL | Built by the node only: `https://github.com/<update_release_repo>/releases/download/v<version>/rizzy-harness-v<version>-<target>.bin.sha256`. The repository comes from `node.toml` (compiled-in default `lyuksovannyy/rizzy-harness`); the target is the node's own; the version is the one in `build.info`, accepted only as plain `MAJOR.MINOR.PATCH` digits, so nothing the master sends can add a path, a host or a query. **Never a URL, a host or a hash source from the master.** |
+| Transport | The node's existing `reqwest` client, HTTPS through the operating system's trust store (§1). GitHub answers a release download with a redirect to its asset host: redirects are allowed only to `github.com` and hosts under `githubusercontent.com`, at most 3. Timeout 15 s; answer capped at 1 KiB; no token. |
+| Parse | Exactly one line, 64 lowercase hex characters, two spaces, `rizzy-harness`; anything else is refused. |
+| Failure | GitHub unreachable, rate-limited or answering 404: retried with backoff (1, 5, 15, 60 minutes, then once a day), and meanwhile the node behaves as `notify` with the reason. **It never falls back to trusting the master: no automatic downgrade of trust, ever.** No drain until verified. |
+| A private fork | Not supported in `"release"` mode (it would need a GitHub token on every node); such a node uses `"master"`. |
+| The workflow change | The release step publishes one more asset per target, the binary's own hash: `sha256sum rizzy-harness > "$name.bin.sha256"` beside the tarball's (`.github/workflows/ci.yml:124-127`), added to `gh release create`. **S.** |
+
+**Consequences, plainly.**
+- **A master built from source cannot serve `"release"` nodes.** Its binary is not the release
+  artifact, so the hashes never match: that is the property working. Those nodes behave as
+  `notify` and say why. A master running the release binary, or the image of that tag, matches.
+- **Nothing works before the first tag, nor between tags** (the `:edge` image is not a release):
+  only `"master"` covers an untagged build.
+- **A node with no route to GitHub** cannot verify and stays at `notify`, with the reason.
+- An older release named by the master is refused as before (never older).
+- Defends against a compromised master and a corrupted cache; not against a compromised GitHub
+  account, workflow or release, or broken TLS to GitHub.
+
+**GitHub, checked 2026-11-12 in its documentation.** *Immutable releases* are a repository or
+organisation setting: a published release's assets cannot be modified or deleted, its tag cannot
+move, and GitHub records a release attestation ("Immutable releases"). **Turn it on before the
+first tag**, so a `.bin.sha256` cannot be swapped later; its interaction with `gh release create`
+uploading in the same call is not confirmed. The REST asset object has a `digest` field ("Release
+assets"), format not confirmed; it is the tarball's, not the binary's, so it does not replace the
+asset above.
+
+**Signature, later.** A release signing key whose public half each node's owner pins would make
+the master and GitHub both mere carriers: it survives a compromised GitHub account if the key is
+kept offline. It needs tagged releases, a signing step, key custody and rotation, none of which
+exist, and `"release"` covers the threat this note is about. Deferred, not built in N.9; its test
+would be `signature_trust_refuses_an_unsigned_or_wrongly_signed_build`.
+
+### 6.6 An escaped agent
 
 **An agent that escaped the sandbox** can replace a binary the node's user owns, and so persist.
 `auto` adds no write access that it lacks today: it can already rewrite `node.toml`, which the
@@ -305,9 +346,8 @@ from then on and exists nowhere else (one prompt-cache miss per turn per drain).
 
 ### 7.5 Abuse
 
-- **Repeated requirements** drain a node only with a verified newer build, after which they are
-  met; `min_minutes_between` and the failed-build list fence the rest. Refusing admission and
-  cancelling sessions a master can already do.
+- **Repeated requirements** drain a node only with a verified newer build; `min_minutes_between`
+  and the failed-build list fence the rest.
 - **A prompt-injected agent** cannot start, cancel or extend a drain (no tool or message exists
   outside one; the node fixes the forced time) nor reach the build endpoint (the link belongs to
   the node process, not the shell). Text imitating the note can make it stop early, as injected
@@ -376,7 +416,7 @@ master holds one open file, not a copy.
 
 | # | Threat | Mitigation |
 |---|---|---|
-| T35 | A compromised master serves a malicious build to nodes that update from it, or uses requirements to keep nodes from working; a prompt-injected agent starts, cancels or stretches a restart | **The node pulls; the master never pushes.** A node asks for a build only with `update_mode = "auto"` and an explicit `update_trust` in its own `node.toml`; nothing on the master enables it. **With `update_trust = "master"` a compromised master runs code of its choice as the node's user, outside the sandbox, on every such node: accepted, by each node owner's choice, logged at every start and shown by `doctor`.** With `"signature"` the master is a cache and a build that does not verify against the pinned key is refused. Always: hash, target, identity and size checked, never older, preflighted, renamed in after the drain, rolled back on a failed handshake, never retried. The endpoint is on the authenticated link, own target only, rate-limited, refused to revoked nodes. The drain's durations are the node's; the agent chooses only finish or pause for its own turn. Tests: `docs/node-update.md` §9. **Residual:** `"master"` trust as above; an escaped agent can replace a node-owned binary, as it can already rewrite `node.toml`. |
+| T35 | A compromised master serves a malicious build to nodes that update from it, or uses requirements to keep nodes from working; a prompt-injected agent starts, cancels or stretches a restart | **The node pulls; the master never pushes.** A node asks for a build only with `update_mode = "auto"` and an explicit `update_trust` in its own `node.toml`; nothing on the master enables it. **With `update_trust = "master"` a compromised master runs code of its choice as the node's user, outside the sandbox, on every such node: accepted, by each node owner's choice, logged at every start and shown by `doctor`.** With `"release"` the node fetches the binary's hash itself from a release URL it builds from its own `node.toml` and a plain version number, compares it before downloading and after, and refuses any mismatch, so the master alone cannot run code there; GitHub unreachable leaves the node at `notify`, never at `"master"` trust. Always: hash, target, identity and size checked, never older, preflighted, renamed in after the drain, rolled back on a failed handshake, never retried. The endpoint is on the authenticated link, own target only, rate-limited, refused to revoked nodes. The drain's durations are the node's; the agent chooses only finish or pause for its own turn. Tests: `docs/node-update.md` §9. **Residual:** `"master"` trust as above; with `"release"`, a compromised GitHub repository or release together with the master; an escaped agent can replace a node-owned binary, as it can already rewrite `node.toml`. |
 
 ## 9. Tests the build commits to
 
@@ -387,7 +427,7 @@ master holds one open file, not a copy.
 5. `a_node_cannot_fetch_another_targets_build`: the answer follows the hello's target only.
 6. `a_build_with_a_wrong_hash_target_or_identity_is_refused_and_nothing_is_installed`.
 7. `a_build_older_than_the_running_one_is_refused`.
-8. `signature_trust_refuses_an_unsigned_or_wrongly_signed_build`.
+8. `a_build_whose_hash_differs_from_the_release_is_refused`: nothing downloaded, nothing installed, no drain.
 9. `auto_without_update_trust_refuses_to_start`, and with a root-owned binary degrades to `notify`.
 10. `a_failed_download_or_verification_causes_no_drain`.
 11. `a_build_that_fails_preflight_causes_no_drain`.
@@ -406,6 +446,10 @@ master holds one open file, not a copy.
 24. `an_agent_cannot_start_or_extend_a_drain`.
 25. `a_draining_refusal_does_not_block_a_routine`.
 26. `an_approval_left_open_is_denied_at_the_forced_point`.
+27. `the_node_never_takes_a_url_or_hash_source_from_the_master`: a `build.info` with extra `url`, `host` or `hash_url` fields fetches only the node-built URL.
+28. `a_master_supplied_version_with_path_characters_is_refused`: `1.2.3/../x`, `1.2.3?a` and `v1.2` are refused before any request.
+29. `github_unreachable_leaves_the_node_at_notify_not_master_trust`.
+30. `a_self_built_masters_build_is_refused_under_release_trust`.
 
 ## 10. Build order and size
 
@@ -416,11 +460,11 @@ master holds one open file, not a copy.
 | 3 | The full drain: phases, the note, `drain_answer`, events, marker, Continue, routines (tests 17 to 26) | **L** | After Gate 3, on step 1 |
 | 4 | Requirement: storage, admin setting, `welcome`, notices; `off`, `notify`, `restart` (tests 1, 23) | **M** | After 3 |
 | 5 | The endpoint on the link and the master's own build (tests 2 to 5, 14) | **M** | After 2 |
-| 6 | Node side of `auto`: fetch, verify, preflight, install after drain, rollback, `update_trust` (tests 6 to 13) | **L** | After 3 and 5 |
-| 7 | The cache: `node-build add`, the GitHub fetch | **M** | After 6; the fetch after the first tag |
-| 8 | `signature` trust in use | **S** code, plus the release signing step | After signed releases |
+| 6 | Node side of `auto`: fetch, verify, preflight, install after drain, rollback, `"master"` trust (tests 6, 7, 9 to 13) | **L** | After 3 and 5 |
+| 7 | `"release"` trust: the hash fetch, URL building, version check, no fallback (tests 8, 27 to 30); the workflow's `.bin.sha256` asset; immutable releases turned on | **M** (fetch) + **S** (workflow) | After 6; usable from the first tag |
+| 8 | The cache: `node-build add`, the GitHub fetch | **M** | After 6; the fetch after the first tag |
 
-About four to five weeks in all. Nothing from the nodes design is needed first: N.1 adds the spool
+`signature` trust is not built (§6.5). About five weeks in all. Nothing from the nodes design is needed first: N.1 adds the spool
 flush and per-workspace notices, N.4 container stop and reconcile.
 
 ## 11. Not settled
@@ -433,5 +477,6 @@ flush and per-workspace notices, N.4 container stop and reconcile.
 
 | # | Decision | Recommended | If you choose the other |
 |---|---|---|---|
-| Q1 | Your answer to "before signed releases exist" was the endpoint. I read it as: `update_trust = "master"` is how a node accepts builds before releases are signed, and `"signature"` becomes the documented default for `auto` once they are. Confirm? | **Yes.** | `"master"` stays the normal setting after signing exists: the master stays a code-execution channel to every `auto` node for good, and T35 keeps that as a permanent residual. |
-| Q2 | Where the release signing key lives | **Offline, with you;** CI builds, you sign the hash and upload the signature. | In CI secrets: whoever takes the GitHub account or a workflow can sign anything, and `"signature"` defends against a compromised master but not a compromised repository. |
+| Q1 | D7 as read in §2: the bytes come from the master, the hash from the GitHub release, fetched by the node. `"release"` becomes the documented setting for `auto` after the first tag; `"master"` remains for untagged and self-built servers by the node owner's explicit choice; signature trust is deferred. Confirm? | **Yes.** | If `"master"` should not exist at all: `auto` does nothing before the first tag or on a self-built master, and those nodes stay at `notify` or `restart`. If signatures are wanted now: tagged releases, a signing step and key custody first, about a week more. |
+
+Withdrawn: the earlier Q2 (where a signing key lives), since signatures are deferred (§6.5).
