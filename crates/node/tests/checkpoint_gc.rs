@@ -17,396 +17,29 @@
 //! - a damaged checkpoint index (it names a blob that is gone) is rebuilt
 //!   from the folder once, so later turns get checkpoints again.
 //!
-//! Tests named `..._is_refused_...` record the residual: while checkpoints
-//! borrow, such a checkpoint cannot be restored. Once they own every blob
-//! (O11), those assertions become: the restore is `Ok` and the file holds X.
+//! A.17 then closed the main gap: at the end of every turn the old versions
+//! of the files it changed are copied into the checkpoint repository's own
+//! store (`crates/node/tests/checkpoint_upkeep.rs`), so housekeeping in the
+//! user's repository *after* a turn no longer takes its undo: the tests that
+//! were named `..._is_refused_...` now assert the restore is `Ok` and the
+//! file holds X. What remains refused is content gone *before* the turn
+//! ended (the agent rewrote and pruned history inside its own turn), which
+//! is how the all-or-nothing refusal of A.16 is still exercised here.
 //!
 //! Every git call here runs with a fixed identity, no system or global
 //! config, and a cleared environment, in a temporary directory.
 
-use std::collections::BTreeMap;
+#[path = "support/rig.rs"]
+mod rig;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 
-use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::event::*;
-use harness_core::{RawEvent, SessionId};
-use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
-use harness_store::{Durability, Store};
+use rig::{AGENT_GIT, Restore, Rig, X};
 
-const X: &str = "X: the content a checkpoint depends on\n";
 const SCRATCH: &str = "untracked scratch file\n";
-
-struct Rig {
-    dir: tempfile::TempDir,
-    ws: PathBuf,
-    _node: NodeRuntime,
-    link: NodeLink,
-    seen: Vec<RawEvent>,
-    sid: SessionId,
-    n: u32,
-}
-
-#[derive(Debug)]
-struct Turn {
-    id: Option<String>,
-    phases: Vec<String>,
-}
-
-#[derive(Debug)]
-struct Restore {
-    result: Result<(), String>,
-    phases: Vec<String>,
-    /// The id of the "folder as it was before this restore" checkpoint.
-    saved: Option<String>,
-    folder_before: BTreeMap<String, Vec<u8>>,
-    folder_after: BTreeMap<String, Vec<u8>>,
-}
-
-impl Rig {
-    async fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().join("ws");
-        std::fs::create_dir(&ws).unwrap();
-        let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
-        let cfg = NodeConfig {
-            node_id: "local".into(),
-            hostname: "test".into(),
-            policy: NodePolicy {
-                workspace_roots: vec![dir.path().into()],
-                max_approval_mode: harness_core::policy::ApprovalMode::Auto,
-                ..Default::default()
-            },
-            store,
-            backend: Arc::new(NativeBackend::new(
-                Arc::new(Mock {
-                    delay: Duration::from_millis(5),
-                }),
-                harness_tools::builtin(),
-                NativeConfig::default(),
-            )),
-            default_model: "mock".into(),
-            secrets: harness_core::SecretSet::new(vec![]),
-            profile: harness_core::event::Profile::Agentic,
-            incognito_ttl: None,
-            checkpoints_dir: Some(dir.path().join("checkpoints")),
-            artifacts: None,
-        };
-        let node = NodeRuntime::start(cfg).await.unwrap();
-        let mut link = node.attach().await;
-        match link.from_node.recv().await.unwrap() {
-            NodeToMaster::Hello { .. } => {}
-            other => panic!("expected hello, got {other:?}"),
-        }
-        let mut rig = Self {
-            dir,
-            ws,
-            _node: node,
-            link,
-            seen: vec![],
-            sid: SessionId::new(),
-            n: 0,
-        };
-        rig.send(MasterToNode::Create {
-            profile: None,
-            incognito: false,
-            agent: None,
-            req_id: "c".into(),
-            session_id: rig.sid,
-            title: "t".into(),
-            cwd: rig.ws.display().to_string(),
-            model: None,
-            approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
-        });
-        rig.until(|k| matches!(k, EventKind::SessionCreated(_)))
-            .await;
-        rig
-    }
-
-    fn send(&self, m: MasterToNode) {
-        self.link.to_node.try_send(m).unwrap();
-    }
-
-    async fn recv(&mut self) -> NodeToMaster {
-        tokio::time::timeout(Duration::from_secs(30), self.link.from_node.recv())
-            .await
-            .expect("timed out")
-            .expect("link closed")
-    }
-
-    async fn until(&mut self, pred: impl Fn(&EventKind) -> bool) {
-        loop {
-            match self.recv().await {
-                NodeToMaster::Event { event } => {
-                    let k = event.typed().unwrap();
-                    self.seen.push(event);
-                    if pred(&k) {
-                        return;
-                    }
-                }
-                NodeToMaster::Ack { ok, error, .. } => assert!(ok, "nack: {error:?}"),
-                _ => {}
-            }
-        }
-    }
-
-    fn checkpoints_since(&self, mark: usize) -> Vec<(String, String)> {
-        self.seen[mark..]
-            .iter()
-            .filter_map(|e| match e.typed() {
-                Ok(EventKind::Checkpoint(c)) => Some((
-                    c.turn_id.clone(),
-                    serde_json::to_value(c.phase)
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                )),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// One agent turn running `cmd` in the folder; waits for the turn to end.
-    async fn turn(&mut self, cmd: &str) -> Turn {
-        self.n += 1;
-        let mark = self.seen.len();
-        self.send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: format!("p{}", self.n),
-            session_id: self.sid,
-            text: format!("run: {cmd}"),
-            images: vec![],
-        });
-        self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
-        let cps = self.checkpoints_since(mark);
-        let id = cps
-            .iter()
-            .find(|(_, p)| p == "after")
-            .map(|(t, _)| t.clone());
-        Turn {
-            id,
-            phases: cps.into_iter().map(|(_, p)| p).collect(),
-        }
-    }
-
-    /// Undo `turn`; returns what the caller sees and the folder around it.
-    async fn restore(&mut self, turn: &str, force: bool) -> Restore {
-        self.n += 1;
-        let req = format!("r{}", self.n);
-        let mark = self.seen.len();
-        let folder_before = self.files();
-        self.send(MasterToNode::Restore {
-            req_id: req.clone(),
-            session_id: self.sid,
-            turn_id: turn.into(),
-            force,
-            rewind: false,
-        });
-        let result = loop {
-            match self.recv().await {
-                NodeToMaster::Event { event } => self.seen.push(event),
-                NodeToMaster::Ack {
-                    req_id, ok, error, ..
-                } if req_id == req => {
-                    break if ok {
-                        Ok(())
-                    } else {
-                        Err(error.unwrap_or_default())
-                    };
-                }
-                _ => {}
-            }
-        };
-        let cps = self.checkpoints_since(mark);
-        Restore {
-            result,
-            saved: cps
-                .iter()
-                .find(|(_, p)| p == "before_restore")
-                .map(|(t, _)| t.clone()),
-            phases: cps.into_iter().map(|(_, p)| p).collect(),
-            folder_before,
-            folder_after: self.files(),
-        }
-    }
-
-    /// Every file in the folder but `.git`, with its bytes.
-    fn files(&self) -> BTreeMap<String, Vec<u8>> {
-        walkdir::WalkDir::new(&self.ws)
-            .into_iter()
-            .filter_entry(|e| e.file_name() != ".git")
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .map(|e| {
-                (
-                    e.path()
-                        .strip_prefix(&self.ws)
-                        .unwrap()
-                        .display()
-                        .to_string(),
-                    std::fs::read(e.path()).unwrap(),
-                )
-            })
-            .collect()
-    }
-
-    fn write(&self, name: &str, text: &str) {
-        std::fs::write(self.ws.join(name), text).unwrap();
-    }
-
-    fn read(&self, name: &str) -> Option<String> {
-        std::fs::read_to_string(self.ws.join(name)).ok()
-    }
-
-    // ---- git, with a fixed identity and no global or system config ----
-
-    fn git_cmd(&self, dir: &Path) -> Command {
-        let mut c = Command::new("git");
-        c.arg("-C")
-            .arg(dir)
-            .args([
-                "-c",
-                "commit.gpgSign=false",
-                "-c",
-                "init.defaultBranch=main",
-            ])
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap())
-            .env("HOME", self.dir.path())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_AUTHOR_NAME", "user")
-            .env("GIT_AUTHOR_EMAIL", "user@example.com")
-            .env("GIT_COMMITTER_NAME", "user")
-            .env("GIT_COMMITTER_EMAIL", "user@example.com");
-        c
-    }
-
-    fn git_in(&self, dir: &Path, args: &[&str]) -> String {
-        let out = self.git_cmd(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {out:?}");
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        self.git_in(&self.ws, args)
-    }
-
-    fn git_ok(&self, args: &[&str]) -> bool {
-        self.git_cmd(&self.ws)
-            .args(args)
-            .output()
-            .unwrap()
-            .status
-            .success()
-    }
-
-    /// Whether the user's repository still has the object.
-    fn user_has(&self, oid: &str) -> bool {
-        self.git_ok(&["cat-file", "-e", oid])
-    }
-
-    /// The checkpoint repository (there is one folder, so one).
-    fn shadow(&self) -> PathBuf {
-        let mut v: Vec<PathBuf> = std::fs::read_dir(self.dir.path().join("checkpoints"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|e| e == "git"))
-            .collect();
-        assert_eq!(v.len(), 1, "{v:?}");
-        v.pop().unwrap()
-    }
-
-    /// Whether the checkpoint repository holds the object in its *own*
-    /// object directory: a copy of it with the alternates file removed.
-    fn shadow_owns(&mut self, oid: &str) -> bool {
-        self.n += 1;
-        let copy = self.dir.path().join(format!("shadow-copy-{}", self.n));
-        let _ = std::fs::remove_dir_all(&copy);
-        assert!(
-            Command::new("cp")
-                .arg("-a")
-                .arg(self.shadow())
-                .arg(&copy)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let alt = copy.join("objects/info/alternates");
-        assert!(alt.exists(), "no alternates file: borrowing is not on");
-        std::fs::remove_file(alt).unwrap();
-        let ok = self
-            .git_cmd(&copy)
-            .args(["cat-file", "-e", oid])
-            .output()
-            .unwrap()
-            .status
-            .success();
-        std::fs::remove_dir_all(copy).unwrap();
-        ok
-    }
-
-    /// Refs of the checkpoint repository.
-    fn shadow_refs(&self) -> Vec<String> {
-        let out = self
-            .git_cmd(&self.shadow())
-            .args(["for-each-ref", "--format=%(refname)"])
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout)
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// base commit (other.txt), then a commit holding keep.txt = X.
-    /// Returns X's blob id.
-    fn base_repo(&self) -> String {
-        self.git(&["init", "-q", "-b", "main"]);
-        self.write("other.txt", "base\n");
-        self.git(&["add", "."]);
-        self.git(&["commit", "-qm", "base"]);
-        self.write("keep.txt", X);
-        self.git(&["add", "."]);
-        self.git(&["commit", "-qm", "adds keep.txt"]);
-        self.git(&["hash-object", "keep.txt"])
-    }
-
-    fn expire_reflog_and_gc_now(&self) {
-        self.git(&["reflog", "expire", "--expire=now", "--all"]);
-        self.git(&["gc", "--prune=now", "-q"]);
-    }
-
-    /// Back-date every loose object in the user's repository.
-    fn age_objects(&self, days: u32) {
-        let when = format!("{days} days ago");
-        assert!(
-            Command::new("find")
-                .arg(self.ws.join(".git/objects"))
-                .args(["-type", "f", "-exec", "touch", "-d", &when, "{}", "+"])
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-
-    /// The user rewrites the commit that held keep.txt = X.
-    fn amend_x_away(&self) {
-        self.write("keep.txt", "Y: the amended content\n");
-        self.git(&["commit", "-qa", "--amend", "-m", "amended"]);
-    }
-}
 
 // ---- scenarios ----
 
@@ -421,13 +54,60 @@ async fn turn_over_committed_x(rig: &mut Rig, dirty: bool) -> (String, String) {
     }
     let t = rig.turn("echo v2 > keep.txt").await;
     assert_eq!(t.phases, ["before", "after"]);
-    // Borrowing is really on, and X is only in the user's object store.
+    // Borrowing is really on (the unchanged `other.txt` is only in the
+    // user's store), and X, which the turn changed, was copied (A.17).
     assert!(rig.user_has(&x));
+    let other = rig.git(&["rev-parse", "HEAD:other.txt"]);
     assert!(
-        !rig.shadow_owns(&x),
-        "X is in the shadow's own objects, so this is not testing borrowing"
+        !rig.shadow_owns(&other),
+        "an unchanged file is in the shadow's own objects, so this is not testing borrowing"
+    );
+    assert!(
+        rig.shadow_owns(&x),
+        "X was not copied at the end of the turn"
     );
     (x, t.id.unwrap())
+}
+
+/// The agent's own history rewrite inside its turn, after it changed
+/// files: amend, expire the reflog, prune everything unreachable.
+fn agent_rewrite() -> String {
+    format!(
+        "{AGENT_GIT}; git commit -qa --amend -m amended && \
+         git reflog expire --expire=now --all && git gc --prune=now -q"
+    )
+}
+
+/// The turn overwrites `keep.txt` (X) with `v2` and then itself rewrites
+/// history and prunes, so X is gone before the turn ends and could not be
+/// copied: the content an undo needs is lost (the A.16 refusal path).
+/// Dirty, so the checkpoint's root tree is its own and the turn has its
+/// "after" checkpoint.
+async fn turn_that_loses_x_inside(rig: &mut Rig) -> (String, String) {
+    let x = rig.base_repo();
+    rig.write("scratch.txt", SCRATCH);
+    let mark = rig.seen.len();
+    let t = rig
+        .turn(&format!("echo v2 > keep.txt; {}", agent_rewrite()))
+        .await;
+    assert_eq!(t.phases, ["before", "after"]);
+    assert!(!rig.user_has(&x), "the agent's gc did not remove X");
+    let notes = rig.notes_since(mark);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.starts_with("This turn's undo is incomplete") && n.contains("`keep.txt`")),
+        "{notes:?}"
+    );
+    (x, t.id.unwrap())
+}
+
+/// [`turn_that_loses_x_inside`], then the undo of that turn.
+async fn lost_inside_scenario() -> (Rig, Restore) {
+    let mut rig = Rig::new().await;
+    let (_x, turn) = turn_that_loses_x_inside(&mut rig).await;
+    let r = rig.restore(&turn, false).await;
+    (rig, r)
 }
 
 /// The user's folder as the turn left it, for the unforced undo to accept.
@@ -484,18 +164,24 @@ async fn main_scenario(dirty: bool) -> (Rig, String, Restore) {
 
 // ---- the main scenario ----
 
-/// ADOPTION_PLAN B.2, final review D3, fixed by A.16 as far as it can be
-/// while checkpoints borrow. A checkpoint borrows the blobs the user's
-/// repository already has (`objects/info/alternates`), so a commit the user
-/// later amends away and `git gc --prune=now` removes takes the checkpoint's
-/// content with it. The undo of the turn is refused before anything is
-/// touched or logged, in plain words, naming the file.
-///
-/// Residual (O11): once checkpoints own the blobs they need, the assertion
-/// becomes: the restore is `Ok` and `keep.txt` holds X.
+/// ADOPTION_PLAN B.2, final review D3. A checkpoint borrows the blobs the
+/// user's repository already has (`objects/info/alternates`), so a commit
+/// the user later amends away and `git gc --prune=now` removes took the
+/// checkpoint's content with it; A.16 made that undo a clean refusal. A.17
+/// copies X into the checkpoint repository's own store at the end of the
+/// turn: the undo works and `keep.txt` holds X.
 #[tokio::test]
-async fn gc_in_the_users_repository_makes_an_older_checkpoint_refused_with_the_reason() {
-    let (rig, _turn, r) = main_scenario(true).await;
+async fn gc_in_the_users_repository_after_the_turn_no_longer_takes_its_undo() {
+    let (_rig, _turn, r) = main_scenario(true).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
+}
+
+/// When the content is gone before it could be copied (the agent pruned it
+/// inside its own turn), the refusal says why in plain words.
+#[tokio::test]
+async fn content_lost_inside_the_turn_is_refused_with_the_reason() {
+    let (rig, r) = lost_inside_scenario().await;
     assert_refused_untouched(&rig, &r, Some("keep.txt"));
     let e = r.result.unwrap_err();
     assert!(e.contains("rewritten"), "says why: {e}");
@@ -508,7 +194,7 @@ async fn gc_in_the_users_repository_makes_an_older_checkpoint_refused_with_the_r
 /// was.
 #[tokio::test]
 async fn a_restore_that_needs_a_missing_blob_changes_nothing() {
-    let (rig, _turn, r) = main_scenario(true).await;
+    let (rig, r) = lost_inside_scenario().await;
     assert_refused_untouched(&rig, &r, Some("keep.txt"));
     assert_eq!(r.folder_after.get("keep.txt"), Some(&b"v2\n".to_vec()));
     assert_eq!(rig.read("keep.txt").as_deref(), Some("v2\n"));
@@ -525,14 +211,16 @@ async fn a_restore_that_needs_a_missing_blob_changes_nothing() {
 async fn a_restore_with_one_lost_blob_changes_neither_file() {
     let mut rig = Rig::new().await;
     let x = rig.base_repo();
-    // Never committed, so the checkpoint repository stores its blob itself.
+    // Never committed, so the checkpoint repository stores its blob itself
+    // (and the agent's `commit -a` leaves it out).
     rig.write("a_ok.txt", "A: original, only in the folder\n");
-    let t = rig.turn("echo a2 > a_ok.txt; echo v2 > keep.txt").await;
-    assert!(!rig.shadow_owns(&x));
-    rig.amend_x_away();
-    rig.expire_reflog_and_gc_now();
-    the_turns_result_is_back(&rig);
-    rig.write("a_ok.txt", "a2\n");
+    let t = rig
+        .turn(&format!(
+            "echo a2 > a_ok.txt; echo v2 > keep.txt; {}",
+            agent_rewrite()
+        ))
+        .await;
+    assert!(!rig.user_has(&x));
     let r = rig.restore(t.id.as_deref().unwrap(), false).await;
     assert_refused_untouched(&rig, &r, Some("keep.txt"));
     assert_eq!(r.folder_after.get("a_ok.txt"), Some(&b"a2\n".to_vec()));
@@ -546,7 +234,7 @@ async fn a_restore_with_one_lost_blob_changes_neither_file() {
 /// `a_failure_after_the_pre_restore_checkpoint_names_it_and_it_restores`.)
 #[tokio::test]
 async fn a_refused_restore_saves_no_checkpoint() {
-    let (rig, _turn, r) = main_scenario(true).await;
+    let (rig, r) = lost_inside_scenario().await;
     assert_refused_untouched(&rig, &r, None);
     assert_eq!(r.saved, None);
     assert!(!r.result.unwrap_err().contains("saved as checkpoint"));
@@ -556,14 +244,14 @@ async fn a_refused_restore_saves_no_checkpoint() {
 
 /// The other face. If the folder was clean when the checkpoint was taken,
 /// the checkpoint's *tree* equals a tree the user's commit already has, so
-/// even the tree is borrowed and gc removes it. That too is refused with the
-/// plain reason (before, it was git's "unable to read tree").
+/// even the tree is borrowed and gc removes it (this was refused with the
+/// plain reason after A.16). A.17 copies the trees a diff of the turn reads
+/// too: the undo works.
 #[tokio::test]
-async fn a_checkpoint_whose_borrowed_tree_is_gone_is_refused_with_the_reason() {
-    let (rig, _turn, r) = main_scenario(false).await;
-    assert_refused_untouched(&rig, &r, None);
-    // The pre-restore ref was never made; only the turn's two remain.
-    assert_eq!(rig.shadow_refs().len(), 2);
+async fn a_checkpoint_whose_tree_the_user_pruned_still_restores() {
+    let (_rig, _turn, r) = main_scenario(false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 }
 
 /// Was: a file the folder still has, unchanged, whose blob is gone (the user
@@ -573,8 +261,9 @@ async fn a_checkpoint_whose_borrowed_tree_is_gone_is_refused_with_the_reason() {
 /// log) and every restore stopped at its pre-restore snapshot.
 ///
 /// Now the index is rebuilt from the folder once: the next turn has its
-/// checkpoint and its undo works. The older checkpoint that depends on the
-/// lost content is refused with the plain reason, and is not deleted.
+/// checkpoint and its undo works. No checkpoint is deleted by the repair.
+/// The older turn did not change `keep.txt`, so its undo needs nothing
+/// that is gone (its trees were copied, A.17) and works too.
 #[tokio::test]
 async fn a_lost_blob_of_an_unchanged_file_is_repaired_at_the_next_snapshot() {
     let mut rig = Rig::new().await;
@@ -614,22 +303,19 @@ async fn a_lost_blob_of_an_unchanged_file_is_repaired_at_the_next_snapshot() {
     assert_eq!(r.folder_after.get("more.txt"), None);
     assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 
-    // The older one that needs what is gone: refused, untouched, kept, and
-    // the refusal made no ref.
-    let refs_now = rig.shadow_refs();
+    // The older one, whose root tree was the user's pruned one.
     let r = rig.restore(first.id.as_deref().unwrap(), true).await;
-    assert_refused(&r, None);
-    assert_eq!(rig.shadow_refs(), refs_now);
-    for r in &refs_before {
-        assert!(rig.shadow_refs().contains(r), "{r} was deleted");
-    }
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("made.txt"), None);
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 }
 
-/// A blob the checkpoint only borrows, still present in the user's
-/// repository: the restore works, and afterwards the blob is in the
-/// checkpoint repository's own objects (it was copied before the write).
-/// (That the copy writes nothing in the user's repository is tested in
-/// `git.rs`, `securing_blobs_copies_them_and_writes_nothing_in_the_users_repository`.)
+/// A blob the checkpoint borrowed, still present in the user's repository:
+/// the restore works, and the blob is in the checkpoint repository's own
+/// objects (copied at the end of the turn, A.17, and again before the
+/// write). (That the copies write nothing in the user's repository is
+/// tested in `git.rs`, `securing_blobs_copies_them_and_writes_nothing_in_the_users_repository`,
+/// and `git/upkeep.rs`, `pinning_and_collecting_write_nothing_in_the_users_repository`.)
 #[tokio::test]
 async fn a_borrowed_blob_is_copied_into_the_checkpoint_repository_by_a_restore() {
     let mut rig = Rig::new().await;
@@ -829,8 +515,9 @@ async fn window_scenario(bin: PathBuf) {
 
 /// The checks the experiment rests on, made once on their own: the folder is
 /// a repository, the shadow borrows (alternates point at the user's object
-/// directory), X is not in the shadow's own objects, and the same check does
-/// find an object the shadow did write (`v2`), so it can say yes.
+/// directory), a committed file the turn did not change (`other.txt`) is not
+/// in the shadow's own objects, and the same check does find an object the
+/// shadow did write (`v2`), so it can say yes.
 #[tokio::test]
 async fn control_the_blob_is_borrowed_and_the_check_can_tell() {
     let mut rig = Rig::new().await;
@@ -841,7 +528,8 @@ async fn control_the_blob_is_borrowed_and_the_check_can_tell() {
         rig.ws.join(".git/objects").to_str().unwrap()
     );
     assert!(rig.user_has(&x));
-    assert!(!rig.shadow_owns(&x));
+    let other = rig.git(&["rev-parse", "HEAD:other.txt"]);
+    assert!(!rig.shadow_owns(&other));
     let v2 = rig.git(&["hash-object", "keep.txt"]);
     assert!(
         rig.shadow_owns(&v2),
@@ -887,10 +575,10 @@ async fn control_without_the_gc_step_the_restore_succeeds() {
 
 /// The object was only ever staged (`git add`, then `git reset`): it lives
 /// in the user's store as a dangling loose object, the checkpoint borrowed
-/// it, gc removes it. Refused with the reason; the file is left as it was
-/// (before A.16 it was deleted).
+/// it, gc removes it. Before A.17 refused (before A.16 the file was
+/// deleted); now it was copied at the end of the turn and the undo works.
 #[tokio::test]
-async fn a_checkpoint_of_a_file_that_was_only_ever_staged_is_refused_after_gc() {
+async fn a_checkpoint_of_a_file_that_was_only_ever_staged_restores_after_gc() {
     let mut rig = Rig::new().await;
     rig.base_repo();
     rig.write("staged.txt", "S: only ever staged\n");
@@ -899,21 +587,20 @@ async fn a_checkpoint_of_a_file_that_was_only_ever_staged_is_refused_after_gc() 
     rig.git(&["reset", "-q"]);
     let t = rig.turn("echo v2 > staged.txt").await;
     assert!(rig.user_has(&s));
-    assert!(
-        !rig.shadow_owns(&s),
-        "the checkpoint borrowed the staged blob"
-    );
     rig.expire_reflog_and_gc_now();
     assert!(!rig.user_has(&s));
     let r = rig.restore(t.id.as_deref().unwrap(), false).await;
-    assert_refused_untouched(&rig, &r, Some("staged.txt"));
-    assert_eq!(r.folder_after.get("staged.txt"), Some(&b"v2\n".to_vec()));
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(
+        r.folder_after.get("staged.txt"),
+        Some(&b"S: only ever staged\n".to_vec())
+    );
 }
 
-/// The work was on a branch the user then deleted (`branch -D`): refused
-/// with the reason, nothing changed.
+/// The work was on a branch the user then deleted (`branch -D`) and
+/// pruned: before A.17 refused, now the undo works.
 #[tokio::test]
-async fn a_checkpoint_is_refused_after_the_branch_that_held_x_is_deleted_and_gc() {
+async fn a_checkpoint_restores_after_the_branch_that_held_x_is_deleted_and_gc() {
     let mut rig = Rig::new().await;
     rig.git(&["init", "-q", "-b", "main"]);
     rig.write("other.txt", "base\n");
@@ -926,14 +613,14 @@ async fn a_checkpoint_is_refused_after_the_branch_that_held_x_is_deleted_and_gc(
     let x = rig.git(&["hash-object", "keep.txt"]);
     rig.write("scratch.txt", SCRATCH);
     let t = rig.turn("echo v2 > keep.txt").await;
-    assert!(!rig.shadow_owns(&x));
     rig.git(&["checkout", "-qf", "main"]);
     rig.git(&["branch", "-D", "feature"]);
     rig.expire_reflog_and_gc_now();
     assert!(!rig.user_has(&x));
     the_turns_result_is_back(&rig);
     let r = rig.restore(t.id.as_deref().unwrap(), false).await;
-    assert_refused_untouched(&rig, &r, Some("keep.txt"));
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 }
 
 /// `git gc --auto` with default settings does nothing in a repository this
@@ -977,9 +664,9 @@ async fn default_gc_right_after_the_rewrite_keeps_x() {
 /// user who never runs `--prune=now` loses the object too, about a month
 /// after the rewrite, and checkpoints are kept for as many turns, not days
 /// (`checkpoints_keep`, default 10), so an old chat's undo can be that old.
-/// Refused with the reason, nothing changed.
+/// Before A.17 refused; now the copy made at the end of the turn serves.
 #[tokio::test]
-async fn default_gc_after_the_reflog_and_the_grace_period_makes_the_checkpoint_refused() {
+async fn default_gc_after_the_reflog_and_the_grace_period_keeps_the_checkpoint() {
     let mut rig = Rig::new().await;
     let (x, turn) = turn_over_committed_x(&mut rig, true).await;
     rig.amend_x_away();
@@ -989,7 +676,8 @@ async fn default_gc_after_the_reflog_and_the_grace_period_makes_the_checkpoint_r
     assert!(!rig.user_has(&x));
     the_turns_result_is_back(&rig);
     let r = rig.restore(&turn, false).await;
-    assert_refused_untouched(&rig, &r, Some("keep.txt"));
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 }
 
 /// `git repack -ad` drops unreachable objects that sit in a pack, but it
@@ -1001,7 +689,6 @@ async fn repack_ad_keeps_x_while_the_reflog_names_it() {
     rig.git(&["gc", "-q"]); // X is in a pack, as in any older repository
     rig.write("scratch.txt", SCRATCH);
     let t = rig.turn("echo v2 > keep.txt").await;
-    assert!(!rig.shadow_owns(&x));
     rig.amend_x_away();
     rig.git(&["repack", "-ad", "-q"]);
     assert!(rig.user_has(&x));
@@ -1011,34 +698,35 @@ async fn repack_ad_keeps_x_while_the_reflog_names_it() {
 }
 
 /// Plain `git repack -ad` after the reflog is expired removes the packed
-/// object (no `gc`, no `--prune`): refused with the reason.
+/// object (no `gc`, no `--prune`): before A.17 refused, now the undo works.
 #[tokio::test]
-async fn repack_ad_after_the_reflog_is_expired_makes_the_checkpoint_refused() {
+async fn repack_ad_after_the_reflog_is_expired_keeps_the_checkpoint() {
     let mut rig = Rig::new().await;
     let x = rig.base_repo();
     rig.git(&["gc", "-q"]);
     rig.write("scratch.txt", SCRATCH);
     let t = rig.turn("echo v2 > keep.txt").await;
-    assert!(!rig.shadow_owns(&x));
     rig.amend_x_away();
     rig.git(&["reflog", "expire", "--expire=now", "--all"]);
     rig.git(&["repack", "-ad", "-q"]);
     assert!(!rig.user_has(&x));
     the_turns_result_is_back(&rig);
     let r = rig.restore(t.id.as_deref().unwrap(), false).await;
-    assert_refused_untouched(&rig, &r, Some("keep.txt"));
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 }
 
 /// The user deletes `.git` and clones again into the same folder. The shadow
 /// is keyed by the folder, so it is reused and its alternates now name the
 /// new clone's object directory. The commit that held X was never pushed, so
-/// the new clone lacks it: the undo is refused with the reason, nothing
-/// changed.
+/// the new clone lacks it: before A.17 refused, now the copy made at the end
+/// of the turn serves and the undo works.
 #[tokio::test]
-async fn re_cloning_the_repository_makes_a_checkpoint_of_unpushed_work_refused() {
+async fn re_cloning_the_repository_keeps_a_checkpoint_of_unpushed_work() {
     let (rig, r) = reclone_scenario(false).await;
     assert!(!rig.user_has_x);
-    assert_refused(&r, Some("keep.txt"));
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&x_bytes()));
 }
 
 /// Control for the previous test: the work had been pushed, the new clone has
@@ -1069,7 +757,6 @@ async fn reclone_scenario(pushed: bool) -> (Cloned, Restore) {
     }
     rig.write("scratch.txt", SCRATCH);
     let t = rig.turn("echo v2 > keep.txt").await;
-    assert!(!rig.shadow_owns(&x));
     std::fs::remove_dir_all(rig.ws.join(".git")).unwrap();
     rig.git_in(rig.dir.path(), &["clone", "-q", &o, "reclone"]);
     std::fs::rename(rig.dir.path().join("reclone/.git"), rig.ws.join(".git")).unwrap();
@@ -1083,13 +770,7 @@ async fn reclone_scenario(pushed: bool) -> (Cloned, Restore) {
 
 /// The chat notes (`error` events) seen since `mark`.
 fn notes_since(rig: &Rig, mark: usize) -> Vec<String> {
-    rig.seen[mark..]
-        .iter()
-        .filter_map(|e| match e.typed() {
-            Ok(EventKind::Error(m)) => Some(m.message),
-            _ => None,
-        })
-        .collect()
+    rig.notes_since(mark)
 }
 
 /// Undo of a turn that replaced a directory by a file of the same name:
@@ -1219,12 +900,17 @@ async fn a_lost_blob_under_a_skipped_nested_repository_does_not_refuse_the_resto
     // Untracked, so the checkpoint's `sub` tree is its own (only the blob
     // is borrowed; a borrowed tree that is gone is refused at the diff).
     rig.write("sub/extra.txt", SCRATCH);
-    let t = rig.turn("rm -r sub").await;
+    // The agent removes the folder and prunes the history that held X in
+    // the same turn, so X is gone before it could be copied (A.17).
+    let t = rig
+        .turn(&format!(
+            "rm -r sub; {AGENT_GIT}; git commit -qa --amend --allow-empty -m amended && \
+             git reflog expire --expire=now --all && git gc --prune=now -q"
+        ))
+        .await;
     assert_eq!(t.phases, ["before", "after"]);
-    assert!(!rig.shadow_owns(&x));
-    rig.git(&["commit", "-qa", "--amend", "--allow-empty", "-m", "amended"]);
-    rig.expire_reflog_and_gc_now();
     assert!(!rig.user_has(&x));
+    assert!(!rig.shadow_owns(&x));
     // A repository appears where the turn removed the files.
     std::fs::create_dir(rig.ws.join("sub")).unwrap();
     rig.git_in(&rig.ws.join("sub"), &["init", "-q"]);

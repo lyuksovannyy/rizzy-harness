@@ -26,6 +26,8 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
+mod upkeep;
+
 /// Where checkpoints for one working folder are stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
@@ -207,8 +209,24 @@ fn result_text(args: &[&str], out: std::process::Output) -> String {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A stand-in `git` for the checkpoint calls of this test thread (a
+    /// `#[tokio::test]` runs on one thread).
+    static TEST_GIT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The git program for the checkpoint calls (`git`, found on `PATH`).
+fn git_program() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = TEST_GIT.with(|g| g.borrow().clone()) {
+        return p;
+    }
+    PathBuf::from("git")
+}
+
 fn command(repo: &Repo, index: Option<&Path>) -> Command {
-    let mut c = hardened(Path::new("git"));
+    let mut c = hardened(&git_program());
     match &repo.shadow {
         Some(dir) => {
             c.arg("--git-dir")
@@ -669,6 +687,22 @@ async fn fresh_index(repo: &Repo) -> Result<PathBuf, String> {
     seeded_index(repo, false).await.map(|(_, tmp)| tmp)
 }
 
+/// Removes a private index and the lock git takes on it (`<index>.lock`)
+/// when dropped: on every path, including a call dropped at a timeout,
+/// whose git was killed holding the lock (A.18). Both names are this
+/// call's own (a fresh id each time); after the index was renamed into
+/// place, the removal finds nothing.
+struct IndexFiles(PathBuf);
+
+impl Drop for IndexFiles {
+    fn drop(&mut self) {
+        let mut lock = self.0.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(lock);
+    }
+}
+
 /// A tree of the folder, and the nested repositories left out of it.
 struct WorkTree {
     id: String,
@@ -724,6 +758,7 @@ impl TreeError {
 /// (`seed`) or empty.
 async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeError> {
     let (real, idx) = seeded_index(repo, seed).await.map_err(TreeError::Stage)?;
+    let _files = IndexFiles(idx.clone());
     let res = async {
         let nested = stage_without_nested(repo, &idx)
             .await
@@ -982,7 +1017,19 @@ pub struct Snapshot {
 /// Snapshot the working directory into a commit stored at `ref_name`, and
 /// say which nested repositories it left out (see [`snapshot`]).
 pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Snapshot, String> {
-    tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
+    snapshot_within(repo, ref_name, msg, SNAPSHOT_TIMEOUT).await
+}
+
+/// [`snapshot_full`] with its time limit. The caller holds the shadow
+/// ([`hold`]): a garbage collection must not run while it writes objects no
+/// ref names yet.
+async fn snapshot_within(
+    repo: &Repo,
+    ref_name: &str,
+    msg: &str,
+    limit: Duration,
+) -> Result<Snapshot, String> {
+    tokio::time::timeout(limit, async {
         let tree = worktree_tree(repo).await?;
         let head = run(repo, &["rev-parse", "--verify", "-q", "HEAD"], None)
             .await
@@ -1018,6 +1065,8 @@ pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Sna
     .await
     .map_err(|_| "snapshot took too long (folder too large?)".to_string())?
 }
+
+pub use upkeep::{check_kept_packs, gc_in_background, hold, pin_changed, sweep_stale_locks};
 
 /// The line prefix in a snapshot's message that names one left-out
 /// repository.
@@ -1143,6 +1192,9 @@ struct DiffRow {
     /// The `a` side's mode and object id (all zeros for `A`).
     old_mode: String,
     old_id: String,
+    /// The `b` side's mode and object id (all zeros for `D`).
+    new_mode: String,
+    new_id: String,
 }
 
 /// The paths that differ between two snapshots.
@@ -1164,9 +1216,14 @@ async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<DiffRow>, String>
         None,
     )
     .await?;
+    Ok(parse_raw(&out))
+}
+
+/// `--raw -z` output as rows.
+fn parse_raw(out: &[u8]) -> Vec<DiffRow> {
     // `:old_mode new_mode old_id new_id status NUL path NUL`
     let parts: Vec<&[u8]> = out.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
-    Ok(parts
+    parts
         .chunks(2)
         .filter_map(|c| match c {
             [meta, path] => {
@@ -1179,11 +1236,13 @@ async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<DiffRow>, String>
                     gitlink: f[..2].contains(&"160000"),
                     old_mode: f[0].to_string(),
                     old_id: f.get(2)?.to_string(),
+                    new_mode: f[1].to_string(),
+                    new_id: f.get(3)?.to_string(),
                 })
             }
             _ => None,
         })
-        .collect())
+        .collect()
 }
 
 /// Paths that differ between two snapshots, with git's status letter.
@@ -1202,15 +1261,33 @@ pub async fn changed(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, String)
         .collect())
 }
 
-/// Whether a snapshot still exists (old ones are pruned).
+/// Whether a snapshot is still kept: a checkpoint ref points at it (old ones
+/// are pruned; their objects stay until the next garbage collection, which
+/// runs rarely, so the object alone does not say it is kept) and it can be
+/// read.
 pub async fn exists(repo: &Repo, sha: &str) -> bool {
-    run(
+    let named = run(
         repo,
-        &["cat-file", "-e", &format!("{sha}^{{commit}}")],
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--points-at",
+            sha,
+            "refs/harness/",
+        ],
         None,
     )
     .await
-    .is_ok()
+    .is_ok_and(|r| !r.is_empty());
+    named
+        && run(
+            repo,
+            &["cat-file", "-e", &format!("{sha}^{{commit}}")],
+            None,
+        )
+        .await
+        .is_ok()
 }
 
 /// Put the folder's files back to snapshot `from` for every path that
@@ -1333,14 +1410,11 @@ pub async fn restore_diff(repo: &Repo, from: &str, expected: &str) -> Result<Res
 /// such as inside a nested repository), never a whole tree.
 ///
 /// `cat-file --batch-check` answers per object (`<id> missing`); the copy
-/// is one `pack-objects` that writes a pack straight into the shadow's own
-/// `objects/pack` (a borrowed object is read through the alternates, the
-/// new pack is written locally, and nothing is written or touched in the
-/// user's repository; `hash-object -w` would not do: an object the
-/// alternate has is "freshened" there and not written locally). A copy that
-/// fails leaves none of its files behind. The pack lives until the shadow's
-/// next `gc` (run by [`prune`] whenever a checkpoint is dropped), which
-/// folds it into one pack and drops what the user's repository still has.
+/// is [`copy_into_own_store`]. The restore holds the shadow (see [`hold`])
+/// until it ends, so no garbage collection starts before the files are
+/// written; the pack then lives until the shadow's next collection, which
+/// drops what the user's repository has packed (the restored state's own
+/// checkpoint pins what an undo of the restore needs, see [`pin_changed`]).
 pub async fn secure_blobs(repo: &Repo, plan: &RestorePlan) -> Result<(), String> {
     let blobs: Vec<(&str, &[u8])> = plan
         .writes
@@ -1379,24 +1453,50 @@ pub async fn secure_blobs(repo: &Repo, plan: &RestorePlan) -> Result<(), String>
         paths.sort();
         return Err(lost_content(repo, &paths));
     }
-    if let (true, Some(dir)) = (borrows(repo), &repo.shadow) {
-        let packs = dir.join("objects/pack");
-        let had = pack_dir_names(&packs).await;
-        let base = packs.join("pack");
-        let base = base.to_string_lossy();
-        let res = run_raw(
-            repo,
-            &["pack-objects", "-q", "--window=0", &base],
-            None,
-            Some(list),
-        )
-        .await;
-        if let Err(e) = res {
-            remove_failed_copy(&packs, &had).await;
-            return Err(format!("nothing was changed: {e}"));
-        }
+    if borrows(repo) {
+        copy_into_own_store(repo, list, true)
+            .await
+            .map_err(|e| format!("nothing was changed: {e}"))?;
     }
     Ok(())
+}
+
+/// Copy the objects `list` names (one id per line, each readable) into the
+/// shadow's own store as one new pack, and return the pack's name (the
+/// hash in `pack-<hash>.pack`). One `pack-objects` reads each object where
+/// it is (a borrowed one through the alternates) and writes the pack into
+/// the shadow's `objects/pack`; nothing is written or touched in the user's
+/// repository (`hash-object -w` would not do: an object the alternate has
+/// is "freshened" there and not written locally). A copy that fails leaves
+/// none of its files behind. Shared by [`secure_blobs`] and the pinned
+/// copies of a turn ([`pin_changed`]).
+///
+/// With `durable` false the pack is not flushed to disk (`core.fsync=none`):
+/// git's default flushes packs, which on a slow rotational disk cost 0.2 to
+/// 1.4 s for a pack of one blob (measured, A.17) against about 1 ms without.
+/// A turn's copies are then as durable as the checkpoint they serve, whose
+/// loose objects and refs git does not flush either; a restore's copy, which
+/// protects the user's files during the write, keeps git's default.
+async fn copy_into_own_store(repo: &Repo, list: Vec<u8>, durable: bool) -> Result<String, String> {
+    let Some(dir) = &repo.shadow else {
+        return Err("no checkpoint repository".into());
+    };
+    let packs = dir.join("objects/pack");
+    let had = pack_dir_names(&packs).await;
+    let base = packs.join("pack");
+    let base = base.to_string_lossy();
+    let mut args = vec!["pack-objects", "-q", "--window=0", &base];
+    if !durable {
+        args.splice(0..0, ["-c", "core.fsync=none"]);
+    }
+    let res = run_raw(repo, &args, None, Some(list)).await;
+    match res {
+        Ok(out) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
+        Err(e) => {
+            remove_failed_copy(&packs, &had).await;
+            Err(e)
+        }
+    }
 }
 
 /// The names in the shadow's pack directory.
@@ -1698,6 +1798,7 @@ pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String
     }
     if !plan.writes.is_empty() {
         let idx = fresh_index(repo).await?;
+        let _files = IndexFiles(idx.clone());
         let res = async {
             let mut info = Vec::new();
             for (mode, id, p) in &plan.writes {
@@ -1777,9 +1878,12 @@ pub async fn delete_ref(repo: &Repo, ref_name: &str) {
     let _ = run(repo, &["update-ref", "-d", ref_name], None).await;
 }
 
-/// Keep only the `keep` most recent checkpoints (groups). In a shadow
-/// repository the dropped snapshots are garbage-collected right away; in a
-/// project repository git's own gc removes them later.
+/// Keep only the `keep` most recent checkpoints (groups): their refs are
+/// deleted (cheap, every time). In a shadow repository the pinned copies of
+/// the dropped groups are released and the drop is counted; their objects
+/// go at the next garbage collection, which runs rarely and after the turn
+/// (see [`gc_in_background`]). In a project repository git's own gc removes
+/// them later.
 pub async fn prune(repo: &Repo, keep: usize) -> usize {
     let Some(f) = order_file(repo).await else {
         return 0;
@@ -1813,8 +1917,10 @@ pub async fn prune(repo: &Repo, keep: usize) -> usize {
         text.push('\n');
     }
     let _ = tokio::fs::write(&f, text).await;
-    if !doomed.is_empty() && repo.is_shadow() {
-        let _ = run(repo, &["gc", "--prune=now", "--quiet"], None).await;
+    if let Some(dir) = &repo.shadow {
+        let groups: std::collections::HashSet<&str> = doomed.iter().map(|r| group_of(r)).collect();
+        upkeep::release_pins(dir, &kept).await;
+        upkeep::count_dropped(dir, groups.len() as u64).await;
     }
     doomed.len()
 }
@@ -1895,7 +2001,7 @@ pub async fn apply(root: &Path, base: &str, result: &str) -> Result<usize, Strin
 mod tests {
     use super::*;
 
-    fn sh(dir: &Path, args: &[&str]) {
+    pub(super) fn sh(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -1915,15 +2021,15 @@ mod tests {
     /// A throwaway repository plus a folder outside it for markers, and a
     /// script that records it ran (`touch <marks>/<name>`, then `cat`, so it
     /// also works as a pass-through filter).
-    struct Hostile {
+    pub(super) struct Hostile {
         _d: tempfile::TempDir,
-        repo: PathBuf,
+        pub(super) repo: PathBuf,
         marks: PathBuf,
-        base: PathBuf,
+        pub(super) base: PathBuf,
     }
 
     impl Hostile {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let d = tempfile::tempdir().unwrap();
             let repo = d.path().join("repo");
             let marks = d.path().join("marks");
@@ -1944,7 +2050,7 @@ mod tests {
         }
 
         /// An executable script that marks `name` when run.
-        fn script(&self, name: &str) -> PathBuf {
+        pub(super) fn script(&self, name: &str) -> PathBuf {
             use std::os::unix::fs::PermissionsExt;
             let p = self.marks.parent().unwrap().join(format!("{name}.sh"));
             let m = self.marks.join(name);
@@ -1953,11 +2059,11 @@ mod tests {
             p
         }
 
-        fn config(&self, key: &str, value: &str) {
+        pub(super) fn config(&self, key: &str, value: &str) {
             sh(&self.repo, &["config", "--local", key, value]);
         }
 
-        fn hook(&self, dir: &Path, name: &str) {
+        pub(super) fn hook(&self, dir: &Path, name: &str) {
             use std::os::unix::fs::PermissionsExt;
             std::fs::create_dir_all(dir).unwrap();
             let p = dir.join(name);
@@ -1965,7 +2071,7 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        fn marked(&self) -> Vec<String> {
+        pub(super) fn marked(&self) -> Vec<String> {
             let mut v: Vec<String> = std::fs::read_dir(&self.marks)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -2136,7 +2242,7 @@ mod tests {
     }
 
     /// Every file under `dir` with its bytes and modification time.
-    fn dir_state(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    pub(super) fn dir_state(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
         walkdir::WalkDir::new(dir)
             .sort_by_file_name()
             .into_iter()
@@ -2363,7 +2469,7 @@ mod tests {
     }
 
     /// A stand-in `git` that runs `body` (a shell script).
-    fn fake_git(dir: &Path, body: &str) -> PathBuf {
+    pub(super) fn fake_git(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("git");
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();

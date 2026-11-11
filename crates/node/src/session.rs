@@ -53,6 +53,10 @@ pub(crate) struct Session {
     /// Approvals of the running turn whose request is in the log and whose
     /// answer is not: the turn's end denies them.
     unresolved: Mutex<Vec<String>>,
+    /// The folder's last recorded state in this session (a turn's `after`
+    /// or a restore's result): the next turn copies what the person changed
+    /// since then (A.17 review, F5).
+    last_state: Mutex<Option<String>>,
 }
 
 /// What the user sent with a prompt.
@@ -117,6 +121,7 @@ impl Session {
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
+            last_state: Mutex::new(None),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
@@ -148,6 +153,17 @@ impl Session {
             .ok_or_else(|| StoreError::Corrupt(format!("session {id} has no session_created")))?;
         // Re-clamp on load: the node policy may have been tightened since.
         let mode = ApprovalMode::clamp(meta.approval_mode, node.cfg.policy.max_approval_mode);
+        let last_state = events.iter().rev().find_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c))
+                if !matches!(
+                    c.phase,
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore
+                ) =>
+            {
+                Some(c.git_ref)
+            }
+            _ => None,
+        });
         Ok(Arc::new(Self {
             node,
             id,
@@ -163,6 +179,7 @@ impl Session {
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
+            last_state: Mutex::new(last_state),
         }))
     }
 
@@ -569,10 +586,12 @@ impl Session {
                 Some(format!("agent backend crashed: {e}")),
             ),
         };
+        let mut collect = None;
         if let Some((root, before)) = checkpoint
             && !self.log_failed.load(Ordering::SeqCst)
         {
             self.checkpoint_after(&turn_id, &root, &before).await;
+            collect = Some(root);
         }
         let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
             TurnEndReason::Cancelled
@@ -580,6 +599,11 @@ impl Session {
             reason
         };
         self.end_turn(&turn_id, reason, usage.clone(), error).await;
+        // The checkpoint repository's garbage collection, when due, runs
+        // after the turn has ended (A.18).
+        if let Some(repo) = collect {
+            crate::git::gc_in_background(repo);
+        }
         (reason, usage)
     }
 
@@ -644,7 +668,10 @@ impl Session {
     ) -> Option<(crate::git::Repo, String)> {
         let repo = self.checkpoint_repo().await?;
         let r = format!("refs/harness/{}/{turn_id}/before", self.id);
-        match crate::git::snapshot_full(&repo, &r, "harness: before turn").await {
+        let busy = crate::git::hold(&repo).await;
+        let snap = crate::git::snapshot_full(&repo, &r, "harness: before turn").await;
+        drop(busy);
+        match snap {
             Ok(snap) => {
                 let sha = snap.sha;
                 // On failure the caller sees `log_failed` and stops; the
@@ -663,6 +690,7 @@ impl Session {
                     crate::git::delete_ref(&repo, &r).await;
                     return None;
                 }
+                self.pin_between_turns(turn_id, &repo, &sha).await;
                 Some((repo, sha))
             }
             Err(e) => {
@@ -691,14 +719,17 @@ impl Session {
 
     async fn checkpoint_after(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
         let r = format!("refs/harness/{}/{turn_id}/after", self.id);
+        let busy = crate::git::hold(repo).await;
         let res = async {
             let snap = crate::git::snapshot_full(repo, &r, "harness: after turn").await?;
             let files = crate::git::changed(repo, before, &snap.sha).await?;
             Ok::<_, String>((snap, files))
         }
         .await;
+        drop(busy);
         match res {
             Ok((snap, files)) => {
+                let sha = snap.sha.clone();
                 let recorded = self
                     .emit(EventKind::Checkpoint(Checkpoint {
                         turn_id: turn_id.into(),
@@ -710,12 +741,95 @@ impl Session {
                     }))
                     .await;
                 if recorded.is_ok() {
+                    let group = format!("refs/harness/{}/{turn_id}", self.id);
+                    self.pin_turn(turn_id, repo, &group, before, &sha).await;
+                    *self.last_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(sha);
                     crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
                 }
             }
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
                 self.no_checkpoint_notice(turn_id, &e).await;
+            }
+        }
+    }
+
+    /// Copy what an undo of this turn needs into the checkpoint repository's
+    /// own store (A.17, `git::pin_changed`), so it no longer depends on the
+    /// user's repository keeping the old versions. When some are already
+    /// gone (the turn itself rewrote history and pruned it) or the copy
+    /// fails, the chat says the undo is incomplete, naming the files; the
+    /// turn still completes. A failed append sets `log_failed` as for any
+    /// other event.
+    async fn pin_turn(
+        &self,
+        turn_id: &str,
+        repo: &crate::git::Repo,
+        group: &str,
+        before: &str,
+        after: &str,
+    ) {
+        let busy = crate::git::hold(repo).await;
+        let pinned = crate::git::pin_changed(repo, group, before, after).await;
+        drop(busy);
+        let message = match pinned {
+            Ok(p) if p.trees_gone => "This turn's undo is incomplete: the folder's earlier \
+                 content was already gone from the git repository in this folder when the \
+                 turn ended (its history was rewritten and cleaned up during the turn), so \
+                 this turn cannot be undone."
+                .to_string(),
+            Ok(p) if p.missing.is_empty() => return,
+            Ok(p) => format!(
+                "This turn's undo is incomplete: the earlier versions of {} were already gone \
+                 from the git repository in this folder when the turn ended (its history was \
+                 rewritten and cleaned up during the turn), so undo cannot put them back and \
+                 will refuse this turn.",
+                p.missing.listed()
+            ),
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "checkpoint copies failed");
+                format!(
+                    "This turn's undo is incomplete: the earlier versions of the files it \
+                     changed could not be copied into the checkpoint store ({e}), so undo \
+                     depends on the git repository in this folder keeping them."
+                )
+            }
+        };
+        let _ = self
+            .emit(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message,
+            }))
+            .await;
+    }
+
+    /// What the person changed in the folder since this session's last
+    /// recorded state (their own edits and commits between turns) is copied
+    /// like a turn's changes, in this turn's group, so a rewind across it
+    /// does not depend on the user's repository either (A.17 review, F5).
+    /// One tree diff of two snapshots that exist; no scan. A loss here is
+    /// only logged: it is the person's own history, not this turn's.
+    async fn pin_between_turns(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
+        let Some(prev) = self
+            .last_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let group = format!("refs/harness/{}/{turn_id}", self.id);
+        let busy = crate::git::hold(repo).await;
+        let pinned = crate::git::pin_changed(repo, &group, &prev, before).await;
+        drop(busy);
+        match pinned {
+            Ok(p) if !p.missing.is_empty() => tracing::warn!(
+                session = %self.id, missing = %p.missing.listed(),
+                "changes between turns: content already gone, not copied"
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(session = %self.id, error = %e, "changes between turns not copied")
             }
         }
     }
@@ -845,6 +959,11 @@ impl Session {
             .ok_or("checkpoints are not available for this folder any more")?;
         // Held until this restore ends, on every path.
         let _claim = self.claim_folder(&repo.root)?;
+        // No garbage collection runs in the checkpoint repository while the
+        // restore runs (it waits for one that is running): the copies
+        // `secure_blobs` makes are protected by nothing else until the
+        // files are written. Nothing below waits on a person.
+        let busy = crate::git::hold(&repo).await;
         // `None`: an interrupted restore, put back over the folder as it is.
         let expected = match (&interrupted, rewind) {
             (Some(_), _) => None,
@@ -910,7 +1029,7 @@ impl Session {
             .append(EventKind::Checkpoint(Checkpoint {
                 turn_id: saved.clone(),
                 phase: CheckpointPhase::BeforeRestore,
-                git_ref: now.sha,
+                git_ref: now.sha.clone(),
                 files: files.clone(),
                 excluded: now.nested.shown,
                 excluded_more: now.nested.more as u64,
@@ -919,6 +1038,19 @@ impl Session {
         {
             crate::git::delete_ref(&repo, &saved_ref).await;
             return Err(format!("nothing was restored: {}", LogError(e.to_string())));
+        }
+        // The saved checkpoint is the way back, also if the write below
+        // fails: the folder's versions of every path that differs from what
+        // the restore writes are copied like a turn's (A.17); a loss is only
+        // logged here.
+        let group = format!("refs/harness/{}/{saved}", self.id);
+        match crate::git::pin_changed(&repo, &group, &now.sha, &before).await {
+            Ok(p) if !p.missing.is_empty() => tracing::warn!(
+                session = %self.id, missing = %p.missing.listed(),
+                "restore checkpoint: content already gone, not copied"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint copies failed"),
         }
         // From here on the saved state is in the log; say so on failure.
         let kept = |e: String| {
@@ -978,7 +1110,10 @@ impl Session {
             .await
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
+        *self.last_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(state.sha.clone());
         crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
+        drop(busy);
+        crate::git::gc_in_background(repo);
         Ok(())
     }
 
