@@ -19,7 +19,8 @@ pub struct RetryPolicy {
     pub retries: u32,
     /// The first wait; each later one doubles.
     pub base: Duration,
-    /// No wait is longer, `Retry-After` included.
+    /// No backoff is longer. A `Retry-After` above it is not waited for at
+    /// all: that model is not retried (see `delay`).
     pub max: Duration,
 }
 
@@ -44,15 +45,37 @@ impl RetryPolicy {
 
     /// The wait before retry number `n` (from 0) after `e`; `None` when `e`
     /// is not worth retrying or the retries are used up. The provider's
-    /// `Retry-After` wins over the backoff, capped at `max`.
+    /// `Retry-After` wins over the backoff. When it is longer than `max`
+    /// there is no retry: sending again before it has passed would fail
+    /// again and count against the provider's limit, so the caller falls
+    /// back to another model or ends the turn (`explain`).
     pub fn delay(&self, e: &ProviderError, n: u32) -> Option<Duration> {
         if n >= self.retries || !e.is_retryable() {
             return None;
         }
         Some(match e.retry_after() {
-            Some(after) => after.min(self.max),
+            Some(after) if after > self.max => return None,
+            Some(after) => after,
             None => self.backoff(n),
         })
+    }
+
+    /// The error to show when `e` asked for a wait longer than `max`, in
+    /// plain words and without the provider's response body.
+    pub fn explain(&self, e: &ProviderError, model: &str) -> Option<String> {
+        let after = e.retry_after().filter(|a| *a > self.max)?;
+        if !e.is_retryable() {
+            return None;
+        }
+        let why = match e {
+            ProviderError::Status { status: 429, .. } => "rate limit",
+            _ => "provider busy",
+        };
+        Some(format!(
+            "The provider of {model} asked to wait {} before the next request ({why}). \
+             Try again after that, or pick another model.",
+            human(after)
+        ))
     }
 
     /// `base * 2^n` capped at `max`, then "equal jitter": half of it fixed,
@@ -66,6 +89,17 @@ impl RetryPolicy {
         let half = full / 2;
         half + half.mul_f64(jitter())
     }
+}
+
+/// A wait as a person says it, rounded up to a whole second, minute or hour.
+fn human(d: Duration) -> String {
+    let secs = d.as_secs() + u64::from(d.subsec_nanos() > 0);
+    let (n, unit) = match secs {
+        0..=59 => (secs.max(1), "second"),
+        60..=3599 => (secs.div_ceil(60), "minute"),
+        _ => (secs.div_ceil(3600), "hour"),
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 /// A number in `[0, 1)`, from the standard library's per-process random
@@ -159,7 +193,50 @@ mod tests {
             },
         };
         assert_eq!(p.delay(&after(7), 0), Some(Duration::from_secs(7)));
-        assert_eq!(p.delay(&after(3600), 0), Some(p.max));
+        // At the cap exactly is still waited for.
+        assert_eq!(p.delay(&after(60), 0), Some(p.max));
+        assert_eq!(p.delay(&after(30), 0), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn a_wait_over_the_cap_is_not_retried_and_is_explained() {
+        let p = RetryPolicy::default();
+        let e = ProviderError::Status {
+            status: 429,
+            body: "secret-ish body".into(),
+            hint: RetryHint {
+                after: Some(Duration::from_secs(300)),
+                no_retry: false,
+            },
+        };
+        assert_eq!(p.delay(&e, 0), None);
+        let msg = p.explain(&e, "m").unwrap();
+        assert_eq!(
+            msg,
+            "The provider of m asked to wait 5 minutes before the next request \
+             (rate limit). Try again after that, or pick another model."
+        );
+        assert!(!msg.contains("secret"));
+        // Within the cap there is nothing to explain.
+        let e = ProviderError::Status {
+            status: 429,
+            body: String::new(),
+            hint: RetryHint {
+                after: Some(Duration::from_secs(60)),
+                no_retry: false,
+            },
+        };
+        assert_eq!(p.explain(&e, "m"), None);
+    }
+
+    #[test]
+    fn waits_read_as_a_person_would_say_them() {
+        let f = |s| human(Duration::from_secs(s));
+        assert_eq!(f(1), "1 second");
+        assert_eq!(f(90), "2 minutes");
+        assert_eq!(f(300), "5 minutes");
+        assert_eq!(f(3600), "1 hour");
+        assert_eq!(f(7300), "3 hours");
     }
 
     #[test]

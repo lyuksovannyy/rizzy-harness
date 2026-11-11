@@ -54,6 +54,8 @@ impl Host {
 /// One scripted reply.
 enum Reply {
     Fail(u16),
+    /// Fails with a status and a `Retry-After` of this many seconds.
+    FailAfter(u16, u64),
     /// Streams some text first, then fails with a 503.
     FailAfterText,
     Ok,
@@ -111,6 +113,14 @@ impl Provider for Scripted {
             .and_then(|q| q.pop_front());
         match next.unwrap_or(Reply::Ok) {
             Reply::Fail(s) => Err(status(s)),
+            Reply::FailAfter(s, secs) => Err(ProviderError::Status {
+                status: s,
+                body: "{\"error\":{\"message\":\"secret-ish body\"}}".into(),
+                hint: RetryHint {
+                    after: Some(Duration::from_secs(secs)),
+                    no_retry: false,
+                },
+            }),
             Reply::FailAfterText => {
                 let _ = deltas.send("half an ans".into());
                 tokio::time::sleep(harness_agent_native::FLUSH_INTERVAL * 3).await;
@@ -273,6 +283,14 @@ async fn cancel_ends_the_wait_at_once() {
 /// An OpenAI-compatible server that rate-limits each model's first request
 /// with the given headers, then answers.
 async fn serve(headers: Vec<(&'static str, &'static str)>) -> (String, Arc<Mutex<u32>>) {
+    serve_status(429, headers).await
+}
+
+/// The same, failing the first request with `status`.
+async fn serve_status(
+    status: u16,
+    headers: Vec<(&'static str, &'static str)>,
+) -> (String, Arc<Mutex<u32>>) {
     let hits = Arc::new(Mutex::new(0u32));
     let h2 = hits.clone();
     let app = Router::new().route(
@@ -287,7 +305,7 @@ async fn serve(headers: Vec<(&'static str, &'static str)>) -> (String, Arc<Mutex
                 };
                 if n == 1 {
                     let mut r = (
-                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        axum::http::StatusCode::from_u16(status).unwrap(),
                         axum::Json(json!({"error": {"message": "Rate limit reached"}})),
                     )
                         .into_response();
@@ -343,13 +361,56 @@ async fn retry_after_is_honoured() {
     );
 }
 
+/// The cap here is 2 s, so a wait that is clamped to it (the old behaviour)
+/// takes at least 2 s and a second request.
+fn capped() -> RetryPolicy {
+    RetryPolicy {
+        retries: 3,
+        base: Duration::from_millis(1),
+        max: Duration::from_secs(2),
+    }
+}
+
 #[tokio::test]
-async fn retry_after_is_capped() {
-    let (base, hits) = serve(vec![("retry-after", "3600")]).await;
-    let b = http_backend(&base, fast());
+async fn a_retry_after_over_the_cap_is_not_retried_and_names_the_wait() {
+    for status in [429, 503] {
+        let (base, hits) = serve_status(status, vec![("retry-after", "300")]).await;
+        let b = http_backend(&base, capped());
+        let t = Instant::now();
+        let out = run(&b, &Host::default(), "loc::m", agent(&[])).await;
+        assert_eq!(out.reason, TurnEndReason::Error, "{status}");
+        assert_eq!(*hits.lock().unwrap(), 1, "{status}: sent again too early");
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        let msg = out.error.unwrap();
+        assert!(msg.contains("5 minutes"), "{msg}");
+        assert!(msg.contains("loc::m"), "{msg}");
+        assert!(!msg.contains("Rate limit reached"), "body leaked: {msg}");
+    }
+}
+
+#[tokio::test]
+async fn a_retry_after_over_the_cap_goes_to_the_fallback_at_once() {
+    for status in [429, 503] {
+        let p = Scripted::new(vec![("m", vec![Reply::FailAfter(status, 300)])]);
+        let b = backend(p.clone(), capped());
+        let host = Host::default();
+        let t = Instant::now();
+        let out = run(&b, &host, "m", agent(&["fb"])).await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert_eq!(p.calls(), ["m", "fb"], "{status}");
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        assert_eq!(host.answer().as_deref(), Some("answer from fb"));
+        assert_eq!(host.fallbacks(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_retry_after_within_the_cap_is_still_waited_and_retried() {
+    let (base, hits) = serve(vec![("retry-after", "1")]).await;
+    let b = http_backend(&base, capped());
     let t = Instant::now();
     let out = run(&b, &Host::default(), "loc::m", agent(&[])).await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     assert_eq!(*hits.lock().unwrap(), 2);
-    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(t.elapsed() >= Duration::from_secs(1), "{:?}", t.elapsed());
 }

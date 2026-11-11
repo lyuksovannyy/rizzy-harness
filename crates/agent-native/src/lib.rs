@@ -1059,7 +1059,12 @@ impl NativeBackend {
                     return TurnOutcome {
                         reason: TurnEndReason::Error,
                         usage: Some(usage),
-                        error: Some(e.to_string()),
+                        error: Some(
+                            self.config
+                                .retry
+                                .explain(&e, &model)
+                                .unwrap_or_else(|| e.to_string()),
+                        ),
                     };
                 }
                 Step::Done(Ok(c)) => c,
@@ -1407,7 +1412,10 @@ impl NativeBackend {
                         .map_err(|e| e.to_string())?;
                         Ok(c.usage)
                     }
-                    Step::Done(Err(e)) => Err(format!("{model}: {e}")),
+                    Step::Done(Err(e)) => Err(match self.config.retry.explain(&e, model) {
+                        Some(m) => m,
+                        None => format!("{model}: {e}"),
+                    }),
                     Step::Cancelled => Err("cancelled".into()),
                 }
             }
