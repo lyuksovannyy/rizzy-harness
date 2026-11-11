@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 pub use provider::{
     ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, RetryHint,
-    ToolSpec, estimate_tokens,
+    StopReason, ToolSpec, estimate_tokens,
 };
 pub use retry::RetryPolicy;
 
@@ -40,6 +40,15 @@ pub const FLUSH_BYTES: usize = 2048;
 /// cancel still reports its output; a dropped bash call kills its group
 /// anyway.
 pub const TOOL_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// The result of every tool call in a message that stopped on the output
+/// limit. It names the cause and the way out, never the cut arguments.
+pub const CUT_BY_OUTPUT_LIMIT: &str = "This tool call was not run: your answer reached the \
+     output limit before the call was complete. Split the change into smaller calls (for \
+     `write`, write the file in parts or use `edit`).";
+
+/// Messages in a row cut by the output limit after which the turn ends.
+pub const MAX_CUT_STEPS: u32 = 3;
 
 /// Aborts a helper task when the call that started it ends.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -900,6 +909,8 @@ impl NativeBackend {
         // A request the provider refused as too long is compacted and sent
         // again once per turn; a second refusal ends the turn.
         let mut overflowed = false;
+        // Messages in a row whose tool calls were cut by the output limit.
+        let mut cut_steps = 0;
         for _ in 0..self.config.max_steps {
             let message_id = new_id();
             let mut sent = messages.clone();
@@ -1103,6 +1114,57 @@ impl NativeBackend {
                     error: None,
                 };
             }
+            // A message cut by the output limit: none of its calls runs,
+            // even one whose arguments parse (a server may have closed
+            // them), and the model is told why instead of being shown
+            // its fragment.
+            if completion.stop == StopReason::OutputLimit {
+                cut_steps += 1;
+                for call in completion.tool_calls {
+                    if host
+                        .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                            author: author.clone(),
+                            turn_id: ctx.turn_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.tool.clone(),
+                            input: call.input,
+                        }))
+                        .await
+                        .is_err()
+                        || host
+                            .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                call_id: call.call_id.clone(),
+                                ok: false,
+                                output: CUT_BY_OUTPUT_LIMIT.into(),
+                                exit_code: None,
+                                truncated: false,
+                                sources: vec![],
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        return stopped(usage);
+                    }
+                    messages.push(ChatMsg::Tool {
+                        call_id: call.call_id,
+                        content: CUT_BY_OUTPUT_LIMIT.into(),
+                    });
+                }
+                if cut_steps >= MAX_CUT_STEPS {
+                    return TurnOutcome {
+                        reason: TurnEndReason::Error,
+                        usage: Some(usage),
+                        error: Some(format!(
+                            "The model's answer reached its output limit {MAX_CUT_STEPS} times \
+                             in a row in the middle of a tool call, so nothing was run. Ask \
+                             for the change in smaller steps, or use a model with a larger \
+                             output limit."
+                        )),
+                    };
+                }
+                continue;
+            }
+            cut_steps = 0;
 
             // Delegations of this step run in parallel, within the caps.
             let (delegations, calls): (Vec<_>, Vec<_>) = completion
@@ -1910,6 +1972,142 @@ mod tests {
             EventKind::ToolCallFinished(f) if !f.ok && f.output.contains("denied"))));
     }
 
+    /// Answers with the completions given, in order, then "done".
+    struct Script(Mutex<std::collections::VecDeque<Completion>>);
+
+    impl Script {
+        fn backend(steps: Vec<Completion>) -> NativeBackend {
+            NativeBackend::new(
+                Arc::new(Script(Mutex::new(steps.into()))),
+                harness_tools::builtin(),
+                NativeConfig::default(),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Script {
+        fn name(&self) -> &'static str {
+            "script"
+        }
+        async fn complete(
+            &self,
+            _req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            Ok(self.0.lock().unwrap().pop_front().unwrap_or(Completion {
+                text: "done".into(),
+                stop: StopReason::End,
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// A message with one `write` call that stopped for `stop`.
+    fn write_call(input: Value, stop: StopReason) -> Completion {
+        Completion {
+            text: "Writing the file.".into(),
+            tool_calls: vec![ToolCallRef {
+                call_id: new_id(),
+                tool: "write".into(),
+                input,
+            }],
+            usage: None,
+            stop,
+        }
+    }
+
+    fn refusals(host: &RecHost) -> Vec<String> {
+        host.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallFinished(f) if !f.ok => Some(f.output.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `write` cut mid-JSON by the output limit: not run, and the model is
+    /// told why and what to do, without its fragment echoed back.
+    #[tokio::test]
+    async fn a_call_cut_by_the_output_limit_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let cut = json!(r#"{"path":"a.txt","content":"FRAGMENT-1f3a half of the fi"#);
+        let out = Script::backend(vec![write_call(cut, StopReason::OutputLimit)])
+            .run_turn(ctx(&host, "write a.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "never offered for approval"
+        );
+        let r = refusals(&host);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("output limit"), "{}", r[0]);
+        assert!(r[0].contains("smaller"), "{}", r[0]);
+        assert!(!r[0].contains("FRAGMENT"), "{}", r[0]);
+        assert!(!r[0].contains("a.txt"), "{}", r[0]);
+        // The text before the cut is kept.
+        let ev = host.events.lock().unwrap();
+        assert!(ev.iter().any(|e| matches!(e,
+            EventKind::AssistantMessage(m) if m.text == "Writing the file.")));
+    }
+
+    /// The dangerous case: a call from a message cut by the output limit
+    /// whose arguments still parse (a provider or server that completes
+    /// them) does not run either.
+    #[tokio::test]
+    async fn a_complete_call_in_a_cut_message_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let whole = json!({"path": "b.txt", "content": "maybe only half"});
+        let out = Script::backend(vec![write_call(whole, StopReason::OutputLimit)])
+            .run_turn(ctx(&host, "write b.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert!(!dir.path().join("b.txt").exists(), "the write ran");
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "never offered for approval"
+        );
+        let r = refusals(&host);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("output limit"), "{}", r[0]);
+        assert!(!r[0].contains("maybe only half"), "{}", r[0]);
+    }
+
+    /// Three cut messages in a row end the turn, naming the cause; two,
+    /// then a step that stops normally, start the count again.
+    #[tokio::test]
+    async fn three_cut_messages_in_a_row_end_the_turn() {
+        let cut = || write_call(json!(r#"{"path":"c.txt","con"#), StopReason::OutputLimit);
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let out = Script::backend(vec![cut(), cut(), cut()])
+            .run_turn(ctx(&host, "write c.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Error);
+        let e = out.error.unwrap_or_default();
+        assert!(e.contains("output limit") && e.contains('3'), "{e}");
+        assert_eq!(refusals(&host).len(), 3, "every cut call has its result");
+
+        let host = RecHost::new(Decision::Allow);
+        let ok = write_call(
+            json!({"path": "d.txt", "content": "x"}),
+            StopReason::ToolUse,
+        );
+        let out = Script::backend(vec![cut(), cut(), ok, cut(), cut()])
+            .run_turn(ctx(&host, "write d.txt", dir.path()))
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        assert!(dir.path().join("d.txt").exists(), "the normal step ran");
+        assert_eq!(refusals(&host).len(), 4);
+    }
+
     #[tokio::test]
     async fn secrets_are_scrubbed_from_tool_output() {
         let dir = tempfile::tempdir().unwrap();
@@ -2007,6 +2205,7 @@ mod tests {
                 text: "done".into(),
                 tool_calls: vec![],
                 usage: None,
+                stop: Default::default(),
             };
             if matches!(req.messages.last(), Some(ChatMsg::Tool { .. })) {
                 return Ok(done);
@@ -2032,6 +2231,7 @@ mod tests {
                     input,
                 }],
                 usage: None,
+                stop: Default::default(),
             })
         }
     }
@@ -2326,6 +2526,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                     usage: None,
+                    stop: Default::default(),
                 })
             }
         }
@@ -2646,6 +2847,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 usage: None,
+                stop: Default::default(),
             })
         }
     }
@@ -3273,6 +3475,7 @@ mod tests {
                 text: "done".into(),
                 tool_calls,
                 usage: None,
+                stop: Default::default(),
             })
         }
     }

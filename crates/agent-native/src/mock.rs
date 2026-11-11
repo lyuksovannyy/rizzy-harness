@@ -197,6 +197,7 @@ impl Provider for Mock {
                 text: format!("Summary of {n} earlier messages."),
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         let raw_user = req
@@ -215,6 +216,7 @@ impl Provider for Mock {
                 text,
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         // Per-turn context comes first in the user message; commands follow it.
@@ -253,6 +255,7 @@ impl Provider for Mock {
                 text,
                 tool_calls,
                 usage,
+                stop: Default::default(),
             });
         }
         // After a tool result, summarise it (or cite it) and stop.
@@ -270,6 +273,7 @@ impl Provider for Mock {
                 text,
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         let call = |tool: &str, input| Completion {
@@ -280,6 +284,7 @@ impl Provider for Mock {
                 input,
             }],
             usage: usage.clone(),
+            stop: Default::default(),
         };
         if let Some(cmd) = user.strip_prefix("run:") {
             return Ok(call("bash", json!({"command": cmd.trim()})));
@@ -307,6 +312,7 @@ impl Provider for Mock {
                 text: String::new(),
                 tool_calls: calls,
                 usage,
+                stop: Default::default(),
             });
         }
         if user.trim().starts_with("memory?") {
@@ -324,6 +330,7 @@ impl Provider for Mock {
                 text,
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         if let Some(t) = user.strip_prefix("remember project:") {
@@ -357,6 +364,7 @@ impl Provider for Mock {
                 text,
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         if user.strip_prefix("rich:").map(str::trim) == Some("demo") {
@@ -366,6 +374,7 @@ impl Provider for Mock {
                 text,
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         // `@writer ui: choices` asks as Writer: the master leaves the mention
@@ -384,6 +393,7 @@ impl Provider for Mock {
                 text,
                 tool_calls: vec![],
                 usage,
+                stop: Default::default(),
             });
         }
         // `mock-*` models (parallel answers in tests) tag their replies.
@@ -400,6 +410,7 @@ impl Provider for Mock {
             text,
             tool_calls: vec![],
             usage,
+            stop: Default::default(),
         })
     }
 }
