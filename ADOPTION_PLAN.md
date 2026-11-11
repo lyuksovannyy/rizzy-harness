@@ -1,7 +1,10 @@
 # ADOPTION PLAN: rizzy-harness
 
 **Status:** accepted by the owner on 2026-11-11 with one change (O3: a node may serve several
-workspaces, see C.12). No code has been changed for it yet; Phase A has not started.
+workspaces, see C.12). **Progress, 2026-11-11:** Phase A tasks A.1 to A.14 are written and merged
+(A.1 to A.5, A.8 to A.10, A.12, A.13 into `integration/gate3`; A.6, A.7, A.14 into pull request
+7; A.11 into pull request 6). A.15 and the new A.16 are open. Experiments B.1, B.2 and B.5 have
+run. Phases C, T, N, X and W have not started.
 
 Brings what the two-round harness study found into our own code. Inputs, by authority:
 `research/round2/final-review-ours.md` (what is true about our code; it wins every
