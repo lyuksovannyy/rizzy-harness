@@ -50,6 +50,7 @@ fn config_with(
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     }
 }
@@ -359,7 +360,8 @@ async fn cwd_outside_roots_is_refused() {
         req_id: "c".into(),
         session_id: SessionId::new(),
         title: "t".into(),
-        cwd: "/".into(),
+        // Outside the roots and holding no protected folder.
+        cwd: "/usr".into(),
         model: None,
         approval_mode: None,
     });
@@ -1479,13 +1481,14 @@ async fn a_writing_sub_agent_is_refused_outside_a_repository() {
     assert_eq!(sessions.len(), 1, "a child session was created");
 }
 
-/// The same when the repository is there but its worktree cannot be made:
-/// here the folder for worktrees (`.git/harness-worktrees`) is a file.
+/// The same when the repository is there but the sub-agent's folder cannot
+/// be made: here the node's folder for them (`<data>/sessions`) is a file.
 #[tokio::test]
-async fn a_writing_sub_agent_is_refused_when_its_worktree_cannot_be_made() {
+async fn a_writing_sub_agent_is_refused_when_its_folder_cannot_be_made() {
     let mut h = Harness::new(auto_policy).await;
     init_repo(&h.ws);
-    std::fs::write(h.ws.join(".git/harness-worktrees"), "in the way\n").unwrap();
+    let _ = std::fs::remove_dir_all(h._dir.path().join("sessions"));
+    std::fs::write(h._dir.path().join("sessions"), "in the way\n").unwrap();
     let sid = h.create().await;
     let before = tree(&h.ws);
     let out = delegate_as_lead(
@@ -1497,7 +1500,7 @@ async fn a_writing_sub_agent_is_refused_when_its_worktree_cannot_be_made() {
     .await;
     let out = out.last().expect("a delegate call");
     assert!(
-        out.contains("not started") && out.contains("worktree could not be made"),
+        out.contains("not started") && out.contains("folder could not be made"),
         "{out}"
     );
     assert_eq!(tree(&h.ws), before, "the folder changed");
@@ -1550,14 +1553,21 @@ async fn a_writing_sub_agent_changes_are_applied_from_its_worktree() {
     )
     .await;
     let out = out.last().expect("a delegate call");
+    // The child worked in its node-owned folder, not in the repository.
+    let folder = h._dir.path().join("sessions");
     assert!(
-        out.contains("harness-worktrees"),
-        "not in a worktree: {out}"
+        out.contains(&folder.display().to_string()),
+        "not in its own folder: {out}"
     );
     assert!(out.contains("2 changed file(s) applied"), "{out}");
     assert_eq!(
         std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
         "v2\n"
+    );
+    assert_eq!(
+        std::fs::read_dir(&folder).unwrap().count(),
+        0,
+        "a folder was left"
     );
     assert_eq!(
         std::fs::read_to_string(h.ws.join("made.txt")).unwrap(),
@@ -2678,15 +2688,616 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
     std::fs::write(moved.join("notes.txt"), "v0\n").unwrap();
     let a = create_in(&mut h, &moved).await;
     let turn = prompt_turn(&mut h, a, "run: echo v1 > notes.txt").await;
-    start_long_turn(&mut h, b).await;
-    let err = restore(&mut h, a, "r", &turn, false)
-        .await
-        .expect_err("same folder through a link");
-    assert!(err.contains(BUSY), "{err}");
-    stop_turn(&mut h, b).await;
+    // Since R.1 (S-2) a folder is pinned when its chat is made: B's folder
+    // was replaced by a link, so B cannot start a turn at all, and so is
+    // never busy in A's folder through it.
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: format!("p-{b}"),
+        session_id: b,
+        text: "run: sleep 30".into(),
+        images: vec![],
+    });
+    let err = ack_for(&mut h, &format!("p-{b}")).await.unwrap_err();
+    assert!(err.contains("folder was replaced"), "{err}");
     restore(&mut h, a, "r2", &turn, false).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(moved.join("notes.txt")).unwrap(),
         "v0\n"
     );
+}
+
+// ---- The node's own git never runs what a session wrote (R.1, S-1, S-2) ----
+
+/// S-1: a sub-agent's shell defines a clean filter in the shared
+/// `.git/config` and asks for it in its worktree's `.gitattributes`. The
+/// node's own git (the result snapshot, applying it to the folder) is not
+/// sandboxed, and it never runs that filter; the change still arrives.
+#[tokio::test]
+async fn a_filter_a_sub_agent_defines_never_runs_in_the_nodes_git() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let marker = h._dir.path().join("ran-outside-the-sandbox");
+    let cmd = format!(
+        "pwd; G=$(git rev-parse --path-format=absolute --git-common-dir); \
+         printf '#!/bin/sh\\ntr \"\\\\0\" \" \" < /proc/$PPID/cmdline > {m}\\ncat\\n' > $G/f.sh; \
+         chmod +x $G/f.sh; git config filter.x.clean $G/f.sh; \
+         git config core.fsmonitor $G/f.sh; mkdir -p $G/hooks; \
+         for h in post-index-change reference-transaction pre-commit; do cp $G/f.sh $G/hooks/$h; done; \
+         echo '* filter=x' > .gitattributes; echo hi > new.txt",
+        m = marker.display()
+    );
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        &format!("delegate: dev=run: {cmd}"),
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("/sessions/"), "not in its own folder: {out}");
+    assert!(
+        !marker.exists(),
+        "the node's own git ran the sub-agent's filter: {}",
+        std::fs::read_to_string(&marker).unwrap_or_default()
+    );
+    assert!(out.contains("2 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("new.txt")).unwrap(),
+        "hi\n"
+    );
+}
+
+/// S-1: hostile configuration in the main repository's `.git/config` (what
+/// the session's own shell may write there, PLAN.md R2) and attributes that
+/// ask for it: a clean/smudge filter, `core.fsmonitor`, `core.hooksPath`
+/// with hooks, `core.sshCommand`, an `include.path` that defines another
+/// filter and a pager, an alias, `diff.external`, a pager, an editor and a
+/// signing program. None of it runs in the node's own git through a turn's
+/// checkpoints, a whole delegation (worktree made, the child changes files,
+/// its changes applied to the folder) and an undo.
+#[cfg(unix)]
+#[tokio::test]
+async fn hostile_config_in_the_main_repository_never_runs_in_the_nodes_git() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let top = h._dir.path().to_path_buf();
+    let marks = top.join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let script = |name: &str| {
+        let p = top.join(format!("{name}.sh"));
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", marks.join(name).display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    let hooks = top.join("hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    for n in [
+        "post-checkout",
+        "pre-commit",
+        "post-commit",
+        "post-index-change",
+        "reference-transaction",
+    ] {
+        let p = hooks.join(n);
+        std::fs::copy(script(n), &p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let included = top.join("included.cfg");
+    std::fs::write(
+        &included,
+        format!(
+            "[filter \"inc\"]\n\tclean = {}\n\tsmudge = {}\n[core]\n\tpager = {}\n",
+            script("inc-clean"),
+            script("inc-smudge"),
+            script("inc-pager")
+        ),
+    )
+    .unwrap();
+    for (k, v) in [
+        ("filter.evil.clean", script("clean")),
+        ("filter.evil.smudge", script("smudge")),
+        ("core.fsmonitor", script("fsmonitor")),
+        ("core.hooksPath", hooks.display().to_string()),
+        ("core.sshCommand", script("ssh")),
+        ("include.path", included.display().to_string()),
+        ("alias.st", format!("!{}", script("alias"))),
+        ("diff.external", script("diff-external")),
+        ("core.pager", script("pager")),
+        ("core.editor", script("editor")),
+        ("gpg.program", script("gpg")),
+        ("commit.gpgSign", "true".into()),
+    ] {
+        git_in(&h.ws, &["config", k, &v]);
+    }
+    std::fs::write(
+        h.ws.join(".gitattributes"),
+        "* filter=evil\n*.md filter=inc\n",
+    )
+    .unwrap();
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt; echo doc > a.md").await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo '* filter=evil' > .gitattributes; echo child > child.txt; \
+         echo m > b.md",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("3 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("child.txt")).unwrap(),
+        "child\n"
+    );
+    restore(&mut h, sid, "r", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert!(!h.ws.join("a.md").exists());
+    let ran: Vec<_> = std::fs::read_dir(&marks)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        ran.is_empty(),
+        "repository config ran in the node's git: {ran:?}"
+    );
+}
+
+/// S-2: a session's folder is pinned when the session is created (its real
+/// path, device and inode). Replaced afterwards (by a link to a folder
+/// outside the workspace roots, by a link to another folder inside them, by
+/// a new directory of the same name), the session refuses its next turn and
+/// its undo, and nothing of the other folder reaches the chat.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_whose_folder_was_replaced_refuses_to_work() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "mine\n").unwrap();
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt").await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+    let inside = h._dir.path().join("other");
+    std::fs::create_dir(&inside).unwrap();
+    std::fs::write(inside.join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+    std::fs::rename(&h.ws, h._dir.path().join("ws.moved")).unwrap();
+    for (i, target) in [
+        Some(outside.path().to_path_buf()),
+        Some(inside.clone()),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let _ = std::fs::remove_file(&h.ws);
+        let _ = std::fs::remove_dir_all(&h.ws);
+        match &target {
+            Some(t) => std::os::unix::fs::symlink(t, &h.ws).unwrap(),
+            None => {
+                std::fs::create_dir(&h.ws).unwrap();
+                std::fs::write(h.ws.join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+            }
+        }
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: format!("p{i}"),
+            session_id: sid,
+            text: "read: id_ed25519".into(),
+            images: vec![],
+        });
+        let e = ack_for(&mut h, &format!("p{i}")).await.unwrap_err();
+        assert!(e.contains("folder was replaced"), "{target:?}: {e}");
+        let e = restore(&mut h, sid, &format!("r{i}"), &turn, false)
+            .await
+            .unwrap_err();
+        assert!(e.contains("folder was replaced"), "{target:?}: {e}");
+    }
+    let leaked = h
+        .seen
+        .iter()
+        .any(|e| e.payload.to_string().contains("SSH-KEY-CANARY"));
+    assert!(!leaked, "the other folder's file reached the chat");
+}
+
+/// Every file under `dir` with its size, `.git` included (to see that
+/// another repository was not touched).
+fn listing(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+    let mut v: Vec<_> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| (e.path().to_path_buf(), e.metadata().unwrap().len()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// R.1 follow-up (R1-1 and the class behind it): the redirects git honours
+/// in a repository's `.git`, each planted in the session's own repository
+/// (its shell may write there): `commondir`, a gitfile `.git`,
+/// `core.worktree`, `extensions.worktreeConfig` with a `config.worktree`,
+/// a linked `.git/objects`, and `objects/info/alternates` naming another
+/// repository. A turn's checkpoints, a delegation and an undo never read,
+/// write or grant anything of the other repository: its canary is in no
+/// event and no file of the session's folder, and its `.git` is unchanged.
+#[cfg(unix)]
+#[tokio::test]
+async fn redirects_in_the_sessions_git_never_reach_another_repository() {
+    for plant in [
+        "commondir",
+        "gitfile",
+        "core.worktree",
+        "worktreeConfig",
+        "objects-link",
+        "alternates",
+    ] {
+        let mut h = Harness::new(auto_policy).await;
+        init_repo(&h.ws);
+        let other = h._dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        git_in(&other, &["init", "-q"]);
+        std::fs::write(other.join("s.txt"), "OTHER-REPOSITORY-SECRET\n").unwrap();
+        git_in(&other, &["add", "."]);
+        git_in(&other, &["commit", "-qm", "other"]);
+        let og = other.join(".git");
+        let g = h.ws.join(".git");
+        match plant {
+            "commondir" => {
+                std::fs::write(g.join("commondir"), format!("{}\n", og.display())).unwrap()
+            }
+            "gitfile" => {
+                std::fs::rename(&g, h._dir.path().join("ws-git")).unwrap();
+                std::fs::write(&g, format!("gitdir: {}\n", og.display())).unwrap();
+            }
+            "core.worktree" => {
+                git_in(
+                    &h.ws,
+                    &["config", "core.worktree", &other.display().to_string()],
+                );
+            }
+            "worktreeConfig" => {
+                git_in(&h.ws, &["config", "extensions.worktreeConfig", "true"]);
+                std::fs::write(
+                    g.join("config.worktree"),
+                    format!("[core]\n\tworktree = {}\n", other.display()),
+                )
+                .unwrap();
+            }
+            "objects-link" => {
+                std::fs::rename(g.join("objects"), h._dir.path().join("ws-objects")).unwrap();
+                std::os::unix::fs::symlink(og.join("objects"), g.join("objects")).unwrap();
+            }
+            _ => std::fs::write(
+                g.join("objects/info/alternates"),
+                format!("{}\n", og.join("objects").display()),
+            )
+            .unwrap(),
+        }
+        let other_before = listing(&other);
+        let sid = h.create().await;
+        let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt").await;
+        let out = delegate_as_lead(
+            &mut h,
+            sid,
+            vec![agent("dev", vec![])],
+            "delegate: dev=run: git log --all --oneline; git show HEAD:s.txt; \
+             git cat-file --batch-all-objects --batch | grep -a SECRET; echo c > c.txt",
+        )
+        .await;
+        let out = out.last().expect("a delegate call").clone();
+        let _ = restore(&mut h, sid, "r", &turn, false).await;
+        let leaked = h
+            .seen
+            .iter()
+            .any(|e| e.payload.to_string().contains("OTHER-REPOSITORY-SECRET"));
+        assert!(
+            !leaked,
+            "{plant}: the other repository reached the chat: {out}"
+        );
+        for (p, _) in listing(&h.ws) {
+            if p.components().any(|c| c.as_os_str() == ".git") {
+                continue;
+            }
+            let text = std::fs::read(&p).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&text).contains("OTHER-REPOSITORY-SECRET"),
+                "{plant}: {} holds the canary",
+                p.display()
+            );
+        }
+        assert_eq!(
+            listing(&other),
+            other_before,
+            "{plant}: the other repository changed"
+        );
+    }
+}
+
+/// Prompt `sid` as `lead` with `spec` and keep reading until the parent's
+/// turn ends, answering any approval request a person would see with
+/// `answer` (a delegation's own one, under `ask_all`).
+async fn lead_turn(
+    h: &mut Harness,
+    sid: SessionId,
+    spec: harness_core::agent::AgentSpec,
+    text: &str,
+    answer: Decision,
+) {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: Some(spec),
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    });
+    loop {
+        let k = h
+            .until(|k| matches!(k, EventKind::TurnEnded(_) | EventKind::ApprovalRequested(_)))
+            .await;
+        let last = h.seen.last().unwrap().session_id;
+        match k {
+            EventKind::ApprovalRequested(a) if !a.reason.contains("denied by this node") => {
+                h.send(MasterToNode::ApprovalRespond {
+                    req_id: "a".into(),
+                    session_id: last,
+                    approval_id: a.approval_id,
+                    decision: answer,
+                })
+            }
+            EventKind::TurnEnded(_) if last == sid => break,
+            _ => {}
+        }
+    }
+}
+
+fn children_of(h: &Harness, sid: SessionId) -> usize {
+    h.seen
+        .iter()
+        .filter(|e| {
+            matches!(e.typed(), Ok(EventKind::SessionCreated(c)) if c.parent_session == Some(sid))
+        })
+        .count()
+}
+
+/// The approval requests of `sid`, as (tool, reason).
+fn asked_in(h: &Harness, sid: SessionId) -> Vec<(String, String)> {
+    h.seen
+        .iter()
+        .filter(|e| e.session_id == sid)
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ApprovalRequested(a)) => Some((a.tool, a.reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalMode) -> SessionId {
+    let sid = SessionId::new();
+    h.send(MasterToNode::Create {
+        req_id: "c".into(),
+        session_id: sid,
+        title: "t".into(),
+        cwd: h.ws.display().to_string(),
+        model: None,
+        approval_mode: Some(mode),
+        profile: None,
+        agent: None,
+        incognito: false,
+    });
+    h.until(|k| matches!(k, EventKind::SessionCreated(_))).await;
+    sid
+}
+
+/// Gate 3 review P-2, the review's proof (`review_p2_…`) inverted:
+/// `delegate` reaches the approval path like any tool, so a node whose
+/// node.toml denies it refuses it with the policy's reason, in `ask_all`
+/// too, before any child session exists.
+#[tokio::test]
+async fn a_node_that_denies_delegate_refuses_it_before_any_child_exists() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        denied_tools: vec!["delegate".into()],
+        ..Default::default()
+    })
+    .await;
+    let sid = create_with_mode(&mut h, harness_core::policy::ApprovalMode::AskAll).await;
+    let scout = agent_with("scout", &["read"], vec![]);
+    lead_turn(
+        &mut h,
+        sid,
+        agent("lead", vec![scout]),
+        "delegate: scout=hello",
+        Decision::Allow,
+    )
+    .await;
+    assert_eq!(children_of(&h, sid), 0, "the denied delegation ran");
+    let asked = asked_in(&h, sid);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].0, "delegate");
+    assert!(
+        asked[0].1.contains("denied by this node's policy"),
+        "{asked:?}"
+    );
+}
+
+/// Gate 3 review P-2: `ask_all` ("every tool call needs approval") asks for
+/// a delegation before the child exists; a denial leaves no child, an
+/// allow starts it. Under `ask` a delegation is not mutating by itself and
+/// runs without asking (the child's own calls are gated as ever).
+#[tokio::test]
+async fn ask_all_asks_before_a_delegation_and_ask_does_not() {
+    use harness_core::policy::ApprovalMode;
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: ApprovalMode::Auto,
+        ..Default::default()
+    })
+    .await;
+    let lead = || agent("lead", vec![agent_with("scout", &["read"], vec![])]);
+
+    let sid = create_with_mode(&mut h, ApprovalMode::AskAll).await;
+    lead_turn(&mut h, sid, lead(), "delegate: scout=hello", Decision::Deny).await;
+    let asked = asked_in(&h, sid);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].0, "delegate");
+    assert_eq!(children_of(&h, sid), 0, "denied, yet a child started");
+
+    let sid = create_with_mode(&mut h, ApprovalMode::AskAll).await;
+    lead_turn(
+        &mut h,
+        sid,
+        lead(),
+        "delegate: scout=hello",
+        Decision::Allow,
+    )
+    .await;
+    assert_eq!(asked_in(&h, sid)[0].0, "delegate");
+    assert_eq!(children_of(&h, sid), 1);
+
+    let sid = create_with_mode(&mut h, ApprovalMode::Ask).await;
+    lead_turn(&mut h, sid, lead(), "delegate: scout=hello", Decision::Deny).await;
+    assert!(asked_in(&h, sid).is_empty(), "{:?}", asked_in(&h, sid));
+    assert_eq!(children_of(&h, sid), 1);
+}
+
+/// Gate 3 review P-2: node.toml `[limits]` bounds delegation. A master spec
+/// that asks for more sub-agents per turn than the node allows is clamped
+/// to the node's number; with a depth of 0 nothing is delegated at all.
+#[tokio::test]
+async fn node_limits_clamp_the_masters_delegation_caps_and_depth() {
+    use harness_core::agent::DelegateCaps;
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.limits.max_subagents = 1;
+        p
+    })
+    .await;
+    let sid = h.create().await;
+    let mut lead = agent(
+        "lead",
+        vec![
+            agent_with("a", &["read"], vec![]),
+            agent_with("b", &["read"], vec![]),
+        ],
+    );
+    lead.caps = Some(DelegateCaps {
+        max_subagents: 10,
+        max_tokens: 1_000_000,
+    });
+    let outs = delegate_outputs(&mut h, sid, lead.clone(), "delegate: a=one | b=two").await;
+    assert_eq!(outs.len(), 2, "{outs:?}");
+    let capped = outs
+        .iter()
+        .filter(|o| o.contains("cap reached: at most 1 sub-agents"))
+        .count();
+    assert_eq!(capped, 1, "{outs:?}");
+    assert_eq!(children_of(&h, sid), 1);
+
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.limits.max_delegation_depth = 0;
+        p
+    })
+    .await;
+    let sid = h.create().await;
+    let outs = delegate_outputs(&mut h, sid, lead, "delegate: a=one").await;
+    assert_eq!(children_of(&h, sid), 0, "{outs:?}");
+}
+
+/// [`lead_turn`], then the outputs of the parent's `delegate` calls.
+async fn delegate_outputs(
+    h: &mut Harness,
+    sid: SessionId,
+    spec: harness_core::agent::AgentSpec,
+    text: &str,
+) -> Vec<String> {
+    lead_turn(h, sid, spec, text, Decision::Allow).await;
+    let stored = h.node.store().events_after(sid, 0, 10_000).unwrap();
+    let calls: Vec<String> = stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallStarted(c)) if c.tool == "delegate" => Some(c.call_id),
+            _ => None,
+        })
+        .collect();
+    stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) if calls.contains(&f.call_id) => Some(f.output),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A nested delegation, with node.toml allowing two levels (R.2's
+/// `max_delegation_depth`) and R.1's rule that a sub-agent's own
+/// sub-agents may only read: a writing child's read-only sub-agent runs in
+/// the child's node-owned folder and sees its files; a writing sub-agent
+/// of the child is refused before any session exists for it; the child's
+/// own change is still applied.
+#[tokio::test]
+async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.limits.max_delegation_depth = 2;
+        p
+    })
+    .await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let dev = |inner: harness_core::agent::AgentSpec| agent("dev", vec![inner]);
+    // The child's read-only sub-agent reads a file of the child's folder.
+    let outs = delegate_outputs(
+        &mut h,
+        sid,
+        agent("lead", vec![dev(agent_with("scout", &["read"], vec![]))]),
+        "delegate: dev=delegate: scout=read: keep.txt",
+    )
+    .await;
+    let out = outs.last().expect("a delegate call");
+    assert!(
+        out.contains("v1"),
+        "the scout did not read the child's folder: {out}"
+    );
+    // The child's writing sub-agent is refused; nothing is written.
+    let before = tree(&h.ws);
+    let outs = delegate_outputs(
+        &mut h,
+        sid,
+        agent("lead", vec![dev(agent("coder", vec![]))]),
+        "delegate: dev=delegate: coder=run: echo nested > nested.txt",
+    )
+    .await;
+    let out = outs.last().expect("a delegate call");
+    assert!(
+        out.contains("@coder was not started") && out.contains("may only read"),
+        "{out}"
+    );
+    assert_eq!(tree(&h.ws), before, "the nested writer changed the folder");
+    assert!(!h.ws.join("nested.txt").exists());
 }

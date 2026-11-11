@@ -7,6 +7,7 @@
 // and any failure is recorded as no_thumb. Two at a time, once per item.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { MediaItem } from "./media";
+import { linked } from "./links.setup";
 import { MAX_THUMB, makeThumb, queueThumb } from "./thumbs";
 
 const item = (over: Partial<MediaItem> = {}): MediaItem => ({
@@ -149,7 +150,7 @@ describe("SVG and HEIC", () => {
     expect(await makeThumb(item({ format: "heic", display: "img" }), api)).toBe("made");
     expect(fetchFn).not.toHaveBeenCalled();
     expect(canvases).toEqual([[240, 320]]);
-    expect((drawn[0] as { src: string }).src).toBe("/api/media/m1/content");
+    expect((drawn[0] as { src: string }).src).toBe(linked("/api/media/m1/content"));
     // SVG has no header size, and needs none.
     fakeImage(true, 0, 0);
     expect(await makeThumb(item({ format: "svg", display: "img", width: null, height: null }), api)).toBe("made");
@@ -191,7 +192,7 @@ describe("video and audio", () => {
     const v = nextMedia("video", { duration: 5, w: 1280, h: 720 });
     const done = makeThumb(item({ kind: "video", format: "mp4" }), api);
     await tick();
-    expect(v.current!.getAttribute("src")).toBe("/api/media/m1/content");
+    expect(v.current!.getAttribute("src")).toBe(linked("/api/media/m1/content"));
     expect(v.current!.preload).toBe("metadata");
     v.current!.dispatchEvent(new Event("loadedmetadata"));
     expect(await done).toBe("made");

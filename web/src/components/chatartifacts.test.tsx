@@ -6,6 +6,7 @@
 // is offered); and the lookup that asks the server once per chat, again
 // while a file uploads, and stops when nothing is pending.
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
@@ -100,7 +101,7 @@ describe("publish card", () => {
     expect(card().querySelector('[role="status"]')!.textContent).toBe("In Artifacts");
     const links = [...card().querySelectorAll("a")].map((a) => [a.textContent, a.getAttribute("href")]);
     expect(links).toEqual([
-      ["Download", "/api/artifacts/a1/versions/v1/download"],
+      ["Download", linked("/api/artifacts/a1/versions/v1/download")],
       ["Open in Artifacts", "#/artifacts/a1"],
     ]);
   });

@@ -7,7 +7,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, test } from "vitest";
 import { fold } from "../fold";
-import { fallbackNote, rawModel } from "../lib/models";
+import { fallbackNote } from "../lib/modelPlan";
+import { rawModel } from "../lib/models";
 import type { Notice, RawEvent } from "../types";
 import { FIX_DEFAULT, FIX_PROVIDERS, FIX_WORKSPACE, Notices, noticeText } from "./Notices";
 

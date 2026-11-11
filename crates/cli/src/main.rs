@@ -92,12 +92,15 @@ enum Cmd {
     /// then exec the command. The node starts bash and graphify this way
     /// (node.toml `[sandbox]`).
     SandboxExec {
-        /// A file or folder the command may read and change.
-        #[arg(long, value_name = "PATH")]
-        rw: Vec<PathBuf>,
-        /// A file or folder the command may read and execute.
-        #[arg(long, value_name = "PATH")]
-        ro: Vec<PathBuf>,
+        /// A file or folder the command may read and change, with what the
+        /// node expects there: `<dev>:<ino>:<label>` (its identity; any other
+        /// directory there refuses the command) or `system` (a folder no
+        /// session can write).
+        #[arg(long, num_args = 2, value_names = ["EXPECT", "PATH"], action = clap::ArgAction::Append)]
+        rw: Vec<std::ffi::OsString>,
+        /// A file or folder the command may read and execute, the same way.
+        #[arg(long, num_args = 2, value_names = ["EXPECT", "PATH"], action = clap::ArgAction::Append)]
+        ro: Vec<std::ffi::OsString>,
         /// Deny TCP connect and bind (needs Landlock ABI 4).
         #[arg(long)]
         no_network: bool,
@@ -160,13 +163,28 @@ fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
             .context("no data directory; pass --data-dir")?
             .join(BRAND),
     };
-    std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
+    // Made 0700 from the start (never visible to others under the umask
+    // for a moment); its parents as usual. An existing one must be this
+    // user's, and is made 0700; a chmod that fails stops the start (Gate 3
+    // review N-3).
+    if let Some(parent) = d.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
-    Ok(d)
+    let mut mk = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
+    match mk.create(&d) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating {}", d.display())),
+    }
+    harness_master::secrets::check_data_dir(&d)?;
+    // Absolute and real, once, here: everything below (the sandbox's temp
+    // folder and protected folder among it) runs in other folders, where a
+    // relative path would name something else (R.1, S-4).
+    d.canonicalize()
+        .with_context(|| format!("resolving {}", d.display()))
 }
 
 fn hostname() -> String {
@@ -317,6 +335,7 @@ async fn serve(
         profile: Profile::Chat,
         incognito_ttl: Some(cfg.chat.incognito_ttl()),
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await?;
@@ -491,6 +510,13 @@ async fn agentic_node(
     policy.protect(dir);
     // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once.
     let sandbox = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;
+    // The node's own git reads a session's folder in the same sandbox
+    // (R.1, R1b-2); with `mode = "off"` it runs unconfined.
+    let git_sandbox = match &sandbox {
+        harness_tools::sandbox::Confinement::Confined { sandbox, .. } => Some(sandbox.clone()),
+        _ => None,
+    };
+    tracing::info!("checkpoints: {}", checkpoint_confinement(&sandbox));
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
@@ -528,12 +554,34 @@ async fn agentic_node(
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: Some(dir.join("checkpoints")),
+        git_sandbox: git_sandbox.clone(),
         // The data dir is passed as is: for the embedded node it is the
         // master's, so its databases, keys and blobs are never published.
         artifacts: Some(harness_node::artifacts::StageConfig::new(dir.to_path_buf())),
     })
     .await?;
     Ok((rt, graphify))
+}
+
+/// How the node's own git for checkpoints and sub-agents runs, in words
+/// for the start-up log and `doctor`.
+fn checkpoint_confinement(c: &harness_tools::sandbox::Confinement) -> &'static str {
+    use harness_tools::sandbox::Confinement;
+    match c {
+        Confinement::Confined { sandbox, .. } if sandbox.is_best_effort() => {
+            "the node's git reads session folders in the sandbox, best-effort (on a kernel \
+             without Landlock it is not confined)"
+        }
+        Confinement::Confined { .. } => {
+            "the node's git reads session folders in the sandbox (read-only on the folder, \
+             write on its checkpoint store only)"
+        }
+        Confinement::Unconfined => {
+            "NOT confined ([sandbox] mode = \"off\"): the node's git reads session folders \
+             with every right of this OS user"
+        }
+        Confinement::Refused(_) => "no agentic sessions here, so no checkpoints",
+    }
 }
 
 /// Set up the shell sandbox for an agentic runtime and record the result
@@ -549,8 +597,14 @@ fn start_sandbox(
         .sandbox
         .settings()
         .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
-    let s = harness_tools::sandbox::start(&settings, dir, &policy.protected_dirs, &node_toml)
-        .map_err(anyhow::Error::msg)?;
+    let s = harness_tools::sandbox::start(
+        &settings,
+        dir,
+        &policy.protected_dirs,
+        &policy.workspace_roots,
+        &node_toml,
+    )
+    .map_err(anyhow::Error::msg)?;
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
@@ -713,12 +767,34 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                     &p.sandbox.settings()?,
                     dir,
                     &p.protected_dirs,
+                    &p.workspace_roots,
                     &node_toml,
                 )
             })
             .and_then(|s| match s.refusal {
                 Some(_) => Err(s.summary),
                 None => Ok(s.summary),
+            }),
+    );
+    check(
+        "checkpoint git",
+        NodePolicy::load(&dir.join("node.toml"))
+            .map_err(|e| e.to_string())
+            .and_then(|mut p| {
+                p.protect(dir);
+                harness_tools::sandbox::start(
+                    &p.sandbox.settings()?,
+                    dir,
+                    &p.protected_dirs,
+                    &p.workspace_roots,
+                    &dir.join("node.toml"),
+                )
+            })
+            .and_then(|s| match &s.confinement {
+                harness_tools::sandbox::Confinement::Confined { .. } => {
+                    Ok(checkpoint_confinement(&s.confinement).to_string())
+                }
+                c => Err(checkpoint_confinement(c).to_string()),
             }),
     );
     #[cfg(unix)]
@@ -791,10 +867,16 @@ fn main() -> anyhow::Result<()> {
             command,
         } = Cli::parse().cmd
     {
+        let grants = |pairs: &[std::ffi::OsString]| {
+            harness_tools::sandbox::Grant::parse_pairs(pairs).unwrap_or_else(|e| {
+                eprintln!("{}: {e}", harness_tools::sandbox::SUBCOMMAND);
+                std::process::exit(2)
+            })
+        };
         std::process::exit(harness_tools::sandbox::exec(
             harness_tools::sandbox::ExecRequest {
-                rw,
-                ro,
+                rw: grants(&rw),
+                ro: grants(&ro),
                 no_network,
                 best_effort,
                 status,

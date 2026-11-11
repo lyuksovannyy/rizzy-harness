@@ -1,5 +1,6 @@
 import { Menu } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
+import { pruneDrafts } from "../lib/drafts";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
@@ -32,6 +33,7 @@ import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import type { FeaturePageProps } from "./pages";
 import { Sidebar } from "./Sidebar";
+import { shownName } from "../md/hiddenChars";
 
 // Everything but the home screen loads on demand (new-tab speed budget).
 const Conversation = lazy(() => import("./Conversation"));
@@ -200,7 +202,7 @@ export function Shell(props: {
             const a = r.items.find((x) => x.session_id === id)!;
             const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
             if (viewing) continue;
-            const n = new Notification(a.title || APP_TITLE, {
+            const n = new Notification(shownName(a.title) || APP_TITLE, {
               body: a.reason === "approval" ? "Needs your approval" : "Asked you a question",
               tag: id,
             });
@@ -220,7 +222,10 @@ export function Shell(props: {
   const refreshSessions = useCallback(() => {
     api
       .sessions(workspaceId)
-      .then((r) => setSessions(r.sessions))
+      .then((r) => {
+        setSessions(r.sessions);
+        pruneDrafts(r.sessions);
+      })
       .catch(unauthorized);
     refreshAttention();
   }, [workspaceId, unauthorized, refreshAttention]);
@@ -313,6 +318,7 @@ export function Shell(props: {
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     live.onWorkspacesChanged = workspacesChanged;
     live.onProjectsChanged = refreshProjects;
+    live.onLoginEnded = () => void api.me().catch(unauthorized);
     refreshProjects();
     refreshSessions();
     refreshNodes();

@@ -46,13 +46,45 @@ const I3_KB = 0;
 // I4: its own growth over BASE_KB + ≤ 0.5, with the reason on the line.
 const I4_KB = 0;
 
+// Fix plan 3.10 (audit L14), measured 361.9 (initial 103.4): drafts kept per
+// user and cleared at sign-out, with the chat and for incognito chats (first
+// load, +0.5); the server-made temporary password's dialog and per-message
+// footnote ids (lazy, +0.4).
+const L14_KB = 0.9;
+
+// Gate 3 P-1, measured 363.0 (initial 103.6): the login key kept and sent
+// by the API client and the socket (first load, +0.2); the links that
+// what the browser loads by itself (<img>, <video>, downloads) needs, in
+// their own chunk that only lazy pages and the composer's image chip
+// load (+0.9).
+const P1_KB = 1.2;
+
+// Gate 3 fix review 2, W-1 to W-3, measured 366.5 (initial 103.9): the
+// approval card shows every field of a call in full, with sizes, head and
+// tail, blank-run and hidden-character markers, look-alike and path notes
+// (lazy, in the conversation chunk, +3.1); hidden characters in chat
+// titles and node names shown as codes on the first screen (+0.3).
+const R6_KB = 3.5;
+
+// 2026-11, measured 368.2 (initial 99.4): page-only API calls, strings,
+// model helpers and project icons moved out of the first load into the
+// chunks that use them. The first load fell by 4.6; the total rose by 1.6,
+// which is what five more chunks cost (+1.6). Gate 3 R2-1: the favicon is
+// fetched with the login key through the links chunk (+0.1).
+const SPLIT_KB = 1.7;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
 // form moved to its own chunk. The rest is for the Phase C image attach in
 // the composer (~0.4). Still under the long-standing 110 KB first-load budget.
+// Three security fixes had brought it back to 103.9. On 2026-11-11 what only
+// lazy pages use left the first load (the page-only API calls, the model plan
+// helpers, the page-only English strings, 19 of the project icons: 4.6 KB), so
+// the initial load measured 99.3. The ceiling stays 104: the room is for the
+// next fixes, not for features.
 const PROGRAM_INITIAL_KB = 104;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");

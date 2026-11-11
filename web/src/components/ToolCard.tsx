@@ -1,11 +1,13 @@
 import { ChevronDown, ChevronRight, Globe, Search } from "lucide-react";
-import { useState } from "react";
-import { api } from "../api";
+import { useMemo, useState } from "react";
+import { pageApi } from "../apiPages";
 import type { WebGroup } from "../lib/rich";
-import { showHidden, stripHidden } from "../md/hidden";
+import { fields as fieldsOf, fmt, markedText, unseen } from "../lib/callText";
+import { showHidden, shownName, stripHidden } from "../md/hidden";
 import { hostOf, parseUrl } from "../md/links";
 import { rt } from "../md/strings";
 import type { Decision, Item, Source } from "../types";
+import { CallInput, useOpenFields } from "./CallInput";
 import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { MemoryNotice } from "./MemoryNotice";
 import { ProjectMemoryNotice } from "./ProjectChip";
@@ -101,66 +103,64 @@ function SourceRows({ sources }: { sources: Source[] }) {
   );
 }
 
-function summary(t: Tool): string {
-  const i = t.input ?? {};
-  switch (t.tool) {
+/** The one-line head (CSS cuts it): a summary that the body spells out in
+ * full. Hidden characters and runs of blanks are marked here too. */
+function summary(tool: string, input: Tool["input"]): string {
+  return markedText(summaryRaw(tool, input).slice(0, 500), "cmd");
+}
+
+function summaryRaw(tool: string, input: Tool["input"]): string {
+  const i = input ?? {};
+  switch (tool) {
     case "bash":
-      return i.command ?? "";
+      return asText(i.command ?? "");
     case "read":
-      return `${i.path ?? ""}${i.offset ? `:${i.offset}` : ""}`;
+      return `${asText(i.path ?? "")}${i.offset ? `:${asText(i.offset)}` : ""}`;
     case "write":
     case "edit":
-      return i.path ?? "";
+      return asText(i.path ?? "");
     case "delegate":
-      return `@${i.agent ?? "?"}: ${i.task ?? ""}`;
+      return `@${asText(i.agent ?? "?")}: ${asText(i.task ?? "")}`;
     case "grep":
-      return `/${i.pattern ?? ""}/ ${i.path ?? ""}${i.glob ? ` (${i.glob})` : ""}`;
+      return `/${asText(i.pattern ?? "")}/ ${asText(i.path ?? "")}${i.glob ? ` (${asText(i.glob)})` : ""}`;
     case "glob":
-      return `${i.pattern ?? ""} ${i.path ?? ""}`;
+      return `${asText(i.pattern ?? "")} ${asText(i.path ?? "")}`;
     default:
       return JSON.stringify(i);
   }
 }
 
-function EditDiff({ input }: { input: { old_string?: string; new_string?: string } }) {
-  const old = (input.old_string ?? "").split("\n");
-  const neu = (input.new_string ?? "").split("\n");
-  return (
-    <pre className="diff">
-      {old.map((l, i) => (
-        <div key={`o${i}`} className="del">
-          - {l}
-        </div>
-      ))}
-      {neu.map((l, i) => (
-        <div key={`n${i}`} className="add">
-          + {l}
-        </div>
-      ))}
-    </pre>
-  );
-}
-
 /** `blocked`: the viewer may not drive this chat here (its workspace role,
  * the account's grant), so an approval offers Deny only; the server refuses
  * the rest anyway. `projectId`: the chat's project, where a project-scoped
- * `remember` waits. */
+ * `remember` waits. `cwd`: the chat's folder, so a path outside it is
+ * named. */
 export function ToolCard({
   sessionId,
   item,
   blocked,
   projectId,
+  cwd,
 }: {
   sessionId: string;
   item: Tool;
   blocked?: boolean;
   projectId?: string | null;
+  cwd?: string;
 }) {
   const pending = item.approval && item.approval.decision === null;
   const [open, setOpen] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [openFields, toggleField] = useOpenFields();
   const status = statusOf(item);
+  // The input exactly as the event carried it: the fold keeps the object it
+  // parsed, nothing in between trims, reorders or re-encodes it. The node
+  // sends the approval the same value it sent with tool_call_started
+  // (agent-native: both are `call.input`).
+  const input = item.input;
+  const shown = useMemo(() => fieldsOf(item.tool, input), [item.tool, input]);
+  const notExpanded = unseen(shown, openFields);
   const web = item.tool === "web_search" || item.tool === "web_fetch";
   // Open while it matters; collapse finished successful calls by default. A
   // web call says what it does in its head, so it opens only on trouble.
@@ -172,7 +172,7 @@ export function ToolCard({
     setBusy(true);
     setErr(null);
     try {
-      await api.approve(sessionId, item.approval.approval_id, d);
+      await pageApi.approve(sessionId, item.approval.approval_id, d);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -208,8 +208,8 @@ export function ToolCard({
       ) : (
         <button className="tool-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
           <span className={`tool-status s-${status}`}>{status}</span>
-          <span className="tool-name">{item.tool}</span>
-          <span className="tool-summary mono ellipsis">{summary(item)}</span>
+          <span className="tool-name">{shownName(item.tool)}</span>
+          <span className="tool-summary mono ellipsis">{summary(item.tool, input)}</span>
           {item.result?.exit_code !== null && item.result?.exit_code !== undefined && (
             <span className="muted mono">exit {item.result.exit_code}</span>
           )}
@@ -218,29 +218,48 @@ export function ToolCard({
       )}
       {child && (
         <a className="child-link small" href={`#/s/${child}`}>
-          Open @{item.input?.agent} session{status === "running" ? " (approvals for its tools appear there)" : ""}
+          Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
         </a>
       )}
       {pending && item.approval && (
         <div className="approval">
           {web && <WebInput item={item} />}
-          <div className="approval-reason">{item.approval.reason}</div>
-          <div className="row">
+          <CallInput fields={shown} cwd={cwd} open={openFields} onToggle={toggleField} />
+          <div className="approval-reason">{showHidden(item.approval.reason)}</div>
+          {/* Allow stays usable while part of the input is collapsed; this
+              line says how much of it the click approves unseen. */}
+          {notExpanded > 0 && (
+            <div className="call-unseen" id={`unseen-${item.approval.approval_id}`} role="note">
+              You are approving {fmt(notExpanded)} characters you have not expanded.
+            </div>
+          )}
+          <div className="row wrap">
             {!blocked && (
               <>
-                <button className="primary" disabled={busy} onClick={() => decide("allow")}>
-                  Allow
+                <button
+                  className="primary"
+                  disabled={busy}
+                  aria-describedby={notExpanded > 0 ? `unseen-${item.approval.approval_id}` : undefined}
+                  onClick={() => decide("allow")}
+                >
+                  Allow once
                 </button>
-                <button disabled={busy} onClick={() => decide("allow_session")}>
-                  Allow {item.tool} for this session
-                </button>
+                {item.approval.turn_allow && (
+                  <button
+                    disabled={busy}
+                    aria-describedby={notExpanded > 0 ? `unseen-${item.approval.approval_id}` : undefined}
+                    onClick={() => decide("allow_session")}
+                  >
+                    Allow this exact call for this turn
+                  </button>
+                )}
               </>
             )}
             <button className="danger" disabled={busy} onClick={() => decide("deny")}>
               Deny
             </button>
           </div>
-          {err && <div className="error-text">{err}</div>}
+          {err && <div className="error-text">{showHidden(err)}</div>}
         </div>
       )}
       {item.approval && item.approval.decision !== null && item.approval.by !== "user" && (
@@ -251,6 +270,7 @@ export function ToolCard({
       {expanded && web && (
         <div className="tool-body">
           {!pending && <WebInput item={item} />}
+          {!pending && <CallInput fields={shown} cwd={cwd} open={openFields} onToggle={toggleField} />}
           {!!item.result?.sources?.length && <SourceRows sources={item.result.sources} />}
           {/* What the model read, as text: where injected instructions would show. */}
           {output &&
@@ -266,12 +286,8 @@ export function ToolCard({
       )}
       {expanded && !web && (
         <div className="tool-body">
-          {item.tool === "edit" && <EditDiff input={item.input} />}
-          {item.tool === "write" && (
-            <pre className="term">{String(item.input?.content ?? "").slice(0, 4000)}</pre>
-          )}
-          {item.tool === "bash" && <pre className="term cmd">$ {item.input?.command}</pre>}
-          {output && <pre className="term">{output}</pre>}
+          {!pending && <CallInput fields={shown} cwd={cwd} open={openFields} onToggle={toggleField} />}
+          {output && <pre className="term">{showHidden(output)}</pre>}
           {status === "ok" && SAVEABLE.has(item.tool) && (
             <SaveAsArtifact path={item.tool === "bash" ? undefined : asText(item.input?.path) || undefined} />
           )}
@@ -288,11 +304,13 @@ export function WebGroupCard({
   group,
   tools,
   blocked,
+  cwd,
 }: {
   sessionId: string;
   group: WebGroup;
   tools: Tool[];
   blocked?: boolean;
+  cwd?: string;
 }) {
   const [open, setOpen] = useState<boolean | null>(null);
   const statuses = tools.map(statusOf);
@@ -319,7 +337,7 @@ export function WebGroupCard({
       {expanded && (
         <div className="tool-group-body">
           {tools.map((t) => (
-            <ToolCard key={t.call_id} sessionId={sessionId} item={t} blocked={blocked} />
+            <ToolCard key={t.call_id} sessionId={sessionId} item={t} blocked={blocked} cwd={cwd} />
           ))}
         </div>
       )}

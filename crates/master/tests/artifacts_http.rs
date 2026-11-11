@@ -4,7 +4,7 @@
 //! lineage; who sees and changes what (T10); search and features.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +58,7 @@ async fn node(dir: &Path, work: &Path) -> NodeRuntime {
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: Some(StageConfig::new(data)),
     })
     .await
@@ -113,7 +114,7 @@ async fn send(
     rb = if auth.starts_with("Bearer ") {
         rb.header("authorization", auth)
     } else {
-        rb.header("cookie", auth).same_origin()
+        rb.login(auth).same_origin()
     };
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -126,21 +127,16 @@ async fn send(
 async fn get(t: &T, path: &str, c: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{}{path}", t.base))
-        .header("cookie", c)
+        .login(c)
         .same_origin()
         .send()
         .await
         .unwrap()
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -148,25 +144,26 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
 
 async fn alex(t: &T) -> String {
     let body = json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"});
-    cookie(&post_anon(t, "/api/setup", body, None).await)
+    cookie(post_anon(t, "/api/setup", body, None).await).await
 }
 
 /// A member account made by `admin`, signed in with its own password.
 async fn account(t: &T, admin: &str, name: &str, agentic: bool) -> String {
-    let body = json!({"username": name, "password": "temporary pw", "can_agentic": agentic});
+    let body = json!({"username": name, "can_agentic": agentic});
     let (st, v) = send(t, Method::POST, "/api/users", Some(body), admin).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let login = json!({"username": name, "password": "temporary pw"});
+    let pw = v["password"].as_str().unwrap();
+    let login = json!({"username": name, "password": pw});
     let first = post_anon(t, "/api/login", login, None).await;
-    let change = json!({"current": "temporary pw", "new": format!("{name}s own password")});
-    cookie(&post_anon(t, "/api/me/password", change, Some(&cookie(&first))).await)
+    let change = json!({"current": pw, "new": format!("{name}s own password")});
+    cookie(post_anon(t, "/api/me/password", change, Some(&cookie(first).await)).await).await
 }
 
 /// An agentic chat of `c`'s on the worker, in `ws` (default: active).

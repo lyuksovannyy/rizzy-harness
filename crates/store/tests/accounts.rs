@@ -31,27 +31,63 @@ fn users_are_unique_and_counted() {
 
 const TTL: i64 = 1_000_000;
 
+/// The login key check passes (the master compares the key's hash).
+fn any(_: &str) -> bool {
+    true
+}
+
+/// Gate 3 P-1: the store hands the stored key hash to the caller's check,
+/// and a session that fails it is not used: no user, and no slide.
+#[test]
+fn a_ui_session_is_used_only_when_its_key_matches() {
+    use harness_store::UI_SESSION_TOUCH_MS as TOUCH;
+    let s = Store::open_in_memory().unwrap();
+    s.create_user(&user("u1", "alex", Role::Admin)).unwrap();
+    s.ui_session_create("h", "key-hash", "u1", 0, TTL).unwrap();
+    let mut seen = String::new();
+    let wrong = s
+        .ui_session_user("h", TOUCH, TTL, |b| {
+            seen = b.to_string();
+            false
+        })
+        .unwrap();
+    assert!(wrong.is_none());
+    assert_eq!(seen, "key-hash");
+    // The refused use did not slide the expiry.
+    assert!(s.ui_session_user("h", TTL, TTL, any).unwrap().is_none());
+    s.ui_session_create("g", "k2", "u1", 0, TTL).unwrap();
+    assert!(
+        s.ui_session_user("g", 0, TTL, |b| b == "k2")
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[test]
 fn ui_sessions_expire_and_revoke() {
     let s = Store::open_in_memory().unwrap();
     s.create_user(&user("u1", "alex", Role::Admin)).unwrap();
-    s.ui_session_create("hash-a", "u1", 0, 1_000).unwrap();
+    s.ui_session_create("hash-a", "bind", "u1", 0, 1_000)
+        .unwrap();
     assert_eq!(
-        s.ui_session_user("hash-a", 999, 0)
+        s.ui_session_user("hash-a", 999, 0, any)
             .unwrap()
             .unwrap()
             .username,
         "alex"
     );
     assert!(
-        s.ui_session_user("hash-a", 1_000, TTL).unwrap().is_none(),
+        s.ui_session_user("hash-a", 1_000, TTL, any)
+            .unwrap()
+            .is_none(),
         "expired"
     );
-    s.ui_session_create("hash-b", "u1", 0, 5_000).unwrap();
+    s.ui_session_create("hash-b", "bind", "u1", 0, 5_000)
+        .unwrap();
     assert!(s.ui_session_delete("hash-b").unwrap());
     assert!(!s.ui_session_delete("hash-b").unwrap());
-    assert!(s.ui_session_user("hash-b", 0, TTL).unwrap().is_none());
-    assert!(s.ui_session_user("no-such", 0, TTL).unwrap().is_none());
+    assert!(s.ui_session_user("hash-b", 0, TTL, any).unwrap().is_none());
+    assert!(s.ui_session_user("no-such", 0, TTL, any).unwrap().is_none());
 }
 
 #[test]
@@ -61,24 +97,24 @@ fn ui_sessions_slide_at_most_once_a_minute() {
     s.create_user(&user("u1", "alex", Role::Admin)).unwrap();
     // Used again within the minute: nothing is written, so the first
     // expiry still stands.
-    s.ui_session_create("quick", "u1", 0, TTL).unwrap();
+    s.ui_session_create("quick", "bind", "u1", 0, TTL).unwrap();
     assert!(
-        s.ui_session_user("quick", TOUCH - 1, TTL)
+        s.ui_session_user("quick", TOUCH - 1, TTL, any)
             .unwrap()
             .is_some()
     );
-    assert!(s.ui_session_user("quick", TTL, TTL).unwrap().is_none());
+    assert!(s.ui_session_user("quick", TTL, TTL, any).unwrap().is_none());
     // Used a minute on: the expiry moves to that moment + TTL.
-    s.ui_session_create("h", "u1", 0, TTL).unwrap();
-    assert!(s.ui_session_user("h", TOUCH, TTL).unwrap().is_some());
+    s.ui_session_create("h", "bind", "u1", 0, TTL).unwrap();
+    assert!(s.ui_session_user("h", TOUCH, TTL, any).unwrap().is_some());
     assert!(
-        s.ui_session_user("h", TTL + TOUCH - 1, TTL)
+        s.ui_session_user("h", TTL + TOUCH - 1, TTL, any)
             .unwrap()
             .is_some(),
         "a session in use outlives its first expiry"
     );
     assert!(
-        s.ui_session_user("h", 3 * TTL, TTL).unwrap().is_none(),
+        s.ui_session_user("h", 3 * TTL, TTL, any).unwrap().is_none(),
         "idle past the TTL"
     );
 }
@@ -91,16 +127,16 @@ fn ui_session_check_does_not_slide() {
     use harness_store::UI_SESSION_TOUCH_MS as TOUCH;
     let s = Store::open_in_memory().unwrap();
     s.create_user(&user("u1", "alex", Role::Admin)).unwrap();
-    s.ui_session_create("h", "u1", 0, TTL).unwrap();
+    s.ui_session_create("h", "bind", "u1", 0, TTL).unwrap();
     for now in [TOUCH, 10 * TOUCH, TTL - 1] {
         assert_eq!(s.ui_session_check("h", now).unwrap().unwrap().user_id, "u1");
     }
     assert!(s.ui_session_check("h", TTL).unwrap().is_none(), "expired");
     assert!(
-        s.ui_session_user("h", TTL, TTL).unwrap().is_none(),
+        s.ui_session_user("h", TTL, TTL, any).unwrap().is_none(),
         "the checks did not slide it"
     );
-    s.ui_session_create("d", "u1", 0, TTL).unwrap();
+    s.ui_session_create("d", "bind", "u1", 0, TTL).unwrap();
     s.update_user(
         "u1",
         &UserPatch {
@@ -117,12 +153,14 @@ fn ui_session_check_does_not_slide() {
 fn creating_a_ui_session_sweeps_expired_ones() {
     let s = Store::open_in_memory().unwrap();
     s.create_user(&user("u1", "alex", Role::Admin)).unwrap();
-    s.ui_session_create("old", "u1", 0, 100).unwrap();
-    s.ui_session_create("live", "u1", 0, 10_000).unwrap();
+    s.ui_session_create("old", "bind", "u1", 0, 100).unwrap();
+    s.ui_session_create("live", "bind", "u1", 0, 10_000)
+        .unwrap();
     assert_eq!(s.ui_session_count().unwrap(), 2);
-    s.ui_session_create("new", "u1", 100, 10_000).unwrap();
+    s.ui_session_create("new", "bind", "u1", 100, 10_000)
+        .unwrap();
     assert_eq!(s.ui_session_count().unwrap(), 2, "the expired one is gone");
-    assert!(s.ui_session_user("live", 100, TTL).unwrap().is_some());
+    assert!(s.ui_session_user("live", 100, TTL, any).unwrap().is_some());
 }
 
 #[test]
@@ -238,8 +276,10 @@ fn user_crud_flags_and_admin_count() {
 fn disabled_or_deleted_users_lose_sessions() {
     let s = Store::open_in_memory().unwrap();
     s.create_user(&user("m1", "bob", Role::Member)).unwrap();
-    s.ui_session_create("h1", "m1", 0, i64::MAX).unwrap();
-    s.ui_session_create("h2", "m1", 0, i64::MAX).unwrap();
+    s.ui_session_create("h1", "bind", "m1", 0, i64::MAX)
+        .unwrap();
+    s.ui_session_create("h2", "bind", "m1", 0, i64::MAX)
+        .unwrap();
     s.update_user(
         "m1",
         &UserPatch {
@@ -249,7 +289,7 @@ fn disabled_or_deleted_users_lose_sessions() {
     )
     .unwrap();
     assert!(
-        s.ui_session_user("h1", 0, TTL).unwrap().is_none(),
+        s.ui_session_user("h1", 0, TTL, any).unwrap().is_none(),
         "disabled user"
     );
     s.update_user(
@@ -260,13 +300,14 @@ fn disabled_or_deleted_users_lose_sessions() {
         },
     )
     .unwrap();
-    assert!(s.ui_session_user("h1", 0, TTL).unwrap().is_some());
+    assert!(s.ui_session_user("h1", 0, TTL, any).unwrap().is_some());
     assert_eq!(s.ui_sessions_delete_for_user("m1").unwrap(), 2);
-    assert!(s.ui_session_user("h1", 0, TTL).unwrap().is_none());
-    s.ui_session_create("h3", "m1", 0, i64::MAX).unwrap();
+    assert!(s.ui_session_user("h1", 0, TTL, any).unwrap().is_none());
+    s.ui_session_create("h3", "bind", "m1", 0, i64::MAX)
+        .unwrap();
     s.delete_user("m1").unwrap();
     assert!(
-        s.ui_session_user("h3", 0, TTL).unwrap().is_none(),
+        s.ui_session_user("h3", 0, TTL, any).unwrap().is_none(),
         "cascade"
     );
 }

@@ -2,7 +2,7 @@
 // a turn stopped during a step and one stopped while a block streams.
 const { check, log, eventually, contrast } = require('./lib.cjs');
 
-const ALLOW = '.approval button:has-text("Allow bash for this session")';
+const ALLOW = '.approval button:has-text("Allow this exact call for this turn")';
 
 /** Everything the progress cards of a chat show. */
 const progressState = async (p) => {

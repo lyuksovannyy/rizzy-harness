@@ -4,7 +4,7 @@
 //! nothing a user sees yet.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -130,19 +130,14 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
+    let r = rb.login(c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -150,7 +145,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -158,32 +153,39 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
 /// The admin "alex" and a member "bob", with their user ids.
 async fn users(t: &T) -> [(String, String); 2] {
     let alex = cookie(
-        &post_anon(
+        post_anon(
             t,
             "/api/setup",
             json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}),
             None,
         )
         .await,
-    );
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    req(t, Method::POST, "/api/users", Some(body), &alex).await;
+    )
+    .await;
+    let body = json!({"username": "bob"});
+    let pw = req(t, Method::POST, "/api/users", Some(body), &alex)
+        .await
+        .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let first = post_anon(
         t,
         "/api/login",
-        json!({"username": "bob", "password": "temporary pw"}),
+        json!({"username": "bob", "password": pw}),
         None,
     )
     .await;
     let bob = cookie(
-        &post_anon(
+        post_anon(
             t,
             "/api/me/password",
-            json!({"current": "temporary pw", "new": "bobs own password"}),
-            Some(&cookie(&first)),
+            json!({"current": pw, "new": "bobs own password"}),
+            Some(&cookie(first).await),
         )
         .await,
-    );
+    )
+    .await;
     let mut out = Vec::new();
     for c in [alex, bob] {
         let (_, me) = req(t, Method::GET, "/api/me", None, &c).await;
@@ -305,6 +307,9 @@ async fn socket(t: &T, c: &str) -> Socket {
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
+    s.send(Message::Text(common::socket_login(c).into()))
+        .await
+        .unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     assert_eq!(next_type(&mut s).await, "error");
     s

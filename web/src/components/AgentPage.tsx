@@ -6,7 +6,8 @@
 // editable copy. Without permission the page is read-only.
 import { Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
-import { api, type Scope } from "../api";
+import { type Scope } from "../api";
+import { pageApi } from "../apiPages";
 import { NEW_AGENT } from "../lib/agents";
 import { rawModel } from "../lib/models";
 import type { Agent, AgentDetail, AgentFeatures, NewAgent } from "../types";
@@ -25,7 +26,7 @@ export function agentMarkers(a: Agent): string[] {
 /** Asks first; chats that used the agent go on with the default one. */
 export async function confirmDelete(a: Agent): Promise<boolean> {
   if (!confirm(`Delete ${a.name}? Chats that use @${a.id} go on with the default agent.`)) return false;
-  await api.deleteAgent(a.id);
+  await pageApi.deleteAgent(a.id);
   return true;
 }
 
@@ -238,7 +239,7 @@ export function AgentPage(props: {
       return;
     }
     let live = true;
-    api
+    pageApi
       .agent(props.id, props.scope)
       .then((d) => {
         if (!live) return;
@@ -281,7 +282,7 @@ export function AgentPage(props: {
     setMsg(null);
     try {
       if (creating) {
-        const d = await api.createAgent(
+        const d = await pageApi.createAgent(
           {
             id: draft.id,
             name: draft.name,
@@ -296,8 +297,8 @@ export function AgentPage(props: {
         return;
       }
       const d = locked
-        ? await api.updateAgent(props.id, { summary: draft.summary, instructions: draft.instructions }, props.scope)
-        : await api.updateAgent(
+        ? await pageApi.updateAgent(props.id, { summary: draft.summary, instructions: draft.instructions }, props.scope)
+        : await pageApi.updateAgent(
             props.id,
             {
               name: draft.name,
@@ -324,7 +325,7 @@ export function AgentPage(props: {
     setErr(null);
     try {
       const prompt = locked && draft.instructions.trim() ? `${draft.prompt}\n\n${draft.instructions}` : draft.prompt;
-      const r = await api.agentSummary({ name: draft.name, prompt });
+      const r = await pageApi.agentSummary({ name: draft.name, prompt });
       set({ summary: r.summary });
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));

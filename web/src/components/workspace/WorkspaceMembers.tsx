@@ -5,7 +5,7 @@
 // their own row); the server still checks, and its refusals show here.
 import { Check } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { api } from "../../api";
+import { pageApi } from "../../apiPages";
 import { t } from "../../lib/i18n";
 import { canGive, canManage, PERM_LABEL, PERMS, ROLES, rolePerms } from "../../lib/workspaceAdmin";
 import type { WorkspaceMember, WorkspaceRole } from "../../types";
@@ -35,7 +35,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
-    api
+    pageApi
       .workspaceMembers(id)
       .then((r) => setMembers(r.members))
       .catch((x) => setErr(message(x)));
@@ -60,7 +60,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
   };
   const add = async (e: FormEvent) => {
     e.preventDefault();
-    if (await run(() => api.addWorkspaceMember(id, username.trim(), role))) {
+    if (await run(() => pageApi.addWorkspaceMember(id, username.trim(), role))) {
       setUsername("");
       setRole("member");
     }
@@ -68,7 +68,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
   const remove = (m: WorkspaceMember) => {
     const who = m.display_name || m.username;
     if (confirm(`Remove ${who} from ${ws.name}? Their chats here go back to their Personal workspace.`))
-      void run(() => api.removeWorkspaceMember(id, m.user_id));
+      void run(() => pageApi.removeWorkspaceMember(id, m.user_id));
   };
 
   return (
@@ -106,7 +106,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
                       aria-label={`Role of ${who}`}
                       value={m.role}
                       disabled={!may || busy}
-                      onChange={(e) => void run(() => api.setWorkspaceMemberRole(id, m.user_id, e.target.value as WorkspaceRole))}
+                      onChange={(e) => void run(() => pageApi.setWorkspaceMemberRole(id, m.user_id, e.target.value as WorkspaceRole))}
                     >
                       <RoleOptions actor={actor} />
                     </select>

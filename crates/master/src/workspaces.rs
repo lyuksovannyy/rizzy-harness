@@ -530,34 +530,131 @@ pub fn sweep_revoked(m: &Master, users: Vec<String>) {
 /// server grant, or their account was disabled or deleted. Failures are
 /// logged, never returned.
 pub async fn cancel_revoked(m: &Master, users: &[String]) {
-    let rows = match m.inner.mirror.call(|s| s.sessions()).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "revocation sweep: could not list sessions");
-            return;
-        }
-    };
-    let running = rows.into_iter().filter(|r| {
-        r.running
-            && r.profile.as_deref() != Some("chat")
-            && r.owner_id.as_ref().is_some_and(|o| users.contains(o))
-    });
-    for row in running {
-        let owner = row.owner_id.clone().unwrap_or_default();
-        let blocked = match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
-            Ok(Some(u)) if !u.disabled => agentic_blocked(m, &Principal::from_user(u), &row).await,
-            Ok(_) => Some("the account is disabled or gone".to_string()),
+    let mut rows = Vec::new();
+    for user in users {
+        let user = user.clone();
+        match m
+            .inner
+            .mirror
+            .call(move |s| s.sessions_of(Some(&user)))
+            .await
+        {
+            Ok(r) => rows.extend(r),
             Err(e) => {
-                tracing::warn!(session = %row.session_id, error = %e, "revocation sweep: could not load the owner");
-                continue;
+                tracing::warn!(error = %e, "revocation sweep: could not list sessions");
+                return;
             }
-        };
-        let Some(why) = blocked else { continue };
-        tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
-        if let Err(e) = m.cancel(row.session_id).await {
-            tracing::warn!(session = %row.session_id, error = %e, "revocation sweep: cancel failed");
         }
     }
+    let running = rows
+        .into_iter()
+        .filter(|r| r.owner_id.as_ref().is_some_and(|o| users.contains(o)));
+    cancel_blocked(m, running).await;
+}
+
+/// The sweep again for the running sessions of `node_id`, once its link is
+/// up (after its hello): a turn whose owner lost access while the node was
+/// away, or while its cancel could not be sent, is cancelled now (Gate 3
+/// review P-3, T11).
+pub async fn cancel_revoked_on(m: &Master, node_id: &str) {
+    let node = node_id.to_string();
+    match m.inner.mirror.call(move |s| s.running_on(&node)).await {
+        Ok(rows) => cancel_blocked(m, rows.into_iter()).await,
+        Err(e) => {
+            tracing::warn!(node = %node_id, error = %e, "revocation sweep: could not list sessions")
+        }
+    }
+}
+
+/// The sweep for one session, once a replay of it has landed (Gate 3 fix
+/// review 2, R2-2): the hello's sweep read the mirror before the replay
+/// arrived, so a turn only the replay shows as running was missed.
+pub async fn cancel_revoked_session(m: &Master, sid: harness_core::SessionId) {
+    match m.inner.mirror.call(move |s| s.session(sid)).await {
+        Ok(row) => cancel_blocked(m, row.into_iter()).await,
+        Err(e) => {
+            tracing::warn!(session = %sid, error = %e, "revocation sweep: could not read the session")
+        }
+    }
+}
+
+/// Why `row`'s owner may no longer drive it, if so; `Err` when that could
+/// not be decided (a store error), so nothing is cancelled on a guess.
+async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, ()> {
+    let owner = row.owner_id.clone().unwrap_or_default();
+    match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
+        Ok(Some(u)) if !u.disabled => Ok(agentic_blocked(m, &Principal::from_user(u), row).await),
+        Ok(_) => Ok(Some("the account is disabled or gone".to_string())),
+        Err(e) => {
+            tracing::warn!(session = %row.session_id, error = %e, "revocation sweep: could not load the owner");
+            Err(())
+        }
+    }
+}
+
+/// Cancel every running agentic session in `rows` whose owner may no
+/// longer drive it.
+async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
+    let running =
+        rows.filter(|r| r.running && r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
+    for row in running {
+        let Ok(Some(why)) = blocked_reason(m, &row).await else {
+            continue;
+        };
+        tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
+        cancel_retrying(m, row.session_id).await;
+    }
+}
+
+/// Attempts at a revocation cancel the node's queue had no room for (or
+/// did not acknowledge); the first wait, doubled after each.
+const CANCEL_TRIES: u32 = 5;
+const CANCEL_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Cancel `sid`; a cancel that could not be queued or was not acknowledged
+/// is tried again in the background (Gate 3 review P-3). A node that is
+/// offline gets it from the sweep at its next hello.
+async fn cancel_retrying(m: &Master, sid: harness_core::SessionId) {
+    match m.cancel(sid).await {
+        Err(crate::CommandError::Timeout) => {}
+        Err(crate::CommandError::NodeOffline(_)) => {
+            tracing::info!(session = %sid, "revocation sweep: node offline; cancelled when it is back");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(session = %sid, error = %e, "revocation sweep: cancel failed");
+            return;
+        }
+        Ok(()) => return,
+    }
+    let m = m.clone();
+    tokio::spawn(async move {
+        let mut wait = CANCEL_RETRY;
+        for attempt in 2..=CANCEL_TRIES {
+            tokio::time::sleep(wait).await;
+            wait *= 2;
+            // Still blocked? A grant given back meanwhile keeps its turn
+            // (R2-2).
+            let row = m.inner.mirror.call(move |s| s.session(sid)).await;
+            let still = match row {
+                Ok(Some(row)) if row.running => {
+                    matches!(blocked_reason(&m, &row).await, Ok(Some(_)))
+                }
+                _ => false,
+            };
+            if !still {
+                return;
+            }
+            match m.cancel(sid).await {
+                Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {}
+                Err(e) => {
+                    tracing::warn!(session = %sid, error = %e, attempt, "revocation sweep: cancel failed");
+                    return;
+                }
+                Ok(()) => return,
+            }
+        }
+    });
 }
 
 #[cfg(test)]

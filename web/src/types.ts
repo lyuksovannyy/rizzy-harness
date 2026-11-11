@@ -154,6 +154,9 @@ export interface ToolResult {
 export interface ApprovalState {
   approval_id: string;
   reason: string;
+  /** "This exact call for this turn" may be offered; present only when
+   * true, as the Rust view serialises it. */
+  turn_allow?: true;
   decision: Decision | null;
   by: ResolvedBy | null;
 }

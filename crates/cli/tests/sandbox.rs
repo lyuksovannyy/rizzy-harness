@@ -289,8 +289,8 @@ async fn a_nested_sandbox_exec_gains_nothing() {
         ..Default::default()
     };
     let cmd = format!(
-        "{EXE} sandbox-exec --status --best-effort --rw / -- cat {data}/api-token; \
-         {EXE} sandbox-exec --rw / -- sh -c 'echo nested-ran; touch {home}/planted'; echo end",
+        "{EXE} sandbox-exec --status --best-effort --rw system / -- cat {data}/api-token; \
+         {EXE} sandbox-exec --rw system / -- sh -c 'echo nested-ran; touch {home}/planted'; echo end",
         data = f.data.display(),
         home = f.home.display()
     );
@@ -301,67 +301,6 @@ async fn a_nested_sandbox_exec_gains_nothing() {
     assert!(out.contains("nested-ran"), "{out}");
     assert!(!out.contains("API-TOKEN-CANARY"), "{out}");
     assert!(!f.home.join("planted").exists(), "{out}");
-}
-
-/// A sub-agent's worktree (`<repo>/.git/harness-worktrees/<id>`) keeps its
-/// git metadata in the main repository's `.git`: status and commit work, the
-/// main working tree stays out of reach.
-#[tokio::test]
-async fn git_works_in_a_sub_agent_worktree() {
-    let Some(_) = landlock() else { return };
-    let f = fixture();
-    let repo = &f.ws;
-    let git = |args: &[&str]| {
-        let o = std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "init.defaultBranch=main",
-            ])
-            .args(args)
-            .current_dir(repo)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    };
-    git(&["init", "-q"]);
-    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
-    git(&["add", "a.txt"]);
-    git(&["commit", "-qm", "base"]);
-    let wt = repo.join(".git/harness-worktrees/child1");
-    git(&["worktree", "add", "--detach", "-q", wt.to_str().unwrap()]);
-    let out = f
-        .bash(
-            Settings::default(),
-            &wt,
-            &format!(
-                "export HOME={home}; echo b > b.txt && git status --short && git add b.txt && \
-                 git -c user.name=a -c user.email=a@a commit -qm sub && git log --oneline | wc -l; \
-                 echo planted > {repo}/planted.txt; echo end",
-                home = f.home.display(),
-                repo = repo.display()
-            ),
-        )
-        .await;
-    assert!(out.contains("?? b.txt"), "{out}");
-    assert!(out.lines().any(|l| l.trim() == "2"), "commit failed: {out}");
-    assert!(!repo.join("planted.txt").exists(), "{out}");
-    // Control: an ordinary worktree elsewhere gets no grant on the main
-    // `.git` (a `.git` file's contents never widen the sandbox).
-    let other = f.home.join("wt2");
-    git(&["worktree", "add", "--detach", "-q", other.to_str().unwrap()]);
-    let out = f
-        .bash(
-            Settings::default(),
-            &other,
-            "git status --short; echo rc=$?",
-        )
-        .await;
-    assert!(!out.contains("rc=0"), "{out}");
 }
 
 /// A pathname Unix socket outside the grants (a session bus, the Docker
@@ -426,6 +365,7 @@ fn start_reports_enforced_and_names_the_abi() {
         &Settings::default(),
         &f.data,
         std::slice::from_ref(&f.data),
+        &[],
         &f.data.join("node.toml"),
     )
     .unwrap();
@@ -442,6 +382,7 @@ fn start_reports_enforced_and_names_the_abi() {
         },
         &f.data,
         std::slice::from_ref(&f.data),
+        &[],
         &f.data.join("node.toml"),
     )
     .unwrap();

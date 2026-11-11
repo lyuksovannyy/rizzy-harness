@@ -11,6 +11,7 @@ import { when } from "../lib/when";
 import { ArtifactActions, ArtifactIcon, ArtifactPage, type Can, canOf, message, Page, useArtifact, Versions } from "./ArtifactDetail";
 import type { ArtifactsPageProps } from "./pages";
 import { Seg } from "./Seg";
+import { shownName } from "../md/hiddenChars";
 
 /** Typing settles before the names are searched. */
 const SEARCH_MS = 250;
@@ -163,7 +164,7 @@ function Row(props: {
                 props.navigate({ kind: "artifacts", id: a.artifact_id });
               }}
             >
-              {a.name}
+              {shownName(a.name)}
             </a>
             {v && <span className="badge">v{v.seq}</span>}
             {v && <span className="small">{bytes(v.size)}</span>}

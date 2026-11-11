@@ -1,0 +1,54 @@
+diff --git a/crates/cli/tests/sub_agent_sandbox.rs b/crates/cli/tests/sub_agent_sandbox.rs
+index 7258ec7..6e23d93 100644
+--- a/crates/cli/tests/sub_agent_sandbox.rs
++++ b/crates/cli/tests/sub_agent_sandbox.rs
+@@ -345,3 +345,49 @@ async fn the_file_tools_and_the_shell_refuse_a_replaced_folder() {
+     assert!(!b.output.contains("SSH-KEY-CANARY"), "{}", b.output);
+     assert!(!victim.join("planted").exists());
+ }
++
++/// GATE 3 FIX REVIEW 4 (R1c-1). Passes on `6cb4d55`, and passing is the
++/// defect: invert the last assertion when it is fixed.
++///
++/// A sub-agent's shell is granted read on the user's object store by the
++/// path `<repo>/.git/objects` (`OwnedFolder::objects`), and the wrapper
++/// opens every granted path following links. That path is inside the
++/// parent session's own folder, which the parent's shell may write. The
++/// node checks that it is a real directory once, when the delegation
++/// starts (`user_repo`); after that a process the parent left running
++/// renames it away and puts a link there, and every later command of the
++/// child is granted read on the link's target. No narrow window: any time
++/// while the child works.
++#[tokio::test]
++async fn review_r1c_1_the_borrowed_object_store_grant_follows_a_link() {
++    let f = fixture();
++    if !f.landlock() {
++        return;
++    }
++    let key = f.home.join(".ssh/id_ed25519");
++    // Control: the child's shell cannot read the key.
++    let out = f
++        .child(&format!("cat {}; echo rc=$?", key.display()))
++        .await;
++    assert!(
++        !out.contains("SSH-KEY-CANARY") && !out.contains("rc=0"),
++        "{out}"
++    );
++    // What the parent session's shell may do in its own folder.
++    let out = f
++        .bash(
++            &f.repo,
++            None,
++            &format!(
++                "mv .git/objects .git/objects.r && ln -s {} .git/objects; echo rc=$?",
++                f.home.join(".ssh").display()
++            ),
++        )
++        .await;
++    assert!(out.contains("rc=0"), "{out}");
++    // The child's next command reads what the link leads to.
++    let out = f
++        .child(&format!("cat {}; echo rc=$?", key.display()))
++        .await;
++    assert!(out.contains("SSH-KEY-CANARY"), "{out}");
++}

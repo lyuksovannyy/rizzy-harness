@@ -1,0 +1,50 @@
+// The project icons a person can pick. The names match ICONS in
+// crates/master/src/projects.rs (projects.test.ts checks). They are a lazy
+// chunk: the sidebar draws the default folder until it has loaded
+// (projectIcons.tsx), and the project page's picker imports it directly.
+import {
+  BookOpen,
+  Briefcase,
+  Camera,
+  ChartLine,
+  Code,
+  Film,
+  FlaskConical,
+  Folder,
+  Gamepad2,
+  Globe,
+  GraduationCap,
+  Heart,
+  House,
+  Lightbulb,
+  type LucideIcon,
+  Music,
+  Palette,
+  PenTool,
+  Plane,
+  Rocket,
+  Terminal,
+} from "lucide-react";
+
+export const PROJECT_ICONS: Record<string, LucideIcon> = {
+  folder: Folder,
+  briefcase: Briefcase,
+  code: Code,
+  terminal: Terminal,
+  rocket: Rocket,
+  "book-open": BookOpen,
+  "graduation-cap": GraduationCap,
+  "flask-conical": FlaskConical,
+  lightbulb: Lightbulb,
+  "pen-tool": PenTool,
+  palette: Palette,
+  camera: Camera,
+  music: Music,
+  film: Film,
+  "gamepad-2": Gamepad2,
+  heart: Heart,
+  house: House,
+  plane: Plane,
+  "chart-line": ChartLine,
+  globe: Globe,
+};

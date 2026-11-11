@@ -26,7 +26,9 @@ import { type MediaFilter, mediaHash } from "../lib/routes";
 import { queueThumb, wantsThumb } from "../lib/thumbs";
 import { when } from "../lib/when";
 import type { MediaPageProps } from "./pages";
+import { LinkedImg } from "./Linked";
 import { Seg } from "./Seg";
+import { shownName } from "../md/hiddenChars";
 
 const MediaPreview = lazy(() => import("./MediaPreview"));
 
@@ -509,7 +511,7 @@ export function Tile({ m }: { m: MediaItem }) {
       <>
         {agent}
         {pictured ? (
-          <img src={thumbUrl(m.media_id)} alt="" loading="lazy" onError={() => setBroken(true)} />
+          <LinkedImg url={thumbUrl(m.media_id)} alt="" loading="lazy" onError={() => setBroken(true)} />
         ) : (
           <span className="media-icon" aria-hidden="true">
             {m.kind === "image" ? <ImageIcon size={28} /> : <Film size={28} />}
@@ -527,7 +529,7 @@ export function Tile({ m }: { m: MediaItem }) {
     <span className="media-icon" aria-hidden="true">
       {agent}
       {m.kind === "audio" ? <Music size={28} /> : <File size={28} />}
-      <span className="media-name small ellipsis">{m.name}</span>
+      <span className="media-name small ellipsis">{shownName(m.name)}</span>
       <span className="small muted">{m.kind === "audio" ? length : m.format.toUpperCase()}</span>
     </span>
   );

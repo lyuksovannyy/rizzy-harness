@@ -2,6 +2,7 @@
 // folded head_seq); on reconnect we resubscribe from that cursor, and the
 // server replays exactly what we missed. Duplicates are dropped by seq, and a
 // gap (which the server should never produce) triggers a resubscribe.
+import { loginKey } from "./api";
 import { apply, emptyView, FoldError } from "./fold";
 import type { RawEvent, SessionView } from "./types";
 
@@ -31,6 +32,10 @@ export class Live {
   /** Workspaces, members, roles or the policy changed (content-free). */
   onWorkspacesChanged: () => void = () => {};
   onProjectsChanged: () => void = () => {};
+  /** The server closed the socket for an ended login (4401, PLAN T2). It
+   * also does so for this browser's own password change, which keeps its
+   * login, so the listener checks before signing out. */
+  onLoginEnded: () => void = () => {};
 
   constructor() {
     this.connect();
@@ -105,6 +110,9 @@ export class Live {
     this.ws = ws;
     this.setState("connecting");
     ws.onopen = () => {
+      // The login key before anything else (P-1, api.ts): a socket without
+      // it is closed as signed out, with nothing sent to it.
+      ws.send(JSON.stringify({ type: "login", key: loginKey() ?? "" }));
       this.backoff = 500;
       this.setState("live");
       for (const id of this.views.keys()) this.sendSubscribe(id);
@@ -120,8 +128,9 @@ export class Live {
       this.opened = true;
     };
     ws.onmessage = (m) => this.onMessage(JSON.parse(m.data as string));
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       this.ws = null;
+      if (e?.code === 4401) this.onLoginEnded();
       this.setState("offline");
       if (!this.closed) {
         setTimeout(() => this.connect(), this.backoff);

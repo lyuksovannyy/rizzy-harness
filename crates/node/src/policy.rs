@@ -147,7 +147,17 @@ pub struct LimitsPolicy {
     /// The longest a `bash` call may run, in seconds, whatever the model
     /// asks for.
     pub bash_timeout_max_s: u64,
+    /// Sub-agents one turn may start (`delegate` calls run). The master's
+    /// agent spec may ask for fewer, never more (Gate 3 review P-2).
+    pub max_subagents: u32,
+    /// How deep delegation may nest: 1 lets a turn's agent delegate and
+    /// its sub-agents not; 0 turns delegation off on this node.
+    pub max_delegation_depth: u32,
 }
+
+/// The most `[limits] max_subagents` and `max_delegation_depth` may say.
+pub const MAX_SUBAGENTS: u32 = 32;
+pub const MAX_DELEGATION_DEPTH: u32 = 4;
 
 impl Default for LimitsPolicy {
     fn default() -> Self {
@@ -155,6 +165,35 @@ impl Default for LimitsPolicy {
             tool_stream_bytes: harness_tools::stream::DEFAULT_STREAM_BYTES,
             max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
             bash_timeout_max_s: harness_tools::DEFAULT_TIMEOUT_MAX_S,
+            // Today's values: the default caps, and one level (the master
+            // resolves a sub-agent's own delegates to none).
+            max_subagents: harness_core::agent::DelegateCaps::default().max_subagents,
+            max_delegation_depth: 1,
+        }
+    }
+}
+
+impl LimitsPolicy {
+    /// The master's agent spec within this node's delegation bounds: its
+    /// per-turn sub-agent cap no higher than `max_subagents`, at every
+    /// level, and no delegates below `max_delegation_depth`.
+    pub fn bound_delegation(
+        &self,
+        mut agent: harness_core::agent::AgentSpec,
+    ) -> harness_core::agent::AgentSpec {
+        self.bound_at(&mut agent, 0);
+        agent
+    }
+
+    fn bound_at(&self, agent: &mut harness_core::agent::AgentSpec, depth: u32) {
+        if depth >= self.max_delegation_depth || self.max_subagents == 0 {
+            agent.delegates.clear();
+        }
+        let mut caps = agent.caps.unwrap_or_default();
+        caps.max_subagents = caps.max_subagents.min(self.max_subagents);
+        agent.caps = Some(caps);
+        for d in &mut agent.delegates {
+            self.bound_at(d, depth + 1);
         }
     }
 }
@@ -235,6 +274,18 @@ impl NodePolicy {
                 "[limits] bash_timeout_max_s = {n}: must be between {min} and {max}"
             ));
         }
+        let n = self.limits.max_subagents;
+        if n > MAX_SUBAGENTS {
+            return Err(format!(
+                "[limits] max_subagents = {n}: must be between 0 and {MAX_SUBAGENTS}"
+            ));
+        }
+        let n = self.limits.max_delegation_depth;
+        if n > MAX_DELEGATION_DEPTH {
+            return Err(format!(
+                "[limits] max_delegation_depth = {n}: must be between 0 and {MAX_DELEGATION_DEPTH}"
+            ));
+        }
         self.sandbox.settings()?;
         Ok(())
     }
@@ -260,29 +311,47 @@ impl NodePolicy {
             return Err(format!("cwd {cwd} is not a directory"));
         }
         self.check_protected(&p)?;
-        let ok = self.workspace_roots.iter().any(|root| {
-            root.canonicalize()
-                .map(|r| p.starts_with(r))
-                .unwrap_or(false)
-        });
-        if ok {
-            Ok(p)
-        } else {
-            Err(format!(
-                "cwd {} is outside the folders this node allows (workspace_roots in node.toml)",
-                p.display()
-            ))
-        }
+        self.check_roots(&p)?;
+        Ok(p)
     }
 
-    /// What is checked again before every turn and restore of an agentic
-    /// session: the sandbox still works here (see [`Self::sandbox_refusal`])
-    /// and the folder does not include a protected one.
+    /// The workspace root (canonical) that holds `dir` (already canonical),
+    /// or a refusal naming `workspace_roots`.
+    pub fn root_of(&self, dir: &Path) -> Result<PathBuf, String> {
+        self.workspace_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .filter(|r| dir.starts_with(r))
+            // The innermost root: the walk for a repository stops there.
+            .max_by_key(|r| r.components().count())
+            .ok_or_else(|| {
+                format!(
+                    "cwd {} is outside the folders this node allows (workspace_roots in \
+                     node.toml)",
+                    dir.display()
+                )
+            })
+    }
+
+    fn check_roots(&self, dir: &Path) -> Result<(), String> {
+        self.root_of(dir).map(|_| ())
+    }
+
+    /// What is checked again before every turn, restore, delegation and
+    /// publish of an agentic session (`cwd` is its folder as the pin
+    /// checked it): the sandbox still works here (see
+    /// [`Self::sandbox_refusal`]), the folder does not include a protected
+    /// one, and it is still inside `workspace_roots` (node.toml may have
+    /// been narrowed since the session was made).
     pub fn check_session(&self, cwd: &Path) -> Result<(), String> {
         if let Some(why) = &self.sandbox_refusal {
             return Err(why.clone());
         }
-        self.check_protected(cwd)
+        self.check_protected(cwd)?;
+        let real = cwd
+            .canonicalize()
+            .map_err(|e| format!("cwd {}: {e}", cwd.display()))?;
+        self.check_roots(&real)
     }
 
     /// Add `dir` to [`Self::protected_dirs`] (canonicalized; a folder that
@@ -344,6 +413,83 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gate 3 review P-2: node.toml bounds what the master's spec asks for
+    /// delegation, at every level; it never raises it.
+    #[test]
+    fn delegation_is_bounded_by_the_node_at_every_level() {
+        use harness_core::agent::{AgentSpec, DelegateCaps};
+        let spec = |id: &str, delegates: Vec<AgentSpec>, caps: Option<DelegateCaps>| AgentSpec {
+            agent_id: id.into(),
+            name: id.into(),
+            system_prompt: String::new(),
+            tools: harness_core::agent::ToolSelection::List(vec![]),
+            model: None,
+            fallbacks: vec![],
+            unavailable: vec![],
+            no_effort: vec![],
+            context_windows: Default::default(),
+            effort: None,
+            budget: Default::default(),
+            ui: Default::default(),
+            prompt_hash: "h".into(),
+            deny_tools: vec![],
+            delegates,
+            caps,
+        };
+        let caps = |n| {
+            Some(DelegateCaps {
+                max_subagents: n,
+                max_tokens: 1,
+            })
+        };
+        // A spec nested three deep, asking for 10 per turn.
+        let deep = spec(
+            "a",
+            vec![spec("b", vec![spec("c", vec![], caps(10))], caps(10))],
+            caps(10),
+        );
+        let l = LimitsPolicy::default();
+        assert_eq!((l.max_subagents, l.max_delegation_depth), (4, 1));
+        let got = l.bound_delegation(deep.clone());
+        assert_eq!(got.caps.unwrap().max_subagents, 4);
+        assert_eq!(got.delegates.len(), 1);
+        assert!(got.delegates[0].delegates.is_empty(), "one level only");
+        // Fewer than the node allows stays as asked.
+        assert_eq!(
+            l.bound_delegation(spec("a", vec![], caps(2)))
+                .caps
+                .unwrap()
+                .max_subagents,
+            2
+        );
+        let two = LimitsPolicy {
+            max_delegation_depth: 2,
+            ..LimitsPolicy::default()
+        };
+        let got = two.bound_delegation(deep.clone());
+        assert_eq!(got.delegates[0].delegates.len(), 1);
+        assert!(got.delegates[0].delegates[0].delegates.is_empty());
+        assert_eq!(got.delegates[0].caps.unwrap().max_subagents, 4);
+        for off in [
+            LimitsPolicy {
+                max_delegation_depth: 0,
+                ..LimitsPolicy::default()
+            },
+            LimitsPolicy {
+                max_subagents: 0,
+                ..LimitsPolicy::default()
+            },
+        ] {
+            assert!(off.bound_delegation(deep.clone()).delegates.is_empty());
+        }
+        let mut p = NodePolicy::default();
+        p.limits.max_subagents = MAX_SUBAGENTS + 1;
+        assert!(p.validate().unwrap_err().contains("max_subagents"));
+        p.limits.max_subagents = 0;
+        p.limits.max_delegation_depth = MAX_DELEGATION_DEPTH + 1;
+        assert!(p.validate().unwrap_err().contains("max_delegation_depth"));
+    }
 
     #[test]
     fn master_cannot_loosen() {

@@ -2,7 +2,7 @@
 //! several providers routed by prefix, per-agent default models.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,6 +102,7 @@ async fn start_with(setup: impl FnOnce(&std::path::Path)) -> T {
         profile: Profile::Chat,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -158,7 +159,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let st = r.status();
@@ -166,7 +167,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (st, c, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &c {
+        common::remember(c, &body);
+    }
+    (st, c, body)
 }
 
 /// As the admin.
@@ -409,19 +414,23 @@ async fn admin_configures_provider_live() {
     assert!(!std::fs::read_to_string(&secrets).unwrap().contains(KEY));
 
     // Members cannot see or change providers.
-    req(
+    let pw = req(
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&t.admin),
     )
-    .await;
+    .await
+    .2["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (_, bc, _) = req(
         &t,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob", "password": pw})),
         None,
     )
     .await;
@@ -429,7 +438,7 @@ async fn admin_configures_provider_live() {
         &t,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;

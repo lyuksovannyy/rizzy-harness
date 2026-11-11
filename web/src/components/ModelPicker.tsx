@@ -25,7 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { type RefObject, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ago, dropModels, MAX_FALLBACKS, moveFallback, type Plan, planProblems, rolesOf, setMain, toggleFallback } from "../lib/models";
+import { ago, dropModels, MAX_FALLBACKS, moveFallback, type Plan, planProblems, rolesOf, setMain, toggleFallback } from "../lib/modelPlan";
 import { useAnchored } from "../md/anchored";
 import type { Agent, ProviderModel } from "../types";
 import { CustomModelForm, type TestTarget } from "./CustomModel";

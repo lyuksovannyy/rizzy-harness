@@ -14,11 +14,13 @@ use crate::{CommandError, Master, auth};
 mod agent_edits;
 mod artifacts;
 mod hooks;
+mod links;
 mod media;
 mod projects;
 mod providers;
 mod routines;
 mod storage;
+mod users;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
@@ -129,11 +131,15 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             "/api/admin/workspaces/{id}/members",
             get(workspaces::admin_members),
         )
-        .route("/api/users", get(list_users).post(create_user))
+        .route(
+            "/api/users",
+            get(users::list_users).post(users::create_user),
+        )
         .route(
             "/api/users/{id}",
-            axum::routing::patch(update_user).delete(delete_user),
+            axum::routing::patch(users::update_user).delete(users::delete_user),
         )
+        .route("/api/users/{id}/password", post(users::reset_password))
         .route("/api/nodes", get(nodes))
         .route("/api/admin/nodes", get(admin_nodes))
         .route("/api/admin/nodes/join", post(node_join_token))
@@ -192,6 +198,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(media::routes())
         .merge(artifacts::routes())
         .merge(storage::routes())
+        .merge(links::routes())
         // Matched routes only (the embedded UI files are not handlers); which
         // routes get which limit is the table in `limits.rs`.
         .route_layer(axum::middleware::from_fn_with_state(
@@ -376,12 +383,17 @@ async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<R
     session_response(&m, &user.user_id).await
 }
 
-/// A new login for `user_id`: the session cookie.
+/// A new login for `user_id`: the session cookie, and the login key in
+/// the body, this once (P-1, `auth`). Login, the first-run claim and a
+/// password change are the only callers.
 async fn session_response(m: &Master, user_id: &str) -> ApiResult<Response> {
-    let id = auth::create_ui_session(&m.inner.mirror, user_id).await?;
+    let login = auth::create_ui_session(&m.inner.mirror, user_id).await?;
     Ok((
-        [(header::SET_COOKIE, m.inner.auth.session_cookie(&id))],
-        Json(json!({"ok": true})),
+        [(
+            header::SET_COOKIE,
+            m.inner.auth.session_cookie(login.cookie.expose()),
+        )],
+        Json(json!({"ok": true, "login_key": login.key.expose()})),
     )
         .into_response())
 }
@@ -407,6 +419,14 @@ async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<R
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
     // The session row goes, so a copy of the cookie is useless from now on.
+    // The cookie alone is enough (Gate 3 fix review 2, R2-3): a page that
+    // lost its key (storage cleared) must be able to end its login, which
+    // would otherwise live for 30 days. Ending a login never harms its
+    // owner and reveals nothing (the answer is the same whether the cookie
+    // was live, dead or made up); the worst a holder of the cookie (another
+    // local port's server, P-1) can do is sign the person out, which it
+    // could only repeat after they visit it again. It ends that one login,
+    // never the person's others. The browser's cookie is cleared either way.
     if let Some(id) = auth::cookie_value(&headers) {
         auth::delete_ui_session(&m, &id).await;
     }
@@ -591,9 +611,11 @@ async fn change_password(
         .await?
         .map(|u| u.password_hash);
     let hasher = m.inner.auth.hasher();
+    // 403, not 401: a 401 means "not logged in", which signs the page out
+    // and forgets its login key.
     if !auth::verify_password(hasher, b.current, phc).await? {
         return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
             "current password is wrong".into(),
         ));
     }
@@ -827,180 +849,6 @@ fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRun
     })
 }
 
-fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
-    json!({
-        "user_id": u.user_id,
-        "username": u.username,
-        "role": u.role,
-        "disabled": u.disabled,
-        "can_agentic": u.role == harness_store::Role::Admin || u.can_agentic,
-        "must_change_password": u.must_change_password,
-        "created_ms": u.created_ms,
-    })
-}
-
-async fn list_users(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let users = m.inner.mirror.call(|s| s.list_users()).await?;
-    Ok(Json(
-        json!({ "users": users.iter().map(user_json).collect::<Vec<_>>() }),
-    ))
-}
-
-#[derive(Deserialize)]
-struct NewUserBody {
-    username: String,
-    /// Temporary; the user must change it at first login.
-    password: String,
-    #[serde(default = "member")]
-    role: harness_store::Role,
-    #[serde(default)]
-    can_agentic: bool,
-}
-
-fn member() -> harness_store::Role {
-    harness_store::Role::Member
-}
-
-async fn create_user(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<NewUserBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
-    let u = auth::create_account(
-        &m.inner.mirror,
-        m.inner.auth.hasher(),
-        b.username.trim().to_ascii_lowercase(),
-        b.password,
-        b.role,
-        b.can_agentic,
-        true,
-    )
-    .await?;
-    Ok(Json(user_json(&u)))
-}
-
-#[derive(Deserialize)]
-struct UserPatchBody {
-    #[serde(default)]
-    role: Option<harness_store::Role>,
-    #[serde(default)]
-    disabled: Option<bool>,
-    #[serde(default)]
-    can_agentic: Option<bool>,
-    /// New temporary password; forces a change at next login.
-    #[serde(default)]
-    password: Option<String>,
-}
-
-/// Refuse changes that would lock everyone out or edit your own access.
-async fn guard_admin_change(
-    m: &Master,
-    who: &auth::Principal,
-    target: &harness_store::UserRow,
-    removes_admin: bool,
-) -> ApiResult<()> {
-    if who.user_id.as_deref() == Some(target.user_id.as_str()) {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "you cannot change your own role or access, or delete yourself".into(),
-        ));
-    }
-    if removes_admin && target.role == harness_store::Role::Admin && !target.disabled {
-        let admins = m.inner.mirror.call(|s| s.active_admin_count()).await?;
-        if admins <= 1 {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "this is the last active admin".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn load_user(m: &Master, id: &str) -> ApiResult<harness_store::UserRow> {
-    let id = id.to_string();
-    m.inner
-        .mirror
-        .call(move |s| s.user_by_id(&id))
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "unknown user".into()))
-}
-
-async fn update_user(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(b): Json<UserPatchBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
-    let target = load_user(&m, &id).await?;
-    let changes_access = b.role.is_some() || b.disabled.is_some() || b.can_agentic.is_some();
-    if changes_access {
-        let removes_admin = b.disabled == Some(true) || b.role == Some(harness_store::Role::Member);
-        guard_admin_change(&m, &who, &target, removes_admin).await?;
-        let patch = harness_store::UserPatch {
-            role: b.role,
-            disabled: b.disabled,
-            can_agentic: b.can_agentic,
-        };
-        let uid = target.user_id.clone();
-        let disable = b.disabled == Some(true);
-        m.inner
-            .mirror
-            .call(move |s| {
-                s.update_user(&uid, &patch)?;
-                if disable {
-                    s.ui_sessions_delete_for_user(&uid)?;
-                }
-                Ok::<_, harness_store::StoreError>(())
-            })
-            .await?;
-        if disable {
-            auth::close_sockets(&m, &target.user_id);
-        }
-        // Disabled owners stop counting as owners, and whether the user may
-        // drive their agentic chats (`blocked`) may have changed: running
-        // ones that lost their access stop.
-        let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
-        let _ = m.inner.live.send(crate::Live::SessionsChanged);
-        ws::sweep_revoked(&m, vec![target.user_id.clone()]);
-    }
-    if let Some(pw) = b.password {
-        auth::set_password(&m, &target.user_id, pw, true).await?;
-    }
-    Ok(Json(user_json(&load_user(&m, &id).await?)))
-}
-
-async fn delete_user(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
-    let target = load_user(&m, &id).await?;
-    guard_admin_change(&m, &who, &target, true).await?;
-    let uid = target.user_id.clone();
-    // Refused (409) while they are the only owner of a team workspace with
-    // other members; their chats leave every team workspace. The projects of
-    // the workspaces that go with them go too, and their facts.
-    let projects = crate::projects::ids(&m).await;
-    m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
-    auth::close_sockets(&m, &target.user_id);
-    // Their stored files lost their rows with the account; unlink them.
-    crate::storage::on_user_deleted(&m).await;
-    crate::projects::forget_gone(&m, projects).await;
-    let _ = m.inner.live.send(crate::Live::WorkspacesChanged);
-    let _ = m.inner.live.send(crate::Live::SessionsChanged);
-    // Their running agentic chats stop (the account is gone).
-    ws::sweep_revoked(&m, vec![target.user_id]);
-    Ok(Json(json!({ "ok": true })))
-}
-
 /// A chat as the UI lists it. `blocked`: why the caller may not make this
 /// agentic chat do work (always `null` for chats).
 fn session_json(r: &harness_store::SessionRow, blocked: Option<&str>) -> serde_json::Value {
@@ -1067,7 +915,12 @@ async fn list_sessions(
         Some(a) => r.workspace_id.as_deref() == Some(a.id()),
         None => true,
     };
-    let rows = m.inner.mirror.call(|s| s.sessions()).await?;
+    let owner = who.user_id.clone();
+    let rows = m
+        .inner
+        .mirror
+        .call(move |s| s.sessions_of(owner.as_deref()))
+        .await?;
     let links = crate::projects::links(&m).await?;
     let mut list: Vec<serde_json::Value> = rows
         .iter()
@@ -1416,7 +1269,9 @@ async fn cancel(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
+    // Stopping work is always allowed, even before a pending password
+    // change (Gate 3 review P-7): only the owner's own chat, as ever.
+    let who = require_any(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     m.cancel(sid).await?;
     Ok(Json(json!({ "ok": true })))
@@ -1450,10 +1305,14 @@ async fn approval(
     Path((id, approval_id)): Path<(String, String)>,
     Json(b): Json<ApprovalBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
     // Allowing makes the chat do work; denying stops it, like cancel, so a
-    // user who lost access can still refuse.
+    // user who lost access, or must change their password first, can
+    // still refuse (Gate 3 review P-7).
+    let who = match b.decision.allows() {
+        true => require(&m, &headers).await?,
+        false => require_any(&m, &headers).await?,
+    };
+    let row = visible_session(&m, &who, &id).await?;
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
     }

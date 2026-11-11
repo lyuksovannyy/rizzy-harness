@@ -1,7 +1,8 @@
 // Settings → Nodes (admin): worker machines, adding one, revoking one.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import type { NodeInfo, RemoteNode } from "../types";
+import { shownName } from "../md/hiddenChars";
 
 export function Nodes(props: { nodes: NodeInfo[] }) {
   const [remote, setRemote] = useState<RemoteNode[]>([]);
@@ -9,7 +10,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
   const [join, setJoin] = useState<{ token: string; port: number; fingerprint: string; expires_in_s: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const load = useCallback(() => {
-    api
+    pageApi
       .remoteNodes()
       .then((r) => {
         setRemote(r.nodes);
@@ -42,7 +43,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
             {embedded.map((n) => (
               <tr key={n.node_id}>
                 <td className="mono">{n.node_id}</td>
-                <td>{n.hostname}</td>
+                <td>{shownName(n.hostname)}</td>
                 <td>{n.connected ? "online" : "offline"} · built in ({n.profile})</td>
                 <td />
               </tr>
@@ -51,7 +52,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
               <tr key={n.node_id}>
                 <td className="mono">{n.node_id}</td>
                 <td>
-                  {n.hostname} <span className="muted small mono">{n.key_fingerprint}</span>
+                  {shownName(n.hostname)} <span className="muted small mono">{n.key_fingerprint}</span>
                 </td>
                 <td>{n.revoked ? "revoked" : n.connected ? "online" : "offline"}</td>
                 <td>
@@ -61,7 +62,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
                       className="danger"
                       onClick={async () => {
                         if (!confirm(`Revoke ${n.node_id}? It is disconnected and its key stops working.`)) return;
-                        await api.revokeNode(n.node_id).catch((x) => setErr(String(x)));
+                        await pageApi.revokeNode(n.node_id).catch((x) => setErr(String(x)));
                         load();
                       }}
                     >
@@ -98,7 +99,7 @@ export function Nodes(props: { nodes: NodeInfo[] }) {
                   type="button"
                   className="primary"
                   onClick={() =>
-                    api
+                    pageApi
                       .joinToken()
                       .then(setJoin)
                       .catch((x) => setErr(String(x)))

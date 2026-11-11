@@ -3,7 +3,7 @@
 //! models; agent fallbacks, notices about unavailable models, avatars.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -171,20 +171,14 @@ async fn start() -> T {
         .send()
         .await
         .unwrap();
-    t.admin = r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
+    t.admin = common::signed_in(r).await;
     t
 }
 
 async fn call(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", &t.admin)
+        .login(&t.admin)
         .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -686,7 +680,7 @@ async fn call_as(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", cookie)
+        .login(cookie)
         .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -701,36 +695,28 @@ async fn member(t: &T, name: &str) -> String {
         t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let cookie = |r: &reqwest::Response| {
-        r.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string()
-    };
+    let pw = v["password"].as_str().unwrap().to_string();
     let r = reqwest::Client::new()
         .post(format!("{}/api/login", t.base))
-        .json(&json!({"username": name, "password": "temporary pw"}))
+        .json(&json!({"username": name, "password": pw}))
         .send()
         .await
         .unwrap();
-    let first = cookie(&r);
+    let first = common::signed_in(r).await;
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
-        .header("cookie", &first)
+        .login(&first)
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": "a password of my own"}))
+        .json(&json!({"current": pw, "new": "a password of my own"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    cookie(&r)
+    common::signed_in(r).await
 }
 
 async fn set_default_model(t: &T, cookie: &str, model: &str) {

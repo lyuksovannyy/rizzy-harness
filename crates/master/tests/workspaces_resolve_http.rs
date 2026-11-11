@@ -4,7 +4,7 @@
 //! chats announced after stamping; and each member's memory switch.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -126,6 +126,7 @@ async fn start() -> Server {
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -180,7 +181,7 @@ async fn send(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -188,7 +189,11 @@ async fn send(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn call(
@@ -215,17 +220,18 @@ async fn user(s: &Server, name: &str, can_agentic: bool) -> (String, String) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "password": "temporary pw", "can_agentic": can_agentic})),
+        Some(json!({"username": name, "can_agentic": can_agentic})),
         &s.admin,
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let pw = v["password"].as_str().unwrap().to_string();
     let id = v["user_id"].as_str().unwrap().to_string();
     let (_, temp, _) = send(
         s,
         Method::POST,
         "/api/login",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name, "password": pw})),
         None,
     )
     .await;
@@ -233,7 +239,7 @@ async fn user(s: &Server, name: &str, can_agentic: bool) -> (String, String) {
         s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "a password of my own"})),
+        Some(json!({"current": pw, "new": "a password of my own"})),
         temp.as_deref(),
     )
     .await;
@@ -358,13 +364,17 @@ async fn wait_stopped(s: &Server, who: &str, sid: &str) {
 }
 
 /// Like `wait_stopped`, read from the store: for chats whose owner can no
-/// longer sign in.
+/// longer sign in. A chat that is gone has stopped too: deleting a user
+/// deletes their chats (Gate 3 P-6), and the row can be gone before this
+/// looks. That the node is told to delete it is tested in
+/// `deleting_a_user_deletes_their_chats_on_the_master_and_the_node`.
 async fn wait_stopped_in_store(s: &Server, sid: &str) {
     let sid = sid.parse().unwrap();
     for _ in 0..500 {
-        let row = s.master.inner_mirror().session(sid).unwrap().unwrap();
-        if !row.running {
-            return;
+        match s.master.inner_mirror().session(sid).unwrap() {
+            None => return,
+            Some(row) if !row.running => return,
+            Some(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -668,7 +678,7 @@ async fn agentic_work_stops_when_access_goes() {
 
     let r = reqwest::Client::new()
         .post(format!("{}/api/attachments?name=notes.txt", s.base))
-        .header("cookie", &carol)
+        .login(&carol)
         .same_origin()
         .body("tram timetable".as_bytes().to_vec())
         .send()

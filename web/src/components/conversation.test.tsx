@@ -7,6 +7,7 @@
 // "removed from Media"), the bar's images, and deleting the chat with or
 // without the Media files that came from it.
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
@@ -15,15 +16,16 @@ import type { Features, Item, RoutineMark, SessionRow, SessionView } from "../ty
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), deleteSession: vi.fn(() => Promise.resolve({ ok: true })), prompt: vi.fn(), approve: vi.fn() },
+  api: { features: (s: unknown) => features(s), prompt: vi.fn() },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
+vi.mock("../apiPages", () => ({ pageApi: { deleteSession: vi.fn(() => Promise.resolve({ ok: true })), approve: vi.fn() } }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
 vi.mock("../lib/artifacts", async (original) => ({ ...(await original<typeof import("../lib/artifacts")>()), artifactsApi }));
 const mediaApi = { list: vi.fn(), get: vi.fn() };
 vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi }));
-const { api } = await import("../api");
+const { pageApi: api } = await import("../apiPages");
 const { default: Conversation } = await import("./Conversation");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -200,7 +202,7 @@ describe("media", () => {
     );
     await show([user([ref(1), ref(2)])], sessionRow());
     const pictures = [...host.querySelectorAll<HTMLButtonElement>(".bubble-image")];
-    expect(pictures.map((b) => b.querySelector("img")!.getAttribute("src"))).toEqual([`/api/media/${ref(1).media_id}/content`, `/api/media/${ref(2).media_id}/content`]);
+    expect(pictures.map((b) => b.querySelector("img")!.getAttribute("src"))).toEqual([linked(`/api/media/${ref(1).media_id}/content`), linked(`/api/media/${ref(2).media_id}/content`)]);
     await act(async () => pictures[0]!.click());
     await until(() => host.querySelector("dialog.media-preview"));
     expect(host.querySelector("dialog.media-preview")!.getAttribute("aria-label")).toBe("p1.webp");
@@ -262,5 +264,70 @@ describe("media", () => {
     await show([], sessionRow());
     await act(async () => deleteButton().click());
     expect(host.querySelector(".delete-chat")!.textContent).toContain("Also delete the Media file that came from this chat");
+  });
+});
+
+describe("drafts (AUDIT L14)", () => {
+  const KEY = `harness.draft.u1.${SID}`;
+  const box = () => host.querySelector<HTMLTextAreaElement>(".bottom textarea")!;
+  const type = (text: string) =>
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box(), text);
+      box().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  async function showChat(incognito: boolean, row: SessionRow | null) {
+    current = view([]);
+    current.meta!.incognito = incognito;
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={[]} models={[]} />));
+  }
+  beforeEach(async () => {
+    localStorage.clear();
+    (await import("../lib/drafts")).setDraftOwner("u1");
+    vi.mocked(api.deleteSession).mockClear();
+    mediaApi.list.mockResolvedValue({ items: [], next: null });
+  });
+
+  test("a chat keeps what was typed under its user, and shows it again", async () => {
+    await showChat(false, sessionRow());
+    type("half a thought");
+    expect(localStorage.getItem(KEY)).toBe("half a thought");
+    act(() => root.unmount());
+    root = createRoot(host);
+    await showChat(false, sessionRow());
+    expect(box().value).toBe("half a thought");
+  });
+
+  test("an incognito chat stores nothing, and loses a draft it had", async () => {
+    localStorage.setItem(KEY, "from before");
+    await showChat(true, sessionRow({ incognito: true }));
+    expect(localStorage.getItem(KEY)).toBeNull();
+    expect(box().value).toBe("");
+    type("not to be kept");
+    expect(Object.keys(localStorage).filter((k) => k.startsWith("harness.draft."))).toEqual([]);
+  });
+
+  test("deleting the chat deletes its draft", async () => {
+    await showChat(false, sessionRow());
+    type("never sent");
+    expect(localStorage.getItem(KEY)).toBe("never sent");
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    const del = [...host.querySelectorAll<HTMLButtonElement>(".delete-chat button")].find((b) => b.textContent === "Delete")!;
+    await act(async () => del.click());
+    expect(api.deleteSession).toHaveBeenCalled();
+    expect(localStorage.getItem(KEY)).toBeNull();
+  });
+
+  test("storage that throws (a private window, blocked or full) never breaks the chat or typing", async () => {
+    const boom = () => {
+      throw new DOMException("blocked", "SecurityError");
+    };
+    vi.stubGlobal("localStorage", { getItem: boom, setItem: boom, removeItem: boom, key: boom });
+    try {
+      await showChat(false, sessionRow());
+      type("still typing");
+      expect(box().value).toBe("still typing");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

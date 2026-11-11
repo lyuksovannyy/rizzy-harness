@@ -74,7 +74,9 @@ async fn setup_with(
         secrets: Default::default(),
         profile: Profile::Agentic,
         incognito_ttl: None,
-        checkpoints_dir: None,
+        // Sub-agent worktrees need the checkpoint store (R.1).
+        checkpoints_dir: Some(dir.path().join("checkpoints")),
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -419,7 +421,7 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
         .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
         .collect();
     assert!(
-        kids.iter().all(|k| k.cwd.contains("harness-worktrees")),
+        kids.iter().all(|k| k.cwd.contains("/sessions/")),
         "{kids:?}"
     );
     assert!(kids.iter().all(|k| !std::path::Path::new(&k.cwd).exists()));

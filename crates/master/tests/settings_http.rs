@@ -1,7 +1,7 @@
 //! Per-user preferences (`/api/me/settings`) and per-message effort.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,6 +41,7 @@ async fn start() -> T {
         profile: Profile::Chat,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -96,7 +97,7 @@ async fn req(
         rb = rb.json(&b);
     }
     rb = match cookie {
-        Some(c) => rb.header("cookie", c).same_origin(),
+        Some(c) => rb.login(c).same_origin(),
         None => rb.bearer_auth("tok"),
     };
     let r = rb.send().await.unwrap();
@@ -105,7 +106,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, c, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &c {
+        common::remember(c, &body);
+    }
+    (status, c, body)
 }
 
 #[tokio::test]
@@ -249,16 +254,17 @@ async fn settings_defaults_validation_and_isolation() {
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     assert_eq!(bob["username"], "bob");
+    let pw = bob["password"].as_str().unwrap();
     let (_, bc, _) = req(
         &t,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob", "password": pw})),
         None,
     )
     .await;
@@ -266,7 +272,7 @@ async fn settings_defaults_validation_and_isolation() {
         &t,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;

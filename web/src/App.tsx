@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { api, HttpError } from "./api";
+import { api, forgetLogin, HttpError, login } from "./api";
+import { clearDrafts, setDraftOwner } from "./lib/drafts";
 import type { Me, WorkspaceSummary } from "./types";
 import { Shell } from "./components/Shell";
 
@@ -43,8 +44,22 @@ export function App() {
     void load(true);
   }, [load]);
   useEffect(() => {
+    // Any 401, from any request: the login is gone (or this tab has no key).
+    login.ended = logout;
     void load(true);
-  }, [load]);
+  }, [load, logout]);
+  // Signed out, however it happened (logout, a 401, a fresh load without a
+  // login): no one's unsent drafts stay in this browser (AUDIT L14), nor the
+  // login key (P-1). Signed in: the drafts read and written are this
+  // user's. Set while rendering, since the reply box reads its draft in its
+  // first render.
+  useEffect(() => {
+    if (me === null) {
+      clearDrafts();
+      forgetLogin();
+    }
+  }, [me]);
+  if (me) setDraftOwner(me.user_id);
   if (me === undefined) return <div className="splash" />;
   if (me === null)
     return (

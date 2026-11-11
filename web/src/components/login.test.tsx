@@ -5,7 +5,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, test, vi } from "vitest";
 
-vi.mock("../api", () => ({ api: { setupStatus: vi.fn().mockResolvedValue({ claimed: false }) } }));
+vi.mock("../apiPages", () => ({ pageApi: { setupStatus: vi.fn().mockResolvedValue({ claimed: false }) } }));
 const { Login } = await import("./Login");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

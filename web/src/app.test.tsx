@@ -19,7 +19,13 @@ type ShellProps = {
 const me = vi.fn();
 const shells: ShellProps[] = [];
 let signIn: (() => void) | null = null;
-vi.mock("./api", () => ({ api: { me }, HttpError: class extends Error {} }));
+// The login key (P-1) is forgotten as the real api.ts does it.
+vi.mock("./api", () => ({
+  api: { me },
+  HttpError: class extends Error {},
+  login: { ended: () => {} },
+  forgetLogin: () => localStorage.removeItem("harness.login"),
+}));
 vi.mock("./components/Shell", () => ({
   Shell: (p: ShellProps) => {
     shells.push(p);
@@ -94,5 +100,53 @@ describe("App", () => {
     await act(async () => signIn!());
     expect(shell().me.workspace!.workspace_id).toBe("q");
     expect(shell().gone).toBeNull();
+  });
+});
+
+describe("drafts at sign-out (AUDIT L14)", () => {
+  const stored = () => Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!).sort();
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+  const seed = () => {
+    localStorage.setItem("harness.draft.u.s1", "alex's unsent words");
+    sessionStorage.setItem("harness.ui.m1#b1", '{"other":"an answer"}');
+    localStorage.setItem("harness.sidebarCollapsed", "1");
+    localStorage.setItem("harness.login", "k".repeat(64));
+  };
+
+  test("logging out clears every draft in this browser", async () => {
+    await start(ws("p", { personal: true }));
+    seed();
+    await act(async () => shell().onLogout());
+    expect(stored()).toEqual(["harness.sidebarCollapsed"]);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  test("so does a login the server ended (401)", async () => {
+    await start(ws("p", { personal: true }));
+    seed();
+    const { HttpError } = await import("./api");
+    me.mockRejectedValue(Object.assign(new HttpError(401, "not logged in"), { status: 401 }));
+    await act(() => shell().onMeChanged());
+    expect(signIn).not.toBeNull();
+    expect(stored()).toEqual(["harness.sidebarCollapsed"]);
+  });
+
+  test("so does a 401 from any request (P-1: the login key is gone with it)", async () => {
+    await start(ws("p", { personal: true }));
+    seed();
+    const { login } = await import("./api");
+    await act(async () => login.ended());
+    expect(signIn).not.toBeNull();
+    expect(stored()).toEqual(["harness.sidebarCollapsed"]);
+  });
+
+  test("and a fresh load that is not signed in", async () => {
+    seed();
+    me.mockRejectedValue(new Error("offline"));
+    await act(async () => root.render(<App />));
+    expect(stored()).toEqual(["harness.sidebarCollapsed"]);
   });
 });

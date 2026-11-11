@@ -2,7 +2,7 @@
 //! numbers and limits (never names or contents).
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 
@@ -59,7 +59,7 @@ async fn send(
     rb = if c.starts_with("Bearer ") {
         rb.header("authorization", c)
     } else {
-        rb.header("cookie", c).same_origin()
+        rb.login(c).same_origin()
     };
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -69,14 +69,9 @@ async fn send(
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -84,7 +79,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -92,32 +87,39 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
 /// The server admin "alex" and a member "bob".
 async fn users(t: &T) -> [String; 2] {
     let alex = cookie(
-        &post_anon(
+        post_anon(
             t,
             "/api/setup",
             json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}),
             None,
         )
         .await,
-    );
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    send(t, Method::POST, "/api/users", Some(body), &alex).await;
+    )
+    .await;
+    let body = json!({"username": "bob"});
+    let pw = send(t, Method::POST, "/api/users", Some(body), &alex)
+        .await
+        .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let first = post_anon(
         t,
         "/api/login",
-        json!({"username": "bob", "password": "temporary pw"}),
+        json!({"username": "bob", "password": pw}),
         None,
     )
     .await;
     let bob = cookie(
-        &post_anon(
+        post_anon(
             t,
             "/api/me/password",
-            json!({"current": "temporary pw", "new": "bobs own password"}),
-            Some(&cookie(&first)),
+            json!({"current": pw, "new": "bobs own password"}),
+            Some(&cookie(first).await),
         )
         .await,
-    );
+    )
+    .await;
     [alex, bob]
 }
 
@@ -131,7 +133,7 @@ fn png(tail: &[u8]) -> Vec<u8> {
 async fn upload(t: &T, c: &str, bytes: Vec<u8>) -> StatusCode {
     reqwest::Client::new()
         .post(format!("{}/api/media", t.base))
-        .header("cookie", c)
+        .login(c)
         .same_origin()
         .header("x-file-name", "a.png")
         .body(bytes)

@@ -2,7 +2,7 @@
 //! and per-user visibility.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +21,8 @@ struct Server {
     master: Master,
     claim_path: std::path::PathBuf,
     ws: std::path::PathBuf,
+    /// The embedded node's own store.
+    node_store: Store,
     _dir: tempfile::TempDir,
 }
 
@@ -28,6 +30,7 @@ async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
+    let node_store = Store::open_in_memory().unwrap();
     let node = NodeRuntime::start(NodeConfig {
         node_id: "local".into(),
         hostname: "h".into(),
@@ -35,7 +38,7 @@ async fn start() -> Server {
             workspace_roots: vec![dir.path().into()],
             ..Default::default()
         },
-        store: Store::open_in_memory().unwrap(),
+        store: node_store.clone(),
         backend: Arc::new(NativeBackend::new(
             Arc::new(Mock {
                 delay: Duration::from_millis(1),
@@ -48,6 +51,7 @@ async fn start() -> Server {
         profile: harness_core::event::Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -83,6 +87,7 @@ async fn start() -> Server {
         master,
         claim_path,
         ws,
+        node_store,
         _dir: dir,
     }
 }
@@ -97,7 +102,7 @@ async fn post(
         .post(format!("{}{path}", s.base))
         .json(&body);
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -105,7 +110,11 @@ async fn post(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn get(
@@ -116,7 +125,7 @@ async fn get(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new().get(format!("{}{path}", s.base));
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     if let Some(b) = bearer {
         rb = rb.bearer_auth(b);
@@ -140,7 +149,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -148,7 +157,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn claim_admin(s: &Server) -> String {
@@ -269,7 +282,7 @@ async fn admin_creates_member_who_must_change_password() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         None,
     )
     .await;
@@ -278,7 +291,7 @@ async fn admin_creates_member_who_must_change_password() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "Bob", "password": "temporary pw"})),
+        Some(json!({"username": "Bob"})),
         Some(&admin),
     )
     .await;
@@ -288,18 +301,19 @@ async fn admin_creates_member_who_must_change_password() {
     assert_eq!(bob["can_agentic"], false);
     assert_eq!(bob["must_change_password"], true);
     assert!(bob.get("password_hash").is_none());
+    let pw = bob["password"].as_str().unwrap().to_string();
     let (st, _, _) = req(
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 
     // First login: everything but /api/me* is blocked until the password changes.
-    let (st, bc) = login(&s, "bob", "temporary pw").await;
+    let (st, bc) = login(&s, "bob", &pw).await;
     assert_eq!(st, StatusCode::OK);
     let bc = bc.unwrap();
     let (_, me) = get(&s, "/api/me", Some(&bc), None).await;
@@ -316,12 +330,16 @@ async fn admin_creates_member_who_must_change_password() {
         Some(&bc),
     )
     .await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a wrong password is not a lost login"
+    );
     let (st, nc, _) = req(
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc),
     )
     .await;
@@ -354,17 +372,18 @@ async fn agentic_needs_grant_and_chats_are_private() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     let bob_id = bob["user_id"].as_str().unwrap().to_string();
-    let (_, bc) = login(&s, "bob", "temporary pw").await;
+    let pw = bob["password"].as_str().unwrap().to_string();
+    let (_, bc) = login(&s, "bob", &pw).await;
     let (_, bc, _) = req(
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;
@@ -458,12 +477,13 @@ async fn disable_reset_delete_and_last_admin_guard() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     let bob_id = bob["user_id"].as_str().unwrap().to_string();
-    let (_, bc) = login(&s, "bob", "temporary pw").await;
+    let pw = bob["password"].as_str().unwrap().to_string();
+    let (_, bc) = login(&s, "bob", &pw).await;
     let bc = bc.unwrap();
 
     // Disabling logs bob out at once and blocks new logins.
@@ -480,10 +500,7 @@ async fn disable_reset_delete_and_last_admin_guard() {
         get(&s, "/api/me", Some(&bc), None).await.0,
         StatusCode::UNAUTHORIZED
     );
-    assert_eq!(
-        login(&s, "bob", "temporary pw").await.0,
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(login(&s, "bob", &pw).await.0, StatusCode::UNAUTHORIZED);
     req(
         &s,
         Method::PATCH,
@@ -496,15 +513,16 @@ async fn disable_reset_delete_and_last_admin_guard() {
     // Admin password reset forces another change.
     let (st, _, v) = req(
         &s,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"password": "another temp pw"})),
+        Method::POST,
+        &format!("/api/users/{bob_id}/password"),
+        None,
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v["must_change_password"], true);
-    assert_eq!(login(&s, "bob", "another temp pw").await.0, StatusCode::OK);
+    let again = v["password"].as_str().unwrap().to_string();
+    assert_eq!(login(&s, "bob", &again).await.0, StatusCode::OK);
 
     // You cannot demote, disable or delete yourself, and the last admin stays.
     for (m, body) in [
@@ -528,7 +546,7 @@ async fn disable_reset_delete_and_last_admin_guard() {
         &s,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "another temp pw"})),
+        Some(json!({"username": "bob", "password": again})),
         None,
     )
     .await;
@@ -536,7 +554,7 @@ async fn disable_reset_delete_and_last_admin_guard() {
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "another temp pw", "new": "bobs own password"})),
+        Some(json!({"current": again, "new": "bobs own password"})),
         Some(&bc2.unwrap()),
     )
     .await;
@@ -603,14 +621,15 @@ async fn admin_and_bob(s: &Server) -> (String, String, [String; 2]) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{bob}");
     let bob_id = bob["user_id"].as_str().unwrap().to_string();
-    let a = login(s, "bob", "temporary pw").await.1.unwrap();
-    let b = login(s, "bob", "temporary pw").await.1.unwrap();
+    let pw = bob["password"].as_str().unwrap().to_string();
+    let a = login(s, "bob", &pw).await.1.unwrap();
+    let b = login(s, "bob", &pw).await.1.unwrap();
     assert_ne!(a, b, "each login is its own session");
     for c in [&a, &b] {
         assert_eq!(me_status(s, c).await, StatusCode::OK);
@@ -638,6 +657,7 @@ async fn login_sets_one_opaque_session_cookie() {
     assert_eq!(set.len(), 1, "{set:?}");
     let name = harness_master::auth::cookie_name();
     let (pair, attrs) = set[0].split_once("; ").unwrap();
+    common::remember(pair, &r.json::<Value>().await.unwrap());
     assert_eq!(attrs, "HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000");
     let id = pair.strip_prefix(&format!("{name}=")).unwrap();
     assert_eq!(id.len(), 64, "256 bits, hex");
@@ -647,8 +667,18 @@ async fn login_sets_one_opaque_session_cookie() {
     let store = s.master.inner_mirror();
     let hash = harness_master::auth::sha256_hex(id);
     let now = harness_core::now_ms();
-    assert!(store.ui_session_user(&hash, now, 0).unwrap().is_some());
-    assert!(store.ui_session_user(id, now, 0).unwrap().is_none());
+    assert!(
+        store
+            .ui_session_user(&hash, now, 0, |_| true)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .ui_session_user(id, now, 0, |_| true)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         me_status(&s, &format!("{name}={hash}")).await,
         StatusCode::UNAUTHORIZED,
@@ -726,15 +756,16 @@ async fn disabling_a_user_ends_every_session_of_theirs() {
 async fn a_password_reset_ends_every_session_of_that_user() {
     let s = start().await;
     let (admin, bob_id, bobs) = admin_and_bob(&s).await;
-    let (st, _, _) = req(
+    let (st, _, v) = req(
         &s,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"password": "another temp pw"})),
+        Method::POST,
+        &format!("/api/users/{bob_id}/password"),
+        None,
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+    let again = v["password"].as_str().unwrap().to_string();
     for c in &bobs {
         unauthorized(me_status(&s, c).await);
     }
@@ -742,13 +773,13 @@ async fn a_password_reset_ends_every_session_of_that_user() {
 
     // Changing your own password: every other browser is signed out and
     // this one gets a new session.
-    let one = login(&s, "bob", "another temp pw").await.1.unwrap();
-    let other = login(&s, "bob", "another temp pw").await.1.unwrap();
+    let one = login(&s, "bob", &again).await.1.unwrap();
+    let other = login(&s, "bob", &again).await.1.unwrap();
     let (st, fresh, _) = req(
         &s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "another temp pw", "new": "bobs own password"})),
+        Some(json!({"current": again, "new": "bobs own password"})),
         Some(&one),
     )
     .await;
@@ -792,7 +823,13 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     // Ran out a second ago.
     let expired = "e1".repeat(32);
     store
-        .ui_session_create(&sha256_hex(&expired), &uid, now - 31 * day, now - 1000)
+        .ui_session_create(
+            &sha256_hex(&expired),
+            &sha256_hex("k"),
+            &uid,
+            now - 31 * day,
+            now - 1000,
+        )
         .unwrap();
     unauthorized(me_status(&s, &format!("{}={expired}", cookie_name())).await);
 
@@ -800,13 +837,16 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     // days from now, and /api/me sends the cookie again so the browser's
     // copy lasts as long.
     let old = "0a".repeat(32);
+    let key = "0b".repeat(32);
     let hash = sha256_hex(&old);
     store
-        .ui_session_create(&hash, &uid, now - 29 * day, now + day)
+        .ui_session_create(&hash, &sha256_hex(&key), &uid, now - 29 * day, now + day)
         .unwrap();
+    let old_cookie = format!("{}={old}", cookie_name());
+    common::remember(&old_cookie, &json!({"login_key": key}));
     let r = reqwest::Client::new()
         .get(format!("{}/api/me", s.base))
-        .header("cookie", format!("{}={old}", cookie_name()))
+        .login(&old_cookie)
         .same_origin()
         .send()
         .await
@@ -822,7 +862,7 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     let later = now + 2 * day;
     assert!(
         store
-            .ui_session_user(&hash, later, SESSION_TTL_MS)
+            .ui_session_user(&hash, later, SESSION_TTL_MS, |_| true)
             .unwrap()
             .is_some(),
         "still valid after its first expiry"
@@ -835,4 +875,58 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
         .await
         .unwrap();
     assert!(r.headers().get("set-cookie").is_none());
+}
+
+/// Gate 3 review P-6: a deleted user's chats stayed on the master and on
+/// the node, and only the API token could delete them. Deleting the user
+/// deletes them on both.
+#[tokio::test]
+async fn deleting_a_user_deletes_their_chats_on_the_master_and_the_node() {
+    let s = start().await;
+    let admin = claim_admin(&s).await;
+    let (_, _, bob) = req(
+        &s,
+        Method::POST,
+        "/api/users",
+        Some(json!({"username": "bob"})),
+        Some(&admin),
+    )
+    .await;
+    let bob_id = bob["user_id"].as_str().unwrap().to_string();
+    let sid = s
+        .master
+        .create_session(harness_master::CreateSpec {
+            profile: Some(harness_core::event::Profile::Agentic),
+            title: "a chat".into(),
+            cwd: s.ws.display().to_string(),
+            owner_id: Some(bob_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(s.node_store.head_seq(sid).unwrap() >= 1);
+    let (st, _, v) = req(
+        &s,
+        Method::DELETE,
+        &format!("/api/users/{bob_id}"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut gone = false;
+    for _ in 0..500 {
+        let mirror = s.master.inner_mirror().session(sid).unwrap();
+        if mirror.is_none() && s.node_store.head_seq(sid).unwrap() == 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        gone,
+        "a deleted user's chat is still there (mirror: {}, node head: {})",
+        s.master.inner_mirror().session(sid).unwrap().is_some(),
+        s.node_store.head_seq(sid).unwrap()
+    );
 }

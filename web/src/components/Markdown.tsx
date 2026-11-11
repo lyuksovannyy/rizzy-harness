@@ -4,7 +4,7 @@
 // Conversation provides MessageCtx (provenance and sources for links, and
 // the sources behind citation labels); `blocks` are the message's ui blocks
 // as Rust validated them, shown in place of their fences.
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -12,6 +12,7 @@ import { Callout, CalloutTitle } from "../md/Callout";
 import { CiteRef, SourcesFooter } from "../md/Cite";
 import { InlineCode, Pre } from "../md/Code";
 import { DoneCtx, NO_BLOCKS, UiCtx } from "../md/context";
+import type { HastNode } from "../md/hast";
 import { ImageChip, Link } from "../md/Link";
 import { prepare, urlTransform } from "../md/pipeline";
 import remarkCallouts from "../md/remark-callouts";
@@ -50,6 +51,20 @@ const components = {
   "ui-block": UiHost,
 } as Components;
 
+/** Markdown instances so far, for each one's footnote id prefix. */
+let rendered = 0;
+
+/** remark-rehype names the footnotes' heading `footnote-label` whatever the
+ * prefix; give it the message's (Link does the same for the references'
+ * aria-describedby). */
+function rehypeFootnoteLabel(fn: string) {
+  return (tree: HastNode) => {
+    for (const s of tree.children ?? [])
+      for (const h of s.tagName === "section" ? (s.children ?? []) : [])
+        if (h.properties?.id === "footnote-label") h.properties.id = fn + "footnote-label";
+  };
+}
+
 export const Markdown = memo(function Markdown(props: {
   text: string;
   done: boolean;
@@ -68,16 +83,23 @@ export const Markdown = memo(function Markdown(props: {
   const from = props.from ?? null;
   const messageId = props.messageId ?? null;
   const cut = !!props.cut;
-  const ui = useMemo(() => ({ messageId, blocks, from, cut }), [messageId, blocks, from, cut]);
+  // Footnote ids get a prefix of their own per message (remark-rehype's
+  // default, `user-content-`, is the same in every message), so ids never
+  // collide and Link can tell this message's footnotes from anything else.
+  const [fn] = useState(() => `m${++rendered}-`);
+  const rehype = useMemo(() => ({ clobberPrefix: fn }), [fn]);
+  const plugins = useMemo((): Options["rehypePlugins"] => [...rehypePlugins!, [rehypeFootnoteLabel, fn]], [fn]);
+  const ui = useMemo(() => ({ messageId, blocks, from, cut, fn }), [messageId, blocks, from, cut, fn]);
   return (
     <DoneCtx.Provider value={done}>
       <UiCtx.Provider value={ui}>
         <div className="md">
           <ReactMarkdown
             remarkPlugins={remarkPlugins}
-            rehypePlugins={rehypePlugins}
+            rehypePlugins={plugins}
             components={components}
             urlTransform={urlTransform}
+            remarkRehypeOptions={rehype}
           >
             {md}
           </ReactMarkdown>

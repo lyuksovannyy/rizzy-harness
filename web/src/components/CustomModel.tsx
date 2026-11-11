@@ -3,11 +3,11 @@
 // A test sends it one short request before it is added.
 import { CircleCheck, Loader2 } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import type { ProviderModel } from "../types";
 
 /** What a model test needs besides the model: the provider it goes to. */
-export type TestTarget = Omit<Parameters<typeof api.testModel>[0], "model">;
+export type TestTarget = Omit<Parameters<typeof pageApi.testModel>[0], "model">;
 
 /** "" is not reported; anything else must be a whole number above 0. */
 function tokens(s: string): number | null | undefined {
@@ -55,7 +55,7 @@ export function CustomModelForm(props: {
     if (!props.test || !raw) return;
     setTesting(true);
     try {
-      const r = await api.testModel({ ...props.test(), model: raw });
+      const r = await pageApi.testModel({ ...props.test(), model: raw });
       setTested({
         id: raw,
         r: r.ok ? { ok: true, text: `Replied “${r.reply}” in ${r.ms} ms.` } : { ok: false, text: r.error || "The model did not answer." },

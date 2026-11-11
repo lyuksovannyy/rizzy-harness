@@ -15,27 +15,33 @@ import {
 } from "react";
 import type { ExtraProps } from "react-markdown";
 import { useAnchored } from "./anchored";
-import { MessageCtx } from "./context";
+import { MessageCtx, UiCtx } from "./context";
 import { useCopy } from "./copy";
 import { reactText } from "./hast";
-import { hostOf, linkKey, needsConfirm, parseUrl, textShowsTarget } from "./links";
+import { hostOf, leavesApp, linkKey, needsConfirm, parseUrl, textShowsTarget } from "./links";
 import { rt } from "./strings";
 
 type AProps = ComponentProps<"a"> & ExtraProps;
 
 export function Link({ href = "", children, id, "aria-describedby": describedBy, "aria-label": label }: AProps) {
-  // GFM footnotes: in-page links. The app routes on the URL hash, so scroll
-  // to the target instead of navigating.
+  const { fn } = useContext(UiCtx);
+  // In-page links work only between this message's GFM footnotes and their
+  // references, whose ids the renderer gave this message's prefix (AUDIT
+  // L14). Any other fragment (an app route, a button's or field's id,
+  // another message's footnote) is text. The app routes on the URL hash, so
+  // a footnote link scrolls instead of navigating.
   if (href.startsWith("#")) {
+    const target = href.slice(1);
+    if (!fn || !target.startsWith(fn) || !/^fn(ref)?-/.test(target.slice(fn.length)))
+      return <span className="link-off">{children}</span>;
     return (
       <a
         href={href}
         id={id}
-        aria-describedby={describedBy}
+        aria-describedby={describedBy && fn + describedBy}
         aria-label={label}
         onClick={(e) => {
           e.preventDefault();
-          const target = decodeSafe(href.slice(1));
           e.currentTarget
             .closest(".md")
             ?.querySelector(`[id="${CSS.escape(target)}"]`)
@@ -103,7 +109,10 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
   }, []);
   // With a fragment only when it is the source's own (see linkKey).
   const source = sources.has(linkKey(u));
-  const confirm = !source && needsConfirm(u, provenance);
+  // Another port of this app's host is another server: its host is always
+  // shown, with the port and a word that it is not this app, and it asks.
+  const away = leavesApp(u);
+  const confirm = away || (!source && needsConfirm(u, provenance));
   const guard = (e: React.MouseEvent) => {
     if (!confirm) return;
     e.preventDefault();
@@ -125,19 +134,25 @@ function External(props: { u: URL; children: ReactNode; showHost?: boolean; clas
       >
         {props.children}
       </a>
-      {props.showHost && (
-        <bdi dir="ltr" className="link-host">
+      {(props.showHost || away) && (
+        <bdi dir="ltr" className={away ? "link-host link-away" : "link-host"}>
           {hostOf(u)}
+          {away && ` · ${rt("linkAway")}`}
         </bdi>
       )}
-      {open && <LinkConfirm url={u.href} anchor={anchor} onClose={close} />}
+      {open && <LinkConfirm url={u.href} away={away} anchor={anchor} onClose={close} />}
     </span>
   );
 }
 
 /** The confirm is a popover in the top layer, placed under (or above) its
  * link (see useAnchored). */
-function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement | null>; onClose: (refocus: boolean) => void }) {
+function LinkConfirm(props: {
+  url: string;
+  away?: boolean;
+  anchor: RefObject<HTMLAnchorElement | null>;
+  onClose: (refocus: boolean) => void;
+}) {
   const { url, anchor, onClose } = props;
   const box = useRef<HTMLSpanElement>(null);
   const [copied, copy] = useCopy();
@@ -157,7 +172,10 @@ function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement |
   }, [onClose]);
   return (
     <span className="link-confirm" popover="manual" role="dialog" aria-label={rt("linkTitle")} ref={box}>
-      <span className="link-confirm-note">{rt("linkCheck")}</span>
+      <span className="link-confirm-note">
+        {rt("linkCheck")}
+        {props.away && ` (${rt("linkAway")})`}
+      </span>
       <span className="link-confirm-url">{url}</span>
       <span className="link-confirm-actions">
         <button
@@ -179,12 +197,4 @@ function LinkConfirm(props: { url: string; anchor: RefObject<HTMLAnchorElement |
       </span>
     </span>
   );
-}
-
-function decodeSafe(s: string): string {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
 }

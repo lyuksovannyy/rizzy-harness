@@ -47,9 +47,24 @@ cargo build --release
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
 (so nobody else can take over a fresh server), creates your **admin**
 account, and walks you through connecting an AI provider, your name and time
-zone, and a search engine. Admins add other people under Settings → Server → **Users**; new accounts get a temporary
-password and must change it at first login. Everyone sees only their own
-chats. Agentic sessions run shell commands on a worker node, so an admin has
+zone, and a search engine. Admins add other people under Settings → Server → **Users**; the server makes each new
+account a temporary password (and a new one on **Reset password**), shows it to the admin
+once with a copy button, and the user must change it at first login. Nobody chooses a
+temporary password, and it is never shown again; a reset also signs the user out
+everywhere. Scripts do the same with `POST /api/users` (`{"username": …}`) and
+`POST /api/users/{id}/password`; each answer carries the password in its `password` field. Everyone sees only their own
+chats.
+
+Scripts use the API token (`rizzy-harness token`) as `Authorization: Bearer …`, as before. A
+browser login's cookie alone no longer authenticates anything. Browsers send a cookie to every
+port of its host, so a server the agent starts on your machine (a dev server on
+`127.0.0.1:8000`, say) would receive it when you open that page. Each login therefore also has a
+login key. It comes in the body of the login answer (`login_key`) and must go with the cookie
+as the `x-harness-login` header, or as a WebSocket's first message
+(`{"type":"login","key":…}`). The web UI keeps the key in this origin's local storage, so a new
+tab stays signed in; signing out forgets it. A file the browser fetches by itself (a picture, a
+video, a download) gets a short-lived link from the UI for that one address. Copied out of the
+browser, such a link does nothing without the login. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
 
 ```bash
@@ -155,6 +170,12 @@ The **account menu** has your Profile, Settings, Log out and the
 role, **+ New workspace…** and Workspace settings). It is a keyboard menu:
 Enter or ↓ opens it, → opens Workspaces, Esc goes back. Design notes:
 [docs/sidebar-search.md](docs/sidebar-search.md).
+
+What you type and have not sent stays in this browser as a draft of that
+chat, for your account only. Logging out (or a login that ended) clears every
+draft in the browser, with your recent folders and test events; deleting a
+chat deletes its draft, here or on another device; incognito chats keep no
+draft.
 
 ## Routines
 
@@ -531,10 +552,20 @@ storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
 back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
-a temporary git worktree, so the folder must be a git repository for
-them: elsewhere, or when the repository's own config defines filter
-commands (git-lfs's standard ones are allowed), such a sub-agent is not
-started and the agent that delegated is told why. Sub-agents that only
+a folder of their own, a copy of yours that the node keeps in its data
+directory (`sessions/<id>/files`), so your folder must be a git
+repository (inside the node's `workspace_roots`, with a plain `.git`
+directory) for them: elsewhere such a sub-agent is not started and the
+agent that delegated is told why. The copy holds the folder as it is,
+your uncommitted work included, and a git repository of its own whose
+history is yours (`git log` works; `git status` shows your uncommitted
+work as changes against `HEAD`), as bytes: your repository's filters are
+not applied (an LFS repository's files arrive as the real files, line
+endings are not converted). No other chat can reach it, and it is
+deleted when the sub-agent ends. When the sub-agent ends, the files it changed are written into
+the folder; if you or another sub-agent changed one of them meanwhile,
+nothing is written and the agent is told. None of this runs your
+repository's config, hooks, filters or attributes. Sub-agents that only
 read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
@@ -574,6 +605,16 @@ same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
 
+**Approving a call.** In `ask` mode a command, a write, an edit or a publish
+waits on a card that shows the whole call: every argument, the full path (and
+whether it is absolute or outside the chat's folder), long text with its size,
+beginning and end and a "show all" for the middle, runs of blanks as counted
+markers, and hidden or look-alike characters as codes. "Allow once" runs this
+call; "Allow this exact call for this turn" also lets the identical call run
+again without asking until the turn ends (any other call still asks); "Deny"
+refuses it. If you allow while part of the input is collapsed, the card says how
+many characters you have not expanded.
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 
@@ -585,11 +626,24 @@ directory, be inside it, or contain it: with the default data directory
 `allow_outside_workspace = true` or through a symlink. The shell runs in a
 sandbox that cannot open it either (see "The shell sandbox" below); its
 output is still scrubbed of the API token and known keys.
+`allow_outside_workspace = true` lets `write` and `edit` change any file
+of the node's user outside the data directory, `~/.bashrc` and
+`~/.gitconfig` included, which is the same as running a command outside
+the sandbox at your next shell: leave it off unless the chats on that
+node are ones you trust like your own shell.
+
+A chat's folder is remembered as the directory it was when the chat was
+made (its real path and its identity on disk). If that folder is later
+replaced, by a link to somewhere else or by another directory of the same
+name (deleted and cloned again, say), the chat refuses to work there
+("this session's folder was replaced"): start a new chat in the folder.
+Every turn also checks the folder against `workspace_roots` again, so
+narrowing node.toml applies to existing chats.
 
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
-denied_tools = []                    # e.g. ["bash"]
+denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
 graphify = false                     # let agents query a graphify knowledge graph (see below)
 env_pass = []                        # extra variables the agent's shell gets (see below)
@@ -598,6 +652,8 @@ env_pass = []                        # extra variables the agent's shell gets (s
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
 max_steps = 50                       # model calls one turn may make (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
+max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
+max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -619,13 +675,22 @@ starts the command. A command may:
 
 Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
 `~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
-users' folders, not `/dev/tty`. A sub-agent's git worktree also gets the
-repository's `.git`, so `git status` and `git commit` work there. Programs
+users' folders, not `/dev/tty`. A sub-agent works in its own folder in
+the node's data directory (with its own git repository there, so `git
+status`, `add`, `commit`, `diff` and `log` work), and may only read your
+repository's object store for its history: nothing of your `.git` is
+writable to it, and no other chat can open its folder. Programs
 cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
 fail inside the sandbox. From Linux 6.12 the shell also cannot signal
 processes outside it, and from Linux 7.1 it cannot connect to Unix sockets
 outside its folders (the session bus, the Docker socket, an ssh-agent); on
 older kernels it **can**, see "Limits" below.
+
+The node's own git, which takes the checkpoints and fills a sub-agent's
+folder, runs in the same sandbox: it may read the chat's folder (and your
+repository's object store), write only its own checkpoint store, and
+nothing else. With `mode = "off"` it is not confined either; `doctor`
+says which ("checkpoint git").
 
 It needs Linux 6.2 or newer with Landlock enabled (`landlock` appears in
 `/sys/kernel/security/lsm`; `network = "off"` needs 6.7). `rizzy-harness
@@ -654,6 +719,15 @@ write = ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.cache",
 `/sys`, `/var`, `/run`, `/nix/store` on NixOS. A shell sandbox entry may not
 contain, equal or be inside the data directory: the node refuses to start
 with such an entry, because Landlock cannot carve a folder out of a grant.
+The same holds for an entry that contains or equals a `workspace_roots`
+folder (every chat's commands would reach every other chat's folder), one
+inside another `write` entry (remove it: the outer entry already grants
+it), and one inside a workspace root whose path goes through a symbolic
+link below the root (list the real path instead). The node remembers
+where each entry really leads when it starts, and grants it to a command
+only while it still leads there: one replaced by a link (or below a
+folder replaced by one) is left out, and one that did not exist at start
+is granted once it exists at that same real path.
 For the same reason a data directory under `/usr`, `/etc` or `/opt` is
 refused. Graphify additionally needs its install (found automatically:
 its venv and the Python it was made from).
@@ -785,7 +859,8 @@ Design and open questions: [docs/projects.md](docs/projects.md).
 ## Rich messages
 
 Replies render as Markdown: headings, lists, GFM tables (click a header to
-sort, **Copy CSV**), task lists, footnotes, callouts (`> [!NOTE]`, `[!TIP]`,
+sort, **Copy CSV**), task lists, footnotes (the only in-page links a reply
+can have: a `#…` link to anything else shows as plain text), callouts (`> [!NOTE]`, `[!TIP]`,
 `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`), code with its language, **Copy**
 and syntax highlighting once the reply is finished, and math written as
 `\( … \)` or `$$ … $$` (a single `$` stays a dollar sign). **Copy** on a
@@ -1075,13 +1150,29 @@ readable; each needs another agent before its next message. Design notes: [docs/
 
 ## Development
 
-```bash
-cargo test --workspace
-```
+The Rust checks CI runs (`cargo deny` needs `cargo install cargo-deny`):
 
 ```bash
-cd web && pnpm test && pnpm typecheck
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
 ```
+
+The web checks CI runs, with Node 22 and the pnpm that `web/package.json`
+pins (`packageManager`, 12.17.0 today). Corepack, which ships with Node,
+provides that pnpm: run `corepack enable` once (or call `corepack pnpm …`).
+
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm typecheck && pnpm test && pnpm build && pnpm size
+```
+
+`pnpm size` fails when the first load is over its budget in
+`web/scripts/size.mjs` (a hard limit), and records what each change adds to
+the total. The Rust build embeds `web/dist`; without it, `cargo build` still
+works and the server shows "UI not built".
 
 UI dev server with hot reload (proxies `/api` to a running `rizzy-harness serve`):
 

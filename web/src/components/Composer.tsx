@@ -1,5 +1,5 @@
 import { ArrowUp, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { pickable } from "../lib/agents";
 import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
@@ -7,12 +7,18 @@ import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
+import { readDraft, writeDraft } from "../lib/drafts";
 import type { Picture } from "../lib/downscale";
 import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, engineOrigin, type SearchKind, supports } from "../lib/engines";
 import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import type { Agent, AvatarState, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+import { shownName } from "../md/hiddenChars";
+
+// An attached image's chip loads through a link (P-1); its own chunk, so
+// the first load does not carry the link code.
+const LinkedImg = lazy(() => import("./Linked"));
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -77,7 +83,8 @@ export function Composer(props: {
    * account's grant); the box is read-only and says so. Stop still works. */
   readOnly?: string | null;
   running?: boolean;
-  draftKey?: string;
+  /** The chat whose unsent text this box keeps (lib/drafts); none: kept nowhere. */
+  draft?: string;
   onSubmit: (s: Submission) => Promise<void>;
   onStop?: () => void;
   /** Home: the classifier's guess for this text (null = no opinion). */
@@ -102,9 +109,7 @@ export function Composer(props: {
   images?: { workspace: string | null; pending?: boolean; left?: number } | null;
 }) {
   const home = props.where === "home";
-  const [text, setText] = useState(() =>
-    props.draftKey ? (localStorage.getItem(props.draftKey) ?? "") : "",
-  );
+  const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
   const [mode, setMode] = useState<Mode>("ask");
   // Once the user picks a mode for this message, the classifier stays quiet.
   const [manual, setManual] = useState(false);
@@ -249,15 +254,17 @@ export function Composer(props: {
     onModeChange?.(mode, pickedBy.current);
     pickedBy.current = "auto";
   }, [onModeChange, mode]);
+  // The chat may be known to keep drafts only once its log arrives (not
+  // incognito): then its draft shows, unless something is typed already.
+  // Writes follow the text alone, so the key's arrival erases nothing.
+  const draft = useRef(props.draft);
   useEffect(() => {
-    if (!props.draftKey) return;
-    try {
-      if (text) localStorage.setItem(props.draftKey, text);
-      else localStorage.removeItem(props.draftKey);
-    } catch {
-      /* storage unavailable */
-    }
-  }, [text, props.draftKey]);
+    const k = (draft.current = props.draft);
+    if (k) setText((t) => t || readDraft(k));
+  }, [props.draft]);
+  useEffect(() => {
+    if (draft.current) writeDraft(draft.current, text);
+  }, [text]);
   useEffect(() => {
     ta.current?.focus();
   }, []);
@@ -491,7 +498,13 @@ export function Composer(props: {
           <ul className="chips" aria-label={t("composer.attachments")}>
             {pictures.map((x) => (
               <li key={x.key} className="chip image-chip">
-                {x.media_id ? <img src={`/api/media/${x.media_id}/content`} alt="" /> : <Loader2 size={14} className="spin" />}
+                {x.media_id ? (
+                  <Suspense fallback={null}>
+                    <LinkedImg url={`/api/media/${x.media_id}/content`} alt="" />
+                  </Suspense>
+                ) : (
+                  <Loader2 size={14} className="spin" />
+                )}
                 {x.name}
                 <button type="button" className="link" aria-label={`${t("composer.remove")} ${x.name}`} onClick={() => setPictures((p) => p.filter((y) => y !== x))}>
                   <X size={14} />
@@ -742,7 +755,7 @@ export function Composer(props: {
               <select className="pill" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
                 {props.workers.map((n) => (
                   <option key={n.node_id} value={n.node_id}>
-                    {n.embedded ? `local (${n.hostname})` : n.hostname}
+                    {n.embedded ? `local (${shownName(n.hostname)})` : shownName(n.hostname)}
                   </option>
                 ))}
               </select>

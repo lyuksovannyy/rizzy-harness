@@ -3,7 +3,7 @@
 //! private), the agentic gate, server-admin views and owner recovery.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +59,7 @@ async fn node(root: &std::path::Path, id: &str, profile: Profile) -> NodeRuntime
         profile,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -131,7 +132,7 @@ async fn send(
     }
     match auth {
         Some(TOKEN) => rb = rb.bearer_auth(TOKEN),
-        Some(c) => rb = rb.header("cookie", c).same_origin(),
+        Some(c) => rb = rb.login(c).same_origin(),
         None => {}
     }
     let r = rb.send().await.unwrap();
@@ -140,7 +141,11 @@ async fn send(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn call(
@@ -161,17 +166,18 @@ async fn user(s: &Server, name: &str, can_agentic: bool) -> (String, String) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "password": "temporary pw", "can_agentic": can_agentic})),
+        Some(json!({"username": name, "can_agentic": can_agentic})),
         &s.admin,
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let pw = v["password"].as_str().unwrap().to_string();
     let id = v["user_id"].as_str().unwrap().to_string();
     let (_, temp, _) = send(
         s,
         Method::POST,
         "/api/login",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name, "password": pw})),
         None,
     )
     .await;
@@ -179,7 +185,7 @@ async fn user(s: &Server, name: &str, can_agentic: bool) -> (String, String) {
         s,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "a password of my own"})),
+        Some(json!({"current": pw, "new": "a password of my own"})),
         temp.as_deref(),
     )
     .await;
@@ -1306,6 +1312,10 @@ async fn ui_sockets_hear_workspace_changes() {
     let origin = format!("http://{}", req.uri().authority().unwrap());
     req.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    socket
+        .send(Message::Text(common::socket_login(&s.admin).into()))
+        .await
+        .unwrap();
     // An answer proves the socket listens to live updates before the change.
     socket.send(Message::Text("hello".into())).await.unwrap();
     assert_eq!(next_message(&mut socket).await["type"], "error");

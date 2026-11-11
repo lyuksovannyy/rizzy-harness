@@ -83,6 +83,7 @@ impl Rig {
             profile: harness_core::event::Profile::Agentic,
             incognito_ttl: None,
             checkpoints_dir: Some(dir.path().join("checkpoints")),
+            git_sandbox: None,
             artifacts: None,
         };
         let node = NodeRuntime::start(cfg).await.unwrap();
@@ -114,6 +115,11 @@ impl Rig {
         rig.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
         rig
+    }
+
+    /// The rig's one session.
+    pub fn session_id(&self) -> SessionId {
+        self.sid
     }
 
     pub fn send(&self, m: MasterToNode) {

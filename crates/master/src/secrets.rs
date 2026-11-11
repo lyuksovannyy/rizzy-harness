@@ -20,8 +20,41 @@ pub enum SecretsError {
     Parse(PathBuf, toml::de::Error),
     #[error("{0} holds secrets and is open to group or others (mode {1:03o}); run: chmod 600 {0}")]
     Permissions(PathBuf, u32),
+    #[error(
+        "{0} is owned by another user (uid {1}, this process runs as uid {2}); the harness only uses files and folders of its own user"
+    )]
+    Owner(PathBuf, u32, u32),
     #[error("secret names must be 1-64 characters: a-z, 0-9, _ -")]
     BadName,
+}
+
+/// Refuse `md` (of `path`) when another user owns it (Gate 3 review N-3).
+#[cfg(unix)]
+fn check_owner(path: &Path, md: &std::fs::Metadata) -> Result<(), SecretsError> {
+    use std::os::unix::fs::MetadataExt;
+    let me = nix::unistd::geteuid().as_raw();
+    if md.uid() != me {
+        return Err(SecretsError::Owner(path.into(), md.uid(), me));
+    }
+    Ok(())
+}
+
+/// The data directory: refused when another user owns it (Gate 3 review
+/// N-3), then made 0700 (a chmod that fails is an error, not ignored).
+pub fn check_data_dir(dir: &Path) -> Result<(), SecretsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let md = std::fs::metadata(dir).map_err(|e| SecretsError::Io(dir.into(), e))?;
+        check_owner(dir, &md)?;
+        if md.permissions().mode() & 0o777 != 0o700 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| SecretsError::Io(dir.into(), e))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -36,8 +69,9 @@ fn valid_name(n: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-/// Refuse a file that holds secrets when its group or others have any
-/// access (`mode & 0o077`), checked before it is read. A symlink is judged
+/// Refuse a file that holds secrets when another user owns it (Gate 3
+/// review N-3) or its group or others have any access (`mode & 0o077`),
+/// checked before it is read. A symlink is judged
 /// by its target (`metadata` follows it, as `chmod` does). A missing file
 /// passes: there is nothing to read. Unix only; elsewhere there are no
 /// mode bits to check and this always passes.
@@ -47,6 +81,7 @@ pub fn check_private(path: &Path) -> Result<(), SecretsError> {
         use std::os::unix::fs::PermissionsExt;
         match std::fs::metadata(path) {
             Ok(md) => {
+                check_owner(path, &md)?;
                 let mode = md.permissions().mode() & 0o777;
                 if mode & 0o077 != 0 {
                     return Err(SecretsError::Permissions(path.into(), mode));
@@ -209,6 +244,22 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         assert!(check_private(&dir.path().join("missing")).is_ok());
+    }
+
+    /// Gate 3 review N-3: a secret file of another user was read as long
+    /// as its mode was private. Its owner is checked first.
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_file_of_another_user_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let theirs = Path::new("/etc/passwd");
+        if std::fs::metadata(theirs).unwrap().uid() == nix::unistd::geteuid().as_raw() {
+            eprintln!("SKIPPED: {} belongs to this user", theirs.display());
+            return;
+        }
+        let e = check_private(theirs).unwrap_err().to_string();
+        assert!(e.contains("owned by another user"), "{e}");
+        assert!(e.contains("/etc/passwd"), "{e}");
     }
 
     #[test]

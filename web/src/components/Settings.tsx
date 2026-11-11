@@ -1,14 +1,16 @@
 // Settings, loaded lazily: four sections, one per tier (lib/settings.ts
 // decides who sees which tab). One panel is mounted at a time, so leaving a
 // tab drops what it did not save (AppearanceFields reverts its preview).
+import "../lib/i18nPages";
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import { t } from "../lib/i18n";
 import { routeHash, settingsHash } from "../lib/routes";
 import { pickTab, type SectionId, type TabId, visibleSections } from "../lib/settings";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
-import { modelLabel, offeredModels, resolveModel, savablePrefs } from "../lib/models";
+import { modelLabel, offeredModels, resolveModel } from "../lib/models";
+import { savablePrefs } from "../lib/modelPlan";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { AppearanceFields } from "./Appearance";
 import { ProfileFields, SearchEngineFields } from "./forms";
@@ -62,7 +64,7 @@ function PrefsEditor(props: {
         setErr(null);
         setMsg(null);
         try {
-          const saved = await api.saveSettings(savablePrefs(p, props.models));
+          const saved = await pageApi.saveSettings(savablePrefs(p, props.models));
           props.onSaved(saved);
           setMsg("Saved.");
         } catch (x) {

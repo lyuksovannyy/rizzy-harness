@@ -19,6 +19,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// reach the port can open one; past this many, new ones are dropped at
 /// once instead of each holding a task and a buffer for the timeout.
 const MAX_PENDING_HANDSHAKES: usize = 32;
+/// Audit rows a run of failed handshakes may write per node id and per
+/// peer address in [`AUTH_FAILURE_WINDOW_MS`] (Gate 3 review L-7).
+pub const AUTH_FAILURE_AUDITS: usize = 5;
+const AUTH_FAILURE_WINDOW_MS: i64 = 15 * 60 * 1000;
 
 /// Node ids the master assigns: `[a-z0-9-]`, at most 64 characters. Others
 /// are refused before any lookup or audit row.
@@ -27,6 +31,12 @@ fn plausible_node_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The limiter of audit rows for failed handshakes ([`AUTH_FAILURE_AUDITS`]
+/// per key; keys are `node:<id>` and `peer:<address>`).
+pub(crate) fn auth_audit_limit() -> crate::auth::limits::FailureMap {
+    crate::auth::limits::FailureMap::new(4096, AUTH_FAILURE_AUDITS, AUTH_FAILURE_WINDOW_MS)
 }
 
 fn token_hash(t: &str) -> String {
@@ -46,9 +56,15 @@ impl Master {
             token_hash(&token),
             harness_core::now_ms() + JOIN_TOKEN_TTL.as_millis() as i64,
         );
+        let detail = serde_json::json!({ "by": by, "expires_ms": exp }).to_string();
         self.inner
             .mirror
-            .call(move |s| s.join_token_create(&h, exp, by.as_deref()))
+            .call(move |s| {
+                s.join_token_create(&h, exp, by.as_deref())?;
+                // Who may add a node, and when (Gate 3 review N-5); never
+                // the token or its hash.
+                s.audit("node.join_token", &detail)
+            })
             .await?;
         Ok(token)
     }
@@ -61,9 +77,21 @@ impl Master {
             .mirror
             .call(move |s| s.node_revoke(&id, harness_core::now_ms()))
             .await?;
+        if done {
+            // Under `nodes`, as `add_link` reads it: a link registered
+            // before this is taken down here, one after it is refused there
+            // (Gate 3 review L-4).
+            let mut nodes = lock(&self.inner.nodes);
+            lock(&self.inner.revoked).insert(node_id.to_string());
+            if let Some(n) = nodes.get_mut(node_id) {
+                n.tx = None;
+                n.info.connected = false;
+            }
+        }
         if let Some(stop) = lock(&self.inner.remote_stops).remove(node_id) {
             stop.cancel();
         }
+        let _ = self.inner.live.send(crate::Live::NodesChanged);
         let id = node_id.to_string();
         let _ = self
             .inner
@@ -99,7 +127,7 @@ impl Master {
                 };
                 let (this, tls, cert) = (this.clone(), tls.clone(), cert.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = this.node_connection(tcp, tls, &cert, permit).await {
+                    if let Err(e) = this.node_connection(tcp, peer, tls, &cert, permit).await {
                         tracing::info!(%peer, error = %e, "node connection ended");
                     }
                 });
@@ -111,6 +139,7 @@ impl Master {
     async fn node_connection(
         &self,
         tcp: tokio::net::TcpStream,
+        peer: std::net::SocketAddr,
         tls: Arc<rustls::ServerConfig>,
         cert: &MasterCert,
         permit: tokio::sync::OwnedSemaphorePermit,
@@ -183,14 +212,19 @@ impl Master {
                 if !ok {
                     // Audit rows only for registered, unrevoked nodes (a
                     // wrong key): ids anyone can make up would let a
-                    // stranger grow the audit log without limit.
-                    if known {
+                    // stranger grow the audit log without limit. And even
+                    // those at most AUTH_FAILURE_AUDITS per node id and per
+                    // peer address in the window: node ids are guessable
+                    // (L-7). The refusal is the same words either way.
+                    if known && self.audit_auth_failure(&node_id, peer) {
                         let detail = serde_json::json!({ "node_id": node_id }).to_string();
                         let _ = self
                             .inner
                             .mirror
                             .call(move |s| s.audit("node.auth_failed", &detail))
                             .await;
+                    } else if known {
+                        tracing::debug!(node = %node_id, %peer, "failed node auth; audit rows for it are at their limit");
                     } else {
                         tracing::info!(node = %node_id, "auth from an unknown node id");
                     }
@@ -210,6 +244,23 @@ impl Master {
                 {
                     old.cancel();
                 }
+                // A revoke that ran between the key check and the line above
+                // found no token to cancel: look again now that it is there
+                // (Gate 3 review L-4). `add_link` refuses it as well.
+                let id = node_id.clone();
+                if self
+                    .inner
+                    .mirror
+                    .call(move |s| s.node_is_revoked(&id))
+                    .await?
+                {
+                    stop.cancel();
+                    let mut stops = lock(&self.inner.remote_stops);
+                    if stops.get(&node_id).is_some_and(|s| s.is_cancelled()) {
+                        stops.remove(&node_id);
+                    }
+                    return Ok(());
+                }
                 let (to_node, from_node) = harness_link::server::bridge(ws, node_id.clone(), stop);
                 self.add_link(NodeLink { to_node, from_node }, false)
                     .await
@@ -217,6 +268,27 @@ impl Master {
                 Ok(())
             }
             None => Ok(()),
+        }
+    }
+
+    /// Whether a failed handshake for `node_id` from `peer` may write its
+    /// audit row: both its node id and its address are under their limit,
+    /// and then both count it.
+    fn audit_auth_failure(&self, node_id: &str, peer: std::net::SocketAddr) -> bool {
+        let now = harness_core::now_ms();
+        let (by_id, by_peer) = (format!("node:{node_id}"), format!("peer:{}", peer.ip()));
+        let limit = &self.inner.node_auth_audits;
+        match (
+            limit.try_reserve(&by_id, now),
+            limit.try_reserve(&by_peer, now),
+        ) {
+            (Ok(a), Ok(b)) => {
+                a.failed();
+                b.failed();
+                true
+            }
+            // A reservation not settled is given back when dropped.
+            _ => false,
         }
     }
 

@@ -3,7 +3,7 @@
 //! board and its templates.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -73,6 +73,7 @@ async fn start() -> T {
         profile: Profile::Chat,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -112,19 +113,14 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
+    let r = rb.login(c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 /// The admin "alex" and a member "bob".
@@ -135,30 +131,34 @@ async fn users(t: &T) -> (String, String) {
         .send()
         .await
         .unwrap();
-    let alex = cookie(&r);
-    req(
+    let alex = cookie(r).await;
+    let pw = req(
         t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         &alex,
     )
-    .await;
+    .await
+    .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let r = reqwest::Client::new()
         .post(format!("{}/api/login", t.base))
-        .json(&json!({"username": "bob", "password": "temporary pw"}))
+        .json(&json!({"username": "bob", "password": pw}))
         .send()
         .await
         .unwrap();
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
-        .header("cookie", cookie(&r))
+        .login(&cookie(r).await)
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
+        .json(&json!({"current": pw, "new": "bobs own password"}))
         .send()
         .await
         .unwrap();
-    (alex, cookie(&r))
+    (alex, cookie(r).await)
 }
 
 async fn new_project(t: &T, c: &str, body: Value) -> Value {

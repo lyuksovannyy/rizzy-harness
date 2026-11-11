@@ -4,7 +4,7 @@
 // the save, so this panel changes only that field (a chain saved between
 // that read and this save can still be lost).
 import { type FormEvent, useEffect, useState } from "react";
-import { api } from "../../api";
+import { pageApi } from "../../apiPages";
 import type { WorkspaceDetail } from "../../types";
 import { AgentMark, agentAlert } from "../AgentAvatar";
 import { Select } from "../Select";
@@ -24,7 +24,7 @@ export function WorkspaceGeneral(props: WorkspacePanelProps) {
     setAgent(d.settings.default_agent ?? "");
   };
   useEffect(() => {
-    api
+    pageApi
       .workspace(id)
       .then(show)
       .catch((x) => setErr(message(x)));
@@ -41,9 +41,9 @@ export function WorkspaceGeneral(props: WorkspacePanelProps) {
     setMsg(null);
     try {
       // The whole document goes back: read again, not as this panel loaded it.
-      const fresh = reagent ? (await api.workspace(id)).settings : null;
+      const fresh = reagent ? (await pageApi.workspace(id)).settings : null;
       show(
-        await api.updateWorkspace(id, {
+        await pageApi.updateWorkspace(id, {
           ...(renamed ? { name: trimmed } : {}),
           ...(fresh ? { settings: { ...fresh, default_agent: agent || null } } : {}),
         }),

@@ -18,11 +18,14 @@ import {
   projectsApi,
 } from "../lib/projects";
 import { artifactHash, type ProjectTab } from "../lib/routes";
-import { accentColor, PROJECT_ICONS, ProjectIcon } from "../lib/projectIcons";
+import { PROJECT_ICONS } from "../lib/projectIconSet";
+import { accentColor, ProjectIcon } from "../lib/projectIcons";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import { Composer, type Submission } from "./Composer";
 import { ACCENTS } from "./forms";
+import { LinkedA } from "./Linked";
+import { shownName } from "../md/hiddenChars";
 
 // Artifacts has no route of its own (lib/routes.ts): the tab is this page's.
 type Tab = ProjectTab | "artifacts";
@@ -293,9 +296,9 @@ function ProjectArtifacts(props: { project: ProjectDetail; workspaceId: string |
             {a.latest && <span className="muted small">v{a.latest.seq}</span>}
           </a>
           {a.latest?.status === "ready" && (
-            <a className="link small" href={latestUrl(a.artifact_id)} download>
+            <LinkedA className="link small" url={latestUrl(a.artifact_id)} download>
               Download
-            </a>
+            </LinkedA>
           )}
         </li>
       ))}
@@ -320,7 +323,7 @@ function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionR
           <li key={c.session_id}>
             <button className="session-item" onClick={() => props.onOpen(c.session_id)}>
               <MessageSquare size={15} className="muted" />
-              <span className="ellipsis grow">{c.title || "New chat"}</span>
+              <span className="ellipsis grow">{shownName(c.title) || "New chat"}</span>
               <span className="muted small">{new Date(c.updated_ms).toLocaleDateString()}</span>
             </button>
             <button className="icon small" aria-label="Remove from project" title="Remove from project" onClick={() => move(c.session_id, null)}>
@@ -336,7 +339,7 @@ function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionR
             <option value="">Choose one of your chats…</option>
             {loose.map((c) => (
               <option key={c.session_id} value={c.session_id}>
-                {c.title || "New chat"}
+                {shownName(c.title) || "New chat"}
               </option>
             ))}
           </select>
@@ -433,7 +436,7 @@ function BoardView(props: { project: ProjectDetail; chats: SessionRow[]; version
                     </button>
                     {card.chat && card.chat !== "private" && (
                       <button className="link small" onClick={() => props.onOpen((card.chat as { session_id: string }).session_id)}>
-                        <MessageSquare size={12} /> {card.chat.title || "Chat"}
+                        <MessageSquare size={12} /> {shownName(card.chat.title) || "Chat"}
                       </button>
                     )}
                     {card.chat === "private" && <span className="muted small">Linked to someone's chat</span>}
@@ -555,7 +558,7 @@ function CardEditor(props: {
               <option value="">None</option>
               {props.chats.map((c) => (
                 <option key={c.session_id} value={c.session_id}>
-                  {c.title || "New chat"}
+                  {shownName(c.title) || "New chat"}
                 </option>
               ))}
             </select>

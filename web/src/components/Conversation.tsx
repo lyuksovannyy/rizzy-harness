@@ -1,11 +1,14 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
+import "../lib/i18nPages";
 import { FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
+import { pageApi } from "../apiPages";
+import { dropDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
-import { fallbackNote } from "../lib/models";
+import { fallbackNote } from "../lib/modelPlan";
 import { markRunSeen } from "../lib/routineResults";
 import { routineHash } from "../lib/routes";
 import {
@@ -21,6 +24,7 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
+import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
 import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
@@ -60,7 +64,7 @@ function Undo(props: {
     setErr(null);
     setLastRewind(rewind);
     try {
-      await api.restoreTurn(props.sessionId, props.turnId, force, rewind);
+      await pageApi.restoreTurn(props.sessionId, props.turnId, force, rewind);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -224,16 +228,18 @@ export default function Conversation(props: {
   // Whether each question or form can be answered now, and what the agent
   // read before asking it. It changes with what progressSlots watches and
   // when a web result arrives.
+  const rowIncognito = props.row?.incognito;
   const inputs = useMemo((): Inputs => {
     const byMessage = new Map<string, InputInfo>();
     if (view) {
+      const incognito = !!(view.meta?.incognito ?? rowIncognito);
       items.forEach((it, i) => {
         if (it.type !== "assistant" || !inputBlock(it)) return;
-        byMessage.set(it.message_id, { state: inputState(items, i, view), notice: webNotice(items, i) });
+        byMessage.set(it.message_id, { state: inputState(items, i, view), notice: webNotice(items, i), incognito });
       });
     }
     return { sessionId, byMessage };
-  }, [view, progressSig, citeSig, sessionId]);
+  }, [view, progressSig, citeSig, sessionId, rowIncognito]);
   // Runs of web tool calls show as one "Researched" row; the rest of a run
   // is rendered by its first item.
   const webGroups = groupWeb(items);
@@ -249,6 +255,12 @@ export default function Conversation(props: {
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
   const incognito = !!(meta?.incognito ?? props.row?.incognito);
+  // A draft only once the chat is known not to be incognito; an incognito
+  // chat loses one it had (AUDIT L14).
+  const keepsDraft = !!(meta || props.row) && !incognito;
+  useEffect(() => {
+    if (incognito) dropDraft(sessionId);
+  }, [incognito, sessionId]);
   // Why the viewer cannot drive this agentic chat here: approvals offer Deny
   // only and the reply box is read-only.
   const blocked = props.row?.blocked ?? null;
@@ -281,7 +293,7 @@ export default function Conversation(props: {
       )}
       <header className="conv-head">
         <div className="conv-title">
-          <h1 className="ellipsis">{meta?.title ?? props.row?.title ?? "…"}</h1>
+          <h1 className="ellipsis">{shownName(meta?.title ?? props.row?.title ?? "…")}</h1>
           <div className="conv-meta">
             <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
               {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
@@ -289,7 +301,7 @@ export default function Conversation(props: {
             </span>
             <span className="muted">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
-            {agentic && <span className="mono muted ellipsis">{meta?.cwd}</span>}
+            {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
             {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
               <span
                 className="muted meter"
@@ -379,6 +391,7 @@ export default function Conversation(props: {
                       sessionId={sessionId}
                       group={web}
                       blocked={!!blocked}
+                      cwd={meta?.cwd}
                       tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
                     />
                   );
@@ -407,7 +420,7 @@ export default function Conversation(props: {
                                 type="button"
                                 className="link"
                                 disabled={busy}
-                                onClick={() => void api.selectVariant(sessionId, g, a.message_id)}
+                                onClick={() => void pageApi.selectVariant(sessionId, g, a.message_id)}
                               >
                                 Continue with this
                               </button>
@@ -481,20 +494,20 @@ export default function Conversation(props: {
                     return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
                     return (
-                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} />
+                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} cwd={meta?.cwd} />
                     );
                   case "artifact":
                     return <SavedItem key={i} staged={it.staged} />;
                   case "artifact_failed":
                     return (
                       <div key={i} className="msg error">
-                        Couldn't save {it.path}: {it.error}
+                        Couldn't save {showHidden(it.path)}: {showHidden(it.error)}
                       </div>
                     );
                   case "error":
                     return (
                       <div key={i} className="msg error">
-                        {it.message}
+                        {showHidden(it.message)}
                       </div>
                     );
                   case "agent_changed":
@@ -563,15 +576,15 @@ export default function Conversation(props: {
             models={props.models}
             workers={[]}
             agentId={activeAgent}
-            onAgentChange={(id) => void api.setAgent(sessionId, id)}
+            onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
             agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}
             readOnly={blocked}
             running={running}
-            draftKey={`harness.draft.${sessionId}`}
+            draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
-            onStop={() => void api.cancel(sessionId)}
+            onStop={() => void pageApi.cancel(sessionId)}
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
             onSubmit={async (s) => {
               stick.current = true;

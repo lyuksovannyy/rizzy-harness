@@ -2,7 +2,7 @@
 //! in free pages or the WAL of either database.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ async fn start(node_ttl: Option<Duration>) -> T {
         profile: Profile::Chat,
         incognito_ttl: node_ttl,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -81,12 +82,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb
-        .header("cookie", cookie)
-        .same_origin()
-        .send()
-        .await
-        .unwrap();
+    let r = rb.login(cookie).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -98,8 +94,7 @@ async fn login(t: &T) -> String {
         .send()
         .await
         .unwrap();
-    let c = r.headers()["set-cookie"].to_str().unwrap();
-    c.split(';').next().unwrap().to_string()
+    common::signed_in(r).await
 }
 
 async fn chat(t: &T, cookie: &str, text: &str, incognito: bool) -> String {
@@ -244,7 +239,7 @@ async fn deleting_a_chat_removes_it_everywhere() {
 async fn upload(t: &T, cookie: &str, name: &str, body: &[u8]) -> (StatusCode, Value) {
     let r = reqwest::Client::new()
         .post(format!("{}/api/attachments?name={name}", t.base))
-        .header("cookie", cookie)
+        .login(cookie)
         .same_origin()
         .body(body.to_vec())
         .send()
@@ -266,42 +261,34 @@ async fn attachments_are_owned_and_used_once() {
     let id = a["attachment_id"].as_str().unwrap().to_string();
 
     // Another account cannot use alex's upload.
-    req(
+    let pw = req(
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         &alex,
     )
-    .await;
+    .await
+    .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let r = reqwest::Client::new()
         .post(format!("{}/api/login", t.base))
-        .json(&json!({"username": "bob", "password": "temporary pw"}))
+        .json(&json!({"username": "bob", "password": pw}))
         .send()
         .await
         .unwrap();
-    let bob = r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
+    let bob = common::signed_in(r).await;
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
-        .header("cookie", &bob)
+        .login(&bob)
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
+        .json(&json!({"current": pw, "new": "bobs own password"}))
         .send()
         .await
         .unwrap();
-    let bob = r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
+    let bob = common::signed_in(r).await;
     let (_, v) = req(
         &t,
         Method::POST,

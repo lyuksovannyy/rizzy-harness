@@ -17,8 +17,8 @@ const providerModels = vi.fn();
 const refreshProviderModels = vi.fn();
 const saveProvider = vi.fn();
 const testModel = vi.fn();
-vi.mock("../api", () => ({
-  api: { memoryCfg, providers, testProvider, saveMemoryCfg, providerModels, refreshProviderModels, saveProvider, testModel },
+vi.mock("../apiPages", () => ({
+  pageApi: { memoryCfg, providers, testProvider, saveMemoryCfg, providerModels, refreshProviderModels, saveProvider, testModel },
 }));
 
 const { MemoryCfgForm } = await import("./Memory");

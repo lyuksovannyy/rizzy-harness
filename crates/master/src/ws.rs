@@ -17,6 +17,13 @@
 //! socket also re-checks its login, without sliding its expiry, every
 //! [`RECHECK`] and before every subscribe, which covers expiry and any
 //! path that deletes rows without telling us.
+//!
+//! A browser cannot give a WebSocket a header, so a cookie login's key
+//! (Gate 3 P-1, `auth`) comes as the socket's first message,
+//! `{"type":"login","key":…}`, within [`KEY_WAIT`]. Before it nothing is
+//! read from the mirror, subscribed or sent; without it, or with a wrong
+//! one, the socket is closed as signed out. Not in the URL (no secret in
+//! a URL) nor in a subprotocol, which proxies log.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -59,6 +66,24 @@ pub const RECHECK: Duration = Duration::from_secs(60);
 pub const SIGNED_OUT: u16 = 4401;
 /// How long a closing socket may take to send its close frame.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
+/// How long a cookie socket has to send its login key.
+pub const KEY_WAIT: Duration = Duration::from_secs(5);
+/// Cookie sockets still waiting for their key, in all (Gate 3 fix review
+/// 2, R2-1). They hold no user's place, and the cookie is not looked at
+/// before the key, so they are counted apart; past this many the oldest
+/// waiting one is closed (1013, try again) rather than the new one refused:
+/// a page sends its key at once, so a flood would have to open sockets
+/// faster than one round trip to keep the person's own from its key.
+pub const MAX_KEY_WAITING: usize = 64;
+/// Close code for a keyed socket over its user's [`MAX_SOCKETS_PER_USER`]
+/// (application range; reads as HTTP 429).
+pub const TOO_MANY: u16 = 4429;
+/// Close code for a keyed socket whose account must change its password
+/// first (reads as HTTP 403).
+pub const CHANGE_PASSWORD: u16 = 4403;
+/// Close code for a waiting socket pushed out by newer ones (RFC 6455
+/// "try again later").
+const TRY_AGAIN: u16 = 1013;
 
 /// The registry key of the API token's sockets (user ids are UUIDs).
 const API_TOKEN: &str = "api-token";
@@ -66,6 +91,9 @@ const API_TOKEN: &str = "api-token";
 /// Every open UI socket, by user.
 pub struct Sockets {
     open: Mutex<HashMap<String, Vec<Entry>>>,
+    /// Cookie sockets waiting for their key, oldest first, each with the
+    /// sender that pushes it out.
+    waiting: Mutex<std::collections::VecDeque<(u64, watch::Sender<bool>)>>,
     next_id: AtomicU64,
     recheck_ms: AtomicU64,
 }
@@ -82,6 +110,7 @@ impl Default for Sockets {
     fn default() -> Self {
         Self {
             open: Mutex::default(),
+            waiting: Mutex::default(),
             next_id: AtomicU64::new(0),
             recheck_ms: AtomicU64::new(RECHECK.as_millis() as u64),
         }
@@ -100,6 +129,26 @@ impl Sockets {
 
     pub fn count(&self) -> usize {
         lock(&self.open).values().map(Vec::len).sum()
+    }
+
+    /// A place among the sockets waiting for their key; at
+    /// [`MAX_KEY_WAITING`] the oldest is pushed out. The receiver turns
+    /// true when this one is.
+    fn wait(&self) -> (u64, watch::Receiver<bool>) {
+        let mut w = lock(&self.waiting);
+        while w.len() >= MAX_KEY_WAITING {
+            if let Some((_, out)) = w.pop_front() {
+                out.send_replace(true);
+            }
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = watch::channel(false);
+        w.push_back((id, tx));
+        (id, rx)
+    }
+
+    fn done_waiting(&self, id: u64) {
+        lock(&self.waiting).retain(|(i, _)| *i != id);
     }
 
     /// Take one of `owner`'s places, or `None` when all are taken.
@@ -169,6 +218,18 @@ impl Drop for Place {
     }
 }
 
+/// A cookie socket's place among those waiting for their key.
+struct Waiting {
+    m: Master,
+    id: u64,
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.m.inner.sockets.done_waiting(self.id);
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
@@ -182,41 +243,128 @@ enum ClientMsg {
     },
 }
 
+/// A cookie socket's first message.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum First {
+    Login { key: String },
+}
+
 pub async fn upgrade(
     State(m): State<Master>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(who) = auth::authenticate(&m, &headers).await else {
+    let ws = ws.max_message_size(MAX_MESSAGE).max_frame_size(MAX_MESSAGE);
+    // The API token, or a client that sent the login key as a header: the
+    // socket is authenticated now.
+    if let Some(who) = auth::authenticate(&m, &headers).await {
+        if who.must_change_password {
+            return (StatusCode::FORBIDDEN, "change your password first").into_response();
+        }
+        // A cookie login is tied to its session; the API token has none (it
+        // lasts as long as the process and its file).
+        let session = match who.user_id {
+            Some(_) => match auth::cookie_value(&headers) {
+                Some(id) => Some(auth::sha256_hex(&id)),
+                None => return (StatusCode::UNAUTHORIZED, "not logged in").into_response(),
+            },
+            None => None,
+        };
+        let owner = who.user_id.clone().unwrap_or_else(|| API_TOKEN.into());
+        let Some((id, revoked)) = m.inner.sockets.register(&owner, session.clone()) else {
+            return (StatusCode::TOO_MANY_REQUESTS, "too many open connections").into_response();
+        };
+        let place = Place {
+            m: m.clone(),
+            owner,
+            id,
+        };
+        return ws.on_upgrade(move |socket| async move {
+            let _place = place;
+            let (sink, stream) = socket.split();
+            run(m, who, session, revoked, sink, stream).await;
+        });
+    }
+    // A browser's cookie alone (a page cannot give a WebSocket a header):
+    // it must send the key first. Nothing about the cookie is looked up
+    // before that, so the answer here is the same for a live cookie, a dead
+    // one and a made-up one, and the socket takes none of the person's
+    // places while it waits (Gate 3 fix review 2, R2-1).
+    let Some(cookie) = auth::cookie_value(&headers) else {
         return (StatusCode::UNAUTHORIZED, "not logged in").into_response();
     };
-    if who.must_change_password {
-        return (StatusCode::FORBIDDEN, "change your password first").into_response();
-    }
-    // A cookie login is tied to its session; the API token has none (it
-    // lasts as long as the process and its file).
-    let session = match who.user_id {
-        Some(_) => match auth::cookie_value(&headers) {
-            Some(id) => Some(auth::sha256_hex(&id)),
-            None => return (StatusCode::UNAUTHORIZED, "not logged in").into_response(),
+    let hash = auth::sha256_hex(&cookie);
+    let (id, pushed_out) = m.inner.sockets.wait();
+    let waiting = Waiting { m: m.clone(), id };
+    ws.on_upgrade(move |socket| async move {
+        let (mut sink, mut stream) = socket.split();
+        let first = key_first(&m, &hash, &mut stream, pushed_out).await;
+        drop(waiting);
+        let user = match first {
+            KeyWait::User(u) => u,
+            KeyWait::No => return close(&mut sink, SIGNED_OUT, "signed out").await,
+            KeyWait::PushedOut => return close(&mut sink, TRY_AGAIN, "try again").await,
+        };
+        let who = auth::Principal::from_user(user);
+        if who.must_change_password {
+            return close(&mut sink, CHANGE_PASSWORD, "change your password first").await;
+        }
+        let owner = who.user_id.clone().unwrap_or_default();
+        let Some((id, revoked)) = m.inner.sockets.register(&owner, Some(hash.clone())) else {
+            return close(&mut sink, TOO_MANY, "too many open connections").await;
+        };
+        let _place = Place {
+            m: m.clone(),
+            owner,
+            id,
+        };
+        run(m, who, Some(hash), revoked, sink, stream).await;
+    })
+}
+
+/// What a cookie socket's wait for its key came to.
+enum KeyWait {
+    User(harness_store::UserRow),
+    /// Silence, another message, a wrong key, an ended or unknown login:
+    /// all the same.
+    No,
+    /// Newer waiting sockets pushed this one out.
+    PushedOut,
+}
+
+/// Wait for a cookie socket's login key: the first message, within
+/// [`KEY_WAIT`], must be the key of the login its cookie names.
+async fn key_first(
+    m: &Master,
+    session_hash: &str,
+    stream: &mut futures::stream::SplitStream<WebSocket>,
+    mut pushed_out: watch::Receiver<bool>,
+) -> KeyWait {
+    let first = tokio::select! {
+        biased;
+        _ = signed_out(&mut pushed_out) => return KeyWait::PushedOut,
+        r = tokio::time::timeout(KEY_WAIT, stream.next()) => r,
+    };
+    let Ok(Some(Ok(Message::Text(text)))) = first else {
+        return KeyWait::No;
+    };
+    match serde_json::from_str::<First>(&text) {
+        Ok(First::Login { key }) => match auth::socket_login(m, session_hash, &key).await {
+            Some(u) => KeyWait::User(u),
+            None => KeyWait::No,
         },
-        None => None,
-    };
-    let owner = who.user_id.clone().unwrap_or_else(|| API_TOKEN.into());
-    let Some((id, revoked)) = m.inner.sockets.register(&owner, session.clone()) else {
-        return (StatusCode::TOO_MANY_REQUESTS, "too many open connections").into_response();
-    };
-    let place = Place {
-        m: m.clone(),
-        owner,
-        id,
-    };
-    ws.max_message_size(MAX_MESSAGE)
-        .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| async move {
-            let _place = place;
-            run(m, who, session, revoked, socket).await;
-        })
+        Err(_) => KeyWait::No,
+    }
+}
+
+/// Send a close frame (bounded by [`CLOSE_WAIT`]).
+async fn close(sink: &mut Sink, code: u16, reason: &'static str) {
+    let frame = Message::Close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }));
+    let _ = tokio::time::timeout(CLOSE_WAIT, sink.send(frame)).await;
 }
 
 type Sink = futures::stream::SplitSink<WebSocket, Message>;
@@ -309,20 +457,22 @@ async fn may_see(m: &Master, who: &auth::Principal, sid: SessionId) -> bool {
     }
 }
 
+/// An authenticated socket, its place taken. Nothing was subscribed, read
+/// or sent before the key (P-1).
 async fn run(
     m: Master,
     who: auth::Principal,
     session: Option<String>,
     revoked: watch::Receiver<bool>,
-    socket: WebSocket,
+    sink: Sink,
+    mut stream: futures::stream::SplitStream<WebSocket>,
 ) {
-    let mut live = m.subscribe();
-    let (sink, mut stream) = socket.split();
     let mut out = Out {
         sink,
         revoked: revoked.clone(),
     };
     let mut revoked = revoked;
+    let mut live = m.subscribe();
     // Registered before this first check: a login that ended before it is
     // found here, one that ends after it flips `revoked`.
     let mut ended = !login_holds(&m, &who, session.as_deref()).await;

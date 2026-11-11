@@ -44,7 +44,7 @@ use harness_core::event::Profile;
 use harness_core::{RawEvent, SessionId, new_id};
 use harness_node::NodeLink;
 use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
-use harness_store::{AppendOutcome, Store};
+use harness_store::{AppendOutcome, HelloState, Store};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -52,6 +52,19 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a create's intended owner is kept for a chat that comes
+/// late (Gate 3 review P-6; fix review 6 N-2): far past `ACK_TIMEOUT`,
+/// short enough that a create the node never makes leaves no row for good.
+pub const CREATE_INTENT_TTL_MS: i64 = 60 * 60 * 1000;
+/// How many sessions of a hello one store read covers.
+const HELLO_BATCH: usize = 256;
+/// What a remote node's `ack.error` may put into a log line or an API
+/// response: one line of at most this many characters.
+const MAX_ACK_ERROR: usize = 300;
+/// A remote node's capabilities: at most this many, each an identifier of
+/// at most `MAX_CAPABILITY` bytes (longer ones are dropped, not cut).
+const MAX_CAPABILITIES: usize = 64;
+const MAX_CAPABILITY: usize = 64;
 /// The maintenance loop's first pass waits this long, so it never competes
 /// with startup, then runs every `MAINTENANCE_EVERY`.
 const MAINTENANCE_FIRST: Duration = Duration::from_secs(60);
@@ -136,6 +149,9 @@ pub struct MasterInner {
     /// Pending commands by request id, with the node each went to: only
     /// that node's ack settles it.
     acks: Mutex<HashMap<String, PendingAck>>,
+    /// Audit rows written for failed node handshakes, per node id and per
+    /// peer address (Gate 3 review L-7).
+    node_auth_audits: auth::limits::FailureMap,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
@@ -148,8 +164,9 @@ pub struct MasterInner {
             std::path::PathBuf,
         )>,
     >,
-    /// Sessions with a re-sent `session.delete` in flight.
-    redeleting: Mutex<HashSet<SessionId>>,
+    /// Sessions with a re-sent `session.delete` in flight, by node: one
+    /// node's resend never stands in for, or blocks, another's.
+    redeleting: Mutex<HashSet<(String, SessionId)>>,
     /// Diverged sessions with a `session.cancel` in flight.
     stopping: Mutex<HashSet<SessionId>>,
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
@@ -157,6 +174,12 @@ pub struct MasterInner {
     builtin_memory: Mutex<Option<Arc<harness_memory::SqliteMemory>>>,
     /// Stop handles of live remote links, by node id (revoke drops them).
     remote_stops: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// Nodes revoked while this process runs. Read and written only while
+    /// `nodes` is held (lock order: `nodes`, then this), so a link is
+    /// either registered before a revoke, which then takes it down, or
+    /// refused after it (Gate 3 review L-4). Revocations from before the
+    /// start are in the store (`nodes.revoked_ms`), read by `add_link`.
+    revoked: Mutex<HashSet<String>>,
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
@@ -252,7 +275,7 @@ fn blind(r: &Resolver, main: &str, compare: &[String]) -> Option<String> {
 }
 
 /// The length of `msg` as JSON, without building the text.
-fn json_len(msg: &MasterToNode) -> usize {
+fn json_len<T: Serialize + ?Sized>(msg: &T) -> usize {
     struct Count(usize);
     impl std::io::Write for Count {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -376,13 +399,15 @@ pub enum CommandError {
 }
 
 /// Why a command to a diverged session is refused (PLAN.md §3).
-const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key \
-     (see the server log); delete the chat to clear it";
+const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key, \
+     or its node sent an event the server refuses (see the server log); delete the chat to clear it";
 
-/// The session a command would make its node write to. Cancel and delete
-/// are left out on purpose: they are how a diverged session is stopped.
+/// The session a command would make its node write to. Cancel, delete and
+/// a deny are left out on purpose: they are how a diverged session is
+/// stopped (Gate 3 review P-7).
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
+        MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
         MasterToNode::Prompt { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
@@ -399,6 +424,52 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     }
 }
 
+/// The kv keys of creates' intended owners (Gate 3 review P-6).
+const CREATE_INTENT_PREFIX: &str = "create-intent:";
+
+fn create_intent_key(sid: SessionId) -> String {
+    format!("{CREATE_INTENT_PREFIX}{sid}")
+}
+
+/// Whether a stored intent is older than [`CREATE_INTENT_TTL_MS`] (one
+/// that cannot be read counts as old).
+fn intent_expired(v: &str, now: i64) -> bool {
+    serde_json::from_str::<serde_json::Value>(v)
+        .ok()
+        .and_then(|v| v["at"].as_i64())
+        .is_none_or(|at| now - at > CREATE_INTENT_TTL_MS)
+}
+
+/// Removes a command's pending-ack entry when its `send_command` ends in
+/// any way (an ack already took it out: removing again is a no-op).
+struct AckEntry<'a> {
+    master: &'a Master,
+    req_id: &'a str,
+}
+
+impl Drop for AckEntry<'_> {
+    fn drop(&mut self) {
+        lock(&self.master.inner.acks).remove(self.req_id);
+    }
+}
+
+/// Clears a session's resume-in-flight mark when dropped, unless disarmed:
+/// a snapshot that stops part way never leaves the session marked.
+struct ResumeGuard<'a> {
+    master: &'a Master,
+    node_id: &'a str,
+    sid: SessionId,
+    armed: bool,
+}
+
+impl Drop for ResumeGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.master.resume_done(self.node_id, self.sid);
+        }
+    }
+}
+
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -412,6 +483,7 @@ impl Master {
                 nodes: Mutex::new(HashMap::new()),
                 live,
                 acks: Mutex::new(HashMap::new()),
+                node_auth_audits: nodes::auth_audit_limit(),
                 auth,
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),
@@ -421,6 +493,7 @@ impl Master {
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
                 remote_stops: Mutex::new(HashMap::new()),
+                revoked: Mutex::new(HashSet::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
                 voice_usage: Default::default(),
@@ -519,6 +592,12 @@ impl Master {
 
     pub fn pdf_reader(&self) -> Option<&pdf::PdfReader> {
         self.inner.pdf.get()
+    }
+
+    /// Commands still waiting for their node's ack (tests).
+    #[doc(hidden)]
+    pub fn pending_acks(&self) -> usize {
+        lock(&self.inner.acks).len()
     }
 
     /// The mirror store (tests and tools).
@@ -629,8 +708,11 @@ impl Master {
     /// Send a message that is never acked (`artifact.fetch`); false when
     /// the node has no link.
     pub(crate) fn send_raw(&self, node_id: &str, msg: MasterToNode) -> bool {
-        lock(&self.inner.nodes)
+        let nodes = lock(&self.inner.nodes);
+        let revoked = lock(&self.inner.revoked).contains(node_id);
+        nodes
             .get(node_id)
+            .filter(|_| !revoked)
             .and_then(|n| n.tx.as_ref())
             .is_some_and(|tx| tx.try_send(msg).is_ok())
     }
@@ -797,22 +879,46 @@ impl Master {
                 "remote node {node_id} may not serve the chat profile"
             ));
         }
-        // What a remote node says about itself is shown in the UI.
-        let (hostname, version) = if embedded {
-            (hostname, version)
+        // What a remote node says about itself is shown in the UI; its
+        // capabilities are kept for the life of the link.
+        let (hostname, version, capabilities) = if embedded {
+            (hostname, version, capabilities)
         } else {
-            (clean_label(&hostname, 64), clean_label(&version, 64))
+            let caps = capabilities
+                .into_iter()
+                .filter(|c| c.len() <= MAX_CAPABILITY && !c.chars().any(char::is_control))
+                .take(MAX_CAPABILITIES)
+                .collect();
+            (clean_label(&hostname, 64), clean_label(&version, 64), caps)
         };
         if protocol_version != PROTOCOL_VERSION {
             return Err(format!(
                 "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
             ));
         }
+        // A node revoked before this process started, or while its
+        // handshake ran (Gate 3 review L-4): `node_connection` checked the
+        // key before the revoke landed.
+        let id = node_id.clone();
+        if self
+            .inner
+            .mirror
+            .call(move |s| s.node_is_revoked(&id))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!("node {node_id} is revoked"));
+        }
         let _ = link.to_node.try_send(MasterToNode::Welcome {
             protocol_version: PROTOCOL_VERSION,
         });
         let generation = {
             let mut nodes = lock(&self.inner.nodes);
+            // Under `nodes`, as `revoke_node` writes it: a revoke either
+            // landed already (refused here) or finds this link registered.
+            if lock(&self.inner.revoked).contains(&node_id) {
+                return Err(format!("node {node_id} is revoked"));
+            }
             let entry = nodes.entry(node_id.clone()).or_insert_with(|| NodeConn {
                 info: NodeInfo {
                     node_id: node_id.clone(),
@@ -839,37 +945,40 @@ impl Master {
         };
         let _ = self.inner.live.send(Live::NodesChanged);
 
-        // Ask for everything we have not mirrored yet.
-        for h in sessions {
-            let sid = h.session_id;
-            let deleted = self
-                .inner
-                .mirror
-                .call(move |s| s.is_deleted(sid))
-                .await
-                .unwrap_or(false);
-            if deleted {
-                self.redelete(&node_id, sid);
-                continue;
+        // Ask for everything we have not mirrored yet: in batches of one
+        // store read each, and only while this link is the node's newest, so
+        // a reconnect stops the old link's pass instead of stacking a second
+        // one on it (a hello can list about 127,000 sessions; Gate 3 review
+        // L-5). Only the node's own sessions are acted on (L-6).
+        for batch in sessions.chunks(HELLO_BATCH) {
+            if !self.is_generation(&node_id, generation) {
+                tracing::info!(node = %node_id, "a newer link took over; stopped reading the old hello");
+                break;
             }
-            // Nothing it sends for a diverged session is taken (PLAN.md §3).
-            let diverged = self
+            let ids: Vec<SessionId> = batch.iter().map(|h| h.session_id).collect();
+            let node = node_id.clone();
+            let states = match self
                 .inner
                 .mirror
-                .call(move |s| s.diverged_seq(sid))
+                .call(move |s| s.hello_states(&node, &ids))
                 .await
-                .unwrap_or(None);
-            if diverged.is_some() {
-                continue;
-            }
-            let mirror_head = self
-                .inner
-                .mirror
-                .call(move |s| s.head_seq(sid))
-                .await
-                .unwrap_or(0);
-            if h.head_seq > mirror_head {
-                self.request_resume(&node_id, sid, mirror_head);
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(node = %node_id, error = %e, "could not read the hello's sessions");
+                    break;
+                }
+            };
+            for (h, state) in batch.iter().zip(states) {
+                match state {
+                    HelloState::Deleted => self.redelete(&node_id, h.session_id),
+                    HelloState::Head(mirror) if h.head_seq > mirror => {
+                        self.request_resume_on(&node_id, Some(generation), h.session_id, mirror)
+                    }
+                    // Nothing it sends for a frozen session is taken (PLAN.md
+                    // §3); another node's session is not this node's business.
+                    HelloState::Head(_) | HelloState::Frozen | HelloState::Foreign => {}
+                }
             }
         }
 
@@ -877,6 +986,12 @@ impl Master {
         let this = self.clone();
         let nid = node_id.clone();
         tokio::spawn(async move { artifacts::on_node_up(&this, &nid).await });
+
+        // A turn whose owner lost access while this node was away is
+        // cancelled now (Gate 3 review P-3).
+        let this = self.clone();
+        let nid = node_id.clone();
+        tokio::spawn(async move { workspaces::cancel_revoked_on(&this, &nid).await });
 
         let this = self.clone();
         let nid = node_id.clone();
@@ -900,9 +1015,29 @@ impl Master {
         Ok(node_id)
     }
 
+    /// Whether `generation` is `node_id`'s newest link.
+    fn is_generation(&self, node_id: &str, generation: u64) -> bool {
+        lock(&self.inner.nodes)
+            .get(node_id)
+            .is_some_and(|n| n.generation == generation)
+    }
+
     fn request_resume(&self, node_id: &str, sid: SessionId, last_seq: u64) {
+        self.request_resume_on(node_id, None, sid, last_seq)
+    }
+
+    /// `request_resume`, sent only while `generation` (when given) is the
+    /// node's newest link.
+    fn request_resume_on(
+        &self,
+        node_id: &str,
+        generation: Option<u64>,
+        sid: SessionId,
+        last_seq: u64,
+    ) {
         let mut nodes = lock(&self.inner.nodes);
         if let Some(n) = nodes.get_mut(node_id)
+            && generation.is_none_or(|g| g == n.generation)
             && n.resuming.insert(sid)
             && let Some(tx) = &n.tx
             && tx
@@ -924,26 +1059,64 @@ impl Master {
         }
     }
 
+    /// Why a node refused a command, as it reaches log lines and API
+    /// responses: from a remote node one line of at most `MAX_ACK_ERROR`
+    /// characters with controls and hidden characters removed (Gate 3
+    /// review L-9). The embedded node's own errors are kept as written.
+    fn ack_error(&self, node_id: &str, error: Option<String>) -> String {
+        let Some(e) = error else {
+            return "rejected".into();
+        };
+        let embedded = lock(&self.inner.nodes)
+            .get(node_id)
+            .is_some_and(|n| n.info.embedded);
+        if embedded {
+            return e;
+        }
+        match harness_core::text::clean_line(&e, MAX_ACK_ERROR) {
+            e if e.is_empty() => "rejected".into(),
+            e => e,
+        }
+    }
+
     async fn on_node_message(&self, node_id: &str, msg: NodeToMaster) {
         match msg {
-            NodeToMaster::Event { event } => self.apply(node_id, event).await,
+            NodeToMaster::Event { event } => {
+                self.apply(node_id, event).await;
+            }
             NodeToMaster::Snapshot {
                 session_id,
                 head_seq,
                 events,
             } => {
+                // The resume stays in flight only while batches keep
+                // landing and more are due; every other way out of here
+                // (an event not taken, the head reached, a store error, a
+                // panic) clears it, so the next gap asks again (Gate 3
+                // review L-8).
+                let mut guard = ResumeGuard {
+                    master: self,
+                    node_id,
+                    sid: session_id,
+                    armed: true,
+                };
+                let mut landed = true;
                 for e in events {
-                    self.apply(node_id, e).await;
+                    landed &= self.apply(node_id, e).await;
                 }
                 let sid = session_id;
-                let head = self
-                    .inner
-                    .mirror
-                    .call(move |s| s.head_seq(sid))
-                    .await
-                    .unwrap_or(0);
-                if head >= head_seq {
-                    self.resume_done(node_id, session_id);
+                let head = self.inner.mirror.call(move |s| s.head_seq(sid)).await;
+                if landed && head.is_ok_and(|h| h < head_seq) {
+                    guard.armed = false;
+                } else {
+                    // The replay is over: a turn it revealed as running (it
+                    // started while the link was down) gets the revocation
+                    // sweep the hello ran before it arrived (Gate 3 fix
+                    // review 2, R2-2).
+                    let this = self.clone();
+                    tokio::spawn(
+                        async move { workspaces::cancel_revoked_session(&this, sid).await },
+                    );
                 }
             }
             NodeToMaster::Ack { req_id, ok, error } => {
@@ -962,7 +1135,7 @@ impl Master {
                     let _ = tx.send(if ok {
                         Ok(())
                     } else {
-                        Err(error.unwrap_or_else(|| "rejected".into()))
+                        Err(self.ack_error(node_id, error))
                     });
                 }
             }
@@ -997,11 +1170,13 @@ impl Master {
         }
     }
 
-    /// The replication rule (PLAN.md §3).
-    async fn apply(&self, node_id: &str, e: RawEvent) {
+    /// The replication rule (PLAN.md §3). True when the event is in the
+    /// mirror now (taken, or already there).
+    async fn apply(&self, node_id: &str, e: RawEvent) -> bool {
         let owner = node_id.to_string();
         let ev = e.clone();
         let res = self.inner.mirror.call(move |s| s.append(&owner, &ev)).await;
+        let landed = matches!(res, Ok(AppendOutcome::Applied | AppendOutcome::Duplicate));
         match res {
             Ok(AppendOutcome::Applied) => {
                 let structural = matches!(
@@ -1012,6 +1187,15 @@ impl Master {
                         | "approval_requested"
                         | "approval_resolved"
                 );
+                if e.kind == "session_created" {
+                    self.claim_late(node_id, e.session_id).await;
+                }
+                if e.kind == "session_created"
+                    && let Some(parent) = e.payload.get("parent_session").and_then(|v| v.as_str())
+                {
+                    self.note_dropped_parent(node_id, e.session_id, parent)
+                        .await;
+                }
                 if e.kind == "tool_call_started"
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
                 {
@@ -1041,6 +1225,9 @@ impl Master {
                 }
                 self.stop_diverged(node_id, e.session_id);
             }
+            Ok(AppendOutcome::Refused { seq, reason }) => {
+                self.refuse(node_id, e.session_id, seq, reason).await
+            }
             Ok(AppendOutcome::Revoked) => {
                 tracing::warn!(node = %node_id, session = %e.session_id, seq = e.seq, "dropped a frame from a revoked node");
             }
@@ -1048,6 +1235,85 @@ impl Master {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
         }
+        landed
+    }
+
+    /// A chat this node just said it made, that the master asked it for
+    /// and whose create had not claimed it yet (an ack before the chat, or
+    /// none in time): claim it for whoever asked (Gate 3 review P-6). The
+    /// claim drops a parent of another owner, as on the usual path.
+    async fn claim_late(&self, node_id: &str, sid: SessionId) {
+        let node = node_id.to_string();
+        let res = self
+            .inner
+            .mirror
+            .call(move |s| {
+                let key = create_intent_key(sid);
+                let Some(v) = s.kv_get(&key)? else {
+                    return Ok(false);
+                };
+                if intent_expired(&v, harness_core::now_ms()) {
+                    s.kv_delete(&key)?;
+                    return Ok(false);
+                }
+                let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
+                if v["node"].as_str() != Some(node.as_str()) {
+                    return Ok(false);
+                }
+                s.claim_session(sid, v["owner"].as_str(), v["workspace"].as_str())?;
+                s.kv_delete(&key)?;
+                Ok::<_, harness_store::StoreError>(true)
+            })
+            .await;
+        match res {
+            Ok(true) => {
+                tracing::info!(node = %node_id, session = %sid, "a chat that arrived after its create was claimed for whoever asked for it")
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(node = %node_id, session = %sid, error = %e, "could not claim a late chat")
+            }
+        }
+    }
+
+    /// A `session_created` named `parent` and the mirror did not keep it
+    /// (another node's chat, an unknown id, the session itself; or, after
+    /// the create's stamp, another owner's chat): say so once, ids only.
+    async fn note_dropped_parent(&self, node_id: &str, sid: SessionId, parent: &str) {
+        let kept = self
+            .inner
+            .mirror
+            .call(move |s| s.session(sid))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.parent_id.is_some());
+        if !kept {
+            tracing::warn!(node = %node_id, session = %sid, parent = %clean_label(parent, 64), "a node named a parent this session may not have; it is a top-level session");
+        }
+    }
+
+    /// An in-order event the mirror does not take (`AppendOutcome::Refused`):
+    /// the session is frozen as a diverged one is, and its node is told to
+    /// stop it. The log line names the rule, never the event's content.
+    async fn refuse(&self, node_id: &str, sid: SessionId, seq: u64, reason: &'static str) {
+        let node = node_id.to_string();
+        match self
+            .inner
+            .mirror
+            .call(move |s| s.freeze(sid, &node, seq))
+            .await
+        {
+            Ok(true) => {
+                tracing::error!(node = %node_id, session = %sid, seq, reason, "refused an event from a node; this session's mirror is frozen until it is deleted");
+                let _ = self.inner.live.send(Live::SessionsChanged);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(node = %node_id, session = %sid, error = %err, "could not freeze a session")
+            }
+        }
+        self.stop_diverged(node_id, sid);
     }
 
     async fn send_command(
@@ -1072,10 +1338,22 @@ impl Master {
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
+        // However this call ends, its ack entry goes with it: also when the
+        // caller drops it half way (an HTTP request's timeout), which used
+        // to leave the entry for good (Gate 3 review N-5).
+        let _entry = AckEntry {
+            master: self,
+            req_id: &req_id,
+        };
         let sent = {
             let nodes = lock(&self.inner.nodes);
+            // A revoked node gets nothing: no prompt, context or image
+            // (`revoke_node` also drops its sender; this holds even if a
+            // link were registered in a way that missed that).
+            let revoked = lock(&self.inner.revoked).contains(node_id);
             nodes
                 .get(node_id)
+                .filter(|_| !revoked)
                 .and_then(|n| n.tx.as_ref())
                 .map(|tx| match tx.try_send(msg) {
                     Ok(()) => Ok(()),
@@ -1086,22 +1364,13 @@ impl Master {
             Some(Ok(())) => {}
             // The node is connected but has `TO_NODE_QUEUE` commands it
             // has not read yet: as good as not answering.
-            Some(Err(true)) => {
-                lock(&self.inner.acks).remove(&req_id);
-                return Err(CommandError::Timeout);
-            }
-            Some(Err(false)) | None => {
-                lock(&self.inner.acks).remove(&req_id);
-                return Err(CommandError::NodeOffline(node_id.into()));
-            }
+            Some(Err(true)) => return Err(CommandError::Timeout),
+            Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
-            Ok(Err(_)) | Err(_) => {
-                lock(&self.inner.acks).remove(&req_id);
-                Err(CommandError::Timeout)
-            }
+            Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }
     }
 
@@ -1142,48 +1411,112 @@ impl Master {
             .model
             .filter(|m| !m.trim().is_empty())
             .filter(|m| auto.model.as_deref() != Some(m.as_str()));
+        // Only a model this workspace lists goes to a node (Gate 3 review
+        // N-5); the approval mode is a closed enum already, and the node
+        // clamps it to its own policy.
+        if let Some(m) = &chosen
+            && r.find_model(m).is_none()
+        {
+            return Err(CommandError::Rejected(format!("unknown model {m:?}")));
+        }
         let agent = match &chosen {
             None => auto,
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
         let sid = SessionId::new();
-        self.send_command(&node_id, |req_id| MasterToNode::Create {
-            req_id,
-            session_id: sid,
-            title: spec.title,
-            cwd: spec.cwd,
-            model,
-            approval_mode: spec.approval_mode,
-            profile: Some(profile),
-            agent: Some(agent),
-            incognito: spec.incognito,
-        })
-        .await?;
+        // Who asked, recorded before the node hears of it: a session_created
+        // that arrives after the ack, or after the ack timed out, is claimed
+        // for them when it lands, instead of staying a chat nobody owns
+        // (Gate 3 review P-6).
+        let now = harness_core::now_ms();
+        let intent = (owner.is_some() || workspace.is_some()).then(|| {
+            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace, "at": now})
+                .to_string()
+        });
+        let key = create_intent_key(sid);
+        let v = intent.clone();
+        self.inner
+            .mirror
+            .call(move |s| {
+                // Intents older than their time, of creates no node ever
+                // made, go here (fix review 6 N-2): one prefix read per
+                // create, over a handful of rows.
+                for (k, old) in s.kv_prefix(CREATE_INTENT_PREFIX)? {
+                    if intent_expired(&old, now) {
+                        s.kv_delete(&k)?;
+                    }
+                }
+                match v {
+                    Some(v) => s.kv_set(&key, &v),
+                    None => Ok(()),
+                }
+            })
+            .await?;
+        let sent = self
+            .send_command(&node_id, |req_id| MasterToNode::Create {
+                req_id,
+                session_id: sid,
+                title: spec.title,
+                cwd: spec.cwd,
+                model,
+                approval_mode: spec.approval_mode,
+                profile: Some(profile),
+                agent: Some(agent),
+                incognito: spec.incognito,
+            })
+            .await;
+        match &sent {
+            // The node may still make it: the intent stays for that.
+            Ok(()) | Err(CommandError::Timeout) => {}
+            // It was refused or never sent: nothing will come.
+            Err(_) if intent.is_some() => {
+                let key = create_intent_key(sid);
+                let _ = self.inner.mirror.call(move |s| s.kv_delete(&key)).await;
+            }
+            Err(_) => {}
+        }
+        sent?;
         // The node's session_created is mirrored before its ack (same
         // ordered link), so the row exists: stamp owner and workspace in one
         // transaction, then tell the UIs (the first SessionsChanged went out
         // before the chat had an owner).
         let auto = chosen.is_none().then(|| auto_model_key(sid));
-        let linked = self
+        let (linked, dropped) = self
             .inner
             .mirror
             .call(move |s| {
                 if let Some(key) = auto {
                     s.kv_set(&key, "1")?;
                 }
+                let mut dropped = None;
+                // A hostile or odd node may ack before the chat exists; then
+                // the intent stays and the chat is claimed when it lands.
+                if s.session(sid)?.is_some() {
+                    s.kv_delete(&create_intent_key(sid))?;
+                }
                 if owner.is_some() || workspace.is_some() {
+                    // The claim drops a parent of another owner (L-1).
+                    let named = s.session(sid)?.and_then(|r| r.parent_id);
                     s.claim_session(sid, owner.as_deref(), workspace.as_deref())?;
+                    let kept = s.session(sid)?.and_then(|r| r.parent_id);
+                    if kept.is_none() {
+                        dropped = named;
+                    }
                 }
                 // Into its project only where the chat landed: a removal
                 // racing the create leaves it in Personal, outside the
                 // team's project.
-                match project {
-                    Some(p) => s.link_new_session(sid, &p),
-                    None => Ok(false),
-                }
+                let linked = match project {
+                    Some(p) => s.link_new_session(sid, &p)?,
+                    None => false,
+                };
+                Ok::<_, harness_store::StoreError>((linked, dropped))
             })
             .await?;
+        if let Some(parent) = dropped {
+            tracing::warn!(node = %node_id, session = %sid, parent = %parent, "a node named another owner's chat as the parent of a new session; it is a top-level session");
+        }
         let _ = self.inner.live.send(Live::SessionsChanged);
         if linked {
             let _ = self.inner.live.send(Live::ProjectsChanged);
@@ -1327,6 +1660,18 @@ impl Master {
         if untrusted {
             turn_context.push(UNTRUSTED_NOTE.into());
         }
+        // The node records the message, its attachments and the image
+        // references as one `user_message`, which its log (and the mirror)
+        // refuses past `MAX_EVENT_BYTES`: say so now rather than fail the
+        // turn there. The margin covers the event's other fields.
+        let refs: Vec<_> = images.iter().map(|i| i.image_ref()).collect();
+        if json_len(&(&text, &attachments, &reply, &refs)) + 64 * 1024
+            > harness_store::MAX_EVENT_BYTES
+        {
+            return Err(CommandError::TooLarge(
+                "This message and its attachments are too long".into(),
+            ));
+        }
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));
         let sent_images: Vec<String> = images.iter().map(|i| i.media_id.clone()).collect();
@@ -1449,6 +1794,21 @@ impl Master {
         .await
     }
 
+    /// Delete every chat of `user_id` everywhere (their account is being
+    /// deleted, Gate 3 review P-6): on the mirror at once (with tombstones),
+    /// and on each owning node now or, for a node that is away, when it says
+    /// hello again. Runs in the background; failures are logged.
+    pub fn delete_sessions_of(&self, sids: Vec<SessionId>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            for sid in sids {
+                if let Err(e) = this.delete_session(sid).await {
+                    tracing::warn!(session = %sid, error = %e, "could not delete a deleted user's chat");
+                }
+            }
+        });
+    }
+
     /// Delete a session everywhere. The mirror copy goes (with a tombstone)
     /// even if the node is offline; the node is told again when it returns.
     pub async fn delete_session(&self, sid: SessionId) -> Result<(), CommandError> {
@@ -1486,7 +1846,8 @@ impl Master {
 
     /// A node still has a session we deleted (it was offline): tell it again.
     fn redelete(&self, node_id: &str, sid: SessionId) {
-        let first = lock(&self.inner.redeleting).insert(sid);
+        let key = (node_id.to_string(), sid);
+        let first = lock(&self.inner.redeleting).insert(key.clone());
         if !first {
             return;
         }
@@ -1499,7 +1860,7 @@ impl Master {
                     session_id: sid,
                 })
                 .await;
-            lock(&this.inner.redeleting).remove(&sid);
+            lock(&this.inner.redeleting).remove(&key);
         });
     }
 

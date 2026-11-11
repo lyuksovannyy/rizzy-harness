@@ -170,6 +170,15 @@ pub struct ToolCtx {
     /// How child processes (bash, graphify) are started: through the
     /// Landlock wrapper on a sandboxed node (node.toml `[sandbox]`).
     pub sandbox: sandbox::Confinement,
+    /// The session folder as pinned when the session was created (its
+    /// canonical path, device and inode). When set, every path is resolved
+    /// in it only after [`Self::workspace_dir`] has checked that it is still
+    /// that directory (R.1, PLAN.md T4).
+    pub pin: Option<harness_core::folder::FolderPin>,
+    /// The node-owned folder of a sub-agent session (its own folder under
+    /// the node's protected sessions folder): paths inside it are not
+    /// refused as protected, for this session only.
+    pub owned: Option<harness_core::folder::OwnedFolder>,
 }
 
 impl ToolCtx {
@@ -190,6 +199,23 @@ impl ToolCtx {
             artifacts: None,
             call_id: String::new(),
             sandbox: Default::default(),
+            pin: None,
+            owned: None,
+        }
+    }
+
+    /// The session folder's real path, checked against [`Self::pin`] when
+    /// one is set: a folder replaced since the session was created (renamed
+    /// away, a link or another directory in its place) is refused, so
+    /// nothing is read, written or started there. Every tool goes through
+    /// this before it touches the folder.
+    pub fn workspace_dir(&self) -> Result<PathBuf, String> {
+        match &self.pin {
+            Some(pin) => pin.check(),
+            None => self
+                .workspace
+                .canonicalize()
+                .map_err(|e| format!("workspace: {e}")),
         }
     }
 
@@ -215,8 +241,10 @@ impl ToolCtx {
     /// In every mode, `allow_outside_workspace` included, a path whose real
     /// location is inside a [`Self::protected`] folder is refused.
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
+        // First of all: the folder is still the session's own (pin).
+        let ws = self.workspace_dir()?;
         if self.allow_outside_workspace {
-            let n = self.normalized(p);
+            let n = self.normalized(&ws, p);
             // Nothing else is refused here, but where the path really leads
             // (links followed, dangling ones by their target) must not be
             // the data directory.
@@ -226,10 +254,6 @@ impl ToolCtx {
             }
             return Ok(n);
         }
-        let ws = self
-            .workspace
-            .canonicalize()
-            .map_err(|e| format!("workspace: {e}"))?;
         // Relative paths start at the real workspace, so the walk is always
         // over an absolute path whatever `workspace` looks like.
         let raw = Path::new(p);
@@ -268,10 +292,7 @@ impl ToolCtx {
         } else {
             path.clone()
         };
-        let ws = self
-            .workspace
-            .canonicalize()
-            .unwrap_or_else(|_| normalize(&self.workspace));
+        let ws = self.workspace_dir()?;
         // Only components below the workspace count when it is inside, so
         // a workspace that itself lives under some `.git` still works.
         let checked = real.strip_prefix(&ws).unwrap_or(&real);
@@ -291,6 +312,13 @@ impl ToolCtx {
 
     /// Refuse `real` (a real or normalized path) inside a protected folder.
     fn refuse_protected(&self, real: &Path, shown: &str) -> Result<(), String> {
+        // A sub-agent's own folder lies in a protected folder by design;
+        // only that folder is let through, for that session.
+        if let Some(o) = &self.owned
+            && real.starts_with(&o.top)
+        {
+            return Ok(());
+        }
         match self.protected.iter().find(|d| real.starts_with(d)) {
             Some(d) => Err(format!(
                 "path {shown} is inside the harness's own data directory {} (keys, tokens, \
@@ -301,12 +329,12 @@ impl ToolCtx {
         }
     }
 
-    fn normalized(&self, p: &str) -> PathBuf {
+    fn normalized(&self, ws: &Path, p: &str) -> PathBuf {
         let raw = Path::new(p);
         let joined = if raw.is_absolute() {
             raw.to_path_buf()
         } else {
-            self.workspace.join(raw)
+            ws.join(raw)
         };
         normalize(&joined)
     }

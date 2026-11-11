@@ -3,7 +3,7 @@
 //! leaves neither the file nor its key behind.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -84,7 +84,7 @@ fn auth(rb: reqwest::RequestBuilder, c: &str) -> reqwest::RequestBuilder {
     if c.starts_with("Bearer ") {
         rb.header("authorization", c)
     } else {
-        rb.header("cookie", c).same_origin()
+        rb.login(c).same_origin()
     }
 }
 
@@ -149,14 +149,9 @@ async fn upload(t: &T, c: &str, name: &str, bytes: &[u8]) -> (StatusCode, Value)
     upload_to(t, c, "", name, bytes, "application/octet-stream").await
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -164,7 +159,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -172,32 +167,39 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
 /// The server admin "alex" and a member "bob", with their user ids.
 async fn users(t: &T) -> [(String, String); 2] {
     let alex = cookie(
-        &post_anon(
+        post_anon(
             t,
             "/api/setup",
             json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}),
             None,
         )
         .await,
-    );
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    req(t, Method::POST, "/api/users", Some(body), &alex).await;
+    )
+    .await;
+    let body = json!({"username": "bob"});
+    let pw = req(t, Method::POST, "/api/users", Some(body), &alex)
+        .await
+        .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let first = post_anon(
         t,
         "/api/login",
-        json!({"username": "bob", "password": "temporary pw"}),
+        json!({"username": "bob", "password": pw}),
         None,
     )
     .await;
     let bob = cookie(
-        &post_anon(
+        post_anon(
             t,
             "/api/me/password",
-            json!({"current": "temporary pw", "new": "bobs own password"}),
-            Some(&cookie(&first)),
+            json!({"current": pw, "new": "bobs own password"}),
+            Some(&cookie(first).await),
         )
         .await,
-    );
+    )
+    .await;
     let mut out = Vec::new();
     for c in [alex, bob] {
         let (_, me) = req(t, Method::GET, "/api/me", None, &c).await;
@@ -258,8 +260,14 @@ async fn raw_head(t: &T, c: &str, extra: &str) -> tokio::net::TcpStream {
     let auth = if c.starts_with("Bearer ") {
         format!("Authorization: {c}")
     } else {
-        // A browser's upload: the cookie and its page's Origin.
-        format!("Cookie: {c}\r\nOrigin: http://{}", t.addr)
+        // A browser's upload: the cookie, its login key and its page's
+        // Origin.
+        let key = common::key_of(c).unwrap_or_default();
+        format!(
+            "Cookie: {c}\r\n{}: {key}\r\nOrigin: http://{}",
+            common::LOGIN_HEADER,
+            t.addr
+        )
     };
     let head = format!(
         "POST /api/media HTTP/1.1\r\nHost: {}\r\n{auth}\r\nX-File-Name: a.png\r\n{extra}\r\n",
@@ -627,7 +635,7 @@ async fn stalled_uploads_time_out_and_slots_are_bounded() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let r = reqwest::Client::new()
         .post(format!("{}/api/media", t.base))
-        .header("cookie", &bob)
+        .login(&bob)
         .same_origin()
         .body(png(1, 1, b"third"))
         .send()
@@ -665,7 +673,7 @@ async fn thumbnails_and_hints_belong_to_the_owner() {
     let put = |c: &str, body: Vec<u8>| {
         let rb = reqwest::Client::new()
             .put(format!("{}{thumb_path}", t.base))
-            .header("cookie", c)
+            .login(c)
             .same_origin()
             .body(body);
         async move { rb.send().await.unwrap().status() }
@@ -910,6 +918,9 @@ async fn socket(t: &T, c: &str) -> Socket {
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
+    s.send(Message::Text(common::socket_login(c).into()))
+        .await
+        .unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     assert_eq!(next_type(&mut s).await, "error");
     s
@@ -1134,7 +1145,7 @@ async fn the_search_provider_shows_only_the_callers_media() {
     let sid = sunset["media_id"].as_str().unwrap().to_string();
     let rb = reqwest::Client::new()
         .put(format!("{}/api/media/{sid}/thumb", t.base))
-        .header("cookie", &alex)
+        .login(&alex)
         .same_origin()
         .body(b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0".to_vec());
     assert_eq!(rb.send().await.unwrap().status(), StatusCode::OK);
@@ -1211,4 +1222,95 @@ async fn the_search_provider_shows_only_the_callers_media() {
     assert!(run("sunset", Some(alex_id), other).is_empty());
     // The API token searches everyone's.
     assert_eq!(run("sunset", None, None).len(), 4);
+}
+
+/// Gate 3 P-1: what the browser fetches by itself (an `<img>`, a
+/// `<video>`, a download) cannot send the login key, so it carries a link
+/// minted by an authenticated call: for one URL, for one login (its
+/// cookie must come along), for a while. The cookie alone gets nothing.
+#[tokio::test]
+async fn an_element_fetches_by_link_and_the_cookie_alone_gets_nothing() {
+    let t = start().await;
+    let [(alex, _), (bob, _)] = users(&t).await;
+    let (_, v) = upload(&t, &alex, "cat.png", &png(64, 48, &[7; 3000])).await;
+    let id = v["media_id"].as_str().unwrap().to_string();
+    let content = format!("/api/media/{id}/content");
+    let download = format!("{content}?download=1");
+    let events = "/api/sessions/00000000-0000-0000-0000-000000000000/events".to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/links",
+        Some(json!({"urls": [content, download, events]})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let links = v["links"].as_object().unwrap();
+    assert!(!links.contains_key(&events), "no link for a chat's events");
+    let inline = links[&content].as_str().unwrap().to_string();
+    let attach = links[&download].as_str().unwrap().to_string();
+    assert!(inline.starts_with(&format!("{content}?link=")), "{inline}");
+
+    // What the browser sends for an element: the cookie, no key, no Origin.
+    let element = |path: String, cookie: Option<String>, range: bool| {
+        let base = t.base.clone();
+        async move {
+            let mut rb = reqwest::Client::new().get(format!("{base}{path}"));
+            if let Some(c) = cookie {
+                rb = rb.header("cookie", c);
+            }
+            if range {
+                rb = rb.header("range", "bytes=0-9");
+            }
+            let r = rb.send().await.unwrap();
+            (r.status(), r.headers().get("content-disposition").cloned())
+        }
+    };
+    let (st, cd) = element(inline.clone(), Some(alex.clone()), false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(cd.unwrap().to_str().unwrap().starts_with("inline"));
+    let (st, cd) = element(attach.clone(), Some(alex.clone()), false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(cd.unwrap().to_str().unwrap().starts_with("attachment"));
+    // A video seeks with ranges on the same link.
+    assert_eq!(
+        element(inline.clone(), Some(alex.clone()), true).await.0,
+        StatusCode::PARTIAL_CONTENT
+    );
+    // The cookie alone, a link without the cookie, another login's cookie,
+    // the link moved to another URL or to its other variant: refused.
+    let refused = [
+        element(content.clone(), Some(alex.clone()), false).await.0,
+        element(inline.clone(), None, false).await.0,
+        element(inline.clone(), Some(bob.clone()), false).await.0,
+        element(
+            inline.replace("/content?", "/thumb?"),
+            Some(alex.clone()),
+            false,
+        )
+        .await
+        .0,
+        element(attach.replace("download=1&", ""), Some(alex.clone()), false)
+            .await
+            .0,
+    ];
+    assert_eq!(refused, [StatusCode::UNAUTHORIZED; 5]);
+    // Only for a browser login: the API token sends its header anyway.
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        "/api/links",
+        Some(json!({"urls": [content]})),
+        TOKEN,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // The link ends with the login.
+    let (st, _) = req(&t, Method::POST, "/api/logout", None, &alex).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        element(inline, Some(alex.clone()), false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
 }

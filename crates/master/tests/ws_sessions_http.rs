@@ -4,7 +4,7 @@
 //! most 64 KiB, and a user has at most 8 sockets.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::time::Duration;
 
@@ -57,22 +57,12 @@ async fn req(t: &T, method: Method, path: &str, body: Option<Value>, c: &str) ->
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    rb.header("cookie", c)
-        .same_origin()
-        .send()
-        .await
-        .unwrap()
-        .status()
+    rb.login(c).same_origin().send().await.unwrap().status()
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -80,7 +70,7 @@ async fn post(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Respo
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -94,40 +84,41 @@ async fn login(t: &T, user: &str, pw: &str) -> String {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK);
-    cookie(&r)
+    cookie(r).await
 }
 
 /// The admin "alex" and a member "bob": (cookie, user id) each.
 async fn users(t: &T) -> [(String, String); 2] {
     let alex = cookie(
-        &post(
+        post(
             t,
             "/api/setup",
             json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}),
             None,
         )
         .await,
-    );
-    let body = json!({"username": "bob", "password": "temporary pw"});
-    assert_eq!(
-        req(t, Method::POST, "/api/users", Some(body), &alex).await,
-        StatusCode::OK
-    );
-    let first = login(t, "bob", "temporary pw").await;
+    )
+    .await;
+    let made = post(t, "/api/users", json!({"username": "bob"}), Some(&alex)).await;
+    assert_eq!(made.status(), StatusCode::OK);
+    let made: Value = made.json().await.unwrap();
+    let pw = made["password"].as_str().unwrap();
+    let first = login(t, "bob", pw).await;
     let bob = cookie(
-        &post(
+        post(
             t,
             "/api/me/password",
-            json!({"current": "temporary pw", "new": "bobs own password"}),
+            json!({"current": pw, "new": "bobs own password"}),
             Some(&first),
         )
         .await,
-    );
+    )
+    .await;
     let mut out = Vec::new();
     for c in [alex, bob] {
         let me: Value = reqwest::Client::new()
             .get(format!("{}/api/me", t.base))
-            .header("cookie", &c)
+            .login(&c)
             .same_origin()
             .send()
             .await
@@ -143,18 +134,47 @@ async fn users(t: &T) -> [(String, String); 2] {
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn try_socket(t: &T, c: &str) -> Result<Socket, WsError> {
+/// Why a socket did not open: the upgrade was refused, or the server
+/// closed it after its key (Gate 3 fix review 2, R2-1: a cookie socket is
+/// judged only once its key arrives).
+#[derive(Debug)]
+enum Refused {
+    Upgrade(#[allow(dead_code)] WsError),
+    Closed(Option<u16>),
+}
+
+async fn try_socket(t: &T, c: &str) -> Result<Socket, Refused> {
     let mut r = format!("ws://{}/api/ws", t.addr)
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
-    let (mut s, _) = tokio_tungstenite::connect_async(r).await?;
+    let (mut s, _) = tokio_tungstenite::connect_async(r)
+        .await
+        .map_err(Refused::Upgrade)?;
+    s.send(Message::Text(common::socket_login(c).into()))
+        .await
+        .unwrap();
     // Answered: the server's loop is running.
-    s.send(Message::Text("hello".into())).await.unwrap();
-    assert_eq!(next_text(&mut s).await.unwrap()["type"], "error");
-    Ok(s)
+    let _ = s.send(Message::Text("hello".into())).await;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), s.next())
+            .await
+            .expect("socket went quiet");
+        match msg {
+            Some(Ok(Message::Text(text))) => {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["type"], "error", "{v}");
+                return Ok(s);
+            }
+            Some(Ok(Message::Close(f))) => {
+                return Err(Refused::Closed(f.map(|f| u16::from(f.code))));
+            }
+            None | Some(Err(_)) => return Err(Refused::Closed(None)),
+            Some(Ok(_)) => {}
+        }
+    }
 }
 
 async fn socket(t: &T, c: &str) -> Socket {
@@ -279,9 +299,9 @@ async fn an_admin_password_reset_closes_the_users_sockets() {
     let mut b = socket(&t, &bob).await;
     let st = req(
         &t,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"password": "new temporary"})),
+        Method::POST,
+        &format!("/api/users/{bob_id}/password"),
+        None,
         &alex,
     )
     .await;
@@ -309,7 +329,7 @@ async fn changing_your_password_closes_all_your_sockets() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::OK);
-    let fresh = cookie(&r);
+    let fresh = cookie(r).await;
     assert_eq!(ended(&mut b, SECOND).await, SIGNED_OUT);
     assert_eq!(ended(&mut b2, SECOND).await, SIGNED_OUT);
     alive(&mut a).await;
@@ -323,12 +343,20 @@ async fn an_expired_login_closes_its_socket_on_the_timer() {
     let t = start(Duration::from_millis(100)).await;
     let [(_, alex_id), _] = users(&t).await;
     let id = "ab".repeat(32);
+    let key = "cd".repeat(32);
     let now = harness_core::now_ms();
     t.master
         .inner_mirror()
-        .ui_session_create(&auth::sha256_hex(&id), &alex_id, now, now + 1_500)
+        .ui_session_create(
+            &auth::sha256_hex(&id),
+            &auth::sha256_hex(&key),
+            &alex_id,
+            now,
+            now + 1_500,
+        )
         .unwrap();
     let c = format!("{}={id}", auth::cookie_name());
+    common::remember(&c, &json!({"login_key": key}));
     let mut s = socket(&t, &c).await;
     alive(&mut s).await;
     assert_eq!(ended(&mut s, Duration::from_secs(4)).await, SIGNED_OUT);
@@ -379,7 +407,7 @@ async fn a_ninth_socket_is_refused_until_one_closes() {
         open.push(socket(&t, &bob).await);
     }
     match try_socket(&t, &bob).await {
-        Err(WsError::Http(r)) => assert_eq!(r.status().as_u16(), 429),
+        Err(Refused::Closed(code)) => assert_eq!(code, Some(4429)),
         other => panic!("ninth socket: {:?}", other.map(|_| ())),
     }
     // Per user: alex is not affected.

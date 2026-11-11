@@ -66,6 +66,7 @@ async fn node(dir: &std::path::Path, id: &str) -> NodeRuntime {
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -191,6 +192,58 @@ async fn join_rules() {
     );
     assert!(matches!(h.await.unwrap(), Err(LinkError::Rejected(_))));
     stop.cancel();
+}
+
+/// Gate 3 review L-7: node ids are guessable (the lowercased hostname),
+/// and every bad signature for a registered id wrote an audit row. A flood
+/// now writes a bounded number of rows, and an unknown id is refused in
+/// the same words as a bad signature. Review N-5: minting a join token is
+/// audited.
+#[tokio::test]
+async fn a_flood_of_bad_signatures_writes_a_bounded_audit() {
+    use harness_link::{Timing, client::connect_node};
+    let env = master().await;
+    let store = env.master.inner_mirror();
+    let before = store.audit_count().unwrap();
+    let token = env.master.create_join_token(None).await.unwrap();
+    assert_eq!(
+        store.audit_count().unwrap(),
+        before + 1,
+        "minting a join token is not audited"
+    );
+    let key = NodeKey::load_or_create(&env.dir.path().join("n1.key")).unwrap();
+    let id = join(&env.url, &env.fp, &token, "box", &key).await.unwrap();
+    let before = store.audit_count().unwrap();
+    let thief = NodeKey::load_or_create(&env.dir.path().join("thief.key")).unwrap();
+    let refusal = |node_id: &str| {
+        let remote = Remote {
+            url: env.url.clone(),
+            fingerprint: env.fp.clone(),
+            node_id: node_id.into(),
+        };
+        let thief = &thief;
+        async move {
+            match connect_node(&remote, thief, Timing::default()).await {
+                Err(LinkError::Rejected(r)) => r,
+                Err(e) => panic!("not a refusal: {e}"),
+                Ok(_) => panic!("authenticated with the wrong key"),
+            }
+        }
+    };
+    let bad = refusal(&id).await;
+    for _ in 0..40 {
+        assert_eq!(refusal(&id).await, bad);
+    }
+    assert_eq!(
+        refusal("no-such-node").await,
+        bad,
+        "an unknown id is told apart"
+    );
+    let rows = store.audit_count().unwrap() - before;
+    assert!(
+        (1..=harness_master::nodes::AUTH_FAILURE_AUDITS as u64).contains(&rows),
+        "{rows} audit rows for 41 bad signatures"
+    );
 }
 
 #[tokio::test]

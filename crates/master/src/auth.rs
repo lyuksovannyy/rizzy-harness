@@ -26,6 +26,20 @@
 //!   any `Origin` sent must match an allowed host with its scheme (CSRF /
 //!   cross-site WS); cookie-authenticated writes and WebSockets must send
 //!   one.
+//! * A login is bound to the page's origin, port included (Gate 3 P-1).
+//!   Browsers send a cookie to every port of its host, so the cookie also
+//!   reaches a server the agent started on the same machine, and such a
+//!   client writes any `Origin` it likes. Each login therefore also has a
+//!   random 256-bit **login key**, returned once in the answer that made
+//!   the login and stored only as its SHA-256 beside the session row. The
+//!   page keeps it in its own origin's storage and sends it as
+//!   [`LOGIN_HEADER`] on every request (a custom header also forces a CORS
+//!   preflight on any cross-origin script, which this server never
+//!   allows); a WebSocket sends it as its first message (`ws`). A cookie
+//!   without its key authenticates nothing. What the browser fetches by
+//!   itself (`<img>`, `<video>`, downloads) carries a short-lived link
+//!   minted by an authenticated call and bound to one URL and to the login
+//!   ([`links`]).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -37,7 +51,7 @@ use harness_store::{NewUser, Role, UserRow};
 use sha2::{Digest, Sha256};
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use harness_core::{APP_NAME, Secret};
@@ -46,7 +60,8 @@ use subtle::ConstantTimeEq;
 
 use crate::Master;
 
-mod limits;
+pub(crate) mod limits;
+pub mod links;
 pub use limits::{
     BUSY, BUSY_RETRY_AFTER_S, FAILURE_MAP_CAPACITY, HASH_PERMITS, HASH_WAIT, HashError, Hasher,
 };
@@ -54,6 +69,9 @@ pub use limits::{
 pub fn cookie_name() -> String {
     format!("{APP_NAME}_session")
 }
+
+/// The request header that carries a browser login's key (P-1).
+pub const LOGIN_HEADER: &str = "x-harness-login";
 
 /// A UI session ends this long after it was last used.
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
@@ -72,6 +90,8 @@ pub struct Auth {
     /// Caller (user id, or `api-token`) -> recent failed lookups by
     /// username (adding a workspace member).
     lookups: Failures,
+    /// Signs the links the browser fetches by itself; a new key per process.
+    links: links::Signer,
 }
 
 type Failures = Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>;
@@ -195,6 +215,30 @@ pub fn new_claim_code() -> String {
         .map(|c| c.iter().collect::<String>())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// A temporary password for an account an admin creates or resets (AUDIT
+/// L14): 4 groups of 5 from Crockford's base32 in lower case, so 100 bits
+/// from the OS generator in 23 characters, with no symbol that reads as
+/// another (no `i l o u`). 32 symbols divide 256, so masking a byte leaves
+/// no bias. Guessing it before its owner logs in is hopeless even without
+/// the login throttle, and it is still short enough to read out once. It is
+/// only ever returned in the one answer that made it.
+pub fn temporary_password() -> Secret<String> {
+    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let mut buf = [0u8; 20];
+    getrandom::fill(&mut buf).expect("OS randomness");
+    let chars: Vec<char> = buf
+        .iter()
+        .map(|b| ALPHABET[(*b & 31) as usize] as char)
+        .collect();
+    Secret::new(
+        chars
+            .chunks(5)
+            .map(|c| c.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("-"),
+    )
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
@@ -439,7 +483,13 @@ impl Auth {
             )),
             hasher: Hasher::default(),
             lookups: Arc::default(),
+            links: links::Signer::new(),
         }
+    }
+
+    /// The signer of this process's download links.
+    pub fn links(&self) -> &links::Signer {
+        &self.links
     }
 
     /// Whether this server serves TLS itself (`--tls`): its own scheme is
@@ -708,21 +758,45 @@ pub fn cookie_value(headers: &HeaderMap) -> Option<String> {
         .filter_map(|kv| kv.trim().split_once('='))
         .find(|(k, _)| *k == name)
         .map(|(_, v)| v.to_string())
-        .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|id| is_hex64(id))
 }
 
-/// Start a UI session for `user_id`; returns the cookie value.
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The login key a page sent ([`LOGIN_HEADER`]), when it has the shape of
+/// one (64 hex characters).
+pub fn login_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(LOGIN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|k| is_hex64(k))
+}
+
+/// A new browser login: the cookie value and the login key (P-1), 256
+/// random bits each. Both go to the browser once, in the answer that made
+/// the login; the store keeps only their hashes.
+pub struct UiLogin {
+    pub cookie: Secret<String>,
+    pub key: Secret<String>,
+}
+
+/// Start a UI session for `user_id`.
 pub async fn create_ui_session(
     store: &Store,
     user_id: &str,
-) -> Result<String, harness_store::StoreError> {
-    let id = random_hex(32);
-    let (hash, uid) = (sha256_hex(&id), user_id.to_string());
+) -> Result<UiLogin, harness_store::StoreError> {
+    let (id, key) = (random_hex(32), random_hex(32));
+    let (hash, bind, uid) = (sha256_hex(&id), sha256_hex(&key), user_id.to_string());
     let now = harness_core::now_ms();
     store
-        .call(move |s| s.ui_session_create(&hash, &uid, now, now + SESSION_TTL_MS))
+        .call(move |s| s.ui_session_create(&hash, &bind, &uid, now, now + SESSION_TTL_MS))
         .await?;
-    Ok(id)
+    Ok(UiLogin {
+        cookie: Secret::new(id),
+        key: Secret::new(key),
+    })
 }
 
 /// End the UI session with cookie value `id` (logout), and close the UI
@@ -749,18 +823,95 @@ pub async fn authenticate(master: &Master, headers: &HeaderMap) -> Option<Princi
             .token_matches(bearer.trim())
             .then(Principal::api_token);
     }
-    // One lookup: the session exists, has not expired and its user is not
-    // disabled. The user row is read now, so a role change counts at once.
+    by_cookie(master, headers).await
+}
+
+/// A browser login: the cookie and its login key, both required (P-1).
+/// One lookup: the session exists, has not expired, its user is not
+/// disabled and the key's hash matches, compared in constant time. The
+/// user row is read now, so a role change counts at once. Any failure is
+/// the same `None`, so nobody learns which half was wrong.
+async fn by_cookie(master: &Master, headers: &HeaderMap) -> Option<Principal> {
     let hash = sha256_hex(&cookie_value(headers)?);
+    let want = sha256_hex(login_key(headers)?);
+    login_with_key(master, hash, want)
+        .await
+        .map(Principal::from_user)
+}
+
+/// The user of the login whose cookie hashes to `session_hash`, if
+/// `key_hash` is its login key's hash. Uses the login (its expiry slides).
+async fn login_with_key(
+    master: &Master,
+    session_hash: String,
+    key_hash: String,
+) -> Option<UserRow> {
     let now = harness_core::now_ms();
     master
         .inner
         .mirror
-        .call(move |s| s.ui_session_user(&hash, now, SESSION_TTL_MS))
+        .call(move |s| {
+            s.ui_session_user(&session_hash, now, SESSION_TTL_MS, |stored| {
+                ct_eq(stored, &key_hash)
+            })
+        })
         .await
         .ok()
         .flatten()
-        .map(Principal::from_user)
+}
+
+/// The user behind a cookie, its key not yet seen: a WebSocket upgrade,
+/// which a browser cannot give a header. Nothing is authenticated by this;
+/// the socket waits for the key ([`socket_key_matches`]). Read only.
+pub async fn cookie_user(master: &Master, headers: &HeaderMap) -> Option<(UserRow, String)> {
+    let hash = sha256_hex(&cookie_value(headers)?);
+    let h = hash.clone();
+    let now = harness_core::now_ms();
+    let user = master
+        .inner
+        .mirror
+        .call(move |s| s.ui_session_check(&h, now))
+        .await
+        .ok()
+        .flatten()?;
+    Some((user, hash))
+}
+
+/// The principal behind a request the browser made by itself: its cookie
+/// is a live login and `uri` carries a link minted for that login and
+/// exactly this URL ([`links`]). Read only, like the elements it serves.
+pub async fn link_principal(master: &Master, headers: &HeaderMap, uri: &Uri) -> Option<Principal> {
+    let (user, hash) = cookie_user(master, headers).await?;
+    let now = harness_core::now_ms();
+    master
+        .inner
+        .auth
+        .links
+        .verify(&hash, uri, now)
+        .then(|| Principal::from_user(user))
+}
+
+/// `target` with a link for the request's login, when it came with a
+/// cookie; for a redirect from a request that was itself made by link.
+pub fn relink(master: &Master, headers: &HeaderMap, target: &str) -> Option<String> {
+    let hash = sha256_hex(&cookie_value(headers)?);
+    master
+        .inner
+        .auth
+        .links
+        .mint(&hash, target, harness_core::now_ms())
+}
+
+/// A cookie socket's first message named `key`: the user of the login
+/// whose cookie hashes to `session_hash`, if `key` is its login key and the
+/// login is live. The socket learns nothing of the cookie before this
+/// (Gate 3 fix review 2, R2-1), and a dead cookie and a wrong key are the
+/// same `None`.
+pub async fn socket_login(master: &Master, session_hash: &str, key: &str) -> Option<UserRow> {
+    if !is_hex64(key) {
+        return None;
+    }
+    login_with_key(master, session_hash.to_string(), sha256_hex(key)).await
 }
 
 pub async fn is_authenticated(master: &Master, headers: &HeaderMap) -> bool {

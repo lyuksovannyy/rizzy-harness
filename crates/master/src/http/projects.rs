@@ -136,7 +136,12 @@ async fn managed(m: &Master, headers: &HeaderMap, id: &str) -> ApiResult<(Princi
 
 /// The caller's own top-level chats per project (each sees only their own).
 async fn own_chats(m: &Master, who: &Principal) -> ApiResult<HashMap<String, usize>> {
-    let rows = m.inner.mirror.call(|s| s.sessions()).await?;
+    let owner = who.user_id.clone();
+    let rows = m
+        .inner
+        .mirror
+        .call(move |s| s.sessions_of(owner.as_deref()))
+        .await?;
     let links = p::links(m).await?;
     let mut n = HashMap::new();
     for r in rows

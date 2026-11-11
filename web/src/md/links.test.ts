@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { hostOf, linkKey, needsConfirm, parseUrl, textShowsTarget, urlKey, urlKeysIn, type Provenance } from "./links";
+import { hostOf, leavesApp, linkKey, needsConfirm, parseUrl, textShowsTarget, urlKey, urlKeysIn, type Provenance } from "./links";
 
 const u = (s: string) => parseUrl(s)!;
 const none: Provenance = { has: () => false };
@@ -140,5 +140,31 @@ describe("textShowsTarget", () => {
     expect(textShowsTarget("https://paypal.com/login", "https://evil.example/login", "evil.example")).toBe(false);
     expect(textShowsTarget("the docs", "https://docs.example/", "docs.example")).toBe(false);
     expect(textShowsTarget("", "https://docs.example/", "docs.example")).toBe(false);
+  });
+});
+
+describe("W-2: another port of the app's own host", () => {
+  const here = { protocol: "http:", hostname: "localhost", port: "7777" };
+
+  test("the host shows its port when it is not the scheme's default", () => {
+    expect(hostOf(u("http://localhost:8000/"))).toBe("localhost:8000");
+    expect(hostOf(u("https://www.example.com:8443/a"))).toBe("example.com:8443");
+    expect(hostOf(u("https://example.com:443/a"))).toBe("example.com");
+    expect(hostOf(u("http://[::1]:3000/"))).toBe("[::1]:3000");
+  });
+
+  test("a link to another port, scheme or loopback name of this machine leaves the app", () => {
+    expect(leavesApp(u("http://localhost:8000/"), here)).toBe(true);
+    expect(leavesApp(u("https://localhost:7777/"), here)).toBe(true);
+    expect(leavesApp(u("http://127.0.0.1:7777/"), here)).toBe(true);
+    expect(leavesApp(u("http://[::1]:5173/"), here)).toBe(true);
+    expect(leavesApp(u("http://app.localhost/"), here)).toBe(true);
+    // The app itself, and other hosts, do not.
+    expect(leavesApp(u("http://localhost:7777/#/s/1"), here)).toBe(false);
+    expect(leavesApp(u("https://example.com/"), here)).toBe(false);
+    expect(leavesApp(u("mailto:a@localhost"), here)).toBe(false);
+    const lan = { protocol: "http:", hostname: "192.168.1.5", port: "7777" };
+    expect(leavesApp(u("http://192.168.1.5:8080/"), lan)).toBe(true);
+    expect(leavesApp(u("http://192.168.1.6:8080/"), lan)).toBe(false);
   });
 });

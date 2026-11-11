@@ -12,6 +12,7 @@ import type { Route } from "../lib/routes";
 import { when } from "../lib/when";
 import type { SearchKind, SearchResult } from "../types";
 import { Highlight } from "./Highlight";
+import { LinkedImg } from "./Linked";
 
 export type Tab = "all" | SearchKind;
 
@@ -92,7 +93,7 @@ export const sameOrigin = (thumb: string) => thumb.startsWith("/") && !thumb.sta
 function RowIcon({ r, projects }: { r: SearchResult; projects: ProjectSummary[] }) {
   const [broken, setBroken] = useState(false);
   if (r.thumb && sameOrigin(r.thumb) && !broken) {
-    return <img className="search-thumb" src={r.thumb} alt="" width={32} height={32} loading="lazy" onError={() => setBroken(true)} />;
+    return <LinkedImg className="search-thumb" url={r.thumb} alt="" width={32} height={32} loading="lazy" onError={() => setBroken(true)} />;
   }
   return icon(r, projects);
 }

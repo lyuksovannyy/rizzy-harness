@@ -11,7 +11,7 @@
 //! a fake node that records what the master sends it.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -88,6 +88,7 @@ async fn rt(root: &Path, id: &str, profile: Profile) -> NodeRuntime {
         profile,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await
@@ -276,7 +277,7 @@ async fn req(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", c)
+        .login(c)
         .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -286,14 +287,9 @@ async fn req(
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -301,7 +297,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -309,18 +305,19 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
 /// The admin "alex", from the claim.
 async fn alex(t: &T) -> String {
     let body = json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"});
-    cookie(&post_anon(t, "/api/setup", body, None).await)
+    cookie(post_anon(t, "/api/setup", body, None).await).await
 }
 
 /// The member "bob", made by `admin`, signed in with his own password.
 async fn bob(t: &T, admin: &str) -> String {
-    let body = json!({"username": "bob", "password": "temporary pw"});
+    let body = json!({"username": "bob"});
     let (st, v) = req(t, Method::POST, "/api/users", Some(body), admin).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let login = json!({"username": "bob", "password": "temporary pw"});
+    let pw = v["password"].as_str().unwrap().to_string();
+    let login = json!({"username": "bob", "password": pw});
     let first = post_anon(t, "/api/login", login, None).await;
-    let change = json!({"current": "temporary pw", "new": "bobs own password"});
-    cookie(&post_anon(t, "/api/me/password", change, Some(&cookie(&first))).await)
+    let change = json!({"current": pw, "new": "bobs own password"});
+    cookie(post_anon(t, "/api/me/password", change, Some(&cookie(first).await)).await).await
 }
 
 fn chat_spec(prompt: &str) -> Value {
