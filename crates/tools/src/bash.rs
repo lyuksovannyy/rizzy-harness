@@ -24,7 +24,7 @@ pub const MAX_TIMEOUT_MAX_S: u64 = 3600;
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// SIGKILLs a process group when dropped while still armed.
-struct KillGroupOnDrop(Option<i32>);
+pub(crate) struct KillGroupOnDrop(pub(crate) Option<i32>);
 
 impl Drop for KillGroupOnDrop {
     fn drop(&mut self) {
@@ -38,7 +38,7 @@ impl Drop for KillGroupOnDrop {
 /// pipe: back-pressure, never unbounded memory.
 const PIPE_CHANNEL: usize = 8;
 
-fn signal_group(pgid: i32, sig: Signal) {
+pub(crate) fn signal_group(pgid: i32, sig: Signal) {
     // ESRCH (group already gone) is fine.
     let _ = killpg(Pid::from_raw(pgid), sig);
 }
