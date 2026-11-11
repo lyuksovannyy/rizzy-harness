@@ -1,0 +1,84 @@
+diff --git a/crates/tools/tests/review_gate3_extras.rs b/crates/tools/tests/review_gate3_extras.rs
+new file mode 100644
+index 0000000..869386a
+--- /dev/null
++++ b/crates/tools/tests/review_gate3_extras.rs
+@@ -0,0 +1,78 @@
++//! GATE 3 FIX REVIEW 6 (docs/security-review/2026-11-gate3-fixes-6.md),
++//! against branch `fix/R.4-remaining-findings`.
++//!
++//! Passes on that branch, and passing is the gap: invert the last assertion
++//! when it is closed.
++
++use std::ffi::OsStr;
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++
++use harness_tools::ToolEnv;
++use harness_tools::sandbox::{Confinement, Grants, Sandbox, Settings};
++
++/// The wrapper's arguments for a command of a session in `ws`.
++fn args(sb: &Arc<Sandbox>, ws: &Path) -> Vec<String> {
++    let c = Confinement::Confined {
++        sandbox: sb.clone(),
++        tmp: None,
++    }
++    .command(
++        OsStr::new("true"),
++        &[],
++        ws,
++        None,
++        &ToolEnv::default(),
++        &[],
++        Grants::default(),
++    )
++    .unwrap();
++    c.as_std()
++        .get_args()
++        .map(|a| a.to_string_lossy().into_owned())
++        .collect()
++}
++
++/// R4-1. A `[sandbox] write` entry is bound to where its path resolves
++/// when the node starts, and to nothing older. While the node runs, an
++/// entry replaced by a link is left out (the fix of R1d-1). But the link
++/// stays on disk, and at the next start the entry resolves through it: the
++/// link's target is then granted read-write to every session, with an
++/// identity, as if the operator had listed it. Reachable only where a
++/// session can write the entry's parent (an entry inside a session's
++/// folder or inside another `write` entry), and it waits for a restart.
++#[test]
++fn review_r4_1_an_extra_swapped_before_a_restart_is_granted_after_it() {
++    let home = tempfile::tempdir().unwrap();
++    let home = home.path().canonicalize().unwrap();
++    let code = home.join("code"); // a session's folder
++    let cache = code.join(".toolcache"); // listed under [sandbox] write
++    let ssh = home.join(".ssh");
++    std::fs::create_dir_all(&cache).unwrap();
++    std::fs::create_dir_all(&ssh).unwrap();
++    let settings = Settings {
++        write: vec![cache.clone()],
++        ..Default::default()
++    };
++    let start = || Arc::new(Sandbox::new(PathBuf::from("/bin/true"), &settings, None, &[]).unwrap());
++
++    let running = start();
++    assert!(args(&running, &code).contains(&cache.display().to_string()));
++    // What the session's shell may do in its own folder.
++    std::fs::rename(&cache, code.join(".toolcache.r")).unwrap();
++    std::os::unix::fs::symlink(&ssh, &cache).unwrap();
++    // The running node leaves the entry out: R1d-1's fix holds.
++    let now = args(&running, &code);
++    assert!(!now.contains(&ssh.display().to_string()), "{now:?}");
++    assert!(!now.contains(&cache.display().to_string()), "{now:?}");
++
++    // The node restarts (an upgrade, a reboot).
++    let restarted = start();
++    let after = args(&restarted, &code);
++    let at = after
++        .iter()
++        .position(|a| *a == ssh.display().to_string())
++        .expect("the link's target is granted after the restart");
++    assert_eq!(after[at - 2], "--rw", "{after:?}");
++    assert_ne!(after[at - 1], "system", "granted with an identity: {after:?}");
++}
