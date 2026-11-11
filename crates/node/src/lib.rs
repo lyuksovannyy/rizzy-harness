@@ -180,6 +180,10 @@ pub struct NodeRuntime {
 impl NodeRuntime {
     /// Open the runtime and recover any turns interrupted by a crash.
     pub async fn start(cfg: NodeConfig) -> Result<Self, harness_store::StoreError> {
+        // Lock files a killed git left in a checkpoint repository (A.18).
+        if let Some(base) = cfg.checkpoints_dir.clone() {
+            let _ = tokio::task::spawn_blocking(move || git::sweep_stale_locks(&base)).await;
+        }
         let rows = cfg.store.call(|s| s.sessions()).await?;
         let hosted: std::collections::HashSet<SessionId> =
             rows.iter().map(|r| r.session_id).collect();

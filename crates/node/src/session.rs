@@ -569,10 +569,12 @@ impl Session {
                 Some(format!("agent backend crashed: {e}")),
             ),
         };
+        let mut collect = None;
         if let Some((root, before)) = checkpoint
             && !self.log_failed.load(Ordering::SeqCst)
         {
             self.checkpoint_after(&turn_id, &root, &before).await;
+            collect = Some(root);
         }
         let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
             TurnEndReason::Cancelled
@@ -580,6 +582,11 @@ impl Session {
             reason
         };
         self.end_turn(&turn_id, reason, usage.clone(), error).await;
+        // The checkpoint repository's garbage collection, when due, runs
+        // after the turn has ended (A.18).
+        if let Some(repo) = collect {
+            crate::git::gc_in_background(repo);
+        }
         (reason, usage)
     }
 
@@ -845,6 +852,10 @@ impl Session {
             .ok_or("checkpoints are not available for this folder any more")?;
         // Held until this restore ends, on every path.
         let _claim = self.claim_folder(&repo.root)?;
+        // No garbage collection starts in the checkpoint repository while
+        // the restore runs: the copies `secure_blobs` makes are protected by
+        // nothing else until the files are written.
+        let busy = crate::git::hold(&repo);
         // `None`: an interrupted restore, put back over the folder as it is.
         let expected = match (&interrupted, rewind) {
             (Some(_), _) => None,
@@ -910,7 +921,7 @@ impl Session {
             .append(EventKind::Checkpoint(Checkpoint {
                 turn_id: saved.clone(),
                 phase: CheckpointPhase::BeforeRestore,
-                git_ref: now.sha,
+                git_ref: now.sha.clone(),
                 files: files.clone(),
                 excluded: now.nested.shown,
                 excluded_more: now.nested.more as u64,
@@ -979,6 +990,8 @@ impl Session {
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
         crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
+        drop(busy);
+        crate::git::gc_in_background(repo);
         Ok(())
     }
 
