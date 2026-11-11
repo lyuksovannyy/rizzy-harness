@@ -1,9 +1,9 @@
 # Nodes, credentials and environments: design note
 
-Status: **proposal, nothing built.** For after Gate 3 of `FIX_PLAN.md` (feature freeze until
-then). The decisions were made by the owner on 2026-11-10 and 2026-11-11. What is marked
-**recommendation** awaits the owner's yes; the questions that block the build are in §9.
-Costs and conflicts with the code are stated, not argued away.
+Status: **signed off by the owner on 2026-11-12; nothing built, nothing blocks the build.**
+For after Gate 3 of `FIX_PLAN.md` (feature freeze until then). The decisions were made by the
+owner on 2026-11-10, 2026-11-11 and 2026-11-12; every recommendation of the 2026-11-11 draft
+was accepted (§9). Costs and conflicts with the code are stated, not argued away.
 
 Citations: every claim about current code added on 2026-11-11 was read on `main` at merge
 `976670e` (which includes pull request 4). Citations in §1 rows P1 to P8 and in the passages
@@ -36,20 +36,26 @@ Second answer (the owner, later the same day), finished here:
 - **No conversation at rest on the node.** The node still writes every event first, durably,
   into a per-workspace **spool**, and deletes it once the master has acknowledged it; the
   master's log becomes the durable record, and the master sends a session's history to the
-  node when it is opened (§4.12). Memory only, the owner's first inclination, is priced as the
-  alternative (Q2).
+  node when it is opened (§4.12). Memory only, the owner's first inclination, was priced as the
+  alternative; the owner chose the spool on 2026-11-12.
 - **`local` is shareable like any other node**, attached to further workspaces by the usual
   pair flow; my earlier restriction is withdrawn (§4.10.6). This changes T11, with the owner's
   explicit yes of 2026-11-11.
-- Host sessions on a node with several workspaces: re-decided with the new layout (§4.10.3,
-  Q1).
+- Host sessions on a node with several workspaces: re-decided with the new layout (§4.10.3).
+
+**What changed on 2026-11-12.** The owner signed off every recommendation (§9) and decided that
+**agentic work happens only inside a git repository**: every agentic session's `files/` is a
+worktree of a repository, a session without a project gets its own repository, a new project
+starts with one the node initialises, and a linked folder must already be a repository
+(§4.11.5).
 
 **Summary.** Today a node is global, holds its own provider key in its own `config.toml`,
 runs every session in a folder on the host that the client names, and keeps every
 conversation in its own database for good. This note makes a node serve the workspaces it is
 attached to, each attachment made by a pair code the node shows, that workspace's owner or
 admin types, and the node's owner confirms. Every session gets its own folder under its
-workspace's directory, derived on the node, so the path decides the workspace. The node keeps
+workspace's directory, derived on the node, so the path decides the workspace, and always
+inside a git repository the node created or the node's owner linked. The node keeps
 no conversation at rest: it spools each event until the master has stored it. Model
 credentials move to the workspace (bring your own key) and reach a node per turn, in memory
 only, usable only by that workspace's sessions. **Environments** add a per-workspace volume
@@ -75,8 +81,10 @@ Terms used below:
   live (`[node] workspaces_dir`, §4.11).
 - **Session folder**: `<base>/<workspace-id>/<session-id>/`; its `files/` is the session's
   working folder.
-- **Linked folder**: a folder that already exists on the machine, made usable by one
+- **Linked folder**: a git repository that already exists on the machine, made usable by one
   workspace by the node's owner (`node link`, §4.11.3).
+- **Scratch session**: an agentic session with no project; it gets a repository of its own
+  (§4.11.5).
 - **Spool**: the node's durable store of events the master has not yet acknowledged (§4.12).
 - **Host session**: a session whose shell runs on the node's machine under Landlock, not in a
   container.
@@ -164,7 +172,7 @@ CREATE TABLE node_links (                    -- linked folders the node reported
 -- A cache of what the node said in its last hello, for the UI. Never an authority.
 
 -- sessions (existing table): `cwd` stops being an input. New columns:
---   files_kind TEXT NOT NULL      -- plain | project | link | environment
+--   files_kind TEXT NOT NULL      -- scratch | project | link | environment (never a plain folder)
 --   link_name  TEXT               -- with files_kind = link
 --   (project and environment are already linked through session_projects / session_environments)
 -- projects (existing): `cwd` goes; gains `repo_url TEXT` (a forge URL, or NULL for an
@@ -390,7 +398,7 @@ the claim creates it.
 
 ```toml
 [node]
-workspaces_dir = "~/Workspaces"   # the base directory (§4.11); see Q3 for the default
+workspaces_dir = "~/Workspaces"   # the base directory (§4.11); the default; `$HOME` itself is refused
 # workspace_roots goes: no session folder is chosen by path any more (§4.11)
 
 [attach]
@@ -543,7 +551,7 @@ classification serves deleting a session folder and detaching a workspace (§4.1
 
 | Finding in the session's `files/` | Class |
 |---|---|
-| Not a git repository, or a repository with no forge remote the session may push to (nothing can be saved automatically; A5) | c |
+| A repository with no forge remote the session may push to: a scratch session, a project created empty, a linked repository without a remote (nothing can be saved automatically; A5). Since 2026-11-12 there is no "not a git repository" case (§4.11.5). | c |
 | Clean status (untracked included, ignored excluded), no stash, no merge/rebase in progress, submodules clean, and HEAD reachable from a ref on the forge checked by `ls-remote` now | a |
 | Anything else, or the forge cannot be reached | b |
 
@@ -621,7 +629,7 @@ path = "/home/me/code/foo"
 | The node announces its workspace ids and, per workspace, its link names (never paths) in `node.hello`. | The master reconciles and shows link names; it never adds an attachment or a link from it. |
 
 **Where the workspace id lives in the protocol.** `session.create` loses `cwd` and gains a
-required `workspace_id` and `files: Plain | Project { project_id, repo_url?, branch } | Link {
+required `workspace_id` and `files: Scratch | Project { project_id, repo_url?, branch } | Link {
 name } | Environment { env_id }` (beside `crates/protocol/src/lib.rs:131-150`);
 `session.prompt`, `session.grant`, `env.*` and the approval, restore and set-agent commands
 carry `workspace_id` too. It is not a secret. The node keeps it implicitly: the session's
@@ -688,7 +696,7 @@ shared node `[sandbox] write` is refused (its entries become `<base>/<ws>/cache/
 | A bug in the file tools' path walk is a read of B. | Nothing: file tools run in the node process in every mode. Tests in §8. |
 
 **Host sessions on a shared node: allowed from Landlock ABI 9, refused below it by default.
-Recommendation (Q1).** `[execution] host_shell_shared = "abi9"` (the default) allows host
+Decided (owner, 2026-11-12).** `[execution] host_shell_shared = "abi9"` (the default) allows host
 sessions on a shared node only when the sandbox self-test reports ABI 9 or newer enforced;
 below that they are refused with the reason; `"always"` allows them below ABI 9 (an explicit,
 logged choice); `"never"` refuses them. My first draft refused them always by default, because
@@ -697,7 +705,7 @@ escape, which ABI 9 closes. What is left at ABI 9 (command lines in `/proc`, loo
 UDP, capacity) is a leak between people each workspace trusts with a shell, not a way into the
 other workspace's files or keys.
 
-Price of this answer: few kernels have ABI 9 today (not established per distribution), so in
+Price of the decision: few kernels have ABI 9 today (not established per distribution), so in
 practice a shared node refuses host sessions until its kernel is new, unless its owner sets
 `"always"`; and at ABI 9 a prompt-injected agent in A can still reach B's unauthenticated
 services on loopback. Price of "allowed" by default: below ABI 9 one injected agent in any
@@ -718,7 +726,7 @@ disk. Turns are not capped: a turn mostly waits for a model.
 
 | Resource | Rule | Bound for B while A is at its share |
 |---|---|---|
-| Command slots, `share = "borrow"` (default, **recommendation**, Q4) | Each attached workspace is guaranteed `max(1, max_commands / n)` slots. A free slot may be borrowed by anyone. When a slot frees, a workspace below its guarantee gets it first. No command is preempted. | B's command starts when the first running command on the node ends: at most the shortest running command, capped by `bash_timeout_max_s`. |
+| Command slots, `share = "borrow"` (default, decided 2026-11-12) | Each attached workspace is guaranteed `max(1, max_commands / n)` slots. A free slot may be borrowed by anyone. When a slot frees, a workspace below its guarantee gets it first. No command is preempted. | B's command starts when the first running command on the node ends: at most the shortest running command, capped by `bash_timeout_max_s`. |
 | Command slots, `share = "strict"` | Each workspace has `max(1, max_commands / n)` slots and never more. | B never waits for A; A alone uses only its share. |
 | Running containers | Strict: `max(1, max_running / n)` each. | B never waits for A. |
 | Environments | Strict: `max(1, max_environments / n)` each. | B never waits for A. |
@@ -726,7 +734,9 @@ disk. Turns are not capped: a turn mostly waits for a model.
 | The link | Shared, first come; one call streams at most `tool_stream_bytes`; B.7 decides whether control frames need a lane. | Not bounded per workspace; measured in B.10. |
 | Disk | A free-space floor for the whole node (§6). No per-workspace quota. | None. Residual. |
 
-`max_workspaces` must not exceed `max_commands` (refused at load). The caps live in `node.toml`
+`max_workspaces` must not exceed `max_commands` (refused at load). Separately, a turn has a
+soft limit of 100 changed files (a warning, never an error), designed in `docs/undo-and-stash.md`
+(on its own branch); it is not part of the share. The caps live in `node.toml`
 only; the master is told the workspace's own share in `node.hello`. A user whose workspace is at
 its share sees, as a line of the tool's live output, "waiting for a free slot on this node (this
 workspace may run 2 at a time)"; it never names another workspace or how many there are.
@@ -750,7 +760,7 @@ owner's; the link entries go.
 
 **Revoke N.** A server admin, or N's owner by `node leave`. Every attachment is detached as
 above, the key is marked revoked, `link_gen` bumps and the link drops. The master revokes N by
-itself when it flaps more than 3 times in 10 minutes (§6). **Recommendation (Q5):** the last
+itself when it flaps more than 3 times in 10 minutes (§6). **Decided (2026-11-12):** the last
 detach also revokes the node, so no pinned key outlives every attachment; `local` is the
 exception.
 
@@ -799,7 +809,7 @@ owner's explicit yes, given on 2026-11-11.
 **Containers on `local`** change the picture for the shell: it runs in another mount, PID and
 network namespace, without the data directory mounted, so the session bus escape and `/proc`
 reading are gone. They do not change it for the file tools (in the master process) or for a
-container escape (the master's uid). **Recommendation:** the Attach dialog for `local` says
+container escape (the master's uid). **Decided (2026-11-12):** the Attach dialog for `local` says
 this, and offers container sessions first where the node has them.
 
 ### 4.11 The two trees on the node
@@ -809,7 +819,8 @@ this, and offers container sessions first where the node has them.
   .rizzy-harness-base                     marks the folder as a base directory (§4.11.4)
   <workspace-id>/                         0700; created at pairing
     <session-id>/                         one per session, sub-agent sessions included
-      files/                              the session's working folder (its cwd)
+      files/                              the session's working folder (its cwd), always a git worktree
+      repo.git                            a scratch session's own bare repository (§4.11.5)
     projects/<project-id>.git             bare repository, one per project (§4.11.2)
     environments/<env>/                   cache/, home/, and repo.git when not a project's
     cache/                                host sessions' caches (replaces [sandbox] write)
@@ -844,7 +855,9 @@ The profile and the tool boundary are those of §4.10.3. A sub-agent session get
 branch when it can write, as A.4 requires on `main` (`crates/node/src/session.rs:1075-1078`);
 read-only children are granted the parent's `files/` read-only. That replaces today's
 worktrees under `<repo>/.git/harness-worktrees/` (`crates/tools/src/sandbox.rs:306-322`,
-`:365-372`). A writer child of a session with a plain `files/` is refused, as today.
+`:365-372`). Since every agentic `files/` is in a repository (§4.11.5), A.4's refusal of a
+writer child in a folder that is not a repository (`crates/node/src/session.rs:1212-1230`)
+can no longer be reached; it stays as a check.
 
 Checkpoints become per session folder (`<data>/ws/<ws>/checkpoints/<session-id>.git`), which
 ends P5 for derived folders: no two sessions share a folder any more, except through a linked
@@ -855,11 +868,11 @@ folder (§4.11.3). C.13 decides what a checkpoint holds.
 A session of a project with a repository gets `files/` as a **git worktree** of
 `<base>/<ws>/projects/<project-id>.git`, a **bare** repository (it has no working tree of its
 own; every session is a worktree), on its own branch `rizzy/<session-short>`. A session with no
-repository gets a plain, empty `files/`.
+project gets a repository of its own (§4.11.5); no agentic session gets a plain folder.
 
 | Question | Decision |
 |---|---|
-| How the repository first arrives | Cloned from the forge through the creating user's Connection (the git path of §4.7, a `forge.grant` for one clone) when the project has a `repo_url`; otherwise created empty with one empty initial commit, so worktrees have a base. Before Connections exist (N.6), only empty repositories and linked folders. |
+| How the repository first arrives | Cloned from the forge through the creating user's Connection (the git path of §4.7, a `forge.grant` for one clone) when the project has a `repo_url`; otherwise auto-initialised by the node (§4.11.5). Before Connections exist (N.6), only auto-initialised repositories and linked ones. |
 | Later sessions | `git fetch` with a fresh grant, then `git worktree add -b rizzy/<short> files/ <base ref>`, all through hardened git (T19). |
 | What the shell must be granted | Read-write on the bare repository too: a commit writes objects and refs there. **So committed work is shared between all sessions of a project on that node**: a session can read a sibling's commits and branches through git, though not its uncommitted `files/`. This is the same as environments today and is accepted inside a workspace. A planted hook or config in the bare repository is C.8's residual; our git ignores both. |
 | Deleting a session | Classify its `files/` (§4.8 table). Class `a`: `git worktree remove`, delete the branch if it is reachable from the forge, remove the session folder. Class `b` or `c`: the owner confirms; the worktree is removed, the branch is renamed `rizzy/trash/<session-short>` and kept with the folder in `.trash/` for `keep_deleted_days`. |
@@ -879,6 +892,7 @@ rizzy-harness node unlink <workspace> <name>
 |---|---|
 | Recorded in `attachments.toml` under its workspace; never created, changed or widened by anything the master sends. The master knows only the name (§4.10.1). | The node decides; paths stay on the node, as OpenCodex keeps root ids and labels, not paths, on its hub (§7). |
 | The path must exist, be canonical (no symlink in it), pass `check_protected`, and not equal, contain or lie inside the base directory, the data directory or another link. | One folder belongs to at most one workspace; detach of another workspace can never reach it. |
+| The path must be the top of a git repository with at least one commit. Otherwise `node link` refuses and prints how to make it one (`git init` and a first commit, by the owner). With the explicit flag `--init`, `node link` does it itself: `git init -b main` where there is no repository, and one empty commit where there is no HEAD, through hardened git; it never stages or commits the owner's files and writes no `.gitignore`. | Agentic work is only inside a repository (§4.11.5). Initialising writes a `.git` into someone's folder, so it needs the owner's explicit act, on the node. |
 | A session on a link uses the folder itself as its cwd; its session folder holds no `files/`. The sandbox treats the linked folder as that workspace's: other workspaces' profiles and tools refuse it. | The link is the workspace's folder. |
 | Several sessions on one link share the folder, as today: A.15's restore refusal stays, and checkpoints are keyed per link. | That is P5, accepted for links. |
 | Allowed on a shared node under the same rule as host sessions (§4.10.3), since a link is a host folder. A container session never mounts a link. | No separate rule needed. |
@@ -903,6 +917,60 @@ Before the node removes `<base>/<ws>`, `<base>/<ws>/<session>` or `<data>/ws/<ws
    `remove_dir_all` on Linux does not follow symlinks inside the tree).
 
 A linked folder is never a target. A failure at any step stops the removal and is reported.
+
+#### 4.11.5 Agentic work only inside a git repository
+
+Decided by the owner on 2026-11-12: an agentic session's `files/` is always inside a git
+repository; there are no plain-folder agentic sessions; a new project starts with a repository
+the node initialises. Chat sessions have no `files/` and are untouched.
+
+| Session | Its `files/` |
+|---|---|
+| In a project | A worktree of `projects/<project-id>.git` (§4.11.2). |
+| Without a project (a scratch session) | **A repository of its own**: the node initialises a bare `<base>/<ws>/<session-id>/repo.git` and adds `files/` as its worktree on branch `main`, the same shape as a project. |
+| On a linked folder | The linked repository itself (§4.11.3). |
+| A sub-agent that can write | A worktree of its parent's repository (§4.11.1). |
+| In an environment | A worktree of the environment's or project's repository (§4.6). |
+
+**Why a scratch repository and not "make a project first".** The quick "just try something"
+session must stay one click; a project is a heavier object (board, instructions, members'
+view). A scratch repository costs the node one `git init` and one empty commit, and gives the
+session everything a project session has: worktrees for writer sub-agents, checkpoints that
+borrow objects, classification. Promoting a scratch session to a project later is moving one
+bare repository into `projects/`; that UI is not designed here.
+
+**Auto-initialisation**, what the node does, always in a folder it owns under the base
+directory and never in anything of the user's:
+
+1. `git init --bare -b main <repo>` through the hardened git (`hardened`,
+   `crates/node/src/git.rs:109-128`: no system or global config, hooks off, no transports).
+   `main` is fixed; it is not a setting.
+2. One empty commit (the empty tree, message `rizzy-harness: start`), so there is always a
+   HEAD: a worktree needs a commit (`worktree_add`, `crates/node/src/git.rs:1828`), and a
+   repository without one broke snapshots before A.15.
+3. Identity: by §4.7's rule, the workspace forge account when there is one, otherwise the
+   hardened git's fixed `harness <harness@localhost>` (`crates/node/src/git.rs:125-128`). No
+   co-author trailer on this commit: it holds nothing of anyone's.
+4. **No starter `.gitignore`.** The node cannot know the language, and a template is a guess
+   that ends up committed. The harness's own exclusions stay in the checkpoint store, not in
+   the repository.
+5. `git worktree add -b <branch> files/ <that commit>`.
+
+Nothing the master sends names a path: it can ask for a scratch session or a project, and the
+node initialises only `<base>/<ws>/<session-id>/repo.git` or `<base>/<ws>/projects/<id>.git`,
+after checking the ids and the base as §4.11.4 does.
+
+**What this removes or simplifies.**
+
+| Where | Today | Afterwards |
+|---|---|---|
+| Checkpoints | Two cases: a repository (the shadow borrows the user's objects) and a plain folder (the shadow stores everything, `crates/node/src/git.rs:1-12`, `:611-617`). Experiment B.3: a plain folder of 250,000 files cannot finish its first snapshot within the 60 s timeout, and the shadow is 478 MiB at 100,000 files (`docs/checkpoint-cost.md`, "What the numbers mean", "Disk"). | Only the repository case remains for agentic sessions; the plain-folder branch can go with C.13. Untracked files in a repository are still stored in full, so B.3's plain numbers still describe a repository full of untracked files. |
+| Writer sub-agents | Refused in a folder that is not a repository (A.4, `crates/node/src/session.rs:1212-1230`). | Always satisfied; the check stays as a guard. |
+| Deletion classes (§4.8) | Class `c` included "not a git repository". | Class `c` means only "a repository with no forge remote it may push to": it still cannot be saved to a forge. |
+| `node link` | Any folder. | A repository with a commit, or `--init` by the owner (§4.11.3). |
+
+Plain-folder agentic sessions that exist before this is built are not carried over: before the
+first tagged release dev data directories are wiped (`CLAUDE.md`).
 
 ### 4.12 No conversation at rest on the node
 
@@ -939,11 +1007,11 @@ A linked folder is never a target. A failure at any step stops the removal and i
 | Reload cost | One `session.history` transfer: 500 events or 2 MiB per batch over the link, then a fold. A long session with stored deltas can be tens of MiB (deltas are stored events today, AUDIT D5); fix plan 4.8 decides whether hydration may skip them (not established that the fold is the same without them: `crates/core/src/view.rs:216`, `:282` fold deltas). |
 | Spool limit | `[limits] spool_mb` per workspace (64 MiB). At the limit the append fails, and the failed-append rule ends the turn (T28): no effect without its event. |
 
-#### 4.12.3 Spool against memory only (Q2)
+#### 4.12.3 Spool against memory only
 
 The owner leaned to "only in memory". What breaks with it, exactly:
 
-| Case | Spool (recommended) | Memory only |
+| Case | Spool (decided) | Memory only |
 |---|---|---|
 | A tool's result when the link drops | Durable in the spool, sent at reconnect. | Lost if the node restarts before reconnecting: the effect happened, its record did not. |
 | "The log is written first" | Kept: the spool append is the append. | Either every effect waits for the master's `session.stored` (a round trip before every tool start and approval, and the turn stops the moment the link drops), or "written" means "in this process's memory", which a crash erases. |
@@ -951,7 +1019,7 @@ The owner leaned to "only in memory". What breaks with it, exactly:
 | Disk | Unacknowledged events only, normally nothing; `secure_delete` and WAL truncation. | Nothing. |
 | Cost to build | A table, an ack message, deletion, the limit. | About the same code, and every effect path must wait for the master. |
 
-**Recommendation: the spool.** It keeps "the log is written first" true without a round trip per
+**Decided (2026-11-12): the spool.** It keeps "the log is written first" true without a round trip per
 effect, and what it leaves at rest is seconds of events while the link is up.
 
 #### 4.12.4 What changes, case by case
@@ -1103,7 +1171,7 @@ version is kept; phase 1 grew twice on 2026-11-11, and phase 1b is new.
 
 | Phase | What | Tests (abuse cases marked *) | Size |
 |---|---|---|---|
-| 1 | Workspace nodes with pair codes: `workspace_nodes`, `link_gen`, `Hello::Pair` with the node's confirmation, the attached list, `node pair`/`detach`/`workspaces`/`leave`; `workspace_id` on every session command; **the two trees**, derived session folders, `workspace_roots` removed, `node link`/`unlink`, sub-agent worktrees as session folders, per-session checkpoints and temp folders under `<data>/ws/`; the sandbox and file-tool boundaries; the shared-node rules; the command share; detach and the removal checks; `local` pairing from the server-admin page and `node pair --local`, `local_node_users` removed; a Nodes page per workspace. | The first version's phase 1 tests (codes reused, expired, a 6th wrong code, a 33rd request, 403 for a Personal chat naming a team node, a member who leaves, a non-member) plus the C.12 tests below. | L+ (about 8 to 9 days; was M) |
+| 1 | Workspace nodes with pair codes: `workspace_nodes`, `link_gen`, `Hello::Pair` with the node's confirmation, the attached list, `node pair`/`detach`/`workspaces`/`leave`; `workspace_id` on every session command; **the two trees**, derived session folders, `workspace_roots` removed, `node link`/`unlink` (repositories only, `--init`), scratch repositories and auto-initialisation (§4.11.5), sub-agent worktrees as session folders, per-session checkpoints and temp folders under `<data>/ws/`; the sandbox and file-tool boundaries; the shared-node rules; the command share; detach and the removal checks; `local` pairing from the server-admin page and `node pair --local`, `local_node_users` removed; a Nodes page per workspace. | The first version's phase 1 tests (codes reused, expired, a 6th wrong code, a 33rd request, 403 for a Personal chat naming a team node, a member who leaves, a non-member) plus the C.12 tests below. | L+ (about 9 to 10 days; was M) |
 | 1b | **The spool**: per-workspace `spool.db`, `session.stored`, deletion and WAL truncation, `session.history`, histories in memory with `history_mb`, restart recovery from spool plus master, `master.db` at `FULL`, B.10's measurement of the master's fsyncs. | The spool tests below. | L (4 to 5 days) |
 | 2 | BYOK, aliases, slots (unchanged). | *Workspace B cannot use A's provider id. *No key appears in plain text in `config.toml` or `master.db`. | L |
 | 3 | Grants keyed by workspace. | *`model_keys = "none"` or `"local"` refuses a grant. *Key bytes absent from the spool, its WAL and the audit table. *A turn with agent X and delegate Y receives exactly those providers. *After a restart, a turn waits for its grant. | M (+half a day) |
@@ -1130,6 +1198,10 @@ code):
 | N.1 | *Detaching A (from the master, and from `node detach` with the master unreachable) leaves B's running `sleep` alive and B's next prompt answered; A's later appends are refused; `<base>/<A>` and `<data>/ws/<A>` end in the trash and then gone; a file outside both trees, a linked folder, and a symlink planted in `<base>/<A>` pointing outside are all untouched. |
 | N.1 | *With `max_commands = 2`, `share = "borrow"`, A running `sleep 1` and `sleep 30`: B's command starts within 1.5 s; with `"strict"`, at once. |
 | N.1 | One link drop and reconnect resumes sessions of A and of B, each to its head, with no frame applied twice. |
+| N.1 | *Creating an agentic session of every kind (scratch, project, link, writer sub-agent) never yields a `files/` that is not inside a git repository. |
+| N.1 | A new project's repository and a scratch session's repository each have a HEAD commit on `main`, by the identity of §4.7, with no file in it. |
+| N.1 | *`node link` refuses a folder that is not a repository, or has no commit, and writes nothing into it; with `--init` it creates `.git` and one empty commit and stages none of the folder's files. |
+| N.1 | *No message from the master makes the node initialise a repository anywhere but `<base>/<ws>/<session-id>/repo.git` or `<base>/<ws>/projects/<id>.git`; a forged path, or an id not in the 32-hex form, is refused. |
 | N.1b | *After the master has sent `session.stored` for a session, a canary string from its messages is found nowhere under the data directory (spool, its WAL, any file), by a byte search. |
 | N.1b | *A link dropped while a tool runs: the tool's result is in the master's log after reconnect, exactly once. |
 | N.1b | *A node killed mid-turn and restarted recovers the turn's tail from its spool and the rest from the master, and closes the open turn once. |
@@ -1143,10 +1215,11 @@ code):
 | N.7 | *Detaching A with an unsafe session folder or environment schedules it; B's are not classified or touched. |
 | N.7 | *Deleting a session of class `b` keeps its branch as `rizzy/trash/…` and its folder in the trash for `keep_deleted_days`. |
 
-**What it costs**, against the first version: phase 1 from M to about 8 to 9 days (attachments
+**What it costs**, against the first version: phase 1 from M to about 9 to 10 days (attachments
 about 3, the two trees and derived folders 2, links 1, sub-agent and checkpoint moves 1 to 2,
-`local` pairing half a day); phase 1b new, 4 to 5 days; phase 3 half a day; phase 4 a day;
-phase 6 a day (first clone); phase 7 two days. About 17 to 19 days in all over the first
+`local` pairing half a day, repository-only sessions and auto-initialisation about 1, most of it
+tests); phase 1b new, 4 to 5 days; phase 3 half a day; phase 4 a day;
+phase 6 a day (first clone); phase 7 two days. About 18 to 20 days in all over the first
 version, most of it on the critical path before N.2.
 
 If time is short, cut in this order: the `borrow` share (ship `strict`); `local` pairing from
@@ -1156,17 +1229,18 @@ offline detach. Do not cut the attached list, derived folders, the workspace che
 the removal checks, the shared-node rule or the spool's acknowledgement-after-commit: they are
 the separation and the durability.
 
-## 9. Questions for the owner, and what remains
+## 9. Decided, and what remains
 
-**Blocking the build:**
+The owner accepted every recommendation of the 2026-11-11 draft. Nothing blocks the build.
 
-| # | Decision | Recommended | If you choose the other |
+| # | Question | Decision | Date |
 |---|---|---|---|
-| Q1 | Host sessions on a node with several workspaces (and on `local` always) | **Allowed from Landlock ABI 9, refused below by default** (`host_shell_shared = "abi9"`), `"always"` as an explicit choice (§4.10.3). | Allowed by default: below ABI 9 one injected agent in any workspace reads every other workspace's files and keys on that node, and on `local` the master's. Refused by default: the home case needs a setting or Podman even on a new kernel. |
-| Q2 | Spool or memory only (§4.12.3) | **The spool**: events are durable until the master has stored them, then deleted. | Memory only: either a round trip to the master before every tool start and approval, with turns stopping the moment the link drops, or tool results lost when a node restarts while disconnected. |
-| Q3 | The default base directory | **A dedicated folder, `~/Workspaces`**, with the base marker; `$HOME` refused as a base. | `$HOME`: 32-hex folders appear directly in the home folder beside everything else (seen by file managers, indexers and backups); the base cannot carry the "holds only ours" marker rule, so detach relies on the id check alone; `$HOME` contains the default data directory, which the base rules must then special-case. |
-| Q4 | The command share's default | **`borrow`** with priority for a workspace below its guarantee; `strict` as a setting. | `strict`: simpler, B never waits for A, but a lone user on a node with two attachments gets half its slots. |
-| Q5 | The last detach of a node | **Also revokes it** (except `local`). | The key stays pinned with no workspace; re-attaching needs no new key, and a stolen copy can still connect and wait. |
+| Q1 | Host sessions on a node with several workspaces (and on `local` always) | Allowed from Landlock ABI 9, refused below it by default (`host_shell_shared = "abi9"`); `"always"` and `"never"` as explicit settings (§4.10.3). | 2026-11-12 |
+| Q2 | Spool or memory only | The spool: events are durable until the master has stored them, then deleted (§4.12). | 2026-11-12 |
+| Q3 | The default base directory | `~/Workspaces`, with the base marker; `$HOME` itself is refused as a base (§4.11). | 2026-11-12 |
+| Q4 | The command share's default | `borrow`, with priority for a workspace below its guarantee; `strict` as a setting (§4.10.4). | 2026-11-12 |
+| Q5 | The last detach of a node | Also revokes it, except `local` (§4.10.5). | 2026-11-12 |
+| Q6 | Agentic work outside a git repository | Not allowed: every agentic `files/` is in a repository; scratch sessions and new projects get one the node initialises; `node link` needs a repository or `--init` (§4.11.5). | 2026-11-12 |
 
 **To confirm, not blocking:** A1, A2, A3, A4; R1; commit identity (§4.7) and its four open
 points (author or co-author; autosave without a workspace account; what a user's own connection
