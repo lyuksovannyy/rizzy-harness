@@ -1,12 +1,25 @@
 # Undo and stash: design note
 
-Status: **proposal, nothing built.** Task C.13 of `ADOPTION_PLAN.md`, answering decision O11.
-For after Gate 3 of `FIX_PLAN.md` (feature freeze), except task A.17 (§2.4), a fix to built
-behaviour that may land earlier. The direction is the owner's (2026-11-11 and 2026-11-12, revised
-the same day); what the owner left to us is marked as a recommendation awaiting their yes. Costs
-come from experiment B.3 (`git show exp/B.3-checkpoint-cost:docs/checkpoint-cost.md`, cited as
-"B.3"). **B.3 measured on a rotational USB hard disk under a load average of 10 to 14, warm cache
-only: they are slow-disk numbers, and no SSD or quiet machine was measured.**
+Status: **decided by the owner on 2026-11-12, except Q1 (the two-choice prompt, §3.3), which was
+left unanswered; the note proceeds on its recommendation.** Nothing built. Nothing blocks the build
+after Gate 3 of `FIX_PLAN.md` (feature freeze), and task A.17 (§2.4), a fix to built behaviour,
+may land earlier. Task C.13 of `ADOPTION_PLAN.md`, answering decision O11. Costs come from
+experiment B.3, `docs/checkpoint-cost.md` (cited as "B.3"). **B.3 measured on a rotational USB
+hard disk under a load average of 10 to 14, warm cache only: they are slow-disk numbers, and no SSD
+or quiet machine was measured.**
+
+**Two rules frame the note.** First, an undo after a commit works "like git revert" (the owner's
+words). It never removes a commit from history. It applies the inverse change to the working
+files, which is what `git revert --no-commit` does to the files, except that we also leave the
+index alone. **We do not create the revert commit:** that would write objects and move a branch in
+the user's repository, which we never do. The person commits the result when they are satisfied.
+Second, **agentic work happens only inside a git repository** (owner, 2026-11-12; designed in
+`docs/nodes-credentials-environments.md` on another branch: new projects get an auto-initialised
+repository with an initial commit, and there are no plain-folder agentic sessions). Today plain
+folders still get shadow checkpoints that store everything; this note does not design for them.
+Under that rule HEAD always exists and the shadow always borrows. So the note has no "unborn" or
+"no repository" case, the HEAD message never degrades for lack of a repository, and A.17 always
+applies.
 
 **Summary.** Most of the direction is already built under other names: each turn's `before`
 snapshot captures the person's edits made between turns, the pre-restore snapshot (A.9) is a
@@ -25,7 +38,10 @@ shadow repository, and A.16 refuses a restore whose content is gone. What is new
    person or by the agent.
 4. **Unstash** is a three-way merge per file. Clean files go back with no further step. For a
    conflicting file, whoever unstashes chooses: skip it, write it beside as `name-1.py`, or have
-   the agent merge it.
+   the agent merge it. When the agent unstashes, the session's approval mode decides how much it
+   may choose by itself.
+5. **A soft limit of 100 changed files per turn.** Above it, the end of the turn and its undo
+   warn. It never blocks anything.
 
 Terms used below:
 
@@ -49,7 +65,7 @@ Short paths: `git.rs` and `session.rs` are in `crates/node/src/`, `event.rs` and
 
 | Piece | Where | What it does |
 |---|---|---|
-| Turn snapshots | `session.rs`, `checkpoint`, `checkpoint_after`; `git.rs`, `snapshot_full` | Before and after every agentic turn, a shadow commit of the folder's tree under `refs/harness/<session>/<turn>/{before,after}`. Plain folders are included. |
+| Turn snapshots | `session.rs`, `checkpoint`, `checkpoint_after`; `git.rs`, `snapshot_full` | Before and after every agentic turn, a shadow commit of the folder's tree under `refs/harness/<session>/<turn>/{before,after}`. Plain folders too, for now. |
 | Borrowing | `git.rs`, `repo_for_with` | The shadow reads the user's objects through `objects/info/alternates`. |
 | Dropping duplicates | `git.rs`, `prune` (`gc --prune=now`); comment on `secure_blobs` | gc repacks with `-l`, so shadow copies of objects the user's repository has are dropped. |
 | Pre-restore snapshot (A.9) | `session.rs`, `restore`; `CheckpointPhase::BeforeRestore` in `event.rs` | Every undo first saves the folder as `restore-<id>`; restoring that id undoes the undo. Pruned under `checkpoints_keep`. |
@@ -67,7 +83,7 @@ record of the user's HEAD.
 | # | Point | State | Missing |
 |---|---|---|---|
 | 1 | The shadow holds only fresh edits; committed content is git's | **Already true as a storage rule** (§2.3). | Nothing, apart from A.17's pins, which deliberately keep old versions of changed files. |
-| 2 | After each turn the shadow records the present state, including folders without a repository | **Already true.** | Nothing. |
+| 2 | After each turn the shadow records the present state, including folders without a repository | **Already true.** | Nothing. Plain folders stop being a case once the repository rule is built. |
 | 3 | The person's edits are tracked | **Partly.** Edits between turns are in `before(T)`; edits after the last turn are in the pre-restore snapshot. | Attribution: one tree diff `after(T-1)..before(T)`, no scan. Edits made during a turn count as the turn's (§4.4). |
 | 4 | An undo over the person's changes asks about a stash; the agent can view one | **Partly.** Today: a refusal, then "Undo anyway" with a copy that is pruned after 10 changes and shown nowhere. | The question, a listed stash with a 30-day life, unstash, agent tools (§3). |
 | 5 | Borrowing stays | **Already true.** | A.17 removes the main thing borrowing still cost undo (§2.4). |
@@ -84,7 +100,16 @@ record of the user's HEAD.
   midnight. Q4 is answered: merge, with a choice per conflicting file. Q5 is decided yes, as
   A.17.
 - Stashes can be deleted by the agent too, through the approval path.
-- Recommended now: no "undo without a stash" choice (§3.3, Q1).
+- Recommended: no "undo without a stash" choice (§3.3). The owner left this question (Q1)
+  blank.
+- **Conflicts during the agent's unstash follow the approval mode** (owner, the second Q2;
+  §3.4). This replaces "always ask a person".
+- **The in-turn pruning gap is accepted, with detection** (the second Q3, decided by the
+  coordinator on the owner's delegation; §2.4).
+- **Undo after a commit is "like git revert"**, without creating the revert commit (see the top
+  of this note).
+- **Agentic work only inside a git repository.** Plain-folder cases are no longer designed for.
+- **New: a soft limit of 100 changed files per turn** (§2.6).
 
 ### 1.4 How others do it
 
@@ -114,9 +139,9 @@ does so whether or not those changes were committed since, by the agent or by th
 working files only. This is already true on `main`: `git.rs`, `restore_paths` writes through a
 private index in the shadow.
 
-"Revert to the previous commit" is therefore not something the harness offers. After an undo
-over a committed change, the working tree differs from the newer commit, git shows that as
-uncommitted changes, and the person decides in git what to do with the commit.
+As the top of this note says, this is "like git revert" without the commit: the working files
+get the inverse of the turn's change, and the commit stays in history. Git then shows the undo as
+uncommitted changes, which the person commits, or not, when satisfied.
 
 **What the person is told.** For each restored path p whose entry in HEAD now differs from p in
 `Hb(T)`, the path is held by a commit made since. The note after the undo names the newest commit
@@ -125,7 +150,7 @@ made during the turn (reachable from `Ha(T)`) or later. Example: "Undo restored 
 `src/a.py` is also in commit 1a2b3c4 ("Fix parser"), which the agent made during this turn; the
 commit was left in history, so git now shows the undo as an uncommitted change." When the commit
 cannot be found (HEAD no longer descends from `Hb(T)`, or history was pruned), the note says
-"HEAD moved from X to Y since this turn". This is one `diff-tree` limited to the restored paths,
+"HEAD moved from X to Y since this turn". This costs one `diff-tree` limited to the restored paths,
 plus one `rev-list` per path that is held by a commit. It runs in the shadow, at undo time only.
 
 **Rewind** (this turn and every later one) follows the same rule, with `Hb` of the first rewound
@@ -134,8 +159,9 @@ turn.
 ### 2.2 Recording HEAD
 
 The message needs HEAD, so each `before`, `after` and `before_restore` event gets a field `head`.
-It is a commit id, `"unborn"` (a repository with no commit yet) or `"unknown"` (unreadable), and
-it is absent outside a repository. This is a **schema change** to `Checkpoint` (`event.rs`) and
+It holds a commit id, or `"unknown"` when HEAD is unreadable. Under the repository rule there is
+always a commit. Until that rule is built, the field is absent in plain folders. This is a
+**schema change** to `Checkpoint` (`event.rs`) and
 `CheckpointState` (`view.rs`). It is made in place, before the first tag, together with
 `PLAN.md`'s event table.
 
@@ -179,7 +205,7 @@ untouched) but does not keep the undo working.
 4. One `pack-objects` writes the present objects into `objects/pack/` with a `.keep` file. The
    pack is recorded against the turn's checkpoint group.
 5. When `prune` drops that group, it deletes the pack and its `.keep`.
-6. Only in a borrowing shadow. A plain folder's shadow already stores everything.
+6. Skipped in today's plain folders, whose shadow already stores everything.
 
 **What this fixes.** Once a turn is pinned, a later rewrite plus `gc --prune=now` in the user's
 repository can no longer defeat that turn's undo. This holds whether the person or an agent does
@@ -191,10 +217,19 @@ restore, `secure_blobs` (A.16) mostly turns into a check, because the blobs are 
 
 - **An agent that prunes inside its own turn.** The pin runs at the end of the turn. An agent
   that rewrites the user's history, expires the reflog and runs `gc --prune=now` during the turn
-  destroys the borrowed old versions before they are pinned. Pinning cannot fix this. Only not
-  borrowing tracked content would, and O11 keeps borrowing. A.17 detects it instead: objects
-  missing at step 3 produce a chat note saying which files of this turn can no longer be undone.
-  This is Q3.
+  destroys the borrowed old versions before they are pinned. Pinning cannot fix this; only not
+  borrowing tracked content would. **Decided: borrowing stays, and the gap is accepted with
+  detection.** Objects missing at step 3 produce a chat note saying which files of this turn can
+  no longer be undone. The reasons:
+  - The cost of not borrowing: about 10 MiB against 478 MiB of store, and 1.9 s against 5.7 s for
+    a first snapshot, at 100,000 files (B.3).
+  - The attack needs the agent to run history-rewriting and pruning commands through its shell.
+    Those commands are in the log, and they need approval in the default mode.
+  - The turn is flagged at its end with the affected files.
+  
+  A possible follow-up, not part of this design: our own `edit` and `write` tools know which file
+  they are about to change, so they could copy its old version before writing, with no scan.
+  Changes made through the shell would still be covered only at the end of the turn.
 - **Turns older than `checkpoints_keep`.** Their checkpoints and pins are gone, as today.
 - **Files the turn did not change.** They are not pinned. Their undo is not needed, because undo
   writes only changed paths.
@@ -213,7 +248,52 @@ A.17 is a fix to built behaviour, security code, and its own task that may land 
 
 ### 2.5 Folders without a repository
 
-There is no HEAD and no borrowing, so undo works as it does today.
+Until the repository rule is built, plain folders keep today's undo: there is no HEAD, no
+borrowing and no pin. After it, they are no longer a place for agentic sessions.
+
+### 2.6 A soft limit of 100 changed files per turn (owner's rule)
+
+**What is counted.** The files a turn changed (added, modified or deleted), as the `after`
+checkpoint already lists them: `changed(before, after)` into `Checkpoint.files`
+(`session.rs`, `checkpoint_after`).
+- Nested repositories and ignored files are not in that list, so they are not counted.
+- A sub-agent's changes count toward the turn that applied them, because they are in the folder
+  when that turn's `after` is taken.
+
+**Above 100: a warning, never an error, never a block.** The turn and its undo complete normally.
+The warning appears in two places:
+- **At the end of the turn:** "This turn changed 143 files, more than the recommended 100; undoing
+  it will affect 143 files."
+- **On the undo of such a turn:** "This undo affects 143 files." It is shown on the undo card if
+  there is one, and otherwise in the note after the undo.
+
+**Channel.** No new event type. The `after` checkpoint already carries the file list, so the UI
+derives the count from it and shows the warning under the turn's undo row. The node also writes
+the end-of-turn sentence as the existing chat note (an `error` event with the turn id, the channel
+used today for "This turn has no checkpoint", `session.rs`, `no_checkpoint_notice`). A log read
+without the UI then says so too. The undo plan returned by `changes: "ask"` carries the count.
+The UI needs the count and the warning text beside the undo row and on the undo card; no screens
+are designed here.
+
+**The number.** It is the owner's number. It lives in one named constant,
+`RECOMMENDED_MAX_FILES_PER_TURN = 100`, in `crates/core/src/policy.rs`, and the node, the UI's
+text and the agents' rule all read that constant. **Recommendation: no `node.toml` setting now**;
+one can come when someone needs it.
+
+**What it is for.** A large turn is hard to review, and its undo is heavy. B.3 measured an undo of
+10 files at 0.5 to 1.3 s in a repository folder and of 1,000 files at 1.2 to 2.1 s (B.3,
+"Restore"; slow disk). So the time an undo takes grows slowly. The real cost of a big turn is the
+review, and the chance that the undo meets the person's changes in many files.
+
+**The models are told (a commitment for later work).** When the work on model instructions and
+orchestration starts (`ADOPTION_PLAN.md` X.2), the instructions of every agent that can change
+files gain this sentence. That is every agent whose effective tools include `write`, `edit` or
+`bash`, the set `Session::isolate` already computes (T32). The sentence:
+
+> "Try to keep the files you change in one turn to at most 100; split larger work across turns.
+> Going over is allowed when the task needs it; say so when you do."
+
+No prompt is edited now.
 
 ## 3. The stash
 
@@ -279,7 +359,7 @@ the owner's decision. Earlier deletion:
 - Deleting a chat deletes its stashes; the confirmation counts them.
 - An incognito chat's stashes go with it (`purge_incognito`).
 
-### 3.3 The question at undo (recommendation, Q1)
+### 3.3 The question at undo (recommendation; Q1 was not answered, the note proceeds on it)
 
 The node plans first. If nothing the undo writes changed since the expected state, the undo runs
 at once, as today. Otherwise nothing is written, and the node returns the plan:
@@ -368,12 +448,26 @@ normal approval covers the clean files.
 The side file is the person's whole stashed file, so it contains the agent's change too. That is
 what the person had, and they take lines from it.
 
-**When the agent unstashes and hits a conflict**, it does not choose for the person. The node puts
-one approval card to a person, listing the conflicting files, each with the three choices and its
-side-file name. The approval carries `seen`, so it applies only to the plan shown. In a routine,
-or wherever no person can answer, conflicts are skipped and reported: nothing is written beside
-and nothing is merged. The direction allowed "unless the person already said which they want";
-see Q2.
+**When the agent unstashes and hits a conflict, the session's approval mode decides** (owner,
+2026-11-12). The owner's names for the modes differ from the code's (`ApprovalMode` in
+`crates/core/src/policy.rs`):
+
+| Owner's name | Code | Who decides a conflict |
+|---|---|---|
+| "Always allow" | `Auto` (nothing needs approval) | The agent, by itself: skip, beside or merge. |
+| "Auto, if safe" | `Ask`, the default (mutating tools need approval) | The agent may choose the **safe** outcomes by itself: **skip** and **beside**, since neither changes or overwrites an existing file. **Merging** changes the person's file, so it asks, exactly as `edit` does in this mode. |
+| "Manual" | `AskAll` (every tool call needs approval) | The person decides every conflict on one card listing the conflicting files, each with the three choices and its side-file name. |
+
+The node's own policy caps the mode, as it does for every tool (`ApprovalMode`: the stricter of
+the requested mode and the node's). A card carries `seen`, so it applies only to the plan it
+showed.
+
+The first version of this note rejected letting "the person already said which they want" in
+chat decide a conflict, because the node cannot verify text that the model relays. The mode rule
+does not need that, and chat text still decides nothing.
+
+**With no person present** (a routine): under `Ask` and `AskAll`, conflicts are skipped and
+reported, and nothing is written beside or merged. Under `Auto`, the agent decides.
 
 **Afterwards.** Files written in place or beside leave the stash, and so do files with nothing to
 write. Skipped files stay. The stash ref moves to a commit without the files that left, and the
@@ -416,15 +510,14 @@ The last dot keeps the final extension, so editors still know the file type. The
 |---|---|---|
 | `stash_list` | read-only | This chat's unexpired stashes: id, date, turn, files, size, expiry. |
 | `stash_show` | read-only | One file of a stash as base, stashed or current version, or a diff between two of them. Same size limits as `read`. |
-| `stash_apply` | mutating, approval | Unstash files of one stash, exactly as §3.4; conflicts go to a person. |
+| `stash_apply` | mutating, approval | Unstash files of one stash, exactly as §3.4; conflicts as the approval mode decides. |
 | `stash_delete` | mutating, approval | Delete one stash. The card says what is lost: how many files, from when, the turn. It cannot be undone. |
 
 - The tools reach only the stashes of the agent's own chat, in its folder.
 - **No tool creates a stash or changes its contents.** Only an undo the person chose creates one.
 - Both mutating tools go through the approval path like `write` (`TurnHost::approve`,
   `crates/core/src/backend.rs`).
-  - The conflict card always goes to a person, whatever the approval mode, with `turn_allow`
-    false. It is denied when no person can answer (O6).
+  - A conflict card, when the mode asks for one (§3.4), has `turn_allow` false.
   - Whether the fold and the UI accept two approvals under one `call_id` is not established. If
     they do not, the second approval gets a derived id.
 - The shadow is in the data directory, and the agent cannot reach it there by other means.
@@ -464,6 +557,7 @@ The last dot keeps the final extension, so editors still know the file type. The
 | `changes`/`seen` on `session.restore`; `session.stash.apply`, `.delete`, `.show` | `crates/protocol/src/lib.rs`, `crates/node/src/lib.rs`; HTTP in a new `crates/master/src/http/stashes.rs` |
 | Merge, conflict choices, side-file naming (as a pure function) | `git.rs`, `session.rs` |
 | `stash_list`, `stash_show`, `stash_apply`, `stash_delete` | `crates/tools`, `TurnHost` |
+| Soft limit: `RECOMMENDED_MAX_FILES_PER_TURN`, end-of-turn note, count in the undo plan | `crates/core/src/policy.rs`, `session.rs`, `web/` |
 
 Gone from the first version: the "committed since" test and its gaps.
 
@@ -504,10 +598,9 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
   without asking. They survive only in the pre-restore snapshot, under `checkpoints_keep`.
   Fixing that needs per-write attribution, which the shell does not give.
 - **An agent that prunes inside its own turn** (§2.4) is detected and reported, but not
-  prevented.
-- **Large plain folders.** A first snapshot of a 250,000-file plain folder did not finish within
-  the 60 s snapshot or the 120 s git timeout (B.3, "Does the 60-second snapshot timeout get
-  close?"). Such a folder has no checkpoint, so no undo and no stash.
+  prevented. This is accepted.
+- **Plain folders** are no longer a supported place for agentic sessions once the repository rule
+  is built. Until then they keep today's undo, with no pin.
 
 ## 5. How it breaks
 
@@ -517,9 +610,9 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 | The agent amends or rebases the person's commits | The files are restored; HEAD is not moved back. The note gives the old HEAD id from the harness's log, which outlives `reflog expire` (the commit object may not). The undo works; restoring the history is git's job, and the agent's rewrite of it remains. |
 | The agent runs `git stash` or `git checkout <branch>` | The file changes are the turn's and are undone. The agent's stash entry and the branch switch stay; the note says HEAD moved and from where. |
 | The agent rewrites history and prunes **in a later turn**, or the person does | Fails against kept turns: pinned (A.17). |
-| The agent rewrites history and prunes **inside its own turn** | **Remains:** the borrowed old versions are gone before the pin; A.17 reports which files cannot be undone (Q3). |
+| The agent rewrites history and prunes **inside its own turn** | **Remains, accepted:** the borrowed old versions are gone before the pin. The commands are in the log and need approval in the default mode, and A.17 reports which files cannot be undone. |
 | A background process that outlives its turn commits | Fails: commits no longer matter. If it prunes after the turn, the pin holds. If it edits files, its edits look like the person's and are stashed. C.11 is still needed for other reasons. |
-| The agent deletes a stash through its tool | Only with the person's approval; the card says what is lost. |
+| The agent deletes a stash through its tool | Goes through the approval path like any mutating tool. It asks under `Ask` and `AskAll`, and the card says what is lost. Under `Auto` it runs without asking, as `bash` does. |
 | The agent deletes stashes or checkpoints through the shell | Unreachable with the enforced sandbox and the file tools (§3.6). Reachable with the sandbox off, an existing residual. |
 | The person commits, then changes their mind | Undo works as always; git handles the commit. |
 | History rewritten after a stash was taken | No effect: the stash is pinned. |
@@ -527,7 +620,8 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 | The node is off at a stash's expiry midnight | Removed at the next start. Unusable from the expiry instant on. |
 | A very large stash | Costs its files' compressed size for up to 30 days, shown in the list and the total. Building it is bounded by the 60 s snapshot limit (`git.rs`, `SNAPSHOT_TIMEOUT`). |
 | A stash holding a secret (an edited `.env`) | File content on the node's disk, with the same exposure as the checkpoint store, for up to 30 days. Events carry paths and sizes only. |
-| A routine, with no person | No undo tool. `stash_apply` and `stash_delete` are denied without approval. Conflicts are always skipped. |
+| A routine, with no person | No undo tool. `stash_apply` and `stash_delete` follow the routine's approval rules (O6). Conflicts are skipped under `Ask` and `AskAll`; under `Auto` the agent decides. |
+| A turn that changes 5,000 files | Completes. It warns at its end and on its undo (§2.6), and its undo completes too. |
 | Hostile repository config | The only new call in the user's repository is `rev-parse`, which runs nothing; the merge runs in the shadow. |
 
 ## 6. Tests the build is committed to
@@ -557,8 +651,16 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
     dangling symlink in the way.
 14. `the_agent_reads_and_deletes_only_its_own_chats_stashes_and_cannot_create_or_change_one`.
 15. `the_agents_delete_asks_for_approval_and_names_what_is_lost`.
-16. `the_agents_unstash_puts_conflicts_to_a_person_and_a_routine_skips_them`.
+16. `the_agents_unstash_follows_the_approval_mode_on_conflicts`:
+    - `Auto` decides without a card.
+    - `Ask` allows skip and beside, and asks for a merge.
+    - `AskAll` asks for every conflict.
+    - A routine under `Ask` skips the conflicts.
 17. `a_stash_with_nothing_left_is_removed`.
+18. `a_turn_that_changes_100_files_warns_nobody`.
+19. `a_turn_that_changes_101_files_warns_at_its_end_and_on_its_undo`: both the turn and the undo
+    complete normally.
+20. `the_file_count_ignores_nested_repositories`.
 
 ## 7. Build order and size
 
@@ -572,18 +674,19 @@ S means a day or less, M a few days, L a week or more, for one person with an ag
 | 4 | Unstash by the person: merge, conflict choices, side files | M | After 3 |
 | 5 | Agent tools (four) | S | After 4 |
 | 6 | Web UI | M | With 3 to 5 |
-| 7 | `PLAN.md` T33 and event table, `README.md` undo section | S | With each task |
+| 7 | Soft limit of 100 files (`ADOPTION_PLAN.md` T.9) | S | After Gate 3 |
+| 8 | `PLAN.md` T33 and event table, `README.md` undo section | S | With each task |
 
 Together about **L** (two to three weeks). It changes built behaviour and adds surface, so it
 waits for Gate 3, except task 1.
 
-## 8. Questions for the owner
+## 8. Questions for the owner, and the answers
 
-| # | Question | Recommendation | If the other answer |
+| # | Question | Recommendation | Answer (2026-11-12) |
 |---|---|---|---|
-| Q1 | When an undo meets the person's changes, offer only "undo and keep my changes in a stash for 30 days" and "cancel"? | **Yes.** Dropping saves nothing and makes a misclick final; the stash can be deleted a second later. | A third choice, "undo without a stash", must say that the pre-restore copy still keeps the changes for ten more changes. |
-| Q2 | When the agent unstashes and hits a conflict, may anything but a person's card decide? | **No, always the card.** "The person already said which they want" in chat is text the model relays, and injected text can say the same. A per-chat setting that the person sets in the UI is the only safe alternative, and only later. | A prompt-injected instruction chooses "beside" or "merge" for the person. |
-| Q3 | An agent that prunes the user's history inside its own turn still defeats that turn's undo: accept that, with detection? | **Accept, with A.17's report.** Closing it means not borrowing tracked content. At 100,000 files that is 478 MiB instead of 9.7 MiB, and a first snapshot of 5.7 s instead of 1.9 s (B.3; slow disk). | O11 is reopened, and every repository's shadow stores a full copy of its tracked files. |
+| Q1 | When an undo meets the person's changes, offer only "undo and keep my changes in a stash for 30 days" and "cancel"? | **Yes.** Dropping saves nothing and makes a misclick final; the stash can be deleted a second later. | **Not answered.** The note proceeds on the recommendation. If the owner wants a third choice, "undo without a stash", it must say that the pre-restore copy still keeps the changes for ten more changes. |
+| Q2 | When the agent unstashes and hits a conflict, who decides? | A person's card, always. | **By the session's approval mode** (§3.4). |
+| Q3 | An agent that prunes history inside its own turn defeats that turn's undo: accept, with detection? | Accept, with A.17's report. | **Accepted** (decided on the owner's delegation; §2.4). |
 
 ## 9. Not settled
 
@@ -592,3 +695,5 @@ waits for Gate 3, except task 1.
 - Whether two approvals under one `call_id` fold and render (§3.6).
 - The exit status of `checkout-index` without `-f` on an existing file (tests 11 and 13).
 - Pin times on an SSD or an idle machine: B.3 measured neither.
+- If the owner wants the revert commit created automatically after an undo, that is a different
+  rule. It needs their explicit yes, because it writes into the user's repository.
