@@ -17,8 +17,9 @@ struct Host(Mutex<Vec<EventKind>>);
 
 #[async_trait::async_trait]
 impl TurnHost for Host {
-    async fn emit(&self, kind: EventKind) {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         self.0.lock().unwrap().push(kind);
+        Ok(())
     }
     async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
         Decision::Allow

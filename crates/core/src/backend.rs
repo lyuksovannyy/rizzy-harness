@@ -16,7 +16,10 @@ use crate::refs::SharedRefs;
 #[async_trait::async_trait]
 pub trait TurnHost: Send + Sync {
     /// Append an event to the session log (assigns seq, persists, publishes).
-    async fn emit(&self, kind: EventKind);
+    /// The log is written first: on `Err` nothing the event describes may
+    /// happen, and the backend ends the turn (no further tool body, no
+    /// further model request).
+    async fn emit(&self, kind: EventKind) -> Result<(), LogError>;
 
     /// Ask whether a tool call may run. The host applies node policy first
     /// and only asks the user if policy requires it. Emits the approval events.
@@ -52,6 +55,12 @@ pub trait TurnHost: Send + Sync {
         Vec::new()
     }
 }
+
+/// An event could not be appended to the session log (full disk, I/O
+/// error, a broken database). Holds the store's reason, never the payload.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the session log could not be written ({0})")]
+pub struct LogError(pub String);
 
 /// An image's bytes for the model (`TurnHost::images`).
 #[derive(Debug, Clone, PartialEq, Eq)]
