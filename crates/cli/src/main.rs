@@ -166,7 +166,11 @@ fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
     }
-    Ok(d)
+    // Absolute and real, once, here: everything below (the sandbox's temp
+    // folder and protected folder among it) runs in other folders, where a
+    // relative path would name something else (R.1, S-4).
+    d.canonicalize()
+        .with_context(|| format!("resolving {}", d.display()))
 }
 
 fn hostname() -> String {

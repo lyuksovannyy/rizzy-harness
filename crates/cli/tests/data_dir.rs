@@ -24,9 +24,16 @@ impl Drop for Server {
 }
 
 fn start(data: &Path) -> Server {
+    start_in(data, data, Path::new("/"))
+}
+
+/// The server with `--data-dir <arg>` (relative to `cwd` when relative);
+/// `data` is where that is.
+fn start_in(data: &Path, arg: &Path, cwd: &Path) -> Server {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rizzy-harness"))
-        .args(["--data-dir", data.to_str().unwrap()])
+        .args(["--data-dir", arg.to_str().unwrap()])
         .args(["serve", "--bind", "127.0.0.1:0"])
+        .current_dir(cwd)
         .env("HARNESS_LOG", "warn")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -167,6 +174,36 @@ async fn sessions_and_tools_stay_out_of_the_data_dir() {
         !all.contains(&token),
         "the API token is in the events: {all}"
     );
+}
+
+/// S-4 (R.1): a relative `--data-dir` is made absolute once, where the
+/// binary reads it, so the sandbox's temp folder and the protected folder
+/// are absolute too; the wrapper runs in the session folder, where a
+/// relative path would name a folder of the project's (and a link planted
+/// there would lead anywhere). The shell's `TMPDIR` is the data
+/// directory's, and the data directory stays closed to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relative_data_dir_is_made_absolute_for_the_sandbox() {
+    let (dir, data, ws) = setup();
+    let home = dir.path().canonicalize().unwrap();
+    // A planted link where a relative temp root would land.
+    std::fs::create_dir_all(ws.join("data")).unwrap();
+    std::os::unix::fs::symlink(&data, ws.join("data/sandbox-tmp")).unwrap();
+    let s = start_in(&data, Path::new("data"), &home);
+    let sid = s.session(&ws).await;
+    let (out, _) = s
+        .tool_output(
+            &sid,
+            "run: echo \"tmp=$TMPDIR\"; cat ../data/api-token; echo done",
+        )
+        .await;
+    assert!(out.contains("done"), "{out}");
+    let tmp = data.join("sandbox-tmp");
+    assert!(
+        out.contains(&format!("tmp={}/", tmp.display())),
+        "TMPDIR is not the data directory's: {out}"
+    );
+    assert!(out.contains("Permission denied"), "{out}");
 }
 
 /// The shell's view of the home directory: a private key next to the
