@@ -452,7 +452,11 @@ refuses a request as too long, the turn summarises older turns, hides all but
 the newest large tool output, and tries once more; a second refusal ends the
 turn with a message saying so. A summary is only made by a model whose window
 holds what it reads: a long history is summarised in pieces, and a single turn
-larger than the window is left unsummarised rather than skipped.
+larger than the window is left unsummarised rather than skipped. A summary
+that is not at least a tenth smaller than the history it replaces is thrown
+away (nothing is logged, the history stays as it was). After two failed or
+useless summaries in one turn, the turn does not try again; if the context
+then does not fit, the error says summarising was tried and did not help.
 
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.
