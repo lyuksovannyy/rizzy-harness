@@ -161,6 +161,7 @@ impl Tool for Bash {
             &ctx.protected,
             crate::sandbox::Grants {
                 workspace_write: true,
+                owned: ctx.owned.clone(),
                 ..Default::default()
             },
         ) {

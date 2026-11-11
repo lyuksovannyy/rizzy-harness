@@ -313,43 +313,9 @@ pub struct Grants {
     pub owned_write: Vec<PathBuf>,
     /// More read-only folders (checked against the protected ones).
     pub read: Vec<PathBuf>,
-}
-
-/// Where a sub-agent worktree keeps its git metadata in the main
-/// repository: `<repo>/.git/harness-worktrees/<id>/…` gives the main
-/// `<repo>/.git` and the worktree's own admin folder
-/// `<repo>/.git/worktrees/<id>` (the node checks, when it makes the
-/// worktree, that git named it so). Judged from the path alone, never from
-/// a `.git` file's contents (repository content could name any folder
-/// there).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeGit {
-    /// The main repository's git directory.
-    pub git: PathBuf,
-    /// This worktree's folder in it (`HEAD`, `index`, its reflog).
-    pub admin: PathBuf,
-    /// The worktree's top folder (`<git>/harness-worktrees/<id>`).
-    pub top: PathBuf,
-}
-
-/// The [`WorktreeGit`] of `cwd`, when it is inside a sub-agent worktree.
-pub fn worktree_git(cwd: &Path) -> Option<WorktreeGit> {
-    let mut p = cwd;
-    while let Some(parent) = p.parent() {
-        if parent.file_name() == Some(OsStr::new("harness-worktrees"))
-            && let Some(git) = parent.parent()
-            && git.file_name() == Some(OsStr::new(".git"))
-            && let Some(id) = p.file_name()
-        {
-            return Some(WorktreeGit {
-                git: git.to_path_buf(),
-                admin: git.join("worktrees").join(id),
-                top: p.to_path_buf(),
-            });
-        }
-        p = parent;
-    }
-    None
+    /// A sub-agent's node-owned folder (see `harness_core::folder::
+    /// OwnedFolder`), when the session is one.
+    pub owned: Option<harness_core::folder::OwnedFolder>,
 }
 
 impl Confinement {
@@ -402,29 +368,40 @@ impl Confinement {
                     sandbox.protected.iter().chain(protected).cloned().collect();
                 let mut rw = grants.owned_write.clone();
                 let mut ro = Vec::new();
-                let mut checked = vec![ws.clone()];
+                // A sub-agent's own folder lies in the node's protected
+                // sessions folder by design: it alone is exempt from the
+                // check, and only for the session the node made it for (the
+                // node passes it; nothing is judged from the path or from a
+                // file the session can write).
+                let owned = grants.owned.as_ref().filter(|o| ws.starts_with(&o.top));
+                let mut checked = Vec::new();
+                if owned.is_none() {
+                    checked.push(ws.clone());
+                }
                 checked.extend(grants.read.iter().cloned());
                 if grants.workspace_write {
                     rw.push(ws.clone());
-                    // A sub-agent's worktree keeps its git metadata in the
-                    // main repository's `.git`. Its own git (`status`, `add`,
-                    // `commit`) needs to write only the object store and the
-                    // worktree's own admin folder; the rest of `.git` (the
-                    // config, hooks, `info`, refs, `packed-refs`, and the
-                    // folder that holds the worktree) is read-only, so the
-                    // child can neither configure commands for anyone's git
-                    // nor move its own folder away (R.1, PLAN.md T32).
-                    // Landlock only adds rights per subtree: the read-only
-                    // rule covers all of `.git`, the two read-write rules
-                    // add writing beneath `objects` and `worktrees/<id>`.
-                    if let Some(wt) = worktree_git(&ws) {
-                        checked.push(wt.git.clone());
-                        rw.push(wt.git.join("objects"));
-                        rw.push(wt.admin);
-                        ro.push(wt.git);
-                    }
                 } else {
                     ro.push(ws.clone());
+                }
+                // The child's own git directory is in its folder; when the
+                // child works in a sub-folder, `.git` is granted too (its git
+                // writes the index and objects there) and the rest of the
+                // folder read-only. The user's object store, which that git
+                // directory borrows for history, is read-only and checked
+                // like any other grant. Nothing of the user's `.git` is
+                // writable (R.1 follow-up, PLAN.md T32).
+                if let Some(o) = owned {
+                    if ws != o.top {
+                        ro.push(o.top.clone());
+                        if grants.workspace_write {
+                            rw.push(o.git.clone());
+                        }
+                    }
+                    if let Some(objects) = &o.objects {
+                        checked.push(objects.clone());
+                        ro.push(objects.clone());
+                    }
                 }
                 ro.extend(grants.read.iter().cloned());
                 for p in &checked {
@@ -787,29 +764,6 @@ mod tests {
         assert!(e.contains("/opt"), "{e}");
     }
 
-    #[test]
-    fn worktree_git_comes_from_the_path_only() {
-        let wt = WorktreeGit {
-            git: PathBuf::from("/r/.git"),
-            admin: PathBuf::from("/r/.git/worktrees/abc"),
-            top: PathBuf::from("/r/.git/harness-worktrees/abc"),
-        };
-        assert_eq!(
-            worktree_git(Path::new("/r/.git/harness-worktrees/abc/sub")),
-            Some(wt.clone())
-        );
-        assert_eq!(
-            worktree_git(Path::new("/r/.git/harness-worktrees/abc")),
-            Some(wt)
-        );
-        assert_eq!(worktree_git(Path::new("/r/.git/harness-worktrees")), None);
-        assert_eq!(worktree_git(Path::new("/r/harness-worktrees/abc")), None);
-        assert_eq!(worktree_git(Path::new("/r/src")), None);
-    }
-
-    /// S-4: the wrapper runs in the session folder, so a relative data
-    /// directory would make the temp root (and the protected folder) a path
-    /// inside it. Refused in every mode, before anything runs.
     #[test]
     fn a_relative_data_dir_is_refused_in_every_mode() {
         for mode in [Mode::Required, Mode::BestEffort, Mode::Off] {

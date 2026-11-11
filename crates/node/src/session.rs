@@ -62,6 +62,11 @@ pub(crate) struct Session {
     /// an agentic one whose folder could not be pinned (it then refuses to
     /// work). Checked by [`Self::checked_folder`] before every use.
     pin: Option<harness_core::folder::FolderPin>,
+    /// A sub-agent's node-owned folder (`git::ChildFolder`): the session
+    /// works in it although it lies in the node's protected sessions
+    /// folder. Not kept across a restart (the folder is removed when the
+    /// sub-agent ends).
+    owned: Option<harness_core::folder::OwnedFolder>,
 }
 
 /// Pin an agentic session's folder (see [`Session::pin`]).
@@ -89,10 +94,10 @@ pub(crate) struct Input {
     pub images: Vec<harness_protocol::ChatImage>,
 }
 
-/// A sub-agent's private worktree.
+/// A sub-agent's private, node-owned folder.
 struct Isolation {
     sub: crate::git::SubRepo,
-    wt: crate::git::Worktree,
+    child: crate::git::ChildFolder,
     base: String,
     cwd: PathBuf,
 }
@@ -107,6 +112,8 @@ pub(crate) struct NewSession {
     pub agent_id: Option<String>,
     pub incognito: bool,
     pub parent_session: Option<SessionId>,
+    /// A sub-agent's node-owned folder, when it has one.
+    pub owned: Option<harness_core::folder::OwnedFolder>,
 }
 
 impl Session {
@@ -124,6 +131,7 @@ impl Session {
             agent_id,
             incognito,
             parent_session,
+            owned,
         } = new;
         let s = Arc::new(Self {
             node: node.clone(),
@@ -142,6 +150,7 @@ impl Session {
             unresolved: Mutex::new(Vec::new()),
             last_state: Mutex::new(None),
             pin: pin_of(profile, &cwd),
+            owned,
         });
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
@@ -205,6 +214,7 @@ impl Session {
             unresolved: Mutex::new(Vec::new()),
             last_state: Mutex::new(last_state),
             pin,
+            owned: None,
         }))
     }
 
@@ -384,8 +394,29 @@ impl Session {
                 ));
             }
         };
+        // A sub-agent's node-owned folder: inside it, and the sandbox still
+        // works; it is in the protected sessions folder by design.
+        if let Some(o) = &self.owned {
+            if let Some(why) = &self.node.cfg.policy.sandbox_refusal {
+                return Err(why.clone());
+            }
+            if !dir.starts_with(&o.top) {
+                return Err(format!(
+                    "{}: {} is outside the sub-agent's folder",
+                    harness_core::folder::REPLACED,
+                    dir.display()
+                ));
+            }
+            return Ok(dir);
+        }
         self.node.cfg.policy.check_session(&dir)?;
         Ok(dir)
+    }
+
+    /// Where sub-agents' folders are made: `<data>/sessions`, beside the
+    /// checkpoint store, protected like the data directory.
+    fn sessions_dir(&self) -> Option<PathBuf> {
+        crate::sessions_dir(self.node.cfg.checkpoints_dir.as_deref()?)
     }
 
     fn check_cwd_still_allowed(&self) -> Result<(), String> {
@@ -708,9 +739,13 @@ impl Session {
 
     /// Where this session's checkpoints go, if it gets any.
     /// `Ok(None)`: this session takes none (a chat, checkpoints off, a
-    /// sub-agent's worktree); `Err`: it should, and cannot, with the reason.
+    /// sub-agent's folder); `Err`: it should, and cannot, with the reason.
     async fn checkpoint_repo(&self) -> Result<Option<crate::git::Repo>, String> {
-        if self.profile != Profile::Agentic || self.node.cfg.policy.checkpoints_keep == 0 {
+        // A sub-agent's folder is removed when it ends: no checkpoints.
+        if self.profile != Profile::Agentic
+            || self.node.cfg.policy.checkpoints_keep == 0
+            || self.owned.is_some()
+        {
             return Ok(None);
         }
         let dir = self.checked_folder()?;
@@ -1228,9 +1263,10 @@ impl Session {
     /// no turn starts there while the restore runs. The entry goes when the
     /// returned guard drops, on every path. This session's own running turn
     /// (and so its sub-agents, which run inside it) is refused before this.
-    /// Another session's sub-agent works in a worktree under
-    /// `<root>/.git/harness-worktrees`, inside that repository's folder, so
-    /// it overlaps a restore there (as its parent's turn does).
+    /// Another session's sub-agent works in its own node-owned folder, but
+    /// only inside its parent's running turn, and that parent's folder
+    /// overlaps a restore here; its result is written into the parent's
+    /// folder before that turn ends.
     fn claim_folder(&self, root: &std::path::Path) -> Result<RestoreClaim, String> {
         let root = real_path(root);
         // Real paths before the lock: no file system call under it.
@@ -1310,7 +1346,7 @@ impl Session {
         let short: String = task.chars().take(60).collect();
         // The parent's folder is still its own before a child works there.
         let here = self.checked_folder()?;
-        // A sub-agent that can change files works in its own git worktree,
+        // A sub-agent that can change files works in its own folder,
         // so parallel sub-agents do not trample each other and a child whose
         // log failed leaves the folder alone; without one it is not started.
         let iso = self.isolate(&agent, child_id, &here).await?;
@@ -1327,6 +1363,7 @@ impl Session {
                 agent_id: Some(agent.agent_id.clone()),
                 incognito: self.incognito,
                 parent_session: Some(self.id),
+                owned: iso.as_ref().map(|i| i.child.owned()),
             },
         )
         .await
@@ -1334,7 +1371,7 @@ impl Session {
             Ok(c) => c,
             Err(e) => {
                 if let Some(i) = &iso {
-                    crate::git::remove_worktree(&i.wt).await;
+                    crate::git::remove_folder(&i.child).await;
                 }
                 return Err(e.to_string());
             }
@@ -1360,7 +1397,7 @@ impl Session {
             publishes: Arc::default(),
         }) {
             if let Some(i) = iso {
-                crate::git::remove_worktree(&i.wt).await;
+                crate::git::remove_folder(&i.child).await;
             }
             return Err(e);
         }
@@ -1383,7 +1420,7 @@ impl Session {
             Err(e) => {
                 child.release(&msg.turn_id);
                 if let Some(i) = iso {
-                    crate::git::remove_worktree(&i.wt).await;
+                    crate::git::remove_folder(&i.child).await;
                 }
                 return Err(e);
             }
@@ -1447,16 +1484,18 @@ impl Session {
                 .any(|t| agent.allows_tool(t) && !denied.iter().any(|d| d == t))
     }
 
-    /// Prepare a worktree for a sub-agent that can change files, seeded with
+    /// Prepare a folder for a sub-agent that can change files, seeded with
     /// the current working state (uncommitted edits included). `Ok(None)`:
     /// the sub-agent cannot change files and works in this folder; `Err`: it
-    /// can, and no worktree could be made, so it must not start. The text
-    /// is the delegation's result, for the parent model. `here` is this
+    /// can, and no folder could be made, so it must not start. The text is
+    /// the delegation's result, for the parent model. `here` is this
     /// session's checked folder.
     ///
-    /// The base snapshot and the files of the worktree come from a
-    /// harness-owned shadow, never from git in the user's repository with
-    /// its config and attributes (R.1, S-1; see `git::SubRepo`).
+    /// The folder is node-owned (`<data>/sessions/<child>/files`, see
+    /// `git::ChildFolder`): outside the user's repository and outside every
+    /// other session's writable area. Its files and its own git directory
+    /// are written by the node before the child starts; no git process of
+    /// the node runs with the user's git directory (R.1 follow-up).
     async fn isolate(
         &self,
         agent: &AgentSpec,
@@ -1468,12 +1507,22 @@ impl Session {
         }
         let who = &agent.agent_id;
         let not_started = |e: String| {
-            tracing::warn!(session = %self.id, error = %e, "no worktree for a sub-agent that changes files; not started");
+            tracing::warn!(session = %self.id, error = %e, "no folder for a sub-agent that changes files; not started");
             format!(
                 "@{who} was not started: it can change files (write, edit or bash), and its \
-                 own git worktree could not be made ({e}). Make the change yourself, or \
-                 delegate to a sub-agent that only reads."
+                 own folder could not be made ({e}). Make the change yourself, or delegate to \
+                 a sub-agent that only reads."
             )
+        };
+        if self.owned.is_some() {
+            return Err(not_started(
+                "a sub-agent's own sub-agents may only read".to_string(),
+            ));
+        }
+        let Some(sessions) = self.sessions_dir() else {
+            return Err(not_started(
+                "this node keeps no checkpoint store, which sub-agent folders need".to_string(),
+            ));
         };
         let sub = match crate::git::sub_repo(
             here,
@@ -1486,33 +1535,40 @@ impl Session {
             Ok(None) => {
                 return Err(format!(
                     "@{who} was not started: it can change files (write, edit or bash), and a \
-                     sub-agent that changes files works in its own git worktree, but this \
-                     folder is not a git repository (within this node's workspace roots). Make \
-                     the change yourself, delegate to a sub-agent that only reads, or ask the \
-                     user to run `git init` in this folder."
+                     sub-agent that changes files works on its own copy of a git repository, \
+                     but this folder is not a git repository (within this node's workspace \
+                     roots). Make the change yourself, delegate to a sub-agent that only reads, \
+                     or ask the user to run `git init` in this folder."
                 ));
             }
             Err(e) => return Err(not_started(e)),
         };
         let id = child.to_string();
         let base_ref = format!("refs/harness/{child}/base");
-        let mut made: Option<crate::git::Worktree> = None;
+        let mut made: Option<crate::git::ChildFolder> = None;
         let res = async {
             let base = sub.base(&id).await?;
-            let wt = sub.make_worktree(&id, &base).await?;
-            made = Some(wt.clone());
+            let folder = sub.make_folder(&id, &base, &sessions).await?;
+            made = Some(folder.clone());
             let rel = here
                 .strip_prefix(&sub.repo.root)
                 .unwrap_or(std::path::Path::new(""));
-            // The node's policy still decides where sessions may work.
-            let cwd = self
-                .node
-                .cfg
-                .policy
-                .check_cwd(&wt.path.join(rel).display().to_string())?;
+            let cwd = folder.path.join(rel);
+            tokio::fs::create_dir_all(&cwd)
+                .await
+                .map_err(|e| format!("{}: {e}", cwd.display()))?;
+            let cwd = cwd
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", cwd.display()))?;
+            if !cwd.starts_with(&folder.path) {
+                return Err(format!(
+                    "{} leads out of the sub-agent's folder",
+                    rel.display()
+                ));
+            }
             Ok::<_, String>(Isolation {
                 sub: sub.clone(),
-                wt,
+                child: folder,
                 base,
                 cwd,
             })
@@ -1521,9 +1577,9 @@ impl Session {
         match res {
             Ok(i) => Ok(Some(i)),
             Err(e) => {
-                // Leave nothing behind: no half-made worktree, no base ref.
-                if let Some(wt) = made {
-                    crate::git::remove_worktree(&wt).await;
+                // Leave nothing behind: no half-made folder, no base ref.
+                if let Some(f) = made {
+                    crate::git::remove_folder(&f).await;
                 }
                 crate::git::delete_ref(&sub.repo, &base_ref).await;
                 Err(not_started(e))
@@ -1532,7 +1588,7 @@ impl Session {
     }
 
     /// Bring a sub-agent's changes back into the main working directory:
-    /// its worktree is snapshotted in the shadow and the changed files are
+    /// its folder is snapshotted in the shadow and the changed files are
     /// written into this session's folder with the restore machinery (no
     /// `git apply` under the user's config). `apply: false` keeps the
     /// result in the node's checkpoint store and changes nothing in the
@@ -1540,7 +1596,7 @@ impl Session {
     async fn merge_back(&self, iso: Isolation, child: SessionId, apply: bool) -> String {
         let id = child.to_string();
         let kept = "it is kept in this node's checkpoint store (sub-agent snapshots)";
-        let note = match iso.sub.result(&iso.wt, &id).await {
+        let note = match iso.sub.result(&iso.child, &id).await {
             Err(e) => format!("its changes could not be collected: {e}"),
             Ok(result) if !apply => format!(
                 "its changes were not applied, because a session log could not be written; \
@@ -1561,7 +1617,7 @@ impl Session {
                 }
             }
         };
-        crate::git::remove_worktree(&iso.wt).await;
+        crate::git::remove_folder(&iso.child).await;
         iso.sub.prune(self.node.cfg.policy.checkpoints_keep).await;
         note
     }
@@ -1692,6 +1748,10 @@ impl TurnHost for Session {
 
     fn folder_pin(&self) -> Option<harness_core::folder::FolderPin> {
         self.pin.clone()
+    }
+
+    fn owned_folder(&self) -> Option<harness_core::folder::OwnedFolder> {
+        self.owned.clone()
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {

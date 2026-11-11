@@ -4,7 +4,7 @@
 //! still run in the order they were sent.
 //!
 //! The restore is made slow for real: the test runs itself again with a
-//! `git` first on `PATH` that sleeps on `checkout-index` (only restore uses
+//! `git` first on `PATH` that sleeps on `cat-file --batch` (only restore uses
 //! it).
 //! A child process because the environment of this one cannot be changed
 //! without `unsafe`.
@@ -45,7 +45,7 @@ fn cancel_during_a_slow_restore_is_answered_within_a_second() {
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = checkout-index ] && sleep {}; done\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --batch ] && sleep {}; done\nexec '{}' \"$@\"\n",
             SLOW.as_secs(),
             real.display()
         ),

@@ -854,8 +854,10 @@ The profile and the tool boundary are those of §4.10.3. A sub-agent session get
 `<base>/<ws>/<child-id>/files/`: a worktree of the parent's project repository on its own
 branch when it can write, as A.4 requires on `main` (`crates/node/src/session.rs:1075-1078`);
 read-only children are granted the parent's `files/` read-only. That replaces today's
-worktrees under `<repo>/.git/harness-worktrees/` (`crates/tools/src/sandbox.rs:306-322`,
-`:365-372`). Since every agentic `files/` is in a repository (§4.11.5), A.4's refusal of a
+sub-agent folders under `<data>/sessions/<child-id>/files/` (R.1: node-owned, a git
+directory of their own, never `worktree add` in the user's repository; PLAN.md T32), which
+already follow the per-session shape; whatever replaces them keeps R.1's rule that the node's
+git never runs with a git directory a session can write. Since every agentic `files/` is in a repository (§4.11.5), A.4's refusal of a
 writer child in a folder that is not a repository (`crates/node/src/session.rs:1212-1230`)
 can no longer be reached; it stays as a check.
 

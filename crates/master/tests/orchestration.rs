@@ -420,7 +420,7 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
         .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
         .collect();
     assert!(
-        kids.iter().all(|k| k.cwd.contains("harness-worktrees")),
+        kids.iter().all(|k| k.cwd.contains("/sessions/")),
         "{kids:?}"
     );
     assert!(kids.iter().all(|k| !std::path::Path::new(&k.cwd).exists()));

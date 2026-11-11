@@ -175,6 +175,10 @@ pub struct ToolCtx {
     /// in it only after [`Self::workspace_dir`] has checked that it is still
     /// that directory (R.1, PLAN.md T4).
     pub pin: Option<harness_core::folder::FolderPin>,
+    /// The node-owned folder of a sub-agent session (its own folder under
+    /// the node's protected sessions folder): paths inside it are not
+    /// refused as protected, for this session only.
+    pub owned: Option<harness_core::folder::OwnedFolder>,
 }
 
 impl ToolCtx {
@@ -196,6 +200,7 @@ impl ToolCtx {
             call_id: String::new(),
             sandbox: Default::default(),
             pin: None,
+            owned: None,
         }
     }
 
@@ -307,6 +312,13 @@ impl ToolCtx {
 
     /// Refuse `real` (a real or normalized path) inside a protected folder.
     fn refuse_protected(&self, real: &Path, shown: &str) -> Result<(), String> {
+        // A sub-agent's own folder lies in a protected folder by design;
+        // only that folder is let through, for that session.
+        if let Some(o) = &self.owned
+            && real.starts_with(&o.top)
+        {
+            return Ok(());
+        }
         match self.protected.iter().find(|d| real.starts_with(d)) {
             Some(d) => Err(format!(
                 "path {shown} is inside the harness's own data directory {} (keys, tokens, \

@@ -359,7 +359,8 @@ async fn cwd_outside_roots_is_refused() {
         req_id: "c".into(),
         session_id: SessionId::new(),
         title: "t".into(),
-        cwd: "/".into(),
+        // Outside the roots and holding no protected folder.
+        cwd: "/usr".into(),
         model: None,
         approval_mode: None,
     });
@@ -1479,13 +1480,14 @@ async fn a_writing_sub_agent_is_refused_outside_a_repository() {
     assert_eq!(sessions.len(), 1, "a child session was created");
 }
 
-/// The same when the repository is there but its worktree cannot be made:
-/// here the folder for worktrees (`.git/harness-worktrees`) is a file.
+/// The same when the repository is there but the sub-agent's folder cannot
+/// be made: here the node's folder for them (`<data>/sessions`) is a file.
 #[tokio::test]
-async fn a_writing_sub_agent_is_refused_when_its_worktree_cannot_be_made() {
+async fn a_writing_sub_agent_is_refused_when_its_folder_cannot_be_made() {
     let mut h = Harness::new(auto_policy).await;
     init_repo(&h.ws);
-    std::fs::write(h.ws.join(".git/harness-worktrees"), "in the way\n").unwrap();
+    let _ = std::fs::remove_dir_all(h._dir.path().join("sessions"));
+    std::fs::write(h._dir.path().join("sessions"), "in the way\n").unwrap();
     let sid = h.create().await;
     let before = tree(&h.ws);
     let out = delegate_as_lead(
@@ -1497,7 +1499,7 @@ async fn a_writing_sub_agent_is_refused_when_its_worktree_cannot_be_made() {
     .await;
     let out = out.last().expect("a delegate call");
     assert!(
-        out.contains("not started") && out.contains("worktree could not be made"),
+        out.contains("not started") && out.contains("folder could not be made"),
         "{out}"
     );
     assert_eq!(tree(&h.ws), before, "the folder changed");
@@ -1550,14 +1552,21 @@ async fn a_writing_sub_agent_changes_are_applied_from_its_worktree() {
     )
     .await;
     let out = out.last().expect("a delegate call");
+    // The child worked in its node-owned folder, not in the repository.
+    let folder = h._dir.path().join("sessions");
     assert!(
-        out.contains("harness-worktrees"),
-        "not in a worktree: {out}"
+        out.contains(&folder.display().to_string()),
+        "not in its own folder: {out}"
     );
     assert!(out.contains("2 changed file(s) applied"), "{out}");
     assert_eq!(
         std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
         "v2\n"
+    );
+    assert_eq!(
+        std::fs::read_dir(&folder).unwrap().count(),
+        0,
+        "a folder was left"
     );
     assert_eq!(
         std::fs::read_to_string(h.ws.join("made.txt")).unwrap(),
@@ -2718,6 +2727,8 @@ async fn a_filter_a_sub_agent_defines_never_runs_in_the_nodes_git() {
         "pwd; G=$(git rev-parse --path-format=absolute --git-common-dir); \
          printf '#!/bin/sh\\ntr \"\\\\0\" \" \" < /proc/$PPID/cmdline > {m}\\ncat\\n' > $G/f.sh; \
          chmod +x $G/f.sh; git config filter.x.clean $G/f.sh; \
+         git config core.fsmonitor $G/f.sh; mkdir -p $G/hooks; \
+         for h in post-index-change reference-transaction pre-commit; do cp $G/f.sh $G/hooks/$h; done; \
          echo '* filter=x' > .gitattributes; echo hi > new.txt",
         m = marker.display()
     );
@@ -2729,10 +2740,7 @@ async fn a_filter_a_sub_agent_defines_never_runs_in_the_nodes_git() {
     )
     .await;
     let out = out.last().expect("a delegate call");
-    assert!(
-        out.contains("harness-worktrees"),
-        "not in a worktree: {out}"
-    );
+    assert!(out.contains("/sessions/"), "not in its own folder: {out}");
     assert!(
         !marker.exists(),
         "the node's own git ran the sub-agent's filter: {}",
@@ -2908,4 +2916,118 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
         .iter()
         .any(|e| e.payload.to_string().contains("SSH-KEY-CANARY"));
     assert!(!leaked, "the other folder's file reached the chat");
+}
+
+/// Every file under `dir` with its size, `.git` included (to see that
+/// another repository was not touched).
+fn listing(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+    let mut v: Vec<_> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| (e.path().to_path_buf(), e.metadata().unwrap().len()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// R.1 follow-up (R1-1 and the class behind it): the redirects git honours
+/// in a repository's `.git`, each planted in the session's own repository
+/// (its shell may write there): `commondir`, a gitfile `.git`,
+/// `core.worktree`, `extensions.worktreeConfig` with a `config.worktree`,
+/// a linked `.git/objects`, and `objects/info/alternates` naming another
+/// repository. A turn's checkpoints, a delegation and an undo never read,
+/// write or grant anything of the other repository: its canary is in no
+/// event and no file of the session's folder, and its `.git` is unchanged.
+#[cfg(unix)]
+#[tokio::test]
+async fn redirects_in_the_sessions_git_never_reach_another_repository() {
+    for plant in [
+        "commondir",
+        "gitfile",
+        "core.worktree",
+        "worktreeConfig",
+        "objects-link",
+        "alternates",
+    ] {
+        let mut h = Harness::new(auto_policy).await;
+        init_repo(&h.ws);
+        let other = h._dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        git_in(&other, &["init", "-q"]);
+        std::fs::write(other.join("s.txt"), "OTHER-REPOSITORY-SECRET\n").unwrap();
+        git_in(&other, &["add", "."]);
+        git_in(&other, &["commit", "-qm", "other"]);
+        let og = other.join(".git");
+        let g = h.ws.join(".git");
+        match plant {
+            "commondir" => {
+                std::fs::write(g.join("commondir"), format!("{}\n", og.display())).unwrap()
+            }
+            "gitfile" => {
+                std::fs::rename(&g, h._dir.path().join("ws-git")).unwrap();
+                std::fs::write(&g, format!("gitdir: {}\n", og.display())).unwrap();
+            }
+            "core.worktree" => {
+                git_in(
+                    &h.ws,
+                    &["config", "core.worktree", &other.display().to_string()],
+                );
+            }
+            "worktreeConfig" => {
+                git_in(&h.ws, &["config", "extensions.worktreeConfig", "true"]);
+                std::fs::write(
+                    g.join("config.worktree"),
+                    format!("[core]\n\tworktree = {}\n", other.display()),
+                )
+                .unwrap();
+            }
+            "objects-link" => {
+                std::fs::rename(g.join("objects"), h._dir.path().join("ws-objects")).unwrap();
+                std::os::unix::fs::symlink(og.join("objects"), g.join("objects")).unwrap();
+            }
+            _ => std::fs::write(
+                g.join("objects/info/alternates"),
+                format!("{}\n", og.join("objects").display()),
+            )
+            .unwrap(),
+        }
+        let other_before = listing(&other);
+        let sid = h.create().await;
+        let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt").await;
+        let out = delegate_as_lead(
+            &mut h,
+            sid,
+            vec![agent("dev", vec![])],
+            "delegate: dev=run: git log --all --oneline; git show HEAD:s.txt; \
+             git cat-file --batch-all-objects --batch | grep -a SECRET; echo c > c.txt",
+        )
+        .await;
+        let out = out.last().expect("a delegate call").clone();
+        let _ = restore(&mut h, sid, "r", &turn, false).await;
+        let leaked = h
+            .seen
+            .iter()
+            .any(|e| e.payload.to_string().contains("OTHER-REPOSITORY-SECRET"));
+        assert!(
+            !leaked,
+            "{plant}: the other repository reached the chat: {out}"
+        );
+        for (p, _) in listing(&h.ws) {
+            if p.components().any(|c| c.as_os_str() == ".git") {
+                continue;
+            }
+            let text = std::fs::read(&p).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&text).contains("OTHER-REPOSITORY-SECRET"),
+                "{plant}: {} holds the canary",
+                p.display()
+            );
+        }
+        assert_eq!(
+            listing(&other),
+            other_before,
+            "{plant}: the other repository changed"
+        );
+    }
 }

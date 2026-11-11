@@ -1,26 +1,78 @@
-//! A sub-agent's shell in its worktree, through the real `rizzy-harness
-//! sandbox-exec` wrapper and the real tools (R.1, S-1 and S-2 of
-//! docs/security-review/2026-11-gate3.md). On a kernel without Landlock the
-//! tests skip with a printed reason.
+//! A sub-agent's shell in its node-owned folder, through the real
+//! `rizzy-harness sandbox-exec` wrapper and the real tools (R.1: S-1, S-2
+//! of docs/security-review/2026-11-gate3.md, R1-1 to R1-3 of
+//! docs/security-review/2026-11-gate3-fixes.md). On a kernel without
+//! Landlock the tests skip with a printed reason.
+//!
+//! The child's folder is laid out as the node lays it out
+//! (`git::SubRepo::make_folder`): `<data>/sessions/<id>/files`, a copy of
+//! the parent's folder with a git directory of its own whose alternates
+//! name the user's object store, and the grants are those the node passes
+//! (`harness_core::folder::OwnedFolder`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use harness_core::folder::OwnedFolder;
 use harness_tools::sandbox::{Confinement, Sandbox, Settings};
 use harness_tools::{Bash, Grep, Read, Tool, ToolCtx, Write};
 use serde_json::json;
 
 const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
 
-/// A data directory, a fake home with an ssh key, and a project folder that
-/// is a git repository with one sub-agent worktree, made the way
-/// `Session::isolate` makes it (`<repo>/.git/harness-worktrees/<id>`).
 struct Fixture {
     _dir: tempfile::TempDir,
     data: PathBuf,
     home: PathBuf,
+    /// The parent's repository.
     repo: PathBuf,
-    worktree: PathBuf,
+    /// Another repository of the same user.
+    other: PathBuf,
+    /// The child's folder, `<data>/sessions/child1/files`.
+    child: PathBuf,
+    /// A sibling child's folder.
+    sibling: PathBuf,
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+/// A child folder as the node makes it, for the repository `repo`.
+fn child_folder(repo: &Path, files: &Path) {
+    std::fs::create_dir_all(files).unwrap();
+    std::fs::copy(repo.join("a.txt"), files.join("a.txt")).unwrap();
+    let g = files.join(".git");
+    for d in [
+        "objects/info",
+        "objects/pack",
+        "refs/heads",
+        "refs/tags",
+        "info",
+    ] {
+        std::fs::create_dir_all(g.join(d)).unwrap();
+    }
+    let head = git(repo, &["rev-parse", "HEAD"]);
+    std::fs::write(g.join("HEAD"), head).unwrap();
+    std::fs::write(
+        g.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        g.join("objects/info/alternates"),
+        format!("{}\n", repo.join(".git/objects").display()),
+    )
+    .unwrap();
+    git(files, &["read-tree", "HEAD"]);
 }
 
 fn fixture() -> Fixture {
@@ -29,38 +81,33 @@ fn fixture() -> Fixture {
     let data = root.join("data");
     let home = root.join("home");
     let repo = home.join("proj");
+    let other = home.join("other");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(home.join(".ssh")).unwrap();
     std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
     std::fs::write(home.join(".ssh/id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
-    let git = |args: &[&str]| {
-        let o = std::process::Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .current_dir(&repo)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    };
-    git(&["init", "-q"]);
+    git(&other, &["init", "-q"]);
+    std::fs::write(other.join("s.txt"), "OTHER-REPOSITORY-SECRET\n").unwrap();
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-qm", "other"]);
+    git(&repo, &["init", "-q"]);
     std::fs::write(repo.join("a.txt"), "a\n").unwrap();
-    git(&["add", "a.txt"]);
-    git(&["commit", "-qm", "base"]);
-    let worktree = repo.join(".git/harness-worktrees/child1");
-    git(&[
-        "worktree",
-        "add",
-        "--detach",
-        "-q",
-        worktree.to_str().unwrap(),
-    ]);
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-qm", "base"]);
+    let child = data.join("sessions/child1/files");
+    let sibling = data.join("sessions/child2/files");
+    child_folder(&repo, &child);
+    child_folder(&repo, &sibling);
+    std::fs::write(sibling.join("sibling.txt"), "SIBLING-WORK\n").unwrap();
     Fixture {
         _dir: dir,
         data,
         home,
         repo,
-        worktree,
+        other,
+        child,
+        sibling,
     }
 }
 
@@ -77,7 +124,8 @@ impl Fixture {
         )
     }
 
-    fn ctx(&self, cwd: &Path) -> ToolCtx {
+    /// A session in `cwd`; with `owned`, a sub-agent in its own folder.
+    fn ctx(&self, cwd: &Path, owned: Option<&Path>) -> ToolCtx {
         let mut ctx = ToolCtx::new(cwd);
         ctx.protected = Arc::new(vec![self.data.clone()]);
         ctx.sandbox = Confinement::Confined {
@@ -85,16 +133,29 @@ impl Fixture {
             tmp: None,
         }
         .for_session("s1");
+        ctx.owned = owned.map(|top| OwnedFolder {
+            top: top.to_path_buf(),
+            git: top.join(".git"),
+            objects: Some(self.repo.join(".git/objects")),
+        });
+        ctx.pin = Some(harness_core::folder::FolderPin::at(cwd).unwrap());
         ctx
     }
 
-    async fn bash(&self, cwd: &Path, cmd: &str) -> String {
-        Bash.run(&self.ctx(cwd), json!({ "command": cmd }))
+    async fn bash(&self, cwd: &Path, owned: Option<&Path>, cmd: &str) -> String {
+        Bash.run(&self.ctx(cwd, owned), json!({ "command": cmd }))
             .await
             .output
     }
 
-    /// Whether Landlock works here (else the test skips).
+    async fn child(&self, cmd: &str) -> String {
+        let cmd = format!(
+            "export HOME={} GIT_CONFIG_GLOBAL=/dev/null; {cmd}",
+            self.home.display()
+        );
+        self.bash(&self.child, Some(&self.child), &cmd).await
+    }
+
     fn landlock(&self) -> bool {
         match self
             .sandbox()
@@ -109,89 +170,151 @@ impl Fixture {
     }
 }
 
-/// S-1: inside the real Landlock sandbox, a sub-agent's shell cannot write
-/// the main repository's `.git/config`, its hooks or `info/attributes`: the
-/// child's grant on the main `.git` is read-only except for `objects` and
-/// its own `worktrees/<id>`.
+/// The child's ordinary git works in its own folder: `status`, `add`,
+/// `commit`, `diff`, and `log` with the user's history (read-only through
+/// its alternates).
 #[tokio::test]
-async fn a_sandboxed_sub_agent_cannot_write_the_shared_git_config() {
+async fn a_sub_agents_git_works_in_its_own_folder() {
+    let f = fixture();
+    if !f.landlock() {
+        return;
+    }
+    let out = f
+        .child(
+            "echo b > b.txt && git status --short && git add b.txt && \
+             git -c user.name=a -c user.email=a@a commit -qm sub && \
+             git log --oneline | wc -l && git diff HEAD~1 --stat && echo end",
+        )
+        .await;
+    assert!(out.contains("?? b.txt"), "{out}");
+    assert!(
+        out.lines().any(|l| l.trim() == "2"),
+        "commit or log failed: {out}"
+    );
+    assert!(out.contains("b.txt | 1 +") && out.contains("end"), "{out}");
+}
+
+/// S-1 and R1-3: the child cannot write anything under the user's `.git`
+/// (config, hooks, `info/attributes`, refs, its object store); its grant
+/// there is read-only `objects` at most.
+#[tokio::test]
+async fn a_sub_agent_cannot_write_anything_in_the_users_git_directory() {
     let f = fixture();
     if !f.landlock() {
         return;
     }
     let g = f.repo.join(".git");
     let out = f
-        .bash(
-            &f.worktree,
-            &format!(
-                "export HOME={home} GIT_CONFIG_GLOBAL=/dev/null; \
-                 git config filter.x.clean 'sh -c \"id > /tmp/x; cat\"'; echo config=$?; \
-                 echo x > {g}/hooks/pre-commit; echo hook=$?; \
-                 echo '* filter=x' > {g}/info/attributes; echo attr=$?; \
-                 echo x > {g}/packed-refs; echo refs=$?",
-                home = f.home.display(),
-                g = g.display()
-            ),
-        )
+        .child(&format!(
+            "echo x >> {g}/config; echo config=$?; \
+             echo x > {g}/hooks/pre-commit; echo hook=$?; \
+             echo '* filter=x' > {g}/info/attributes; echo attr=$?; \
+             echo x > {g}/packed-refs; echo refs=$?; \
+             mkdir {g}/objects/zz; echo objects=$?; \
+             rm -rf {g}/objects/pack; echo rmobjects=$?; \
+             cat {g}/config >/dev/null; echo readconfig=$?",
+            g = g.display()
+        ))
         .await;
-    for step in ["config", "hook", "attr", "refs"] {
+    for step in [
+        "config",
+        "hook",
+        "attr",
+        "refs",
+        "objects",
+        "rmobjects",
+        "readconfig",
+    ] {
         assert!(!out.contains(&format!("{step}=0")), "{step}: {out}");
     }
-    let config = std::fs::read_to_string(g.join("config")).unwrap();
-    assert!(!config.contains("[filter \"x\"]"), "{config}");
-    assert!(!g.join("hooks/pre-commit").exists());
-    assert!(!g.join("info/attributes").exists());
+    assert!(!g.join("objects/zz").exists() && !g.join("hooks/pre-commit").exists());
 }
 
-/// S-2: the child cannot move its own folder away or put a link in its
-/// place (the directory that holds its worktree is not writable to it), so
-/// the file tools and the next shell stay in the worktree, and the user's
-/// key stays out of reach.
+/// R1-1: the child reaches no other repository, through its alternates or
+/// otherwise; and S-2/R1-2: it cannot move its own folder away, and no
+/// other session reaches it (the parent, a sibling child).
 #[tokio::test]
-async fn a_sandboxed_sub_agent_cannot_point_its_folder_at_another_one() {
+async fn a_sub_agents_folder_is_its_own_and_nothing_else_is() {
     let f = fixture();
     if !f.landlock() {
         return;
     }
-    let wt = &f.worktree;
-    let victim = f.home.join(".ssh");
+    // The child points its own git at the other repository: read refused.
+    let out = f
+        .child(&format!(
+            "echo {o}/.git/objects > .git/objects/info/alternates; \
+             git --no-pager log --all --oneline 2>&1; git show $(git -C {o} rev-parse HEAD 2>/dev/null || echo x):s.txt 2>&1; \
+             cat {o}/s.txt; echo cat=$?; cat {s}/sibling.txt; echo sib=$?; \
+             echo x > {s}/planted; echo sibw=$?; \
+             cd / && mv {c} {c}.r; echo mv=$?",
+            o = f.other.display(),
+            s = f.sibling.display(),
+            c = f.child.display()
+        ))
+        .await;
+    assert!(!out.contains("OTHER-REPOSITORY-SECRET"), "{out}");
+    assert!(!out.contains("SIBLING-WORK"), "{out}");
+    for step in ["cat", "sib", "sibw", "mv"] {
+        assert!(!out.contains(&format!("{step}=0")), "{step}: {out}");
+    }
+    assert!(f.child.is_dir() && !f.sibling.join("planted").exists());
+    // The parent, in its repository: the child's folder does not exist for
+    // it, and it cannot rename its own folder (its parent is not granted).
     let out = f
         .bash(
-            wt,
+            &f.repo,
+            None,
             &format!(
-                "cd / && mv {w} {w}.r; echo mv=$?; ln -s {v} {w}.l; echo ln=$?; \
-                 cat {v}/id_ed25519; echo cat=$?",
-                w = wt.display(),
-                v = victim.display()
+                "ls {c}; echo ls=$?; echo x > {c}/planted; echo w=$?; \
+                 cd / && mv {r} {r}.r; echo mvself=$?",
+                c = f.child.display(),
+                r = f.repo.display()
             ),
         )
         .await;
-    for step in ["mv", "ln", "cat"] {
+    for step in ["ls", "w", "mvself"] {
         assert!(!out.contains(&format!("{step}=0")), "{step}: {out}");
     }
-    assert!(!out.contains("SSH-KEY-CANARY"), "{out}");
-    assert!(wt.is_dir() && !wt.is_symlink());
-    let r = Read.run(&f.ctx(wt), json!({ "path": "id_ed25519" })).await;
-    assert!(!r.output.contains("SSH-KEY-CANARY"), "{}", r.output);
+    assert!(!f.child.join("planted").exists() && f.repo.is_dir());
+    // The file tools: the child reads its own folder, not a sibling's.
+    let ctx = f.ctx(&f.child, Some(&f.child));
+    let r = Read.run(&ctx, json!({ "path": "a.txt" })).await;
+    assert!(r.ok, "{}", r.output);
+    let g = Grep.run(&ctx, json!({ "pattern": "^a$" })).await;
+    assert!(g.output.contains("a.txt"), "{}", g.output);
+    let r = Read
+        .run(
+            &ctx,
+            json!({ "path": f.sibling.join("sibling.txt").display().to_string() }),
+        )
+        .await;
+    assert!(!r.ok && !r.output.contains("SIBLING-WORK"), "{}", r.output);
+    // A parent's file tools cannot reach a child's folder either.
+    let ctx = f.ctx(&f.repo, None);
+    let r = Read
+        .run(
+            &ctx,
+            json!({ "path": f.child.join("a.txt").display().to_string() }),
+        )
+        .await;
+    assert!(!r.ok, "{}", r.output);
 }
 
-/// S-2, when someone else replaces the folder (here the test, as a process
-/// of the parent's left running in the parent's folder could): with the
-/// session's pin, `read`, `write`, `grep` and the next shell command all
-/// refuse, and nothing of the other folder is read or written.
+/// S-2, when someone else replaces a session's folder: with the session's
+/// pin, `read`, `write`, `grep` and the next shell command all refuse, and
+/// nothing of the other folder is read or written.
 #[tokio::test]
 async fn the_file_tools_and_the_shell_refuse_a_replaced_folder() {
     let f = fixture();
     if !f.landlock() {
         return;
     }
-    let wt = &f.worktree;
+    let ws = f.repo.join("sub");
+    std::fs::create_dir(&ws).unwrap();
     let victim = f.home.join(".ssh");
-    let pin = harness_core::folder::FolderPin::at(wt).unwrap();
-    std::fs::rename(wt, wt.with_extension("r")).unwrap();
-    std::os::unix::fs::symlink(&victim, wt).unwrap();
-    let mut ctx = f.ctx(wt);
-    ctx.pin = Some(pin);
+    let ctx = f.ctx(&ws, None);
+    std::fs::rename(&ws, ws.with_extension("r")).unwrap();
+    std::os::unix::fs::symlink(&victim, &ws).unwrap();
     let r = Read.run(&ctx, json!({ "path": "id_ed25519" })).await;
     assert!(
         !r.ok && r.output.contains("folder was replaced"),

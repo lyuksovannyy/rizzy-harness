@@ -61,6 +61,10 @@ fn home() -> Home {
     }
 }
 
+/// `core.worktree` in the session's own config moved git's top level to any
+/// ancestor (S-3). The node no longer asks git: the root is the folder
+/// that holds the `.git` directory, and a whole turn (snapshot, change
+/// list, undo) stays inside it.
 #[tokio::test]
 async fn core_worktree_cannot_move_checkpoints_out_of_the_session_folder() {
     let h = home();
@@ -74,46 +78,71 @@ async fn core_worktree_cannot_move_checkpoints_out_of_the_session_folder() {
             h.home.to_str().unwrap(),
         ],
     );
-    // The next turn's checkpoint: refused, never the user's home.
-    let repo = repo_for(&h.proj, Some(&h.base)).await;
-    assert!(
-        repo.is_none(),
-        "the checkpoint root followed core.worktree to {:?}",
-        repo.map(|r| r.root)
-    );
-    // Nothing outside the session folder was touched.
+    let repo = repo_for(&h.proj, Some(&h.base)).await.unwrap();
+    assert_eq!(repo.root, h.proj, "the checkpoint root left the folder");
+    let before = snapshot(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    std::fs::write(h.other.join("notes.txt"), "v2\n").unwrap();
+    std::fs::write(h.home.join(".profile"), "export A=2\n").unwrap();
+    std::fs::write(h.proj.join("a.txt"), "two\n").unwrap();
+    let after = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let ch: Vec<String> = changed(&repo, &before, &after)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(ch, ["a.txt"]);
+    restore(&repo, &before, &after, false).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(h.other.join("notes.txt")).unwrap(),
-        "v1\n"
+        "v2\n"
     );
     assert_eq!(
         std::fs::read_to_string(h.home.join(".profile")).unwrap(),
-        "export A=1\n"
+        "export A=2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.proj.join("a.txt")).unwrap(),
+        "one\n"
     );
 }
 
-/// The refusal says why, for the chat's "no checkpoint" note.
+/// A `.git` that is not a plain repository directory (a gitfile, a link,
+/// one with a `commondir`) is never followed: the session folder is
+/// checkpointed as a plain folder, and a writing sub-agent is refused with
+/// the reason.
 #[tokio::test]
-async fn core_worktree_refusal_names_the_reason() {
-    let h = home();
-    sh(
-        &h.proj,
-        &[
-            "config",
-            "--local",
-            "core.worktree",
-            h.home.to_str().unwrap(),
-        ],
-    );
-    let e = checkpoint_repo(&h.proj, Some(&h.base), &Bounds::default())
-        .await
-        .unwrap_err();
-    assert!(e.contains("core.worktree"), "{e}");
-    assert!(
-        sub_repo(&h.proj, Some(&h.base), &Bounds::default())
+async fn a_git_entry_that_redirects_is_not_used_as_a_repository() {
+    for plant in ["gitfile", "link", "commondir"] {
+        let h = home();
+        let git = h.proj.join(".git");
+        match plant {
+            "gitfile" => {
+                std::fs::rename(&git, h.proj.join("real-git")).unwrap();
+                std::fs::write(
+                    &git,
+                    format!("gitdir: {}\n", h.other.join(".git").display()),
+                )
+                .unwrap();
+            }
+            "link" => {
+                std::fs::remove_dir_all(&git).unwrap();
+                std::os::unix::fs::symlink(h.other.join(".git"), &git).unwrap();
+            }
+            _ => std::fs::write(git.join("commondir"), "../../other/.git\n").unwrap(),
+        }
+        let repo = repo_for(&h.proj, Some(&h.base)).await.unwrap();
+        assert_eq!(repo.root, h.proj, "{plant}");
+        assert!(!borrows(&repo), "{plant}: borrowed an object store");
+        let e = sub_repo(&h.proj, Some(&h.base), &Bounds::default())
             .await
-            .is_err()
-    );
+            .unwrap_err();
+        assert!(!e.is_empty(), "{plant}");
+    }
 }
 
 /// A session inside a repository whose top folder is above the workspace
@@ -245,4 +274,81 @@ async fn a_restore_never_writes_or_deletes_outside_the_folder() {
         std::fs::read_to_string(h.proj.join("a.txt")).unwrap(),
         "two\n"
     );
+}
+
+/// While an undo writes and deletes in the folder, a process of the
+/// session swaps a folder in it for a link to another folder, over and
+/// over (R.1 follow-up). The writes and deletes are relative to
+/// directories opened without following links (`git::at`), so nothing is
+/// ever written or deleted in the other folder, however the race falls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_swapped_for_a_link_during_an_undo_is_never_written_through() {
+    const TRIES: usize = 120;
+    const FILES: usize = 20;
+    let h = home();
+    let victim = h.home.join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    for k in 0..FILES {
+        std::fs::write(victim.join(format!("f{k}")), "victim\n").unwrap();
+        std::fs::write(victim.join(format!("n{k}")), "victim\n").unwrap();
+    }
+    let victim_state = || {
+        let mut v: Vec<(String, String)> = std::fs::read_dir(&victim)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(e.path()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let clean = victim_state();
+    let d = h.proj.join("d");
+    let away = h.proj.join("d.r");
+    let repo = repo_for(&h.proj, Some(&h.base)).await.unwrap();
+    for i in 0..TRIES {
+        let _ = std::fs::remove_file(&d);
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&away);
+        std::fs::create_dir(&d).unwrap();
+        for k in 0..FILES {
+            std::fs::write(d.join(format!("f{k}")), "old\n").unwrap();
+        }
+        let before = snapshot(&repo, &format!("refs/harness/s/{i}/before"), "b")
+            .await
+            .unwrap();
+        for k in 0..FILES {
+            std::fs::write(d.join(format!("f{k}")), "new\n").unwrap();
+            std::fs::write(d.join(format!("n{k}")), "new\n").unwrap();
+        }
+        let after = snapshot(&repo, &format!("refs/harness/s/{i}/after"), "a")
+            .await
+            .unwrap();
+        let (dd, aw, v) = (d.clone(), away.clone(), victim.clone());
+        let delay = std::time::Duration::from_micros((i as u64 % 20) * 150);
+        let swapper = std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(40);
+            while std::time::Instant::now() < until {
+                if std::fs::rename(&dd, &aw).is_ok() {
+                    let _ = std::os::unix::fs::symlink(&v, &dd);
+                    std::thread::yield_now();
+                    let _ = std::fs::remove_file(&dd);
+                    let _ = std::fs::rename(&aw, &dd);
+                }
+                std::thread::yield_now();
+            }
+        });
+        let _ = restore(&repo, &before, &after, true).await;
+        swapper.join().unwrap();
+        assert_eq!(
+            victim_state(),
+            clean,
+            "try {i} wrote or deleted through the link"
+        );
+    }
 }

@@ -64,6 +64,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// The node-owned folder this session works in, when it is a
+    /// sub-agent's ([`crate::folder::OwnedFolder`]): the tools and the
+    /// sandbox grant it although it is inside a protected folder.
+    fn owned_folder(&self) -> Option<crate::folder::OwnedFolder> {
+        None
+    }
+
     /// The bytes of this session's images among `sha256` (those it has; an
     /// image it lacks is named to the model instead of shown).
     async fn images(&self, _sha256: &[String]) -> Vec<ImageData> {

@@ -172,6 +172,14 @@ impl Inner {
     }
 }
 
+/// Where sub-agents' folders live: `<data>/sessions`, beside the checkpoint
+/// store `checkpoints` (R.1 follow-up; the per-session layout of
+/// docs/nodes-credentials-environments.md §4.11 puts every session there).
+pub(crate) fn sessions_dir(checkpoints: &std::path::Path) -> Option<std::path::PathBuf> {
+    let abs = std::path::absolute(checkpoints).ok()?;
+    Some(abs.parent()?.join("sessions"))
+}
+
 #[derive(Clone)]
 pub struct NodeRuntime {
     inner: Arc<Inner>,
@@ -179,13 +187,22 @@ pub struct NodeRuntime {
 
 impl NodeRuntime {
     /// Open the runtime and recover any turns interrupted by a crash.
-    pub async fn start(cfg: NodeConfig) -> Result<Self, harness_store::StoreError> {
+    pub async fn start(mut cfg: NodeConfig) -> Result<Self, harness_store::StoreError> {
         // Lock files a killed git left in a checkpoint repository, and kept
         // copies a power loss damaged (A.18). Before any session runs.
         if let Some(base) = cfg.checkpoints_dir.clone() {
             let b = base.clone();
             let _ = tokio::task::spawn_blocking(move || git::sweep_stale_locks(&b)).await;
             git::check_kept_packs(&base).await;
+            // Sub-agents' folders: protected like the data directory (no
+            // session folder may hold them, no file tool or sandbox grant
+            // reaches them) except for the one child each belongs to. The
+            // folders of sub-agents that were running when the node stopped
+            // are gone with their sessions.
+            if let Some(s) = sessions_dir(&base) {
+                let _ = std::fs::remove_dir_all(&s);
+                cfg.policy.protect(&s);
+            }
         }
         let rows = cfg.store.call(|s| s.sessions()).await?;
         let hosted: std::collections::HashSet<SessionId> =
@@ -742,6 +759,7 @@ impl NodeRuntime {
                 agent_id: agent.map(|a| a.agent_id),
                 incognito,
                 parent_session: None,
+                owned: None,
             },
         )
         .await

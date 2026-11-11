@@ -75,6 +75,22 @@ impl FolderPin {
     }
 }
 
+/// A folder the node made for one session only (a sub-agent's folder under
+/// the node's sessions folder, which is protected like the data
+/// directory): the session may work in it although it lies in a protected
+/// folder, and nothing else may (R.1 follow-up, PLAN.md T32).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedFolder {
+    /// The folder's top (canonical); the session's folder is it or inside.
+    pub top: PathBuf,
+    /// Its own git directory (`<top>/.git`), which the session's shell may
+    /// write; the node never runs git with it.
+    pub git: PathBuf,
+    /// The user's object store that git directory borrows from, read-only
+    /// to the session's shell (`None`: none).
+    pub objects: Option<PathBuf>,
+}
+
 #[cfg(unix)]
 fn identity(dir: &Path) -> Result<(u64, u64), String> {
     use std::os::unix::fs::MetadataExt;

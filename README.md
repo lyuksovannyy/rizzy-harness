@@ -541,13 +541,17 @@ storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
 back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
-a temporary git worktree, so the folder must be a git repository (inside
-the node's `workspace_roots`) for them: elsewhere such a sub-agent is not
-started and the agent that delegated is told why. The worktree holds the
-folder as it is, your uncommitted work included (its own `git status`
-shows that work as changes against `HEAD`), as bytes: your repository's
-filters are not applied (an LFS repository's files arrive as the real
-files). When the sub-agent ends, the files it changed are written into
+a folder of their own, a copy of yours that the node keeps in its data
+directory (`sessions/<id>/files`), so your folder must be a git
+repository (inside the node's `workspace_roots`, with a plain `.git`
+directory) for them: elsewhere such a sub-agent is not started and the
+agent that delegated is told why. The copy holds the folder as it is,
+your uncommitted work included, and a git repository of its own whose
+history is yours (`git log` works; `git status` shows your uncommitted
+work as changes against `HEAD`), as bytes: your repository's filters are
+not applied (an LFS repository's files arrive as the real files, line
+endings are not converted). No other chat can reach it, and it is
+deleted when the sub-agent ends. When the sub-agent ends, the files it changed are written into
 the folder; if you or another sub-agent changed one of them meanwhile,
 nothing is written and the agent is told. None of this runs your
 repository's config, hooks, filters or attributes. Sub-agents that only
@@ -643,11 +647,11 @@ starts the command. A command may:
 
 Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
 `~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
-users' folders, not `/dev/tty`. A sub-agent's git worktree also gets the
-repository's `.git` read-only, and read-write only its object store and
-the worktree's own entry in it, so `git status`, `git add`, `git diff` and
-`git commit` work there, while `git config`, hooks, branches and the
-folder that holds the worktree stay out of its reach. Programs
+users' folders, not `/dev/tty`. A sub-agent works in its own folder in
+the node's data directory (with its own git repository there, so `git
+status`, `add`, `commit`, `diff` and `log` work), and may only read your
+repository's object store for its history: nothing of your `.git` is
+writable to it, and no other chat can open its folder. Programs
 cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
 fail inside the sandbox. From Linux 6.12 the shell also cannot signal
 processes outside it, and from Linux 7.1 it cannot connect to Unix sockets

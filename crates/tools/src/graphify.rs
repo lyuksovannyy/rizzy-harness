@@ -167,6 +167,7 @@ async fn run(
             workspace_write: false,
             owned_write: vec![out.to_path_buf()],
             read: install_dirs(bin),
+            owned: ctx.owned.clone(),
         },
     )?;
     cmd.env("GRAPHIFY_OUT", out)
