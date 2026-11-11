@@ -57,6 +57,16 @@ struct Call {
     summary: bool,
     tokens: u64,
     text: String,
+    system: String,
+}
+
+/// What the `n`th summary request gets back (default: a short summary).
+#[derive(Clone)]
+enum Reply {
+    Short,
+    /// More text than the request held.
+    Pad,
+    Fail,
 }
 
 /// Rejects a request estimated above its window like OpenAI does (400,
@@ -66,6 +76,7 @@ struct Windowed {
     window: u64,
     summary_window: u64,
     hold: Option<(usize, Duration)>,
+    replies: Vec<Reply>,
     calls: Mutex<Vec<Call>>,
 }
 
@@ -75,6 +86,16 @@ impl Windowed {
             window,
             summary_window,
             hold: None,
+            replies: vec![],
+            calls: Mutex::default(),
+        })
+    }
+    fn replying(window: u64, replies: Vec<Reply>) -> Arc<Self> {
+        Arc::new(Self {
+            window,
+            summary_window: BIG,
+            hold: None,
+            replies,
             calls: Mutex::default(),
         })
     }
@@ -116,12 +137,22 @@ impl Provider for Windowed {
             .filter_map(|m| m.user_text())
             .collect::<Vec<_>>()
             .join("\n");
+        let system = req
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMsg::System(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let n = {
             let mut calls = self.calls.lock().unwrap();
             calls.push(Call {
                 summary,
                 tokens,
                 text,
+                system,
             });
             calls.iter().filter(|c| c.summary).count()
         };
@@ -139,10 +170,21 @@ impl Provider for Windowed {
             {
                 tokio::time::sleep(d).await;
             }
-            return Ok(Completion {
-                text: format!("SUMMARY{n}"),
-                ..Default::default()
-            });
+            return match self.replies.get(n - 1).unwrap_or(&Reply::Short) {
+                Reply::Short => Ok(Completion {
+                    text: format!("SUMMARY{n}"),
+                    ..Default::default()
+                }),
+                Reply::Pad => Ok(Completion {
+                    text: format!("PADDED{n} {}", "x".repeat(400_000)),
+                    ..Default::default()
+                }),
+                Reply::Fail => Err(ProviderError::Status {
+                    status: 400,
+                    body: "bad request".into(),
+                    hint: RetryHint::default(),
+                }),
+            };
         }
         Ok(Completion {
             text: "answer".into(),
@@ -433,6 +475,7 @@ async fn cancel_during_compaction_leaves_a_consistent_log() {
         window: BIG,
         summary_window: 5_000,
         hold: Some((2, Duration::from_secs(30))),
+        replies: vec![],
         calls: Mutex::default(),
     });
     let b = backend(p.clone(), Some(1_000));
@@ -467,6 +510,7 @@ async fn cancel_during_compaction_leaves_a_consistent_log() {
         window: BIG,
         summary_window: BIG,
         hold: Some((1, Duration::from_secs(30))),
+        replies: vec![],
         calls: Mutex::default(),
     });
     let b = backend(p.clone(), Some(1_000));
@@ -480,4 +524,136 @@ async fn cancel_during_compaction_leaves_a_consistent_log() {
     let out = run(&b, &host, h, agent(None), cancel).await;
     assert_eq!(out.reason, TurnEndReason::Cancelled);
     assert!(host.0.lock().unwrap().is_empty());
+}
+
+fn summary_calls(p: &Windowed) -> usize {
+    p.calls().iter().filter(|c| c.summary).count()
+}
+
+/// A summary that is not smaller than what it replaces is thrown away: no
+/// event, and the next request carries the history as it was.
+#[tokio::test]
+async fn a_summary_that_does_not_shrink_the_history_is_discarded() {
+    let h = history(4, 3_000);
+    let p = Windowed::replying(BIG, vec![Reply::Pad]);
+    let b = backend(p.clone(), Some(100));
+    let host = Host::default();
+    let out = run(&b, &host, h, agent(None), Default::default()).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(p.kinds(), ["summary", "main"]);
+    assert!(host.summaries().is_empty(), "a padded summary was logged");
+    let main = p.calls().pop().unwrap();
+    assert!(
+        !main.system.contains("PADDED"),
+        "the padded summary was used"
+    );
+    assert!(main.text.contains("question 1"), "history was replaced");
+    assert!(main.tokens > 12_000, "{}", main.tokens);
+}
+
+/// Two failures in one turn: no third summary request. The window is too
+/// small for the request, so the provider's refusal sends the turn through
+/// compaction a second time.
+#[tokio::test]
+async fn two_rejected_summaries_open_the_breaker_for_the_turn() {
+    let p = Windowed::replying(1_000, vec![Reply::Pad, Reply::Pad, Reply::Short]);
+    let b = backend(p.clone(), Some(100));
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(summary_calls(&p), 2, "{:?}", p.kinds());
+    assert!(host.summaries().is_empty());
+    assert_eq!(out.reason, TurnEndReason::Error);
+}
+
+/// A failed request counts like a rejected summary.
+#[tokio::test]
+async fn a_failed_request_and_a_rejected_summary_open_the_breaker() {
+    let p = Windowed::replying(1_000, vec![Reply::Fail, Reply::Pad, Reply::Short]);
+    let b = backend(p.clone(), Some(100));
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(summary_calls(&p), 2, "{:?}", p.kinds());
+    assert_eq!(out.reason, TurnEndReason::Error);
+}
+
+/// The breaker is per turn: the next turn tries again.
+#[tokio::test]
+async fn the_next_turn_tries_compaction_again() {
+    let p = Windowed::replying(1_000, vec![Reply::Pad; 4]);
+    let b = backend(p.clone(), Some(100));
+    let host = Host::default();
+    run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(summary_calls(&p), 2);
+    run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(summary_calls(&p), 4, "{:?}", p.kinds());
+}
+
+/// A summary that does shrink is used, as before.
+#[tokio::test]
+async fn a_summary_that_shrinks_the_history_is_accepted() {
+    let p = Windowed::replying(BIG, vec![Reply::Short]);
+    let b = backend(p.clone(), Some(100));
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(host.summaries().len(), 1);
+    assert!(p.calls().pop().unwrap().system.contains("SUMMARY1"));
+}
+
+/// Out of room after compaction was tried: the error says both.
+#[tokio::test]
+async fn overflow_after_failed_compaction_says_so() {
+    let p = Windowed::replying(1_000, vec![Reply::Pad, Reply::Pad]);
+    let b = backend(p.clone(), Some(100));
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Error);
+    let err = out.error.unwrap();
+    assert!(err.contains("context window"), "{err}");
+    assert!(
+        err.contains("summar") && err.contains("did not help"),
+        "{err}"
+    );
 }

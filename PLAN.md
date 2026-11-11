@@ -928,7 +928,12 @@ summary, incognito TTL).
   summarised by the same model into a `history_summarized` event; later turns send
   system prompt + summary + recent turns. Skipped when the old part is small (otherwise
   two huge turns would trigger a summary call on every turn). The UI shows the latest
-  summary as a collapsible marker.
+  summary as a collapsible marker. **Shrink check:** each piece's summary is kept only if
+  its estimated tokens are at most 90% of the summary so far plus the piece it replaces;
+  otherwise it is discarded with no event and counts as a failure. **Breaker:** after two
+  failures (failed request, empty or non-shrinking summary) in one turn, no further
+  summary is requested that turn; an overflow then ends the turn saying summarising was
+  tried and did not help. A new turn starts with the count at zero.
 * **Incognito** (chat only): toggle in the bar; banner in the chat; hidden from recents,
   search and suggestions; deleted by the chat runtime *and* the master after
   `[chat] incognito_ttl_minutes` idle (default 24 h), or at once with "Delete now".

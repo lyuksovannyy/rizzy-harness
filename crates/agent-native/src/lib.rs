@@ -201,6 +201,26 @@ preferences; drop pleasantries. Write at most 300 words in the conversation's la
 /// Turns kept verbatim after a summary.
 const KEEP_TURNS: usize = 2;
 
+/// Compaction failures (a failed request, or a summary that was empty or
+/// did not shrink the history) after which a turn stops trying.
+const MAX_COMPACT_FAILURES: u32 = 2;
+
+/// A summary is kept only if it is at most this many tenths of what it
+/// replaces: a summary barely smaller than its input costs a request and
+/// loses detail for nothing, and the next step would compact again.
+const SUMMARY_MAX_TENTHS: u64 = 9;
+
+fn note_compact_failure(failures: &mut u32, model: &str) {
+    *failures += 1;
+    if *failures == MAX_COMPACT_FAILURES {
+        tracing::warn!(
+            model,
+            failures = *failures,
+            "compaction keeps failing; not trying again this turn"
+        );
+    }
+}
+
 /// The latest summary in a history, and the events after it.
 pub fn split_summary(history: &[RawEvent]) -> (Option<String>, &[RawEvent]) {
     let mut found: Option<(String, u64)> = None;
@@ -793,6 +813,8 @@ impl NativeBackend {
         // trigger is configured (0 = never summarise).
         let configured = self.config.summarize_after_tokens;
         let limit = compact::threshold(configured, window_of(&model));
+        // Failed or useless summaries this turn; two stop further attempts.
+        let mut compact_failures = 0u32;
         let estimate = |events: &[RawEvent]| {
             let mut m = history_to_messages(events);
             if let Some(k) = keep {
@@ -812,6 +834,7 @@ impl NativeBackend {
                     recent,
                     limit / 4,
                     &mut usage,
+                    &mut compact_failures,
                 )
                 .await
             else {
@@ -968,20 +991,32 @@ impl NativeBackend {
                     };
                 }
                 Step::Done(Err(e)) if !emitted && e.is_context_overflow() => {
-                    let fail = |usage: Usage, what: &str| TurnOutcome {
+                    // `tried`: compaction failed or did not shrink anything
+                    // this turn, which the error then says.
+                    let fail = |usage: Usage, what: &str, tried: u32| TurnOutcome {
                         reason: TurnEndReason::Error,
                         usage: Some(usage),
                         error: Some(format!(
-                            "The conversation is too long for the context window of {model}{what}. \
+                            "The conversation is too long for the context window of {model}{what}{}. \
                              Start a new chat, or switch to a model with a larger context window. \
                              (provider: {})",
+                            if tried > 0 {
+                                "; summarising older turns was tried and did not help"
+                            } else {
+                                ""
+                            },
                             e.log_line()
                         )),
                     };
                     if overflowed {
                         return fail(
                             usage,
-                            ", even after summarising older turns and hiding old tool output",
+                            if compact_failures > 0 {
+                                ", even after hiding old tool output"
+                            } else {
+                                ", even after summarising older turns and hiding old tool output"
+                            },
+                            compact_failures,
                         );
                     }
                     overflowed = true;
@@ -1010,6 +1045,7 @@ impl NativeBackend {
                                 recent,
                                 0,
                                 &mut usage,
+                                &mut compact_failures,
                             )
                             .await
                         else {
@@ -1042,7 +1078,7 @@ impl NativeBackend {
                     };
                     if after >= before {
                         // Nothing to shrink: the same request would fail again.
-                        return fail(usage, "");
+                        return fail(usage, "", compact_failures);
                     }
                     continue;
                 }
@@ -1496,7 +1532,11 @@ impl NativeBackend {
         recent: &[RawEvent],
         min_old: usize,
         usage: &mut Usage,
+        failures: &mut u32,
     ) -> Result<Option<(String, u64)>, harness_core::backend::LogError> {
+        if *failures >= MAX_COMPACT_FAILURES {
+            return Ok(None);
+        }
         let starts: Vec<usize> = recent
             .iter()
             .enumerate()
@@ -1557,15 +1597,35 @@ impl NativeBackend {
             let c = match self.complete_quietly(&req, &ctx.cancel).await {
                 Ok(c) => c,
                 Err(e) => {
+                    // Cancelled (`None`) is not a failure of compaction.
                     if let Some(e) = e {
                         tracing::warn!(model, error = %e.log_line(), "summary call failed");
+                        note_compact_failure(failures, model);
                     }
                     break;
                 }
             };
             usage.add(&c.usage.unwrap_or_default());
             let text = c.text.trim().to_string();
-            if text.is_empty() {
+            // What the summary replaces: the summary so far and this piece,
+            // counted as they sit in the request, by the same estimate that
+            // sizes `old` above. Each piece is checked on its own, because
+            // each is its own event: the log never holds a summary that
+            // grew the history, and a later piece's rejection leaves the
+            // earlier ones in force.
+            let replaced = provider::estimate_tokens(&history_to_messages(&old[from..end]))
+                + prev.as_deref().map_or(0, |p| {
+                    provider::estimate_tokens(&[ChatMsg::System(p.into())])
+                });
+            let got = provider::estimate_tokens(&[ChatMsg::System(text.clone())]);
+            if text.is_empty() || got * 10 > replaced * SUMMARY_MAX_TENTHS {
+                tracing::warn!(
+                    model,
+                    summary_tokens = got,
+                    replaced_tokens = replaced,
+                    "summary does not shrink the history; discarded"
+                );
+                note_compact_failure(failures, model);
                 break;
             }
             let through_seq = old[end - 1].seq;
@@ -3024,6 +3084,58 @@ mod tests {
         assert_eq!(recent.first().map(|e| e.seq), Some(10));
     }
 
+    /// With the breaker open, `compact` makes no request at all.
+    #[tokio::test]
+    async fn an_open_breaker_makes_no_summary_request() {
+        let sid = SessionId::new();
+        let mut seq = 1;
+        let mut history = vec![];
+        for n in 1..=6 {
+            history.extend(turn_events(sid, &mut seq, n));
+        }
+        let rec = Arc::new(Rec {
+            inner: mock::Mock {
+                delay: Duration::from_millis(0),
+            },
+            reqs: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(rec.clone(), vec![], NativeConfig::default());
+        let host = RecHost::new(Decision::Allow);
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(&host, "next", dir.path());
+        let mut usage = Usage::default();
+        let mut failures = MAX_COMPACT_FAILURES;
+        let res = b
+            .compact(
+                &c,
+                "mock",
+                None,
+                None,
+                &history,
+                0,
+                &mut usage,
+                &mut failures,
+            )
+            .await;
+        assert!(matches!(res, Ok(None)));
+        assert!(rec.reqs.lock().unwrap().is_empty());
+        let mut failures = 0;
+        let res = b
+            .compact(
+                &c,
+                "mock",
+                None,
+                None,
+                &history,
+                0,
+                &mut usage,
+                &mut failures,
+            )
+            .await;
+        assert!(matches!(res, Ok(Some(_))), "{res:?}");
+        assert_eq!(failures, 0);
+    }
+
     /// The log is written first, for summaries too: a summary whose event
     /// could not be appended does not replace the history, no further
     /// summary request is made, and the turn makes no model request.
@@ -3064,7 +3176,16 @@ mod tests {
         let window = compact::SUMMARY_OVERHEAD + one_turn * 3;
         let mut usage = Usage::default();
         let res = b
-            .compact(&c, "mock", Some(window), None, &history, 0, &mut usage)
+            .compact(
+                &c,
+                "mock",
+                Some(window),
+                None,
+                &history,
+                0,
+                &mut usage,
+                &mut 0,
+            )
             .await;
         assert!(res.is_err(), "an unlogged summary was returned: {res:?}");
         assert_eq!(
