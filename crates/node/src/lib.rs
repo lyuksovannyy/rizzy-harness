@@ -113,6 +113,9 @@ pub struct NodeLink {
 pub(crate) struct Inner {
     pub(crate) cfg: NodeConfig,
     pub(crate) sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
+    /// Folders (real paths) a restore is running in: no turn starts in an
+    /// overlapping folder meanwhile, and no second restore (`session.rs`).
+    pub(crate) restoring: Mutex<Vec<std::path::PathBuf>>,
     /// The current link to the master, if connected.
     link: Mutex<Option<mpsc::Sender<NodeToMaster>>>,
     /// Where published files are staged; `None` when this runtime does not
@@ -184,6 +187,7 @@ impl NodeRuntime {
         let inner = Arc::new(Inner {
             cfg,
             sessions: Mutex::new(HashMap::new()),
+            restoring: Mutex::new(Vec::new()),
             link: Mutex::new(None),
             stages,
         });
