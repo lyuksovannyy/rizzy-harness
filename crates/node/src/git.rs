@@ -622,10 +622,11 @@ async fn repo_for_with(cwd: &Path, shadow_base: Option<&Path>, user: &UserGitEnv
     })
 }
 
-/// A private index seeded from the repository's own (keeps its stat cache,
-/// so `add -A` only rehashes what changed). In a shadow repository the
-/// index is the shadow's, never the user's.
-async fn temp_index(repo: &Repo) -> Result<(PathBuf, PathBuf), String> {
+/// The repository's index and a private one next to it. With `seed`, the
+/// private one starts as a copy of the real one (keeps its stat cache, so
+/// staging only rehashes what changed), else empty (absent). In a shadow
+/// repository the index is the shadow's, never the user's.
+async fn seeded_index(repo: &Repo, seed: bool) -> Result<(PathBuf, PathBuf), String> {
     let real = match &repo.shadow {
         Some(dir) => dir.join("index"),
         None => PathBuf::from(
@@ -638,7 +639,7 @@ async fn temp_index(repo: &Repo) -> Result<(PathBuf, PathBuf), String> {
         ),
     };
     let tmp = real.with_file_name(format!("harness-index-{}", harness_core::new_id()));
-    if real.exists() {
+    if seed && real.exists() {
         tokio::fs::copy(&real, &tmp)
             .await
             .map_err(|e| e.to_string())?;
@@ -663,6 +664,11 @@ async fn temp_index(repo: &Repo) -> Result<(PathBuf, PathBuf), String> {
     Ok((real, tmp))
 }
 
+/// A private, empty index (the file does not exist yet).
+async fn fresh_index(repo: &Repo) -> Result<PathBuf, String> {
+    seeded_index(repo, false).await.map(|(_, tmp)| tmp)
+}
+
 /// A tree of the folder, and the nested repositories left out of it.
 struct WorkTree {
     id: String,
@@ -674,7 +680,7 @@ struct WorkTree {
 /// for turn checkpoints (shadow repository) and for a sub-agent's base and
 /// result (the user's own repository) alike.
 async fn worktree_tree(repo: &Repo) -> Result<WorkTree, String> {
-    let (real, idx) = temp_index(repo).await?;
+    let (real, idx) = seeded_index(repo, true).await?;
     let res = async {
         let nested = stage_without_nested(repo, &idx).await?;
         let id = run(repo, &["write-tree"], Some(&idx)).await?;
@@ -1039,6 +1045,10 @@ pub struct RestorePlan {
     /// repository made over files the turn's checkpoint holds, or a `.git`
     /// git does not accept): their files are restored, the `.git` stays.
     pub git_inside: Names,
+    /// What [`restore_paths`] writes: `from`'s mode, blob and path for each
+    /// path it puts back, and the paths `from` does not have (deleted).
+    writes: Vec<(String, String, Vec<u8>)>,
+    deletes: Vec<Vec<u8>>,
 }
 
 /// What a test restore did.
@@ -1058,9 +1068,11 @@ pub async fn restore_report(
     expected: &str,
     force: bool,
 ) -> Result<Restored, String> {
+    let diff = restore_diff(repo, from, expected).await?;
+    secure_blobs(repo, &diff).await?;
     let now = snapshot(repo, "refs/harness/test/now/before", "now").await?;
-    let plan = restore_plan(repo, from, expected, &now, !force).await?;
-    let files = restore_paths(repo, from, &plan.touched).await?;
+    let plan = restore_plan(repo, &diff, &now, !force).await?;
+    let files = restore_paths(repo, &plan).await?;
     Ok(Restored {
         files,
         nested: plan.nested.shown.clone(),
@@ -1068,9 +1080,22 @@ pub async fn restore_report(
     })
 }
 
-/// One path of a tree diff: status letter, path, and whether either side
-/// is a gitlink (a nested repository an older snapshot recorded).
-async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, Vec<u8>, bool)>, String> {
+/// One path of a tree diff.
+#[derive(Debug, Clone)]
+struct DiffRow {
+    /// Git's status letter (`A`: only in `b`).
+    status: char,
+    path: Vec<u8>,
+    /// Either side is a gitlink (a nested repository an older snapshot
+    /// recorded).
+    gitlink: bool,
+    /// The `a` side's mode and object id (all zeros for `A`).
+    old_mode: String,
+    old_id: String,
+}
+
+/// The paths that differ between two snapshots.
+async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<DiffRow>, String> {
     let out = run_raw(
         repo,
         &[
@@ -1096,9 +1121,14 @@ async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, Vec<u8>, b
             [meta, path] => {
                 let meta = String::from_utf8_lossy(meta);
                 let f: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
-                let st = f.get(4)?.chars().next()?;
-                let gitlink = f[..2].contains(&"160000");
-                Some((st, path.to_vec(), gitlink))
+                let status = f.get(4)?.chars().next()?;
+                Some(DiffRow {
+                    status,
+                    path: path.to_vec(),
+                    gitlink: f[..2].contains(&"160000"),
+                    old_mode: f[0].to_string(),
+                    old_id: f.get(2)?.to_string(),
+                })
             }
             _ => None,
         })
@@ -1116,8 +1146,8 @@ pub async fn changed(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, String)
     Ok(diff_raw(repo, a, b)
         .await?
         .into_iter()
-        .filter(|(_, p, gitlink)| !gitlink && !within(p, &set))
-        .map(|(st, p, _)| (st, String::from_utf8_lossy(&p).into_owned()))
+        .filter(|r| !r.gitlink && !within(&r.path, &set))
+        .map(|r| (r.status, String::from_utf8_lossy(&r.path).into_owned()))
         .collect())
 }
 
@@ -1136,9 +1166,9 @@ pub async fn exists(repo: &Repo, sha: &str) -> bool {
 /// differs between `from` and `expected` (what the folder should look like
 /// now). Refuses, listing them, if any of those files changed since
 /// `expected`, unless `force`. Undo: `from` = before the turn, `expected`
-/// = after it. Rewind: `expected` = the latest state. (The session splits
-/// this in two, `restore_plan` and `restore_paths`, to snapshot and log
-/// between them.)
+/// = after it. Rewind: `expected` = the latest state. (The session runs the
+/// steps itself, `restore_diff`, `secure_blobs`, a snapshot, `restore_plan`
+/// and `restore_paths`, to log between them.)
 #[cfg(test)]
 pub async fn restore(
     repo: &Repo,
@@ -1151,10 +1181,173 @@ pub async fn restore(
         .map(|r| r.files)
 }
 
-/// The paths a restore of `from` over `expected` writes, with their status
-/// letter, and what it leaves alone. `now` is a snapshot of the folder as
-/// it is; with `check`, refuses, listing them, if any of those files differ
-/// there from `expected`.
+/// The difference a restore of `from` over `expected` works from, read once
+/// (see [`restore_diff`]).
+#[derive(Debug, Clone)]
+pub struct RestoreDiff {
+    from: String,
+    expected: String,
+    rows: Vec<DiffRow>,
+}
+
+impl RestoreDiff {
+    /// Keep only `files` (paths as an event names them).
+    pub fn only(&mut self, files: &[String]) {
+        let keep: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+        self.rows
+            .retain(|r| keep.contains(String::from_utf8_lossy(&r.path).as_ref()));
+    }
+
+    /// `from`'s blob and path for every file a restore may write (a
+    /// superset of what [`restore_plan`] keeps: the folder's own nested
+    /// repositories are not known yet).
+    fn blobs(&self) -> Vec<(&str, &[u8])> {
+        self.rows
+            .iter()
+            .filter(|r| !r.gitlink && r.status != 'A')
+            .map(|r| (r.old_id.as_str(), r.path.as_slice()))
+            .collect()
+    }
+}
+
+/// Why a checkpoint that needs objects that are gone cannot be restored,
+/// in words for the person; `paths` are the files whose content is missing.
+fn lost_content(repo: &Repo, paths: &[Vec<u8>]) -> String {
+    let mut s = if borrows(repo) {
+        "nothing was changed: this checkpoint depends on content that the git repository \
+         in this folder no longer has (usually because its history was rewritten, by an \
+         amend, a rebase, a reset or a deleted branch, and then cleaned up by `git gc`), \
+         so it cannot be restored"
+            .to_string()
+    } else {
+        "nothing was changed: this checkpoint is damaged (content it needs is missing \
+         from the checkpoint store), so it cannot be restored"
+            .to_string()
+    };
+    if !paths.is_empty() {
+        s.push_str(&format!("; missing: {}", Names::of(paths).listed()));
+    }
+    s
+}
+
+/// Whether this checkpoint repository borrows objects from the user's.
+fn borrows(repo: &Repo) -> bool {
+    repo.shadow
+        .as_ref()
+        .is_some_and(|d| d.join("objects/info/alternates").exists())
+}
+
+/// The trees of `commits` (and every tree below them) that cannot be read.
+/// Blobs are not visited (`--filter=blob:none`); used only once a diff of
+/// them has failed, to say why in plain words.
+async fn trees_missing(repo: &Repo, commits: &[&str]) -> bool {
+    let mut trees = Vec::new();
+    for c in commits {
+        let Ok(text) = run(repo, &["cat-file", "commit", c], None).await else {
+            return false;
+        };
+        match text.lines().next().and_then(|l| l.strip_prefix("tree ")) {
+            Some(t) => trees.push(t.to_string()),
+            None => return false,
+        }
+    }
+    let mut args = vec![
+        "rev-list",
+        "--objects",
+        "--missing=print",
+        "--filter=blob:none",
+        "--no-object-names",
+    ];
+    args.extend(trees.iter().map(String::as_str));
+    run(repo, &args, None)
+        .await
+        .is_ok_and(|out| out.lines().any(|l| l.starts_with('?')))
+}
+
+/// The tree diff a restore of `from` over `expected` writes from. If it
+/// cannot be read because a tree is gone (borrowed from the user's
+/// repository, then pruned there), the error says so in plain words.
+pub async fn restore_diff(repo: &Repo, from: &str, expected: &str) -> Result<RestoreDiff, String> {
+    match diff_raw(repo, from, expected).await {
+        Ok(rows) => Ok(RestoreDiff {
+            from: from.to_string(),
+            expected: expected.to_string(),
+            rows,
+        }),
+        Err(e) if trees_missing(repo, &[from, expected]).await => {
+            tracing::debug!(error = %e, "checkpoint tree missing");
+            Err(lost_content(repo, &[]))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Make every blob a restore may write safe before anything is touched:
+/// each must be readable (else the restore is refused, in plain words,
+/// naming the files), and when the checkpoint repository borrows from the
+/// user's, they are all copied into its own object store, so nothing done
+/// in the user's repository between this check and the write can take them
+/// away. Only the blobs this restore writes are read, never a whole tree.
+///
+/// `cat-file --batch-check` answers per object (`<id> missing`); the copy
+/// is one `pack-objects` that writes a pack straight into the shadow's own
+/// `objects/pack` (a borrowed object is read through the alternates, the
+/// new pack is written locally, and nothing is written or touched in the
+/// user's repository; `hash-object -w` would not do: an object the
+/// alternate has is "freshened" there and not written locally).
+pub async fn secure_blobs(repo: &Repo, diff: &RestoreDiff) -> Result<(), String> {
+    let blobs = diff.blobs();
+    if blobs.is_empty() {
+        return Ok(());
+    }
+    let mut ids: Vec<&str> = blobs.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let list: Vec<u8> = ids
+        .iter()
+        .flat_map(|i| format!("{i}\n").into_bytes())
+        .collect();
+    let out = run_raw(
+        repo,
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        None,
+        Some(list.clone()),
+    )
+    .await?;
+    // One line per id: `<id> blob`, or `<id> missing` for one that is gone.
+    let text = String::from_utf8_lossy(&out);
+    let present: std::collections::HashSet<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_suffix(" blob"))
+        .collect();
+    if ids.iter().any(|i| !present.contains(i)) {
+        let mut paths: Vec<Vec<u8>> = blobs
+            .iter()
+            .filter(|(id, _)| !present.contains(id))
+            .map(|(_, p)| p.to_vec())
+            .collect();
+        paths.sort();
+        return Err(lost_content(repo, &paths));
+    }
+    if let (true, Some(dir)) = (borrows(repo), &repo.shadow) {
+        let base = dir.join("objects/pack/pack");
+        let base = base.to_string_lossy();
+        run_raw(
+            repo,
+            &["pack-objects", "-q", "--window=0", &base],
+            None,
+            Some(list),
+        )
+        .await
+        .map_err(|e| format!("nothing was changed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The paths a restore of `diff` (`from` over `expected`) writes, with
+/// their status letter, and what it leaves alone. `now` is a snapshot of
+/// the folder as it is; with `check`, refuses, listing them, if any of
+/// those files differ there from `expected`.
 ///
 /// A restore skips only what a snapshot recorded as left out (`from`,
 /// `expected` or `now`) and gitlinks of an older snapshot: it never writes,
@@ -1164,12 +1357,12 @@ pub async fn restore(
 /// restore never writes or deletes one.
 pub async fn restore_plan(
     repo: &Repo,
-    from: &str,
-    expected: &str,
+    diff: &RestoreDiff,
     now: &str,
     check: bool,
 ) -> Result<RestorePlan, String> {
     use std::collections::{BTreeSet, HashSet};
+    let (from, expected) = (diff.from.as_str(), diff.expected.as_str());
     let in_from: BTreeSet<Vec<u8>> = nested_in(repo, from).await.into_iter().collect();
     let in_expected: BTreeSet<Vec<u8>> = nested_in(repo, expected).await.into_iter().collect();
     let changed_repos: Vec<Vec<u8>> = in_from
@@ -1178,23 +1371,23 @@ pub async fn restore_plan(
         .collect();
     let mut nested: BTreeSet<Vec<u8>> = in_from.union(&in_expected).cloned().collect();
     nested.extend(nested_in(repo, now).await);
-    let mut candidates: Vec<(char, Vec<u8>)> = Vec::new();
-    for (st, p, gitlink) in diff_raw(repo, from, expected).await? {
-        if gitlink {
-            nested.insert(p);
+    let mut candidates: Vec<&DiffRow> = Vec::new();
+    for r in &diff.rows {
+        if r.gitlink {
+            nested.insert(r.path.clone());
         } else {
-            candidates.push((st, p));
+            candidates.push(r);
         }
     }
     let nested = outermost(nested);
     let set: HashSet<&[u8]> = nested.iter().map(Vec::as_slice).collect();
-    let candidates: Vec<(char, Vec<u8>)> = candidates
+    let candidates: Vec<&DiffRow> = candidates
         .into_iter()
-        .filter(|(_, p)| !within(p, &set))
+        .filter(|r| !within(&r.path, &set))
         .collect();
     // Folders written into that hold a `.git` (to tell the person).
     let root = repo.root.clone();
-    let paths: Vec<Vec<u8>> = candidates.iter().map(|(_, p)| p.clone()).collect();
+    let paths: Vec<Vec<u8>> = candidates.iter().map(|r| r.path.clone()).collect();
     let git_inside: BTreeSet<Vec<u8>> = tokio::task::spawn_blocking(move || {
         let mut seen: std::collections::HashMap<Vec<u8>, bool> = Default::default();
         let mut found = BTreeSet::new();
@@ -1214,8 +1407,10 @@ pub async fn restore_plan(
     .map_err(|e| e.to_string())?;
     let touched: Vec<(char, String)> = candidates
         .iter()
-        .map(|(st, p)| (*st, String::from_utf8_lossy(p).into_owned()))
+        .map(|r| (r.status, String::from_utf8_lossy(&r.path).into_owned()))
         .collect();
+    let (deleted, written): (Vec<&DiffRow>, Vec<&DiffRow>) =
+        candidates.iter().partition(|r| r.status == 'A');
     if check && !touched.is_empty() {
         let mut args = vec![
             "diff",
@@ -1240,44 +1435,69 @@ pub async fn restore_plan(
         nested: Names::of(&nested),
         changed_repos: Names::of(&changed_repos),
         git_inside: Names::of(&outermost(git_inside)),
+        writes: written
+            .iter()
+            .map(|r| (r.old_mode.clone(), r.old_id.clone(), r.path.clone()))
+            .collect(),
+        deletes: deleted.iter().map(|r| r.path.clone()).collect(),
     })
 }
 
-/// Write `from`'s version of every path in `touched` (from
-/// `restore_plan`) into the folder; paths `from` does not have are deleted.
-pub async fn restore_paths(
-    repo: &Repo,
-    from: &str,
-    touched: &[(char, String)],
-) -> Result<Vec<String>, String> {
-    if touched.is_empty() {
-        return Ok(vec![]);
-    }
-    let paths: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
-    // Write the old versions through a private index.
-    let (_, idx) = temp_index(repo).await?;
-    let res = async {
-        run(repo, &["read-tree", from], Some(&idx)).await?;
-        let restore: Vec<&str> = touched
-            .iter()
-            .filter(|(st, _)| *st != 'A')
-            .map(|(_, p)| p.as_str())
-            .collect();
-        if !restore.is_empty() {
-            let mut args = vec!["checkout-index", "-f", "--"];
-            args.extend(restore);
-            run(repo, &args, Some(&idx)).await?;
-        }
-        for (st, p) in touched {
-            if *st == 'A' {
-                let _ = tokio::fs::remove_file(repo.root.join(p)).await;
+/// Write the plan's files into the folder (`from`'s version of each, from
+/// the blobs [`secure_blobs`] made safe) and delete the paths `from` does
+/// not have.
+///
+/// The private index holds only the entries written, built from their
+/// blob ids (`update-index --index-info`), so no tree is read here and no
+/// object other than those blobs is needed. Not atomic across files: git
+/// writes them one by one, so a failure partway (a read-only folder, a
+/// full disk, a path that became something git cannot replace) leaves the
+/// earlier ones written; the caller names the checkpoint that holds the
+/// folder as it was.
+pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String>, String> {
+    let paths: Vec<String> = plan.touched.iter().map(|(_, p)| p.clone()).collect();
+    if !plan.writes.is_empty() {
+        let idx = fresh_index(repo).await?;
+        let res = async {
+            let mut info = Vec::new();
+            for (mode, id, p) in &plan.writes {
+                info.extend_from_slice(format!("{mode} {id}\t").as_bytes());
+                info.extend_from_slice(p);
+                info.push(0);
             }
+            run_raw(
+                repo,
+                &["update-index", "-z", "--index-info"],
+                Some(&idx),
+                Some(info),
+            )
+            .await?;
+            let names: Vec<u8> = plan
+                .writes
+                .iter()
+                .flat_map(|(_, _, p)| p.iter().copied().chain([0]))
+                .collect();
+            run_raw(
+                repo,
+                &["checkout-index", "-f", "-z", "--stdin"],
+                Some(&idx),
+                Some(names),
+            )
+            .await
+            .map(|_| ())
         }
-        Ok::<_, String>(())
+        .await;
+        let _ = tokio::fs::remove_file(&idx).await;
+        res?;
     }
-    .await;
-    let _ = tokio::fs::remove_file(&idx).await;
-    res?;
+    for p in &plan.deletes {
+        match tokio::fs::remove_file(repo.root.join(rel_path(p))).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("could not delete {}: {e}", shown(p)));
+            }
+            _ => {}
+        }
+    }
     Ok(paths)
 }
 
@@ -1448,6 +1668,8 @@ mod tests {
             .arg("-C")
             .arg(dir)
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
@@ -1679,6 +1901,88 @@ mod tests {
             String::from_utf8_lossy(&refs.stdout)
         );
         assert!(!h.repo.join(".git/harness-checkpoints").exists());
+    }
+
+    /// Every file under `dir` with its bytes and modification time.
+    fn dir_state(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+        walkdir::WalkDir::new(dir)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| {
+                let m = e.metadata().unwrap().modified().unwrap();
+                (e.path().to_path_buf(), std::fs::read(e.path()).unwrap(), m)
+            })
+            .collect()
+    }
+
+    /// A.16: the blobs a restore writes are checked and copied into the
+    /// shadow's own objects, in a repository whose config names commands
+    /// (fsmonitor, hooks): nothing runs, and no file of the user's `.git`
+    /// changes, not even a modification time.
+    #[tokio::test]
+    async fn securing_blobs_copies_them_and_writes_nothing_in_the_users_repository() {
+        let h = Hostile::new();
+        sh(&h.repo, &["gc", "-q"]); // the blobs sit in a pack, as in any older repository
+        // After the test's own git call, which would run it.
+        h.config("core.fsmonitor", &h.script("fsmonitor").to_string_lossy());
+        h.hook(&h.repo.join(".git/hooks"), "post-checkout");
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "before")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "after")
+            .await
+            .unwrap();
+        let one = run(&repo, &["rev-parse", &format!("{before}:a.txt")], None)
+            .await
+            .unwrap();
+        let alternates = h.base.read_dir().unwrap().next().unwrap().unwrap().path();
+        let alternates = alternates.join("objects/info/alternates");
+        let owns = |id: String| {
+            let alt = alternates.clone();
+            let repo = repo.clone();
+            async move {
+                let text = std::fs::read(&alt).unwrap();
+                std::fs::remove_file(&alt).unwrap();
+                let ok = run(&repo, &["cat-file", "-e", &id], None).await.is_ok();
+                std::fs::write(&alt, text).unwrap();
+                ok
+            }
+        };
+        assert!(!owns(one.clone()).await, "a.txt's blob is not borrowed");
+        let user_git = dir_state(&h.repo.join(".git"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let diff = restore_diff(&repo, &before, &after).await.unwrap();
+        secure_blobs(&repo, &diff).await.unwrap();
+        assert!(owns(one).await, "a.txt's blob was not copied");
+        assert!(
+            dir_state(&h.repo.join(".git")) == user_git,
+            "the user's .git changed"
+        );
+        assert_eq!(h.marked(), Vec::<String>::new());
+    }
+
+    /// A blob that is gone is named, in plain words, before anything else
+    /// happens, and nothing is copied.
+    #[tokio::test]
+    async fn securing_a_missing_blob_is_refused_with_its_path() {
+        let h = Hostile::new();
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "before")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "after")
+            .await
+            .unwrap();
+        let mut diff = restore_diff(&repo, &before, &after).await.unwrap();
+        diff.rows[0].old_id = "1".repeat(40);
+        let e = secure_blobs(&repo, &diff).await.unwrap_err();
+        assert!(e.starts_with("nothing was changed:"), "{e}");
+        assert!(e.contains("missing: `a.txt`"), "{e}");
     }
 
     #[tokio::test]

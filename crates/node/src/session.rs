@@ -734,12 +734,19 @@ impl Session {
     }
 
     /// Undo one turn's file changes, or rewind: undo it and every later
-    /// turn (see `git::restore_plan`). The log is written first: the
-    /// folder as it is now is snapshotted and recorded as a
-    /// `before_restore` checkpoint before any file changes (so a forced
-    /// restore loses nothing), then the restored state is recorded as that
-    /// checkpoint's `after` and as each undone turn's `restored`. Restoring
-    /// the `before_restore` checkpoint's id undoes the restore.
+    /// turn (see `git::restore_plan`). In order:
+    /// 1. every blob the restore writes is checked and made safe
+    ///    (`git::secure_blobs`); a checkpoint that needs content that is
+    ///    gone is refused here, with nothing touched and nothing logged;
+    /// 2. the folder as it is now is snapshotted and recorded as a
+    ///    `before_restore` checkpoint (so a forced restore loses nothing);
+    /// 3. the files are written; the restored state is recorded as that
+    ///    checkpoint's `after` and as each undone turn's `restored`.
+    ///
+    /// Restoring the `before_restore` checkpoint's id undoes the restore.
+    /// If the restore failed after step 2, that checkpoint has no `after`:
+    /// restoring it then puts back the paths its event lists to their
+    /// saved content, over the folder as it is (see `interrupted`).
     pub(crate) async fn restore(
         &self,
         turn_id: &str,
@@ -763,9 +770,30 @@ impl Session {
             .checkpoints
             .get(turn_id)
             .ok_or("this turn has no checkpoint")?;
-        let (Some(before), Some(after)) = (cp.before.clone(), cp.after.clone()) else {
-            return Err("this turn's checkpoint is incomplete".into());
+        let incomplete = || "this turn's checkpoint is incomplete".to_string();
+        let before = cp.before.clone().ok_or_else(incomplete)?;
+        // A restore that failed after saving the folder: its
+        // `before_restore` event lists the paths it may have written. (A
+        // turn without its `after` stays incomplete: nothing says what it
+        // changed.)
+        let interrupted: Option<Vec<String>> = match &cp.after {
+            Some(_) => None,
+            None => Some(
+                events
+                    .iter()
+                    .find_map(|e| match e.typed() {
+                        Ok(EventKind::Checkpoint(c))
+                            if c.turn_id == turn_id
+                                && c.phase == CheckpointPhase::BeforeRestore =>
+                        {
+                            Some(c.files)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(incomplete)?,
+            ),
         };
+        let after = cp.after.clone().unwrap_or_default();
         // Turns from this one on, in order, and the latest recorded state.
         let mut later: Vec<String> = Vec::new();
         let mut latest = after.clone();
@@ -795,8 +823,13 @@ impl Session {
             .ok_or("checkpoints are not available for this folder any more")?;
         // Held until this restore ends, on every path.
         let _claim = self.claim_folder(&repo.root)?;
-        let expected = if rewind { latest } else { after };
-        for sha in [&before, &expected] {
+        // `None`: an interrupted restore, put back over the folder as it is.
+        let expected = match (&interrupted, rewind) {
+            (Some(_), _) => None,
+            (None, true) => Some(latest),
+            (None, false) => Some(after),
+        };
+        for sha in std::iter::once(&before).chain(expected.as_ref()) {
             if !crate::git::exists(&repo, sha).await {
                 return Err(format!(
                     "this checkpoint is no longer kept (only the latest {} changes are)",
@@ -804,6 +837,16 @@ impl Session {
                 ));
             }
         }
+        // Everything the write needs, read and made safe before the folder
+        // is saved or touched: a refusal here leaves nothing behind.
+        let checked = match &expected {
+            Some(e) => {
+                let diff = crate::git::restore_diff(&repo, &before, e).await?;
+                crate::git::secure_blobs(&repo, &diff).await?;
+                Some(diff)
+            }
+            None => None,
+        };
         // The folder as it is, saved first: its own checkpoint, counted
         // against `checkpoints_keep` like a turn's. The same scan serves
         // the unforced check.
@@ -814,8 +857,22 @@ impl Session {
             .map_err(|e| {
                 format!("nothing was restored: the folder could not be saved first ({e})")
             })?;
-        let plan = match crate::git::restore_plan(&repo, &before, &expected, &now.sha, !force).await
-        {
+        let planned = async {
+            let diff = match (checked, &interrupted) {
+                (Some(d), _) => d,
+                (None, files) => {
+                    // An interrupted restore: back to its saved state, for
+                    // the paths it may have written, over the folder now.
+                    let mut d = crate::git::restore_diff(&repo, &before, &now.sha).await?;
+                    d.only(files.as_deref().unwrap_or_default());
+                    crate::git::secure_blobs(&repo, &d).await?;
+                    d
+                }
+            };
+            crate::git::restore_plan(&repo, &diff, &now.sha, !force).await
+        }
+        .await;
+        let plan = match planned {
             Ok(t) => t,
             Err(e) => {
                 crate::git::delete_ref(&repo, &saved_ref).await;
@@ -844,7 +901,7 @@ impl Session {
                  checkpoint {saved} (ref {saved_ref})"
             )
         };
-        crate::git::restore_paths(&repo, &before, &plan.touched)
+        crate::git::restore_paths(&repo, &plan)
             .await
             .map_err(kept)?;
         let state = crate::git::snapshot_full(
@@ -864,7 +921,7 @@ impl Session {
         }))
         .await
         .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
-        let targets: Vec<String> = if rewind {
+        let targets: Vec<String> = if rewind && interrupted.is_none() {
             later
                 .into_iter()
                 .filter(|t| view.checkpoints.get(t).is_some_and(|c| !c.restored))
