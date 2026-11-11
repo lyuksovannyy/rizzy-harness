@@ -4,7 +4,7 @@
 //! agent that asked.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,7 +77,7 @@ async fn req(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", cookie)
+        .login(cookie)
         .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -87,9 +87,9 @@ async fn req(
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    let c = r.headers()["set-cookie"].to_str().unwrap();
-    c.split(';').next().unwrap().to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn accounts(t: &T) -> (String, String) {
@@ -100,7 +100,7 @@ async fn accounts(t: &T) -> (String, String) {
         .send()
         .await
         .unwrap();
-    let alex = cookie(&r);
+    let alex = cookie(r).await;
     let (_, made) = req(
         t,
         Method::POST,
@@ -118,13 +118,13 @@ async fn accounts(t: &T) -> (String, String) {
         .unwrap();
     let r = c
         .post(format!("{}/api/me/password", t.base))
-        .header("cookie", cookie(&r))
+        .login(&cookie(r).await)
         .same_origin()
         .json(&json!({"current": pw, "new": "bobs own password"}))
         .send()
         .await
         .unwrap();
-    (alex, cookie(&r))
+    (alex, cookie(r).await)
 }
 
 /// Wait until the session's turn is over; returns its events.

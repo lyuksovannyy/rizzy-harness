@@ -1,7 +1,7 @@
 //! "Needs you" list: pending approvals and unanswered questions.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,18 +89,9 @@ async fn approvals_and_questions_need_attention_until_handled() {
         .send()
         .await
         .unwrap();
-    let ck = r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
+    let ck = common::signed_in(r).await;
     let req = |m: Method, p: &str, b: Option<Value>| {
-        let mut rb = c
-            .request(m, format!("{base}{p}"))
-            .header("cookie", &ck)
-            .same_origin();
+        let mut rb = c.request(m, format!("{base}{p}")).login(&ck).same_origin();
         if let Some(b) = b {
             rb = rb.json(&b);
         }

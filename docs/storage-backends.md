@@ -12,7 +12,7 @@ plan for MariaDB. The Docker templates in [`docker/`](../docker/) are built on t
 | Blobs (files, images) | the encrypted blob store in the data directory | no |
 | Memory facts, keyword recall | `memory.db` (SQLite + FTS5) | `mem0` replaces it whole |
 | Memory vectors | `memory.db`, or **Qdrant** (`HARNESS_MEMORY_BACKEND=qdrant`) | yes |
-| Browser logins | `ui_sessions` in `master.db`: the SHA-256 of the session cookie, the user, and an expiry that slides with use | with the port |
+| Browser logins | `ui_sessions` in `master.db`: the SHA-256 of the session cookie and of its login key (Gate 3 P-1), the user, and an expiry that slides with use | with the port |
 
 There is no database or cache setting: SQLite in the data directory is the
 only database, and one server process owns it.

@@ -59,8 +59,16 @@ pub async fn favicon(
     headers: HeaderMap,
     Query(q): Query<FaviconQuery>,
 ) -> Response {
-    let Some(who) = auth::authenticate(&m, &headers).await else {
-        return error(StatusCode::UNAUTHORIZED, "not logged in");
+    // The one request a cookie alone still authenticates (P-1): an
+    // engine's icon is drawn by an `<img>`, which cannot send the login
+    // key, and it reveals no chat and changes nothing of anyone's; the
+    // login is only there to bound who makes the server fetch.
+    let who = match auth::authenticate(&m, &headers).await {
+        Some(who) => who,
+        None => match auth::cookie_user(&m, &headers).await {
+            Some((user, _)) => auth::Principal::from_user(user),
+            None => return error(StatusCode::UNAUTHORIZED, "not logged in"),
+        },
     };
     if who.must_change_password {
         return error(StatusCode::FORBIDDEN, "change your password first");

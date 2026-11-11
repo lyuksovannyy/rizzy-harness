@@ -4,7 +4,7 @@
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,6 +13,7 @@ use harness_store::media::{MediaInsert, MediaQuery, MediaRow, NewItem};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::links::require_bytes;
 use super::{ApiError, ApiResult, query_flag, require};
 use crate::auth::Principal;
 use crate::media::{self, item_json};
@@ -68,6 +69,25 @@ async fn caller(m: &Master, headers: &HeaderMap) -> ApiResult<Principal> {
 /// Item `id`, if the caller may see it: its owner, or the API token.
 async fn visible(m: &Master, headers: &HeaderMap, id: &str) -> ApiResult<(Principal, MediaRow)> {
     let who = caller(m, headers).await?;
+    visible_to(m, who, id).await
+}
+
+/// [`visible`] for an element or a download, which may come with a link
+/// instead of the login key (P-1, `http::links`).
+async fn visible_bytes(
+    m: &Master,
+    headers: &HeaderMap,
+    uri: &Uri,
+    id: &str,
+) -> ApiResult<(Principal, MediaRow)> {
+    let who = require_bytes(m, headers, uri).await?;
+    if !media::enabled(m) {
+        return Err(unknown());
+    }
+    visible_to(m, who, id).await
+}
+
+async fn visible_to(m: &Master, who: Principal, id: &str) -> ApiResult<(Principal, MediaRow)> {
     let mid = id.to_string();
     let row = m.inner.mirror.call(move |s| s.media_get(&mid)).await?;
     match row {
@@ -481,10 +501,11 @@ struct ContentQuery {
 async fn content(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Path(id): Path<String>,
     Query(q): Query<ContentQuery>,
 ) -> ApiResult<Response> {
-    let (_, row) = visible(&m, &headers, &id).await?;
+    let (_, row) = visible_bytes(&m, &headers, &uri, &id).await?;
     let st = storage::get(&m).ok_or_else(unknown)?;
     let path = st.path(&row.blob.blob_id).ok_or_else(unknown)?;
     let blob = row.blob.blob_id.clone();
@@ -510,9 +531,10 @@ async fn content(
 async fn thumb(
     State(m): State<Master>,
     headers: HeaderMap,
+    uri: Uri,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    let (_, row) = visible(&m, &headers, &id).await?;
+    let (_, row) = visible_bytes(&m, &headers, &uri, &id).await?;
     let blob = row.blob.blob_id.clone();
     let (mime, bytes) = m
         .inner

@@ -3,6 +3,9 @@
 //! writes need an allowed `Origin` with the server's scheme, API answers
 //! are not stored, HSTS only with `--tls`.
 
+mod common;
+use common::Login as _;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -82,7 +85,7 @@ async fn start(tls: bool, extra: &[&str]) -> T {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    let admin = cookie(&r);
+    let admin = common::signed_in(r).await;
     T {
         addr,
         base,
@@ -92,21 +95,11 @@ async fn start(tls: bool, extra: &[&str]) -> T {
     }
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
-}
-
 /// A request as the admin's browser on this page would send it.
 fn browser(t: &T, method: Method, path: &str) -> reqwest::RequestBuilder {
     reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", &t.admin)
+        .login(&t.admin)
         .header("origin", &t.base)
 }
 
@@ -309,7 +302,7 @@ async fn cookie_writes_need_this_servers_origin() {
     let send = |origin: Option<String>| {
         let mut rb = reqwest::Client::new()
             .post(format!("{}/api/logout", t.base))
-            .header("cookie", &t.admin);
+            .login(&t.admin);
         if let Some(o) = origin {
             rb = rb.header("origin", o);
         }
@@ -333,7 +326,7 @@ async fn cookie_writes_need_this_servers_origin() {
     // A cookie GET needs none (a link, an image).
     let r = reqwest::Client::new()
         .get(format!("{}/api/me", t.base))
-        .header("cookie", &t.admin)
+        .login(&t.admin)
         .send()
         .await
         .unwrap();
@@ -394,7 +387,7 @@ async fn the_origin_scheme_follows_the_server() {
         let r = reqwest::Client::new()
             .put(format!("{}/api/me/settings", t.base))
             .header("host", &host)
-            .header("cookie", &t.admin)
+            .login(&t.admin)
             .header("origin", &origin)
             .json(&json!({}))
             .send()

@@ -53,7 +53,18 @@ once with a copy button, and the user must change it at first login. Nobody choo
 temporary password, and it is never shown again; a reset also signs the user out
 everywhere. Scripts do the same with `POST /api/users` (`{"username": …}`) and
 `POST /api/users/{id}/password`; each answer carries the password in its `password` field. Everyone sees only their own
-chats. Agentic sessions run shell commands on a worker node, so an admin has
+chats.
+
+Scripts use the API token (`rizzy-harness token`) as `Authorization: Bearer …`, as before. A
+browser login's cookie alone no longer authenticates anything. Browsers send a cookie to every
+port of its host, so a server the agent starts on your machine (a dev server on
+`127.0.0.1:8000`, say) would receive it when you open that page. Each login therefore also has a
+login key. It comes in the body of the login answer (`login_key`) and must go with the cookie
+as the `x-harness-login` header, or as a WebSocket's first message
+(`{"type":"login","key":…}`). The web UI keeps the key in this origin's local storage, so a new
+tab stays signed in; signing out forgets it. A file the browser fetches by itself (a picture, a
+video, a download) gets a short-lived link from the UI for that one address. Copied out of the
+browser, such a link does nothing without the login. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
 
 ```bash

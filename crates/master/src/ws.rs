@@ -17,6 +17,13 @@
 //! socket also re-checks its login, without sliding its expiry, every
 //! [`RECHECK`] and before every subscribe, which covers expiry and any
 //! path that deletes rows without telling us.
+//!
+//! A browser cannot give a WebSocket a header, so a cookie login's key
+//! (Gate 3 P-1, `auth`) comes as the socket's first message,
+//! `{"type":"login","key":…}`, within [`KEY_WAIT`]. Before it nothing is
+//! read from the mirror, subscribed or sent; without it, or with a wrong
+//! one, the socket is closed as signed out. Not in the URL (no secret in
+//! a URL) nor in a subprotocol, which proxies log.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -59,6 +66,8 @@ pub const RECHECK: Duration = Duration::from_secs(60);
 pub const SIGNED_OUT: u16 = 4401;
 /// How long a closing socket may take to send its close frame.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
+/// How long a cookie socket has to send its login key.
+pub const KEY_WAIT: Duration = Duration::from_secs(5);
 
 /// The registry key of the API token's sockets (user ids are UUIDs).
 const API_TOKEN: &str = "api-token";
@@ -182,13 +191,27 @@ enum ClientMsg {
     },
 }
 
+/// A cookie socket's first message.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum First {
+    Login { key: String },
+}
+
 pub async fn upgrade(
     State(m): State<Master>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(who) = auth::authenticate(&m, &headers).await else {
-        return (StatusCode::UNAUTHORIZED, "not logged in").into_response();
+    // The API token, or a client that sent the login key as a header: the
+    // socket is authenticated now. A browser's cookie alone only opens the
+    // socket; it must send the key first (`run`).
+    let (who, key_pending) = match auth::authenticate(&m, &headers).await {
+        Some(who) => (who, false),
+        None => match auth::cookie_user(&m, &headers).await {
+            Some((user, _)) => (auth::Principal::from_user(user), true),
+            None => return (StatusCode::UNAUTHORIZED, "not logged in").into_response(),
+        },
     };
     if who.must_change_password {
         return (StatusCode::FORBIDDEN, "change your password first").into_response();
@@ -215,8 +238,35 @@ pub async fn upgrade(
         .max_frame_size(MAX_MESSAGE)
         .on_upgrade(move |socket| async move {
             let _place = place;
-            run(m, who, session, revoked, socket).await;
+            run(m, who, session, key_pending, revoked, socket).await;
         })
+}
+
+/// Wait for a cookie socket's login key: the first message, within
+/// [`KEY_WAIT`], must be the key of this socket's own login. Anything else
+/// (silence, another message, a wrong key, an ended login) is a no.
+async fn key_first(
+    m: &Master,
+    who: &auth::Principal,
+    session: Option<&str>,
+    stream: &mut futures::stream::SplitStream<WebSocket>,
+    revoked: &mut watch::Receiver<bool>,
+) -> bool {
+    let (Some(hash), Some(uid)) = (session, who.user_id.as_deref()) else {
+        return false;
+    };
+    let first = tokio::select! {
+        biased;
+        _ = signed_out(revoked) => return false,
+        r = tokio::time::timeout(KEY_WAIT, stream.next()) => r,
+    };
+    let Ok(Some(Ok(Message::Text(text)))) = first else {
+        return false;
+    };
+    match serde_json::from_str::<First>(&text) {
+        Ok(First::Login { key }) => auth::socket_key_matches(m, hash, uid, &key).await,
+        Err(_) => false,
+    }
 }
 
 type Sink = futures::stream::SplitSink<WebSocket, Message>;
@@ -313,19 +363,23 @@ async fn run(
     m: Master,
     who: auth::Principal,
     session: Option<String>,
+    key_pending: bool,
     revoked: watch::Receiver<bool>,
     socket: WebSocket,
 ) {
-    let mut live = m.subscribe();
     let (sink, mut stream) = socket.split();
     let mut out = Out {
         sink,
         revoked: revoked.clone(),
     };
     let mut revoked = revoked;
+    // Nothing is subscribed, read or sent before the key (P-1).
+    let keyed =
+        !key_pending || key_first(&m, &who, session.as_deref(), &mut stream, &mut revoked).await;
+    let mut live = m.subscribe();
     // Registered before this first check: a login that ended before it is
     // found here, one that ends after it flips `revoked`.
-    let mut ended = !login_holds(&m, &who, session.as_deref()).await;
+    let mut ended = !keyed || !login_holds(&m, &who, session.as_deref()).await;
     let mut subs: HashMap<SessionId, u64> = HashMap::new();
     let mut ping = tokio::time::interval(Duration::from_secs(25));
     ping.reset();

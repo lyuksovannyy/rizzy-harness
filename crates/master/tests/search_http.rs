@@ -4,7 +4,7 @@
 //! the per-viewer feature flags and the classifier store.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -172,7 +172,7 @@ async fn req(
         rb = rb.json(&b);
     }
     rb = match cookie {
-        Some(c) => rb.header("cookie", c).same_origin(),
+        Some(c) => rb.login(c).same_origin(),
         None => rb.bearer_auth("tok"),
     };
     let r = rb.send().await.unwrap();
@@ -181,7 +181,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, c, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &c {
+        common::remember(c, &body);
+    }
+    (status, c, body)
 }
 
 async fn login_admin(t: &T) -> String {
@@ -960,7 +964,7 @@ fn png(tail: &[u8]) -> Vec<u8> {
 async fn upload(t: &T, cookie: &str, name: &str, bytes: Vec<u8>) -> String {
     let r = reqwest::Client::new()
         .post(format!("{}/api/media", t.base))
-        .header("cookie", cookie)
+        .login(cookie)
         .same_origin()
         .header("x-file-name", name.replace(' ', "%20"))
         .body(bytes)
@@ -976,7 +980,7 @@ async fn upload(t: &T, cookie: &str, name: &str, bytes: Vec<u8>) -> String {
 async fn image(t: &T, cookie: &str, path: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{}{path}", t.base))
-        .header("cookie", cookie)
+        .login(cookie)
         .same_origin()
         .header("sec-fetch-dest", "image")
         .send()
@@ -1024,7 +1028,7 @@ async fn media_rows_carry_thumbnails_their_owner_can_load() {
     // The owner's browser makes the thumbnail; the row then points at it.
     let r = reqwest::Client::new()
         .put(format!("{}/api/media/{orchard}/thumb", t.base))
-        .header("cookie", &alex)
+        .login(&alex)
         .same_origin()
         .body(png(b"thumb"))
         .send()
@@ -1150,7 +1154,7 @@ async fn published_artifacts_are_found_by_whoever_may_see_them() {
     let thumb = format!("/api/artifacts/{art}/versions/{vid}/thumb");
     let r = reqwest::Client::new()
         .put(format!("{}{thumb}", t.base))
-        .header("cookie", &alex)
+        .login(&alex)
         .same_origin()
         .body(png(b"thumb"))
         .send()

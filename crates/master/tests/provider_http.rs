@@ -2,7 +2,7 @@
 //! several providers routed by prefix, per-agent default models.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -158,7 +158,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let st = r.status();
@@ -166,7 +166,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (st, c, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &c {
+        common::remember(c, &body);
+    }
+    (st, c, body)
 }
 
 /// As the admin.

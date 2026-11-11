@@ -4,7 +4,7 @@
 //! choose one any more.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -92,7 +92,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -100,7 +100,11 @@ async fn req(
         .headers()
         .get("set-cookie")
         .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string());
-    (status, cookie, r.json().await.unwrap_or(Value::Null))
+    let body = r.json().await.unwrap_or(Value::Null);
+    if let Some(c) = &cookie {
+        common::remember(c, &body);
+    }
+    (status, cookie, body)
 }
 
 async fn admin(s: &Server) -> String {

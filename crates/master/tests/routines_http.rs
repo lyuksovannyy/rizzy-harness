@@ -6,7 +6,7 @@
 //! the scripted mock model.
 
 mod common;
-use common::SameOrigin as _;
+use common::{Login as _, SameOrigin as _};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -153,6 +153,11 @@ async fn send(
         .request(method, format!("{}{path}", t.base))
         .header(auth.0, auth.1)
         .same_origin();
+    if auth.0 == "cookie"
+        && let Some(k) = common::key_of(auth.1)
+    {
+        rb = rb.header(common::LOGIN_HEADER, k);
+    }
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -175,14 +180,9 @@ async fn token(t: &T, method: Method, path: &str, body: Option<Value>) -> (Statu
     send(t, method, path, body, ("authorization", "Bearer tok")).await
 }
 
-fn cookie(r: &reqwest::Response) -> String {
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+/// The cookie a login answer set; its login key is recorded (P-1).
+async fn cookie(r: reqwest::Response) -> String {
+    common::signed_in(r).await
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
@@ -190,7 +190,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c).same_origin();
+        rb = rb.login(c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -203,7 +203,7 @@ async fn user_id(t: &T, c: &str) -> String {
 /// The admin "alex" (agentic allowed), from the claim.
 async fn alex(t: &T) -> (String, String) {
     let body = json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"});
-    let c = cookie(&post_anon(t, "/api/setup", body, None).await);
+    let c = cookie(post_anon(t, "/api/setup", body, None).await).await;
     let id = user_id(t, &c).await;
     (c, id)
 }
@@ -217,14 +217,15 @@ async fn account(t: &T, admin: &str, name: &str, agentic: bool) -> (String, Stri
     let login = json!({"username": name, "password": pw});
     let first = post_anon(t, "/api/login", login, None).await;
     let change = json!({"current": pw, "new": format!("{name}s own password")});
-    let c = cookie(&post_anon(t, "/api/me/password", change, Some(&cookie(&first))).await);
+    let c =
+        cookie(post_anon(t, "/api/me/password", change, Some(&cookie(first).await)).await).await;
     let id = user_id(t, &c).await;
     (c, id)
 }
 
 async fn login(t: &T, name: &str, password: &str) -> String {
     let body = json!({"username": name, "password": password});
-    cookie(&post_anon(t, "/api/login", body, None).await)
+    cookie(post_anon(t, "/api/login", body, None).await).await
 }
 
 /// A team workspace "Acme" owned by `owner`, with `members` in it.
@@ -407,6 +408,9 @@ async fn socket(t: &T, c: &str) -> Socket {
     let origin = format!("http://{}", r.uri().authority().unwrap());
     r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
+    s.send(Message::Text(common::socket_login(c).into()))
+        .await
+        .unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     // The server answers the bad message: the socket is listening.
     loop {
