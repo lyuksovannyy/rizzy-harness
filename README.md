@@ -509,7 +509,20 @@ undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
 `before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
-the undo. The chat has no button for it yet.
+the undo. The chat has no button for it yet. A git repository inside your
+folder (a sub-folder git treats as its own repository: a clone, a
+submodule, a worktree, or one made with `git init`) is not covered by undo
+and is never touched by it: checkpoints leave it out, and an undo neither
+restores, deletes nor recreates anything in it. Use git in that repository
+to undo changes there. The chat says so after an undo when such a
+repository appeared or went away during the turn; each checkpoint in the
+chat's log lists the repositories it left out (`excluded`), which the chat
+does not show yet. Files a checkpoint already holds stay covered even if a
+`.git` appears in their folder later: an undo puts them back and leaves the
+`.git` as it is. An undo is refused while another chat is working in the
+same folder (or in a folder that contains it, or one inside it), and no
+chat can start working in that folder while an undo runs there; wait a
+moment, or cancel the other chat, and try again.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.

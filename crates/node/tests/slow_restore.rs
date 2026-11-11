@@ -235,6 +235,30 @@ async fn scenario() {
         })
         .expect("a checkpoint");
     let b = l.create(&ws).await;
+    // B gets a turn of its own to undo later (another file).
+    l.prompt(b, "pb", "run: echo b > b.txt");
+    l.pump_until(
+        |l| {
+            l.events
+                .iter()
+                .filter(|e| matches!(e, EventKind::TurnEnded(_)))
+                .count()
+                == 2
+        },
+        Duration::from_secs(20),
+    )
+    .await;
+    let b_turn = l
+        .events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After => {
+                Some(c.turn_id.clone())
+            }
+            _ => None,
+        })
+        .expect("b's checkpoint");
 
     let started = Instant::now();
     l.send(MasterToNode::Restore {
@@ -277,6 +301,32 @@ async fn scenario() {
         );
     }
     assert!(l.ack("cancel-a").unwrap().1 && l.ack("cancel-b").unwrap().1);
+    // While A's restore runs, B can neither start a turn in the folder nor
+    // restore it (A.15).
+    l.prompt(b, "turn-during-restore", "run: echo late > late.txt");
+    l.send(MasterToNode::Restore {
+        req_id: "second-restore".into(),
+        session_id: b,
+        turn_id: b_turn,
+        force: false,
+        rewind: false,
+    });
+    l.pump_until(
+        |l| l.ack("turn-during-restore").is_some() && l.ack("second-restore").is_some(),
+        Duration::from_secs(20),
+    )
+    .await;
+    for r in ["turn-during-restore", "second-restore"] {
+        let a = l.ack(r).unwrap();
+        assert!(
+            !a.1 && a
+                .2
+                .as_deref()
+                .is_some_and(|e| e.contains("an undo is running in this folder")),
+            "{r}: {a:?}"
+        );
+    }
+    assert!(!ws.join("late.txt").exists());
     assert!(
         l.ack("restore").is_none(),
         "the restore was not slow; the test proves nothing"
