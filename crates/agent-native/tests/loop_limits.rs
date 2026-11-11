@@ -66,6 +66,7 @@ impl Provider for Forever {
                 input: self.input.clone(),
             }],
             usage: None,
+            stop: Default::default(),
         })
     }
 }

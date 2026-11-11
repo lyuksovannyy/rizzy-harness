@@ -83,6 +83,24 @@ pub struct Completion {
     pub text: String,
     pub tool_calls: Vec<ToolCallRef>,
     pub usage: Option<Usage>,
+    /// Why the model stopped.
+    pub stop: StopReason,
+}
+
+/// Why a model stopped writing, normalised from each provider's own value
+/// (`llm::stop_reason`). A value we do not know is `Other`, never `End`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StopReason {
+    /// The answer is complete.
+    End,
+    /// The model stopped to call tools.
+    ToolUse,
+    /// The answer reached the output-token limit and was cut: a tool call
+    /// in it may be incomplete, whether or not its arguments parse.
+    OutputLimit,
+    /// Anything else, or the provider did not say.
+    #[default]
+    Other,
 }
 
 /// What a failed response said about trying again (its headers).

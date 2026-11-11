@@ -667,6 +667,11 @@ asks for more is cut at that value, and the tool description the model sees
 states it. Neither an agent definition, a prompt nor the master can raise
 either; a value outside its range stops the node at start.
 
+When a model's answer reaches its output limit while it is writing a tool
+call, that call (and every other call in the same answer) is not run, even if
+it looks complete; the model is told to split the change into smaller calls.
+Three cut answers in a row end the turn with a message saying so.
+
 **File limits.** The file tools only open regular files: a FIFO, a device
 (`/dev/zero`), a socket or a directory is refused at once, also through a
 symlink. `read` streams a file and stops after 32 MiB, saying where (use

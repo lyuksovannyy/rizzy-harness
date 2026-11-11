@@ -1826,6 +1826,7 @@ impl harness_agent_native::Provider for Script {
             text: "done".into(),
             tool_calls,
             usage: None,
+            stop: Default::default(),
         })
     }
 }
