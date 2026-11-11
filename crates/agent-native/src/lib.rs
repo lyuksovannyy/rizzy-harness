@@ -31,8 +31,6 @@ pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
 /// ...or when this many bytes are buffered.
 pub const FLUSH_BYTES: usize = 2048;
 
-const MAX_STEPS: usize = 50;
-
 /// After a cancel, how long a tool has to return on its own before the turn
 /// stops waiting for it. Longer than bash needs to end a group that ignores
 /// SIGTERM (2 s to SIGKILL, up to 2 s draining its pipes), so a normal
@@ -155,6 +153,12 @@ pub struct NativeConfig {
     /// session gets its own temp folder under it.
     pub sandbox: harness_tools::sandbox::Confinement,
     pub tool_timeout: Duration,
+    /// Model calls one turn (and each sub-agent's turn) may make (node.toml
+    /// `[limits] max_steps`).
+    pub max_steps: usize,
+    /// The longest a `bash` call may run (node.toml `[limits]
+    /// bash_timeout_max_s`).
+    pub bash_timeout_max: Duration,
     /// Reasoning effort requested from the provider, if the model supports it.
     pub effort: Option<Effort>,
     /// Summarise older turns once the history is estimated above this many
@@ -173,6 +177,8 @@ impl Default for NativeConfig {
             protected_dirs: Arc::default(),
             sandbox: Default::default(),
             tool_timeout: Duration::from_secs(600),
+            max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
+            bash_timeout_max: Duration::from_secs(harness_tools::DEFAULT_TIMEOUT_MAX_S),
             effort: None,
             summarize_after_tokens: 0,
         }
@@ -284,7 +290,7 @@ impl NativeBackend {
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
-                schema: t.schema(),
+                schema: t.schema_for(self.config.bash_timeout_max),
             })
             .collect();
         if let Some(a) = agent.filter(|a| !a.delegates.is_empty())
@@ -864,7 +870,7 @@ impl NativeBackend {
             .clone()
             .map(|r| fallback_event(&ctx.turn_id, &model, &ctx.model, r));
         let mut started = false;
-        for _ in 0..MAX_STEPS {
+        for _ in 0..self.config.max_steps {
             let message_id = new_id();
             let mut sent = messages.clone();
             if let Some(k) = keep {
@@ -1128,7 +1134,10 @@ impl NativeBackend {
         TurnOutcome {
             reason: TurnEndReason::Error,
             usage: Some(usage),
-            error: Some(format!("stopped after {MAX_STEPS} steps")),
+            error: Some(format!(
+                "stopped after {} steps (`max_steps` in node.toml)",
+                self.config.max_steps
+            )),
         }
     }
 }
@@ -1389,6 +1398,7 @@ impl NativeBackend {
             allow_outside_workspace: self.config.allow_outside_workspace,
             protected: self.config.protected_dirs.clone(),
             timeout: self.config.tool_timeout,
+            bash_timeout_max: self.config.bash_timeout_max,
             env: self.config.tool_env.clone(),
             observed: Arc::new(observed.to_vec()),
             savings: ctx.extra.savings.clone(),

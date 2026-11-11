@@ -14,6 +14,12 @@ use crate::{Tool, ToolCtx, ToolOutcome, cap, str_arg};
 
 pub struct Bash;
 
+/// The `bash` timeout ceiling when node.toml does not set one (a call may
+/// ask for less, never more), and the range node.toml may set it in.
+pub const DEFAULT_TIMEOUT_MAX_S: u64 = 3600;
+pub const MIN_TIMEOUT_MAX_S: u64 = 1;
+pub const MAX_TIMEOUT_MAX_S: u64 = 3600;
+
 /// Grace period between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
@@ -104,11 +110,21 @@ impl Tool for Bash {
     }
 
     fn schema(&self) -> Value {
+        self.schema_for(Duration::from_secs(DEFAULT_TIMEOUT_MAX_S))
+    }
+
+    fn schema_for(&self, bash_timeout_max: Duration) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The command to run"},
-                "timeout_secs": {"type": "integer", "description": "Optional timeout in seconds (max 3600)"}
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": format!(
+                        "Optional timeout in seconds (max {})",
+                        bash_timeout_max.as_secs()
+                    )
+                }
             },
             "required": ["command"]
         })
@@ -123,11 +139,15 @@ impl Tool for Bash {
             Ok(c) => c.to_string(),
             Err(e) => return ToolOutcome::err(e),
         };
+        // The node's ceiling applies to what the call asks for and to the
+        // default alike.
+        let ceiling = ctx.bash_timeout_max.max(Duration::from_secs(1));
         let timeout = input
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
-            .map(|s| Duration::from_secs(s.clamp(1, 3600)))
-            .unwrap_or(ctx.timeout);
+            .map(|s| Duration::from_secs(s.max(1)))
+            .unwrap_or(ctx.timeout)
+            .min(ceiling);
 
         // The allow-listed environment (node.toml `env_pass`), nothing else,
         // in the Landlock sandbox where the node has one (node.toml
@@ -428,7 +448,18 @@ mod tests {
         ctx.output = Some(sink);
         let cancel = ctx.cancel.clone();
         let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": "yes"})).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Wait for the state the test needs (the bounded channel is full, so
+        // the producer is blocked on the stuck consumer), not for a fixed
+        // time: a loaded machine can take far longer than 300 ms to get there.
+        let full_by = Instant::now() + Duration::from_secs(60);
+        while rx.len() < STREAM_CHANNEL {
+            assert!(
+                Instant::now() < full_by,
+                "channel never filled: {}",
+                rx.len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let started = Instant::now();
         cancel.cancel();
         let r = tokio::time::timeout(Duration::from_secs(10), h)

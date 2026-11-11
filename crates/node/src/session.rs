@@ -735,7 +735,12 @@ impl Session {
     }
 
     /// Undo one turn's file changes, or rewind: undo it and every later
-    /// turn (see `git::restore`). Records the new state as a snapshot.
+    /// turn (see `git::restore_plan`). The log is written first: the
+    /// folder as it is now is snapshotted and recorded as a
+    /// `before_restore` checkpoint before any file changes (so a forced
+    /// restore loses nothing), then the restored state is recorded as that
+    /// checkpoint's `after` and as each undone turn's `restored`. Restoring
+    /// the `before_restore` checkpoint's id undoes the restore.
     pub(crate) async fn restore(
         &self,
         turn_id: &str,
@@ -774,7 +779,10 @@ impl Session {
                 if seen && c.phase == CheckpointPhase::After && !later.contains(&c.turn_id) {
                     later.push(c.turn_id.clone());
                 }
-                if c.phase != CheckpointPhase::Before {
+                if !matches!(
+                    c.phase,
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore
+                ) {
                     latest = c.git_ref.clone();
                 }
             }
@@ -795,13 +803,68 @@ impl Session {
                 ));
             }
         }
-        let files = crate::git::restore(&repo, &before, &expected, force).await?;
+        // The folder as it is, saved first: its own checkpoint, counted
+        // against `checkpoints_keep` like a turn's. The same scan serves
+        // the unforced check.
+        let saved = format!("restore-{}", harness_core::new_id());
+        let saved_ref = format!("refs/harness/{}/{saved}/before", self.id);
+        let now = crate::git::snapshot(&repo, &saved_ref, "harness: before restore")
+            .await
+            .map_err(|e| {
+                format!("nothing was restored: the folder could not be saved first ({e})")
+            })?;
+        let touched = match crate::git::restore_plan(
+            &repo,
+            &before,
+            &expected,
+            (!force).then_some(now.as_str()),
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                crate::git::delete_ref(&repo, &saved_ref).await;
+                return Err(e);
+            }
+        };
+        let files: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
+        if let Err(e) = self
+            .append(EventKind::Checkpoint(Checkpoint {
+                turn_id: saved.clone(),
+                phase: CheckpointPhase::BeforeRestore,
+                git_ref: now,
+                files: files.clone(),
+            }))
+            .await
+        {
+            crate::git::delete_ref(&repo, &saved_ref).await;
+            return Err(format!("nothing was restored: {}", LogError(e.to_string())));
+        }
+        // From here on the saved state is in the log; say so on failure.
+        let kept = |e: String| {
+            format!(
+                "{e}; the folder as it was before this restore is saved as \
+                 checkpoint {saved} (ref {saved_ref})"
+            )
+        };
+        crate::git::restore_paths(&repo, &before, &touched)
+            .await
+            .map_err(kept)?;
         let state = crate::git::snapshot(
             &repo,
-            &format!("refs/harness/{}/{turn_id}/restored", self.id),
+            &format!("refs/harness/{}/{saved}/after", self.id),
             "harness: restored",
         )
-        .await?;
+        .await
+        .map_err(kept)?;
+        self.append(EventKind::Checkpoint(Checkpoint {
+            turn_id: saved.clone(),
+            phase: CheckpointPhase::After,
+            git_ref: state.clone(),
+            files: files.clone(),
+        }))
+        .await
+        .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         let targets: Vec<String> = if rewind {
             later
                 .into_iter()
@@ -818,8 +881,9 @@ impl Session {
                 files: files.clone(),
             }))
             .await
-            .map_err(|e| LogError(e.to_string()).to_string())?;
+            .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
+        crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
         Ok(())
     }
 
@@ -836,16 +900,9 @@ impl Session {
         let child_id = SessionId::new();
         let short: String = task.chars().take(60).collect();
         // A sub-agent that can change files works in its own git worktree,
-        // so parallel sub-agents do not trample each other.
-        let (iso, iso_note) = match self.isolate(&agent, child_id).await {
-            Ok(i) => (i, None),
-            Err(e) => (
-                None,
-                Some(format!(
-                    "no separate worktree ({e}); it worked in the shared folder"
-                )),
-            ),
-        };
+        // so parallel sub-agents do not trample each other and a child whose
+        // log failed leaves the folder alone; without one it is not started.
+        let iso = self.isolate(&agent, child_id).await?;
         let cwd = iso
             .as_ref()
             .map(|i| i.cwd.clone())
@@ -916,12 +973,12 @@ impl Session {
             .await;
         // Each session's log gates its own effects: the parent's turn goes
         // on, but nothing of a child whose log failed (or whose parent's
-        // did) reaches the shared folder, since no event would record it.
+        // did) reaches the parent's folder, since no event would record it.
         let log_failed =
             child.log_failed.load(Ordering::SeqCst) || self.log_failed.load(Ordering::SeqCst);
         let merge_note = match iso {
             Some(i) => Some(self.merge_back(i, child_id, !log_failed).await),
-            None => iso_note,
+            None => None,
         };
         let log = self
             .node
@@ -958,39 +1015,51 @@ impl Session {
         })
     }
 
-    /// Prepare a worktree for a sub-agent with write access, seeded with the
-    /// current working state (uncommitted edits included). `Ok(None)`: no
-    /// worktree is wanted (read-only agent, no repository); `Err`: one was
-    /// wanted but could not be made, and the sub-agent shares the folder.
+    /// Whether a sub-agent can change files here: its tools, narrowed by
+    /// its own denials and by this node's policy, include `write`, `edit` or
+    /// `bash` (no shell on a node is read-only).
+    fn can_change_files(&self, agent: &AgentSpec) -> bool {
+        let denied = &self.node.cfg.policy.denied_tools;
+        self.profile == Profile::Agentic
+            && ["write", "edit", "bash"]
+                .iter()
+                .any(|t| agent.allows_tool(t) && !denied.iter().any(|d| d == t))
+    }
+
+    /// Prepare a worktree for a sub-agent that can change files, seeded with
+    /// the current working state (uncommitted edits included). `Ok(None)`:
+    /// the sub-agent cannot change files and works in this folder; `Err`: it
+    /// can, and no worktree could be made, so it must not start. The text
+    /// is the delegation's result, for the parent model.
     async fn isolate(
         &self,
         agent: &AgentSpec,
         child: SessionId,
     ) -> Result<Option<Isolation>, String> {
-        if self.profile != Profile::Agentic
-            || !["write", "edit", "bash"]
-                .iter()
-                .any(|t| agent.allows_tool(t))
-        {
+        if !self.can_change_files(agent) {
             return Ok(None);
         }
+        let who = &agent.agent_id;
         let Some(root) = crate::git::repo_root(&self.cwd).await else {
-            return Ok(None);
+            return Err(format!(
+                "@{who} was not started: it can change files (write, edit or bash), and a \
+                 sub-agent that changes files works in its own git worktree, but this folder \
+                 is not a git repository. Make the change yourself, delegate to a sub-agent \
+                 that only reads, or ask the user to run `git init` in this folder."
+            ));
         };
         let project = crate::git::Repo::project(&root);
+        let base_ref = format!("refs/harness/{child}/base");
+        let mut made: Option<PathBuf> = None;
         let res = async {
             // Before anything runs in the user's repository: its own config
             // must not define commands that `add`/checkout would run.
             crate::git::check_worktree_safe(&root).await?;
-            let base = crate::git::snapshot(
-                &project,
-                &format!("refs/harness/{child}/base"),
-                "harness: sub-agent base",
-            )
-            .await?;
+            let base = crate::git::snapshot(&project, &base_ref, "harness: sub-agent base").await?;
             let wt = crate::git::worktrees_dir(&root)
                 .await?
                 .join(child.to_string());
+            made = Some(wt.clone());
             crate::git::worktree_add(&root, &wt, &base).await?;
             let rel = self
                 .cwd
@@ -998,10 +1067,7 @@ impl Session {
                 .unwrap_or(std::path::Path::new(""));
             let cwd = wt.join(rel);
             // The node's policy still decides where sessions may work.
-            if let Err(e) = self.node.cfg.policy.check_cwd(&cwd.display().to_string()) {
-                crate::git::worktree_remove(&root, &wt).await;
-                return Err(e);
-            }
+            self.node.cfg.policy.check_cwd(&cwd.display().to_string())?;
             Ok::<_, String>(Isolation {
                 root: root.clone(),
                 worktree: wt,
@@ -1013,8 +1079,17 @@ impl Session {
         match res {
             Ok(i) => Ok(Some(i)),
             Err(e) => {
-                tracing::warn!(session = %self.id, error = %e, "no worktree for sub-agent; sharing the folder");
-                Err(e)
+                // Leave nothing behind: no half-made worktree, no base ref.
+                if let Some(wt) = made {
+                    crate::git::worktree_remove(&root, &wt).await;
+                }
+                crate::git::delete_ref(&project, &base_ref).await;
+                tracing::warn!(session = %self.id, error = %e, "no worktree for a sub-agent that changes files; not started");
+                Err(format!(
+                    "@{who} was not started: it can change files (write, edit or bash), and its \
+                     own git worktree could not be made ({e}). Make the change yourself, or \
+                     delegate to a sub-agent that only reads."
+                ))
             }
         }
     }

@@ -141,12 +141,20 @@ pub struct LimitsPolicy {
     /// Bytes one tool call may stream live (stored as events and sent to
     /// the master); the rest is read and dropped after one marker.
     pub tool_stream_bytes: usize,
+    /// Model calls one turn may make. Each sub-agent's turn has the same cap
+    /// of its own; the caps do not add up into one budget.
+    pub max_steps: usize,
+    /// The longest a `bash` call may run, in seconds, whatever the model
+    /// asks for.
+    pub bash_timeout_max_s: u64,
 }
 
 impl Default for LimitsPolicy {
     fn default() -> Self {
         Self {
             tool_stream_bytes: harness_tools::stream::DEFAULT_STREAM_BYTES,
+            max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
+            bash_timeout_max_s: harness_tools::DEFAULT_TIMEOUT_MAX_S,
         }
     }
 }
@@ -205,6 +213,26 @@ impl NodePolicy {
         if !(min..=max).contains(&n) {
             return Err(format!(
                 "[limits] tool_stream_bytes = {n}: must be between {min} and {max}"
+            ));
+        }
+        let n = self.limits.max_steps;
+        let (min, max) = (
+            harness_core::policy::MIN_MAX_STEPS,
+            harness_core::policy::MAX_MAX_STEPS,
+        );
+        if !(min..=max).contains(&n) {
+            return Err(format!(
+                "[limits] max_steps = {n}: must be between {min} and {max}"
+            ));
+        }
+        let n = self.limits.bash_timeout_max_s;
+        let (min, max) = (
+            harness_tools::MIN_TIMEOUT_MAX_S,
+            harness_tools::MAX_TIMEOUT_MAX_S,
+        );
+        if !(min..=max).contains(&n) {
+            return Err(format!(
+                "[limits] bash_timeout_max_s = {n}: must be between {min} and {max}"
             ));
         }
         self.sandbox.settings()?;
@@ -481,6 +509,10 @@ mod tests {
             "env_pass = [\"A=B\"]\n",
             "env_pass = [\"\"]\n",
             "[limits]\ntool_stream_bytes = 10\n",
+            "[limits]\nmax_steps = 0\n",
+            "[limits]\nmax_steps = 1001\n",
+            "[limits]\nbash_timeout_max_s = 0\n",
+            "[limits]\nbash_timeout_max_s = 3601\n",
             "[limits]\ntool_bytes = 65536\n",
         ] {
             std::fs::write(&f, bad).unwrap();
@@ -490,5 +522,37 @@ mod tests {
         std::fs::write(&f, "env_pass = [\"CARGO_[\"]\n").unwrap();
         let e = NodePolicy::load(&f).unwrap_err().to_string();
         assert!(e.contains("env_pass") && e.contains("CARGO_["), "{e}");
+    }
+
+    #[test]
+    fn loop_limits_default_to_todays_values_and_stop_the_node_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("node.toml");
+        let d = NodePolicy::load(&f).unwrap();
+        assert_eq!(d.limits.max_steps, 50);
+        assert_eq!(d.limits.bash_timeout_max_s, 3600);
+        std::fs::write(&f, "[limits]\nmax_steps = 2\nbash_timeout_max_s = 1\n").unwrap();
+        let p = NodePolicy::load(&f).unwrap();
+        assert_eq!((p.limits.max_steps, p.limits.bash_timeout_max_s), (2, 1));
+        std::fs::write(
+            &f,
+            "[limits]\nmax_steps = 1000\nbash_timeout_max_s = 3600\n",
+        )
+        .unwrap();
+        assert!(NodePolicy::load(&f).is_ok(), "the range ends are valid");
+        for (bad, key, range) in [
+            ("max_steps = 0", "max_steps", "1 and 1000"),
+            ("max_steps = 1001", "max_steps", "1 and 1000"),
+            ("bash_timeout_max_s = 0", "bash_timeout_max_s", "1 and 3600"),
+            (
+                "bash_timeout_max_s = 3601",
+                "bash_timeout_max_s",
+                "1 and 3600",
+            ),
+        ] {
+            std::fs::write(&f, format!("[limits]\n{bad}\n")).unwrap();
+            let e = NodePolicy::load(&f).unwrap_err().to_string();
+            assert!(e.contains(key) && e.contains(range), "{bad}: {e}");
+        }
     }
 }

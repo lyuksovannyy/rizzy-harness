@@ -1369,6 +1369,230 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
     );
 }
 
+/// `git -C dir args...`, with an identity; panics unless it succeeds.
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A repository at `dir` with one committed file, `keep.txt`.
+fn init_repo(dir: &std::path::Path) {
+    git_in(dir, &["init", "-q"]);
+    std::fs::write(dir.join("keep.txt"), "v1\n").unwrap();
+    git_in(dir, &["add", "."]);
+    git_in(dir, &["commit", "-qm", "init"]);
+}
+
+fn agent_with(
+    id: &str,
+    tools: &[&str],
+    delegates: Vec<harness_core::agent::AgentSpec>,
+) -> harness_core::agent::AgentSpec {
+    harness_core::agent::AgentSpec {
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        ..agent(id, delegates)
+    }
+}
+
+/// Prompt `sid` as `lead` (who may delegate to `delegates`) and wait for
+/// the parent's turn to end; returns the outputs of its `delegate` calls.
+async fn delegate_as_lead(
+    h: &mut Harness,
+    sid: SessionId,
+    delegates: Vec<harness_core::agent::AgentSpec>,
+    text: &str,
+) -> Vec<String> {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: Some(agent("lead", delegates)),
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    });
+    loop {
+        h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+        if h.seen.last().is_some_and(|e| e.session_id == sid) {
+            break;
+        }
+    }
+    let stored = h.node.store().events_after(sid, 0, 10_000).unwrap();
+    let calls: Vec<String> = stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallStarted(c)) if c.tool == "delegate" => Some(c.call_id),
+            _ => None,
+        })
+        .collect();
+    stored
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) if calls.contains(&f.call_id) => Some(f.output),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A sub-agent that can change files gets its own worktree or is not
+/// started: in a folder that is not a repository the delegation is refused
+/// with the reason, no child session exists and nothing in the folder moved.
+#[tokio::test]
+async fn a_writing_sub_agent_is_refused_outside_a_repository() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    let sid = h.create().await;
+    let before = tree(&h.ws);
+    for tools in [&["bash"][..], &["write"], &["edit"]] {
+        let out = delegate_as_lead(
+            &mut h,
+            sid,
+            vec![agent_with("dev", tools, vec![])],
+            "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+        )
+        .await;
+        let out = out.last().expect("a delegate call");
+        assert!(
+            out.contains("not started") && out.contains("not a git repository"),
+            "{tools:?}: {out}"
+        );
+        assert!(out.contains("git init"), "{out}");
+    }
+    assert_eq!(tree(&h.ws), before, "the folder changed");
+    let sessions = h.node.store().sessions().unwrap();
+    assert_eq!(sessions.len(), 1, "a child session was created");
+}
+
+/// The same when the repository is there but its worktree cannot be made:
+/// here the folder for worktrees (`.git/harness-worktrees`) is a file.
+#[tokio::test]
+async fn a_writing_sub_agent_is_refused_when_its_worktree_cannot_be_made() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    std::fs::write(h.ws.join(".git/harness-worktrees"), "in the way\n").unwrap();
+    let sid = h.create().await;
+    let before = tree(&h.ws);
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(
+        out.contains("not started") && out.contains("worktree could not be made"),
+        "{out}"
+    );
+    assert_eq!(tree(&h.ws), before, "the folder changed");
+    assert_eq!(h.node.store().sessions().unwrap().len(), 1);
+    assert_eq!(
+        git_in(&h.ws, &["for-each-ref", "refs/harness"]),
+        "",
+        "a ref was left"
+    );
+    assert_eq!(
+        git_in(&h.ws, &["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count(),
+        1
+    );
+}
+
+/// A sub-agent that cannot change files needs no worktree: it still runs
+/// in a folder that is not a repository.
+#[tokio::test]
+async fn a_read_only_sub_agent_runs_outside_a_repository() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "hello from the folder\n").unwrap();
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent_with("scout", &["read", "grep", "glob"], vec![])],
+        "delegate: scout=read: keep.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("@scout ended (completed)"), "{out}");
+    assert!(out.contains("hello from the folder"), "{out}");
+    assert_eq!(h.node.store().sessions().unwrap().len(), 2);
+}
+
+/// In a repository a writing sub-agent works in its worktree and its
+/// changes are applied to the folder afterwards.
+#[tokio::test]
+async fn a_writing_sub_agent_changes_are_applied_from_its_worktree() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: pwd; echo v2 > keep.txt; echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(
+        out.contains("harness-worktrees"),
+        "not in a worktree: {out}"
+    );
+    assert!(out.contains("2 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("made.txt")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(git_in(&h.ws, &["worktree", "list"]).lines().count(), 1);
+}
+
+/// Two writing sub-agents delegated in one step do not see each other's
+/// uncommitted files while they run; both results are applied.
+#[tokio::test]
+async fn parallel_writing_sub_agents_do_not_see_each_other() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let task = |me: &str, other: &str| {
+        format!(
+            "{me}=run: echo {me} > {me}.txt; sleep 1; \
+             if test -e {other}.txt; then echo SAW-{other}; else echo ALONE-{me}; fi"
+        )
+    };
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("a", vec![]), agent("b", vec![])],
+        &format!("delegate: {} | {}", task("a", "b"), task("b", "a")),
+    )
+    .await;
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out.iter().any(|o| o.contains("ALONE-a")), "{out:?}");
+    assert!(out.iter().any(|o| o.contains("ALONE-b")), "{out:?}");
+    assert!(out.iter().all(|o| !o.contains("SAW-")), "{out:?}");
+    assert_eq!(std::fs::read_to_string(h.ws.join("a.txt")).unwrap(), "a\n");
+    assert_eq!(std::fs::read_to_string(h.ws.join("b.txt")).unwrap(), "b\n");
+}
+
 /// A failed append while bash runs stops it: its process tree is gone
 /// within the grace period.
 #[tokio::test]
@@ -1655,6 +1879,55 @@ impl Harness {
     }
 }
 
+// ---- A restore first saves the folder as it is (PLAN.md T33) ----
+
+/// A checkpoint's phase as the log spells it.
+fn phase(c: &Checkpoint) -> String {
+    serde_json::to_value(c.phase)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// The ack for `id`, collecting the events on the way.
+async fn ack_for(h: &mut Harness, id: &str) -> Result<(), String> {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .expect("timed out waiting for ack")
+            .expect("link closed");
+        match msg {
+            NodeToMaster::Event { event } => h.seen.push(event),
+            NodeToMaster::Ack {
+                req_id, ok, error, ..
+            } if req_id == id => {
+                return if ok {
+                    Ok(())
+                } else {
+                    Err(error.unwrap_or_default())
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
 fn bash(cmd: &str) -> serde_json::Value {
     serde_json::json!(["bash", {"command": cmd}])
 }
@@ -1671,6 +1944,75 @@ fn resolved(h: &Harness) -> Vec<(Decision, ResolvedBy)> {
         .iter()
         .filter_map(|e| match e.typed().unwrap() {
             EventKind::ApprovalResolved(r) => Some((r.decision, r.by)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn restore(
+    h: &mut Harness,
+    sid: SessionId,
+    id: &str,
+    turn: &str,
+    force: bool,
+) -> Result<(), String> {
+    h.send(MasterToNode::Restore {
+        req_id: id.into(),
+        session_id: sid,
+        turn_id: turn.into(),
+        force,
+        rewind: false,
+    });
+    ack_for(h, id).await
+}
+
+async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    });
+    let EventKind::Checkpoint(after) = h
+        .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
+        .await
+    else {
+        unreachable!()
+    };
+    h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    after.turn_id
+}
+
+/// A git repository, one turn that edits `keep.txt` and creates `made.txt`,
+/// then the user's own work between turns: an edit to the tracked file,
+/// their own `made.txt` and a new untracked binary file.
+async fn turn_then_user_work() -> (Harness, SessionId, String) {
+    let mut h = Harness::new(auto_policy).await;
+    run_git(&h.ws, &["init", "-q"]);
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    run_git(&h.ws, &["add", "."]);
+    run_git(
+        &h.ws,
+        &["-c", "commit.gpgSign=false", "commit", "-qm", "init"],
+    );
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v2 > keep.txt; echo new > made.txt").await;
+    std::fs::write(h.ws.join("keep.txt"), "the user's edit\n").unwrap();
+    std::fs::write(h.ws.join("made.txt"), "the user's own version\n").unwrap();
+    std::fs::write(h.ws.join("extra.bin"), [0u8, 159, 255, 10, 13]).unwrap();
+    (h, sid, turn)
+}
+
+fn pre_restore_snapshots(seen: &[RawEvent]) -> Vec<Checkpoint> {
+    seen.iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) if phase(&c) == "before_restore" => Some(c),
             _ => None,
         })
         .collect()
@@ -1777,6 +2119,8 @@ async fn a_policy_denied_call_cannot_be_allowed_for_the_turn() {
 #[tokio::test]
 async fn a_sub_agent_does_not_inherit_allow_for_this_turn() {
     let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    // A sub-agent that can change files needs a repository for its worktree.
+    init_repo(&h.ws);
     let sid = h.create().await;
     let task = serde_json::json!([bash("ls")]).to_string();
     let calls = serde_json::json!([
@@ -1796,4 +2140,177 @@ async fn a_sub_agent_does_not_inherit_allow_for_this_turn() {
     assert_eq!(commands(&asked), ["ls", "ls"], "{asked:?}");
     assert_eq!(asked[0].0, sid);
     assert_ne!(asked[1].0, sid, "the second request is the sub-agent's");
+}
+
+/// A forced restore overwrites work no turn checkpoint holds; it saves the
+/// folder first, and restoring to that snapshot brings the work back.
+#[tokio::test]
+async fn a_forced_restore_can_be_undone() {
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    let mine = tree(&h.ws);
+    let mark = h.seen.len();
+    restore(&mut h, sid, "r1", &turn, false)
+        .await
+        .expect_err("an unforced restore over the user's edits is refused");
+    assert_eq!(tree(&h.ws), mine);
+    assert!(
+        pre_restore_snapshots(&h.seen[mark..]).is_empty(),
+        "a refused restore records nothing"
+    );
+
+    restore(&mut h, sid, "r2", &turn, true).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert!(!h.ws.join("made.txt").exists());
+    let pre = pre_restore_snapshots(&h.seen[mark..]);
+    assert_eq!(pre.len(), 1, "one snapshot before the restore");
+    // It is in the log before the restore's own events.
+    let phases: Vec<String> = h.seen[mark..]
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) => Some(phase(&c)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        phases.first().map(String::as_str),
+        Some("before_restore"),
+        "{phases:?}"
+    );
+
+    // Undo the restore: an ordinary restore of the snapshot's checkpoint.
+    restore(&mut h, sid, "r3", &pre[0].turn_id, false)
+        .await
+        .unwrap();
+    assert_eq!(tree(&h.ws), mine, "the user's work is back, byte for byte");
+}
+
+/// The snapshot's event is written before any file changes: when it
+/// cannot be appended, nothing is restored and the reason comes back.
+#[tokio::test]
+async fn a_restore_whose_snapshot_cannot_be_logged_changes_nothing() {
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    let mine = tree(&h.ws);
+    let db = rusqlite::Connection::open(h._dir.path().join("node.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER break_log BEFORE INSERT ON events
+         WHEN NEW.kind = 'checkpoint' AND json_extract(NEW.payload, '$.phase') = 'before_restore'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+    let err = restore(&mut h, sid, "r1", &turn, true)
+        .await
+        .expect_err("a restore whose snapshot is not in the log must not run");
+    assert!(err.contains("log could not be written"), "{err}");
+    assert!(err.contains("nothing was restored"), "{err}");
+    assert_eq!(tree(&h.ws), mine, "the folder changed");
+    let stored = h.node.store().events_after(sid, 0, 1000).unwrap();
+    assert!(
+        !stored.iter().any(|e| matches!(e.typed(),
+            Ok(EventKind::Checkpoint(c)) if c.phase == CheckpointPhase::Restored)),
+        "a restore was recorded"
+    );
+
+    // Fixed: the same restore runs.
+    db.execute_batch("DROP TRIGGER break_log;").unwrap();
+    restore(&mut h, sid, "r2", &turn, true).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+}
+
+/// When the folder cannot be saved (here a file the node cannot read, so
+/// `git add -A` fails), the restore is refused with the reason and the
+/// folder is left as it is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restore_whose_snapshot_fails_changes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    let locked = h.ws.join("locked.txt");
+    std::fs::write(&locked, "private\n").unwrap();
+    let mine = tree(&h.ws);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&locked).is_ok() {
+        eprintln!("skipped: this user can read a mode 000 file (root?)");
+        return;
+    }
+    let res = restore(&mut h, sid, "r1", &turn, true).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let err = res.expect_err("a restore that could not save the folder must not run");
+    assert!(err.contains("nothing was restored"), "{err}");
+    assert!(
+        err.contains("locked.txt"),
+        "the reason names the file: {err}"
+    );
+    assert_eq!(tree(&h.ws), mine, "the folder changed");
+}
+
+/// Pre-restore snapshots are checkpoints like a turn's: each counts as one
+/// against `checkpoints_keep`, the oldest go, the newest stays usable.
+#[tokio::test]
+async fn pre_restore_snapshots_obey_checkpoints_keep() {
+    let mut h = Harness::new(|root| NodePolicy {
+        workspace_roots: vec![root.into()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        checkpoints_keep: 2,
+        ..Default::default()
+    })
+    .await;
+    std::fs::write(h.ws.join("notes.txt"), "v0\n").unwrap();
+    let sid = h.create().await;
+    let turn = prompt_turn(&mut h, sid, "run: echo v1 > notes.txt").await;
+    // Undo the turn, undo that undo, and so on: three restores.
+    let mut target = turn;
+    let mut snaps = vec![];
+    for i in 0..3 {
+        let mark = h.seen.len();
+        restore(&mut h, sid, &format!("r{i}"), &target, false)
+            .await
+            .unwrap();
+        let pre = pre_restore_snapshots(&h.seen[mark..]);
+        assert_eq!(pre.len(), 1);
+        target = pre[0].turn_id.clone();
+        snaps.push(pre[0].clone());
+    }
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("notes.txt")).unwrap(),
+        "v0\n"
+    );
+    let shadow = std::fs::read_dir(h._dir.path().join("checkpoints"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "git"))
+        .expect("a shadow repository");
+    let refs = run_git(
+        &h.ws,
+        &[
+            "--git-dir",
+            &shadow.display().to_string(),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/harness/",
+        ],
+    );
+    let groups: std::collections::BTreeSet<String> = refs
+        .lines()
+        .map(|r| r.rsplit_once('/').unwrap().0.to_string())
+        .collect();
+    let want: std::collections::BTreeSet<String> = snaps[1..]
+        .iter()
+        .map(|c| format!("refs/harness/{sid}/{}", c.turn_id))
+        .collect();
+    assert_eq!(groups, want, "only the two newest checkpoints are kept");
+    // The newest still undoes.
+    restore(&mut h, sid, "last", &snaps[2].turn_id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("notes.txt")).unwrap(),
+        "v1\n"
+    );
 }

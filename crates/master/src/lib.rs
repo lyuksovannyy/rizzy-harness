@@ -150,6 +150,8 @@ pub struct MasterInner {
     >,
     /// Sessions with a re-sent `session.delete` in flight.
     redeleting: Mutex<HashSet<SessionId>>,
+    /// Diverged sessions with a `session.cancel` in flight.
+    stopping: Mutex<HashSet<SessionId>>,
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
     /// The built-in store, when that is the backend (embedder switched live).
     builtin_memory: Mutex<Option<Arc<harness_memory::SqliteMemory>>>,
@@ -345,6 +347,30 @@ pub enum CommandError {
     TooLarge(String),
 }
 
+/// Why a command to a diverged session is refused (PLAN.md §3).
+const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key \
+     (see the server log); delete the chat to clear it";
+
+/// The session a command would make its node write to. Cancel and delete
+/// are left out on purpose: they are how a diverged session is stopped.
+fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
+    match msg {
+        MasterToNode::Prompt { session_id, .. }
+        | MasterToNode::SelectVariant { session_id, .. }
+        | MasterToNode::SetAgent { session_id, .. }
+        | MasterToNode::Restore { session_id, .. }
+        | MasterToNode::ApprovalRespond { session_id, .. }
+        | MasterToNode::ArtifactStage { session_id, .. } => Some(*session_id),
+        MasterToNode::Welcome { .. }
+        | MasterToNode::Create { .. }
+        | MasterToNode::Cancel { .. }
+        | MasterToNode::Delete { .. }
+        | MasterToNode::Resume { .. }
+        | MasterToNode::ArtifactFetch { .. }
+        | MasterToNode::ArtifactRelease { .. } => None,
+    }
+}
+
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -363,6 +389,7 @@ impl Master {
                 providers: Mutex::new(None),
                 graphify: Mutex::new(None),
                 redeleting: Mutex::new(HashSet::new()),
+                stopping: Mutex::new(HashSet::new()),
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
                 remote_stops: Mutex::new(HashMap::new()),
@@ -797,6 +824,16 @@ impl Master {
                 self.redelete(&node_id, sid);
                 continue;
             }
+            // Nothing it sends for a diverged session is taken (PLAN.md §3).
+            let diverged = self
+                .inner
+                .mirror
+                .call(move |s| s.diverged_seq(sid))
+                .await
+                .unwrap_or(None);
+            if diverged.is_some() {
+                continue;
+            }
             let mirror_head = self
                 .inner
                 .mirror
@@ -963,6 +1000,22 @@ impl Master {
             Ok(AppendOutcome::Duplicate) => {}
             Ok(AppendOutcome::Gap { head }) => self.request_resume(node_id, e.session_id, head),
             Ok(AppendOutcome::Deleted) => self.redelete(node_id, e.session_id),
+            Ok(AppendOutcome::Diverged { seq, first }) => {
+                if first {
+                    // No content: the two versions may hold anything.
+                    tracing::error!(
+                        node = %node_id,
+                        session = %e.session_id,
+                        seq,
+                        "two writers sent different events under one seq (a copied node key or a node restored from an old disk); this session's mirror is frozen until it is deleted"
+                    );
+                    let _ = self.inner.live.send(Live::SessionsChanged);
+                }
+                self.stop_diverged(node_id, e.session_id);
+            }
+            Ok(AppendOutcome::Revoked) => {
+                tracing::warn!(node = %node_id, session = %e.session_id, seq = e.seq, "dropped a frame from a revoked node");
+            }
             Err(err) => {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
@@ -975,16 +1028,31 @@ impl Master {
         build: impl FnOnce(String) -> MasterToNode,
     ) -> Result<(), CommandError> {
         let req_id = new_id();
+        let msg = build(req_id.clone());
+        // A diverged session takes no events, so nothing may make its node
+        // write one (a turn would run with nobody seeing it). Cancel and
+        // delete still go through.
+        if let Some(sid) = writes_to(&msg)
+            && self
+                .inner
+                .mirror
+                .call(move |s| s.diverged_seq(sid))
+                .await?
+                .is_some()
+        {
+            return Err(CommandError::Rejected(DIVERGED.into()));
+        }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
         let sent = {
             let nodes = lock(&self.inner.nodes);
-            nodes.get(node_id).and_then(|n| n.tx.as_ref()).map(|tx| {
-                match tx.try_send(build(req_id.clone())) {
+            nodes
+                .get(node_id)
+                .and_then(|n| n.tx.as_ref())
+                .map(|tx| match tx.try_send(msg) {
                     Ok(()) => Ok(()),
                     Err(e) => Err(matches!(e, mpsc::error::TrySendError::Full(_))),
-                }
-            })
+                })
         };
         match sent {
             Some(Ok(())) => {}
@@ -1380,6 +1448,25 @@ impl Master {
                 })
                 .await;
             lock(&this.inner.redeleting).remove(&sid);
+        });
+    }
+
+    /// A diverged session: tell its node to stop the running turn. Asked
+    /// again on later refused frames, one cancel in flight at a time.
+    fn stop_diverged(&self, node_id: &str, sid: SessionId) {
+        if !lock(&self.inner.stopping).insert(sid) {
+            return;
+        }
+        let this = self.clone();
+        let node = node_id.to_string();
+        tokio::spawn(async move {
+            let _ = this
+                .send_command(&node, |req_id| MasterToNode::Cancel {
+                    req_id,
+                    session_id: sid,
+                })
+                .await;
+            lock(&this.inner.stopping).remove(&sid);
         });
     }
 
