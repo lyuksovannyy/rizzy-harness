@@ -142,30 +142,86 @@ fn exposes<'a>(p: &Path, protected: &'a [PathBuf]) -> Option<&'a PathBuf> {
     })
 }
 
-/// Refuse a node.toml `[sandbox] read`/`write` entry that equals or holds
-/// a `workspace_roots` entry (Gate 3 fix review 5, R1d-1): every command
-/// would get every other chat's folder. An entry *inside* a root is not
-/// refused (with the default root, the home folder, every toolchain entry
-/// the README lists is inside it); it is bound to its identity instead
-/// ([`Extra::grant`]).
+/// The start-up checks of node.toml's `[sandbox] read`/`write` entries
+/// against the workspace roots and each other (Gate 3 fix reviews 5 and 6,
+/// R1d-1 and R4-1). Refused, naming the key and the path:
+///
+/// * an entry that equals or holds a `workspace_roots` entry: every command
+///   would get every other chat's folder;
+/// * an entry inside another `write` entry: its parent is writable to every
+///   command, so a command could replace it by a link; it is never needed,
+///   the outer entry already grants it;
+/// * an entry below a workspace root whose path holds a symbolic link
+///   anywhere below the root (each component `lstat`ed): a chat there may
+///   have put that link in place of a real folder while the node was down,
+///   and the entry would be granted through it. List the real path instead.
+///
+/// An entry inside a root is not refused otherwise (with the default root,
+/// the home folder, every toolchain entry the README lists is inside it);
+/// while the node runs each entry is granted only while it still resolves
+/// where it did at start ([`Extra::grant`]).
 pub fn check_extras_against_roots(settings: &Settings, roots: &[PathBuf]) -> Result<(), String> {
-    for (key, list, what) in [
-        ("read", &settings.read, "read"),
-        ("write", &settings.write, "read and change"),
-    ] {
-        for p in list {
-            let rp = real(p);
-            if let Some(r) = roots
-                .iter()
-                .find(|r| r.starts_with(&rp) || real(r).starts_with(&rp))
-            {
+    let entries: Vec<(&str, &PathBuf)> = settings
+        .read
+        .iter()
+        .map(|p| ("read", p))
+        .chain(settings.write.iter().map(|p| ("write", p)))
+        .collect();
+    for (key, p) in &entries {
+        let what = if *key == "write" {
+            "read and change"
+        } else {
+            "read"
+        };
+        let rp = real(p);
+        if let Some(r) = roots
+            .iter()
+            .find(|r| r.starts_with(&rp) || real(r).starts_with(&rp))
+        {
+            return Err(format!(
+                "node.toml [sandbox] {key}: {} holds {}, a workspace_roots entry, so every \
+                 chat's commands could {what} every other chat's folder; list a folder that \
+                 does not contain a workspace root",
+                p.display(),
+                r.display()
+            ));
+        }
+        for w in &settings.write {
+            let rw = real(w);
+            if rp != rw && rp.starts_with(&rw) {
                 return Err(format!(
-                    "node.toml [sandbox] {key}: {} holds {}, a workspace_roots entry, so every \
-                     chat's commands could {what} every other chat's folder; list a folder that \
-                     does not contain a workspace root",
+                    "node.toml [sandbox] {key}: {} is inside the [sandbox] write entry {}; every \
+                     command may change that folder, so it could replace this entry by a link; \
+                     remove it (the write entry already grants it)",
                     p.display(),
-                    r.display()
+                    w.display()
                 ));
+            }
+        }
+        let lexical = normalize(p);
+        for r in roots {
+            let below = [normalize(r), real(r)]
+                .into_iter()
+                .find_map(|base| Some((lexical.strip_prefix(&base).ok()?.to_path_buf(), base)));
+            let Some((rest, base)) = below else { continue };
+            let mut at = base;
+            for c in rest.components() {
+                at.push(c);
+                match std::fs::symlink_metadata(&at) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        return Err(format!(
+                            "node.toml [sandbox] {key}: {} goes through the symbolic link {} \
+                             inside the workspace root {}; a chat there could have put that link \
+                             in place of a real folder; list the real path instead",
+                            p.display(),
+                            at.display(),
+                            r.display()
+                        ));
+                    }
+                    Ok(_) => {}
+                    // Not there yet: nothing below it can be a link either.
+                    Err(_) => break,
+                }
             }
         }
     }

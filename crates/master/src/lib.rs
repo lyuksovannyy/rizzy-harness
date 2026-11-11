@@ -52,6 +52,10 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a create's intended owner is kept for a chat that comes
+/// late (Gate 3 review P-6; fix review 6 N-2): far past `ACK_TIMEOUT`,
+/// short enough that a create the node never makes leaves no row for good.
+pub const CREATE_INTENT_TTL_MS: i64 = 60 * 60 * 1000;
 /// How many sessions of a hello one store read covers.
 const HELLO_BATCH: usize = 256;
 /// What a remote node's `ack.error` may put into a log line or an API
@@ -420,9 +424,20 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     }
 }
 
-/// The kv key of a create's intended owner (Gate 3 review P-6).
+/// The kv keys of creates' intended owners (Gate 3 review P-6).
+const CREATE_INTENT_PREFIX: &str = "create-intent:";
+
 fn create_intent_key(sid: SessionId) -> String {
-    format!("create-intent:{sid}")
+    format!("{CREATE_INTENT_PREFIX}{sid}")
+}
+
+/// Whether a stored intent is older than [`CREATE_INTENT_TTL_MS`] (one
+/// that cannot be read counts as old).
+fn intent_expired(v: &str, now: i64) -> bool {
+    serde_json::from_str::<serde_json::Value>(v)
+        .ok()
+        .and_then(|v| v["at"].as_i64())
+        .is_none_or(|at| now - at > CREATE_INTENT_TTL_MS)
 }
 
 /// Removes a command's pending-ack entry when its `send_command` ends in
@@ -1237,6 +1252,10 @@ impl Master {
                 let Some(v) = s.kv_get(&key)? else {
                     return Ok(false);
                 };
+                if intent_expired(&v, harness_core::now_ms()) {
+                    s.kv_delete(&key)?;
+                    return Ok(false);
+                }
                 let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
                 if v["node"].as_str() != Some(node.as_str()) {
                     return Ok(false);
@@ -1410,13 +1429,30 @@ impl Master {
         // that arrives after the ack, or after the ack timed out, is claimed
         // for them when it lands, instead of staying a chat nobody owns
         // (Gate 3 review P-6).
+        let now = harness_core::now_ms();
         let intent = (owner.is_some() || workspace.is_some()).then(|| {
-            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace}).to_string()
+            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace, "at": now})
+                .to_string()
         });
-        if let Some(v) = intent.clone() {
-            let key = create_intent_key(sid);
-            self.inner.mirror.call(move |s| s.kv_set(&key, &v)).await?;
-        }
+        let key = create_intent_key(sid);
+        let v = intent.clone();
+        self.inner
+            .mirror
+            .call(move |s| {
+                // Intents older than their time, of creates no node ever
+                // made, go here (fix review 6 N-2): one prefix read per
+                // create, over a handful of rows.
+                for (k, old) in s.kv_prefix(CREATE_INTENT_PREFIX)? {
+                    if intent_expired(&old, now) {
+                        s.kv_delete(&k)?;
+                    }
+                }
+                match v {
+                    Some(v) => s.kv_set(&key, &v),
+                    None => Ok(()),
+                }
+            })
+            .await?;
         let sent = self
             .send_command(&node_id, |req_id| MasterToNode::Create {
                 req_id,

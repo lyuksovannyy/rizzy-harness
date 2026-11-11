@@ -720,11 +720,14 @@ write = ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.cache",
 contain, equal or be inside the data directory: the node refuses to start
 with such an entry, because Landlock cannot carve a folder out of a grant.
 The same holds for an entry that contains or equals a `workspace_roots`
-folder (every chat's commands would reach every other chat's folder). An
-entry is granted only while it is still what it was when the node
-started: one replaced by a link (or below a folder replaced by one) is
-left out, and one that did not exist at start is granted once it exists
-at the same real path.
+folder (every chat's commands would reach every other chat's folder), one
+inside another `write` entry (remove it: the outer entry already grants
+it), and one inside a workspace root whose path goes through a symbolic
+link below the root (list the real path instead). The node remembers
+where each entry really leads when it starts, and grants it to a command
+only while it still leads there: one replaced by a link (or below a
+folder replaced by one) is left out, and one that did not exist at start
+is granted once it exists at that same real path.
 For the same reason a data directory under `/usr`, `/etc` or `/opt` is
 refused. Graphify additionally needs its install (found automatically:
 its venv and the Python it was made from).

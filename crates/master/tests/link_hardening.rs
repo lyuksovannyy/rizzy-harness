@@ -491,6 +491,49 @@ async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
     );
 }
 
+/// Gate 3 fix review 6, N-2: a create that timed out and never landed left
+/// its intent row for good. An intent lives for `CREATE_INTENT_TTL`: an
+/// older one is removed by the next create and claims nothing.
+#[tokio::test]
+async fn a_create_intent_that_never_lands_is_removed_and_claims_nothing() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    let stale = SessionId::new();
+    let old = harness_core::now_ms() - harness_master::CREATE_INTENT_TTL_MS - 1;
+    store
+        .kv_set(
+            &format!("create-intent:{stale}"),
+            &serde_json::json!({"node": "n1", "owner": "mallory", "workspace": null, "at": old})
+                .to_string(),
+        )
+        .unwrap();
+    // The next create clears it.
+    let m2 = m.clone();
+    let made = tokio::spawn(async move { m2.create_session(create_spec("bob")).await });
+    let (req, sid) = next_create(&mut c).await;
+    send(&tx, event(sid, 1, "")).await;
+    tx.send(NodeToMaster::Ack {
+        req_id: req,
+        ok: true,
+        error: None,
+    })
+    .await
+    .unwrap();
+    made.await.unwrap().unwrap();
+    assert_eq!(
+        store.kv_get(&format!("create-intent:{stale}")).unwrap(),
+        None,
+        "the stale intent row stayed"
+    );
+    // And a chat that turns up that late is nobody's claim.
+    send(&tx, event(stale, 1, "")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.session(stale).unwrap().unwrap().owner_id, None);
+}
+
 /// Gate 3 review N-5: a command whose caller went away (an HTTP request
 /// that timed out) left its entry in the master's table of pending acks;
 /// and a model at create was forwarded to the node unchecked.
