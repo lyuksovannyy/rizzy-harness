@@ -1,7 +1,7 @@
 # Undo and stash: design note
 
-Status: **decided by the owner on 2026-11-12, except Q1 (the two-choice prompt, §3.3), which was
-left unanswered; the note proceeds on its recommendation.** Nothing built. Nothing blocks the build
+Status: **decided by the owner on 2026-11-12, Q1 (the two-choice prompt, §3.3) included.**
+Nothing built. Nothing blocks the build
 after Gate 3 of `FIX_PLAN.md` (feature freeze), and task A.17 (§2.4), a fix to built behaviour,
 may land earlier. Task C.13 of `ADOPTION_PLAN.md`, answering decision O11. Costs come from
 experiment B.3, `docs/checkpoint-cost.md` (cited as "B.3"). **B.3 measured on a rotational USB
@@ -100,8 +100,8 @@ record of the user's HEAD.
   midnight. Q4 is answered: merge, with a choice per conflicting file. Q5 is decided yes, as
   A.17.
 - Stashes can be deleted by the agent too, through the approval path.
-- Recommended: no "undo without a stash" choice (§3.3). The owner left this question (Q1)
-  blank.
+- No "undo without a stash" choice (§3.3): the owner decided Q1 on 2026-11-12 ("do stash and
+  undo").
 - **Conflicts during the agent's unstash follow the approval mode** (owner, the second Q2;
   §3.4). This replaces "always ask a person".
 - **The in-turn pruning gap is accepted, with detection** (the second Q3, decided by the
@@ -359,7 +359,7 @@ the owner's decision. Earlier deletion:
 - Deleting a chat deletes its stashes; the confirmation counts them.
 - An incognito chat's stashes go with it (`purge_incognito`).
 
-### 3.3 The question at undo (recommendation; Q1 was not answered, the note proceeds on it)
+### 3.3 The question at undo (Q1, decided by the owner on 2026-11-12)
 
 The node plans first. If nothing the undo writes changed since the expected state, the undo runs
 at once, as today. Otherwise nothing is written, and the node returns the plan:
@@ -685,7 +685,7 @@ waits for Gate 3, except task 1.
 
 | # | Question | Recommendation | Answer (2026-11-12) |
 |---|---|---|---|
-| Q1 | When an undo meets the person's changes, offer only "undo and keep my changes in a stash for 30 days" and "cancel"? | **Yes.** Dropping saves nothing and makes a misclick final; the stash can be deleted a second later. | **Not answered.** The note proceeds on the recommendation. If the owner wants a third choice, "undo without a stash", it must say that the pre-restore copy still keeps the changes for ten more changes. |
+| Q1 | When an undo meets the person's changes, offer only "undo and keep my changes in a stash for 30 days" and "cancel"? | **Yes.** Dropping saves nothing and makes a misclick final; the stash can be deleted a second later. | **Yes** (decided by the owner on 2026-11-12: "do stash and undo"). Two choices: "undo and keep my changes in a stash for 30 days" and "cancel". |
 | Q2 | When the agent unstashes and hits a conflict, who decides? | A person's card, always. | **By the session's approval mode** (§3.4). |
 | Q3 | An agent that prunes history inside its own turn defeats that turn's undo: accept, with detection? | Accept, with A.17's report. | **Accepted** (decided on the owner's delegation; §2.4). |
 
