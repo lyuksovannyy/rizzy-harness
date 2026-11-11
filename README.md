@@ -541,10 +541,13 @@ undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
 `before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
-the undo. The chat has no button for it yet. An undo first checks that it
-has everything it will write: if the checkpoint needs content your
-repository no longer has (after you rewrote history and `git gc` cleaned
-it up), the undo is refused with that reason and your folder is left
+the undo. The chat has no button for it yet. At the end of each turn the
+old versions of the files it changed are copied into the private
+repository, so you can commit, rewrite history and `git gc` freely: the
+undo of every kept turn still works. Only if the old versions were already
+gone when the turn ended (the agent itself rewrote and pruned history
+during the turn) does the chat say that turn's undo is incomplete, naming
+the files; such an undo is refused with that reason and your folder is left
 exactly as it was. If writing fails partway (a full disk, a read-only
 folder), the error names the checkpoint that holds your folder as it was;
 restoring it puts the folder back. If an undo would replace a folder by a

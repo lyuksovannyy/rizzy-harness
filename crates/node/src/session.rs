@@ -706,6 +706,7 @@ impl Session {
         .await;
         match res {
             Ok((snap, files)) => {
+                let sha = snap.sha.clone();
                 let recorded = self
                     .emit(EventKind::Checkpoint(Checkpoint {
                         turn_id: turn_id.into(),
@@ -717,6 +718,8 @@ impl Session {
                     }))
                     .await;
                 if recorded.is_ok() {
+                    let group = format!("refs/harness/{}/{turn_id}", self.id);
+                    self.pin_turn(turn_id, repo, &group, before, &sha).await;
                     crate::git::prune(repo, self.node.cfg.policy.checkpoints_keep).await;
                 }
             }
@@ -725,6 +728,47 @@ impl Session {
                 self.no_checkpoint_notice(turn_id, &e).await;
             }
         }
+    }
+
+    /// Copy what an undo of this turn needs into the checkpoint repository's
+    /// own store (A.17, `git::pin_changed`), so it no longer depends on the
+    /// user's repository keeping the old versions. When some are already
+    /// gone (the turn itself rewrote history and pruned it) or the copy
+    /// fails, the chat says the undo is incomplete, naming the files; the
+    /// turn still completes. A failed append sets `log_failed` as for any
+    /// other event.
+    async fn pin_turn(
+        &self,
+        turn_id: &str,
+        repo: &crate::git::Repo,
+        group: &str,
+        before: &str,
+        after: &str,
+    ) {
+        let message = match crate::git::pin_changed(repo, group, before, after).await {
+            Ok(p) if p.missing.is_empty() => return,
+            Ok(p) => format!(
+                "This turn's undo is incomplete: the earlier versions of {} were already gone \
+                 from the git repository in this folder when the turn ended (its history was \
+                 rewritten and cleaned up during the turn), so undo cannot put them back and \
+                 will refuse this turn.",
+                p.missing.listed()
+            ),
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "checkpoint copies failed");
+                format!(
+                    "This turn's undo is incomplete: the earlier versions of the files it \
+                     changed could not be copied into the checkpoint store ({e}), so undo \
+                     depends on the git repository in this folder keeping them."
+                )
+            }
+        };
+        let _ = self
+            .emit(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message,
+            }))
+            .await;
     }
 
     /// Record which parallel answer the conversation continues from.
@@ -988,6 +1032,17 @@ impl Session {
             }))
             .await
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
+        }
+        // Undoing this restore needs the folder's versions it overwrote:
+        // copied like a turn's (A.17); a loss is only logged here.
+        let group = format!("refs/harness/{}/{saved}", self.id);
+        match crate::git::pin_changed(&repo, &group, &now.sha, &state.sha).await {
+            Ok(p) if !p.missing.is_empty() => tracing::warn!(
+                session = %self.id, missing = %p.missing.listed(),
+                "restore checkpoint: content already gone, not copied"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(session = %self.id, error = %e, "checkpoint copies failed"),
         }
         crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
         drop(busy);

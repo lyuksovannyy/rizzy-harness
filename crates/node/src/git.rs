@@ -1066,7 +1066,7 @@ async fn snapshot_within(
     .map_err(|_| "snapshot took too long (folder too large?)".to_string())?
 }
 
-pub use upkeep::{gc_in_background, hold, sweep_stale_locks};
+pub use upkeep::{gc_in_background, hold, pin_changed, sweep_stale_locks};
 
 /// The line prefix in a snapshot's message that names one left-out
 /// repository.
@@ -1192,6 +1192,9 @@ struct DiffRow {
     /// The `a` side's mode and object id (all zeros for `A`).
     old_mode: String,
     old_id: String,
+    /// The `b` side's mode and object id (all zeros for `D`).
+    new_mode: String,
+    new_id: String,
 }
 
 /// The paths that differ between two snapshots.
@@ -1213,9 +1216,14 @@ async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<DiffRow>, String>
         None,
     )
     .await?;
+    Ok(parse_raw(&out))
+}
+
+/// `--raw -z` output as rows.
+fn parse_raw(out: &[u8]) -> Vec<DiffRow> {
     // `:old_mode new_mode old_id new_id status NUL path NUL`
     let parts: Vec<&[u8]> = out.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
-    Ok(parts
+    parts
         .chunks(2)
         .filter_map(|c| match c {
             [meta, path] => {
@@ -1228,11 +1236,13 @@ async fn diff_raw(repo: &Repo, a: &str, b: &str) -> Result<Vec<DiffRow>, String>
                     gitlink: f[..2].contains(&"160000"),
                     old_mode: f[0].to_string(),
                     old_id: f.get(2)?.to_string(),
+                    new_mode: f[1].to_string(),
+                    new_id: f.get(3)?.to_string(),
                 })
             }
             _ => None,
         })
-        .collect())
+        .collect()
 }
 
 /// Paths that differ between two snapshots, with git's status letter.
@@ -1400,16 +1410,11 @@ pub async fn restore_diff(repo: &Repo, from: &str, expected: &str) -> Result<Res
 /// such as inside a nested repository), never a whole tree.
 ///
 /// `cat-file --batch-check` answers per object (`<id> missing`); the copy
-/// is one `pack-objects` that writes a pack straight into the shadow's own
-/// `objects/pack` (a borrowed object is read through the alternates, the
-/// new pack is written locally, and nothing is written or touched in the
-/// user's repository; `hash-object -w` would not do: an object the
-/// alternate has is "freshened" there and not written locally). A copy that
-/// fails leaves none of its files behind. The restore holds the shadow (see
-/// [`hold`]) until it ends, so no garbage collection starts before the
-/// files are written; the pack then lives until the shadow's next
-/// collection, which folds it into one pack and drops what the user's
-/// repository has packed.
+/// is [`copy_into_own_store`]. The restore holds the shadow (see [`hold`])
+/// until it ends, so no garbage collection starts before the files are
+/// written; the pack then lives until the shadow's next collection, which
+/// drops what the user's repository has packed (the restored state's own
+/// checkpoint pins what an undo of the restore needs, see [`pin_changed`]).
 pub async fn secure_blobs(repo: &Repo, plan: &RestorePlan) -> Result<(), String> {
     let blobs: Vec<(&str, &[u8])> = plan
         .writes
@@ -1448,24 +1453,50 @@ pub async fn secure_blobs(repo: &Repo, plan: &RestorePlan) -> Result<(), String>
         paths.sort();
         return Err(lost_content(repo, &paths));
     }
-    if let (true, Some(dir)) = (borrows(repo), &repo.shadow) {
-        let packs = dir.join("objects/pack");
-        let had = pack_dir_names(&packs).await;
-        let base = packs.join("pack");
-        let base = base.to_string_lossy();
-        let res = run_raw(
-            repo,
-            &["pack-objects", "-q", "--window=0", &base],
-            None,
-            Some(list),
-        )
-        .await;
-        if let Err(e) = res {
-            remove_failed_copy(&packs, &had).await;
-            return Err(format!("nothing was changed: {e}"));
-        }
+    if borrows(repo) {
+        copy_into_own_store(repo, list, true)
+            .await
+            .map_err(|e| format!("nothing was changed: {e}"))?;
     }
     Ok(())
+}
+
+/// Copy the objects `list` names (one id per line, each readable) into the
+/// shadow's own store as one new pack, and return the pack's name (the
+/// hash in `pack-<hash>.pack`). One `pack-objects` reads each object where
+/// it is (a borrowed one through the alternates) and writes the pack into
+/// the shadow's `objects/pack`; nothing is written or touched in the user's
+/// repository (`hash-object -w` would not do: an object the alternate has
+/// is "freshened" there and not written locally). A copy that fails leaves
+/// none of its files behind. Shared by [`secure_blobs`] and the pinned
+/// copies of a turn ([`pin_changed`]).
+///
+/// With `durable` false the pack is not flushed to disk (`core.fsync=none`):
+/// git's default flushes packs, which on a slow rotational disk cost 0.2 to
+/// 1.4 s for a pack of one blob (measured, A.17) against about 1 ms without.
+/// A turn's copies are then as durable as the checkpoint they serve, whose
+/// loose objects and refs git does not flush either; a restore's copy, which
+/// protects the user's files during the write, keeps git's default.
+async fn copy_into_own_store(repo: &Repo, list: Vec<u8>, durable: bool) -> Result<String, String> {
+    let Some(dir) = &repo.shadow else {
+        return Err("no checkpoint repository".into());
+    };
+    let packs = dir.join("objects/pack");
+    let had = pack_dir_names(&packs).await;
+    let base = packs.join("pack");
+    let base = base.to_string_lossy();
+    let mut args = vec!["pack-objects", "-q", "--window=0", &base];
+    if !durable {
+        args.splice(0..0, ["-c", "core.fsync=none"]);
+    }
+    let res = run_raw(repo, &args, None, Some(list)).await;
+    match res {
+        Ok(out) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
+        Err(e) => {
+            remove_failed_copy(&packs, &had).await;
+            Err(e)
+        }
+    }
 }
 
 /// The names in the shadow's pack directory.
@@ -1848,10 +1879,11 @@ pub async fn delete_ref(repo: &Repo, ref_name: &str) {
 }
 
 /// Keep only the `keep` most recent checkpoints (groups): their refs are
-/// deleted (cheap, every time). In a shadow repository the drop is counted;
-/// the dropped groups' objects go at the next garbage collection, which
-/// runs rarely and after the turn (see [`gc_in_background`]). In a project
-/// repository git's own gc removes them later.
+/// deleted (cheap, every time). In a shadow repository the pinned copies of
+/// the dropped groups are released and the drop is counted; their objects
+/// go at the next garbage collection, which runs rarely and after the turn
+/// (see [`gc_in_background`]). In a project repository git's own gc removes
+/// them later.
 pub async fn prune(repo: &Repo, keep: usize) -> usize {
     let Some(f) = order_file(repo).await else {
         return 0;
@@ -1887,6 +1919,7 @@ pub async fn prune(repo: &Repo, keep: usize) -> usize {
     let _ = tokio::fs::write(&f, text).await;
     if let Some(dir) = &repo.shadow {
         let groups: std::collections::HashSet<&str> = doomed.iter().map(|r| group_of(r)).collect();
+        upkeep::release_pins(dir, &kept).await;
         upkeep::count_dropped(dir, groups.len() as u64).await;
     }
     doomed.len()

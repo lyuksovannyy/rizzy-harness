@@ -1,5 +1,18 @@
-//! Keeping the shadow repository healthy: rare garbage collection (A.18)
-//! and stale lock files.
+//! Keeping the shadow repository healthy: pinned copies (A.17), rare
+//! garbage collection (A.18), stale lock files.
+//!
+//! **Pinned copies.** In a repository folder a checkpoint borrows what the
+//! user's repository has, so a history rewrite plus a prune there could
+//! take the content an undo needs. At the end of each turn the objects an
+//! undo of that turn reads are copied into the shadow's own store: the old
+//! version of every file the turn changed or deleted, and the trees on the
+//! way to them in both snapshots (a diff of the turn reads exactly those).
+//! Never the whole tree. What git's gc does to such a copy was established
+//! by test (below): a copy of an object the alternate has packed is dropped
+//! by the shadow's gc, so the copy is a pack with a `.keep` file, which gc
+//! and repack leave alone. The `.keep` file names the turn's checkpoint
+//! group; when [`super::prune`] drops the group the line goes, and with
+//! the last line the file, and the next collection drops the copy.
 //!
 //! **Garbage collection.** Dropping a checkpoint's refs is cheap and stays
 //! on every turn; `git gc` is the largest cost of a turn (B.3: 0.26 s at
@@ -9,7 +22,7 @@
 //! often than [`GC_INTERVAL`]. The state is a small file in the shadow
 //! (`harness-gc`), so a restart keeps it. It runs after the turn has ended
 //! ([`gc_in_background`]), only while none of our commands that write
-//! unreferenced objects runs there ([`hold`]: snapshots, a whole
+//! unreferenced objects runs there ([`hold`]: snapshots, pinning, a whole
 //! restore), and prunes only objects older than its own start, so a
 //! snapshot that starts while it runs keeps what it writes.
 //!
@@ -21,7 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{GIT_TIMEOUT, ORDER, Repo, run};
+use super::{GIT_TIMEOUT, Names, ORDER, Repo, borrows, copy_into_own_store, run, run_raw};
 
 /// A collection is due once this many checkpoint groups were dropped since
 /// the last one. At 3.3 s for a plain folder of 100,000 files (B.3) that is
@@ -35,13 +48,16 @@ pub(crate) const GC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const LOOSE_LIMIT: u64 = 6700;
 
 /// Packs that make a collection due earlier (git's `gc.autoPackLimit`);
-/// a restore in a repository folder adds one (its copy).
+/// each turn in a repository folder adds one (its copies).
 const PACK_LIMIT: u64 = 50;
 
 /// A lock or private index older than this belongs to no running command
 /// of ours: one git call is killed at [`GIT_TIMEOUT`], and the longest-lived
 /// private index (a restore's) spans two calls.
 pub(crate) const STALE_AFTER: Duration = Duration::from_secs(2 * GIT_TIMEOUT.as_secs() + 60);
+
+/// The line prefix in a `.keep` file that marks it as ours.
+const PIN: &str = "harness-pin ";
 
 /// The state file of the collection rule, in the shadow.
 const STATE: &str = "harness-gc";
@@ -113,6 +129,173 @@ impl Collecting {
 impl Drop for Collecting {
     fn drop(&mut self) {
         with_busy(&self.0, |b| b.collecting = false);
+    }
+}
+
+// ---- pinned copies (A.17) ----
+
+/// What [`pin_changed`] could not copy.
+#[derive(Debug, Default)]
+pub struct Pinned {
+    /// Files whose old version was already gone (sorted, for showing).
+    pub missing: Names,
+}
+
+/// Copy into the shadow's own store what an undo of the change from
+/// `before` to `after` reads, protected by a `.keep` file naming `group`
+/// (`refs/harness/<session>/<turn>`): the old version of every file that
+/// changed or was deleted, and both snapshots' trees on the way to the
+/// changes. Nothing in a folder that borrows nothing (every object is the
+/// shadow's own and gc keeps what a ref reaches). No folder scan and no gc:
+/// one tree diff, one existence check, one `pack-objects` of exactly those
+/// objects. Objects that are already gone are reported, not an error.
+pub async fn pin_changed(
+    repo: &Repo,
+    group: &str,
+    before: &str,
+    after: &str,
+) -> Result<Pinned, String> {
+    if !borrows(repo) {
+        return Ok(Pinned::default());
+    }
+    let _busy = hold(repo);
+    let roots = run(
+        repo,
+        &[
+            "rev-parse",
+            &format!("{before}^{{tree}}"),
+            &format!("{after}^{{tree}}"),
+        ],
+        None,
+    )
+    .await?;
+    let out = run_raw(
+        repo,
+        &[
+            "diff-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--raw",
+            "--no-renames",
+            "--no-abbrev",
+            before,
+            after,
+        ],
+        None,
+        None,
+    )
+    .await?;
+    let zero = |id: &str| id.bytes().all(|b| b == b'0');
+    let mut ids: Vec<String> = roots.lines().map(str::to_string).collect();
+    // The old blob of each changed path, and the path to name if it is gone.
+    let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    for r in super::parse_raw(&out) {
+        if r.old_mode == "040000" && !zero(&r.old_id) {
+            ids.push(r.old_id.clone());
+        }
+        if r.new_mode == "040000" && !zero(&r.new_id) {
+            ids.push(r.new_id.clone());
+        }
+        let blob = matches!(r.old_mode.as_str(), "100644" | "100755" | "120000");
+        if blob && !zero(&r.old_id) {
+            blobs.push((r.old_id.clone(), r.path.clone()));
+        }
+    }
+    ids.extend(blobs.iter().map(|(id, _)| id.clone()));
+    ids.sort_unstable();
+    ids.dedup();
+    let list: Vec<u8> = ids
+        .iter()
+        .flat_map(|i| format!("{i}\n").into_bytes())
+        .collect();
+    let checked = run_raw(
+        repo,
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        None,
+        Some(list),
+    )
+    .await?;
+    let text = String::from_utf8_lossy(&checked);
+    let present: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.ends_with(" missing"))
+        .filter_map(|l| l.split(' ').next())
+        .collect();
+    let mut missing: Vec<Vec<u8>> = blobs
+        .iter()
+        .filter(|(id, _)| !present.contains(&id.as_str()))
+        .map(|(_, p)| p.clone())
+        .collect();
+    missing.sort();
+    missing.dedup();
+    if !present.is_empty() {
+        let list: Vec<u8> = present
+            .iter()
+            .flat_map(|i| format!("{i}\n").into_bytes())
+            .collect();
+        let name = copy_into_own_store(repo, list, false).await?;
+        keep_for(repo, &name, group).await?;
+    }
+    Ok(Pinned {
+        missing: Names::of(&missing),
+    })
+}
+
+/// Add `group` to the `.keep` file of pack `name` (made if absent; two
+/// turns that copy the same objects get the same pack name).
+async fn keep_for(repo: &Repo, name: &str, group: &str) -> Result<(), String> {
+    let Some(dir) = &repo.shadow else {
+        return Ok(());
+    };
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("pack-objects named no pack ({name:?})"));
+    }
+    let path = dir.join(format!("objects/pack/pack-{name}.keep"));
+    let _g = ORDER.lock().await;
+    let mut text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let line = format!("{PIN}{group}");
+    if !text.lines().any(|l| l == line) {
+        text.push_str(&line);
+        text.push('\n');
+        write_atomic(&path, text.as_bytes())
+            .await
+            .map_err(|e| format!("could not keep the copies: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Release the copies of every group not in `kept` (the caller holds
+/// `ORDER`): its line goes from each of our `.keep` files, and a file left
+/// with none is removed, so the next collection drops those copies. A
+/// `.keep` file with any line that is not ours is never touched.
+pub(super) async fn release_pins(dir: &Path, kept: &[String]) {
+    let packs = dir.join("objects/pack");
+    let Ok(mut rd) = tokio::fs::read_dir(&packs).await else {
+        return;
+    };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let path = e.path();
+        if path.extension().is_none_or(|x| x != "keep") {
+            continue;
+        }
+        let Ok(text) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        if text.lines().any(|l| !l.starts_with(PIN)) {
+            continue;
+        }
+        let left: Vec<&str> = text
+            .lines()
+            .filter(|l| kept.iter().any(|k| l.strip_prefix(PIN) == Some(k.as_str())))
+            .collect();
+        if left.is_empty() {
+            let _ = tokio::fs::remove_file(&path).await;
+        } else if left.len() != text.lines().count() {
+            let mut t = left.join("\n");
+            t.push('\n');
+            let _ = write_atomic(&path, t.as_bytes()).await;
+        }
     }
 }
 
@@ -317,15 +500,295 @@ fn sweep_shadow(dir: &Path, older: Duration) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .arg("-c")
+            .arg("gc.auto=0")
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap()
+    }
+
+    fn ok(dir: &Path, args: &[&str]) -> String {
+        let o = git(dir, args);
+        assert!(o.status.success(), "git {args:?}: {o:?}");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    fn ok_in(dir: &Path, args: &[&str], input: &str) -> String {
+        use std::io::Write;
+        let mut c = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let o = c.wait_with_output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {o:?}");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// A user repository and a bare shadow borrowing from it, with one ref
+    /// in the shadow to a commit of the user's tree.
+    struct Pair {
+        _d: tempfile::TempDir,
+        user: std::path::PathBuf,
+        shadow: std::path::PathBuf,
+        x: String,
+    }
+
+    impl Pair {
+        fn new() -> Self {
+            let d = tempfile::tempdir().unwrap();
+            let user = d.path().join("user");
+            let shadow = d.path().join("sh.git");
+            std::fs::create_dir(&user).unwrap();
+            ok(&user, &["init", "-q", "-b", "main"]);
+            std::fs::write(user.join("keep.txt"), "X\n").unwrap();
+            std::fs::write(user.join("other.txt"), "base\n").unwrap();
+            ok(&user, &["add", "."]);
+            ok(&user, &["commit", "-qm", "c"]);
+            ok(&user, &["gc", "-q"]);
+            let x = ok(&user, &["rev-parse", "HEAD:keep.txt"]);
+            let t = ok(&user, &["rev-parse", "HEAD^{tree}"]);
+            ok(d.path(), &["init", "-q", "--bare", "sh.git"]);
+            let alt = user.join(".git/objects");
+            std::fs::write(
+                shadow.join("objects/info/alternates"),
+                format!("{}\n", alt.display()),
+            )
+            .unwrap();
+            let c = ok(&shadow, &["commit-tree", "-m", "s", &t]);
+            ok(&shadow, &["update-ref", "refs/harness/a", &c]);
+            Self {
+                _d: d,
+                user,
+                shadow,
+                x,
+            }
+        }
+
+        /// Whether the shadow holds `id` in its own store (alternates moved
+        /// out of the way for the check).
+        fn owns(&self, id: &str) -> bool {
+            let alt = self.shadow.join("objects/info/alternates");
+            let tmp = self.shadow.join("alternates.off");
+            std::fs::rename(&alt, &tmp).unwrap();
+            let has = git(&self.shadow, &["cat-file", "-e", id]).status.success();
+            std::fs::rename(&tmp, &alt).unwrap();
+            has
+        }
+
+        fn pack_copy(&self, id: &str) -> String {
+            let base = self.shadow.join("objects/pack/pack");
+            ok_in(
+                &self.shadow,
+                &["pack-objects", "-q", "--window=0", base.to_str().unwrap()],
+                &format!("{id}\n"),
+            )
+        }
+    }
+
+    /// What A.17 rests on, established against the git on this machine: a
+    /// local copy of an object the alternate also has is dropped by the
+    /// shadow's own `gc` (and `repack -a -d -l`), packed or loose; one in a
+    /// pack with a `.keep` file survives every gc and repack, and is dropped
+    /// at the next gc once the `.keep` file is gone.
+    #[test]
+    fn gc_drops_local_copies_the_alternate_has_unless_their_pack_is_kept() {
+        let p = Pair::new();
+        p.pack_copy(&p.x);
+        assert!(p.owns(&p.x), "the copy was not made");
+        ok(&p.shadow, &["gc", "--prune=now", "-q"]);
+        assert!(!p.owns(&p.x), "gc kept a packed copy the alternate has");
+
+        let name = p.pack_copy(&p.x);
+        let keep = p.shadow.join(format!("objects/pack/pack-{name}.keep"));
+        std::fs::write(&keep, "pin\n").unwrap();
+        for args in [
+            &["gc", "--prune=now", "-q"][..],
+            &["gc", "-q"],
+            &["repack", "-a", "-d", "-l", "-q"],
+            &["repack", "-A", "-d", "-q"],
+        ] {
+            ok(&p.shadow, args);
+            assert!(p.owns(&p.x), "{args:?} dropped the kept copy");
+        }
+        std::fs::remove_file(&keep).unwrap();
+        ok(&p.shadow, &["gc", "--prune=now", "-q"]);
+        assert!(!p.owns(&p.x), "the released copy stayed");
+    }
+
+    /// A local copy written while the alternate lacked the object, which
+    /// then gained it (the user commits a file a checkpoint already stored):
+    /// the shadow's gc keeps it while the user's copy is loose and drops it
+    /// once the user's repository has packed it (its own gc).
+    #[test]
+    fn gc_drops_a_loose_local_copy_the_alternate_gained_later() {
+        let p = Pair::new();
+        std::fs::write(p.user.join("new.txt"), "N\n").unwrap();
+        let n = ok(
+            &p.shadow,
+            &[
+                "hash-object",
+                "-w",
+                p.user.join("new.txt").to_str().unwrap(),
+            ],
+        );
+        assert!(p.owns(&n));
+        ok(&p.user, &["add", "new.txt"]);
+        ok(&p.user, &["commit", "-qm", "n"]);
+        // Reachable from the shadow too.
+        let t = ok(&p.user, &["rev-parse", "HEAD^{tree}"]);
+        let c = ok(&p.shadow, &["commit-tree", "-m", "s", &t]);
+        ok(&p.shadow, &["update-ref", "refs/harness/b", &c]);
+        // `--local` leaves out only objects found in the alternate's packs:
+        // while the user's copy is loose, the shadow's copy is packed.
+        ok(&p.shadow, &["gc", "--prune=now", "-q"]);
+        assert!(p.owns(&n), "dropped while the alternate's copy is loose");
+        ok(&p.user, &["gc", "-q"]);
+        ok(&p.shadow, &["gc", "--prune=now", "-q"]);
+        assert!(!p.owns(&n), "gc kept a copy the alternate has packed");
+    }
+
+    /// The shadow's gc when an object a kept ref reaches is gone from the
+    /// alternate (the user rewrote and pruned): gc fails, and nothing of the
+    /// shadow is lost by trying.
+    #[test]
+    fn gc_fails_while_a_kept_ref_reaches_a_lost_object() {
+        let p = Pair::new();
+        ok(&p.user, &["checkout", "-q", "--orphan", "new"]);
+        std::fs::write(p.user.join("keep.txt"), "other\n").unwrap();
+        ok(&p.user, &["commit", "-qam", "fresh"]);
+        ok(&p.user, &["branch", "-qD", "main"]);
+        ok(&p.user, &["reflog", "expire", "--expire=now", "--all"]);
+        ok(&p.user, &["gc", "-q", "--prune=now"]);
+        assert!(!git(&p.user, &["cat-file", "-e", &p.x]).status.success());
+        let out = git(&p.shadow, &["gc", "--prune=now", "-q"]);
+        assert!(!out.status.success(), "gc succeeded: {out:?}");
+        let refs = ok(&p.shadow, &["for-each-ref", "--format=%(refname)"]);
+        assert_eq!(refs, "refs/harness/a");
+    }
+
     // ---- the functions ----
 
-    use super::super::tests::fake_git;
+    use super::super::tests::{Hostile, dir_state, fake_git, sh};
     use super::super::{TEST_GIT, repo_for, snapshot, snapshot_within};
     use super::*;
+
+    /// Whether `repo`'s shadow has `id` in its own store.
+    async fn owns(repo: &Repo, id: &str) -> bool {
+        let alt = repo.shadow.clone().unwrap().join("objects/info/alternates");
+        let off = alt.with_extension("off");
+        std::fs::rename(&alt, &off).unwrap();
+        let has = run(repo, &["cat-file", "-e", id], None).await.is_ok();
+        std::fs::rename(&off, &alt).unwrap();
+        has
+    }
+
+    async fn id_of(repo: &Repo, rev: &str) -> String {
+        run(repo, &["rev-parse", rev], None).await.unwrap()
+    }
 
     /// Make a collection due by the count of dropped groups.
     async fn make_due(repo: &Repo) {
         count_dropped(repo.shadow.as_ref().unwrap(), GC_EVERY).await;
+    }
+
+    /// A.17, the twin of `securing_blobs_copies_them_and_writes_nothing_in_the_users_repository`:
+    /// pinning a turn copies the old version of exactly the changed file,
+    /// and neither it nor the node's collection afterwards runs anything
+    /// the user's repository defines (fsmonitor, hooks) or changes any file
+    /// of the user's `.git`, not even a modification time.
+    #[tokio::test]
+    async fn pinning_and_collecting_write_nothing_in_the_users_repository() {
+        let h = Hostile::new();
+        sh(&h.repo, &["gc", "-q"]); // packed there: the shadow's gc drops plain copies
+        h.config("core.fsmonitor", &h.script("fsmonitor").to_string_lossy());
+        for hook in ["post-checkout", "reference-transaction", "pre-auto-gc"] {
+            h.hook(&h.repo.join(".git/hooks"), hook);
+        }
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "before")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "after")
+            .await
+            .unwrap();
+        let a1 = id_of(&repo, &format!("{before}:a.txt")).await;
+        let b1 = id_of(&repo, &format!("{before}:b.txt")).await;
+        assert!(!owns(&repo, &a1).await, "a.txt's blob is not borrowed");
+        let user_git = dir_state(&h.repo.join(".git"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let p = pin_changed(&repo, "refs/harness/s/t", &before, &after)
+            .await
+            .unwrap();
+        assert!(p.missing.is_empty(), "{p:?}");
+        assert!(owns(&repo, &a1).await, "a.txt's old version was not copied");
+        assert!(!owns(&repo, &b1).await, "b.txt did not change");
+        make_due(&repo).await;
+        assert!(maybe_gc(&repo).await, "the collection did not run");
+        assert!(owns(&repo, &a1).await, "the collection dropped the copy");
+        assert!(
+            dir_state(&h.repo.join(".git")) == user_git,
+            "the user's .git changed"
+        );
+        assert_eq!(h.marked(), Vec::<String>::new());
+    }
+
+    /// A copy is released when its group is no longer kept, and only ours
+    /// are touched: a `.keep` file with a line that is not ours stays.
+    #[tokio::test]
+    async fn copies_are_released_with_their_group() {
+        let h = Hostile::new();
+        sh(&h.repo, &["gc", "-q"]);
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        pin_changed(&repo, "refs/harness/s/t", &before, &after)
+            .await
+            .unwrap();
+        let packs = repo.shadow.clone().unwrap().join("objects/pack");
+        let foreign = packs.join("pack-0000.keep");
+        std::fs::write(&foreign, "not ours\n").unwrap();
+        let keeps = || {
+            let mut v: Vec<String> = std::fs::read_dir(&packs)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".keep"))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(keeps().len(), 2);
+        release_pins(repo.shadow.as_ref().unwrap(), &["refs/harness/s/t".into()]).await;
+        assert_eq!(keeps().len(), 2, "a kept group's copy was released");
+        release_pins(repo.shadow.as_ref().unwrap(), &[]).await;
+        assert_eq!(keeps(), ["pack-0000.keep"]);
     }
 
     /// A.18: the rule. Not before `GC_EVERY` dropped groups (a small store
@@ -466,6 +929,145 @@ mod tests {
         snapshot(&repo, "refs/harness/s/v/before", "b")
             .await
             .unwrap();
+    }
+
+    /// Timing only (A.17, A.18): what a steady-state turn's checkpoints cost
+    /// with the old per-turn `gc --prune=now` and with the new path (copies,
+    /// refs dropped, no gc), for 10 and 1,000 changed files.
+    /// `A17_DIR=<dir on the disk to measure> A17_FILES=100000 cargo test -p
+    /// harness-node --lib checkpoint_turn_cost -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn checkpoint_turn_cost() {
+        use std::time::Instant;
+        let base = std::env::var_os("A17_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let n: usize = std::env::var("A17_FILES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100_000);
+        let runs = 5;
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v[v.len() / 2]
+        };
+        for kind in ["repo", "plain"] {
+            let d = tempfile::tempdir_in(&base).unwrap();
+            let ws = d.path().join("ws");
+            let path = |i: usize| ws.join(format!("d{}/e{}/f{i}.txt", i / 2500, (i / 50) % 50));
+            let t = Instant::now();
+            for i in 0..n {
+                let p = path(i);
+                if i % 50 == 0 {
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                }
+                std::fs::write(&p, format!("file {i}\n").repeat(1 + i % 60)).unwrap();
+            }
+            if kind == "repo" {
+                sh(&ws, &["init", "-q", "-b", "main"]);
+                sh(&ws, &["add", "."]);
+                sh(&ws, &["commit", "-qm", "init", "--no-gpg-sign"]);
+            } else {
+                // `A17_DIR` may lie inside a repository (this one); a gitfile
+                // that leads nowhere stops git's search, so the folder is a
+                // plain one (git never stages an entry named `.git`).
+                std::fs::write(ws.join(".git"), "gitdir: /nonexistent\n").unwrap();
+            }
+            eprintln!("[{kind}] {n} files made in {:.0} ms", ms(t));
+            let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+            assert_eq!(repo.root, ws.canonicalize().unwrap());
+            assert_eq!(borrows(&repo), kind == "repo");
+            if kind == "repo" {
+                // What the copy's `pack-objects` costs with and without
+                // git's flush of the pack (see `copy_into_own_store`).
+                let snap = snapshot(&repo, "refs/harness/p/p/before", "p")
+                    .await
+                    .unwrap();
+                let id = run(&repo, &["rev-parse", &format!("{snap}:d0/e0/f0.txt")], None)
+                    .await
+                    .unwrap();
+                for durable in [true, false] {
+                    let mut v = Vec::new();
+                    for _ in 0..5 {
+                        let t = Instant::now();
+                        copy_into_own_store(&repo, format!("{id}\n").into_bytes(), durable)
+                            .await
+                            .unwrap();
+                        v.push(ms(t));
+                    }
+                    eprintln!(
+                        "[{kind}] one-blob copy, flushed: {durable}: {:.0} ms",
+                        median(v)
+                    );
+                }
+            }
+            let mut turn = 0usize;
+            // One turn as the session runs it; `old` adds the old per-turn gc.
+            let mut one = |changed: usize, old: bool| {
+                turn += 1;
+                let (repo, ws_turn) = (repo.clone(), turn);
+                let edit: Vec<PathBuf> = (0..changed).map(|k| path(k * (n / changed))).collect();
+                async move {
+                    let g = format!("refs/harness/s/t{ws_turn}");
+                    let t = Instant::now();
+                    let b = snapshot(&repo, &format!("{g}/before"), "b").await.unwrap();
+                    let snaps0 = ms(t);
+                    for p in &edit {
+                        std::fs::write(p, format!("edit {ws_turn}\n")).unwrap();
+                    }
+                    let t = Instant::now();
+                    let a = snapshot(&repo, &format!("{g}/after"), "a").await.unwrap();
+                    super::super::changed(&repo, &b, &a).await.unwrap();
+                    let snaps = snaps0 + ms(t);
+                    let t = Instant::now();
+                    pin_changed(&repo, &g, &b, &a).await.unwrap();
+                    let pin = ms(t);
+                    let t = Instant::now();
+                    super::super::prune(&repo, 10).await;
+                    let prune = ms(t);
+                    let t = Instant::now();
+                    if old {
+                        run(&repo, &["gc", "--prune=now", "--quiet"], None)
+                            .await
+                            .unwrap();
+                    }
+                    (snaps, pin, prune, ms(t))
+                }
+            };
+            for _ in 0..11 {
+                one(10, false).await;
+            }
+            for changed in [10, 1000] {
+                for old in [false, true] {
+                    let mut rows = Vec::new();
+                    for _ in 0..runs {
+                        rows.push(one(changed, old).await);
+                    }
+                    let col =
+                        |f: fn(&(f64, f64, f64, f64)) -> f64| median(rows.iter().map(f).collect());
+                    let total = median(rows.iter().map(|r| r.0 + r.1 + r.2 + r.3).collect());
+                    eprintln!(
+                        "[{kind}] {changed} changed, {}: turn {total:.0} ms = snapshots+changed {:.0} \
+                         + copies {:.0} + prune {:.0} + gc {:.0} (medians of {runs})",
+                        if old { "old (gc every turn)" } else { "new" },
+                        col(|r| r.0),
+                        col(|r| r.1),
+                        col(|r| r.2),
+                        col(|r| r.3),
+                    );
+                }
+            }
+            // The rule's own collection, once, on the new path's store.
+            for _ in 0..3 {
+                one(10, false).await;
+            }
+            make_due(&repo).await;
+            let t = Instant::now();
+            assert!(maybe_gc(&repo).await);
+            eprintln!("[{kind}] one collection by the rule: {:.0} ms", ms(t));
+        }
     }
 
     /// A.18: the sweep at start-up removes lock files and private indexes

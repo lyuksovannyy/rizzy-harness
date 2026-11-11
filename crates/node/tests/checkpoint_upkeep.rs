@@ -1,3 +1,9 @@
+//! A.17: undo does not depend on the user's repository keeping old content.
+//! At the end of every turn in a repository folder, the old versions of the
+//! files the turn changed (and the trees a diff of the turn reads) are
+//! copied into the checkpoint repository's own store, in a pack with a
+//! `.keep` file, released when the turn's checkpoint is pruned.
+//!
 //! A.18: the checkpoint repository's garbage collection runs rarely, after
 //! the turn has ended, and bounded growth still holds.
 //!
@@ -11,10 +17,205 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use rig::Rig;
+use harness_core::event::*;
+use rig::{AGENT_GIT, Rig, X};
+
+/// The prefix of the chat note for a turn whose undo cannot be complete.
+const INCOMPLETE: &str = "This turn's undo is incomplete";
 
 /// How many dropped checkpoint groups make a garbage collection due.
 const GC_EVERY: u64 = 16;
+
+/// Two committed files, `a.txt` and `b.txt`, in one commit (and nothing
+/// else in the folder, so the checkpoint's trees equal the user's). Returns
+/// their blob ids.
+fn two_committed_files(rig: &Rig) -> (String, String) {
+    rig.git(&["init", "-q", "-b", "main"]);
+    rig.write("a.txt", "A1: committed\n");
+    rig.write("b.txt", "B1: committed\n");
+    rig.git(&["add", "."]);
+    rig.git(&["commit", "-qm", "base"]);
+    (
+        rig.git(&["hash-object", "a.txt"]),
+        rig.git(&["hash-object", "b.txt"]),
+    )
+}
+
+/// The agent's own history rewrite: amend the commit with what the folder
+/// holds now, expire the reflog, prune everything unreachable.
+fn agent_rewrites_and_prunes() -> String {
+    format!(
+        "{AGENT_GIT}; git commit -qa --amend -m rewritten && \
+         git reflog expire --expire=now --all && git gc --prune=now -q"
+    )
+}
+
+fn turn_ended_normally(rig: &Rig, mark: usize) -> bool {
+    rig.seen[mark..].iter().any(
+        |e| matches!(e.typed(), Ok(EventKind::TurnEnded(t)) if t.reason != TurnEndReason::Error),
+    )
+}
+
+// ---- A.17 ----
+
+/// The owner's case: the turn changes two committed files; afterwards the
+/// user rewrites history and prunes, so the old versions are gone from the
+/// user's repository. The undo works and puts back the exact bytes.
+#[tokio::test]
+async fn undo_works_after_the_user_rewrites_history_and_prunes() {
+    let mut rig = Rig::new().await;
+    let (a1, b1) = two_committed_files(&rig);
+    let t = rig.turn("echo a2 > a.txt; echo b2 > b.txt").await;
+    assert_eq!(t.phases, ["before", "after"]);
+    rig.write("a.txt", "A3: amended\n");
+    rig.git(&["commit", "-qa", "--amend", "-m", "amended"]);
+    rig.expire_reflog_and_gc_now();
+    assert!(!rig.user_has(&a1) && !rig.user_has(&b1), "not pruned");
+    rig.write("a.txt", "a2\n"); // the turn's result, as the turn left it
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(
+        r.folder_after.get("a.txt"),
+        Some(&b"A1: committed\n".to_vec())
+    );
+    assert_eq!(
+        r.folder_after.get("b.txt"),
+        Some(&b"B1: committed\n".to_vec())
+    );
+}
+
+/// The abuse case: the agent itself rewrites history and prunes inside its
+/// turn, after changing the files, so the old versions are gone before the
+/// turn ends and cannot be copied. The turn ends normally, and the chat
+/// says this turn's undo is incomplete, naming both files. Undo is then
+/// refused with nothing changed (A.16).
+#[tokio::test]
+async fn history_pruned_inside_the_turn_is_named_in_the_chat_and_the_turn_ends() {
+    let mut rig = Rig::new().await;
+    let (a1, b1) = two_committed_files(&rig);
+    // Untracked, so the checkpoint's root tree is its own (see the clean
+    // variant below).
+    rig.write("scratch.txt", "untracked\n");
+    let mark = rig.seen.len();
+    let t = rig
+        .turn(&format!(
+            "echo a2 > a.txt; echo b2 > b.txt; {}",
+            agent_rewrites_and_prunes()
+        ))
+        .await;
+    assert!(
+        !rig.user_has(&a1) && !rig.user_has(&b1),
+        "the agent's gc ran"
+    );
+    assert_eq!(t.phases, ["before", "after"]);
+    assert!(turn_ended_normally(&rig, mark));
+    let notes = rig.notes_since(mark);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.starts_with(INCOMPLETE) && n.contains("`a.txt`") && n.contains("`b.txt`")),
+        "{notes:?}"
+    );
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    let e = r.result.unwrap_err();
+    assert!(e.starts_with("nothing was changed:"), "{e}");
+    assert_eq!(r.folder_after, r.folder_before);
+}
+
+/// The same inside a clean folder: there the checkpoint's root tree is the
+/// user's own, so the agent's prune takes the tree too, the turn's changes
+/// cannot even be listed, and the existing note says the turn has no
+/// checkpoint. Visible, not closed (residual).
+#[tokio::test]
+async fn history_pruned_inside_a_clean_turn_says_the_turn_has_no_checkpoint() {
+    let mut rig = Rig::new().await;
+    two_committed_files(&rig);
+    let mark = rig.seen.len();
+    rig.turn(&format!("echo a2 > a.txt; {}", agent_rewrites_and_prunes()))
+        .await;
+    assert!(turn_ended_normally(&rig, mark));
+    let notes = rig.notes_since(mark);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.starts_with("This turn has no checkpoint")),
+        "{notes:?}"
+    );
+}
+
+/// The variant the copy does close: the agent changes the files, the turn
+/// ends, and only a later turn rewrites history and prunes. The first
+/// turn's undo works.
+#[tokio::test]
+async fn history_pruned_by_a_later_turn_does_not_take_the_undo() {
+    let mut rig = Rig::new().await;
+    let (a1, b1) = two_committed_files(&rig);
+    let t = rig.turn("echo a2 > a.txt; echo b2 > b.txt").await;
+    let mark = rig.seen.len();
+    rig.turn(&agent_rewrites_and_prunes()).await;
+    assert!(
+        !rig.user_has(&a1) && !rig.user_has(&b1),
+        "the agent's gc ran"
+    );
+    assert!(
+        !rig.notes_since(mark)
+            .iter()
+            .any(|n| n.starts_with(INCOMPLETE)),
+        "{:?}",
+        rig.notes_since(mark)
+    );
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(
+        r.folder_after.get("a.txt"),
+        Some(&b"A1: committed\n".to_vec())
+    );
+    assert_eq!(
+        r.folder_after.get("b.txt"),
+        Some(&b"B1: committed\n".to_vec())
+    );
+}
+
+/// The copies survive the checkpoint repository's own garbage collection
+/// (the command the node runs, and a plain `git gc`), so a prune in the
+/// user's repository afterwards still does not take the undo.
+#[tokio::test]
+async fn copies_survive_the_checkpoint_repositorys_own_gc() {
+    let mut rig = Rig::new().await;
+    let (a1, _) = two_committed_files(&rig);
+    let t = rig.turn("echo a2 > a.txt; echo b2 > b.txt").await;
+    let shadow = rig.shadow();
+    let at = format!(
+        "--prune={}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 1
+    );
+    for args in [
+        &["gc", "--prune=now", "--quiet"][..],
+        &["gc", &at, "--quiet"],
+        &["gc", "--quiet"],
+    ] {
+        rig.git_in(&shadow, args);
+    }
+    assert!(rig.shadow_owns(&a1), "the copy of a.txt went with gc");
+    rig.replace_history_and_prune();
+    assert!(!rig.user_has(&a1));
+    rig.write("a.txt", "a2\n");
+    rig.write("b.txt", "b2\n");
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(
+        r.folder_after.get("a.txt"),
+        Some(&b"A1: committed\n".to_vec())
+    );
+    assert_eq!(
+        r.folder_after.get("b.txt"),
+        Some(&b"B1: committed\n".to_vec())
+    );
+}
 
 /// "Six minutes later": the time of the last garbage collection is moved
 /// back, so the rule's minimum interval does not hold the next one back.
@@ -57,6 +258,76 @@ async fn no_gc_running(rig: &Rig) {
     while rig.shadow().join("gc.pid").exists() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// What the copies cost: after a turn that changed one large committed
+/// file, the checkpoint repository's own store holds that file's old and
+/// new versions and no other blob; over 60 turns that each rewrite it, no
+/// more copies are kept than there are kept checkpoints, and the store
+/// stays bounded (copies of pruned checkpoints are released and collected).
+#[tokio::test]
+async fn only_changed_files_are_copied_and_copies_go_with_their_checkpoint() {
+    const KEEP: usize = 3;
+    const SIZE: u64 = 256 * 1024;
+    let mut rig = Rig::with_keep(KEEP).await;
+    rig.git(&["init", "-q", "-b", "main"]);
+    let big = |rig: &Rig| {
+        let mut f = std::fs::File::open("/dev/urandom").unwrap();
+        let mut buf = vec![0u8; SIZE as usize];
+        std::io::Read::read_exact(&mut f, &mut buf).unwrap();
+        std::fs::write(rig.ws.join("big.bin"), buf).unwrap();
+    };
+    big(&rig);
+    for i in 0..5 {
+        rig.write(&format!("small{i}.txt"), &format!("small {i}\n"));
+    }
+    rig.git(&["add", "."]);
+    rig.git(&["commit", "-qm", "base"]);
+    let b0 = rig.git(&["hash-object", "big.bin"]);
+    let cmd = format!("head -c {SIZE} /dev/urandom > big.bin");
+    rig.turn(&cmd).await;
+    let b1 = rig.git(&["hash-object", "big.bin"]);
+    let own = rig.shadow_own_blobs();
+    assert!(own.contains(&b0), "the old version was not copied: {own:?}");
+    assert_eq!(
+        own,
+        [b0.clone(), b1].into_iter().collect(),
+        "blobs of unchanged files were copied"
+    );
+    let mut peak = 0;
+    for _ in 0..TURNS {
+        pretend_the_last_gc_was_long_ago(&rig);
+        rig.turn(&cmd).await;
+        assert!(
+            rig.shadow_keeps().len() <= KEEP,
+            "copies outlive their checkpoints: {:?}",
+            rig.shadow_keeps()
+        );
+        peak = peak.max(rig.shadow_object_bytes());
+        no_gc_running(&rig).await;
+    }
+    // Two versions a turn: without release or collection the store would
+    // reach 2 * TURNS * SIZE (30 MiB).
+    let bound = 2 * SIZE * waiting_groups(KEEP);
+    eprintln!("peak {peak}, bound {bound}");
+    assert!(peak <= bound, "peak {peak} > bound {bound}");
+}
+
+/// A folder that is not a repository borrows nothing, so nothing is copied:
+/// no pack and no `.keep` file appear, and undo works as before.
+#[tokio::test]
+async fn a_plain_folder_gets_no_copies() {
+    let mut rig = Rig::new().await;
+    rig.write("keep.txt", X);
+    let t = rig.turn("echo v2 > keep.txt").await;
+    assert!(!rig.shadow().join("objects/info/alternates").exists());
+    let packs: Vec<_> = std::fs::read_dir(rig.shadow().join("objects/pack"))
+        .unwrap()
+        .collect();
+    assert!(packs.is_empty(), "{packs:?}");
+    let r = rig.restore(t.id.as_deref().unwrap(), false).await;
+    assert_eq!(r.result, Ok(()));
+    assert_eq!(r.folder_after.get("keep.txt"), Some(&X.as_bytes().to_vec()));
 }
 
 // ---- A.18 ----
@@ -117,10 +388,11 @@ async fn the_checkpoint_repository_stays_bounded_in_a_plain_folder() {
     );
 }
 
-/// After a collection, every kept checkpoint still restores: the user
-/// commits and packs before each turn, the node's collection runs, and a
-/// rewind to the oldest kept turn puts back exactly the folder as it was
-/// before that turn.
+/// After a collection, every kept checkpoint still restores, including
+/// those whose old versions exist only as copies: the user commits and
+/// packs before each turn, the node's collection runs, the user throws its
+/// history away, and a rewind to the oldest kept turn puts back exactly the
+/// folder as it was before that turn.
 #[tokio::test]
 async fn after_gc_every_kept_checkpoint_restores() {
     const KEEP: usize = 4;
@@ -139,6 +411,7 @@ async fn after_gc_every_kept_checkpoint_restores() {
         turns.push((t.id.unwrap(), before));
     }
     wait_for_a_finished_gc(&rig).await;
+    rig.replace_history_and_prune();
     let (oldest, folder) = &turns[turns.len() - KEEP];
     let r = rig.restore_with(oldest, false, true).await;
     assert_eq!(r.result, Ok(()));
