@@ -52,6 +52,8 @@ export interface InputInfo {
   state: InputState;
   /** Hosts of the web pages read since the user's last message. */
   notice: string[];
+  /** An incognito chat: the answer being typed is kept nowhere (AUDIT L14). */
+  incognito?: boolean;
 }
 
 /** The input blocks of the conversation, by message id (ui/blocks.ts

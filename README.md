@@ -160,6 +160,12 @@ role, **+ New workspace…** and Workspace settings). It is a keyboard menu:
 Enter or ↓ opens it, → opens Workspaces, Esc goes back. Design notes:
 [docs/sidebar-search.md](docs/sidebar-search.md).
 
+What you type and have not sent stays in this browser as a draft of that
+chat, for your account only. Logging out (or a login that ended) clears every
+draft in the browser, with your recent folders and test events; deleting a
+chat deletes its draft, here or on another device; incognito chats keep no
+draft.
+
 ## Routines
 
 A routine starts a chat for you on a schedule or when a webhook is called:

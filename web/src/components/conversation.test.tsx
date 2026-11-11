@@ -264,3 +264,68 @@ describe("media", () => {
     expect(host.querySelector(".delete-chat")!.textContent).toContain("Also delete the Media file that came from this chat");
   });
 });
+
+describe("drafts (AUDIT L14)", () => {
+  const KEY = `harness.draft.u1.${SID}`;
+  const box = () => host.querySelector<HTMLTextAreaElement>(".bottom textarea")!;
+  const type = (text: string) =>
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box(), text);
+      box().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  async function showChat(incognito: boolean, row: SessionRow | null) {
+    current = view([]);
+    current.meta!.incognito = incognito;
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={[]} models={[]} />));
+  }
+  beforeEach(async () => {
+    localStorage.clear();
+    (await import("../lib/drafts")).setDraftOwner("u1");
+    vi.mocked(api.deleteSession).mockClear();
+    mediaApi.list.mockResolvedValue({ items: [], next: null });
+  });
+
+  test("a chat keeps what was typed under its user, and shows it again", async () => {
+    await showChat(false, sessionRow());
+    type("half a thought");
+    expect(localStorage.getItem(KEY)).toBe("half a thought");
+    act(() => root.unmount());
+    root = createRoot(host);
+    await showChat(false, sessionRow());
+    expect(box().value).toBe("half a thought");
+  });
+
+  test("an incognito chat stores nothing, and loses a draft it had", async () => {
+    localStorage.setItem(KEY, "from before");
+    await showChat(true, sessionRow({ incognito: true }));
+    expect(localStorage.getItem(KEY)).toBeNull();
+    expect(box().value).toBe("");
+    type("not to be kept");
+    expect(Object.keys(localStorage).filter((k) => k.startsWith("harness.draft."))).toEqual([]);
+  });
+
+  test("deleting the chat deletes its draft", async () => {
+    await showChat(false, sessionRow());
+    type("never sent");
+    expect(localStorage.getItem(KEY)).toBe("never sent");
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Delete chat"]')!.click());
+    const del = [...host.querySelectorAll<HTMLButtonElement>(".delete-chat button")].find((b) => b.textContent === "Delete")!;
+    await act(async () => del.click());
+    expect(api.deleteSession).toHaveBeenCalled();
+    expect(localStorage.getItem(KEY)).toBeNull();
+  });
+
+  test("storage that throws (a private window, blocked or full) never breaks the chat or typing", async () => {
+    const boom = () => {
+      throw new DOMException("blocked", "SecurityError");
+    };
+    vi.stubGlobal("localStorage", { getItem: boom, setItem: boom, removeItem: boom, key: boom });
+    try {
+      await showChat(false, sessionRow());
+      type("still typing");
+      expect(box().value).toBe("still typing");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
