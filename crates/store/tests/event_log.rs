@@ -578,3 +578,278 @@ fn a_revoked_nodes_frames_are_refused_at_append() {
         AppendOutcome::Applied
     );
 }
+
+// --- What a node may set in the sessions row (Gate 3 review L-1, L-2, L-3) ---
+
+fn raw(sid: SessionId, seq: u64, kind: &str, payload: serde_json::Value) -> RawEvent {
+    RawEvent {
+        session_id: sid,
+        seq,
+        ts_ms: seq as i64,
+        kind: kind.into(),
+        payload,
+    }
+}
+
+fn created_json(title: &str, parent: Option<SessionId>) -> serde_json::Value {
+    let mut p = json!({"title": title, "cwd": "/w", "model": "m", "backend": "native",
+        "node_id": "n1", "profile": "agentic", "approval_mode": "ask"});
+    if let Some(parent) = parent {
+        p["parent_session"] = json!(parent);
+    }
+    p
+}
+
+/// A chat on node `node`, created through the master by `owner`.
+fn chat_of(s: &Store, node: &str, owner: &str) -> SessionId {
+    let sid = SessionId::new();
+    assert_eq!(
+        s.append(
+            node,
+            &raw(sid, 1, "session_created", created_json("t", None))
+        )
+        .unwrap(),
+        AppendOutcome::Applied
+    );
+    s.claim_session(sid, Some(owner), None).unwrap();
+    sid
+}
+
+/// L-2. The row is set by the session's first event only. A second
+/// `session_created` from the node (here naming another user's chat on the
+/// same node as parent, then an unknown parent) is not applied: the owner,
+/// the parent, `incognito` and `profile` stay what the creation set.
+#[test]
+fn the_row_is_set_at_seq_1_and_its_owner_never_changes() {
+    let s = Store::open_in_memory().unwrap();
+    let alice = chat_of(&s, "n1", "alice");
+    let bob = chat_of(&s, "n1", "bob");
+    let mut moved = created_json("t", Some(bob));
+    moved["incognito"] = json!(true);
+    moved["profile"] = json!("chat");
+    let out = s
+        .append("n1", &raw(alice, 2, "session_created", moved))
+        .unwrap();
+    assert_ne!(
+        out,
+        AppendOutcome::Applied,
+        "a second session_created is refused"
+    );
+    let row = s.session(alice).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("alice"));
+    assert_eq!(row.parent_id, None);
+    assert!(!row.incognito);
+    assert_eq!(row.profile.as_deref(), Some("agentic"));
+    let out = s
+        .append(
+            "n1",
+            &raw(
+                bob,
+                2,
+                "session_created",
+                created_json("t", Some(SessionId::new())),
+            ),
+        )
+        .unwrap();
+    assert_ne!(out, AppendOutcome::Applied);
+    assert_eq!(
+        s.session(bob).unwrap().unwrap().owner_id.as_deref(),
+        Some("bob")
+    );
+}
+
+/// L-1, the store half. A parent is stored only when it is a session of
+/// the same node with the same owner: another node's chat is dropped at
+/// append, another user's chat on the same node when the master stamps
+/// the owner it recorded for the create.
+#[test]
+fn a_parent_is_kept_only_under_the_same_node_and_owner() {
+    let s = Store::open_in_memory().unwrap();
+    let victim = chat_of(&s, "n-victim", "alice");
+    let sid = SessionId::new();
+    s.append(
+        "n-hostile",
+        &raw(sid, 1, "session_created", created_json("t", Some(victim))),
+    )
+    .unwrap();
+    // What `Master::create_session` does after the node's ack.
+    s.claim_session(sid, Some("mallory"), None).unwrap();
+    let row = s.session(sid).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("mallory"));
+    assert_eq!(row.parent_id, None, "another node's chat is no parent");
+
+    // Same node, other owner: alice's chat on the hostile node.
+    let alices = chat_of(&s, "n-hostile", "alice");
+    let sid = SessionId::new();
+    s.append(
+        "n-hostile",
+        &raw(sid, 1, "session_created", created_json("t", Some(alices))),
+    )
+    .unwrap();
+    s.claim_session(sid, Some("mallory"), None).unwrap();
+    let row = s.session(sid).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("mallory"));
+    assert_eq!(row.parent_id, None, "another user's chat is no parent");
+}
+
+/// L-3. A node's title is cut to a few hundred characters in the row, so
+/// a listing never carries megabytes per chat.
+#[test]
+fn a_nodes_title_is_capped_in_the_row() {
+    let s = Store::open_in_memory().unwrap();
+    // Megabytes, yet under the event cap: the event is taken, the row cut.
+    let big = "A".repeat(3 << 20);
+    for _ in 0..3 {
+        let sid = SessionId::new();
+        assert_eq!(
+            s.append(
+                "n1",
+                &raw(sid, 1, "session_created", created_json(&big, None)),
+            )
+            .unwrap(),
+            AppendOutcome::Applied
+        );
+    }
+    let rows = s.sessions().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter()
+            .all(|r| r.title.chars().count() <= harness_store::MAX_TITLE_CHARS)
+    );
+    // Cut on a character boundary, and a short title is left as it is.
+    let sid = SessionId::new();
+    let wide = "é".repeat(300);
+    s.append(
+        "n1",
+        &raw(sid, 1, "session_created", created_json(&wide, None)),
+    )
+    .unwrap();
+    let title = s.session(sid).unwrap().unwrap().title;
+    assert_eq!(title, "é".repeat(harness_store::MAX_TITLE_CHARS));
+    let sid = SessionId::new();
+    let long_but_fine = "a legitimate, long title ".repeat(7);
+    s.append(
+        "n1",
+        &raw(
+            sid,
+            1,
+            "session_created",
+            created_json(&long_but_fine, None),
+        ),
+    )
+    .unwrap();
+    assert_eq!(s.session(sid).unwrap().unwrap().title, long_but_fine);
+}
+
+/// L-3. An event larger than `MAX_EVENT_BYTES` is refused, with nothing
+/// stored; a large legitimate one (3 MiB, more than today's largest) is
+/// taken.
+#[test]
+fn an_event_over_the_size_cap_is_refused() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    s.append(
+        "n1",
+        &raw(sid, 1, "session_created", created_json("t", None)),
+    )
+    .unwrap();
+    let message = |seq, n: usize| {
+        raw(
+            sid,
+            seq,
+            "user_message",
+            json!({"turn_id": "t1", "text": "x".repeat(n)}),
+        )
+    };
+    assert_eq!(
+        s.append("n1", &message(2, 3 << 20)).unwrap(),
+        AppendOutcome::Applied
+    );
+    let out = s
+        .append("n1", &message(3, harness_store::MAX_EVENT_BYTES))
+        .unwrap();
+    assert!(
+        matches!(out, AppendOutcome::Refused { seq: 3, reason } if reason.contains("too large")),
+        "{out:?}"
+    );
+    assert_eq!(s.head_seq(sid).unwrap(), 2);
+    assert_eq!(s.events_after(sid, 2, 10).unwrap(), vec![]);
+    // Refused, not frozen: the store leaves that to its caller (the
+    // master freezes; a node's own log just fails the append).
+    assert_eq!(s.diverged_seq(sid).unwrap(), None);
+    assert_eq!(
+        s.append("n1", &message(3, 10)).unwrap(),
+        AppendOutcome::Applied
+    );
+}
+
+/// L-3. Identifiers and paths a node supplies are refused past their
+/// limits rather than cut; ordinary ones are taken.
+#[test]
+fn identifiers_and_paths_past_their_limits_are_refused() {
+    let s = Store::open_in_memory().unwrap();
+    let cases = [
+        (
+            "cwd",
+            json!(format!("/{}", "d".repeat(harness_store::MAX_CWD_BYTES))),
+        ),
+        (
+            "model",
+            json!("m".repeat(harness_store::MAX_MODEL_BYTES + 1)),
+        ),
+        (
+            "agent_id",
+            json!("a".repeat(harness_store::MAX_AGENT_ID_BYTES + 1)),
+        ),
+        ("profile", json!("root")),
+    ];
+    for (field, value) in cases {
+        let sid = SessionId::new();
+        let mut p = created_json("t", None);
+        p[field] = value;
+        let out = s.append("n1", &raw(sid, 1, "session_created", p)).unwrap();
+        assert!(
+            matches!(out, AppendOutcome::Refused { seq: 1, .. }),
+            "{field}: {out:?}"
+        );
+        assert!(s.session(sid).unwrap().is_none(), "{field}: no row");
+    }
+    let sid = SessionId::new();
+    let mut p = created_json("t", None);
+    p["cwd"] = json!(format!("/{}", "d".repeat(300)));
+    p["model"] = json!("openrouter/anthropic/claude-some-long-model-name-20991231");
+    assert_eq!(
+        s.append("n1", &raw(sid, 1, "session_created", p)).unwrap(),
+        AppendOutcome::Applied
+    );
+    let changed = raw(
+        sid,
+        2,
+        "agent_changed",
+        json!({"agent": {"agent_id": "x".repeat(1000)}}),
+    );
+    assert!(matches!(
+        s.append("n1", &changed).unwrap(),
+        AppendOutcome::Refused { seq: 2, .. }
+    ));
+}
+
+/// L-3. One account's listing is filtered in SQL: it holds only that
+/// account's rows; `None` (the API token) holds everyone's.
+#[test]
+fn a_listing_of_one_owner_reads_only_their_rows() {
+    let s = Store::open_in_memory().unwrap();
+    let alice = [chat_of(&s, "n1", "alice"), chat_of(&s, "n1", "alice")];
+    let bob = chat_of(&s, "n1", "bob");
+    let ids = |rows: Vec<harness_store::SessionRow>| {
+        let mut v: Vec<SessionId> = rows.into_iter().map(|r| r.session_id).collect();
+        v.sort_by_key(|s| s.to_string());
+        v
+    };
+    let mut want = alice.to_vec();
+    want.sort_by_key(|s| s.to_string());
+    assert_eq!(ids(s.sessions_of(Some("alice")).unwrap()), want);
+    assert_eq!(ids(s.sessions_of(Some("bob")).unwrap()), vec![bob]);
+    assert!(s.sessions_of(Some("carol")).unwrap().is_empty());
+    assert_eq!(s.sessions_of(None).unwrap().len(), 3);
+}

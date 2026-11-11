@@ -529,7 +529,7 @@ pub fn chats(s: &Store, ctx: &SearchCtx) -> harness_store::Result<Vec<SearchResu
         }
         None => {
             let rows: Vec<SessionRow> = s
-                .sessions()?
+                .sessions_of(ctx.owner)?
                 .into_iter()
                 .filter(|r| listed(r, ctx.owner, ctx.workspace))
                 .collect();

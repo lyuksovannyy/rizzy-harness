@@ -107,12 +107,38 @@ sticky refusal, key order and float round trips, revoked writer) and
 queued at revoke, a reconnect that replays). Not done here: a generation per
 connection and an epoch per session (ADOPTION_PLAN C.1).
 
+## What a registered node sends (2026-11-11, Gate 3 review, R.3)
+
+Findings L-1 to L-6, L-8 and L-9 of `docs/security-review/2026-11-gate3.md`
+(on the review branch): what a node that is registered, but hostile, can do
+to the master and to other users through its frames.
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| L-2 | Medium | A second `session_created` was applied to the row at any `seq`: naming another user's chat on the node as parent moved the chat to that user; an unknown parent left it with no owner; `incognito` and `profile` were rewritten. | The row is set at `seq` 1 only; a later `session_created` is refused and freezes the session; no event changes an owner once set. |
+| L-1 | Medium | `parent_session` was stored whatever it named; `project_of` then followed it with no check, so the node got another chat's project instructions, board and facts. | A parent is kept only when it is a session of the same node with the same owner (checked at append and at the create's stamp), and every follower of `parent_id` checks again. |
+| L-3 | Medium | Titles, `cwd`, model and agent id were stored uncapped and every listing loaded every account's rows. Nothing capped one event below the frame. | Events are capped at 4 MiB (`MAX_EVENT_BYTES`) where they are appended; the row's strings are capped; listings filter by owner in SQL. |
+| L-4 | Medium | A revoke landing between the handshake's key check and the stop token's registration cancelled nothing, and `add_link` and `send_command` never looked at `revoked_ms`: prompts, context and images kept going to the node. | `node_connection` looks again after registering the token; `add_link` refuses a revoked node (store, and an in-memory set written by `revoke_node` under the link table's lock); `send_command` and `send_raw` send nothing to one. |
+| L-5 | Low | `node.hello` may list about 127,000 sessions; the master made three store calls per entry in a loop that a reconnect did not stop, so passes stacked. | Batches of 256 with one store read each; the pass stops once the node has a newer link and never sends on it. |
+| L-6 | Low | A hello naming another node's session got `resume{last_seq}` (its length), and for a deleted one a `session.delete`; `redeleting` was keyed by session only. | Hello entries are acted on only for the node's own sessions; tombstones record their node, and another node's events for a deleted id are refused as for a live one; `redeleting` is keyed by node and session. |
+| L-8 | Low | An append error inside a snapshot left the session marked as resuming, so later gaps asked for nothing until a reconnect. | A guard clears the mark on every way out unless the batch landed and more are due. |
+| L-9 | Low | `ack.error` from a node was unbounded and not cleaned and reached log lines and API responses. | One line, controls and hidden characters removed, at most 300 characters (`ack_error`); capabilities are at most 64 identifiers of at most 64 bytes. Hostname and version were already cleaned; chunk errors already were. |
+
+A refused event (too large, malformed) is not stored. On the mirror the
+session is frozen like a diverged one (logged once at `error` with the rule
+and no content, `session.cancel`, commands refused); a node's own log
+applies the same rules first, so an honest node fails its own append
+instead of sending it. PLAN.md §3 has the rules.
+
+Tests: `crates/store/tests/event_log.rs` (the inverted proof tests:
+`the_row_is_set_at_seq_1_and_its_owner_never_changes`,
+`a_parent_is_kept_only_under_the_same_node_and_owner`,
+`a_nodes_title_is_capped_in_the_row`; plus the size cap, identifiers and
+the per-owner listing), `crates/master/tests/link_hardening.rs` and
+`hostile_node.rs` (a fake node sends the hostile frames to a real master).
+
 ## Left open
 
-- **One event bigger than a frame.** Nothing caps a single event below
-  `MAX_FRAME`. Such an event breaks the link each time it is sent, live or in
-  a snapshot, so that node's link never settles. The cap belongs where events
-  are appended.
 - **Channel binding** uses the certificate fingerprint, not a TLS exporter
   (RFC 9266). Equivalent here, since losing the master's key is total
   anyway.

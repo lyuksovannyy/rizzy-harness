@@ -297,6 +297,14 @@ impl Session {
             .store
             .call(move |s| s.append(&owner, &e2))
             .await?;
+        if let AppendOutcome::Refused { reason, .. } = out {
+            // An event the log does not take (too large, say): nothing was
+            // stored, so the turn stops on a log failure and the next one
+            // starts from the same head.
+            return Err(StoreError::Refused(format!(
+                "the session log refused an event: {reason}"
+            )));
+        }
         if out != AppendOutcome::Applied {
             // Only this struct writes this session, so this is a bug.
             return Err(StoreError::Corrupt(format!(
