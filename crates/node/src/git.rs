@@ -1597,3 +1597,9 @@ mod tests {
         );
     }
 }
+
+/// Experiment B.5: what checkpoints and undo do with a git repository nested
+/// in the folder. Test-only; lives in its own file.
+#[cfg(test)]
+#[path = "git_nested_tests.rs"]
+mod nested_tests;
