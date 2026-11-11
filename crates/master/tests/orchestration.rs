@@ -89,6 +89,9 @@ fn outputs(evs: &[RawEvent]) -> Vec<String> {
 #[tokio::test]
 async fn teamlead_delegates_in_parallel_within_caps() {
     let (m, ws, _d) = setup().await;
+    // Coder and Writer can change files: they need a repository for their
+    // worktrees, or they are not started.
+    git(&ws, &["init", "-q"]);
     let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
@@ -174,9 +177,72 @@ async fn teamlead_delegates_in_parallel_within_caps() {
     );
 }
 
+/// The built-in roster against sub-agent isolation (T32): in a folder that
+/// is not a git repository, the read-only delegates (Scout, Reviewer,
+/// Researcher) still run there, and the ones that can change files
+/// (Software Developer, Writer) are refused with the reason.
+#[tokio::test]
+async fn builtin_delegates_outside_a_repository_by_role() {
+    let (m, ws, _d) = setup().await;
+    let sid = session(&m, &ws, "teamlead").await;
+    // Two turns: a refused delegation still counts against the cap of 4.
+    m.prompt(
+        sid,
+        "delegate: scout=look | reviewer=check | researcher=ask".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    turns_ended(&m, sid, 1).await;
+    m.prompt(
+        sid,
+        "delegate: coder=build | writer=draft".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let outs = outputs(&evs);
+    assert_eq!(outs.len(), 5, "{outs:#?}");
+    for (who, said) in [
+        ("scout", "look"),
+        ("reviewer", "check"),
+        ("researcher", "ask"),
+    ] {
+        assert!(
+            outs.iter()
+                .any(|o| o.contains(&format!("@{who} ended (completed):\nYou said: {said}"))),
+            "{who}: {outs:#?}"
+        );
+    }
+    for who in ["coder", "writer"] {
+        assert!(
+            outs.iter()
+                .any(|o| o.contains(&format!("@{who} was not started"))
+                    && o.contains("not a git repository")),
+            "{who}: {outs:#?}"
+        );
+    }
+    // Only the three read-only sub-agents got a session.
+    let kids = m
+        .inner_mirror()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .count();
+    assert_eq!(kids, 3);
+    assert_eq!(
+        std::fs::read_dir(&ws).unwrap().count(),
+        0,
+        "folder unchanged"
+    );
+}
+
 #[tokio::test]
 async fn cancelling_the_parent_cancels_children() {
     let (m, ws, _d) = setup().await;
+    git(&ws, &["init", "-q"]);
     let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,

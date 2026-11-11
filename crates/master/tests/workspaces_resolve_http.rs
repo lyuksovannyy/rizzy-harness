@@ -76,8 +76,9 @@ fn config() -> Config {
     cfg
 }
 
-/// The built-in agents, plus Boss, who hands work to Helper; both may use
-/// every tool (`remember` included).
+/// The built-in agents, plus Boss, who hands work to Helper. Boss may use
+/// every tool; Helper only reads and remembers, so it needs no worktree
+/// (the folder is not a git repository).
 fn agents() -> harness_agents::AgentSet {
     let mut all = harness_agents::builtins();
     for (id, text) in [
@@ -85,7 +86,10 @@ fn agents() -> harness_agents::AgentSet {
             "boss",
             "---\nname: Boss\ntools: all\ndelegates: [helper]\n---\nHand work to Helper.\n",
         ),
-        ("helper", "---\nname: Helper\ntools: all\n---\nHelp.\n"),
+        (
+            "helper",
+            "---\nname: Helper\ntools: [read, remember]\n---\nHelp.\n",
+        ),
     ] {
         all.push(harness_agents::parse(id, text, false).unwrap());
     }

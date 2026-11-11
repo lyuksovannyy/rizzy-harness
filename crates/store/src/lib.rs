@@ -64,6 +64,16 @@ pub enum AppendOutcome {
     },
     /// The session was deleted here; its events are not accepted again.
     Deleted,
+    /// A second writer: `seq` already holds other content, now or earlier.
+    /// Nothing is stored, and nothing will be for this session until it is
+    /// deleted. `first` is true for the append that found it.
+    Diverged {
+        seq: u64,
+        first: bool,
+    },
+    /// The writer is a revoked node (refused even for frames queued before
+    /// the revoke).
+    Revoked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +250,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     pending_approvals INTEGER NOT NULL DEFAULT 0,
     last_asks  INTEGER NOT NULL DEFAULT 0,
     asks_user  INTEGER NOT NULL DEFAULT 0,
-    attention_seq INTEGER NOT NULL DEFAULT 0
+    attention_seq INTEGER NOT NULL DEFAULT 0,
+    -- Set when a second writer sent other content under this seq (PLAN.md
+    -- §3): every later append is refused until the session is deleted.
+    diverged_seq INTEGER
 );
 -- How far each user has looked at each chat (questions stop needing
 -- attention once seen).
@@ -454,6 +467,28 @@ fn asks_with_a_block(payload: &serde_json::Value) -> bool {
 /// How often a UI session in use has its expiry moved forward.
 pub const UI_SESSION_TOUCH_MS: i64 = 60 * 1000;
 
+/// Whether `e` is the event already stored at its `seq`: same kind, time
+/// and payload, the payload compared as JSON values (member order does not
+/// count; floats survive the text round trip with `float_roundtrip`).
+fn same_as_stored(tx: &rusqlite::Transaction<'_>, sid: &str, e: &RawEvent) -> Result<bool> {
+    let stored: Option<(i64, String, String)> = tx
+        .query_row(
+            "SELECT ts_ms, kind, payload FROM events WHERE session_id = ?1 AND seq = ?2",
+            params![sid, e.seq as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((ts_ms, kind, payload)) = stored else {
+        // Below head with no row: nothing to compare against (not reachable
+        // today: a session's events and row are deleted together). Treated
+        // as a duplicate, as before, rather than freezing the session.
+        return Ok(true);
+    };
+    Ok(ts_ms == e.ts_ms
+        && kind == e.kind
+        && serde_json::from_str::<serde_json::Value>(&payload)? == e.payload)
+}
+
 fn is_incognito(payload: &serde_json::Value) -> bool {
     payload.get("incognito").and_then(|v| v.as_bool()) == Some(true)
 }
@@ -518,11 +553,22 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let sid = e.session_id.to_string();
-        let existing: Option<(String, i64)> = tx
+        // Checked here, in the transaction that would store the frame, so
+        // frames queued before a revoke are refused too. Only the mirror has
+        // node rows; the embedded node and a node's own log have none.
+        let revoked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_ms IS NOT NULL)",
+            params![owner],
+            |r| r.get(0),
+        )?;
+        if revoked {
+            return Ok(AppendOutcome::Revoked);
+        }
+        let existing: Option<(String, i64, Option<i64>)> = tx
             .query_row(
-                "SELECT node_id, head_seq FROM sessions WHERE session_id = ?1",
+                "SELECT node_id, head_seq, diverged_seq FROM sessions WHERE session_id = ?1",
                 params![sid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         if existing.is_none() {
@@ -536,7 +582,7 @@ impl Store {
             }
         }
         let head = match &existing {
-            Some((node, head)) => {
+            Some((node, head, diverged)) => {
                 if node != owner {
                     return Err(StoreError::WrongOwner {
                         session_id: e.session_id,
@@ -544,12 +590,31 @@ impl Store {
                         claimed: owner.to_string(),
                     });
                 }
+                if let Some(at) = diverged {
+                    return Ok(AppendOutcome::Diverged {
+                        seq: *at as u64,
+                        first: false,
+                    });
+                }
                 *head as u64
             }
             None => 0,
         };
         if e.seq <= head {
-            return Ok(AppendOutcome::Duplicate);
+            // Only a resend reaches this (the owning node's own appends are
+            // always head + 1), so the extra read is off the hot path.
+            if same_as_stored(&tx, &sid, e)? {
+                return Ok(AppendOutcome::Duplicate);
+            }
+            tx.execute(
+                "UPDATE sessions SET diverged_seq = ?2 WHERE session_id = ?1",
+                params![sid, e.seq as i64],
+            )?;
+            tx.commit()?;
+            return Ok(AppendOutcome::Diverged {
+                seq: e.seq,
+                first: true,
+            });
         }
         if e.seq != head + 1 {
             return Ok(AppendOutcome::Gap { head });
@@ -823,6 +888,19 @@ impl Store {
         session_images::on_session_deleted(&tx, &id)?;
         tx.commit()?;
         Ok(n > 0)
+    }
+
+    /// The `seq` at which a second writer was caught, if one was.
+    pub fn diverged_seq(&self, sid: SessionId) -> Result<Option<u64>> {
+        let conn = self.lock();
+        let v: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT diverged_seq FROM sessions WHERE session_id = ?1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.flatten().map(|s| s as u64))
     }
 
     pub fn is_deleted(&self, sid: SessionId) -> Result<bool> {

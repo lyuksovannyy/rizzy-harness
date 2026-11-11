@@ -470,14 +470,22 @@ impl NodeRuntime {
                 kind_hint: None,
                 call_id: None,
             };
+            let mut stage_id = None;
             let kind = match stages.stage(req, src, Default::default()).await {
-                Ok(staged) => EventKind::ArtifactStaged(Box::new(staged)),
+                Ok(staged) => {
+                    stage_id = Some(staged.stage_id.clone());
+                    EventKind::ArtifactStaged(Box::new(staged))
+                }
                 Err(error) => {
                     EventKind::ArtifactStageFailed(ArtifactStageFailed { path, name, error })
                 }
             };
             if let Err(e) = s.record(kind).await {
                 tracing::error!(session = %sid, error = %e, "could not record a staged file");
+                // No event names the copy: drop it.
+                if let Some(id) = stage_id {
+                    let _ = stages.release(sid, &id);
+                }
             }
         });
         Ok(())

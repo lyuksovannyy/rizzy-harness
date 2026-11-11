@@ -57,7 +57,10 @@ to grant them per user. Print the claim code with:
 ```
 
 Scripts can call the API with `Authorization: Bearer <token>`, using the token
-printed by `rizzy-harness token`.
+printed by `rizzy-harness token`. Treat this token as an admin password: it acts
+as an administrator and can read and drive every user's chats, which is an
+accepted gap until per-user tokens exist (`PLAN.md`, T29). Do not give it to
+automation that only needs one user's access, and do not copy it if no script needs it.
 
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
@@ -498,11 +501,18 @@ repository the private copy borrows your committed objects instead of
 storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
-back the exact bytes. Sub-agents that can write get a temporary git
-worktree; it is refused, and the sub-agent shares the folder, if the
-repository's own config defines filter commands (git-lfs's standard ones
-are allowed). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it.
+back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
+a temporary git worktree, so the folder must be a git repository for
+them: elsewhere, or when the repository's own config defines filter
+commands (git-lfs's standard ones are allowed), such a sub-agent is not
+started and the agent that delegated is told why. Sub-agents that only
+read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
+undo or rewind changes a file it saves the folder as it is, your own edits
+since the turn included, as a checkpoint of its own, so "Undo anyway" loses
+nothing: restoring that checkpoint (its id is in the chat's log, phase
+`before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
+the undo. The chat has no button for it yet.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
@@ -526,6 +536,8 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
+max_steps = 50                       # model calls one turn may make (1 .. 1000)
+bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -624,11 +636,26 @@ command keeps running until it exits, times out or is cancelled, and the
 rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
+**Step and time limits.** A turn ends after `[limits] max_steps` model calls
+(default 50, 1 to 1000; a sub-agent's turn has the same cap) with the message
+"stopped after N steps (`max_steps` in node.toml)". `bash` runs at most
+`[limits] bash_timeout_max_s` seconds (default 3600, 1 to 3600): a call that
+asks for more is cut at that value, and the tool description the model sees
+states it. Neither an agent definition, a prompt nor the master can raise
+either; a value outside its range stops the node at start.
+
 **File limits.** The file tools only open regular files: a FIFO, a device
 (`/dev/zero`), a socket or a directory is refused at once, also through a
 symlink. `read` streams a file and stops after 32 MiB, saying where (use
 bash `tail` or `sed -n` for later parts); `grep` skips files over 8 MiB and
 says how many it skipped; `edit` and `outline` refuse files over 8 MiB.
+`edit` and `write` never change a file in place: they write a temporary
+file (`.rizzy-harness-write.<random>.tmp`, deleted on any error; one left
+after a crash can be removed) in the same folder and rename it over the
+original, so a crash, full disk or cancel leaves the old file whole. The
+file keeps its permission bits, but a hard link to it is split (the other
+name keeps the old content), extended attributes and ACLs are not carried
+over, and a file in a folder the node cannot write to cannot be changed.
 Cancelling a turn stops any tool: one that does not return by itself
 within 2 seconds is abandoned. A slow undo or delete in one chat never
 delays Stop or an approval answer, in that chat or any other.
@@ -835,6 +862,12 @@ printed commands on the other machine (same binary). That machine needs its own
 `config.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
+
+Run each node from its own data directory. If two processes use one node's key
+(a copied data directory, a node restored from an old backup) and write the same
+chat differently, the server stops taking that chat's events, logs an error
+naming the chat and the node, and refuses new messages to it ("diverged").
+Delete the chat to clear it; the node's copy goes with it.
 
 ### Set up a node by hand
 

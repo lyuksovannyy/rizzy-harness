@@ -15,7 +15,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use futures::{SinkExt, StreamExt};
 use harness_core::Secret;
-use harness_master::auth::{Auth, Claim};
+use harness_master::auth::{Auth, Claim, create_ui_session};
 use harness_master::limits::{Timeouts, enforce};
 use harness_master::serve::{ServeConfig, serve, serve_with};
 use harness_master::{Master, router_with};
@@ -386,20 +386,42 @@ async fn uploads_and_blob_downloads_are_not_cut() {
 
 const REQUEST: Duration = Duration::from_millis(500);
 
-async fn master_server() -> Server {
+/// The real router with a short request timeout, and the cookie of an admin
+/// who is already logged in.
+///
+/// The admin and the login are made directly, the way `/api/setup` makes
+/// them, and not through that route: it hashes a password, which on a loaded
+/// machine takes longer than the short timeout these tests need, and the
+/// request then ends in a 504 with no cookie.
+async fn master_server() -> (Server, String) {
     let dir = tempfile::tempdir().unwrap();
     let claim_path = dir.path().join("claim-code");
     std::fs::write(&claim_path, "X").unwrap();
     // The Host allowlist needs the address; bind first.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let master = Master::new(
-        Store::open_in_memory().unwrap(),
+    let store = Store::open_in_memory().unwrap();
+    let auth =
         Auth::new(Secret::new("tok".into()), vec![addr.to_string()], false).with_claim(Claim {
             code: Secret::new("CLAIM".into()),
             path: claim_path,
-        }),
-    );
+        });
+    let Ok(admin) = auth
+        .claim(&store, "CLAIM", "alex".into(), "admin password".into())
+        .await
+    else {
+        panic!("the claim code is right and the server is unclaimed");
+    };
+    let id = create_ui_session(&store, &admin.user_id).await.unwrap();
+    let cookie = auth
+        .session_cookie(&id)
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let master = Master::new(store, auth);
     let app = router_with(
         master,
         Timeouts {
@@ -415,33 +437,19 @@ async fn master_server() -> Server {
         })
         .await
     });
-    Server {
-        addr,
-        stop: Some(stop),
-        done,
-    }
-}
-
-async fn admin_cookie(addr: SocketAddr) -> String {
-    let r = reqwest::Client::new()
-        .post(format!("http://{addr}/api/setup"))
-        .json(&serde_json::json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}))
-        .send()
-        .await
-        .unwrap();
-    r.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string()
+    (
+        Server {
+            addr,
+            stop: Some(stop),
+            done,
+        },
+        cookie,
+    )
 }
 
 #[tokio::test]
 async fn a_websocket_outlives_the_request_timeout_and_does_not_hold_shutdown() {
-    let srv = master_server().await;
-    let cookie = admin_cookie(srv.addr).await;
+    let (srv, cookie) = master_server().await;
     let mut r = format!("ws://{}/api/ws", srv.addr)
         .into_client_request()
         .unwrap();
@@ -461,8 +469,7 @@ async fn a_websocket_outlives_the_request_timeout_and_does_not_hold_shutdown() {
 
 #[tokio::test]
 async fn a_slow_upload_through_the_real_router_is_not_cut() {
-    let srv = master_server().await;
-    let cookie = admin_cookie(srv.addr).await;
+    let (srv, cookie) = master_server().await;
     // Chunks arrive further apart than the request timeout.
     let body = futures::stream::unfold(0u8, |i| async move {
         if i == 3 {
