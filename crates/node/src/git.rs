@@ -815,6 +815,11 @@ async fn record_order(repo: &Repo, ref_name: &str) {
     }
 }
 
+/// Delete one ref (best effort).
+pub async fn delete_ref(repo: &Repo, ref_name: &str) {
+    let _ = run(repo, &["update-ref", "-d", ref_name], None).await;
+}
+
 /// Keep only the `keep` most recent checkpoints (groups). In a shadow
 /// repository the dropped snapshots are garbage-collected right away; in a
 /// project repository git's own gc removes them later.

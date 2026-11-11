@@ -53,6 +53,9 @@ pub(crate) struct Session {
     /// A turn's last events could not be written: its end is still missing
     /// from the log, and the next prompt writes it first.
     unclosed: AtomicBool,
+    /// Approvals of the running turn whose request is in the log and whose
+    /// answer is not: the turn's end denies them.
+    unresolved: Mutex<Vec<String>>,
 }
 
 /// What the user sent with a prompt.
@@ -117,6 +120,7 @@ impl Session {
             turn_approved: Mutex::new(HashSet::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
+            unresolved: Mutex::new(Vec::new()),
         });
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
@@ -163,6 +167,7 @@ impl Session {
             turn_approved: Mutex::new(HashSet::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
+            unresolved: Mutex::new(Vec::new()),
         }))
     }
 
@@ -266,7 +271,7 @@ impl Session {
     /// on `Err` the caller must not do what the event describes. The first
     /// failure stops the turn (its token is cancelled) and makes the rest of
     /// its appends fail untried; the backend then ends the turn.
-    async fn emit(&self, kind: EventKind) -> Result<(), LogError> {
+    pub(crate) async fn emit(&self, kind: EventKind) -> Result<(), LogError> {
         if self.log_failed.load(Ordering::SeqCst) {
             return Err(LogError(
                 "an earlier event of this turn was not written".into(),
@@ -433,6 +438,10 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         self.log_failed.store(false, Ordering::SeqCst);
+        self.unresolved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 agent: agent.map(AgentSpec::agent_ref),
@@ -605,13 +614,29 @@ impl Session {
             }))
             .await;
         }
-        let ended = self
-            .append_end(EventKind::TurnEnded(TurnEnded {
-                turn_id: turn_id.into(),
-                reason,
-                usage,
-            }))
-            .await;
+        // An approval whose answer was not written would stay pending in
+        // the log after the turn: deny it first. If that cannot be written
+        // either, the turn stays open for the next prompt to close.
+        let unresolved =
+            std::mem::take(&mut *self.unresolved.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut closed = true;
+        for approval_id in unresolved {
+            closed &= self
+                .append_end(EventKind::ApprovalResolved(ApprovalResolved {
+                    approval_id,
+                    decision: Decision::Deny,
+                    by: ResolvedBy::Cancelled,
+                }))
+                .await;
+        }
+        let ended = closed
+            && self
+                .append_end(EventKind::TurnEnded(TurnEnded {
+                    turn_id: turn_id.into(),
+                    reason,
+                    usage,
+                }))
+                .await;
         if !ended {
             self.unclosed.store(true, Ordering::SeqCst);
         }
@@ -636,15 +661,20 @@ impl Session {
         let r = format!("refs/harness/{}/{turn_id}/before", self.id);
         match crate::git::snapshot(&repo, &r, "harness: before turn").await {
             Ok(sha) => {
-                // On failure the caller sees `log_failed` and stops.
-                self.emit(EventKind::Checkpoint(Checkpoint {
-                    turn_id: turn_id.into(),
-                    phase,
-                    git_ref: sha.clone(),
-                    files: vec![],
-                }))
-                .await
-                .ok()?;
+                // On failure the caller sees `log_failed` and stops; the
+                // ref no event names goes.
+                let recorded = self
+                    .emit(EventKind::Checkpoint(Checkpoint {
+                        turn_id: turn_id.into(),
+                        phase,
+                        git_ref: sha.clone(),
+                        files: vec![],
+                    }))
+                    .await;
+                if recorded.is_err() {
+                    crate::git::delete_ref(&repo, &r).await;
+                    return None;
+                }
                 Some((repo, sha))
             }
             Err(e) => {
@@ -890,10 +920,16 @@ impl Session {
             }
         };
         let (reason, usage) = child
+            .clone()
             .run_turn(msg, history, Some(agent), vec![], extra, cancel)
             .await;
+        // Each session's log gates its own effects: the parent's turn goes
+        // on, but nothing of a child whose log failed (or whose parent's
+        // did) reaches the shared folder, since no event would record it.
+        let log_failed =
+            child.log_failed.load(Ordering::SeqCst) || self.log_failed.load(Ordering::SeqCst);
         let merge_note = match iso {
-            Some(i) => Some(self.merge_back(i, child_id).await),
+            Some(i) => Some(self.merge_back(i, child_id, !log_failed).await),
             None => iso_note,
         };
         let log = self
@@ -913,6 +949,11 @@ impl Session {
             .unwrap_or_default();
         // Whatever the answer cites, the parent resolves through these.
         let sources = harness_core::refs::sources_in(&log);
+        let text = if child.log_failed.load(Ordering::SeqCst) {
+            "The sub-agent stopped because its session log could not be written.".to_string()
+        } else {
+            text
+        };
         let text = match merge_note {
             Some(n) => format!("{text}\n\n[{n}]"),
             None => text,
@@ -988,7 +1029,9 @@ impl Session {
     }
 
     /// Bring a sub-agent's changes back into the main working directory.
-    async fn merge_back(&self, iso: Isolation, child: SessionId) -> String {
+    /// `apply: false` keeps the result as a ref and changes nothing in the
+    /// folder.
+    async fn merge_back(&self, iso: Isolation, child: SessionId, apply: bool) -> String {
         let result_ref = format!("refs/harness/{child}/result");
         let note = match crate::git::snapshot(
             &crate::git::Repo::project(&iso.worktree),
@@ -998,6 +1041,11 @@ impl Session {
         .await
         {
             Err(e) => format!("its changes could not be collected: {e}"),
+            Ok(result) if !apply => format!(
+                "its changes were not applied, because a session log could not be written; \
+                 to apply by hand: git diff {} {result} | git apply",
+                iso.base
+            ),
             Ok(result) => match crate::git::apply(&iso.root, &iso.base, &result).await {
                 Ok(0) => "no file changes".to_string(),
                 Ok(n) => format!("{n} changed file(s) applied to the folder"),
@@ -1017,6 +1065,26 @@ impl Session {
         )
         .await;
         note
+    }
+
+    /// Record an approval's answer; `false` if the log refused it (the
+    /// approval then stays in `unresolved` for the turn's end to deny).
+    async fn resolve(&self, approval_id: String, decision: Decision, by: ResolvedBy) -> bool {
+        let written = self
+            .emit(EventKind::ApprovalResolved(ApprovalResolved {
+                approval_id: approval_id.clone(),
+                decision,
+                by,
+            }))
+            .await
+            .is_ok();
+        if written {
+            self.unresolved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|a| *a != approval_id);
+        }
+        written
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -1134,12 +1202,11 @@ impl TurnHost for Session {
                 }))
                 .await;
             if requested.is_ok() {
-                let _ = self
-                    .emit(EventKind::ApprovalResolved(ApprovalResolved {
-                        approval_id,
-                        decision: Decision::Deny,
-                        by: ResolvedBy::Policy,
-                    }))
+                self.unresolved
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(approval_id.clone());
+                self.resolve(approval_id, Decision::Deny, ResolvedBy::Policy)
                     .await;
             }
             return Decision::Deny;
@@ -1170,7 +1237,12 @@ impl TurnHost for Session {
                 turn_allow,
             }))
             .await;
-        if requested.is_err() {
+        if requested.is_ok() {
+            self.unresolved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(approval_id.clone());
+        } else {
             // Nobody can see a request the log does not hold; the turn is
             // already stopping.
             self.approvals
@@ -1197,14 +1269,7 @@ impl TurnHost for Session {
             d => d,
         };
         // An approval the log does not hold allows nothing.
-        let resolved = self
-            .emit(EventKind::ApprovalResolved(ApprovalResolved {
-                approval_id,
-                decision,
-                by,
-            }))
-            .await;
-        if resolved.is_err() {
+        if !self.resolve(approval_id, decision, by).await {
             return Decision::Deny;
         }
         if decision.allows() {
