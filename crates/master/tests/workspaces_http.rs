@@ -59,6 +59,7 @@ async fn node(root: &std::path::Path, id: &str, profile: Profile) -> NodeRuntime
         profile,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await

@@ -35,3 +35,9 @@ walkdir.workspace = true
 harness-agent-native.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
+
+[features]
+# The test hooks `crates/cli`'s sandbox tests drive (`testing`); never in
+# the shipped binary (resolver 3 enables a dev-dependency's features only
+# for the targets that need them).
+testing = []

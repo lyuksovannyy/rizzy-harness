@@ -1,44 +1,102 @@
-//! Turn checkpoints in git, and the git calls for sub-agent worktrees.
+//! Turn checkpoints and sub-agents' folders in git.
 //!
-//! Checkpoints always live in a harness-owned *shadow* repository in the
-//! node's data directory (`checkpoints/<hash>.git`, run as `--git-dir
-//! <shadow> --work-tree <folder>`), for git repositories and plain folders
-//! alike. The user's `.git/config`, hooks, filters and index are never
-//! consulted for a checkpoint, a diff or an undo; in a repository the shadow
-//! borrows the user's objects through `objects/info/alternates` so files
-//! already committed are not stored twice, and copies `.git/info/exclude`
-//! so the same files are ignored. Only the latest N checkpoints are kept.
-//! A git repository nested in the folder is left out of every checkpoint
-//! and never touched by an undo (see `stage_without_nested`).
+//! **No git process of the node runs with the user's git directory as its
+//! git directory or common directory** (R.1, PLAN.md T19). A session may
+//! write anything in its repository's `.git` (config, hooks, attributes,
+//! `commondir`, a gitfile, `core.worktree`, `extensions.*`), and git honours
+//! each of those as a redirect or a command, so every git call runs in a
+//! harness-owned *shadow* repository in the node's data directory
+//! (`checkpoints/<hash>.git` for turn checkpoints, `checkpoints/<hash>-sub.git`
+//! for sub-agents), as `--git-dir <shadow> --work-tree <folder>`, with
+//! attributes from the empty tree. What the node needs to know about the
+//! user's repository is read from its files by our own code
+//! ([`user_repo`]). The one use of the user's repository by the node's git
+//! is as an object store borrowed read-only through the shadow's
+//! `objects/info/alternates`, at a path our code computed, and only when it
+//! chains to no other store; files already committed are then not stored
+//! twice. `.git/info/exclude` is copied so the same files are ignored. Only
+//! the latest N checkpoints are kept. A git repository nested in the folder
+//! is left out of every checkpoint and never touched by an undo (see
+//! `stage_without_nested`).
 //!
-//! Sub-agent worktrees must run in the user's repository. Those calls get
-//! the same hardened base (no system/global config, hooks off, fsmonitor
-//! off, no transports, timeouts), and a worktree is refused when the
-//! repository's own config defines a filter command, which would otherwise
-//! run during checkout.
+//! **The checkpoint root is found on the file system** (R.1, PLAN.md T33):
+//! the nearest folder at or above the session folder that holds a plain
+//! `.git` directory, not above the workspace root the session is in.
+//!
+//! **A sub-agent's folder is node-owned** (`<data>/sessions/<id>/files`, see
+//! [`ChildFolder`]): the node fills it from the shadow and writes it a git
+//! directory of its own before the child starts, never runs git with that
+//! directory, snapshots the child's result in the shadow, and writes the
+//! changed files into the parent's folder with the restore machinery, whose
+//! writes and deletes are relative to directories opened without following
+//! links ([`at`]).
 //!
 //! Every git process gets a cleared environment, command-line overrides for
 //! the config keys that run commands, a timeout, and is killed (with its
 //! process group) when the call is dropped.
 
 use std::path::{Path, PathBuf};
+
+use harness_core::folder::Identity;
 use std::time::Duration;
 
 use tokio::process::Command;
 
+mod at;
 mod upkeep;
+mod user_repo;
 
 /// Where checkpoints for one working folder are stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
     /// The folder whose files are snapshotted.
     pub root: PathBuf,
-    /// The harness-owned git dir (always set for turn checkpoints; `None`
-    /// only for the sub-agent calls that must use the user's repository).
+    /// The harness-owned git dir. Always set: no `Repo` is ever made for
+    /// the user's own repository (an `Option` only so the tests that look
+    /// inside the shadow read the same field).
     shadow: Option<PathBuf>,
     /// The empty tree of the shadow's object format (its attribute source).
     empty_tree: &'static str,
+    /// Folders a restore never writes or deletes in (the node's data
+    /// directory), canonical.
+    protected: Vec<PathBuf>,
+    /// A work tree other than the one the shadow is for (a sub-agent's
+    /// folder): snapshots start from an empty index and do not keep it,
+    /// so the shadow's stat cache stays the folder's.
+    scratch: bool,
+    /// The sandbox every git process of this repository runs in (R.1,
+    /// R1b-2): read-only on the work tree and on the borrowed object store,
+    /// read-write on the shadow; `None` where the node has no sandbox
+    /// (`[sandbox] mode = "off"`) and in tests.
+    jail: Jail,
+    /// The user's object store this shadow borrows (its alternates), for
+    /// the jail's read-only grant, with the identity it had when it was
+    /// accepted for borrowing (R1c-1).
+    borrowed: Option<(PathBuf, Identity)>,
+    /// The identities of the work tree and the shadow when this handle was
+    /// made: every jail grant of them carries these (R1c-1).
+    root_id: Identity,
+    shadow_id: Option<Identity>,
+    /// The work tree is written by git (filling a sub-agent's new folder,
+    /// which no session can reach yet): read-write in the jail.
+    tree_rw: bool,
 }
+
+/// The sandbox of a [`Repo`]'s git processes; equal when it is the same one.
+#[derive(Debug, Clone, Default)]
+pub struct Jail(pub Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>);
+
+impl PartialEq for Jail {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Jail {}
 
 /// Build output and dependency folders a shadow repository of a plain
 /// folder never snapshots (a repository's own ignore rules apply instead).
@@ -93,23 +151,39 @@ fn empty_tree(format: &str) -> &'static str {
 }
 
 impl Repo {
-    pub fn project(root: &Path) -> Self {
+    pub fn is_shadow(&self) -> bool {
+        self.shadow.is_some()
+    }
+
+    /// The same shadow with another work tree (a sub-agent's folder, which
+    /// the node made and no session can reach: its identity now).
+    fn with_root(&self, root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
-            shadow: None,
-            empty_tree: empty_tree("sha1"),
+            root_id: Identity::of(root).unwrap_or(Identity { dev: 0, ino: 0 }),
+            ..self.clone()
         }
     }
 
-    pub fn is_shadow(&self) -> bool {
-        self.shadow.is_some()
+    /// This, as a scratch work tree (see [`Repo::scratch`]).
+    fn scratch(mut self) -> Self {
+        self.scratch = true;
+        self
     }
 }
 
 /// A git command with the hardened base: cleared environment, overrides,
 /// no stdin. `program` is `git` except in tests.
 fn hardened(program: &Path) -> Command {
-    let mut c = Command::new(program);
+    let mut c = hardened_std(std::process::Command::new(program));
+    overrides(&mut c);
+    Command::from(c)
+}
+
+/// The hardened environment on `c` (a `git` command, or the sandbox
+/// wrapper that will `exec` git: the environment is inherited across that
+/// `exec`).
+fn hardened_std(mut c: std::process::Command) -> std::process::Command {
     c.env_clear();
     for k in KEEP_ENV {
         if let Some(v) = std::env::var_os(k) {
@@ -128,10 +202,14 @@ fn hardened(program: &Path) -> Command {
         .env("GIT_AUTHOR_EMAIL", "harness@localhost")
         .env("GIT_COMMITTER_NAME", "harness")
         .env("GIT_COMMITTER_EMAIL", "harness@localhost");
+    c
+}
+
+/// The `-c` overrides, as arguments.
+fn overrides(c: &mut std::process::Command) {
     for o in OVERRIDES {
         c.arg("-c").arg(o);
     }
-    c
 }
 
 /// Kills a git process group when dropped (timeout, cancelled turn), so
@@ -225,8 +303,55 @@ fn git_program() -> PathBuf {
     PathBuf::from("git")
 }
 
-fn command(repo: &Repo, index: Option<&Path>) -> Command {
-    let mut c = hardened(&git_program());
+/// A git command for `repo`: in the jail when the repository has one
+/// (R.1, R1b-2). The jail grants read-only on the work tree (read-write
+/// while the node fills a sub-agent's new folder) and on the borrowed
+/// object store, read-write on the shadow (its objects, refs, index and
+/// every private index of ours, which live there), and nothing else: not
+/// the rest of the data directory, not the home folder. A link a session
+/// swaps into its folder while git walks it then leads somewhere this git
+/// cannot open, so its content never reaches a snapshot.
+fn command_std(repo: &Repo, index: Option<&Path>) -> std::process::Command {
+    let base = match (&repo.jail.0, &repo.shadow) {
+        (Some(s), Some(dir)) => {
+            // Each grant with the identity the node took when it made this
+            // handle: the wrapper opens it once and refuses the call if it
+            // is another directory now (R1c-1).
+            use harness_tools::sandbox::Grant;
+            let shadow = match repo.shadow_id {
+                Some(id) => Grant::identified(dir, id, "the checkpoint store"),
+                None => Grant::system(dir),
+            };
+            let root = Grant::identified(&repo.root, repo.root_id, "the session's folder");
+            let mut rw = vec![shadow];
+            let mut ro = Vec::new();
+            if repo.tree_rw {
+                rw.push(root);
+            } else {
+                ro.push(root);
+            }
+            ro.extend(
+                repo.borrowed
+                    .iter()
+                    .map(|(p, id)| Grant::identified(p, *id, "the repository's object store")),
+            );
+            if let Some(i) = index
+                && let Some(parent) = i.parent()
+                && !parent.starts_with(dir)
+                && !(repo.tree_rw && parent.starts_with(&repo.root))
+            {
+                // A private index of the node's own, elsewhere in the data
+                // directory: no session can write there.
+                rw.push(Grant::system(parent));
+            }
+            let mut c = s.helper(&rw, &ro);
+            c.arg(git_program());
+            c
+        }
+        _ => std::process::Command::new(git_program()),
+    };
+    let mut c = hardened_std(base);
+    overrides(&mut c);
     match &repo.shadow {
         Some(dir) => {
             c.arg("--git-dir")
@@ -245,14 +370,21 @@ fn command(repo: &Repo, index: Option<&Path>) -> Command {
             // is all of it, wherever the node process itself runs.
             c.current_dir(&repo.root);
         }
+        // Never made (see `Repo::shadow`); a git dir that does not exist
+        // fails the call rather than fall back to the user's repository.
         None => {
-            c.arg("-C").arg(&repo.root);
+            c.arg("--git-dir").arg("/nonexistent/harness-no-shadow");
+            c.current_dir(&repo.root);
         }
     }
     if let Some(i) = index {
         c.env("GIT_INDEX_FILE", i);
     }
     c
+}
+
+fn command(repo: &Repo, index: Option<&Path>) -> Command {
+    Command::from(command_std(repo, index))
 }
 
 async fn run(repo: &Repo, args: &[&str], index: Option<&Path>) -> Result<String, String> {
@@ -279,181 +411,117 @@ async fn run_raw(
     }
 }
 
-async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
-    run(&Repo::project(dir), args, index).await
+/// The commit, branch and whether tracked files changed, for the folder a
+/// published file came from (display only). Commit and branch are read
+/// from the repository's files ([`user_repo`]); whether anything changed
+/// is asked of the shadow (see [`Repo::changed_since`]). No git process
+/// runs in the user's repository.
+pub async fn describe(
+    dir: &Path,
+    shadow_base: Option<&Path>,
+    bounds: &Bounds,
+) -> Option<(String, String, bool)> {
+    let dir = dir.canonicalize().ok()?;
+    let user_repo::Found::Repo(r) = find_repo(&dir, bounds).await else {
+        return None;
+    };
+    let commit = r.head.clone()?;
+    let dirty = match (checkpoint_repo(&dir, shadow_base, bounds).await, &r.index) {
+        (Ok(Some(repo)), Some(index)) if repo.root == r.top => {
+            repo.changed_since(index, &commit).await
+        }
+        _ => false,
+    };
+    Some((commit, r.branch, dirty))
 }
 
-/// The repository's own config, as `(key, value)`, read without running
-/// anything (`git config --list` executes nothing; includes are followed
-/// because the other git calls follow them too).
-async fn local_config(root: &Path) -> Result<Vec<(String, String)>, String> {
-    let out = git(
-        root,
-        &["config", "--list", "--includes", "--show-scope", "-z"],
-        None,
-    )
-    .await?;
-    // With -z: `scope NUL key LF value NUL` per entry.
-    let fields: Vec<&str> = out.split('\0').collect();
-    Ok(fields
-        .chunks(2)
-        .filter_map(|c| match c {
-            // Our own overrides show up as "command".
-            [scope, entry] if *scope != "command" && !entry.is_empty() => {
-                let (k, v) = entry.split_once('\n').unwrap_or((entry, ""));
-                Some((k.to_string(), v.to_string()))
-            }
-            _ => None,
-        })
-        .collect())
-}
-
-/// git-lfs's own filter commands, the only filter definitions allowed.
-const LFS_STANDARD: &[(&str, &str)] = &[
-    ("clean", "git-lfs clean -- %f"),
-    ("smudge", "git-lfs smudge -- %f"),
-    ("smudge", "git-lfs smudge --skip -- %f"),
-    ("process", "git-lfs filter-process"),
-    ("process", "git-lfs filter-process --skip"),
-];
-
-/// Whether a config entry would run a command during a worktree checkout,
-/// `add` or `apply` despite the overrides: filter drivers, and git-lfs's
-/// own command hooks (custom transfer agents, extensions).
-fn runs_command(key: &str, value: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    if let Some(rest) = k.strip_prefix("filter.") {
-        let Some((name, var)) = rest.rsplit_once('.') else {
+impl Repo {
+    /// Whether tracked files in the folder differ from `commit` (what
+    /// `git status --untracked-files=no` would call dirty), asked of the
+    /// shadow with a private copy of the user's index (its stat cache, so
+    /// unchanged files are not read). Raw bytes are compared, so a file the
+    /// repository filters (LFS, eol conversion) may count as changed.
+    async fn changed_since(&self, user_index: &Path, commit: &str) -> bool {
+        let Some(dir) = &self.shadow else {
             return false;
         };
-        if !matches!(var, "clean" | "smudge" | "process") {
+        let tmp = dir.join(format!("harness-index-{}", harness_core::new_id()));
+        let _files = IndexFiles(tmp.clone());
+        if tokio::fs::copy(user_index, &tmp).await.is_err() {
             return false;
         }
-        return !(name == "lfs" && LFS_STANDARD.contains(&(var, value.trim())));
-    }
-    k.starts_with("lfs.customtransfer.")
-        || k.starts_with("lfs.extension.")
-        || k == "lfs.standalonetransferagent"
-}
-
-/// Config keys in the repository at `root` that would run a command in a
-/// sub-agent worktree. Empty means a worktree may be created.
-pub async fn worktree_hazards(root: &Path) -> Result<Vec<String>, String> {
-    let mut bad: Vec<String> = local_config(root)
-        .await?
-        .into_iter()
-        .filter(|(k, v)| runs_command(k, v))
-        .map(|(k, _)| k)
-        .collect();
-    bad.sort();
-    bad.dedup();
-    Ok(bad)
-}
-
-/// Refuse sub-agent worktrees in a repository whose own config defines
-/// commands that checkout would run.
-pub async fn check_worktree_safe(root: &Path) -> Result<(), String> {
-    let bad = worktree_hazards(root).await?;
-    if bad.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "this repository's own git config defines commands that a checkout would run ({}); \
-             no separate worktree is created in it",
-            bad.join(", ")
-        ))
+        let mut c = command(self, Some(&tmp));
+        c.args([
+            "diff-index",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            commit,
+        ]);
+        matches!(exec(c, None, GIT_TIMEOUT).await, Ok(o) if o.status.code() == Some(1))
     }
 }
 
-/// The commit, branch and whether tracked files changed, for the folder a
-/// published file came from (display only).
-pub async fn describe(dir: &Path) -> Option<(String, String, bool)> {
-    let commit = git(dir, &["rev-parse", "HEAD"], None).await.ok()?;
-    let branch = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"], None)
-        .await
-        .unwrap_or_default();
-    // `status` may run clean filters: switch off every filter the
-    // repository defines (an empty command is a no-op).
-    let mut args: Vec<String> = Vec::new();
-    let mut names: Vec<String> = local_config(dir)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(k, _)| {
-            let rest = k.strip_prefix("filter.")?;
-            let (name, _) = rest.rsplit_once('.')?;
-            Some(name.to_string())
-        })
-        .collect();
-    names.sort();
-    names.dedup();
-    for n in names {
-        for (var, val) in [
-            ("clean", ""),
-            ("smudge", ""),
-            ("process", ""),
-            ("required", "false"),
-        ] {
-            args.push("-c".into());
-            args.push(format!("filter.{n}.{var}={val}"));
-        }
-    }
-    args.extend(["status", "--porcelain", "--untracked-files=no"].map(String::from));
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let status = git(dir, &refs, None).await.unwrap_or_default();
-    Some((commit, branch, !status.is_empty()))
-}
-
-/// What one `rev-parse` says about the repository containing a folder.
-struct RepoInfo {
-    root: PathBuf,
-    common_dir: PathBuf,
-    objects: PathBuf,
-    exclude: PathBuf,
-    format: String,
-}
-
-async fn repo_info(cwd: &Path) -> Option<RepoInfo> {
-    let out = git(
-        cwd,
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--show-toplevel",
-            "--git-common-dir",
-            "--git-path",
-            "objects",
-            "--git-path",
-            "info/exclude",
-            "--show-object-format",
-        ],
+/// The bytes snapshot `sha` holds at `path` (tests in `crates/cli`).
+#[cfg(feature = "testing")]
+pub(crate) async fn blob_at(repo: &Repo, sha: &str, path: &str) -> Option<Vec<u8>> {
+    run_raw(
+        repo,
+        &["cat-file", "blob", &format!("{sha}:{path}")],
+        None,
         None,
     )
     .await
-    .ok()?;
-    let l: Vec<&str> = out.lines().collect();
-    let [root, common, objects, exclude, format] = l[..] else {
-        return None;
-    };
-    let root = PathBuf::from(root);
-    // A `core.worktree` pointing elsewhere does not move the checkpoint
-    // root away from the folder the session works in.
-    if root.as_os_str().is_empty() || !cwd.starts_with(&root) {
-        return None;
-    }
-    Some(RepoInfo {
-        root,
-        common_dir: PathBuf::from(common),
-        objects: PathBuf::from(objects),
-        exclude: PathBuf::from(exclude),
-        format: format.to_string(),
-    })
+    .ok()
 }
 
-/// The repository containing `cwd`, if any.
-pub async fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let cwd = cwd.canonicalize().ok()?;
-    repo_info(&cwd).await.map(|i| i.root)
+/// `(mode, path)` of every entry snapshot `sha` holds (tests in
+/// `crates/cli`).
+#[cfg(feature = "testing")]
+pub(crate) async fn tree_listing(repo: &Repo, sha: &str) -> Vec<(String, String)> {
+    run_raw(repo, &["ls-tree", "-r", "-z", sha], None, None)
+        .await
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .filter_map(|e| {
+            let e = String::from_utf8_lossy(e);
+            let (meta, path) = e.split_once('\t')?;
+            Some((meta.split(' ').next()?.to_string(), path.to_string()))
+        })
+        .collect()
+}
+
+/// What may bound a checkpoint root or a sub-agent's repository: the
+/// workspace root the session folder is in (no walk goes above it) and the
+/// folders no checkpoint may hold (the node's data directory). Canonical.
+#[derive(Debug, Clone, Default)]
+pub struct Bounds {
+    /// The innermost workspace root holding the folder; `None` only in
+    /// tests (the walk then goes up to `/`).
+    pub ceiling: Option<PathBuf>,
+    pub protected: Vec<PathBuf>,
+    /// The sandbox the node's git for this folder runs in (R1b-2); `None`
+    /// where the node has none.
+    pub sandbox: Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>,
+}
+
+impl Bounds {
+    /// Whether `dir` (canonical) is a protected folder, inside one or holds
+    /// one.
+    fn exposes(&self, dir: &Path) -> Option<&PathBuf> {
+        self.protected
+            .iter()
+            .find(|p| dir.starts_with(p) || p.starts_with(dir))
+    }
+}
+
+/// [`user_repo::find`] off the async threads (it reads files the session
+/// may write).
+async fn find_repo(cwd: &Path, bounds: &Bounds) -> user_repo::Found {
+    let (cwd, ceiling) = (cwd.to_path_buf(), bounds.ceiling.clone());
+    tokio::task::spawn_blocking(move || user_repo::find(&cwd, ceiling.as_deref()))
+        .await
+        .unwrap_or(user_repo::Found::None)
 }
 
 /// Write `text` to `path` unless it already holds exactly that (other
@@ -466,11 +534,54 @@ async fn write_if_changed(path: &Path, text: &[u8]) {
 
 /// Where to checkpoint `cwd`: a shadow repository under `shadow_base`
 /// (created on first use) whose work tree is the repository containing
-/// `cwd`, or `cwd` itself when it is not in one. `None` when no shadow base
-/// is configured, and for a sub-agent's temporary worktree (it is removed
-/// when the sub-agent ends, so its checkpoints could never be used).
+/// `cwd` (found on the file system, [`user_repo::find`]), or `cwd` itself
+/// when it is in none within the bounds, when the `.git` there is not a
+/// plain repository directory (a gitfile, a link, a `commondir`), or when
+/// that repository's folder holds a protected one (the node's data
+/// directory in a repository at `$HOME`): then only the session folder is
+/// checkpointed, as a plain folder. `Ok(None)` when no shadow base is
+/// configured. `Err`: refused, with the reason for the chat.
+pub async fn checkpoint_repo(
+    cwd: &Path,
+    shadow_base: Option<&Path>,
+    bounds: &Bounds,
+) -> Result<Option<Repo>, String> {
+    repo_for_with(
+        cwd,
+        shadow_base,
+        bounds,
+        &UserGitEnv::from_process(),
+        Shadow::Checkpoints,
+    )
+    .await
+    .map(|r| r.map(|(repo, _)| repo))
+}
+
+/// [`checkpoint_repo`] without bounds (tests).
+#[cfg(test)]
 pub async fn repo_for(cwd: &Path, shadow_base: Option<&Path>) -> Option<Repo> {
-    repo_for_with(cwd, shadow_base, &UserGitEnv::from_process()).await
+    checkpoint_repo(cwd, shadow_base, &Bounds::default())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The repository's top folder containing `cwd`, without bounds (tests).
+#[cfg(test)]
+pub async fn repo_root(cwd: &Path) -> Option<PathBuf> {
+    let cwd = cwd.canonicalize().ok()?;
+    match user_repo::find(&cwd, None) {
+        user_repo::Found::Repo(r) => Some(r.top),
+        _ => None,
+    }
+}
+
+/// Which shadow of a folder: turn checkpoints, or sub-agents' snapshots
+/// (their own, so a delegation never pushes a turn's checkpoint out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shadow {
+    Checkpoints,
+    SubAgents,
 }
 
 /// Where the user's own git settings live: only used to find their global
@@ -513,10 +624,12 @@ async fn read_ignore_file(path: &Path) -> Vec<u8> {
 /// Where the user's global ignore file is, as git finds it:
 /// `core.excludesFile` from the user's global config, else
 /// `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`. This is the
-/// only call that sees the global config, and `git config --get` runs
-/// nothing; it runs in `dir` so `includeIf "gitdir:…"` resolves as it
-/// would for the user.
-async fn global_excludes_path(dir: &Path, env: &UserGitEnv) -> Option<PathBuf> {
+/// only call that sees the user's global config; `git config --get` runs
+/// nothing, and it runs with the shadow `shadow` as its git directory, so
+/// no repository config of the user's is read (an `includeIf "gitdir:…"`
+/// there matches the shadow's path, not the folder's). A relative path is
+/// taken relative to the folder `root`, as git does.
+async fn global_excludes_path(root: &Path, shadow: &Path, env: &UserGitEnv) -> Option<PathBuf> {
     let mut c = hardened(Path::new("git"));
     c.env_remove("GIT_CONFIG_GLOBAL").env_remove("HOME");
     if let Some(g) = &env.global_config {
@@ -528,7 +641,7 @@ async fn global_excludes_path(dir: &Path, env: &UserGitEnv) -> Option<PathBuf> {
     if let Some(x) = &env.xdg_config_home {
         c.env("XDG_CONFIG_HOME", x);
     }
-    c.arg("-C").arg(dir).args([
+    c.arg("--git-dir").arg(shadow).args([
         "config",
         "--global",
         "--includes",
@@ -536,6 +649,7 @@ async fn global_excludes_path(dir: &Path, env: &UserGitEnv) -> Option<PathBuf> {
         "--get",
         "core.excludesFile",
     ]);
+    c.current_dir(shadow);
     if let Ok(out) = exec(c, None, GIT_TIMEOUT).await
         && out.status.success()
     {
@@ -543,8 +657,7 @@ async fn global_excludes_path(dir: &Path, env: &UserGitEnv) -> Option<PathBuf> {
             .trim_end_matches('\n')
             .to_string();
         if !v.is_empty() {
-            // A relative path is relative to the work tree, as in git.
-            return Some(dir.join(v));
+            return Some(root.join(v));
         }
     }
     match (&env.xdg_config_home, &env.home) {
@@ -556,8 +669,8 @@ async fn global_excludes_path(dir: &Path, env: &UserGitEnv) -> Option<PathBuf> {
 
 /// The patterns of the user's global ignore file, ready to append to the
 /// shadow's `info/exclude` (starts on a new line).
-async fn global_excludes(dir: &Path, env: &UserGitEnv) -> Vec<u8> {
-    let Some(path) = global_excludes_path(dir, env).await else {
+async fn global_excludes(root: &Path, shadow: &Path, env: &UserGitEnv) -> Vec<u8> {
+    let Some(path) = global_excludes_path(root, shadow, env).await else {
         return Vec::new();
     };
     let text = read_ignore_file(&path).await;
@@ -570,32 +683,58 @@ async fn global_excludes(dir: &Path, env: &UserGitEnv) -> Vec<u8> {
     v
 }
 
-async fn repo_for_with(cwd: &Path, shadow_base: Option<&Path>, user: &UserGitEnv) -> Option<Repo> {
+async fn repo_for_with(
+    cwd: &Path,
+    shadow_base: Option<&Path>,
+    bounds: &Bounds,
+    user: &UserGitEnv,
+    kind: Shadow,
+) -> Result<Option<(Repo, user_repo::Found)>, String> {
     // Absolute: git runs in the folder's top, so a relative data directory
     // (`--data-dir data`) would resolve against the user's folder.
-    let base = std::path::absolute(shadow_base?).ok()?;
+    let Some(base) = shadow_base else {
+        return Ok(None);
+    };
+    let base = std::path::absolute(base).map_err(|e| e.to_string())?;
     let base = base.as_path();
-    let cwd = cwd.canonicalize().ok()?;
-    let info = repo_info(&cwd).await;
-    if let Some(i) = &info
-        && i.root.starts_with(i.common_dir.join("harness-worktrees"))
-    {
-        return None;
+    let cwd = cwd
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", cwd.display()))?;
+    if let Some(p) = bounds.exposes(&cwd) {
+        return Err(format!(
+            "{} holds or is inside the harness's own data directory {}",
+            cwd.display(),
+            p.display()
+        ));
     }
-    let root = info.as_ref().map(|i| i.root.clone()).unwrap_or(cwd);
+    let found = find_repo(&cwd, bounds).await;
+    let (root, info) = match &found {
+        // A repository whose folder holds the data directory (one at
+        // `$HOME`): only the session folder is checkpointed, as a plain one.
+        user_repo::Found::Repo(r) if bounds.exposes(&r.top).is_some() => (cwd.clone(), None),
+        user_repo::Found::Repo(r) => (r.top.clone(), Some(r.clone())),
+        _ => (cwd.clone(), None),
+    };
+    // Sub-agents need a repository; no shadow is made for a plain folder.
+    if kind == Shadow::SubAgents && info.is_none() {
+        return Ok(Some((dummy_repo(), found)));
+    }
     let key = {
         use sha2::Digest;
         hex::encode(sha2::Sha256::digest(root.to_string_lossy().as_bytes()))[..16].to_string()
     };
-    let dir = base.join(format!("{key}.git"));
+    let dir = match kind {
+        Shadow::Checkpoints => base.join(format!("{key}.git")),
+        Shadow::SubAgents => base.join(format!("{key}-sub.git")),
+    };
     if !dir.join("HEAD").exists() {
-        let format = info.as_ref().map_or("sha1", |i| i.format.as_str());
+        let format = info.as_ref().map_or("sha1", |i| i.format);
         let mut c = hardened(Path::new("git"));
         c.args(["init", "--bare", "-q", "--object-format", format])
             .arg(&dir);
-        let ok = exec(c, None, GIT_TIMEOUT).await.ok()?.status.success();
-        if !ok {
-            return None;
+        let out = exec(c, None, GIT_TIMEOUT).await?;
+        if !out.status.success() {
+            return Err(result_text(&["init"], out));
         }
         let _ = tokio::fs::write(dir.join("harness-format"), format).await;
         let _ = tokio::fs::write(
@@ -610,34 +749,76 @@ async fn repo_for_with(cwd: &Path, shadow_base: Option<&Path>, user: &UserGitEnv
         .await
         .unwrap_or_else(|_| "sha1".into());
     let alternates = dir.join("objects/info/alternates");
-    match &info {
-        Some(i) => {
-            // The user's objects are only read (content-addressed data); new
-            // objects are always written into the shadow.
-            if i.format == shadow_format.trim() {
-                let mut line = i.objects.to_string_lossy().into_owned().into_bytes();
-                line.push(b'\n');
-                write_if_changed(&alternates, &line).await;
-            } else {
-                let _ = tokio::fs::remove_file(&alternates).await;
-            }
-            // Ignore patterns are data; copy them so the same files are skipped.
-            let mut exclude = read_ignore_file(&i.exclude).await;
-            exclude.extend(global_excludes(&root, user).await);
-            write_if_changed(&dir.join("info/exclude"), &exclude).await;
+    // The user's objects are only read (content-addressed data), and only
+    // when `user_repo` found them borrowable; new objects always go into
+    // the shadow.
+    let borrowed = match info
+        .as_ref()
+        .and_then(|i| i.objects.as_ref().map(|o| (i, o)))
+    {
+        Some((i, objects)) if i.format == shadow_format.trim() => {
+            let mut line = objects.to_string_lossy().into_owned().into_bytes();
+            line.push(b'\n');
+            write_if_changed(&alternates, &line).await;
+            i.objects_id.map(|id| (objects.clone(), id))
         }
-        None => {
+        _ => {
             let _ = tokio::fs::remove_file(&alternates).await;
-            let mut exclude = SHADOW_EXCLUDES.as_bytes().to_vec();
-            exclude.extend(global_excludes(&root, user).await);
-            write_if_changed(&dir.join("info/exclude"), &exclude).await;
+            None
         }
+    };
+    // Ignore patterns are data; copy them so the same files are skipped.
+    let mut exclude = match &info {
+        Some(i) => match &i.exclude {
+            Some(p) => {
+                // In the session's `.git`: no link followed, bounded.
+                let p = p.clone();
+                tokio::task::spawn_blocking(move || user_repo::read_bounded(&p, 1 << 20))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            }
+            None => Vec::new(),
+        },
+        None => SHADOW_EXCLUDES.as_bytes().to_vec(),
+    };
+    exclude.extend(global_excludes(&root, &dir, user).await);
+    write_if_changed(&dir.join("info/exclude"), &exclude).await;
+    let root_id = Identity::of(&root)?;
+    let shadow_id = Identity::of(&dir).ok();
+    Ok(Some((
+        Repo {
+            root,
+            shadow: Some(dir),
+            empty_tree: empty_tree(shadow_format.trim()),
+            protected: bounds.protected.clone(),
+            scratch: false,
+            jail: Jail(bounds.sandbox.clone()),
+            borrowed,
+            root_id,
+            shadow_id,
+            tree_rw: false,
+        },
+        found,
+    )))
+}
+
+/// A `Repo` that is never used (a sub-agent's refusal carries the walk's
+/// result only).
+fn dummy_repo() -> Repo {
+    Repo {
+        root: PathBuf::new(),
+        shadow: None,
+        empty_tree: empty_tree("sha1"),
+        protected: Vec::new(),
+        scratch: true,
+        jail: Jail::default(),
+        borrowed: None,
+        root_id: Identity { dev: 0, ino: 0 },
+        shadow_id: None,
+        tree_rw: false,
     }
-    Some(Repo {
-        root,
-        shadow: Some(dir),
-        empty_tree: empty_tree(shadow_format.trim()),
-    })
 }
 
 /// The repository's index and a private one next to it. With `seed`, the
@@ -645,19 +826,12 @@ async fn repo_for_with(cwd: &Path, shadow_base: Option<&Path>, user: &UserGitEnv
 /// staging only rehashes what changed), else empty (absent). In a shadow
 /// repository the index is the shadow's, never the user's.
 async fn seeded_index(repo: &Repo, seed: bool) -> Result<(PathBuf, PathBuf), String> {
-    let real = match &repo.shadow {
-        Some(dir) => dir.join("index"),
-        None => PathBuf::from(
-            run(
-                repo,
-                &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-                None,
-            )
-            .await?,
-        ),
+    let Some(dir) = &repo.shadow else {
+        return Err("no checkpoint repository".into());
     };
+    let real = dir.join("index");
     let tmp = real.with_file_name(format!("harness-index-{}", harness_core::new_id()));
-    if seed && real.exists() {
+    if seed && !repo.scratch && real.exists() {
         tokio::fs::copy(&real, &tmp)
             .await
             .map_err(|e| e.to_string())?;
@@ -772,7 +946,11 @@ async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeErr
     // The shadow keeps the index git just wrote: the next checkpoint only
     // rehashes files whose stat data changed. (Concurrent snapshots each
     // write a complete index; the last rename wins.)
-    if res.is_ok() && repo.is_shadow() && tokio::fs::rename(&idx, &real).await.is_ok() {
+    if res.is_ok()
+        && repo.is_shadow()
+        && !repo.scratch
+        && tokio::fs::rename(&idx, &real).await.is_ok()
+    {
         return res;
     }
     let _ = tokio::fs::remove_file(&idx).await;
@@ -834,6 +1012,10 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     run(repo, &["add", "-u"], Some(idx)).await?;
     // New files, by name.
     let (_, new) = split_within(&untracked, &set);
+    // The second line behind the jail (R1b-2): a new path whose folder now
+    // really lies outside the folder (a link swapped in after git listed
+    // it) or in a protected one is left out, as the file tools refuse it.
+    let new = inside_only(repo, new.into_iter().map(<[u8]>::to_vec).collect()).await?;
     let new: Vec<u8> = new
         .iter()
         .flat_map(|p| p.iter().copied().chain([0]))
@@ -879,6 +1061,41 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     .map_err(|e| e.to_string())?;
     nested.extend(replaced);
     Ok(outermost(nested))
+}
+
+/// The paths of `paths` (relative to the folder) whose containing folder
+/// really is inside the folder and outside every protected one, judged by
+/// real path (one `canonicalize` per distinct folder).
+async fn inside_only(repo: &Repo, paths: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, String> {
+    if paths.is_empty() {
+        return Ok(paths);
+    }
+    let root = repo.root.clone();
+    let protected = repo.protected.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut seen: std::collections::HashMap<PathBuf, bool> = Default::default();
+        paths
+            .into_iter()
+            .filter(|p| {
+                let full = root.join(rel_path(p));
+                let Some(dir) = full.parent() else {
+                    return false;
+                };
+                *seen.entry(dir.to_path_buf()).or_insert_with(|| {
+                    dir.canonicalize().is_ok_and(|real| {
+                        // A protected folder that holds the folder itself (a
+                        // sub-agent's, in the sessions folder) is its own.
+                        real.starts_with(&root)
+                            && !protected
+                                .iter()
+                                .any(|d| real.starts_with(d) && !root.starts_with(d))
+                    })
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// `ls-files -z --stage` output (`mode id stage TAB path`), as the paths of
@@ -1172,7 +1389,7 @@ pub async fn restore_report(
     let now = snapshot(repo, "refs/harness/test/now/before", "now").await?;
     let plan = restore_plan(repo, &diff, &now, !force).await?;
     secure_blobs(repo, &plan).await?;
-    let files = restore_paths(repo, &plan).await?;
+    let files = restore_paths(repo, &plan, WriteLimits::UNDO).await?;
     Ok(Restored {
         files,
         nested: plan.nested.shown.clone(),
@@ -1575,6 +1792,10 @@ pub async fn restore_plan(
         .into_iter()
         .filter(|r| !within(&r.path, &set))
         .collect();
+    // Whatever the snapshots say: nothing outside the folder, nothing in a
+    // protected one (R.1, S-3).
+    let paths: Vec<Vec<u8>> = candidates.iter().map(|r| r.path.clone()).collect();
+    check_inside(repo, paths).await?;
     // Folders written into that hold a `.git` (to tell the person).
     let root = repo.root.clone();
     let paths: Vec<Vec<u8>> = candidates.iter().map(|r| r.path.clone()).collect();
@@ -1754,17 +1975,249 @@ fn path_bytes(p: &Path) -> Vec<u8> {
     p.to_string_lossy().replace('\\', "/").into_bytes()
 }
 
+/// Refuse a restore that would write or delete anything outside the
+/// checkpoint's folder or inside a protected one, whatever the snapshots
+/// say (R.1, S-3): every path must be relative with plain components only,
+/// the folder must still be where it was found, and the deepest existing
+/// folder on the way to each path must really be inside it (no link on the
+/// way leads out) and outside every protected folder. Nothing is written
+/// when one path fails. A link swapped in after this check is the residual
+/// of PLAN.md T33; `checkout-index` itself does not write through a linked
+/// folder inside the work tree.
+async fn check_inside(repo: &Repo, paths: Vec<Vec<u8>>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let root = repo.root.clone();
+    let protected = repo.protected.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::path::Component;
+        let real_root = root
+            .canonicalize()
+            .map_err(|e| format!("nothing was changed: the folder {}: {e}", root.display()))?;
+        if real_root != root {
+            return Err(format!(
+                "nothing was changed: the folder {} now leads to {}",
+                root.display(),
+                real_root.display()
+            ));
+        }
+        let refuse = |p: &[u8], why: &str| {
+            Err(format!(
+                "nothing was changed: the checkpoint names {}, which is {why}",
+                shown(p)
+            ))
+        };
+        let mut seen: std::collections::HashMap<PathBuf, bool> = Default::default();
+        for p in &paths {
+            let rel = rel_path(p);
+            if rel.as_os_str().is_empty()
+                || rel.components().any(|c| !matches!(c, Component::Normal(_)))
+            {
+                return refuse(p, "not a plain path inside the folder");
+            }
+            let mut dir = root.join(&rel);
+            let inside = loop {
+                if !dir.pop() {
+                    break false;
+                }
+                if let Some(ok) = seen.get(&dir) {
+                    break *ok;
+                }
+                match dir.canonicalize() {
+                    Ok(real) => {
+                        let ok = real.starts_with(&root)
+                            && !protected.iter().any(|d| real.starts_with(d));
+                        seen.insert(dir.clone(), ok);
+                        break ok;
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.kind() == std::io::ErrorKind::NotADirectory => {}
+                    Err(_) => break false,
+                }
+            };
+            if !inside {
+                return refuse(
+                    p,
+                    &format!(
+                        "outside {} or in the harness's own data directory",
+                        root.display()
+                    ),
+                );
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What one restore may write (R1b-1): per file and in total, checked
+/// against the blobs' sizes before anything is deleted or written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteLimits {
+    pub per_file: u64,
+    pub total: u64,
+}
+
+impl WriteLimits {
+    /// An undo or rewind puts back what the folder held, so the bound is
+    /// generous: 4 GiB a file, 16 GiB in all.
+    pub const UNDO: Self = Self {
+        per_file: 4 << 30,
+        total: 16 << 30,
+    };
+    /// A sub-agent's result is new content, applied with nobody asked:
+    /// bounded like a published file (`[artifacts] max_mb`, 200 MiB) and
+    /// the artifact stage (`stage_max_mb`, 2 GiB in all). A sparse file
+    /// counts at its full size, as it is written out.
+    pub const SUB_AGENT: Self = Self {
+        per_file: 200 << 20,
+        total: 2 << 30,
+    };
+}
+
+/// The size of each blob `writes` names, by id (`cat-file --batch-check`),
+/// refused above `limits` before anything is written.
+async fn blob_sizes(
+    repo: &Repo,
+    writes: &[(String, String, Vec<u8>)],
+    limits: WriteLimits,
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    let mut ids: Vec<&str> = writes.iter().map(|(_, id, _)| id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out = std::collections::HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let list: Vec<u8> = ids
+        .iter()
+        .flat_map(|i| format!("{i}\n").into_bytes())
+        .collect();
+    let raw = run_raw(
+        repo,
+        &[
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ],
+        None,
+        Some(list),
+    )
+    .await?;
+    for l in String::from_utf8_lossy(&raw).lines() {
+        if let [id, "blob", n] = l.split(' ').collect::<Vec<_>>()[..]
+            && let Ok(n) = n.parse::<u64>()
+        {
+            out.insert(id.to_string(), n);
+        }
+    }
+    if let Some(id) = ids.iter().find(|i| !out.contains_key(**i)) {
+        return Err(format!("nothing was changed: content {id} is missing"));
+    }
+    let mut total = 0u64;
+    for (_, id, p) in writes {
+        let n = out[id];
+        if n > limits.per_file {
+            return Err(format!(
+                "nothing was changed: {} would be {n} bytes, over the limit of {} bytes for one \
+                 file",
+                shown(p),
+                limits.per_file
+            ));
+        }
+        total = total.saturating_add(n);
+    }
+    if total > limits.total {
+        return Err(format!(
+            "nothing was changed: {total} bytes would be written, over the limit of {} bytes for \
+             one restore",
+            limits.total
+        ));
+    }
+    Ok(out)
+}
+
+/// The largest object header line `cat-file --batch` prints
+/// (`<id> <type> <size>`).
+const HEADER_MAX: u64 = 256;
+
+/// Stream each blob of `writes` from one `cat-file --batch` (in the
+/// repository's jail) into `top`, one at a time through a 64 KiB buffer,
+/// never holding a blob (R1b-1). `sizes` were checked first; a blob whose
+/// size differs now is refused. The process (and its group) is killed on
+/// every way out.
+fn stream_writes(
+    mut cmd: std::process::Command,
+    writes: &[(String, String, Vec<u8>)],
+    sizes: &std::collections::HashMap<String, u64>,
+    top: &at::Top,
+) -> Result<(), String> {
+    use std::io::{BufRead, Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
+    let _group = Group(Some(child.id()));
+    let ids: Vec<u8> = writes
+        .iter()
+        .flat_map(|(_, id, _)| format!("{id}\n").into_bytes())
+        .collect();
+    let mut stdin = child.stdin.take().ok_or("git: no stdin")?;
+    let feeder = std::thread::spawn(move || {
+        let _ = stdin.write_all(&ids);
+    });
+    let stdout = child.stdout.take().ok_or("git: no stdout")?;
+    let mut out = std::io::BufReader::with_capacity(64 << 10, stdout);
+    let res = (|| {
+        for (mode, id, p) in writes {
+            let mut head = Vec::new();
+            (&mut out)
+                .take(HEADER_MAX)
+                .read_until(b'\n', &mut head)
+                .map_err(|e| format!("git cat-file: {e}"))?;
+            let head = String::from_utf8_lossy(&head).trim_end().to_string();
+            let want = sizes.get(id).copied();
+            let n = match head.split(' ').collect::<Vec<_>>()[..] {
+                [got, "blob", n] if got == id => n.parse::<u64>().ok(),
+                _ => None,
+            };
+            if n.is_none() || n != want {
+                return Err(format!("{}: content changed or missing ({head})", shown(p)));
+            }
+            let n = n.unwrap_or_default();
+            top.write_from(&rel_path(p), mode, n, &mut out)?;
+            let mut lf = [0u8; 1];
+            out.read_exact(&mut lf)
+                .map_err(|e| format!("git cat-file: {e}"))?;
+        }
+        Ok(())
+    })();
+    drop(out);
+    let _ = feeder.join();
+    let _ = child.wait();
+    res
+}
+
 /// Write the plan's files into the folder (`from`'s version of each, from
 /// the blobs [`secure_blobs`] made safe) and delete the paths `from` does
-/// not have.
+/// not have, within `limits`.
 ///
-/// The private index holds only the entries written, built from their
-/// blob ids (`update-index --index-info`), so no tree is read here and no
-/// object other than those blobs is needed. Not atomic across files: git
-/// writes them one by one, so a failure partway (a read-only folder, a
-/// full disk, a path that became something git cannot replace) leaves the
-/// earlier ones written; the caller names the checkpoint that holds the
-/// folder as it was.
+/// First every blob's size is read and checked against `limits`, so a
+/// restore over them is refused before anything changes. Then the blobs
+/// are streamed from one `cat-file --batch` in the shadow, one at a time
+/// through a small buffer, into files written by our code, relative to
+/// the folder's top opened once and to directories opened from it without
+/// following links (`git::at`): a link a process of the session swaps in
+/// for a folder, at any moment, is never written or deleted through (R.1
+/// follow-up), and the node never holds a blob in memory (R1b-1). Not
+/// atomic across files: a failure partway (a read-only folder, a full
+/// disk) leaves the earlier ones written; the caller names the checkpoint
+/// that holds the folder as it was.
 ///
 /// Deletes go first, then the writes. A path the turn added is a file or a
 /// link in the folder (the folder was just snapshotted); deleting it first
@@ -1774,63 +2227,41 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 /// any more: missing, its parent no longer a directory (`ENOTDIR`), or now
 /// a directory (someone replaced it; not this entry, left alone). Any other
 /// failure to delete is an error.
-pub async fn restore_paths(repo: &Repo, plan: &RestorePlan) -> Result<Vec<String>, String> {
+pub async fn restore_paths(
+    repo: &Repo,
+    plan: &RestorePlan,
+    limits: WriteLimits,
+) -> Result<Vec<String>, String> {
     let paths: Vec<String> = plan.touched.iter().map(|(_, p)| p.clone()).collect();
-    for p in &plan.deletes {
-        let full = repo.root.join(rel_path(p));
-        match tokio::fs::symlink_metadata(&full).await {
-            Ok(m) if m.is_dir() => continue,
-            Ok(_) => {}
-            Err(e)
-                if e.kind() == std::io::ErrorKind::NotFound
-                    || e.kind() == std::io::ErrorKind::NotADirectory =>
-            {
-                continue;
-            }
-            Err(e) => return Err(format!("could not delete {}: {e}", shown(p))),
+    // Checked again right before writing (the plan was made a moment ago).
+    let all: Vec<Vec<u8>> = plan
+        .deletes
+        .iter()
+        .cloned()
+        .chain(plan.writes.iter().map(|(_, _, p)| p.clone()))
+        .collect();
+    check_inside(repo, all).await?;
+    let sizes = blob_sizes(repo, &plan.writes, limits).await?;
+    let mut cmd = command_std(repo, None);
+    cmd.args(["cat-file", "--batch"]);
+    let root = repo.root.clone();
+    let deletes = plan.deletes.clone();
+    let writes = plan.writes.clone();
+    tokio::task::spawn_blocking(move || {
+        // The folder's top, opened once; every write and delete below is
+        // relative to directories opened from it without following links.
+        let top = at::Top::open(&root)?;
+        for p in &deletes {
+            top.delete(&rel_path(p))
+                .map_err(|e| format!("could not delete {}: {e}", shown(p)))?;
         }
-        match tokio::fs::remove_file(&full).await {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(format!("could not delete {}: {e}", shown(p)));
-            }
-            _ => {}
+        if writes.is_empty() {
+            return Ok(());
         }
-    }
-    if !plan.writes.is_empty() {
-        let idx = fresh_index(repo).await?;
-        let _files = IndexFiles(idx.clone());
-        let res = async {
-            let mut info = Vec::new();
-            for (mode, id, p) in &plan.writes {
-                info.extend_from_slice(format!("{mode} {id}\t").as_bytes());
-                info.extend_from_slice(p);
-                info.push(0);
-            }
-            run_raw(
-                repo,
-                &["update-index", "-z", "--index-info"],
-                Some(&idx),
-                Some(info),
-            )
-            .await?;
-            let names: Vec<u8> = plan
-                .writes
-                .iter()
-                .flat_map(|(_, _, p)| p.iter().copied().chain([0]))
-                .collect();
-            run_raw(
-                repo,
-                &["checkout-index", "-f", "-z", "--stdin"],
-                Some(&idx),
-                Some(names),
-            )
-            .await
-            .map(|_| ())
-        }
-        .await;
-        let _ = tokio::fs::remove_file(&idx).await;
-        res?;
-    }
+        stream_writes(cmd, &writes, &sizes, &top)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     Ok(paths)
 }
 
@@ -1928,73 +2359,306 @@ pub async fn prune(repo: &Repo, keep: usize) -> usize {
 /// Serializes applying sub-agent results to one working directory.
 static APPLY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// A detached worktree at `path` checked out at `commit`. Refused when the
-/// repository's config defines commands the checkout would run (see
-/// [`check_worktree_safe`]); hooks (`post-checkout`) never run.
-pub async fn worktree_add(root: &Path, path: &Path, commit: &str) -> Result<(), String> {
-    check_worktree_safe(root).await?;
-    let p = path.to_string_lossy();
-    git(
-        root,
-        &["worktree", "add", "--detach", "-q", &p, commit],
-        None,
+/// Where a sub-agent's snapshots live: the shadow of the parent's
+/// repository folder (its own, `<hash>-sub.git`, so delegations never push
+/// a turn's checkpoint out), and what the node read of that repository.
+#[derive(Debug, Clone)]
+pub struct SubRepo {
+    pub repo: Repo,
+    user: user_repo::UserRepo,
+}
+
+/// A sub-agent's folder (R.1 follow-up, PLAN.md T32): `<sessions>/<child
+/// id>/files`, node-owned, outside the user's repository and outside every
+/// other session's writable area (the sessions folder is protected like
+/// the data directory, and only the child itself is granted its own
+/// folder). It holds the parent's folder as it was (the base) and a git
+/// directory of its own (`files/.git`) that the node made for the child's
+/// git; the node never runs git with that directory.
+#[derive(Debug, Clone)]
+pub struct ChildFolder {
+    /// `<sessions>/<id>/files`, canonical: the child's work tree.
+    pub path: PathBuf,
+    /// `<sessions>/<id>`: removed when the child ends.
+    dir: PathBuf,
+    /// The user's object store the child's git may read (its alternates),
+    /// canonical; read-only in the child's sandbox.
+    objects: Option<(PathBuf, Identity)>,
+    /// The folder as made: its result is snapshotted only while it is still
+    /// that directory.
+    pin: harness_core::folder::FolderPin,
+    /// Its `.git` as made (for the child's grant).
+    git_id: Identity,
+}
+
+impl ChildFolder {
+    /// What the child's session may use of it (its tools and sandbox).
+    pub fn owned(&self) -> harness_core::folder::OwnedFolder {
+        harness_core::folder::OwnedFolder {
+            top: self.path.clone(),
+            top_id: self.pin.identity(),
+            git: self.path.join(".git"),
+            git_id: self.git_id,
+            objects: self.objects.clone(),
+        }
+    }
+}
+
+/// The [`SubRepo`] for a session working in `cwd`. `Ok(None)`: `cwd` is in
+/// no git repository within `bounds`. `Err`: it is in one the node does not
+/// use for sub-agents (a gitfile `.git`, a link, a `commondir`, an object
+/// store that is a link or borrows from another), with the reason.
+pub async fn sub_repo(
+    cwd: &Path,
+    shadow_base: Option<&Path>,
+    bounds: &Bounds,
+) -> Result<Option<SubRepo>, String> {
+    if shadow_base.is_none() {
+        return Err("this node keeps no checkpoint store, which sub-agent folders need".into());
+    }
+    match repo_for_with(
+        cwd,
+        shadow_base,
+        bounds,
+        &UserGitEnv::from_process(),
+        Shadow::SubAgents,
     )
-    .await
-    .map(|_| ())
+    .await?
+    {
+        Some((repo, user_repo::Found::Repo(user))) if repo.is_shadow() => {
+            if user.head.is_some() && user.objects.is_none() {
+                return Err(format!(
+                    "the repository in {} is not used for sub-agents: {}",
+                    user.top.display(),
+                    user.no_borrow
+                        .as_deref()
+                        .unwrap_or("its object store cannot be read")
+                ));
+            }
+            Ok(Some(SubRepo { repo, user }))
+        }
+        Some((_, user_repo::Found::Unusual(why))) => Err(why),
+        // Not a repository within the bounds (no shadow was made for it).
+        _ => Ok(None),
+    }
 }
 
-pub async fn worktree_remove(root: &Path, path: &Path) {
-    let p = path.to_string_lossy();
-    let _ = git(root, &["worktree", "remove", "--force", &p], None).await;
-    let _ = git(root, &["worktree", "prune"], None).await;
+/// The minimal git directory of a child's folder, written by our code.
+fn child_git_files(user: &user_repo::UserRepo) -> Vec<(&'static str, String)> {
+    let mut config = format!(
+        "[core]\n\trepositoryformatversion = {}\n\tfilemode = true\n\tbare = false\n\
+         \tlogallrefupdates = true\n",
+        if user.format == "sha256" { 1 } else { 0 }
+    );
+    if user.format == "sha256" {
+        config.push_str("[extensions]\n\tobjectformat = sha256\n");
+    }
+    let head = match &user.head {
+        Some(id) => format!("{id}\n"),
+        None if user.branch != "HEAD" => format!("ref: refs/heads/{}\n", user.branch),
+        None => "ref: refs/heads/main\n".to_string(),
+    };
+    let mut files = vec![("HEAD", head), ("config", config)];
+    if let Some(o) = &user.objects {
+        files.push(("objects/info/alternates", format!("{}\n", o.display())));
+    }
+    files
 }
 
-/// Where sub-agent worktrees live: inside the repository's git directory,
-/// so they never show up as untracked files.
-pub async fn worktrees_dir(root: &Path) -> Result<PathBuf, String> {
-    Ok(PathBuf::from(
-        git(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            None,
+impl SubRepo {
+    /// Snapshot the parent's folder as the sub-agent's base (uncommitted
+    /// work included), at `refs/harness/<child>/base` in the shadow.
+    pub async fn base(&self, child: &str) -> Result<String, String> {
+        let _busy = hold(&self.repo).await;
+        snapshot(
+            &self.repo,
+            &format!("refs/harness/{child}/base"),
+            "harness: sub-agent base",
         )
-        .await?,
-    )
-    .join("harness-worktrees"))
+        .await
+    }
+
+    /// Make the folder for `child` under `sessions` (a node-owned folder no
+    /// session can write) and fill it with `base`.
+    ///
+    /// Nothing runs in the user's repository: the files are written from
+    /// the shadow (attributes from the empty tree, no filter), the child's
+    /// git directory (`files/.git`) is written by our code (`HEAD` at the
+    /// user's `HEAD` commit, the user's object store as its alternates, so
+    /// `git log` shows the history), and its index is `HEAD`'s tree, made
+    /// by the shadow; the child's git then sees the parent's uncommitted
+    /// work as its changes. No other session can reach the folder while it
+    /// is filled, so the paths are not swapped under the node's git.
+    pub async fn make_folder(
+        &self,
+        child: &str,
+        base: &str,
+        sessions: &Path,
+    ) -> Result<ChildFolder, String> {
+        if child.is_empty() || child.contains(['/', '\\', '.']) {
+            return Err("not a child id".into());
+        }
+        let sessions = sessions.to_path_buf();
+        let id = child.to_string();
+        let dir = tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&sessions)
+                .map_err(|e| format!("{}: {e}", sessions.display()))?;
+            let sessions = sessions
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", sessions.display()))?;
+            let dir = sessions.join(&id);
+            let mut b = std::fs::DirBuilder::new();
+            b.mode(0o700);
+            b.create(&dir)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            b.create(dir.join("files"))
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            Ok::<_, String>(dir)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let path = dir.join("files");
+        let made = async {
+            let pin = harness_core::folder::FolderPin::at(&path)?;
+            // The folder is new and no session can reach it: git writes it.
+            let mut into = self.repo.with_root(&path).scratch();
+            into.tree_rw = true;
+            let idx = fresh_index(&into).await?;
+            let _files = IndexFiles(idx.clone());
+            run(&into, &["read-tree", base], Some(&idx)).await?;
+            run(&into, &["checkout-index", "-a", "-f"], Some(&idx)).await?;
+            let git = path.join(".git");
+            for d in [
+                "objects/info",
+                "objects/pack",
+                "refs/heads",
+                "refs/tags",
+                "info",
+            ] {
+                tokio::fs::create_dir_all(git.join(d))
+                    .await
+                    .map_err(|e| format!("{}: {e}", git.display()))?;
+            }
+            for (name, text) in child_git_files(&self.user) {
+                tokio::fs::write(git.join(name), text)
+                    .await
+                    .map_err(|e| format!("{}: {e}", git.display()))?;
+            }
+            if let (Some(h), Some(_)) = (&self.user.head, &self.user.objects) {
+                run(&into, &["read-tree", h], Some(&git.join("index"))).await?;
+            }
+            pin.check()?;
+            Ok::<_, String>((pin, Identity::of(&git)?))
+        }
+        .await;
+        match made {
+            Ok((pin, git_id)) => Ok(ChildFolder {
+                path,
+                dir,
+                objects: self.user.objects.clone().zip(self.user.objects_id),
+                git_id,
+                pin,
+            }),
+            Err(e) => {
+                remove_dir(&dir).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Snapshot the child's folder as its result, at
+    /// `refs/harness/<child>/result` in the shadow (the child's own git
+    /// directory, config, attributes and index are never read; `.git` is
+    /// never staged).
+    pub async fn result(&self, folder: &ChildFolder, child: &str) -> Result<String, String> {
+        folder.pin.check()?;
+        let _busy = hold(&self.repo).await;
+        snapshot(
+            &self.repo.with_root(&folder.path).scratch(),
+            &format!("refs/harness/{child}/result"),
+            "harness: sub-agent result",
+        )
+        .await
+    }
+
+    /// Write what changed from `base` to `result` into the parent's folder,
+    /// with the restore machinery: the changed files from the shadow's
+    /// blobs, deletions as deletions, nested repositories left alone, every
+    /// path checked to be inside the folder and outside the protected ones,
+    /// every write and delete made relative to directories opened without
+    /// following links (`restore_paths`). All or nothing for the conflict
+    /// check: when the folder changed any of those files since `base` (the
+    /// parent or another sub-agent), nothing is written. Returns how many
+    /// files were written or deleted.
+    pub async fn apply(&self, base: &str, result: &str, child: &str) -> Result<usize, String> {
+        let _guard = APPLY.lock().await;
+        let _busy = hold(&self.repo).await;
+        let diff = restore_diff(&self.repo, result, base).await?;
+        if diff.rows.iter().all(|r| r.gitlink) {
+            return Ok(0);
+        }
+        let now = snapshot(
+            &self.repo,
+            &format!("refs/harness/{child}/now"),
+            "harness: folder before a sub-agent's result",
+        )
+        .await?;
+        let paths: Vec<String> = diff
+            .rows
+            .iter()
+            .filter(|r| !r.gitlink)
+            .map(|r| String::from_utf8_lossy(&r.path).into_owned())
+            .collect();
+        let mut args = vec![
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            base,
+            now.as_str(),
+            "--",
+        ];
+        args.extend(paths.iter().map(String::as_str));
+        let since = run(&self.repo, &args, None).await?;
+        if !since.is_empty() {
+            return Err(format!(
+                "the folder changed these files while the sub-agent worked: {}",
+                since.lines().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let plan = restore_plan(&self.repo, &diff, &now, true).await?;
+        secure_blobs(&self.repo, &plan).await?;
+        restore_paths(&self.repo, &plan, WriteLimits::SUB_AGENT).await?;
+        Ok(plan.touched.len())
+    }
+
+    /// Keep the shadow's sub-agent snapshots bounded (`keep` groups) and
+    /// collect it when due.
+    pub async fn prune(&self, keep: usize) {
+        prune(&self.repo, keep).await;
+        gc_in_background(self.repo.clone());
+    }
 }
 
-/// Apply the change `base..result` to the working directory at `root`
-/// (files only; index and HEAD untouched). All or nothing.
-pub async fn apply(root: &Path, base: &str, result: &str) -> Result<usize, String> {
-    let _guard = APPLY.lock().await;
-    let n = changed(&Repo::project(root), base, result).await?.len();
-    if n == 0 {
-        return Ok(0);
-    }
-    // The patch is passed on byte for byte (not through `run`, which trims).
-    let diff = [
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--binary",
-        base,
-        result,
-    ];
-    let mut c = command(&Repo::project(root), None);
-    c.args(diff);
-    let out = exec(c, None, GIT_TIMEOUT).await?;
-    if !out.status.success() {
-        return Err(result_text(&diff, out));
-    }
-    let args = ["apply", "--whitespace=nowarn", "-"];
-    let mut c = command(&Repo::project(root), None);
-    c.args(args);
-    let res = exec(c, Some(out.stdout), GIT_TIMEOUT).await?;
-    if res.status.success() {
-        Ok(n)
-    } else {
-        Err(result_text(&args, res))
-    }
+/// Remove a child's folder (`<sessions>/<id>`, with its git directory).
+/// `remove_dir_all` follows no link.
+pub async fn remove_folder(folder: &ChildFolder) {
+    remove_dir(&folder.dir).await;
+}
+
+async fn remove_dir(dir: &Path) {
+    let d = dir.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&d)).await;
+}
+
+/// Where sub-agents' folders go for a checkpoint store `base` (tests).
+#[cfg(test)]
+pub(crate) fn sessions_of(base: &Path) -> PathBuf {
+    crate::sessions_dir(base).unwrap()
 }
 
 #[cfg(test)]
@@ -2165,17 +2829,26 @@ mod tests {
         h.config("diff.external", &h.script("external").to_string_lossy());
         h.config("diff.tc.textconv", &h.script("textconv").to_string_lossy());
         h.turn_and_undo().await;
-        // The sub-agent merge-back diff runs in the user's repository.
-        let project = Repo::project(&h.repo);
-        let base = snapshot(&project, "refs/harness/c/base", "b")
+        // A sub-agent's base, worktree, result and merge-back: all in the
+        // shadow, none of it under the repository's config (R.1, S-1).
+        let sub = sub_repo(&h.repo, Some(&h.base), &Bounds::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let base = sub.base("c").await.unwrap();
+        let wt = sub
+            .make_folder("c", &base, &sessions_of(&h.base))
             .await
             .unwrap();
-        std::fs::write(h.repo.join("a.txt"), "changed\n").unwrap();
-        let result = snapshot(&project, "refs/harness/c/result", "r")
-            .await
-            .unwrap();
-        std::fs::write(h.repo.join("a.txt"), "one\n").unwrap();
-        assert_eq!(apply(&h.repo, &base, &result).await.unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        std::fs::write(wt.path.join("a.txt"), "changed\n").unwrap();
+        let result = sub.result(&wt, "c").await.unwrap();
+        assert_eq!(sub.apply(&base, &result, "c").await.unwrap(), 1);
+        remove_folder(&wt).await;
+        assert!(!wt.path.exists() && !wt.dir.exists());
         assert_eq!(
             std::fs::read_to_string(h.repo.join("a.txt")).unwrap(),
             "changed\n"
@@ -2442,29 +3115,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worktree_add_runs_no_hooks() {
+    async fn making_a_worktree_runs_no_hooks() {
         let h = Hostile::new();
         h.hook(&h.repo.join(".git/hooks"), "post-checkout");
-        let head = git(&h.repo, &["rev-parse", "HEAD"], None).await.unwrap();
-        let wt = h.marks.parent().unwrap().join("wt");
-        worktree_add(&h.repo, &wt, &head).await.unwrap();
-        assert!(wt.join("a.txt").exists());
-        worktree_remove(&h.repo, &wt).await;
+        h.hook(&h.repo.join(".git/hooks"), "reference-transaction");
+        let sub = sub_repo(&h.repo, Some(&h.base), &Bounds::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let base = sub.base("c").await.unwrap();
+        let wt = sub
+            .make_folder("c", &base, &sessions_of(&h.base))
+            .await
+            .unwrap();
+        assert!(wt.path.join("a.txt").exists());
+        // The child's own git sees a clean worktree at `HEAD` (its index
+        // is `HEAD`'s tree), and its changes as changes.
+        std::fs::write(wt.path.join("b.txt"), "child\n").unwrap();
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&wt.path)
+            .args(["status", "--porcelain"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "{st:?}");
+        assert_eq!(String::from_utf8_lossy(&st.stdout), " M b.txt\n");
+        remove_folder(&wt).await;
+        assert!(!wt.path.exists() && !wt.dir.exists());
         assert_eq!(h.marked(), Vec::<String>::new());
     }
 
+    /// A repository whose config and committed attributes define a filter
+    /// gets a worktree all the same (R.1): nothing in it is converted by the
+    /// node's git, so the filter never runs, and the files are the bytes of
+    /// the folder.
     #[tokio::test]
-    async fn worktree_add_refuses_repo_defined_filters() {
+    async fn making_a_worktree_never_runs_repo_defined_filters() {
         let h = Hostile::new();
         std::fs::write(h.repo.join(".gitattributes"), "* filter=evil\n").unwrap();
         sh(&h.repo, &["add", "."]);
         sh(&h.repo, &["commit", "-qm", "attrs"]);
         h.config("filter.evil.smudge", &h.script("smudge").to_string_lossy());
-        let head = git(&h.repo, &["rev-parse", "HEAD"], None).await.unwrap();
-        let wt = h.marks.parent().unwrap().join("wt");
-        let e = worktree_add(&h.repo, &wt, &head).await.unwrap_err();
-        assert!(e.contains("filter.evil.smudge"), "{e}");
-        assert!(!wt.exists());
+        h.config("filter.evil.clean", &h.script("clean").to_string_lossy());
+        h.config("filter.evil.required", "true");
+        let sub = sub_repo(&h.repo, Some(&h.base), &Bounds::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let base = sub.base("c").await.unwrap();
+        let wt = sub
+            .make_folder("c", &base, &sessions_of(&h.base))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        std::fs::write(wt.path.join("b.txt"), "changed\n").unwrap();
+        let result = sub.result(&wt, "c").await.unwrap();
+        assert_eq!(sub.apply(&base, &result, "c").await.unwrap(), 1);
+        remove_folder(&wt).await;
         assert_eq!(h.marked(), Vec::<String>::new());
     }
 
@@ -2586,27 +3298,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_standard_lfs_filters_are_allowed() {
-        assert!(!runs_command("filter.lfs.clean", "git-lfs clean -- %f"));
-        assert!(!runs_command(
-            "filter.lfs.process",
-            "git-lfs filter-process"
-        ));
-        assert!(!runs_command("filter.lfs.required", "true"));
-        assert!(runs_command(
-            "filter.lfs.clean",
-            "git-lfs clean -- %f; evil"
-        ));
-        assert!(runs_command("filter.LFS2.smudge", "git-lfs smudge -- %f"));
-        assert!(runs_command("filter.x.process", "anything"));
-        assert!(runs_command("lfs.customtransfer.x.path", "evil"));
-        assert!(
-            !runs_command("core.fsmonitor", "evil"),
-            "overridden instead"
-        );
-    }
-
     /// A user environment whose global git config (a temp file) names a
     /// global ignore file with `*.swp` and `.idea/`.
     fn user_env(dir: &Path) -> UserGitEnv {
@@ -2620,6 +3311,22 @@ mod tests {
             xdg_config_home: None,
             global_config: Some(cfg),
         }
+    }
+
+    /// The checkpoint repository of `cwd` under `base`, for the user
+    /// environment `env`, without bounds.
+    async fn with_env(cwd: &Path, base: &Path, env: &UserGitEnv) -> Repo {
+        repo_for_with(
+            cwd,
+            Some(base),
+            &Bounds::default(),
+            env,
+            Shadow::Checkpoints,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0
     }
 
     async fn tree_files(repo: &Repo, sha: &str) -> Vec<String> {
@@ -2638,7 +3345,7 @@ mod tests {
         let h = Hostile::new();
         let env = user_env(h.marks.parent().unwrap());
         std::fs::write(h.repo.join("old.swp"), "v1\n").unwrap();
-        let repo = repo_for_with(&h.repo, Some(&h.base), &env).await.unwrap();
+        let repo = with_env(&h.repo, &h.base, &env).await;
         let before = snapshot(&repo, "refs/harness/s/t/before", "b")
             .await
             .unwrap();
@@ -2696,7 +3403,7 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "a\n").unwrap();
         std::fs::write(ws.join("x.swp"), "s\n").unwrap();
         let base = d.path().join("cp");
-        let repo = repo_for_with(&ws, Some(&base), &env).await.unwrap();
+        let repo = with_env(&ws, &base, &env).await;
         let sha = snapshot(&repo, "refs/harness/s/t/before", "b")
             .await
             .unwrap();
@@ -2704,7 +3411,7 @@ mod tests {
         // A directory where the ignore file should be: skipped, no error.
         std::fs::remove_file(xdg.join("git/ignore")).unwrap();
         std::fs::create_dir_all(xdg.join("git/ignore")).unwrap();
-        let repo = repo_for_with(&ws, Some(&base), &env).await.unwrap();
+        let repo = with_env(&ws, &base, &env).await;
         let sha = snapshot(&repo, "refs/harness/s/t2/before", "b")
             .await
             .unwrap();
@@ -2751,7 +3458,9 @@ mod tests {
         std::fs::write(r.join("staged.txt"), "user work\n").unwrap();
         sh(r, &["add", "staged.txt"]);
         std::fs::write(r.join("secret.env"), "KEY=1\n").unwrap();
-        let root = Repo::project(&repo_root(r).await.unwrap());
+        let cp = tempfile::tempdir().unwrap();
+        assert_eq!(repo_root(r).await.unwrap(), r.canonicalize().unwrap());
+        let root = repo_for(r, Some(cp.path())).await.unwrap();
         let index_before = std::fs::read(r.join(".git/index")).unwrap();
 
         let before = snapshot(&root, "refs/harness/s/t/before", "before")
@@ -2816,3 +3525,17 @@ mod nested_tests;
 #[cfg(test)]
 #[path = "git_cost_bench.rs"]
 mod cost_bench;
+
+/// The checkpoint root and what a restore may write stay inside the
+/// session's bounds (R.1, S-3). Test-only; lives in its own file.
+#[cfg(test)]
+#[path = "git_bounds_tests.rs"]
+mod bounds_tests;
+
+#[cfg(test)]
+#[path = "git_child_tests.rs"]
+mod child_tests;
+
+#[cfg(test)]
+#[path = "git_restore_memory_tests.rs"]
+mod restore_memory_tests;

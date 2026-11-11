@@ -73,6 +73,7 @@ async fn worker(dir: &Path, work: &Path) -> NodeRuntime {
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: Some(StageConfig::new(data)),
     })
     .await
@@ -101,6 +102,7 @@ async fn serve(media: bool, with_worker: bool) -> T {
         profile: Profile::Chat,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: None,
     })
     .await

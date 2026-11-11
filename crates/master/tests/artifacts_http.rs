@@ -58,6 +58,7 @@ async fn node(dir: &Path, work: &Path) -> NodeRuntime {
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: Some(StageConfig::new(data)),
     })
     .await

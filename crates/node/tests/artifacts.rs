@@ -95,6 +95,7 @@ async fn node(provider: Arc<dyn Provider>, edit: impl FnOnce(&mut NodePolicy)) -
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: None,
+        git_sandbox: None,
         artifacts: Some(StageConfig::new(data)),
     })
     .await

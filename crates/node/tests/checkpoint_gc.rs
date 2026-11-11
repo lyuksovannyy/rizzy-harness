@@ -436,7 +436,7 @@ async fn a_turn_without_a_checkpoint_says_so_in_the_chat() {
 /// The window between the check and the write: the user's repository loses
 /// X after the restore checked it and before it writes (a stand-in `git`
 /// first on `PATH` runs `gc --prune=now` in the user's repository when the
-/// restore's first writing step, `checkout-index`, starts). The restore
+/// restore reads the blobs it writes, `cat-file --batch`, just before the first write). The restore
 /// still writes X, because it was copied into the checkpoint repository
 /// first. Runs in a child process: this one's `PATH` cannot be changed
 /// without `unsafe`.
@@ -463,7 +463,7 @@ fn a_blob_removed_between_the_check_and_the_write_is_still_restored() {
         format!(
             "#!/bin/sh\n\
              for a in \"$@\"; do\n\
-             if [ \"$a\" = checkout-index ] && [ -f '{b}/ws' ] && [ ! -e '{b}/fired' ]; then\n\
+             if [ \"$a\" = --batch ] && [ -f '{b}/ws' ] && [ ! -e '{b}/fired' ]; then\n\
              : > '{b}/fired'\n\
              env -u GIT_INDEX_FILE -u GIT_ATTR_SOURCE GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
              '{r}' -C \"$(cat '{b}/ws')\" gc --prune=now -q || exit 99\n\

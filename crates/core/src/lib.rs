@@ -5,6 +5,7 @@ pub mod agent;
 pub mod artifacts;
 pub mod backend;
 pub mod event;
+pub mod folder;
 pub mod policy;
 pub mod refs;
 pub mod savings;
