@@ -387,6 +387,11 @@ impl Session {
             return Err("images can't go into an incognito chat".into());
         }
         self.check_cwd_still_allowed()?;
+        // The node decides how far delegation goes (Gate 3 review P-2): the
+        // master's spec may ask for less than `[limits]`, never more. Its
+        // sub-agents' specs come from this one, so they are bounded too.
+        let limits = &self.node.cfg.policy.limits;
+        let agent = agent.map(|a| limits.bound_delegation(a));
         let turn_id = new_id();
         let cancel = CancellationToken::new();
         self.claim_turn(RunningTurn {

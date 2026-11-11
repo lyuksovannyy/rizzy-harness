@@ -610,7 +610,7 @@ output is still scrubbed of the API token and known keys.
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
-denied_tools = []                    # e.g. ["bash"]
+denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
 graphify = false                     # let agents query a graphify knowledge graph (see below)
 env_pass = []                        # extra variables the agent's shell gets (see below)
@@ -619,6 +619,8 @@ env_pass = []                        # extra variables the agent's shell gets (s
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
 max_steps = 50                       # model calls one turn may make (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
+max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
+max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
