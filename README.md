@@ -57,7 +57,10 @@ to grant them per user. Print the claim code with:
 ```
 
 Scripts can call the API with `Authorization: Bearer <token>`, using the token
-printed by `rizzy-harness token`.
+printed by `rizzy-harness token`. Treat this token as an admin password: it acts
+as an administrator and can read and drive every user's chats, which is an
+accepted gap until per-user tokens exist (`PLAN.md`, T29). Do not give it to
+automation that only needs one user's access, and do not copy it if no script needs it.
 
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
@@ -839,6 +842,12 @@ printed commands on the other machine (same binary). That machine needs its own
 `config.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
+
+Run each node from its own data directory. If two processes use one node's key
+(a copied data directory, a node restored from an old backup) and write the same
+chat differently, the server stops taking that chat's events, logs an error
+naming the chat and the node, and refuses new messages to it ("diverged").
+Delete the chat to clear it; the node's copy goes with it.
 
 ### Set up a node by hand
 
