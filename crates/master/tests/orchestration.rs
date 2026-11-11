@@ -13,6 +13,41 @@ use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::Store;
 
 async fn setup() -> (Master, String, tempfile::TempDir) {
+    setup_with(Arc::new(Mock {
+        delay: Duration::from_millis(10),
+    }))
+    .await
+}
+
+/// Passes requests to the mock and keeps the `delegate` tool each one offered.
+struct Seen {
+    inner: Mock,
+    delegate_tools: std::sync::Mutex<Vec<harness_agent_native::provider::ToolSpec>>,
+}
+
+#[async_trait::async_trait]
+impl harness_agent_native::provider::Provider for Seen {
+    fn name(&self) -> &'static str {
+        "seen"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::provider::ChatRequest,
+        deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<
+        harness_agent_native::provider::Completion,
+        harness_agent_native::provider::ProviderError,
+    > {
+        if let Some(t) = req.tools.iter().find(|t| t.name == "delegate") {
+            self.delegate_tools.lock().unwrap().push(t.clone());
+        }
+        self.inner.complete(req, deltas).await
+    }
+}
+
+async fn setup_with(
+    provider: Arc<dyn harness_agent_native::provider::Provider>,
+) -> (Master, String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
@@ -31,9 +66,7 @@ async fn setup() -> (Master, String, tempfile::TempDir) {
         },
         store: Store::open_in_memory().unwrap(),
         backend: Arc::new(NativeBackend::new(
-            Arc::new(Mock {
-                delay: Duration::from_millis(10),
-            }),
+            provider,
             harness_tools::builtin(),
             NativeConfig::default(),
         )),
@@ -178,9 +211,10 @@ async fn teamlead_delegates_in_parallel_within_caps() {
 }
 
 /// The built-in roster against sub-agent isolation (T32): in a folder that
-/// is not a git repository, the read-only delegates (Scout, Reviewer,
-/// Researcher) still run there, and the ones that can change files
-/// (Software Developer, Writer) are refused with the reason.
+/// is not a git repository, the read-only delegates (Scout, Reviewer) still
+/// run there, and the ones that can change files (Software Developer,
+/// Writer) are refused with the reason. Researcher is refused for another
+/// reason: its web and memory tools do not exist on a node.
 #[tokio::test]
 async fn builtin_delegates_outside_a_repository_by_role() {
     let (m, ws, _d) = setup().await;
@@ -204,11 +238,7 @@ async fn builtin_delegates_outside_a_repository_by_role() {
     let evs = turns_ended(&m, sid, 2).await;
     let outs = outputs(&evs);
     assert_eq!(outs.len(), 5, "{outs:#?}");
-    for (who, said) in [
-        ("scout", "look"),
-        ("reviewer", "check"),
-        ("researcher", "ask"),
-    ] {
+    for (who, said) in [("scout", "look"), ("reviewer", "check")] {
         assert!(
             outs.iter()
                 .any(|o| o.contains(&format!("@{who} ended (completed):\nYou said: {said}"))),
@@ -223,7 +253,14 @@ async fn builtin_delegates_outside_a_repository_by_role() {
             "{who}: {outs:#?}"
         );
     }
-    // Only the three read-only sub-agents got a session.
+    assert!(
+        outs.iter().any(|o| o.contains(
+            "@researcher was not started: none of its tools (web search, web fetch, memory) \
+             are available on this node. Do the work another way or tell the user."
+        )),
+        "researcher: {outs:#?}"
+    );
+    // Only the two read-only sub-agents with tools here got a session.
     let kids = m
         .inner_mirror()
         .sessions()
@@ -231,12 +268,69 @@ async fn builtin_delegates_outside_a_repository_by_role() {
         .into_iter()
         .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
         .count();
-    assert_eq!(kids, 3);
+    assert_eq!(kids, 2);
     assert_eq!(
         std::fs::read_dir(&ws).unwrap().count(),
         0,
         "folder unchanged"
     );
+}
+
+/// On an agentic node the web and memory tools are not registered, so
+/// Researcher would run with no tools while the parent believes research
+/// was done: it is not offered, and a call to it by name starts no session.
+#[tokio::test]
+async fn researcher_is_not_offered_on_a_node_without_its_tools() {
+    let seen = Arc::new(Seen {
+        inner: Mock {
+            delay: Duration::from_millis(10),
+        },
+        delegate_tools: Default::default(),
+    });
+    let (m, ws, _d) = setup_with(seen.clone()).await;
+    let sid = session(&m, &ws, "teamlead").await;
+    m.prompt(sid, "hello".into(), PromptOpts::default())
+        .await
+        .unwrap();
+    turns_ended(&m, sid, 1).await;
+    let tool = seen.delegate_tools.lock().unwrap()[0].clone();
+    let offered: Vec<&str> = tool.schema["properties"]["agent"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for who in ["scout", "reviewer", "coder", "writer"] {
+        assert!(offered.contains(&who), "{who} missing from {offered:?}");
+    }
+    assert!(!offered.contains(&"researcher"), "{offered:?}");
+    assert!(
+        !tool.description.contains("researcher"),
+        "{}",
+        tool.description
+    );
+
+    m.prompt(
+        sid,
+        "delegate: researcher=ask".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let last = outputs(&evs).pop().unwrap();
+    assert!(
+        last.starts_with("@researcher was not started: none of its tools"),
+        "{last}"
+    );
+    let kids = m
+        .inner_mirror()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .count();
+    assert_eq!(kids, 0, "no child session");
 }
 
 #[tokio::test]

@@ -1252,6 +1252,10 @@ impl TurnHost for Session {
         }))
     }
 
+    fn tool_denied(&self, tool: &str) -> bool {
+        self.node.cfg.policy.denied_tools.iter().any(|t| t == tool)
+    }
+
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
         let policy = &self.node.cfg.policy;
         if policy.denied_tools.iter().any(|t| t == tool) {

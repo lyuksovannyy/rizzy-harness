@@ -945,6 +945,14 @@ The built-in agents, grouped by category in the picker:
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
 
+**Researcher in Agentic sessions.** Web and memory tools exist only in chats,
+not on nodes yet. In an Agentic session, Researcher is therefore not offered
+to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
+to it by name is refused with the reason, so the lead never believes research
+was done that was not. The rule is general: any sub-agent that lists tools
+of which none is available on the node is treated the same way; one that lists
+no tools on purpose (Smol) or has some of them is unaffected.
+
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
 each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
