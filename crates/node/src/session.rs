@@ -1,7 +1,7 @@
 //! One session: the single writer of its log, the running turn, and the
 //! approval gate.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,9 +44,6 @@ pub(crate) struct Session {
     parent_session: Option<SessionId>,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
-    /// Tools a person approved in the running turn. "Allow for this turn"
-    /// counts only once the tool is in here (cleared when a turn starts).
-    turn_approved: Mutex<HashSet<String>>,
     /// An append of the running turn failed: the rest of its appends fail
     /// without being tried, so the turn ends (cleared when a turn starts).
     log_failed: AtomicBool,
@@ -117,7 +114,6 @@ impl Session {
             parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
-            turn_approved: Mutex::new(HashSet::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -164,7 +160,6 @@ impl Session {
             parent_session: meta.parent_session,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
-            turn_approved: Mutex::new(HashSet::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -433,10 +428,6 @@ impl Session {
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
             .await
             .map_err(|e| e.to_string())?;
-        self.turn_approved
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
         self.log_failed.store(false, Ordering::SeqCst);
         self.unresolved
             .lock()
@@ -1289,13 +1280,11 @@ impl TurnHost for Session {
         if !self.mode.needs_approval(risk) {
             return Decision::Allow;
         }
-        // "For this turn" is offered, and honoured, only after this tool has
-        // been approved once in the turn, so its first call is always seen.
-        let turn_allow = self
-            .turn_approved
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains(tool);
+        // "For this turn" is offered on every request a person answers: it
+        // covers only this exact call, the one on the card (the loop keys it
+        // with `harness_tools::call_key`, PLAN.md T4). The answer reaches
+        // only this call: the approval id is bound to this one waiting
+        // request, and the loop records the key of the call it is running.
         let approval_id = new_id();
         let (tx, rx) = oneshot::channel();
         self.approvals
@@ -1309,7 +1298,7 @@ impl TurnHost for Session {
                 tool: tool.into(),
                 input: input.clone(),
                 reason: approval_reason(tool, risk),
-                turn_allow,
+                turn_allow: true,
             }))
             .await;
         if requested.is_ok() {
@@ -1338,20 +1327,9 @@ impl TurnHost for Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&approval_id);
-        // Whatever the client sent: not offered, not honoured.
-        let decision = match decision {
-            Decision::AllowSession if !turn_allow => Decision::Allow,
-            d => d,
-        };
         // An approval the log does not hold allows nothing.
         if !self.resolve(approval_id, decision, by).await {
             return Decision::Deny;
-        }
-        if decision.allows() {
-            self.turn_approved
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(tool.to_string());
         }
         decision
     }

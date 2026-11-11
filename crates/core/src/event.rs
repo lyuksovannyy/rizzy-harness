@@ -449,9 +449,10 @@ pub struct ApprovalRequested {
     pub tool: String,
     pub input: Value,
     pub reason: String,
-    /// "Allow for this turn" (`allow_session`) may be offered: this is not
-    /// the tool's first approval in the turn. The node downgrades the
-    /// decision to a single allow when it is false, whatever a client sends.
+    /// "Allow for this turn" (`allow_session`) may be offered. The node sets
+    /// it on every request a person can answer; it would cover only this
+    /// exact call (tool and canonical argument) for the rest of the turn. A
+    /// policy denial carries it false and is resolved by the node at once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub turn_allow: bool,
 }

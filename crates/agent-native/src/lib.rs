@@ -834,7 +834,10 @@ impl NativeBackend {
             .and_then(|a| a.effort.as_deref())
             .and_then(parse_effort)
             .or(self.config.effort);
-        let mut allowed_for_session: HashSet<String> = HashSet::new();
+        // Calls a person allowed "for this turn": each exact call, never a
+        // tool as a whole (PLAN.md T4). New for every turn and every
+        // sub-agent.
+        let mut allowed_this_turn: HashSet<harness_tools::CallKey> = HashSet::new();
         let mut trusted = trusted_results(recent);
         // A sub-agent's "user" message is its parent model's task: not the
         // user's words.
@@ -1094,14 +1097,7 @@ impl NativeBackend {
                     observed.splice(0..0, inh.iter().cloned());
                 }
                 let outcome = self
-                    .run_tool(
-                        &ctx,
-                        host,
-                        &call,
-                        &mut allowed_for_session,
-                        &observed,
-                        &refs,
-                    )
+                    .run_tool(&ctx, host, &call, &mut allowed_this_turn, &observed, &refs)
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
@@ -1353,7 +1349,7 @@ impl NativeBackend {
         ctx: &TurnCtx<'_>,
         host: &dyn harness_core::backend::TurnHost,
         call: &ToolCallRef,
-        allowed_for_session: &mut HashSet<String>,
+        allowed_this_turn: &mut HashSet<harness_tools::CallKey>,
         observed: &[String],
         refs: &SharedRefs,
     ) -> ToolOutcome {
@@ -1372,7 +1368,8 @@ impl NativeBackend {
                 call.input
             ));
         }
-        if !allowed_for_session.contains(tool.name()) {
+        let key = harness_tools::call_key(&ctx.cwd, tool.name(), &call.input);
+        if !allowed_this_turn.contains(&key) {
             let decision = host
                 .approve(&call.call_id, tool.name(), &call.input, tool.risk())
                 .await;
@@ -1386,7 +1383,7 @@ impl NativeBackend {
                     });
                 }
                 harness_core::policy::Decision::AllowSession => {
-                    allowed_for_session.insert(tool.name().to_string());
+                    allowed_this_turn.insert(key);
                 }
                 harness_core::policy::Decision::Allow => {}
             }
@@ -3129,5 +3126,169 @@ mod tests {
         );
         assert_eq!(observed.len(), 1, "{observed:?}");
         assert!(observed[0].starts_with("c3 "));
+    }
+
+    // ---- "allow for this turn" covers the exact call (ADOPTION_PLAN A.2) --
+
+    /// Answers every approval "for this turn" and records what it was asked.
+    struct TurnAllowHost {
+        asked: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHost for TurnAllowHost {
+        async fn emit(&self, _kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+            Ok(())
+        }
+        async fn approve(&self, _c: &str, _t: &str, input: &Value, _r: ToolRisk) -> Decision {
+            self.asked.lock().unwrap().push(input.clone());
+            Decision::AllowSession
+        }
+    }
+
+    /// A mutating stand-in that does nothing.
+    struct Noop;
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "noop"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::Mutating
+        }
+        async fn run(&self, _: &ToolCtx, _: Value) -> ToolOutcome {
+            ToolOutcome::ok("ok")
+        }
+    }
+
+    /// Run `calls` in one turn, every approval answered "for this turn";
+    /// returns the inputs a person was asked about.
+    async fn asked_in_one_turn(
+        dir: &std::path::Path,
+        calls: Vec<(&'static str, Value)>,
+    ) -> Vec<Value> {
+        let host = TurnAllowHost {
+            asked: Mutex::new(vec![]),
+        };
+        let mut tools = harness_tools::builtin();
+        tools.push(Arc::new(Noop));
+        let b = NativeBackend::new(Arc::new(Chain(calls)), tools, NativeConfig::default());
+        let out = b
+            .run_turn(TurnCtx {
+                session_id: harness_core::SessionId::new(),
+                turn_id: "t".into(),
+                history: vec![],
+                user_text: "go".into(),
+                cwd: dir.to_path_buf(),
+                model: "mock".into(),
+                agent: None,
+                compare: vec![],
+                parent_session: None,
+                extra: Default::default(),
+                cancel: Default::default(),
+                host: &host,
+            })
+            .await;
+        assert_eq!(out.reason, TurnEndReason::Completed);
+        host.asked.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_for_one_command_does_not_cover_another() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("x")).unwrap();
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                ("bash", json!({"command": "ls"})),
+                ("bash", json!({"command": "rm -rf x"})),
+            ],
+        )
+        .await;
+        assert_eq!(asked.len(), 2, "rm -rf x ran without asking: {asked:?}");
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_covers_the_identical_command_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                ("bash", json!({"command": "ls"})),
+                ("bash", json!({"command": "ls"})),
+                // Byte for byte: one more space is another command.
+                ("bash", json!({"command": "ls "})),
+                // So is the same command with another timeout.
+                ("bash", json!({"command": "ls", "timeout_secs": 5})),
+            ],
+        )
+        .await;
+        assert_eq!(
+            asked,
+            [
+                json!({"command": "ls"}),
+                json!({"command": "ls "}),
+                json!({"command": "ls", "timeout_secs": 5}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_for_a_file_change_is_that_change_to_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        std::fs::write(dir.path().join("a/f.txt"), "one two\n").unwrap();
+        let w = |p: &str, c: &str| ("write", json!({"path": p, "content": c}));
+        let e = |p: &str, o: &str, n: &str| {
+            ("edit", json!({"path": p, "old_string": o, "new_string": n}))
+        };
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                w("a/f.txt", "one two\n"),
+                // Other spellings of the same file, same content: covered.
+                w("a/../a/f.txt", "one two\n"),
+                w("./a/f.txt", "one two\n"),
+                // Another file: asked.
+                w("a/g.txt", "one two\n"),
+                // The same file, other content: asked.
+                w("a/f.txt", "three\n"),
+                e("a/f.txt", "three", "four"),
+                e("a/./f.txt", "three", "four"),
+                // A different edit to the same file: asked.
+                e("a/f.txt", "four", "five"),
+            ],
+        )
+        .await;
+        let paths: Vec<&str> = asked.iter().map(|i| i["path"].as_str().unwrap()).collect();
+        assert_eq!(
+            paths,
+            ["a/f.txt", "a/g.txt", "a/f.txt", "a/f.txt", "a/f.txt"],
+            "{asked:?}"
+        );
+        assert_eq!(asked[2]["content"], "three\n");
+        assert_eq!(asked[3]["new_string"], "four");
+        assert_eq!(asked[4]["new_string"], "five");
+    }
+
+    #[tokio::test]
+    async fn turn_allowance_for_another_tool_is_its_input_in_any_key_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let a: Value = serde_json::from_str(r#"{"a": 1, "b": {"c": 2, "d": 3}}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"b": {"d": 3, "c": 2}, "a": 1}"#).unwrap();
+        let other = json!({"a": 1, "b": {"c": 2, "d": 4}});
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![("noop", a.clone()), ("noop", b), ("noop", other.clone())],
+        )
+        .await;
+        assert_eq!(asked, [a, other]);
     }
 }

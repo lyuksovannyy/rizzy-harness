@@ -19,15 +19,27 @@ struct Harness {
 }
 
 fn config(store: Store, policy: NodePolicy) -> NodeConfig {
+    config_with(
+        store,
+        policy,
+        Arc::new(Mock {
+            delay: Duration::from_millis(5),
+        }),
+    )
+}
+
+fn config_with(
+    store: Store,
+    policy: NodePolicy,
+    provider: Arc<dyn harness_agent_native::Provider>,
+) -> NodeConfig {
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
         policy,
         store,
         backend: Arc::new(NativeBackend::new(
-            Arc::new(Mock {
-                delay: Duration::from_millis(5),
-            }),
+            provider,
             harness_tools::builtin(),
             NativeConfig::default(),
         )),
@@ -44,11 +56,24 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
 
 impl Harness {
     async fn new(policy: impl FnOnce(&std::path::Path) -> NodePolicy) -> Self {
+        Self::with_provider(
+            policy,
+            Arc::new(Mock {
+                delay: Duration::from_millis(5),
+            }),
+        )
+        .await
+    }
+
+    async fn with_provider(
+        policy: impl FnOnce(&std::path::Path) -> NodePolicy,
+        provider: Arc<dyn harness_agent_native::Provider>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
-        let mut cfg = config(store, policy(dir.path()));
+        let mut cfg = config_with(store, policy(dir.path()), provider);
         cfg.checkpoints_dir = Some(dir.path().join("checkpoints"));
         let node = NodeRuntime::start(cfg).await.unwrap();
         let mut link = node.attach().await;
@@ -163,95 +188,6 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
     let v = SessionView::fold(&stored).unwrap();
     assert!(v.running_turn.is_none());
     assert!(v.pending_approvals.is_empty());
-}
-
-/// "Allow for this turn" (`allow_session` on the wire) is honoured only
-/// after the tool's first approval in the turn (audit L10): whatever a
-/// client sends on the first request is a single allow, so the first command
-/// is always seen; the next request offers it, and then it holds for the
-/// rest of the turn only.
-#[tokio::test]
-async fn allow_for_this_turn_is_refused_on_the_first_approval() {
-    let mut h = Harness::new(default_policy).await;
-    let sid = h.create().await;
-    let prompt = |h: &Harness, id: &str| {
-        h.send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: id.into(),
-            session_id: sid,
-            // Three `bash true` calls in one turn.
-            text: "progress: 4".into(),
-            images: vec![],
-        })
-    };
-    prompt(&h, "p1");
-    let mut asked = vec![];
-    for _ in 0..2 {
-        let EventKind::ApprovalRequested(a) = h
-            .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
-            .await
-        else {
-            unreachable!()
-        };
-        asked.push(a.clone());
-        // A scripted or stale client sends "for this turn" every time.
-        h.send(MasterToNode::ApprovalRespond {
-            req_id: "a".into(),
-            session_id: sid,
-            approval_id: a.approval_id,
-            decision: Decision::AllowSession,
-        });
-    }
-    h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
-    let events: Vec<EventKind> = h.seen.iter().map(|e| e.typed().unwrap()).collect();
-    let requests = events
-        .iter()
-        .filter(|k| matches!(k, EventKind::ApprovalRequested(_)))
-        .count();
-    let resolved: Vec<Decision> = events
-        .iter()
-        .filter_map(|k| match k {
-            EventKind::ApprovalResolved(r) => Some(r.decision),
-            _ => None,
-        })
-        .collect();
-    // The first answer was cut down to a single allow; the second request
-    // came because of it; the third call ran without asking.
-    assert_eq!(requests, 2, "{resolved:?}");
-    assert_eq!(resolved, [Decision::Allow, Decision::AllowSession]);
-    assert!(!asked[0].turn_allow, "first request must not offer it");
-    assert!(asked[1].turn_allow, "second request offers it");
-
-    // A new turn starts over: the first approval again cannot be "for the turn".
-    prompt(&h, "p2");
-    let EventKind::ApprovalRequested(a) = h
-        .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
-        .await
-    else {
-        unreachable!()
-    };
-    assert!(!a.turn_allow);
-    // Deny everything until the turn ends.
-    let mut next = Some(a);
-    while let Some(a) = next.take() {
-        h.send(MasterToNode::ApprovalRespond {
-            req_id: "a".into(),
-            session_id: sid,
-            approval_id: a.approval_id,
-            decision: Decision::Deny,
-        });
-        if let EventKind::ApprovalRequested(a) = h
-            .until(|k| matches!(k, EventKind::ApprovalRequested(_) | EventKind::TurnEnded(_)))
-            .await
-        {
-            next = Some(a);
-        }
-    }
 }
 
 #[tokio::test]
@@ -1844,6 +1780,105 @@ async fn ack_time_on_a_long_session() {
     }
 }
 
+// ---- "allow for this turn" covers the exact call (ADOPTION_PLAN A.2) ------
+
+/// Calls what the user (or a parent's task) lists, one per request: the
+/// message holds a JSON array of `[tool, input]`; then it answers "done".
+struct Script;
+
+#[async_trait::async_trait]
+impl harness_agent_native::Provider for Script {
+    fn name(&self) -> &'static str {
+        "script"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::ChatRequest,
+        _deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<harness_agent_native::Completion, harness_agent_native::ProviderError> {
+        use harness_agent_native::ChatMsg;
+        let since = req
+            .messages
+            .iter()
+            .rposition(|m| m.user_text().is_some())
+            .unwrap_or(0);
+        let user = req.messages[since].user_text().unwrap_or("");
+        let calls: Vec<(String, serde_json::Value)> = user
+            .find('[')
+            .zip(user.rfind(']'))
+            .and_then(|(a, b)| serde_json::from_str(&user[a..=b]).ok())
+            .unwrap_or_default();
+        let done = req.messages[since + 1..]
+            .iter()
+            .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+            .count();
+        let tool_calls = calls
+            .get(done)
+            .map(|(tool, input)| ToolCallRef {
+                call_id: harness_core::new_id(),
+                tool: tool.clone(),
+                input: input.clone(),
+            })
+            .into_iter()
+            .collect();
+        Ok(harness_agent_native::Completion {
+            text: "done".into(),
+            tool_calls,
+            usage: None,
+        })
+    }
+}
+
+impl Harness {
+    /// Send `text` as a prompt to `sid` (as `agent`, if given), answer every
+    /// approval of any session with `answer(n)` (n counts from 0), until
+    /// `sid`'s turn ends. Returns each request with its session.
+    async fn turn_answering(
+        &mut self,
+        sid: SessionId,
+        agent: Option<harness_core::agent::AgentSpec>,
+        text: String,
+        answer: impl Fn(usize) -> Decision,
+    ) -> Vec<(SessionId, ApprovalRequested)> {
+        self.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent,
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text,
+            images: vec![],
+        });
+        let mut asked = vec![];
+        loop {
+            let k = self
+                .until(|k| matches!(k, EventKind::ApprovalRequested(_) | EventKind::TurnEnded(_)))
+                .await;
+            let session = self.seen.last().unwrap().session_id;
+            match k {
+                EventKind::ApprovalRequested(a) => {
+                    // A policy denial is resolved by the node at once; an
+                    // answer to it would only be refused.
+                    if !a.reason.contains("denied by this node's policy") {
+                        self.send(MasterToNode::ApprovalRespond {
+                            req_id: "a".into(),
+                            session_id: session,
+                            approval_id: a.approval_id.clone(),
+                            decision: answer(asked.len()),
+                        });
+                    }
+                    asked.push((session, a));
+                }
+                EventKind::TurnEnded(_) if session == sid => return asked,
+                _ => {}
+            }
+        }
+    }
+}
+
 // ---- A restore first saves the folder as it is (PLAN.md T33) ----
 
 /// A checkpoint's phase as the log spells it.
@@ -1891,6 +1926,27 @@ async fn ack_for(h: &mut Harness, id: &str) -> Result<(), String> {
             _ => {}
         }
     }
+}
+
+fn bash(cmd: &str) -> serde_json::Value {
+    serde_json::json!(["bash", {"command": cmd}])
+}
+
+fn commands(asked: &[(SessionId, ApprovalRequested)]) -> Vec<&str> {
+    asked
+        .iter()
+        .map(|(_, a)| a.input["command"].as_str().unwrap_or(""))
+        .collect()
+}
+
+fn resolved(h: &Harness) -> Vec<(Decision, ResolvedBy)> {
+    h.seen
+        .iter()
+        .filter_map(|e| match e.typed().unwrap() {
+            EventKind::ApprovalResolved(r) => Some((r.decision, r.by)),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn restore(
@@ -1960,6 +2016,130 @@ fn pre_restore_snapshots(seen: &[RawEvent]) -> Vec<Checkpoint> {
             _ => None,
         })
         .collect()
+}
+
+/// "Allow for this turn" (`allow_session` on the wire) covers the exact
+/// call on the card the person answers, so it is offered and honoured on
+/// the first request for that call (ADOPTION_PLAN A.2).
+#[tokio::test]
+async fn allow_for_this_turn_is_honoured_on_the_first_approval() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("true"), bash("true"), bash("true")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::AllowSession)
+        .await;
+    assert_eq!(commands(&asked), ["true"]);
+    assert!(asked[0].1.turn_allow, "the first request offers it");
+    assert_eq!(resolved(&h), [(Decision::AllowSession, ResolvedBy::User)]);
+}
+
+/// A single "allow" covers that one call only.
+#[tokio::test]
+async fn a_single_allow_does_not_cover_the_next_identical_call() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("ls"), bash("ls")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::Allow)
+        .await;
+    assert_eq!(commands(&asked), ["ls", "ls"]);
+}
+
+/// Approving `ls` "for this turn" approves `ls`, not `bash`: a later
+/// `rm -rf x` in the same turn is asked about.
+#[tokio::test]
+async fn allow_for_this_turn_does_not_cover_another_command() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    std::fs::create_dir(h.ws.join("x")).unwrap();
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("ls"), bash("ls"), bash("rm -rf x")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |n| {
+            if n == 0 {
+                Decision::AllowSession
+            } else {
+                Decision::Deny
+            }
+        })
+        .await;
+    assert_eq!(commands(&asked), ["ls", "rm -rf x"]);
+    assert!(h.ws.join("x").exists(), "rm -rf x ran");
+}
+
+/// The same command twice after "for this turn" is asked once; the next
+/// turn asks again.
+#[tokio::test]
+async fn allow_for_this_turn_covers_the_same_command_until_the_turn_ends() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("ls"), bash("ls")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::AllowSession)
+        .await;
+    assert_eq!(commands(&asked), ["ls"]);
+
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::AllowSession)
+        .await;
+    assert_eq!(commands(&asked), ["ls"], "the allowance outlived its turn");
+}
+
+/// A call `node.toml` denies is refused every time, whatever a client
+/// answers: no allowance can cover it.
+#[tokio::test]
+async fn a_policy_denied_call_cannot_be_allowed_for_the_turn() {
+    let mut h = Harness::with_provider(
+        |root| NodePolicy {
+            workspace_roots: vec![root.into()],
+            denied_tools: vec!["bash".into()],
+            ..Default::default()
+        },
+        Arc::new(Script),
+    )
+    .await;
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("touch nope"), bash("touch nope")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::AllowSession)
+        .await;
+    assert_eq!(commands(&asked), ["touch nope", "touch nope"]);
+    assert!(asked.iter().all(|(_, a)| !a.turn_allow));
+    assert_eq!(
+        resolved(&h),
+        [
+            (Decision::Deny, ResolvedBy::Policy),
+            (Decision::Deny, ResolvedBy::Policy)
+        ]
+    );
+    assert!(!h.ws.join("nope").exists());
+}
+
+/// A sub-agent started in the turn does not inherit the parent's allowance.
+#[tokio::test]
+async fn a_sub_agent_does_not_inherit_allow_for_this_turn() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    // A sub-agent that can change files needs a repository for its worktree.
+    init_repo(&h.ws);
+    let sid = h.create().await;
+    let task = serde_json::json!([bash("ls")]).to_string();
+    let calls = serde_json::json!([
+        bash("ls"),
+        bash("ls"),
+        ["delegate", {"agent": "dev", "task": task}],
+    ]);
+    // The parent's second `ls` is covered; the sub-agent's is asked.
+    let asked = h
+        .turn_answering(
+            sid,
+            Some(agent("lead", vec![agent("dev", vec![])])),
+            calls.to_string(),
+            |_| Decision::AllowSession,
+        )
+        .await;
+    assert_eq!(commands(&asked), ["ls", "ls"], "{asked:?}");
+    assert_eq!(asked[0].0, sid);
+    assert_ne!(asked[1].0, sid, "the second request is the sub-agent's");
 }
 
 /// A forced restore overwrites work no turn checkpoint holds; it saves the
