@@ -1012,6 +1012,12 @@ impl Master {
                         | "approval_requested"
                         | "approval_resolved"
                 );
+                if e.kind == "session_created"
+                    && let Some(parent) = e.payload.get("parent_session").and_then(|v| v.as_str())
+                {
+                    self.note_dropped_parent(node_id, e.session_id, parent)
+                        .await;
+                }
                 if e.kind == "tool_call_started"
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
                 {
@@ -1050,6 +1056,23 @@ impl Master {
             Err(err) => {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
+        }
+    }
+
+    /// A `session_created` named `parent` and the mirror did not keep it
+    /// (another node's chat, an unknown id, the session itself; or, after
+    /// the create's stamp, another owner's chat): say so once, ids only.
+    async fn note_dropped_parent(&self, node_id: &str, sid: SessionId, parent: &str) {
+        let kept = self
+            .inner
+            .mirror
+            .call(move |s| s.session(sid))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.parent_id.is_some());
+        if !kept {
+            tracing::warn!(node = %node_id, session = %sid, parent = %clean_label(parent, 64), "a node named a parent this session may not have; it is a top-level session");
         }
     }
 
@@ -1191,25 +1214,36 @@ impl Master {
         // transaction, then tell the UIs (the first SessionsChanged went out
         // before the chat had an owner).
         let auto = chosen.is_none().then(|| auto_model_key(sid));
-        let linked = self
+        let (linked, dropped) = self
             .inner
             .mirror
             .call(move |s| {
                 if let Some(key) = auto {
                     s.kv_set(&key, "1")?;
                 }
+                let mut dropped = None;
                 if owner.is_some() || workspace.is_some() {
+                    // The claim drops a parent of another owner (L-1).
+                    let named = s.session(sid)?.and_then(|r| r.parent_id);
                     s.claim_session(sid, owner.as_deref(), workspace.as_deref())?;
+                    let kept = s.session(sid)?.and_then(|r| r.parent_id);
+                    if kept.is_none() {
+                        dropped = named;
+                    }
                 }
                 // Into its project only where the chat landed: a removal
                 // racing the create leaves it in Personal, outside the
                 // team's project.
-                match project {
-                    Some(p) => s.link_new_session(sid, &p),
-                    None => Ok(false),
-                }
+                let linked = match project {
+                    Some(p) => s.link_new_session(sid, &p)?,
+                    None => false,
+                };
+                Ok::<_, harness_store::StoreError>((linked, dropped))
             })
             .await?;
+        if let Some(parent) = dropped {
+            tracing::warn!(node = %node_id, session = %sid, parent = %parent, "a node named another owner's chat as the parent of a new session; it is a top-level session");
+        }
         let _ = self.inner.live.send(Live::SessionsChanged);
         if linked {
             let _ = self.inner.live.send(Live::ProjectsChanged);

@@ -275,21 +275,31 @@ pub fn effective<'a>(
     (chat_workspace(row) == Some(l.workspace_id.as_str())).then_some(l.project_id.as_str())
 }
 
+/// A sub-agent session's parent, when it is one to follow: a session of the
+/// same node with the same owner. The store keeps only such parents
+/// (Gate 3 review L-1); this is the second line, for every place that
+/// follows `parent_id` to the parent's project or memory.
+pub(crate) async fn parent_of(m: &Master, row: &SessionRow) -> Option<SessionRow> {
+    let parent = row.parent_id.as_deref()?.parse::<SessionId>().ok()?;
+    let p = m
+        .inner
+        .mirror
+        .call(move |s| s.session(parent))
+        .await
+        .ok()??;
+    let same = p.node_id == row.node_id && p.owner_id == row.owner_id;
+    if !same {
+        tracing::warn!(session = %row.session_id, parent = %parent, node = %row.node_id, "not following a parent of another node or owner");
+    }
+    same.then_some(p)
+}
+
 /// The project a chat is in, if any. A sub-agent's session counts as part
-/// of its parent's project.
+/// of its parent's project, and has none of its own.
 pub async fn project_of(m: &Master, row: &SessionRow) -> Option<ProjectRow> {
     let mut row = row.clone();
-    if let Some(parent) = row
-        .parent_id
-        .as_deref()
-        .and_then(|p| p.parse::<SessionId>().ok())
-    {
-        row = m
-            .inner
-            .mirror
-            .call(move |s| s.session(parent))
-            .await
-            .ok()??;
+    if row.parent_id.is_some() {
+        row = parent_of(m, &row).await?;
     }
     let sid = row.session_id;
     let link = m
@@ -341,11 +351,11 @@ pub fn offer_remember(
 /// agent's own switches where it is not the turn's (a sub-agent), or where
 /// nothing was recorded (a turn from before a restart).
 pub async fn turn_memory(m: &Master, row: &SessionRow) -> TurnMemory {
-    let turn = row
-        .parent_id
-        .as_deref()
-        .and_then(|p| p.parse::<SessionId>().ok())
-        .unwrap_or(row.session_id);
+    let turn = match row.parent_id {
+        Some(_) => parent_of(m, row).await.map(|p| p.session_id),
+        None => None,
+    }
+    .unwrap_or(row.session_id);
     let recorded = crate::lock(&m.inner.turn_memory).get(&turn).copied();
     let mut t = match recorded {
         Some(t) => t,

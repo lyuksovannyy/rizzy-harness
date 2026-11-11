@@ -57,6 +57,8 @@ struct Fake {
     seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     mode: Arc<Mutex<Mode>>,
+    /// What its `session_created` names as parent when it answers a create.
+    parent: Arc<Mutex<Option<SessionId>>>,
 }
 
 /// A node that announces `caps` and keeps its files in `files` (shared
@@ -85,6 +87,7 @@ fn fake_with(
         seqs: Arc::default(),
         files,
         mode: Arc::new(Mutex::new(Mode::Honest)),
+        parent: Arc::default(),
     };
     let me = f.clone();
     tokio::spawn(async move {
@@ -94,7 +97,10 @@ fn fake_with(
             match &msg {
                 MasterToNode::Create {
                     session_id, cwd, ..
-                } => me.emit(*session_id, created(&me.id, cwd, None)),
+                } => {
+                    let parent = *me.parent.lock().unwrap();
+                    me.emit(*session_id, created(&me.id, cwd, parent))
+                }
                 MasterToNode::ArtifactFetch {
                     req_id,
                     stage_id,
@@ -723,4 +729,134 @@ async fn a_restart_mid_transfer_resumes_at_the_next_hello() {
     let v = done.expect("pulled by the second master");
     assert_eq!(v[0].status, "ready", "{:?}", v[0].error);
     assert_eq!(v[0].sha256, hex::encode(Sha256::digest(&bytes)));
+}
+
+/// A user on the master, with their Personal workspace.
+fn user(t: &T, name: &str) -> String {
+    let id = format!("u-{name}");
+    t.store()
+        .create_user(&harness_store::NewUser {
+            user_id: id.clone(),
+            username: name.into(),
+            password_hash: "x".into(),
+            role: harness_store::Role::Member,
+            can_agentic: true,
+            must_change_password: false,
+        })
+        .unwrap();
+    t.store().personal_workspace(&id).unwrap();
+    id
+}
+
+/// The context of the last prompt the fake node got for `sid`.
+fn prompt_context(node: &Fake, sid: SessionId) -> Option<String> {
+    node.seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            MasterToNode::Prompt {
+                session_id,
+                context,
+                ..
+            } if *session_id == sid => Some(context.clone().unwrap_or_default()),
+            _ => None,
+        })
+}
+
+/// L-1 (Gate 3 review): a node answers a create with `session_created`
+/// naming another user's chat as parent, to get that chat's project
+/// context on the next prompt. The parent is dropped (another owner, even
+/// on the same node), the prompt carries no project, and a sub-agent
+/// session the node creates on its own under the same owner keeps its
+/// parent and its parent's project.
+#[tokio::test]
+async fn a_node_cannot_borrow_another_users_chat_as_parent() {
+    let t = start().await;
+    let (link, node) = fake("evil", &["profile:agentic"]);
+    let victim = chat(&t, link, "evil").await;
+    let ws = t.store().personal_workspace(&t.alex_id).unwrap();
+    let project = t
+        .store()
+        .create_project(
+            &harness_store::NewProject {
+                project_id: harness_core::new_id(),
+                workspace_id: ws,
+                name: "Plans".into(),
+                description: String::new(),
+                icon: String::new(),
+                accent: String::new(),
+                instructions: "SECRET-PLAN-INSTRUCTIONS".into(),
+                settings: "{}".into(),
+                created_by: Some(t.alex_id.clone()),
+                columns: vec![],
+            },
+            10,
+        )
+        .unwrap();
+    t.store()
+        .set_session_project(victim, Some(&project.project_id))
+        .unwrap();
+    // The control: the victim's own prompt carries its project.
+    t.master
+        .prompt(victim, "hi".into(), Default::default())
+        .await
+        .unwrap();
+    assert!(
+        prompt_context(&node, victim)
+            .unwrap()
+            .contains("SECRET-PLAN-INSTRUCTIONS")
+    );
+
+    let mallory = user(&t, "mallory");
+    *node.parent.lock().unwrap() = Some(victim);
+    let sid = t
+        .master
+        .create_session(CreateSpec {
+            profile: Some(Profile::Agentic),
+            node_id: Some("evil".into()),
+            cwd: "/w".into(),
+            owner_id: Some(mallory.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    *node.parent.lock().unwrap() = None;
+    let row = t.store().session(sid).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some(mallory.as_str()));
+    assert_eq!(row.parent_id, None, "another owner's chat is no parent");
+    assert_ne!(
+        row.workspace_id,
+        t.store().session(victim).unwrap().unwrap().workspace_id
+    );
+    assert!(
+        harness_master::projects::project_of(&t.master, &row)
+            .await
+            .is_none()
+    );
+    t.master
+        .prompt(sid, "hi".into(), Default::default())
+        .await
+        .unwrap();
+    let context = prompt_context(&node, sid).unwrap();
+    assert!(!context.contains("SECRET-PLAN"), "{context}");
+
+    // A sub-agent session the node starts itself under the victim's chat
+    // (a delegation) is the victim's, with the victim's project.
+    let child = SessionId::new();
+    node.emit(child, created("evil", "/w", Some(victim)));
+    let mut row = None;
+    for _ in 0..400 {
+        row = t.store().session(child).unwrap();
+        if row.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let row = row.expect("the child is mirrored");
+    assert_eq!(row.parent_id, Some(victim.to_string()));
+    assert_eq!(row.owner_id.as_deref(), Some(t.alex_id.as_str()));
+    let p = harness_master::projects::project_of(&t.master, &row).await;
+    assert_eq!(p.map(|p| p.project_id), Some(project.project_id));
 }

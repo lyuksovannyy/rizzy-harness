@@ -657,3 +657,37 @@ fn the_row_is_set_at_seq_1_and_its_owner_never_changes() {
         Some("bob")
     );
 }
+
+/// L-1, the store half. A parent is stored only when it is a session of
+/// the same node with the same owner: another node's chat is dropped at
+/// append, another user's chat on the same node when the master stamps
+/// the owner it recorded for the create.
+#[test]
+fn a_parent_is_kept_only_under_the_same_node_and_owner() {
+    let s = Store::open_in_memory().unwrap();
+    let victim = chat_of(&s, "n-victim", "alice");
+    let sid = SessionId::new();
+    s.append(
+        "n-hostile",
+        &raw(sid, 1, "session_created", created_json("t", Some(victim))),
+    )
+    .unwrap();
+    // What `Master::create_session` does after the node's ack.
+    s.claim_session(sid, Some("mallory"), None).unwrap();
+    let row = s.session(sid).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("mallory"));
+    assert_eq!(row.parent_id, None, "another node's chat is no parent");
+
+    // Same node, other owner: alice's chat on the hostile node.
+    let alices = chat_of(&s, "n-hostile", "alice");
+    let sid = SessionId::new();
+    s.append(
+        "n-hostile",
+        &raw(sid, 1, "session_created", created_json("t", Some(alices))),
+    )
+    .unwrap();
+    s.claim_session(sid, Some("mallory"), None).unwrap();
+    let row = s.session(sid).unwrap().unwrap();
+    assert_eq!(row.owner_id.as_deref(), Some("mallory"));
+    assert_eq!(row.parent_id, None, "another user's chat is no parent");
+}

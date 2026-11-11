@@ -667,26 +667,41 @@ impl Store {
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
                 };
+                // A parent is kept only when it is another session of the
+                // same node (Gate 3 review L-1): a node cannot attach its
+                // session to another node's chat and so reach that chat's
+                // project. Anything else is dropped and the session is an
+                // ordinary top-level one.
+                let parent = match opt("parent_session") {
+                    Some(p) => tx
+                        .query_row(
+                            "SELECT p.session_id FROM sessions p
+                             WHERE p.session_id = ?1 AND p.node_id = ?2 AND p.session_id != ?3",
+                            params![p, owner, sid],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()?,
+                    None => None,
+                };
                 tx.execute(
                     "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8 WHERE session_id = ?1",
-                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), opt("parent_session")],
+                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent],
                 )?;
-                // A sub-agent's session belongs to whoever owns its parent
-                // (same node only: a node cannot adopt another node's chats).
-                // Only into an empty owner: no event changes one once set.
-                if let Some(parent) = opt("parent_session") {
+                // A sub-agent's session belongs to whoever owns its parent,
+                // so the two have the same owner by construction; only into
+                // an empty owner: no event changes one once set.
+                if let Some(parent) = &parent {
                     tx.execute(
-                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2 AND p.node_id = ?3) WHERE session_id = ?1 AND owner_id IS NULL",
-                        params![sid, parent, owner],
+                        "UPDATE sessions SET owner_id = (SELECT p.owner_id FROM sessions p WHERE p.session_id = ?2) WHERE session_id = ?1 AND owner_id IS NULL",
+                        params![sid, parent],
                     )?;
-                    // ...and lives in its parent's workspace, under the same
-                    // rule (no rows on a node: it never maps chats).
+                    // ...and lives in its parent's workspace (no rows on a
+                    // node: it never maps chats).
                     tx.execute(
                         "INSERT OR IGNORE INTO session_workspaces (session_id, workspace_id)
                          SELECT ?1, sw.workspace_id FROM session_workspaces sw
-                         JOIN sessions p ON p.session_id = sw.session_id
-                         WHERE sw.session_id = ?2 AND p.node_id = ?3",
-                        params![sid, parent, owner],
+                         WHERE sw.session_id = ?2",
+                        params![sid, parent],
                     )?;
                 }
             }
@@ -1461,6 +1476,26 @@ impl Store {
                 .optional()?
                 .flatten(),
         };
+        // A parent is kept only under the same node and the same owner
+        // (Gate 3 review L-1). `append` checked the node; the owner is known
+        // only now, as the master recorded it for the create, and a node
+        // that named another user's chat on itself as parent loses that
+        // parent here, with the workspace mapping it inherited from it.
+        let dropped = tx.execute(
+            "UPDATE sessions SET parent_id = NULL
+             WHERE session_id = ?1 AND parent_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM sessions p
+                               WHERE p.session_id = sessions.parent_id
+                                 AND p.node_id = sessions.node_id
+                                 AND p.owner_id IS sessions.owner_id)",
+            params![id],
+        )?;
+        if dropped > 0 {
+            tx.execute(
+                "DELETE FROM session_workspaces WHERE session_id = ?1",
+                params![id],
+            )?;
+        }
         let mapped = match workspace {
             Some(ws) => {
                 tx.execute(
