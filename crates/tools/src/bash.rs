@@ -672,4 +672,267 @@ mod tests {
         assert!(r.ok, "{}", r.output);
         assert!(started.elapsed() < Duration::from_secs(5));
     }
+
+    // ---- Experiment B.1 (ADOPTION_PLAN): processes that leave the group ----
+    //
+    // The tool signals one process group. A process that calls `setsid` is in
+    // another session and group, so these tests record what happens to it.
+    // Every process a test expects to survive is recorded by pid and killed
+    // by exactly that pid (after checking its command line) by `Reaper`.
+
+    /// Kills one recorded pid on drop, only if `/proc/<pid>/cmdline` is still
+    /// exactly `sleep <secs>` (so a recycled pid is never touched).
+    struct Reaper {
+        pid: i32,
+        secs: u32,
+    }
+
+    fn is_our_sleep(pid: i32, secs: u32) -> bool {
+        pid_alive(pid)
+            && std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|c| c == format!("sleep\0{secs}\0").as_bytes())
+                .unwrap_or(false)
+    }
+
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            if is_our_sleep(self.pid, self.secs) {
+                let _ = nix::sys::signal::kill(Pid::from_raw(self.pid), Signal::SIGKILL);
+            }
+        }
+    }
+
+    /// Wait for the command to write its pid, and guard that pid.
+    async fn recorded(pidfile: &std::path::Path, secs: u32) -> Reaper {
+        for _ in 0..250 {
+            if let Ok(s) = std::fs::read_to_string(pidfile)
+                && let Ok(pid) = s.trim().parse::<i32>()
+                && is_our_sleep(pid, secs)
+            {
+                return Reaper { pid, secs };
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the command never recorded a `sleep {secs}` pid");
+    }
+
+    /// `sh -c 'echo $$ > FILE; exec sleep N'`: the pid in FILE is the sleep.
+    fn recording_sleep(pidfile: &std::path::Path, secs: u32) -> String {
+        format!("sh -c 'echo $$ > {}; exec sleep {secs}'", pidfile.display())
+    }
+
+    enum Stop {
+        Cancel,
+        Timeout,
+        Drop,
+    }
+
+    /// Run `command`, wait until `secs`'s sleep is recorded, stop the call
+    /// the given way, wait two seconds, and return the guard and whether the
+    /// recorded process is still alive.
+    async fn stop_and_look(
+        command: String,
+        pidfile: &std::path::Path,
+        secs: u32,
+        how: Stop,
+    ) -> (Reaper, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let cancel = ctx.cancel.clone();
+        let input = match how {
+            Stop::Timeout => json!({"command": command, "timeout_secs": 1}),
+            _ => json!({"command": command}),
+        };
+        let h = tokio::spawn(async move { Bash.run(&ctx, input).await });
+        let reaper = recorded(pidfile, secs).await;
+        match how {
+            Stop::Cancel => {
+                cancel.cancel();
+                let r = h.await.unwrap();
+                assert!(r.output.contains("cancelled"), "{}", r.output);
+            }
+            Stop::Timeout => {
+                let r = h.await.unwrap();
+                assert!(r.output.contains("timed out"), "{}", r.output);
+            }
+            Stop::Drop => {
+                h.abort();
+                let _ = h.await;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let alive = is_our_sleep(reaper.pid, secs);
+        (reaper, alive)
+    }
+
+    /// Control: a background child that stays in the group is gone.
+    #[tokio::test]
+    async fn b1_control_same_group_background_child_dies_on_cancel() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!("{} & wait", recording_sleep(&pidfile, 987_601));
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_601, Stop::Cancel).await;
+        assert!(!alive, "control failed: a same-group child survived");
+    }
+
+    /// Control: a process the test starts itself is alive after the same
+    /// wait, so "alive" detection works.
+    #[tokio::test]
+    async fn b1_control_unrelated_process_is_detected_alive() {
+        let mut c = std::process::Command::new("sleep")
+            .arg("987602")
+            .spawn()
+            .unwrap();
+        let r = Reaper {
+            pid: c.id() as i32,
+            secs: 987_602,
+        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(is_our_sleep(r.pid, 987_602));
+        drop(r);
+        let _ = c.wait();
+    }
+
+    /// KNOWN GAP (design note C.11, built by T.8): a child that called
+    /// `setsid` is not in the process group the tool signals, so it
+    /// survives a cancel. Once a containment (cgroup, PID namespace or
+    /// `/proc` walk) exists, this assertion flips to `!alive`.
+    #[tokio::test]
+    async fn a_setsid_child_survives_cancel() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_603));
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_603, Stop::Cancel).await;
+        assert!(
+            alive,
+            "the setsid child died: the gap is closed, flip this test"
+        );
+    }
+
+    /// KNOWN GAP (C.11 / T.8): same as above, ended by the timeout.
+    #[tokio::test]
+    async fn a_setsid_child_survives_timeout() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_604));
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_604, Stop::Timeout).await;
+        assert!(
+            alive,
+            "the setsid child died: the gap is closed, flip this test"
+        );
+    }
+
+    /// KNOWN GAP (C.11 / T.8): same as above, ended by dropping the call
+    /// future (`KillGroupOnDrop` path).
+    #[tokio::test]
+    async fn a_setsid_child_survives_a_dropped_call() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_605));
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_605, Stop::Drop).await;
+        assert!(
+            alive,
+            "the setsid child died: the gap is closed, flip this test"
+        );
+    }
+
+    /// KNOWN GAP (C.11 / T.8): `setsid -f` (forks, parent exits at once).
+    #[tokio::test]
+    async fn a_setsid_f_child_survives_cancel() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!(
+            "setsid -f {}; sleep 1000",
+            recording_sleep(&pidfile, 987_606)
+        );
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_606, Stop::Cancel).await;
+        assert!(
+            alive,
+            "the setsid -f child died: the gap is closed, flip this test"
+        );
+    }
+
+    /// KNOWN GAP (C.11 / T.8): a classic double fork (subshell in the
+    /// background, then `setsid`), the shape of a daemon.
+    #[tokio::test]
+    async fn a_double_forked_setsid_daemon_survives_cancel() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!(
+            "( setsid nohup {} >/dev/null 2>&1 & ) ; sleep 1000",
+            recording_sleep(&pidfile, 987_607)
+        );
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_607, Stop::Cancel).await;
+        assert!(alive, "the daemon died: the gap is closed, flip this test");
+    }
+
+    /// Control: a double fork with `nohup` but without `setsid` is still in
+    /// the group, so it is killed. (`nohup` ignores SIGHUP only; it does not
+    /// leave the group.)
+    #[tokio::test]
+    async fn b1_control_double_fork_with_nohup_only_dies_on_cancel() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!(
+            "( nohup {} >/dev/null 2>&1 & ) ; sleep 1000",
+            recording_sleep(&pidfile, 987_608)
+        );
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_608, Stop::Cancel).await;
+        assert!(
+            !alive,
+            "control failed: a nohup child in the group survived"
+        );
+    }
+
+    /// The node is SIGKILLed while an ordinary in-group command runs.
+    ///
+    /// Not the real node: the test re-runs this test binary as a helper
+    /// process that drives the real `Bash` tool (the same code the node
+    /// runs), then SIGKILLs that helper, the way `kill -9` on the node
+    /// would. It does not prove anything about the node's supervisor, the
+    /// session actor or a restart: only that nothing in `bash.rs` can clean
+    /// up after a SIGKILL of its process.
+    ///
+    /// KNOWN GAP (C.11 / T.8): the ordinary child survives. A containment
+    /// that dies with the node (a cgroup, or a PID namespace whose init is
+    /// the node's helper) would flip this to `!alive`.
+    #[tokio::test]
+    async fn a_command_survives_sigkill_of_its_node() {
+        const SECS: u32 = 987_609;
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "bash::tests::b1_helper_runs_a_long_command",
+                "--nocapture",
+            ])
+            .env("B1_HELPER_PIDFILE", &pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let reaper = recorded(&pidfile, SECS).await;
+        helper.kill().unwrap(); // SIGKILL
+        let _ = helper.wait();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let alive = is_our_sleep(reaper.pid, SECS);
+        assert!(
+            alive,
+            "the command died with its node: the gap is closed, flip this test"
+        );
+    }
+
+    /// Not a test on its own: the body of the helper process above. Without
+    /// the env var it returns at once.
+    #[tokio::test]
+    async fn b1_helper_runs_a_long_command() {
+        let Some(pidfile) = std::env::var_os("B1_HELPER_PIDFILE") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let cmd = recording_sleep(std::path::Path::new(&pidfile), 987_609);
+        let _ = Bash.run(&ctx, json!({"command": cmd})).await;
+    }
 }
