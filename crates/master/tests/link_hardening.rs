@@ -362,3 +362,39 @@ async fn a_second_session_created_moves_nothing_and_freezes_the_chat() {
     barrier(&store, &tx).await;
     assert_eq!(store.head_seq(bob).unwrap(), 2);
 }
+
+#[tokio::test]
+async fn an_oversized_event_from_a_node_is_refused_and_freezes_the_chat() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let sid = SessionId::new();
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    send(&tx, created_by(sid, 1, None)).await;
+    // A large legitimate event is taken...
+    send(&tx, event(sid, 2, &"x".repeat(3 << 20))).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.head_seq(sid).unwrap(), 2);
+    // ...one over the cap is not, and nothing after it either.
+    send(
+        &tx,
+        event(sid, 3, &"x".repeat(harness_store::MAX_EVENT_BYTES)),
+    )
+    .await;
+    send(&tx, event(sid, 4, "after")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.head_seq(sid).unwrap(), 2);
+    assert_eq!(store.diverged_seq(sid).unwrap(), Some(3));
+    assert!(cancelled(&mut c, sid).await);
+
+    // Refused at its first event: a frozen empty row, so later frames are
+    // refused too instead of asking for the session again.
+    let other = SessionId::new();
+    let mut first = created_by(other, 1, None);
+    first.payload["cwd"] = serde_json::json!("/".repeat(harness_store::MAX_CWD_BYTES + 1));
+    send(&tx, first).await;
+    send(&tx, event(other, 2, "next")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.head_seq(other).unwrap(), 0);
+    assert_eq!(store.diverged_seq(other).unwrap(), Some(1));
+}

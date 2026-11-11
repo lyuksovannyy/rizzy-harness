@@ -252,7 +252,7 @@ fn blind(r: &Resolver, main: &str, compare: &[String]) -> Option<String> {
 }
 
 /// The length of `msg` as JSON, without building the text.
-fn json_len(msg: &MasterToNode) -> usize {
+fn json_len<T: Serialize + ?Sized>(msg: &T) -> usize {
     struct Count(usize);
     impl std::io::Write for Count {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -1386,6 +1386,18 @@ impl Master {
         // Last, so it is what the model reads right before answering.
         if untrusted {
             turn_context.push(UNTRUSTED_NOTE.into());
+        }
+        // The node records the message, its attachments and the image
+        // references as one `user_message`, which its log (and the mirror)
+        // refuses past `MAX_EVENT_BYTES`: say so now rather than fail the
+        // turn there. The margin covers the event's other fields.
+        let refs: Vec<_> = images.iter().map(|i| i.image_ref()).collect();
+        if json_len(&(&text, &attachments, &reply, &refs)) + 64 * 1024
+            > harness_store::MAX_EVENT_BYTES
+        {
+            return Err(CommandError::TooLarge(
+                "This message and its attachments are too long".into(),
+            ));
         }
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));

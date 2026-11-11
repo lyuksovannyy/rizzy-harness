@@ -264,6 +264,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- §3): every later append is refused until the session is deleted.
     diverged_seq INTEGER
 );
+-- Listings are per owner (`Store::sessions_of`).
+CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner_id, updated_ms);
 -- How far each user has looked at each chat (questions stop needing
 -- attention once seen).
 CREATE TABLE IF NOT EXISTS seen (
@@ -446,11 +448,82 @@ pub struct SearchHit {
     pub updated_ms: i64,
 }
 
+/// The largest event the log takes: its payload as JSON plus its kind
+/// (Gate 3 review L-3). Half the link's 8 MiB frame, so one event always
+/// fits a frame with its envelope. The largest legitimate event today is a
+/// `user_message`: the prompt text (the HTTP body limit is 2 MB) plus up to
+/// five attachments of 100,000 characters, about 2.5 MB of JSON in a
+/// realistic worst case; `Master::prompt` refuses a message that would not
+/// fit. Everything else is far smaller (tool output is cut to 30,000
+/// characters, model output by its token limit).
+pub const MAX_EVENT_BYTES: usize = 4 << 20;
+/// A session title in the row (and the search index) is cut to this many
+/// characters; the event keeps it whole. Sub-agent titles are under 100.
+pub const MAX_TITLE_CHARS: usize = 200;
+/// Identifiers and paths a node supplies for the row are refused past
+/// these lengths rather than cut: a cut one would name something else.
+/// `PATH_MAX` on Linux.
+pub const MAX_CWD_BYTES: usize = 4096;
+pub const MAX_MODEL_BYTES: usize = 256;
+/// Agent ids are at most 32 characters (`harness_agents::valid_id`).
+pub const MAX_AGENT_ID_BYTES: usize = 64;
+const MAX_KIND_BYTES: usize = 64;
+
+/// A title as the row stores it: at most `MAX_TITLE_CHARS` characters, cut
+/// on a character boundary.
+fn row_title(t: &str) -> String {
+    match t.char_indices().nth(MAX_TITLE_CHARS) {
+        Some((at, _)) => t[..at].to_string(),
+        None => t.to_string(),
+    }
+}
+
+/// Why the log does not take `e`, the next event in order with a payload of
+/// `payload_len` bytes of JSON; `None` when it does. The reasons name the
+/// rule only, never content.
+fn refusal(e: &RawEvent, payload_len: usize) -> Option<&'static str> {
+    if e.kind.len() > MAX_KIND_BYTES {
+        return Some("event kind too long");
+    }
+    if payload_len + e.kind.len() > MAX_EVENT_BYTES {
+        return Some("event too large");
+    }
+    let longer = |v: Option<&serde_json::Value>, max: usize| {
+        v.and_then(|v| v.as_str()).is_some_and(|s| s.len() > max)
+    };
+    let p = &e.payload;
+    match e.kind.as_str() {
+        // The row is a session's creation record: set once, by its first
+        // event. A later `session_created` would rewrite the owner (through
+        // its parent), `incognito` and `profile` on a node's word alone
+        // (Gate 3 review L-2), and no node writes one.
+        "session_created" if e.seq != 1 => Some("session_created after the session's first event"),
+        "session_created" if longer(p.get("cwd"), MAX_CWD_BYTES) => Some("cwd too long"),
+        "session_created" if longer(p.get("model"), MAX_MODEL_BYTES) => Some("model too long"),
+        "session_created" if longer(p.get("agent_id"), MAX_AGENT_ID_BYTES) => {
+            Some("agent id too long")
+        }
+        "session_created"
+            if !matches!(p.get("profile"), None | Some(serde_json::Value::Null))
+                && !matches!(
+                    p.get("profile").and_then(|v| v.as_str()),
+                    Some("chat" | "agentic")
+                ) =>
+        {
+            Some("unknown profile")
+        }
+        "agent_changed" if longer(p.pointer("/agent/agent_id"), MAX_AGENT_ID_BYTES) => {
+            Some("agent id too long")
+        }
+        _ => None,
+    }
+}
+
 /// What a newly appended event contributes to the search index.
 fn index_text(kind: &str, payload: &serde_json::Value) -> Option<(&'static str, String)> {
     let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::to_string);
     match kind {
-        "session_created" => text("title").map(|t| ("title", t)),
+        "session_created" => text("title").map(|t| ("title", row_title(&t))),
         "user_message" | "assistant_message" => text("text")
             .filter(|t| !t.trim().is_empty())
             .map(|t| ("body", t)),
@@ -628,19 +701,13 @@ impl Store {
         if e.seq != head + 1 {
             return Ok(AppendOutcome::Gap { head });
         }
-        // The row is a session's creation record: set once, by its first
-        // event. A later `session_created` would rewrite the owner (through
-        // its parent), `incognito` and `profile` on a node's word alone
-        // (Gate 3 review L-2), and no node writes one.
-        if e.kind == "session_created" && e.seq != 1 {
-            return Ok(AppendOutcome::Refused {
-                seq: e.seq,
-                reason: "session_created after the session's first event",
-            });
+        let payload = serde_json::to_string(&e.payload)?;
+        if let Some(reason) = refusal(e, payload.len()) {
+            return Ok(AppendOutcome::Refused { seq: e.seq, reason });
         }
         tx.execute(
             "INSERT INTO events (session_id, seq, ts_ms, kind, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![sid, e.seq as i64, e.ts_ms, e.kind, serde_json::to_string(&e.payload)?],
+            params![sid, e.seq as i64, e.ts_ms, e.kind, payload],
         )?;
         if existing.is_none() {
             tx.execute(
@@ -683,9 +750,12 @@ impl Store {
                         .optional()?,
                     None => None,
                 };
+                // Every listing loads the title: cut, never refused (it is
+                // free text; the event keeps the whole of it).
+                let title = row_title(&s("title"));
                 tx.execute(
                     "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8 WHERE session_id = ?1",
-                    params![sid, s("title"), s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent],
+                    params![sid, title, s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent],
                 )?;
                 // A sub-agent's session belongs to whoever owns its parent,
                 // so the two have the same owner by construction; only into
@@ -1391,6 +1461,21 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&Self::session_query("ORDER BY s.updated_ms DESC"))?;
         let rows = stmt.query_map([], Self::session_from_row)?;
+        rows.map(|r| Self::finish_session(r?)).collect()
+    }
+
+    /// `owner`'s sessions, newest first (`None`: everyone's, for the API
+    /// token). Filtered in SQL, so listing one account's chats never loads
+    /// every other account's rows (Gate 3 review L-3).
+    pub fn sessions_of(&self, owner: Option<&str>) -> Result<Vec<SessionRow>> {
+        let Some(owner) = owner else {
+            return self.sessions();
+        };
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&Self::session_query(
+            "WHERE s.owner_id = ?1 ORDER BY s.updated_ms DESC",
+        ))?;
+        let rows = stmt.query_map(params![owner], Self::session_from_row)?;
         rows.map(|r| Self::finish_session(r?)).collect()
     }
 
