@@ -1193,7 +1193,16 @@ async fn agentic_runs_wait_for_approval_and_time_out() {
     assert_eq!(att["routines"][0]["kind"], "failed", "{att}");
     assert_eq!(att["routines"][0]["status"], "timed_out");
 
-    // A delegate's approval parks the run too.
+    // A delegate's approval parks the run too. Coder can change files, so
+    // it needs a repository for its worktree, or it is not started.
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&t.root)
+            .status()
+            .unwrap()
+            .success()
+    );
     let deleg = routine(
         &t,
         &alex,
