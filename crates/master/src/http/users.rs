@@ -220,6 +220,16 @@ pub(super) async fn delete_user(
     // other members; their chats leave every team workspace. The projects of
     // the workspaces that go with them go too, and their facts.
     let projects = crate::projects::ids(&m).await;
+    let owner = uid.clone();
+    let chats: Vec<_> = m
+        .inner
+        .mirror
+        .call(move |s| s.sessions_of(Some(&owner)))
+        .await?
+        .into_iter()
+        .filter(|r| r.owner_id.as_deref() == Some(uid.as_str()))
+        .map(|r| r.session_id)
+        .collect();
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
     auth::close_sockets(&m, &target.user_id);
     // Their stored files lost their rows with the account; unlink them.
@@ -227,7 +237,9 @@ pub(super) async fn delete_user(
     crate::projects::forget_gone(&m, projects).await;
     let _ = m.inner.live.send(Live::WorkspacesChanged);
     let _ = m.inner.live.send(Live::SessionsChanged);
-    // Their running agentic chats stop (the account is gone).
+    // Their running agentic chats stop (the account is gone), and every
+    // chat of theirs is deleted on the master and on its node (P-6).
     ws::sweep_revoked(&m, vec![target.user_id]);
+    m.delete_sessions_of(chats);
     Ok(Json(json!({ "ok": true })))
 }

@@ -21,6 +21,8 @@ struct Server {
     master: Master,
     claim_path: std::path::PathBuf,
     ws: std::path::PathBuf,
+    /// The embedded node's own store.
+    node_store: Store,
     _dir: tempfile::TempDir,
 }
 
@@ -28,6 +30,7 @@ async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
+    let node_store = Store::open_in_memory().unwrap();
     let node = NodeRuntime::start(NodeConfig {
         node_id: "local".into(),
         hostname: "h".into(),
@@ -35,7 +38,7 @@ async fn start() -> Server {
             workspace_roots: vec![dir.path().into()],
             ..Default::default()
         },
-        store: Store::open_in_memory().unwrap(),
+        store: node_store.clone(),
         backend: Arc::new(NativeBackend::new(
             Arc::new(Mock {
                 delay: Duration::from_millis(1),
@@ -84,6 +87,7 @@ async fn start() -> Server {
         master,
         claim_path,
         ws,
+        node_store,
         _dir: dir,
     }
 }
@@ -871,4 +875,58 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
         .await
         .unwrap();
     assert!(r.headers().get("set-cookie").is_none());
+}
+
+/// Gate 3 review P-6: a deleted user's chats stayed on the master and on
+/// the node, and only the API token could delete them. Deleting the user
+/// deletes them on both.
+#[tokio::test]
+async fn deleting_a_user_deletes_their_chats_on_the_master_and_the_node() {
+    let s = start().await;
+    let admin = claim_admin(&s).await;
+    let (_, _, bob) = req(
+        &s,
+        Method::POST,
+        "/api/users",
+        Some(json!({"username": "bob"})),
+        Some(&admin),
+    )
+    .await;
+    let bob_id = bob["user_id"].as_str().unwrap().to_string();
+    let sid = s
+        .master
+        .create_session(harness_master::CreateSpec {
+            profile: Some(harness_core::event::Profile::Agentic),
+            title: "a chat".into(),
+            cwd: s.ws.display().to_string(),
+            owner_id: Some(bob_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(s.node_store.head_seq(sid).unwrap() >= 1);
+    let (st, _, v) = req(
+        &s,
+        Method::DELETE,
+        &format!("/api/users/{bob_id}"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut gone = false;
+    for _ in 0..500 {
+        let mirror = s.master.inner_mirror().session(sid).unwrap();
+        if mirror.is_none() && s.node_store.head_seq(sid).unwrap() == 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        gone,
+        "a deleted user's chat is still there (mirror: {}, node head: {})",
+        s.master.inner_mirror().session(sid).unwrap().is_some(),
+        s.node_store.head_seq(sid).unwrap()
+    );
 }
