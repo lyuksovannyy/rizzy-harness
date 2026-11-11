@@ -714,6 +714,12 @@ write = ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.cache",
 `/sys`, `/var`, `/run`, `/nix/store` on NixOS. A shell sandbox entry may not
 contain, equal or be inside the data directory: the node refuses to start
 with such an entry, because Landlock cannot carve a folder out of a grant.
+The same holds for an entry that contains or equals a `workspace_roots`
+folder (every chat's commands would reach every other chat's folder). An
+entry is granted only while it is still what it was when the node
+started: one replaced by a link (or below a folder replaced by one) is
+left out, and one that did not exist at start is granted once it exists
+at the same real path.
 For the same reason a data directory under `/usr`, `/etc` or `/opt` is
 refused. Graphify additionally needs its install (found automatically:
 its venv and the Python it was made from).

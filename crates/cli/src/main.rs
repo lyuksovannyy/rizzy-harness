@@ -586,8 +586,14 @@ fn start_sandbox(
         .sandbox
         .settings()
         .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
-    let s = harness_tools::sandbox::start(&settings, dir, &policy.protected_dirs, &node_toml)
-        .map_err(anyhow::Error::msg)?;
+    let s = harness_tools::sandbox::start(
+        &settings,
+        dir,
+        &policy.protected_dirs,
+        &policy.workspace_roots,
+        &node_toml,
+    )
+    .map_err(anyhow::Error::msg)?;
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
@@ -750,6 +756,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                     &p.sandbox.settings()?,
                     dir,
                     &p.protected_dirs,
+                    &p.workspace_roots,
                     &node_toml,
                 )
             })
@@ -768,6 +775,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                     &p.sandbox.settings()?,
                     dir,
                     &p.protected_dirs,
+                    &p.workspace_roots,
                     &dir.join("node.toml"),
                 )
             })
