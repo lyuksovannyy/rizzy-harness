@@ -8,11 +8,11 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { embedFirst, type Plan } from "../lib/models";
+import { embedFirst, type Plan } from "../lib/modelPlan";
 import type { Agent, ProviderModel } from "../types";
 
 const testModel = vi.fn();
-vi.mock("../api", () => ({ api: { testModel } }));
+vi.mock("../apiPages", () => ({ pageApi: { testModel } }));
 
 const { filterModels, modelTags, ModelPicker } = await import("./ModelPicker");
 

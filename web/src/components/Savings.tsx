@@ -1,6 +1,6 @@
 // Settings → Token savings (admin): every method can be switched off.
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import type { GraphifyStatus, Style, TokenSavings } from "../types";
 
 type BoolKey = {
@@ -69,7 +69,7 @@ function GraphifyCard({ enabled, onToggle }: { enabled: boolean; onToggle: (v: b
   const [g, setG] = useState<GraphifyStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    api.graphify().then(setG).catch((x) => setErr(String(x)));
+    pageApi.graphify().then(setG).catch((x) => setErr(String(x)));
   }, []);
   const ready = !!g?.local_node && g.allowed && !!g.installed;
   return (
@@ -112,14 +112,14 @@ export function SavingsSettings() {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    api.savings().then(setS).catch((x) => setErr(String(x)));
+    pageApi.savings().then(setS).catch((x) => setErr(String(x)));
   }, []);
   if (!s) return err ? <div className="error-text">{err}</div> : null;
   const save = async (n: TokenSavings) => {
     setS(n);
     setErr(null);
     try {
-      setS(await api.saveSavings(n));
+      setS(await pageApi.saveSavings(n));
       setMsg("Saved. Applies from the next message.");
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));

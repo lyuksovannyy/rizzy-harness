@@ -4,7 +4,8 @@
 import { ArrowRight, CircleAlert, Info, Loader2, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { dropModels, embedFirst, type Plan, planChanges, planFrom, planProblems, renameModel, setMain } from "../lib/models";
+import { pageApi } from "../apiPages";
+import { dropModels, embedFirst, type Plan, planChanges, planFrom, planProblems, renameModel, setMain } from "../lib/modelPlan";
 import type { Agent, ProviderModel, ProviderPreset, ProvidersState, ProviderState } from "../types";
 import { type CustomModels, ModelPicker } from "./ModelPicker";
 
@@ -173,9 +174,9 @@ export function ProviderForm(props: {
   const loadCache = useCallback(async (id: string) => {
     want.current = id;
     try {
-      let l = await api.providerModels(id);
+      let l = await pageApi.providerModels(id);
       if (want.current !== id) return;
-      if (!l.models.length) l = await api.refreshProviderModels(id);
+      if (!l.models.length) l = await pageApi.refreshProviderModels(id);
       if (want.current !== id) return;
       setListing(l.models);
       setFetched(l.fetched_ms);
@@ -258,7 +259,7 @@ export function ProviderForm(props: {
     setErr(null);
     setMsg(null);
     try {
-      const r = await api.testProvider({
+      const r = await pageApi.testProvider({
         preset: preset.id,
         base_url: preset.url_editable ? url : undefined,
         api_key: key || undefined,
@@ -288,7 +289,7 @@ export function ProviderForm(props: {
     setBusy("refresh");
     setErr(null);
     try {
-      const l = await api.refreshProviderModels(existing.id);
+      const l = await pageApi.refreshProviderModels(existing.id);
       setListing(l.models);
       setFetched(l.fetched_ms);
       props.onListed?.();
@@ -304,7 +305,7 @@ export function ProviderForm(props: {
     if (!existing) return;
     setErr(null);
     try {
-      const s = await api.removeProviderModel(existing.id, raw);
+      const s = await pageApi.removeProviderModel(existing.id, raw);
       setOwn((o) => o.filter((m) => m.id !== raw));
       setChosen((c) => c.filter((x) => x !== raw));
       // As the server repairs the chain: a first fallback takes the main model's place.
@@ -320,7 +321,7 @@ export function ProviderForm(props: {
     setBusy("save");
     setErr(null);
     try {
-      const s = await api.saveProvider(pid, {
+      const s = await pageApi.saveProvider(pid, {
         name: custom ? name.trim() : (existing?.name ?? preset.label),
         preset: preset.id,
         base_url: preset.url_editable ? url : undefined,
@@ -338,7 +339,7 @@ export function ProviderForm(props: {
         const moveDefault = general !== undefined && general !== null && general !== s.default_model;
         if (Object.keys(next).length) {
           try {
-            done = await api.saveAgentModels({ agent_models: next, ...(moveDefault ? { default_model: general } : {}) });
+            done = await pageApi.saveAgentModels({ agent_models: next, ...(moveDefault ? { default_model: general } : {}) });
           } catch (x) {
             // The provider is saved: the parent learns of it, the plan's error shows.
             props.onState?.(s);
@@ -568,7 +569,7 @@ export function useProviders(enabled = true) {
   const [err, setErr] = useState<string | null>(null);
   const load = useCallback(() => {
     if (!enabled) return;
-    api
+    pageApi
       .providers()
       .then(setState)
       .catch((x) => setErr(x instanceof Error ? x.message : String(x)));
@@ -610,7 +611,7 @@ export function ProvidersSettings(props: { onChanged: () => void }) {
     if (!confirm(`Remove ${p.name}? Chats can no longer use its models.`)) return;
     setDelErr(null);
     try {
-      saved(await api.deleteProvider(p.id));
+      saved(await pageApi.deleteProvider(p.id));
     } catch (x) {
       setDelErr(x instanceof Error ? x.message : String(x));
     }
@@ -679,5 +680,5 @@ export function ProvidersSettings(props: { onChanged: () => void }) {
 
 /** Use the built-in demo provider (no AI) for now. */
 export function chooseDemoProvider(): Promise<ProvidersState> {
-  return api.demoProvider();
+  return pageApi.demoProvider();
 }

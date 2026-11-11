@@ -16,15 +16,16 @@ import type { Features, Item, RoutineMark, SessionRow, SessionView } from "../ty
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), deleteSession: vi.fn(() => Promise.resolve({ ok: true })), prompt: vi.fn(), approve: vi.fn() },
+  api: { features: (s: unknown) => features(s), prompt: vi.fn() },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
+vi.mock("../apiPages", () => ({ pageApi: { deleteSession: vi.fn(() => Promise.resolve({ ok: true })), approve: vi.fn() } }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
 vi.mock("../lib/artifacts", async (original) => ({ ...(await original<typeof import("../lib/artifacts")>()), artifactsApi }));
 const mediaApi = { list: vi.fn(), get: vi.fn() };
 vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi }));
-const { api } = await import("../api");
+const { pageApi: api } = await import("../apiPages");
 const { default: Conversation } = await import("./Conversation");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

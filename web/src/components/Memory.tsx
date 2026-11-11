@@ -2,7 +2,8 @@
 // here for a confirm; only confirmed facts are used.
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { embedFirst } from "../lib/models";
+import { pageApi } from "../apiPages";
+import { embedFirst } from "../lib/modelPlan";
 import type { FactKind, MemoryCfg, MemoryFact, Preset, ProviderModel, ProvidersState } from "../types";
 import { ModelPicker } from "./ModelPicker";
 import { ProviderForm } from "./ProviderForm";
@@ -41,10 +42,10 @@ function FactRow(props: { f: MemoryFact; onChange: () => void }) {
         <span className="spacer" />
         {f.status === "proposed" && edit === null && (
           <>
-            <button type="button" className="primary" onClick={() => void run(api.updateMemory(f.id, { status: "active" }))}>
+            <button type="button" className="primary" onClick={() => void run(pageApi.updateMemory(f.id, { status: "active" }))}>
               Remember
             </button>
-            <button type="button" onClick={() => void run(api.deleteMemory(f.id))}>
+            <button type="button" onClick={() => void run(pageApi.deleteMemory(f.id))}>
               Discard
             </button>
           </>
@@ -54,14 +55,14 @@ function FactRow(props: { f: MemoryFact; onChange: () => void }) {
             <button type="button" className="link" onClick={() => setEdit(f.text)}>
               Edit
             </button>
-            <button type="button" className="link" onClick={() => void run(api.deleteMemory(f.id))}>
+            <button type="button" className="link" onClick={() => void run(pageApi.deleteMemory(f.id))}>
               Forget
             </button>
           </>
         )}
         {edit !== null && (
           <>
-            <button type="button" className="primary" onClick={() => void run(api.updateMemory(f.id, { text: edit }))}>
+            <button type="button" className="primary" onClick={() => void run(pageApi.updateMemory(f.id, { text: edit }))}>
               Save
             </button>
             <button type="button" onClick={() => setEdit(null)}>
@@ -118,7 +119,7 @@ export function MemoryPage(props: { version: number }) {
             e.preventDefault();
             setErr(null);
             try {
-              await api.addMemory(text);
+              await pageApi.addMemory(text);
               setText("");
               load();
             } catch (x) {
@@ -180,13 +181,13 @@ function useListings() {
 }
 
 const providerList = (id: string, refresh: boolean) => async () => {
-  let l = refresh ? await api.refreshProviderModels(id) : await api.providerModels(id);
+  let l = refresh ? await pageApi.refreshProviderModels(id) : await pageApi.providerModels(id);
   // Nothing cached: list once.
-  if (!refresh && !l.models.length) l = await api.refreshProviderModels(id);
+  if (!refresh && !l.models.length) l = await pageApi.refreshProviderModels(id);
   return { models: l.models, fetched: l.fetched_ms };
 };
 const ollamaList = (url: string) => async () => {
-  const r = await api.testProvider({ preset: "ollama", base_url: url });
+  const r = await pageApi.testProvider({ preset: "ollama", base_url: url });
   if (!r.ok) throw new Error(r.error);
   return { models: r.models, fetched: Date.now() };
 };
@@ -237,7 +238,7 @@ export function MemoryCfgForm(props: {
   const given = useRef(props.providers);
 
   useEffect(() => {
-    Promise.all([api.memoryCfg(), given.current ? Promise.resolve(given.current) : api.providers().catch(() => null)])
+    Promise.all([pageApi.memoryCfg(), given.current ? Promise.resolve(given.current) : pageApi.providers().catch(() => null)])
       .then(([c, ps]) => {
         if (!given.current) setLoaded(ps);
         const list = ps?.providers.filter((p) => p.kind !== "mock") ?? [];
@@ -368,7 +369,7 @@ export function MemoryCfgForm(props: {
     setErr(null);
     setMsg(null);
     try {
-      const c = await api.saveMemoryCfg({
+      const c = await pageApi.saveMemoryCfg({
         recall: "meaning",
         source: "provider",
         provider_id: saved.id,
@@ -396,11 +397,11 @@ export function MemoryCfgForm(props: {
         setErr(null);
         setMsg(null);
         try {
-          const body: Parameters<typeof api.saveMemoryCfg>[0] = { recall, source: provider ? "provider" : "ollama", preset: keep };
+          const body: Parameters<typeof pageApi.saveMemoryCfg>[0] = { recall, source: provider ? "provider" : "ollama", preset: keep };
           if (meaning && provider) Object.assign(body, { provider_id: provider.id, embeddings_model: model.trim() });
           if (meaning && from === "ollama")
             Object.assign(body, { embeddings_url: ollamaUrl.trim(), embeddings_model: pick === "custom" ? model.trim() : "" });
-          const c = await api.saveMemoryCfg(body);
+          const c = await pageApi.saveMemoryCfg(body);
           setCfg(c);
           setMsg(c.active_model ? `Using ${c.active_model}.` : "Keyword recall only.");
           props.onSaved?.();

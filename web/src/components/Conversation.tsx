@@ -1,12 +1,14 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
+import "../lib/i18nPages";
 import { FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
+import { pageApi } from "../apiPages";
 import { dropDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
-import { fallbackNote } from "../lib/models";
+import { fallbackNote } from "../lib/modelPlan";
 import { markRunSeen } from "../lib/routineResults";
 import { routineHash } from "../lib/routes";
 import {
@@ -62,7 +64,7 @@ function Undo(props: {
     setErr(null);
     setLastRewind(rewind);
     try {
-      await api.restoreTurn(props.sessionId, props.turnId, force, rewind);
+      await pageApi.restoreTurn(props.sessionId, props.turnId, force, rewind);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -418,7 +420,7 @@ export default function Conversation(props: {
                                 type="button"
                                 className="link"
                                 disabled={busy}
-                                onClick={() => void api.selectVariant(sessionId, g, a.message_id)}
+                                onClick={() => void pageApi.selectVariant(sessionId, g, a.message_id)}
                               >
                                 Continue with this
                               </button>
@@ -574,7 +576,7 @@ export default function Conversation(props: {
             models={props.models}
             workers={[]}
             agentId={activeAgent}
-            onAgentChange={(id) => void api.setAgent(sessionId, id)}
+            onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
             agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}
@@ -582,7 +584,7 @@ export default function Conversation(props: {
             running={running}
             draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
-            onStop={() => void api.cancel(sessionId)}
+            onStop={() => void pageApi.cancel(sessionId)}
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
             onSubmit={async (s) => {
               stick.current = true;

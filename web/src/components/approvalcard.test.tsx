@@ -16,7 +16,7 @@ import type { Item } from "../types";
 import { ToolCard } from "./ToolCard";
 
 const approve = vi.fn(async () => ({}));
-vi.mock("../api", () => ({ api: { approve: (...a: unknown[]) => approve(...(a as [])) } }));
+vi.mock("../apiPages", () => ({ pageApi: { approve: (...a: unknown[]) => approve(...(a as [])) } }));
 
 type Tool = Extract<Item, { type: "tool" }>;
 

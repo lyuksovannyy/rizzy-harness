@@ -4,7 +4,7 @@
 // model chains a workspace saves. Settings only, so it loads with that lazy
 // chunk; lib/workspaces.ts is part of the first load.
 import type { AgentChain, Perm, WorkspaceRole, WorkspaceSettings } from "../types";
-import type { Plan } from "./models";
+import type { Plan } from "./modelPlan";
 
 export const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "guest"];
 /** The members panel's columns, in the server's wire order. */

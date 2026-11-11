@@ -3,9 +3,10 @@
 // and Log out. Workspaces is a submenu beside it, or drilled in place on a
 // narrow screen or a touch pointer. A new workspace is named in a small
 // dialog: a text field may not live inside a menu.
+import "../lib/i18nPages";
 import { Check, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { pageApi } from "../apiPages";
 import { t } from "../lib/i18n";
 import type { Route } from "../lib/routes";
 import { workspaceName } from "../lib/workspaces";
@@ -296,7 +297,7 @@ function NewWorkspace(props: AccountMenuProps) {
     setBusy(true);
     setErr(null);
     try {
-      const w = await api.createWorkspace(n);
+      const w = await pageApi.createWorkspace(n);
       await props.onSwitch(w.workspace_id);
       props.onView(null);
     } catch (x) {
