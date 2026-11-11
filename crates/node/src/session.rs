@@ -44,9 +44,10 @@ pub(crate) struct Session {
     parent_session: Option<SessionId>,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
-    /// Tools a person approved in the running turn. "Allow for this turn"
-    /// counts only once the tool is in here (cleared when a turn starts).
-    turn_approved: Mutex<HashSet<String>>,
+    /// Calls (tool and canonical argument, [`harness_tools::call_key`]) a
+    /// person approved in the running turn. "Allow for this turn" is offered
+    /// and honoured only for a call in here (cleared when a turn starts).
+    turn_approved: Mutex<HashSet<harness_tools::CallKey>>,
     /// An append of the running turn failed: the rest of its appends fail
     /// without being tried, so the turn ends (cleared when a turn starts).
     log_failed: AtomicBool,
@@ -1214,13 +1215,16 @@ impl TurnHost for Session {
         if !self.mode.needs_approval(risk) {
             return Decision::Allow;
         }
-        // "For this turn" is offered, and honoured, only after this tool has
-        // been approved once in the turn, so its first call is always seen.
+        // "For this turn" is offered, and honoured, only after this exact
+        // call has been approved once in the turn, so every call is seen at
+        // least once; what it then covers is this exact call, keyed as the
+        // loop keys it (PLAN.md T4).
+        let key = harness_tools::call_key(&self.cwd, tool, input);
         let turn_allow = self
             .turn_approved
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .contains(tool);
+            .contains(&key);
         let approval_id = new_id();
         let (tx, rx) = oneshot::channel();
         self.approvals
@@ -1276,7 +1280,7 @@ impl TurnHost for Session {
             self.turn_approved
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(tool.to_string());
+                .insert(key);
         }
         decision
     }

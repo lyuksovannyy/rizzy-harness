@@ -19,15 +19,27 @@ struct Harness {
 }
 
 fn config(store: Store, policy: NodePolicy) -> NodeConfig {
+    config_with(
+        store,
+        policy,
+        Arc::new(Mock {
+            delay: Duration::from_millis(5),
+        }),
+    )
+}
+
+fn config_with(
+    store: Store,
+    policy: NodePolicy,
+    provider: Arc<dyn harness_agent_native::Provider>,
+) -> NodeConfig {
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
         policy,
         store,
         backend: Arc::new(NativeBackend::new(
-            Arc::new(Mock {
-                delay: Duration::from_millis(5),
-            }),
+            provider,
             harness_tools::builtin(),
             NativeConfig::default(),
         )),
@@ -44,11 +56,24 @@ fn config(store: Store, policy: NodePolicy) -> NodeConfig {
 
 impl Harness {
     async fn new(policy: impl FnOnce(&std::path::Path) -> NodePolicy) -> Self {
+        Self::with_provider(
+            policy,
+            Arc::new(Mock {
+                delay: Duration::from_millis(5),
+            }),
+        )
+        .await
+    }
+
+    async fn with_provider(
+        policy: impl FnOnce(&std::path::Path) -> NodePolicy,
+        provider: Arc<dyn harness_agent_native::Provider>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
-        let mut cfg = config(store, policy(dir.path()));
+        let mut cfg = config_with(store, policy(dir.path()), provider);
         cfg.checkpoints_dir = Some(dir.path().join("checkpoints"));
         let node = NodeRuntime::start(cfg).await.unwrap();
         let mut link = node.attach().await;
@@ -1618,4 +1643,180 @@ async fn ack_time_on_a_long_session() {
         }
         println!("ack after {n} events: {:?}", t.elapsed());
     }
+}
+
+// ---- "allow for this turn" covers the exact call (ADOPTION_PLAN A.2) ------
+
+/// Calls what the user (or a parent's task) lists, one per request: the
+/// message holds a JSON array of `[tool, input]`; then it answers "done".
+struct Script;
+
+#[async_trait::async_trait]
+impl harness_agent_native::Provider for Script {
+    fn name(&self) -> &'static str {
+        "script"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::ChatRequest,
+        _deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<harness_agent_native::Completion, harness_agent_native::ProviderError> {
+        use harness_agent_native::ChatMsg;
+        let since = req
+            .messages
+            .iter()
+            .rposition(|m| m.user_text().is_some())
+            .unwrap_or(0);
+        let user = req.messages[since].user_text().unwrap_or("");
+        let calls: Vec<(String, serde_json::Value)> = user
+            .find('[')
+            .zip(user.rfind(']'))
+            .and_then(|(a, b)| serde_json::from_str(&user[a..=b]).ok())
+            .unwrap_or_default();
+        let done = req.messages[since + 1..]
+            .iter()
+            .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+            .count();
+        let tool_calls = calls
+            .get(done)
+            .map(|(tool, input)| ToolCallRef {
+                call_id: harness_core::new_id(),
+                tool: tool.clone(),
+                input: input.clone(),
+            })
+            .into_iter()
+            .collect();
+        Ok(harness_agent_native::Completion {
+            text: "done".into(),
+            tool_calls,
+            usage: None,
+        })
+    }
+}
+
+impl Harness {
+    /// Send `text` as a prompt to `sid` (as `agent`, if given), answer every
+    /// approval of any session with `answer(n)` (n counts from 0), until
+    /// `sid`'s turn ends. Returns each request with its session.
+    async fn turn_answering(
+        &mut self,
+        sid: SessionId,
+        agent: Option<harness_core::agent::AgentSpec>,
+        text: String,
+        answer: impl Fn(usize) -> Decision,
+    ) -> Vec<(SessionId, ApprovalRequested)> {
+        self.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent,
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text,
+            images: vec![],
+        });
+        let mut asked = vec![];
+        loop {
+            let k = self
+                .until(|k| matches!(k, EventKind::ApprovalRequested(_) | EventKind::TurnEnded(_)))
+                .await;
+            let session = self.seen.last().unwrap().session_id;
+            match k {
+                EventKind::ApprovalRequested(a) => {
+                    self.send(MasterToNode::ApprovalRespond {
+                        req_id: "a".into(),
+                        session_id: session,
+                        approval_id: a.approval_id.clone(),
+                        decision: answer(asked.len()),
+                    });
+                    asked.push((session, a));
+                }
+                EventKind::TurnEnded(_) if session == sid => return asked,
+                _ => {}
+            }
+        }
+    }
+}
+
+fn bash(cmd: &str) -> serde_json::Value {
+    serde_json::json!(["bash", {"command": cmd}])
+}
+
+fn commands(asked: &[(SessionId, ApprovalRequested)]) -> Vec<&str> {
+    asked
+        .iter()
+        .map(|(_, a)| a.input["command"].as_str().unwrap_or(""))
+        .collect()
+}
+
+/// Approving `ls` "for this turn" approves `ls`, not `bash`: a later
+/// `rm -rf x` in the same turn is asked about.
+#[tokio::test]
+async fn allow_for_this_turn_does_not_cover_another_command() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    std::fs::create_dir(h.ws.join("x")).unwrap();
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("ls"), bash("ls"), bash("rm -rf x")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |n| {
+            if n < 2 {
+                Decision::AllowSession
+            } else {
+                Decision::Deny
+            }
+        })
+        .await;
+    assert_eq!(commands(&asked), ["ls", "ls", "rm -rf x"]);
+    assert!(asked[1].1.turn_allow);
+    // Its first request in the turn: "for this turn" is not offered.
+    assert!(!asked[2].1.turn_allow);
+    assert!(h.ws.join("x").exists(), "rm -rf x ran");
+}
+
+/// The same command twice after "for this turn" is asked once; the next
+/// turn asks again, and its first request cannot be "for this turn".
+#[tokio::test]
+async fn allow_for_this_turn_covers_the_same_command_until_the_turn_ends() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    let sid = h.create().await;
+    let calls = serde_json::json!([bash("ls"), bash("ls"), bash("ls"), bash("ls")]);
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::AllowSession)
+        .await;
+    // The first answer is cut to a single allow; the second holds.
+    assert_eq!(commands(&asked), ["ls", "ls"]);
+    assert!(!asked[0].1.turn_allow && asked[1].1.turn_allow);
+
+    let asked = h
+        .turn_answering(sid, None, calls.to_string(), |_| Decision::AllowSession)
+        .await;
+    assert_eq!(commands(&asked), ["ls", "ls"]);
+    assert!(!asked[0].1.turn_allow, "the allowance outlived its turn");
+}
+
+/// A sub-agent started in the turn does not inherit the parent's allowance.
+#[tokio::test]
+async fn a_sub_agent_does_not_inherit_allow_for_this_turn() {
+    let mut h = Harness::with_provider(default_policy, Arc::new(Script)).await;
+    let sid = h.create().await;
+    let task = serde_json::json!([bash("ls")]).to_string();
+    let calls = serde_json::json!([
+        bash("ls"),
+        bash("ls"),
+        ["delegate", {"agent": "dev", "task": task}],
+    ]);
+    let asked = h
+        .turn_answering(
+            sid,
+            Some(agent("lead", vec![agent("dev", vec![])])),
+            calls.to_string(),
+            |_| Decision::AllowSession,
+        )
+        .await;
+    assert_eq!(commands(&asked), ["ls", "ls", "ls"], "{asked:?}");
+    let (child, request) = &asked[2];
+    assert_ne!(*child, sid, "the third request is the sub-agent's");
+    assert!(!request.turn_allow);
 }

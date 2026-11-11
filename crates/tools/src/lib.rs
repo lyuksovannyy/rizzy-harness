@@ -3,6 +3,7 @@
 //! Every tool is cancellable through `ToolCtx::cancel`. Path-taking tools are
 //! confined to the workspace unless the node policy says otherwise.
 
+pub mod approval;
 mod bash;
 pub mod env;
 pub mod filter;
@@ -25,6 +26,7 @@ use harness_core::refs::SharedRefs;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+pub use approval::{CallKey, call_key};
 pub use bash::Bash;
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
