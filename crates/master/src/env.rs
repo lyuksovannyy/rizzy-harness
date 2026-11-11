@@ -502,10 +502,10 @@ mod tests {
         let mut eff = file.clone();
         e.apply(&mut eff).unwrap();
         assert_eq!(eff.memory.backend, MemoryBackend::Qdrant);
-        eff.chat.summarize_after_tokens = 1234;
+        eff.chat.summarize_after_tokens = Some(1234);
         let out = e.for_file(&eff, &p).unwrap();
         assert_eq!(out.memory.backend, MemoryBackend::Off);
-        assert_eq!(out.chat.summarize_after_tokens, 1234);
+        assert_eq!(out.chat.summarize_after_tokens, Some(1234));
     }
 
     #[test]

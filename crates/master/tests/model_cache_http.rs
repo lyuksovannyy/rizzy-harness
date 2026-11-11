@@ -917,7 +917,7 @@ async fn inherited_fallbacks_and_effort() {
     f.list(&["a", "b", "c"]);
     let url = fake(f.clone()).await;
     let t = start().await;
-    let ms = json!([{"id": "a", "effort": true}, {"id": "b"}, {"id": "c"}]);
+    let ms = json!([{"id": "a", "effort": true, "context": 200000}, {"id": "b", "context": 8192}, {"id": "c"}]);
     let (st, v) = put_local(&t, &url, ms).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let assign = |general: Value| {
@@ -938,6 +938,13 @@ async fn inherited_fallbacks_and_effort() {
         .unwrap();
     assert_eq!(spec.effort.as_deref(), Some("high"));
     assert_eq!(spec.no_effort, ["loc::b"]);
+    // The node is told each chain model's known context window.
+    let windows: Vec<(&str, u64)> = spec
+        .context_windows
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    assert_eq!(windows, [("loc::a", 200_000), ("loc::b", 8192)]);
     // Only a fallback takes one: kept for it.
     assign(json!({"model": "loc::c", "fallbacks": ["loc::a"]})).await;
     let spec = t
@@ -962,7 +969,7 @@ async fn inherited_fallbacks_and_effort() {
     assert_eq!(coder.model.as_deref(), Some("loc::a"));
     assert_eq!(coder.fallbacks, ["loc::b"], "General's, inherited");
     assert_eq!(coder.unavailable, ["loc::a"]);
-    let ultra = t.master.agent_spec(Some("ultracode"), None).unwrap();
+    let ultra = t.master.agent_spec(Some("teamlead"), None).unwrap();
     assert_eq!(ultra.fallbacks, ["loc::b"]);
     assert!(!ultra.delegates.is_empty());
     for d in &ultra.delegates {
@@ -987,8 +994,11 @@ async fn inherited_fallbacks_and_effort() {
     let coder = t.master.agent_spec(Some("coder"), None).unwrap();
     assert_eq!(coder.model.as_deref(), Some("loc::c"));
     assert!(coder.fallbacks.is_empty());
-    let scout = t.master.agent_spec(Some("scout"), Some("loc::c")).unwrap();
-    assert!(scout.fallbacks.is_empty());
+    let reviewer = t
+        .master
+        .agent_spec(Some("reviewer"), Some("loc::c"))
+        .unwrap();
+    assert!(reviewer.fallbacks.is_empty());
 }
 
 /// Every agent has a stable avatar from its id until an admin sets one,

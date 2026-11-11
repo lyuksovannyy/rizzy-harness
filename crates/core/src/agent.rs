@@ -95,6 +95,12 @@ pub struct AgentSpec {
     /// reasoning effort: a request to one of these goes without `effort`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_effort: Vec<String>,
+    /// Context windows (tokens) of the chain's models, where the master
+    /// knows them from the provider's listing or the admin. Compaction is
+    /// keyed to these; a model missing here falls back to the configured
+    /// trigger.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub context_windows: std::collections::BTreeMap<String, u64>,
     /// `low` | `medium` | `high` | `max`; only applied if the model supports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,

@@ -362,7 +362,12 @@ async fn serve(
     }
     let (agents, agent_errors) = harness_agents::AgentSet::load(&dir.join("agents"));
     for e in &agent_errors {
-        tracing::warn!(error = %e, "skipping agent definition");
+        match e {
+            harness_agents::AgentError::AliasTaken(_) => {
+                tracing::warn!(error = %e, "dropping an agent alias")
+            }
+            _ => tracing::warn!(error = %e, "skipping agent definition"),
+        }
     }
     master.set_agents(agents);
     master.load_agent_edits().await?;

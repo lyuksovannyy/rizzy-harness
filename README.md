@@ -114,13 +114,15 @@ Workspaces). The last member leaving a workspace deletes it.
 
 Settings has four sections:
 
-- **Account**: your profile, appearance, search engines, default agent and
-  model, your memories, your password.
+- **Account**: your profile, appearance, search engines, default agents (one
+  for chats, one for Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
-  defaults it gives, and whether your memories are used in its chats.
+  defaults it gives, and whether your facts (your memories) are shared with
+  its chats: always in Personal; in a team workspace off until you turn it
+  on, for the workspace's creator too.
 - **Workspace admin** (admins and owners; not for Personal): its name, default
-  agent, the model each agent uses there (General's is the workspace's default
-  model), members and roles, deleting it.
+  agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
+  workspace's default model), members and roles, deleting it.
 - **Server** (server admins): providers, memory recall, token savings, nodes,
   accounts, and every workspace (owners, members, making someone owner,
   deleting). Agents have their own page in the sidebar (below).
@@ -239,7 +241,8 @@ else downloads. Design notes and the API: [docs/media.md](docs/media.md).
 
 **Artifacts** holds the files agents build for you: binaries, packages,
 archives, documents and media, each name with its versions. In an agentic
-chat an agent calls `publish` (Coder and Writer have it, and any custom agent
+chat an agent calls `publish` (Software Developer, Senior Teamlead and Writer
+have it, and any custom agent
 that may edit files or run commands); in `ask` mode you approve each publish. You can also
 use **Save as artifact** on a file a tool card shows, or the field in the chat
 header. The node copies the file (a folder is packed as `.tar.gz`), the
@@ -377,12 +380,22 @@ and listings never mark it. Testing a saved provider in the UI refreshes its
 listing too, but only with its saved key and preset: a test with a key typed
 into the form, not yet saved, changes neither the listing nor the marks.
 
-An agent has one model; one model may serve several agents. When a turn's
-model is unavailable, or its request fails before any output with a model
+An agent has one model; one model may serve several agents. A model call
+that fails before any output for a passing reason (rate limit 429, server
+error 500/502/503/504, Anthropic's overloaded 529, no connection, a stream
+that breaks before its first word) is retried up to 3 times, waiting 2, 4,
+then 8 seconds (with jitter), or what the provider's `Retry-After` asks; a
+cancel ends the wait at once. A `Retry-After` over 60 s (a quota window, say)
+is not retried: the agent's next fallback model answers at once, or without
+one the turn ends with a message naming the wait. A refused key, a missing
+permission, an exhausted quota or a bad request is not retried, and nothing
+is retried once part of the answer is on screen. The chat shows the turn as
+still running while it waits. When a turn's
+model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
 which model answered. An agent without an `[agent_models]` entry runs on
-the default (General's main model) with General's fallbacks; a sub-agent
+the default (the Assistant's main model) with the Assistant's fallbacks; a sub-agent
 without a model of its own runs on its parent's model with the parent's
 fallbacks. A reasoning effort goes only to the models of the chain that take
 one. Unavailable models in use show as notices on the home screen:
@@ -413,7 +426,8 @@ Chats and web tools (restart after changing):
 ```toml
 [chat]
 incognito_ttl_minutes = 1440         # incognito chats deleted after this idle time
-summarize_after_tokens = 24000       # 0 = never summarise older turns
+# summarize_after_tokens = 24000     # unset: the model's context window less a reserve
+                                     # (24000 when the window is unknown); 0 = never
 
 [web]
 search = "searxng"                   # none | searxng | brave
@@ -431,6 +445,21 @@ preset = "balanced"                  # fast | balanced | best (Ollama model name
 # embeddings_model = "nomic-embed-text"  # overrides the preset; required for provider
 # mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
+
+Older turns are summarised when the history nears the model's context window
+(the window from the provider's model listing or your `context` on a model,
+less a fifth of it, at least 16k, for the reply and tool results), measured
+with the token count the provider reported for the previous turn. Set
+`summarize_after_tokens` to use a fixed number instead. If a provider still
+refuses a request as too long, the turn summarises older turns, hides all but
+the newest large tool output, and tries once more; a second refusal ends the
+turn with a message saying so. A summary is only made by a model whose window
+holds what it reads: a long history is summarised in pieces, and a single turn
+larger than the window is left unsummarised rather than skipped. A summary
+that is not at least a tenth smaller than the history it replaces is thrown
+away (nothing is logged, the history stays as it was). After two failed or
+useless summaries in one turn, the turn does not try again; if the context
+then does not fit, the error says summarising was tried and did not help.
 
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.
@@ -667,6 +696,11 @@ own, smaller cap and says when the live stream was cut.
 asks for more is cut at that value, and the tool description the model sees
 states it. Neither an agent definition, a prompt nor the master can raise
 either; a value outside its range stops the node at start.
+
+When a model's answer reaches its output limit while it is writing a tool
+call, that call (and every other call in the same answer) is not run, even if
+it looks complete; the model is told to split the change into smaller calls.
+Three cut answers in a row end the turn with a message saying so.
 
 **File limits.** The file tools only open regular files: a FIFO, a device
 (`/dev/zero`), a socket or a directory is refused at once, also through a
@@ -956,9 +990,62 @@ systemctl daemon-reload && systemctl enable --now rizzy-harness-node
 login), updates, and how the node reaches the master (a VPN such as WireGuard
 rather than the open internet). rizzy-harness does not touch them.
 
-The **Ultracode** agent splits big jobs into parallel sub-tasks for Coder,
-Scout and Writer (at most 4 per turn and 200k tokens by default; set
-`delegates`, `max_subagents` and `max_subagent_tokens` in an agent file).
+The built-in agents, grouped by category in the picker:
+
+| Agent (`@handle`, aliases) | Category | Runs as | Can |
+|---|---|---|---|
+| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory |
+| Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
+| Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory |
+| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
+| Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
+| Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
+| Scout (`@scout`) | IT | sub-agent | read and search files only |
+| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
+
+**Researcher in Agentic sessions.** Web and memory tools exist only in chats,
+not on nodes yet. In an Agentic session, Researcher is therefore not offered
+to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
+to it by name is refused with the reason, so the lead never believes research
+was done that was not. The rule is general: any sub-agent that lists tools
+of which none is available on the node is treated the same way; one that lists
+no tools on purpose (Smol) or has some of them is unaffected.
+
+**Default agents per mode.** A chat gets the Assistant unless you pick
+another; an Agentic chat gets the Software Developer. A workspace overrides
+each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
+your own preferences override the workspace's in the picker. An agent you
+name for the chat always wins. The Agentic default must be able to change
+files or run commands: the Assistant, Smol and Researcher are refused there,
+saying why; so is an agent that runs only as a sub-agent or does not exist,
+naming the setting. An agent with file tools may be the chats' default: in a
+chat it simply has no file or command tools (a call to one gets "unknown
+tool").
+
+"Your facts" are the memories in Settings → Account; an agent without them
+neither recalls nor proposes them. Scout and Reviewer are read-only by their
+tool list: they are offered no tool that writes or runs anything, and the loop
+refuses any other call. That is not a sandbox: there is no read-only shell
+yet, so Reviewer cannot list a change itself and reviews what it is given or
+reads.
+
+A message that starts with `@handle` (an id or an alias: `@dev fix the
+build`) goes to that agent for one turn; the chat's agent stays. An agent
+that runs only as a sub-agent (Scout) cannot answer a chat: `@scout ...`,
+choosing it for a chat, or making it a default is refused with a message
+saying so. An agent that does not exist is refused wherever it is named, and
+the error names it. A chat whose agent no longer exists (such as the removed
+Ultracode) still opens, but its next message is refused ("this chat's agent
+"ultracode" no longer exists: choose another agent for this chat"); pick
+another agent in the chat and it goes on. A default agent setting that names
+a missing agent is refused the same way when a chat needs it, naming the
+setting to fix. A routine naming a missing agent is paused and says why. A
+message that starts with `@something` that is no agent is ordinary text.
+
+Delegating agents split big jobs into parallel sub-tasks (at most 4 per turn
+and 200k tokens by default; set `delegates`, `max_subagents` and
+`max_subagent_tokens` in an agent file). Delegation is one level deep: a
+sub-agent never delegates further.
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
@@ -969,9 +1056,15 @@ features: only their summary and **additional instructions** (added after
 their own) change there, and **Duplicate** makes an editable copy. **Write
 from instructions** asks the default model for a summary. An agent file can
 set `memory: false` (no recall, no `remember`), `project_memory: false` (no
-project facts in project chats) and `available_as: [agent]` or
-`[subagent]` (default both). Deleting an agent leaves its chats to the
-default agent. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
+project facts in project chats), `available_as: [agent]` or
+`[subagent]` (default both), `aliases: [h, ...]` (more handles) and
+`category: IT` (the picker's group, default General). Ids and aliases are one
+namespace: making or changing an agent with a handle another agent has is
+refused, naming it ("`ai` is already reserved for the Assistant agent
+(general)"), as is an alias listed twice or equal to the agent's own id. An
+existing file or agent whose id is now a built-in's alias keeps its id and the
+built-in loses that alias (logged at startup, naming both agents). Deleting an agent leaves its chats
+readable; each needs another agent before its next message. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
 ## Development
 

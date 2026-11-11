@@ -43,6 +43,13 @@ pub trait TurnHost: Send + Sync {
         Err("delegation is not available here".into())
     }
 
+    /// Whether this node's policy denies `tool` outright (`denied_tools`).
+    /// A sub-agent whose declared tools are all denied or unregistered here
+    /// is not offered as a delegate.
+    fn tool_denied(&self, _tool: &str) -> bool {
+        false
+    }
+
     /// Where this session's turns publish files (`publish`); `None` when
     /// publishing is off here (chat sessions, nodes without staging).
     fn artifacts(&self) -> Option<std::sync::Arc<dyn crate::artifacts::ArtifactSink>> {

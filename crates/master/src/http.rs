@@ -239,9 +239,13 @@ impl From<CommandError> for ApiError {
             CommandError::UnknownSession => StatusCode::NOT_FOUND,
             CommandError::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-            CommandError::Rejected(_) => StatusCode::CONFLICT,
+            CommandError::Rejected(_)
+            | CommandError::AgentGone(_)
+            | CommandError::BadDefault(_) => StatusCode::CONFLICT,
             CommandError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            CommandError::UnknownAgent(_) => StatusCode::BAD_REQUEST,
+            CommandError::UnknownAgent(_) | CommandError::SubagentOnly { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             CommandError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
         };
         ApiError(code, e.to_string())
@@ -536,9 +540,17 @@ async fn agents(
         .iter()
         .map(|a| agent_json(&m, &r, a))
         .collect();
-    Ok(Json(
-        json!({ "agents": agents, "default": r.default_agent() }),
-    ))
+    Ok(Json(json!({
+        "agents": agents,
+        // The ordinary-mode default, as before.
+        "default": r.default_agent(),
+        // The default per mode, for the picker to preselect; null when
+        // the setting names an agent that cannot work there.
+        "defaults": {
+            "chat": r.default_for(harness_core::event::Profile::Chat).ok(),
+            "agentic": r.default_for(harness_core::event::Profile::Agentic).ok(),
+        },
+    })))
 }
 
 async fn notices(

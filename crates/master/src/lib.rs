@@ -313,6 +313,15 @@ fn deny_untrusted(spec: &mut harness_core::agent::AgentSpec) {
     }
 }
 
+/// The mode of a stored chat (rows from before profiles are Agentic, as a
+/// new session without one is).
+fn profile_of(row: &harness_store::SessionRow) -> Profile {
+    match row.profile.as_deref() {
+        Some("chat") => Profile::Chat,
+        _ => Profile::Agentic,
+    }
+}
+
 /// A leading `@agent-id` in a prompt routes that turn to the agent.
 pub fn leading_mention(text: &str) -> Option<&str> {
     let rest = text.trim_start().strip_prefix('@')?;
@@ -339,8 +348,27 @@ pub enum CommandError {
     Rejected(String),
     #[error("store: {0}")]
     Store(#[from] harness_store::StoreError),
-    #[error("unknown agent {0:?}")]
+    #[error("unknown agent {0:?}: choose one of the agents listed")]
     UnknownAgent(String),
+    /// The chat's own agent no longer exists (deleted, its file removed, a
+    /// removed built-in such as `ultracode`). The chat stays readable; a
+    /// prompt needs another agent first.
+    #[error(
+        "this chat's agent {0:?} no longer exists: choose another agent for this chat, \
+         then send the message again"
+    )]
+    AgentGone(String),
+    /// A default agent setting names an agent that cannot run the chat; the
+    /// text names the setting and the agent.
+    #[error("{0}")]
+    BadDefault(String),
+    /// The agent exists but runs only as a sub-agent (`available_as`): it
+    /// takes sub-tasks from other agents and never runs a chat.
+    #[error(
+        "{name} (@{id}) works only as a sub-agent: other agents hand it tasks, but it cannot \
+         answer a chat. Choose another agent"
+    )]
+    SubagentOnly { id: String, name: String },
     /// A command too large for the node link's frame (images and
     /// attachments together); the text says so to the user.
     #[error("{0}")]
@@ -1104,14 +1132,19 @@ impl Master {
         // default unless the user picked another: the default counts as no
         // choice, so the session keeps following the defaults.
         let r = self.resolver_for(workspace.as_deref()).await;
-        let auto = r.agent_spec_with(spec.agent_id.as_deref(), None, None)?;
+        // An explicit agent beats the defaults; without one, the mode's.
+        let agent_id = match spec.agent_id {
+            Some(a) => a,
+            None => r.default_for(profile)?.to_string(),
+        };
+        let auto = r.agent_spec_with(Some(&agent_id), None, None)?;
         let chosen = spec
             .model
             .filter(|m| !m.trim().is_empty())
             .filter(|m| auto.model.as_deref() != Some(m.as_str()));
         let agent = match &chosen {
             None => auto,
-            Some(m) => r.agent_spec_with(spec.agent_id.as_deref(), Some(m), None)?,
+            Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
         let sid = SessionId::new();
@@ -1202,16 +1235,34 @@ impl Master {
             }
             None => None,
         };
-        let asker = asker.filter(|id| r.agents().get(id).is_some());
-        let mention = leading_mention(&text)
-            .filter(|id| reply.is_none() && r.agents().get(id).is_some())
-            .map(str::to_string);
-        // A chat whose agent was deleted goes on with the default one.
-        let kept = row
-            .agent_id
-            .clone()
-            .filter(|id| r.agents().get(id).is_some());
-        let chosen = asker.or(agent_id).or(mention).or(kept);
+        let asker = asker.and_then(|id| r.top_level(&id).ok().map(|a| a.id.clone()));
+        // A leading @mention of an agent that runs only as a sub-agent is
+        // refused, not dropped: the user named an agent that exists, and an
+        // answer from another one would read as if it came from that one.
+        // A mention of no agent at all is just text ("@everyone").
+        // Only read when nothing ahead of it chose: a routine's or the
+        // popup's explicit agent wins, and an event's text cannot fail the
+        // turn by starting with such a mention.
+        let named = asker.or(agent_id);
+        let mention = match leading_mention(&text).filter(|_| reply.is_none() && named.is_none()) {
+            Some(handle) => match r.top_level(handle) {
+                Ok(a) => Some(a.id.clone()),
+                Err(e @ CommandError::SubagentOnly { .. }) => return Err(e),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        // The chat's own agent; one that is gone or became sub-agent-only
+        // refuses the prompt (an explicit agent or a mention still works).
+        let chosen = match named.or(mention) {
+            Some(id) => Some(id),
+            None => r.session_agent(row.agent_id.as_deref())?,
+        };
+        // A chat that never stored an agent gets its mode's default.
+        let chosen = match chosen {
+            Some(id) => Some(id),
+            None => Some(r.default_for(profile_of(&row))?.to_string()),
+        };
         let session_model = self.session_model(&row).await;
         let mut agent = r.agent_spec_with(
             chosen.as_deref(),
@@ -1320,10 +1371,11 @@ impl Master {
     ) -> Option<String> {
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         let session_model = self.session_model(row).await;
-        let kept = row
-            .agent_id
-            .clone()
-            .filter(|id| r.agents().get(id).is_some());
+        let kept = r
+            .session_agent(row.agent_id.as_deref())
+            .ok()
+            .flatten()
+            .or_else(|| r.default_for(profile_of(row)).ok().map(str::to_string));
         let main =
             match r.agent_spec_with(agent_id.or(kept.as_deref()), session_model.as_deref(), None) {
                 Ok(agent) => turn_model(&agent, session_model.as_deref(), row),

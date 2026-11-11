@@ -1,0 +1,395 @@
+{
+ "groups": {
+  "01-loop-dispatch-durability.md": {
+   "bytes": 207668,
+   "permalinks": 531,
+   "projects": 13
+  },
+  "02-approvals-permission-rules.md": {
+   "bytes": 410561,
+   "permalinks": 1108,
+   "projects": 13
+  },
+  "03-sandbox-containers-execution.md": {
+   "bytes": 129739,
+   "permalinks": 303,
+   "projects": 13
+  },
+  "04-credentials-secrets-auth.md": {
+   "bytes": 154595,
+   "permalinks": 380,
+   "projects": 13
+  },
+  "05-links-workers-protocols.md": {
+   "bytes": 190623,
+   "permalinks": 402,
+   "projects": 13
+  },
+  "06-sessions-fork-checkpoints.md": {
+   "bytes": 171656,
+   "permalinks": 384,
+   "projects": 13
+  },
+  "07-context-compaction-memory.md": {
+   "bytes": 321515,
+   "permalinks": 736,
+   "projects": 13
+  },
+  "08-edit-tools-mechanics.md": {
+   "bytes": 169693,
+   "permalinks": 347,
+   "projects": 13
+  },
+  "09-subagents-models-retry.md": {
+   "bytes": 209072,
+   "permalinks": 395,
+   "projects": 13
+  },
+  "10-extensibility-unattended.md": {
+   "bytes": 211286,
+   "permalinks": 566,
+   "projects": 13
+  }
+ },
+ "files": {
+  "cline.agents-sessions.md": {
+   "bytes": 111816,
+   "findings": 37,
+   "permalinks": 260,
+   "marked_checked": 24,
+   "marked_corrected": 5,
+   "has_review": true
+  },
+  "cline.safety.md": {
+   "bytes": 98868,
+   "findings": 37,
+   "permalinks": 218,
+   "marked_checked": 32,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "codex.agents.md": {
+   "bytes": 102535,
+   "findings": 29,
+   "permalinks": 308,
+   "marked_checked": 19,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "codex.safety.md": {
+   "bytes": 73674,
+   "findings": 28,
+   "permalinks": 149,
+   "marked_checked": 27,
+   "marked_corrected": 5,
+   "has_review": true
+  },
+  "codex.sessions.md": {
+   "bytes": 86077,
+   "findings": 37,
+   "permalinks": 181,
+   "marked_checked": 16,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "deepseek-harness.agents.md": {
+   "bytes": 81447,
+   "findings": 27,
+   "permalinks": 158,
+   "marked_checked": 22,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "deepseek-harness.safety.md": {
+   "bytes": 74895,
+   "findings": 25,
+   "permalinks": 163,
+   "marked_checked": 23,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "deepseek-harness.sessions.md": {
+   "bytes": 85395,
+   "findings": 28,
+   "permalinks": 228,
+   "marked_checked": 16,
+   "marked_corrected": 0,
+   "has_review": true
+  },
+  "goose.agents.md": {
+   "bytes": 100784,
+   "findings": 39,
+   "permalinks": 222,
+   "marked_checked": 19,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "goose.safety.md": {
+   "bytes": 79972,
+   "findings": 35,
+   "permalinks": 154,
+   "marked_checked": 23,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "goose.sessions.md": {
+   "bytes": 92790,
+   "findings": 31,
+   "permalinks": 259,
+   "marked_checked": 21,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "hermes-agent.agents.md": {
+   "bytes": 125440,
+   "findings": 45,
+   "permalinks": 294,
+   "marked_checked": 21,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "hermes-agent.safety.md": {
+   "bytes": 68678,
+   "findings": 23,
+   "permalinks": 189,
+   "marked_checked": 17,
+   "marked_corrected": 2,
+   "has_review": true
+  },
+  "hermes-agent.sessions.md": {
+   "bytes": 88412,
+   "findings": 32,
+   "permalinks": 182,
+   "marked_checked": 16,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "oh-my-pi.agents.md": {
+   "bytes": 71055,
+   "findings": 35,
+   "permalinks": 175,
+   "marked_checked": 18,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "oh-my-pi.safety.md": {
+   "bytes": 66194,
+   "findings": 32,
+   "permalinks": 143,
+   "marked_checked": 32,
+   "marked_corrected": 2,
+   "has_review": true
+  },
+  "oh-my-pi.sessions.md": {
+   "bytes": 99935,
+   "findings": 34,
+   "permalinks": 272,
+   "marked_checked": 18,
+   "marked_corrected": 2,
+   "has_review": true
+  },
+  "openclaw.agents.md": {
+   "bytes": 100868,
+   "findings": 38,
+   "permalinks": 208,
+   "marked_checked": 19,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "openclaw.safety.md": {
+   "bytes": 75781,
+   "findings": 34,
+   "permalinks": 166,
+   "marked_checked": 29,
+   "marked_corrected": 9,
+   "has_review": true
+  },
+  "openclaw.sessions.md": {
+   "bytes": 68136,
+   "findings": 31,
+   "permalinks": 137,
+   "marked_checked": 18,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "opencode.agents.md": {
+   "bytes": 96746,
+   "findings": 38,
+   "permalinks": 170,
+   "marked_checked": 19,
+   "marked_corrected": 0,
+   "has_review": true
+  },
+  "opencode.safety.md": {
+   "bytes": 65461,
+   "findings": 30,
+   "permalinks": 134,
+   "marked_checked": 29,
+   "marked_corrected": 2,
+   "has_review": true
+  },
+  "opencode.sessions.md": {
+   "bytes": 82007,
+   "findings": 28,
+   "permalinks": 194,
+   "marked_checked": 19,
+   "marked_corrected": 2,
+   "has_review": true
+  },
+  "opencodex.md": {
+   "bytes": 98525,
+   "findings": 38,
+   "permalinks": 226,
+   "marked_checked": 18,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "openhands.agents-sessions.md": {
+   "bytes": 114841,
+   "findings": 35,
+   "permalinks": 237,
+   "marked_checked": 20,
+   "marked_corrected": 2,
+   "has_review": true
+  },
+  "openhands.safety.md": {
+   "bytes": 70909,
+   "findings": 32,
+   "permalinks": 155,
+   "marked_checked": 25,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "pi.agents.md": {
+   "bytes": 96165,
+   "findings": 30,
+   "permalinks": 209,
+   "marked_checked": 17,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "pi.safety.md": {
+   "bytes": 92124,
+   "findings": 36,
+   "permalinks": 212,
+   "marked_checked": 31,
+   "marked_corrected": 3,
+   "has_review": true
+  },
+  "pi.sessions.md": {
+   "bytes": 81291,
+   "findings": 29,
+   "permalinks": 177,
+   "marked_checked": 15,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "warp.md": {
+   "bytes": 73684,
+   "findings": 29,
+   "permalinks": 214,
+   "marked_checked": 15,
+   "marked_corrected": 1,
+   "has_review": true
+  },
+  "zed.md": {
+   "bytes": 86646,
+   "findings": 26,
+   "permalinks": 185,
+   "marked_checked": 15,
+   "marked_corrected": 2,
+   "has_review": true
+  }
+ },
+ "comparison_bytes": 123843,
+ "patterns_bytes": 104730,
+ "docs-vs-code_bytes": 207582,
+ "ours_bytes": 183031,
+ "not-settled_bytes": 37147,
+ "repos": {
+  "codex": {
+   "repo": "openai/codex",
+   "sha": "82e6bacb9c6950d3b56cb153847fa80bdd698053",
+   "branch": "main",
+   "date": "2026-11-10T19:52:49Z"
+  },
+  "opencodex": {
+   "repo": "lidge-jun/opencodex",
+   "sha": "ddee2c20030c1f0ec852202256be877397e8f396",
+   "branch": "dev",
+   "date": "2026-11-11T04:58:42+09:00"
+  },
+  "opencode": {
+   "repo": "anomalyco/opencode",
+   "sha": "05d347d75054bf27778750ad5f2cd30336e81d8f",
+   "branch": "dev",
+   "date": "2026-11-10T20:28:23Z"
+  },
+  "deepseek-harness": {
+   "repo": "deepseek-ai/deepseek-harness",
+   "sha": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+   "branch": "master",
+   "date": "2026-11-04T16:40:00+08:00"
+  },
+  "oh-my-pi": {
+   "repo": "can1357/oh-my-pi",
+   "sha": "e325ffc73ab86e03bdd20a91b77d8e2b3964c906",
+   "branch": "main",
+   "date": "2026-11-10T21:11:46+01:00"
+  },
+  "pi": {
+   "repo": "earendil-works/pi",
+   "sha": "91d9719b4123a83816249d7a7917c75126bb55af",
+   "branch": "main",
+   "date": "2026-11-10T21:22:05+01:00"
+  },
+  "openhands": {
+   "repo": "OpenHands/OpenHands",
+   "sha": "d7293dfd671e23dab182fe71c247ff05f48e780b",
+   "branch": "main",
+   "date": "2026-11-10T21:12:50+01:00"
+  },
+  "openclaw": {
+   "repo": "openclaw/openclaw",
+   "sha": "8bac830dcb8ff99055ba71558dd369a989cc7881",
+   "branch": "main",
+   "date": "2026-11-10T20:27:14Z"
+  },
+  "goose": {
+   "repo": "aaif-goose/goose",
+   "sha": "14bf51817b79f6e98ca73c6eda61c11d9d5cc892",
+   "branch": "main",
+   "date": "2026-11-10T19:00:38Z"
+  },
+  "hermes-agent": {
+   "repo": "NousResearch/hermes-agent",
+   "sha": "95fc3e668fc1e13ad05d22a4f02fccc6a6d6ce02",
+   "branch": "main",
+   "date": "2026-11-10T10:58:48-08:00"
+  },
+  "zed": {
+   "repo": "zed-industries/zed",
+   "sha": "3def8bad0b62dbda02d5b67b00df96fe8d3957bd",
+   "branch": "main",
+   "date": "2026-11-10T18:56:15Z"
+  },
+  "warp": {
+   "repo": "warpdotdev/warp",
+   "sha": "4b790f5fac9a2cc637c865aacbfa4f2cf64f6c39",
+   "branch": "master",
+   "date": "2026-11-10T14:14:26-05:00"
+  },
+  "cline": {
+   "repo": "cline/cline",
+   "sha": "500a40e7b76692153906b44dd68732520a966663",
+   "branch": "main",
+   "date": "2026-11-10T12:29:54-08:00"
+  }
+ },
+ "totals": {
+  "files": 31,
+  "findings": 1008,
+  "permalinks": 6179,
+  "marked_checked": 653
+ }
+}

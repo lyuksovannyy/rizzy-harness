@@ -1,4 +1,4 @@
-//! Ultracode delegation: parallel child sessions, caps, depth one, owner
+//! Teamlead delegation: parallel child sessions, caps, depth one, owner
 //! inheritance, cancel cascading to children.
 
 use std::sync::Arc;
@@ -13,6 +13,41 @@ use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::Store;
 
 async fn setup() -> (Master, String, tempfile::TempDir) {
+    setup_with(Arc::new(Mock {
+        delay: Duration::from_millis(10),
+    }))
+    .await
+}
+
+/// Passes requests to the mock and keeps the `delegate` tool each one offered.
+struct Seen {
+    inner: Mock,
+    delegate_tools: std::sync::Mutex<Vec<harness_agent_native::provider::ToolSpec>>,
+}
+
+#[async_trait::async_trait]
+impl harness_agent_native::provider::Provider for Seen {
+    fn name(&self) -> &'static str {
+        "seen"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::provider::ChatRequest,
+        deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<
+        harness_agent_native::provider::Completion,
+        harness_agent_native::provider::ProviderError,
+    > {
+        if let Some(t) = req.tools.iter().find(|t| t.name == "delegate") {
+            self.delegate_tools.lock().unwrap().push(t.clone());
+        }
+        self.inner.complete(req, deltas).await
+    }
+}
+
+async fn setup_with(
+    provider: Arc<dyn harness_agent_native::provider::Provider>,
+) -> (Master, String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
@@ -31,9 +66,7 @@ async fn setup() -> (Master, String, tempfile::TempDir) {
         },
         store: Store::open_in_memory().unwrap(),
         backend: Arc::new(NativeBackend::new(
-            Arc::new(Mock {
-                delay: Duration::from_millis(10),
-            }),
+            provider,
             harness_tools::builtin(),
             NativeConfig::default(),
         )),
@@ -87,12 +120,12 @@ fn outputs(evs: &[RawEvent]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn ultracode_delegates_in_parallel_within_caps() {
+async fn teamlead_delegates_in_parallel_within_caps() {
     let (m, ws, _d) = setup().await;
     // Coder and Writer can change files: they need a repository for their
     // worktrees, or they are not started.
     git(&ws, &["init", "-q"]);
-    let sid = session(&m, &ws, "ultracode").await;
+    let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
         "delegate: coder=slow: 20 | scout=slow: 20 | writer=draft notes | coder=delegate: scout=nested | scout=fifth".into(),
@@ -151,19 +184,160 @@ async fn ultracode_delegates_in_parallel_within_caps() {
         && e.payload["text"].as_str().unwrap().starts_with("session: ")));
 
     // A plain agent gets no delegate tool at all.
-    let plain = session(&m, &ws, "coder").await;
+    let plain = session(&m, &ws, "reviewer").await;
     m.prompt(plain, "delegate: scout=x".into(), PromptOpts::default())
         .await
         .unwrap();
     let evs = turns_ended(&m, plain, 1).await;
     assert!(outputs(&evs)[0].contains("unknown tool `delegate`"));
+
+    // Agents that run only as agents are handed no sub-task, named by id
+    // or by alias: the node refuses what is not in the roster.
+    m.prompt(
+        sid,
+        "delegate: general=x | teamlead=y | ai=z".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let outs: Vec<String> = outputs(&evs).into_iter().skip(5).collect();
+    assert_eq!(outs.len(), 3, "{outs:#?}");
+    assert!(
+        outs.iter()
+            .all(|o| o.contains("is not an agent this one can delegate to")),
+        "{outs:#?}"
+    );
+}
+
+/// The built-in roster against sub-agent isolation (T32): in a folder that
+/// is not a git repository, the read-only delegates (Scout, Reviewer) still
+/// run there, and the ones that can change files (Software Developer,
+/// Writer) are refused with the reason. Researcher is refused for another
+/// reason: its web and memory tools do not exist on a node.
+#[tokio::test]
+async fn builtin_delegates_outside_a_repository_by_role() {
+    let (m, ws, _d) = setup().await;
+    let sid = session(&m, &ws, "teamlead").await;
+    // Two turns: a refused delegation still counts against the cap of 4.
+    m.prompt(
+        sid,
+        "delegate: scout=look | reviewer=check | researcher=ask".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    turns_ended(&m, sid, 1).await;
+    m.prompt(
+        sid,
+        "delegate: coder=build | writer=draft".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let outs = outputs(&evs);
+    assert_eq!(outs.len(), 5, "{outs:#?}");
+    for (who, said) in [("scout", "look"), ("reviewer", "check")] {
+        assert!(
+            outs.iter()
+                .any(|o| o.contains(&format!("@{who} ended (completed):\nYou said: {said}"))),
+            "{who}: {outs:#?}"
+        );
+    }
+    for who in ["coder", "writer"] {
+        assert!(
+            outs.iter()
+                .any(|o| o.contains(&format!("@{who} was not started"))
+                    && o.contains("not a git repository")),
+            "{who}: {outs:#?}"
+        );
+    }
+    assert!(
+        outs.iter().any(|o| o.contains(
+            "@researcher was not started: none of its tools (web search, web fetch, memory) \
+             are available on this node. Do the work another way or tell the user."
+        )),
+        "researcher: {outs:#?}"
+    );
+    // Only the two read-only sub-agents with tools here got a session.
+    let kids = m
+        .inner_mirror()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .count();
+    assert_eq!(kids, 2);
+    assert_eq!(
+        std::fs::read_dir(&ws).unwrap().count(),
+        0,
+        "folder unchanged"
+    );
+}
+
+/// On an agentic node the web and memory tools are not registered, so
+/// Researcher would run with no tools while the parent believes research
+/// was done: it is not offered, and a call to it by name starts no session.
+#[tokio::test]
+async fn researcher_is_not_offered_on_a_node_without_its_tools() {
+    let seen = Arc::new(Seen {
+        inner: Mock {
+            delay: Duration::from_millis(10),
+        },
+        delegate_tools: Default::default(),
+    });
+    let (m, ws, _d) = setup_with(seen.clone()).await;
+    let sid = session(&m, &ws, "teamlead").await;
+    m.prompt(sid, "hello".into(), PromptOpts::default())
+        .await
+        .unwrap();
+    turns_ended(&m, sid, 1).await;
+    let tool = seen.delegate_tools.lock().unwrap()[0].clone();
+    let offered: Vec<&str> = tool.schema["properties"]["agent"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for who in ["scout", "reviewer", "coder", "writer"] {
+        assert!(offered.contains(&who), "{who} missing from {offered:?}");
+    }
+    assert!(!offered.contains(&"researcher"), "{offered:?}");
+    assert!(
+        !tool.description.contains("researcher"),
+        "{}",
+        tool.description
+    );
+
+    m.prompt(
+        sid,
+        "delegate: researcher=ask".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    let evs = turns_ended(&m, sid, 2).await;
+    let last = outputs(&evs).pop().unwrap();
+    assert!(
+        last.starts_with("@researcher was not started: none of its tools"),
+        "{last}"
+    );
+    let kids = m
+        .inner_mirror()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .count();
+    assert_eq!(kids, 0, "no child session");
 }
 
 #[tokio::test]
 async fn cancelling_the_parent_cancels_children() {
     let (m, ws, _d) = setup().await;
     git(&ws, &["init", "-q"]);
-    let sid = session(&m, &ws, "ultracode").await;
+    let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
         "delegate: coder=slow: 500".into(),
@@ -214,7 +388,7 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
     // Uncommitted user work is visible to the sub-agents.
     std::fs::write(format!("{ws}/draft.txt"), "wip\n").unwrap();
 
-    let sid = session(&m, &ws, "ultracode").await;
+    let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
         "delegate: coder=run: cat draft.txt > a.txt | coder=run: echo b > b.txt".into(),

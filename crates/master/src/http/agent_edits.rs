@@ -100,6 +100,10 @@ pub(super) struct NewAgent {
     summary: String,
     prompt: String,
     features: Features,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 pub(super) async fn create_agent(
@@ -115,13 +119,16 @@ pub(super) async fn create_agent(
         summary: b.summary,
         prompt: b.prompt,
         features: b.features,
+        aliases: b.aliases,
+        category: b.category,
     };
     m.save_custom_agent(&id, c, true).await?;
     Ok(Json(detail(&m, &who, &q, &id).await?))
 }
 
 /// The fields to change; the rest stay. Built-in and file agents take only
-/// `summary` and `instructions`; custom ones everything but those.
+/// `summary` and `instructions` (the rest may be sent as they are);
+/// custom ones everything but `instructions`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AgentChange {
@@ -130,6 +137,8 @@ pub(super) struct AgentChange {
     prompt: Option<String>,
     instructions: Option<String>,
     features: Option<Features>,
+    aliases: Option<Vec<String>>,
+    category: Option<String>,
 }
 
 pub(super) async fn update_agent(
@@ -157,6 +166,8 @@ pub(super) async fn update_agent(
                 summary: b.summary.unwrap_or(old.summary),
                 prompt: b.prompt.unwrap_or(old.prompt),
                 features: b.features.unwrap_or(old.features),
+                aliases: b.aliases.unwrap_or(old.aliases),
+                category: b.category.or(old.category),
             };
             m.save_custom_agent(&id, c, false).await?;
         }
@@ -165,9 +176,17 @@ pub(super) async fn update_agent(
             let Some(def) = set.get(&id) else {
                 return Err(AgentEditError::NotFound(id).into());
             };
+            // Aliases as the list shows them: a custom agent's id may have
+            // pushed one of the definition's out.
+            let shown = m.agents();
+            let shown = shown.get(&id).unwrap_or(def);
             if b.name.as_ref().is_some_and(|n| n.trim() != def.name)
                 || b.prompt.is_some()
                 || b.features.is_some_and(|f| f != def.features)
+                || b.aliases.as_ref().is_some_and(|a| *a != shown.aliases)
+                || b.category
+                    .as_ref()
+                    .is_some_and(|c| c.trim() != def.category)
             {
                 return Err(m.edit_refusal(&id).into());
             }
