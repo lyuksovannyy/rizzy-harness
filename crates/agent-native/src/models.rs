@@ -138,6 +138,7 @@ async fn send_json(
         return Err(ProviderError::Status {
             status,
             body: String::from_utf8_lossy(&body).chars().take(300).collect(),
+            hint: Default::default(),
         });
     }
     let body = read_capped(resp, cap).await?;
@@ -408,6 +409,7 @@ pub async fn test_chat(
                 Err(ProviderError::Status {
                     status: 400,
                     body: b,
+                    ..
                 }) if b.contains("max_completion_tokens") => {
                     let again = client.post(&url).json(&body("max_completion_tokens"));
                     send_json(again, kind, api_key, MAX_CHAT_BODY).await?

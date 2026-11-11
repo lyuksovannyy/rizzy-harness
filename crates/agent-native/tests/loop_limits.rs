@@ -66,6 +66,7 @@ impl Provider for Forever {
                 input: self.input.clone(),
             }],
             usage: None,
+            stop: Default::default(),
         })
     }
 }
@@ -155,6 +156,7 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        context_windows: Default::default(),
         effort: None,
         budget: harness_core::agent::Budget::Standard,
         ui: Default::default(),

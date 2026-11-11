@@ -413,16 +413,19 @@ impl Default for WebConfig {
 pub struct ChatConfig {
     /// Incognito chats idle this long are deleted (master and chat runtime).
     pub incognito_ttl_minutes: u64,
-    /// When the estimated history passes this many tokens, older turns are
-    /// replaced by a summary (0 disables summarising).
-    pub summarize_after_tokens: usize,
+    /// When the history passes this many tokens, older turns are replaced
+    /// by a summary (0 disables summarising). Unset: the model's context
+    /// window less a reserve for the reply, or 24k when the window is
+    /// unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summarize_after_tokens: Option<usize>,
 }
 
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             incognito_ttl_minutes: 24 * 60,
-            summarize_after_tokens: 24_000,
+            summarize_after_tokens: None,
         }
     }
 }
