@@ -2021,7 +2021,11 @@ ended it when there was none; every other harness studied retries first
 (`research/harnesses-round-1.md` §8 item 2). Now each model call (a turn's steps, compare
 variants, the summary call) is retried in `agent-native` (`retry.rs`) up to 3 times, waiting
 `2 s · 2ⁿ` capped at 60 s with equal jitter, or the provider's `retry-after-ms` /
-`retry-after` (seconds; an HTTP date is ignored) capped at the same 60 s. Retried: 429
+`retry-after` (seconds; an HTTP date is ignored). A `Retry-After` longer than the 60 s cap is
+not waited for and not retried (clamping it sent up to three requests that were certain to
+fail and count against the limit): the next fallback is tried at once, or the turn ends with
+"The provider of M asked to wait 5 minutes before the next request (rate limit)…" (no
+response body; `RetryPolicy::explain`). Retried: 429
 (except `insufficient_quota` / billing codes), 500, 502, 503, 504, 529, connection and
 stream-start failures. Never: 4xx refusals (401, 403, 400, 404, 413…), `x-should-retry:
 false`, or an attempt whose text has reached the user. After the retries the fallback chain
