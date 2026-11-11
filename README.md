@@ -57,7 +57,10 @@ to grant them per user. Print the claim code with:
 ```
 
 Scripts can call the API with `Authorization: Bearer <token>`, using the token
-printed by `rizzy-harness token`.
+printed by `rizzy-harness token`. Treat this token as an admin password: it acts
+as an administrator and can read and drive every user's chats, which is an
+accepted gap until per-user tokens exist (`PLAN.md`, T29). Do not give it to
+automation that only needs one user's access, and do not copy it if no script needs it.
 
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
