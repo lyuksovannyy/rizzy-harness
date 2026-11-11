@@ -14,6 +14,7 @@ import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import type { Agent, AvatarState, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+import { shownName } from "../md/hiddenChars";
 
 // An attached image's chip loads through a link (P-1); its own chunk, so
 // the first load does not carry the link code.
@@ -754,7 +755,7 @@ export function Composer(props: {
               <select className="pill" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
                 {props.workers.map((n) => (
                   <option key={n.node_id} value={n.node_id}>
-                    {n.embedded ? `local (${n.hostname})` : n.hostname}
+                    {n.embedded ? `local (${shownName(n.hostname)})` : shownName(n.hostname)}
                   </option>
                 ))}
               </select>

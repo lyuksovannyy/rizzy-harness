@@ -4,6 +4,7 @@
 import { openResult, resultLabel } from "../lib/routineResults";
 import { when } from "../lib/when";
 import type { AttentionItem, RoutineAttention } from "../types";
+import { shownName } from "../md/hiddenChars";
 
 export function Attention(props: {
   items: AttentionItem[];
@@ -25,7 +26,7 @@ export function Attention(props: {
             {props.items.map((a) => (
               <li key={a.session_id}>
                 <button type="button" onClick={() => props.onOpen(a.session_id)}>
-                  <span className="similar-title ellipsis">{a.title}</span>
+                  <span className="similar-title ellipsis">{shownName(a.title)}</span>
                   <span className="similar-snippet ellipsis">
                     {a.reason === "approval" ? "Needs your approval" : "Asked you a question"}
                     {a.parent_id ? " (sub-task)" : ""}

@@ -59,8 +59,15 @@ const L14_KB = 0.9;
 // load (+0.9).
 const P1_KB = 1.2;
 
+// Gate 3 fix review 2, W-1 to W-3, measured 366.5 (initial 103.9): the
+// approval card shows every field of a call in full, with sizes, head and
+// tail, blank-run and hidden-character markers, look-alike and path notes
+// (lazy, in the conversation chunk, +3.1); hidden characters in chat
+// titles and node names shown as codes on the first screen (+0.3).
+const R6_KB = 3.5;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

@@ -16,11 +16,27 @@ export function parseUrl(href: string): URL | null {
 }
 
 /** The host the browser will contact (punycode ASCII), without a leading
- * www.; for mailto it is the address (see mailAddress), or the address as
- * written, percent-encoded, when it is not a plain one. */
+ * www., with its port when it is not the scheme's default (another port of
+ * a host is another server: `localhost:8000` is not this app on
+ * `localhost:7777`); for mailto it is the address (see mailAddress), or
+ * the address as written, percent-encoded, when it is not a plain one. */
 export function hostOf(u: URL): string {
   if (u.protocol === "mailto:") return mailAddress(u) ?? u.pathname;
-  return u.hostname.replace(/^www\./, "");
+  return u.host.replace(/^www\./, "");
+}
+
+const LOOPBACK = /^(localhost|.+\.localhost|127(\.\d+){3}|\[::1\])$/i;
+const sameMachine = (a: string, b: string) => a === b || (LOOPBACK.test(a) && LOOPBACK.test(b));
+
+/** A web link to this app's own machine that is not this app: another port
+ * or scheme of the page's host (or of loopback when the app is on loopback).
+ * Whatever listens there is not the harness (the agent may have started
+ * it), so it is shown with its port, marked as leaving the app and always
+ * asks first (Gate 3 fix review 2, W-2). */
+export function leavesApp(u: URL, here: { protocol: string; hostname: string; port: string } | undefined = globalThis.location): boolean {
+  if (!here || (u.protocol !== "http:" && u.protocol !== "https:")) return false;
+  if (!sameMachine(u.hostname.toLowerCase(), here.hostname.toLowerCase())) return false;
+  return u.port !== here.port || u.protocol !== here.protocol || u.hostname.toLowerCase() !== here.hostname.toLowerCase();
 }
 
 const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
@@ -123,9 +139,11 @@ function tokenLike(s: string): boolean {
  * a path that is long, holds a token-like run or a `;param`, a long or
  * token-like host label, many labels) or mislead (a punycode host,
  * credentials before the host, a mail address with hidden characters or a
- * punycode or odd domain).
+ * punycode or odd domain). A link to another server on this app's own
+ * machine always asks (leavesApp).
  */
 export function needsConfirm(u: URL, provenance: Provenance): boolean {
+  if (leavesApp(u)) return true;
   if (provenance.has(linkKey(u))) return false;
   if (u.search !== "" || u.hash !== "") return true;
   if (u.protocol === "mailto:") {
