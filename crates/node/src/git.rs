@@ -2810,3 +2810,9 @@ mod tests {
 #[cfg(test)]
 #[path = "git_nested_tests.rs"]
 mod nested_tests;
+
+/// Experiment B.3: what a turn's checkpoints cost as the folder grows.
+/// Ignored benchmark; lives in its own file.
+#[cfg(test)]
+#[path = "git_cost_bench.rs"]
+mod cost_bench;
