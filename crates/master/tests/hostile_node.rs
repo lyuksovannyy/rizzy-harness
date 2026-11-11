@@ -264,10 +264,20 @@ impl Fake {
         })
     }
 
-    fn released(&self, stage: &str) -> bool {
-        self.saw(
-            |m| matches!(m, MasterToNode::ArtifactRelease { stage_id, .. } if stage_id == stage),
-        ) > 0
+    /// Whether the master told this node to delete `stage`. The master sends
+    /// that after it has recorded the version's final status, so a test that
+    /// has just seen the status must wait for the message, not look once.
+    async fn released(&self, stage: &str) -> bool {
+        for _ in 0..400 {
+            let seen = self.saw(
+                |m| matches!(m, MasterToNode::ArtifactRelease { stage_id, .. } if stage_id == stage),
+            );
+            if seen > 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
     }
 }
 
@@ -428,7 +438,7 @@ async fn an_honest_transfer_arrives_byte_for_byte() {
     let stage = node.publish(sid, "app", &bytes);
     let v = settled(&t, sid, 1).await;
     assert_eq!(v[0].status, "ready", "{:?}", v[0].error);
-    assert!(node.released(&stage));
+    assert!(node.released(&stage).await);
     assert!(node.saw(|m| matches!(m, MasterToNode::ArtifactFetch { len, .. } if *len <= harness_protocol::MAX_CHUNK)) >= 4,
         "three chunks and the busy retry");
     let path = format!(
@@ -493,7 +503,7 @@ async fn lying_chunks_fail_cleanly() {
             "{mode:?}: {:?}",
             v.error
         );
-        assert!(node.released(&stage), "{mode:?}");
+        assert!(node.released(&stage).await, "{mode:?}");
         assert!(t.store().known_blob_ids().unwrap().is_empty(), "{mode:?}");
         assert_eq!(tmp_files(&t), 0, "{mode:?}");
     }
