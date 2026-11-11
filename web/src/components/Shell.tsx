@@ -33,6 +33,7 @@ import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import type { FeaturePageProps } from "./pages";
 import { Sidebar } from "./Sidebar";
+import { shownName } from "../md/hiddenChars";
 
 // Everything but the home screen loads on demand (new-tab speed budget).
 const Conversation = lazy(() => import("./Conversation"));
@@ -201,7 +202,7 @@ export function Shell(props: {
             const a = r.items.find((x) => x.session_id === id)!;
             const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
             if (viewing) continue;
-            const n = new Notification(a.title || APP_TITLE, {
+            const n = new Notification(shownName(a.title) || APP_TITLE, {
               body: a.reason === "approval" ? "Needs your approval" : "Asked you a question",
               tag: id,
             });

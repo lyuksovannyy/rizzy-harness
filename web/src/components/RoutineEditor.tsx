@@ -28,6 +28,7 @@ import { Seg } from "./Seg";
 import { Select } from "./Select";
 import { pickerGroups, VariablePicker } from "./VariablePicker";
 import { WebhookCard } from "./WebhookCard";
+import { shownName } from "../md/hiddenChars";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Typing settles before the server previews the prompt and schedules. */
@@ -257,7 +258,7 @@ export function RoutineEditor(props: {
                     <option value="">Pick a node</option>
                     {workers.map((n) => (
                       <option key={n.node_id} value={n.node_id}>
-                        {n.embedded ? "local" : n.hostname}
+                        {n.embedded ? "local" : shownName(n.hostname)}
                         {n.connected ? "" : " (offline)"}
                       </option>
                     ))}

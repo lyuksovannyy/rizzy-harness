@@ -1268,6 +1268,10 @@ select.pill {
   font-size: 0.8em;
   white-space: nowrap;
 }
+.link-host.link-away {
+  color: var(--warn);
+  white-space: normal;
+}
 .md a {
   color: var(--accent);
   text-decoration-color: var(--accent-line);

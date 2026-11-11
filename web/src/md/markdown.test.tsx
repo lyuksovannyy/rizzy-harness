@@ -1,7 +1,7 @@
 // The whole rendering path (prepare, remark plugins, components) as static
 // markup. Effects do not run here, so this is what a streaming message shows.
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { Markdown } from "../components/Markdown";
 import { MessageCtx, NO_CITES, NONE } from "./context";
 import { hasHidden } from "./hidden";
@@ -113,6 +113,20 @@ describe("safety", () => {
     expect(out).toMatch(/href="#m\d+-fn-1"/);
     expect(out).not.toContain("user-content-");
     expect(out).not.toMatch(/href="#m\d+-fn-1"[^>]*target/);
+  });
+  test("W-2: a link to another port of the app's host shows the port and is marked as leaving the app", () => {
+    vi.stubGlobal("location", { protocol: "http:", hostname: "localhost", port: "7777" });
+    try {
+      // Even when its text is the bare host, and even when it is an autolink.
+      for (const text of ["[localhost](http://localhost:8000/)", "<http://localhost:8000/>"]) {
+        expect(md(text)).toContain(
+          '<bdi dir="ltr" class="link-host link-away">localhost:8000 · another server on this machine, not this app</bdi>',
+        );
+      }
+      expect(md("[app](http://localhost:7777/)")).not.toContain("link-away");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

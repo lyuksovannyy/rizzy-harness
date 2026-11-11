@@ -18,6 +18,7 @@ const en = {
   cancel: "Cancel",
   linkTitle: "Check this link",
   linkCheck: "The assistant wrote this link. Check the full address before you open it.",
+  linkAway: "another server on this machine, not this app",
   image: "Image",
   imageHint: "Images in replies are not loaded",
   embedded: "embedded image (not shown)",
