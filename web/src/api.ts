@@ -55,12 +55,61 @@ export class HttpError extends Error {
   }
 }
 
+// The login key (Gate 3 P-1). Browsers send the login cookie to every port
+// of the host, so another local server (the agent's dev server) gets it
+// too; the cookie alone authenticates nothing. The key comes in the answer
+// that made the login and goes out as a header on every request and as the
+// socket's first message (live.ts). It lives in localStorage: per origin,
+// port included, so no other port's page or server ever sees it, and a new
+// tab of this origin has it. Never in a URL; cleared on any sign-out.
+const KEY = "harness.login";
+
+export function loginKey(): string | null {
+  try {
+    return localStorage.getItem(KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function forgetLogin() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    /* storage gone */
+  }
+}
+
+/** `h` with the login key, for requests made outside `call`. */
+export const keyed = (h: Record<string, string> = {}): Record<string, string> => {
+  const k = loginKey();
+  return k ? { ...h, "x-harness-login": k } : h;
+};
+
+/** Called on any 401: the login ended, or this tab has no key for it. */
+export const login = { ended: () => {} };
+
+/** Checks an answer outside `call`: a 401 signs out; a new login's key is kept. */
+export function seen(status: number, data: unknown) {
+  const k = (data as { login_key?: string } | null)?.login_key;
+  if (k)
+    try {
+      localStorage.setItem(KEY, k);
+    } catch {
+      /* not kept: the next request signs out */
+    }
+  if (status === 401) {
+    forgetLogin();
+    login.ended();
+  }
+}
+
 export async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method,
     signal,
     credentials: "same-origin",
-    headers: body === undefined ? {} : { "content-type": "application/json" },
+    headers: keyed(body === undefined ? {} : { "content-type": "application/json" }),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data: unknown = null;
@@ -69,6 +118,7 @@ export async function call<T>(method: string, path: string, body?: unknown, sign
   } catch {
     /* non-JSON */
   }
+  seen(res.status, data);
   if (!res.ok) {
     const msg = (data as { error?: string } | null)?.error ?? `${res.status} ${res.statusText}`;
     throw new HttpError(res.status, msg);
@@ -149,10 +199,11 @@ export const api = {
     const res = await fetch("/api/transcribe", {
       method: "POST",
       credentials: "same-origin",
-      headers: { "content-type": audio.type || "audio/webm" },
+      headers: keyed({ "content-type": audio.type || "audio/webm" }),
       body: audio,
     });
     const data = (await res.json().catch(() => null)) as { text?: string; error?: string } | null;
+    seen(res.status, data);
     if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
     return data?.text ?? "";
   },
@@ -180,10 +231,11 @@ export const api = {
     const res = await fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {
       method: "POST",
       credentials: "same-origin",
-      headers: { "content-type": "application/octet-stream" },
+      headers: keyed({ "content-type": "application/octet-stream" }),
       body: file,
     });
     const data = (await res.json().catch(() => null)) as UploadedAttachment & { error?: string };
+    seen(res.status, data);
     if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
     return data;
   },

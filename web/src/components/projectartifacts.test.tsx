@@ -4,6 +4,7 @@
 // each linking to its page, with Download once a version is ready. The
 // project's bar takes images where the server does.
 import { act } from "react";
+import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Artifact, ArtifactPage, ArtifactQuery } from "../lib/artifacts";
@@ -101,7 +102,7 @@ describe("the project's Artifacts tab", () => {
     const rows = [...host.querySelectorAll(".project-chats li")];
     expect(rows.map((r) => r.querySelector(".session-item")!.textContent)).toEqual(["app1v3", "app2v3"]);
     expect(rows[0]!.querySelector(".session-item")!.getAttribute("href")).toBe(`#/artifacts/${artifact(1, "ready").artifact_id}`);
-    expect(rows[0]!.querySelector("a[download]")!.getAttribute("href")).toBe(`/api/artifacts/${artifact(1, "ready").artifact_id}/latest/download`);
+    expect(rows[0]!.querySelector("a[download]")!.getAttribute("href")).toBe(linked(`/api/artifacts/${artifact(1, "ready").artifact_id}/latest/download`));
     expect(rows[1]!.querySelector("a[download]")).toBeNull();
   });
 

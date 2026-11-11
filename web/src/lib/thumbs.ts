@@ -5,6 +5,8 @@
 // tenth) through a hidden <video>; audio and other files get an icon. Never
 // a blob: URL, so the app's CSP stays as it is. Whatever fails is recorded
 // (`no_thumb`), so it is never tried again.
+import { keyed } from "../api";
+import { link } from "./links";
 import { contentUrl, type MediaItem, type MediaPatch, mediaApi, safeToDecode } from "./media";
 
 /** Longest side of a thumbnail, and the most the server takes. */
@@ -71,7 +73,7 @@ function once(el: EventTarget, ok: string, bad = "error"): Promise<void> {
 
 /** A raster image the browser decodes from its bytes. */
 async function fromBitmap(m: MediaItem): Promise<Blob> {
-  const res = await fetch(contentUrl(m.media_id), { credentials: "same-origin" });
+  const res = await fetch(contentUrl(m.media_id), { credentials: "same-origin", headers: keyed() });
   if (!res.ok) throw new Error(`${res.status}`);
   const bmp = await createImageBitmap(await res.blob());
   try {
@@ -84,22 +86,25 @@ async function fromBitmap(m: MediaItem): Promise<Blob> {
 /** SVG and HEIC: shown only as an image (`Sec-Fetch-Dest: image`), so an
  * <img> loads it; the same origin keeps the canvas readable. */
 async function fromImg(m: MediaItem): Promise<Blob> {
+  // A link: an element cannot send the login key (P-1, lib/links).
+  const src = await link(contentUrl(m.media_id));
   const img = new Image();
   img.decoding = "async";
   const loaded = once(img, "load");
-  img.src = contentUrl(m.media_id);
+  img.src = src;
   await loaded;
   return encode(img, img.naturalWidth || THUMB_PX, img.naturalHeight || THUMB_PX);
 }
 
 /** A media element's metadata (and, for video, a frame drawn). */
 async function fromMedia(m: MediaItem, tag: "video" | "audio"): Promise<{ thumb: Blob | null; hints: MediaPatch }> {
+  const src = await link(contentUrl(m.media_id));
   const el = document.createElement(tag);
   el.muted = true;
   el.preload = "metadata";
   if (el instanceof HTMLVideoElement) el.playsInline = true;
   const meta = once(el, "loadedmetadata");
-  el.src = contentUrl(m.media_id);
+  el.src = src;
   try {
     await meta;
     const secs = Number.isFinite(el.duration) ? el.duration : 0;

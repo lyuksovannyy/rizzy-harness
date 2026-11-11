@@ -2,6 +2,7 @@
 // folded head_seq); on reconnect we resubscribe from that cursor, and the
 // server replays exactly what we missed. Duplicates are dropped by seq, and a
 // gap (which the server should never produce) triggers a resubscribe.
+import { loginKey } from "./api";
 import { apply, emptyView, FoldError } from "./fold";
 import type { RawEvent, SessionView } from "./types";
 
@@ -109,6 +110,9 @@ export class Live {
     this.ws = ws;
     this.setState("connecting");
     ws.onopen = () => {
+      // The login key before anything else (P-1, api.ts): a socket without
+      // it is closed as signed out, with nothing sent to it.
+      ws.send(JSON.stringify({ type: "login", key: loginKey() ?? "" }));
       this.backoff = 500;
       this.setState("live");
       for (const id of this.views.keys()) this.sendSubscribe(id);

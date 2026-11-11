@@ -52,8 +52,15 @@ const I4_KB = 0;
 // footnote ids (lazy, +0.4).
 const L14_KB = 0.9;
 
+// Gate 3 P-1, measured 363.0 (initial 103.6): the login key kept and sent
+// by the API client and the socket (first load, +0.2); the links that
+// what the browser loads by itself (<img>, <video>, downloads) needs, in
+// their own chunk that only lazy pages and the composer's image chip
+// load (+0.9).
+const P1_KB = 1.2;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

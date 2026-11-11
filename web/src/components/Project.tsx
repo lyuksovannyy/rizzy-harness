@@ -23,6 +23,7 @@ import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import { Composer, type Submission } from "./Composer";
 import { ACCENTS } from "./forms";
+import { LinkedA } from "./Linked";
 
 // Artifacts has no route of its own (lib/routes.ts): the tab is this page's.
 type Tab = ProjectTab | "artifacts";
@@ -293,9 +294,9 @@ function ProjectArtifacts(props: { project: ProjectDetail; workspaceId: string |
             {a.latest && <span className="muted small">v{a.latest.seq}</span>}
           </a>
           {a.latest?.status === "ready" && (
-            <a className="link small" href={latestUrl(a.artifact_id)} download>
+            <LinkedA className="link small" url={latestUrl(a.artifact_id)} download>
               Download
-            </a>
+            </LinkedA>
           )}
         </li>
       ))}

@@ -21,6 +21,7 @@ import {
   safeToDecode,
   stillIn,
 } from "../lib/media";
+import { useLink } from "../lib/links";
 import { artifactHash } from "../lib/routes";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -110,9 +111,12 @@ export default function MediaPreview(props: {
   };
 
   const why = fallback(m, broken);
+  // Links, not bare URLs: neither an element nor a download sends the login key (P-1).
+  const src = useLink(contentUrl(m.media_id));
+  const file = useLink(contentUrl(m.media_id, true), true);
   const Icon = ICON[m.kind] ?? File;
   const download = (
-    <a className="button-like row" href={contentUrl(m.media_id, true)} download={m.name}>
+    <a className="button-like row" href={file} download={m.name}>
       <Download size={16} aria-hidden="true" /> Download
     </a>
   );
@@ -136,7 +140,7 @@ export default function MediaPreview(props: {
           </div>
         ) : m.kind === "image" ? (
           <img
-            src={contentUrl(m.media_id)}
+            src={src}
             alt={m.name}
             className={full ? "full" : "fit"}
             title={full ? "Fit to the window" : "Actual size"}
@@ -144,11 +148,11 @@ export default function MediaPreview(props: {
             onError={() => setBroken(true)}
           />
         ) : m.kind === "video" ? (
-          <video src={contentUrl(m.media_id)} controls preload="metadata" onError={() => setBroken(true)} />
+          <video src={src} controls preload="metadata" onError={() => setBroken(true)} />
         ) : (
           <div className="media-fallback stack">
             <Music size={48} aria-hidden="true" />
-            <audio src={contentUrl(m.media_id)} controls preload="metadata" onError={() => setBroken(true)} />
+            <audio src={src} controls preload="metadata" onError={() => setBroken(true)} />
           </div>
         )}
         {props.onPrev && (

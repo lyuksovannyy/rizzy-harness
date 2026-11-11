@@ -7,7 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e6-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -48,6 +48,7 @@ async function skipOnboarding(page) {
     const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
     const p = await b.newPage({ viewport: { width: 1280, height: 860 } });
+    await keyed(p);
     const errors = [];
     p.on('pageerror', (e) => errors.push(e.message));
     await p.goto(URL_);

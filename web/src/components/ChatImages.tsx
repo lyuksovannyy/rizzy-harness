@@ -5,6 +5,7 @@
 import { lazy, Suspense, useState } from "react";
 import { contentUrl, type MediaItem, mediaApi, safeToDecode } from "../lib/media";
 import type { ImageRef } from "../types";
+import { LinkedImg } from "./Linked";
 
 const MediaPreview = lazy(() => import("./MediaPreview"));
 
@@ -23,7 +24,7 @@ export function BubbleImages({ images }: { images: ImageRef[] }) {
               <button type="button" className="bubble-image" title={r.name} onClick={() => mediaApi.get(r.media_id).then(setOpen, () => lose(r.media_id))}>
                 {/* The header's size, as Media checks it: nothing too large is decoded. */}
                 {safeToDecode({ kind: "image", display: "inline", format: "", width: r.width, height: r.height }) ? (
-                  <img src={contentUrl(r.media_id)} alt={r.name} width={r.width} height={r.height} loading="lazy" onError={() => lose(r.media_id)} />
+                  <LinkedImg url={contentUrl(r.media_id)} alt={r.name} width={r.width} height={r.height} loading="lazy" onError={() => lose(r.media_id)} />
                 ) : (
                   r.name
                 )}

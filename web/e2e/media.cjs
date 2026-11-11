@@ -15,7 +15,7 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly } = require('./onboard.cjs');
+const { createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2em-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -135,6 +135,7 @@ async function imagesInChats(p) {
     const code = await claimCode();
     const b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: true });
+    await keyed(ctx);
     const p = await ctx.newPage();
     PAGE = p;
     const errors = [];
@@ -189,7 +190,7 @@ async function imagesInChats(p) {
     const shown = await p.$eval('dialog.media-preview .media-stage img', (i) => i.naturalWidth);
     check(shown === 64, 'the SVG renders as an image');
     check((await p.evaluate(() => window.__pwned)) === undefined, 'window.__pwned stays undefined');
-    const [download] = await Promise.all([p.waitForEvent('download'), p.click('dialog.media-preview a:has-text("Download")')]);
+    const [download] = await Promise.all([p.waitForEvent('download'), p.click('dialog.media-preview a[href*="link="]:has-text("Download")')]);
     const saved = await download.path();
     check(fs.readFileSync(saved, 'utf8').includes('<rect'), 'the download holds the SVG file');
     log('svg download:', download.suggestedFilename());
@@ -218,6 +219,7 @@ async function imagesInChats(p) {
     await p.click('dialog button:has-text("Done")');
     await p.waitForSelector('td:has-text("bob")');
     const q = await (await b.newContext({ viewport: { width: 1280, height: 860 } })).newPage();
+    await keyed(q);
     q.on('pageerror', (e) => errors.push(`bob: ${e.message}`));
     await q.goto(URL_);
     await q.fill('input[placeholder="username"]', 'bob');
