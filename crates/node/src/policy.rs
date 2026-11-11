@@ -141,7 +141,8 @@ pub struct LimitsPolicy {
     /// Bytes one tool call may stream live (stored as events and sent to
     /// the master); the rest is read and dropped after one marker.
     pub tool_stream_bytes: usize,
-    /// Model calls one turn may make, sub-agents' turns included.
+    /// Model calls one turn may make. Each sub-agent's turn has the same cap
+    /// of its own; the caps do not add up into one budget.
     pub max_steps: usize,
     /// The longest a `bash` call may run, in seconds, whatever the model
     /// asks for.
