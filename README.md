@@ -518,7 +518,10 @@ the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
-written into your folder or your `.git`, and your repository's own git
+written into your folder, no objects, refs, index or config are ever written
+into your `.git` (git may update the timestamps of existing object files
+there when a checkpoint reads content your repository already has), and
+your repository's own git
 config, hooks and filters are never run for a checkpoint or an undo (in a
 repository the private copy borrows your committed objects instead of
 storing them again, and honours `.gitignore`, `.git/info/exclude` and your
@@ -535,7 +538,31 @@ undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
 `before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
-the undo. The chat has no button for it yet.
+the undo. The chat has no button for it yet. An undo first checks that it
+has everything it will write: if the checkpoint needs content your
+repository no longer has (after you rewrote history and `git gc` cleaned
+it up), the undo is refused with that reason and your folder is left
+exactly as it was. If writing fails partway (a full disk, a read-only
+folder), the error names the checkpoint that holds your folder as it was;
+restoring it puts the folder back. If an undo would replace a folder by a
+file and that folder holds files no checkpoint has (build output your
+`.gitignore` skips, say), it is refused and names the folder; "Undo
+anyway" deletes them and says which. If a checkpoint cannot be taken, the
+chat says that turn cannot be undone.
+A git repository inside your
+folder (a sub-folder git treats as its own repository: a clone, a
+submodule, a worktree, or one made with `git init`) is not covered by undo
+and is never touched by it: checkpoints leave it out, and an undo neither
+restores, deletes nor recreates anything in it. Use git in that repository
+to undo changes there. The chat says so after an undo when such a
+repository appeared or went away during the turn; each checkpoint in the
+chat's log lists the repositories it left out (`excluded`), which the chat
+does not show yet. Files a checkpoint already holds stay covered even if a
+`.git` appears in their folder later: an undo puts them back and leaves the
+`.git` as it is. An undo is refused while another chat is working in the
+same folder (or in a folder that contains it, or one inside it), and no
+chat can start working in that folder while an undo runs there; wait a
+moment, or cancel the other chat, and try again.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.

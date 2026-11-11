@@ -447,3 +447,137 @@ fn start_reports_enforced_and_names_the_abi() {
     .unwrap();
     assert!(off.refusal.is_none() && off.summary.contains("OFF"));
 }
+
+// ---- Experiment B.1 (ADOPTION_PLAN): processes that leave the group ----
+//
+// Landlock restricts file access, not process control, so the sandbox is
+// expected to change nothing about what the tool's `killpg` can reach. Every
+// process a test expects to survive is recorded by pid and killed by exactly
+// that pid, after checking its command line, by `Reaper`.
+
+fn pid_alive(pid: i32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z'),
+        Err(_) => false,
+    }
+}
+
+fn is_our_sleep(pid: i32, secs: u32) -> bool {
+    pid_alive(pid)
+        && std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|c| c == format!("sleep\0{secs}\0").as_bytes())
+            .unwrap_or(false)
+}
+
+struct Reaper {
+    pid: i32,
+    secs: u32,
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if is_our_sleep(self.pid, self.secs) {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
+/// Run `command` in the sandbox, wait for the recorded `sleep <secs>`, end
+/// the call by cancel or by a 1 s timeout, wait two seconds, and say whether
+/// that pid is still alive.
+async fn sandboxed_stop_and_look(command: &str, secs: u32, timeout: bool) -> (Reaper, bool) {
+    let f = fixture();
+    let pidfile = f.ws.join("pid");
+    let command = command.replace("PIDFILE", &pidfile.display().to_string());
+    let ctx = f.ctx(f.sandbox(Settings::default()), &f.ws);
+    let cancel = ctx.cancel.clone();
+    let input = if timeout {
+        json!({"command": command, "timeout_secs": 1})
+    } else {
+        json!({"command": command})
+    };
+    let h = tokio::spawn(async move { Bash.run(&ctx, input).await });
+    let mut reaper = None;
+    for _ in 0..250 {
+        if let Ok(s) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = s.trim().parse::<i32>()
+            && is_our_sleep(pid, secs)
+        {
+            reaper = Some(Reaper { pid, secs });
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let Some(reaper) = reaper else {
+        h.abort();
+        panic!("the sandboxed command never recorded a `sleep {secs}` pid");
+    };
+    if !timeout {
+        cancel.cancel();
+    }
+    let r = h.await.unwrap();
+    assert!(
+        r.output
+            .contains(if timeout { "timed out" } else { "cancelled" }),
+        "{}",
+        r.output
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let alive = is_our_sleep(reaper.pid, secs);
+    (reaper, alive)
+}
+
+/// Control: inside the sandbox a same-group background child is killed.
+#[tokio::test]
+async fn b1_control_sandboxed_same_group_child_dies_on_cancel() {
+    let Some(_) = landlock() else { return };
+    let (_r, alive) = sandboxed_stop_and_look(
+        "sh -c 'echo $$ > PIDFILE; exec sleep 987611' & wait",
+        987_611,
+        false,
+    )
+    .await;
+    assert!(!alive, "control failed: a same-group child survived");
+}
+
+/// KNOWN GAP (design note C.11, built by T.8): the Landlock sandbox does not
+/// change it; a child that called `setsid` survives a cancel. Once a
+/// containment exists this assertion flips to `!alive`.
+#[tokio::test]
+async fn a_setsid_child_survives_cancel_in_the_sandbox() {
+    let Some(_) = landlock() else { return };
+    let (_r, alive) = sandboxed_stop_and_look(
+        "setsid sh -c 'echo $$ > PIDFILE; exec sleep 987612' & wait",
+        987_612,
+        false,
+    )
+    .await;
+    assert!(
+        alive,
+        "the setsid child died: the gap is closed, flip this test"
+    );
+}
+
+/// KNOWN GAP (C.11 / T.8): the same, ended by the timeout.
+#[tokio::test]
+async fn a_setsid_child_survives_timeout_in_the_sandbox() {
+    let Some(_) = landlock() else { return };
+    let (_r, alive) = sandboxed_stop_and_look(
+        "setsid sh -c 'echo $$ > PIDFILE; exec sleep 987613' & wait",
+        987_613,
+        true,
+    )
+    .await;
+    assert!(
+        alive,
+        "the setsid child died: the gap is closed, flip this test"
+    );
+}

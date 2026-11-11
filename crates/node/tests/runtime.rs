@@ -2316,3 +2316,377 @@ async fn pre_restore_snapshots_obey_checkpoints_keep() {
         "v1\n"
     );
 }
+
+// ---- Nested repositories are outside checkpoints (PLAN.md T33, A.15) ----
+
+/// A committed repository at `dir` (`x.txt`), or with no commit yet.
+fn nested_repo(dir: &std::path::Path, commit: bool) {
+    std::fs::create_dir_all(dir).unwrap();
+    git_in(dir, &["init", "-q"]);
+    std::fs::write(dir.join("x.txt"), "x-1\n").unwrap();
+    if commit {
+        git_in(dir, &["add", "."]);
+        git_in(dir, &["-c", "commit.gpgSign=false", "commit", "-qm", "n"]);
+    }
+}
+
+/// Every entry under `dir`, `.git` included, with its bytes.
+fn whole(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out: Vec<_> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|e| {
+            let bytes = if e.file_type().is_file() {
+                std::fs::read(e.path()).unwrap()
+            } else {
+                vec![]
+            };
+            (e.path().to_path_buf(), bytes)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn checkpoint_events(seen: &[RawEvent]) -> Vec<Checkpoint> {
+    seen.iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The person is told what undo does not cover: each checkpoint names the
+/// nested repositories its snapshot left out, the undo's `restored` record
+/// names the ones it left alone and lists none of them among its files,
+/// and the chat gets a note naming them.
+#[tokio::test]
+async fn nested_repositories_are_named_in_checkpoints_and_after_an_undo() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    nested_repo(&h.ws.join("vendor lib"), true);
+    nested_repo(&h.ws.join("a/b/scratch"), false);
+    let sid = h.create().await;
+    let mark = h.seen.len();
+    let turn = prompt_turn(
+        &mut h,
+        sid,
+        "run: echo v2 > keep.txt; echo agent > 'vendor lib/x.txt'; echo agent > a/b/scratch/x.txt",
+    )
+    .await;
+    let want = ["a/b/scratch", "vendor lib"];
+    let cps = checkpoint_events(&h.seen[mark..]);
+    assert_eq!(cps.len(), 2, "{cps:?}");
+    for c in &cps {
+        assert_eq!(c.excluded, want, "{c:?}");
+    }
+    assert_eq!(cps[1].files, ["keep.txt"], "no nested path among the files");
+    let nested_before = (
+        whole(&h.ws.join("vendor lib")),
+        whole(&h.ws.join("a/b/scratch")),
+    );
+
+    let mark = h.seen.len();
+    restore(&mut h, sid, "r", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    assert_eq!(
+        (
+            whole(&h.ws.join("vendor lib")),
+            whole(&h.ws.join("a/b/scratch"))
+        ),
+        nested_before,
+        "undo touched a nested repository"
+    );
+    let restored: Vec<Checkpoint> = checkpoint_events(&h.seen[mark..])
+        .into_iter()
+        .filter(|c| c.phase == CheckpointPhase::Restored)
+        .collect();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].files, ["keep.txt"]);
+    assert_eq!(restored[0].excluded, want);
+    // Repositories that were there all along: named in `excluded` only,
+    // no note in the chat.
+    assert_eq!(notes(&h.seen[mark..]), Vec::<String>::new());
+    // The fold keeps them with the checkpoint.
+    let view = SessionView::fold(&h.seen).unwrap();
+    assert_eq!(view.checkpoints[&turn].excluded, want);
+
+    // A turn that makes a repository: its undo leaves it and says so,
+    // starting with what it restored.
+    let turn = prompt_turn(
+        &mut h,
+        sid,
+        "run: echo v3 > keep.txt; mkdir made && cd made && git init -q && echo m > m.txt",
+    )
+    .await;
+    let mark = h.seen.len();
+    restore(&mut h, sid, "r2", &turn, false).await.unwrap();
+    assert!(h.ws.join("made/.git").is_dir());
+    let notes = notes(&h.seen[mark..]);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("Undo restored 1 file.") && notes[0].contains("`made`"),
+        "{}",
+        notes[0]
+    );
+}
+
+/// The chat notes (`error` events) among `seen`.
+fn notes(seen: &[RawEvent]) -> Vec<String> {
+    seen.iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::Error(e)) => Some(e.message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A restore that fails after it registered its folder unregisters it: a
+/// turn and a restore of the same folder run afterwards.
+#[tokio::test]
+async fn a_failed_restore_does_not_keep_the_folder_busy() {
+    let (mut h, sid, turn) = turn_then_user_work().await;
+    restore(&mut h, sid, "r1", &turn, false)
+        .await
+        .expect_err("refused: the user's edits");
+    let ws = h.ws.clone();
+    let other = create_in(&mut h, &ws).await;
+    prompt_turn(&mut h, other, "run: echo hi > other.txt").await;
+    restore(&mut h, sid, "r2", &turn, true).await.unwrap();
+}
+
+/// A sub-agent's base snapshot leaves nested repositories out too: one
+/// without a commit no longer stops a delegation.
+#[tokio::test]
+async fn a_writing_sub_agent_runs_beside_a_nested_repository_without_a_commit() {
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    nested_repo(&h.ws.join("scratch"), false);
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo v2 > keep.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("1 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v2\n"
+    );
+}
+
+/// A nested repository arriving with a hostile `.git/config` (fsmonitor,
+/// hooks, a filter its own `.gitattributes` asks for), with and without a
+/// commit, runs none of it when a turn is checkpointed and undone.
+#[cfg(unix)]
+#[tokio::test]
+async fn hostile_nested_repo_config_does_not_run_on_checkpoint_or_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new(auto_policy).await;
+    init_repo(&h.ws);
+    let marks = h.ws.parent().unwrap().join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let script = |name: &str| {
+        let p = h.ws.parent().unwrap().join(format!("{name}.sh"));
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n{}\n",
+                marks.join(name).display(),
+                if name.contains("clean") || name.contains("smudge") {
+                    "cat"
+                } else {
+                    "exit 0"
+                }
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    for (dep, commit) in [("dep", true), ("unborn", false)] {
+        let d = h.ws.join(dep);
+        nested_repo(&d, commit);
+        std::fs::write(d.join(".gitattributes"), "* filter=evil\n").unwrap();
+        let cfg = |k: &str, v: &str| git_in(&d, &["config", k, v]);
+        cfg("core.fsmonitor", &script(&format!("{dep}-fsmonitor")));
+        cfg("filter.evil.clean", &script(&format!("{dep}-clean")));
+        cfg("filter.evil.smudge", &script(&format!("{dep}-smudge")));
+        cfg("filter.evil.required", "true");
+        let hooks = d.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for n in ["post-index-change", "pre-commit", "post-checkout"] {
+            let p = hooks.join(n);
+            std::fs::copy(script(&format!("{dep}-{n}")), &p).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let sid = h.create().await;
+    let turn = prompt_turn(
+        &mut h,
+        sid,
+        "run: echo v2 > keep.txt; echo agent > dep/x.txt; echo agent > unborn/x.txt",
+    )
+    .await;
+    restore(&mut h, sid, "r", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v1\n"
+    );
+    let ran: Vec<_> = std::fs::read_dir(&marks)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(ran.is_empty(), "nested repository config ran: {ran:?}");
+}
+
+// ---- A restore waits for other chats in the folder (PLAN.md T33, A.15) ----
+
+const BUSY: &str = "another chat is working in this folder right now";
+
+async fn create_in(h: &mut Harness, cwd: &std::path::Path) -> SessionId {
+    let sid = SessionId::new();
+    h.send(MasterToNode::Create {
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: format!("c-{sid}"),
+        session_id: sid,
+        title: "t".into(),
+        cwd: cwd.display().to_string(),
+        model: None,
+        approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+    });
+    until_in(h, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;
+    sid
+}
+
+/// Receive until `pred` matches an event of session `sid`.
+async fn until_in(h: &mut Harness, sid: SessionId, pred: impl Fn(&EventKind) -> bool) {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(20), h.link.from_node.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("link closed");
+        if let NodeToMaster::Event { event } = msg {
+            let k = event.typed().unwrap();
+            let mine = event.session_id == sid;
+            h.seen.push(event);
+            if mine && pred(&k) {
+                return;
+            }
+        }
+    }
+}
+
+/// Start a turn in `sid` that keeps running (a long command).
+async fn start_long_turn(h: &mut Harness, sid: SessionId) {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: format!("p-{sid}"),
+        session_id: sid,
+        text: "run: sleep 30".into(),
+        images: vec![],
+    });
+    until_in(h, sid, |k| matches!(k, EventKind::ToolCallStarted(_))).await;
+}
+
+async fn stop_turn(h: &mut Harness, sid: SessionId) {
+    h.send(MasterToNode::Cancel {
+        req_id: format!("x-{sid}"),
+        session_id: sid,
+    });
+    until_in(h, sid, |k| matches!(k, EventKind::TurnEnded(_))).await;
+}
+
+/// An undo is refused while another chat has a turn running in the same
+/// folder, in a folder containing it or in one inside it: it would write
+/// files under that turn's feet. The refusal records nothing and changes
+/// nothing. Once that chat is idle the undo runs, and a chat busy in an
+/// unrelated folder never blocks it.
+#[tokio::test]
+async fn a_restore_is_refused_while_another_chat_works_in_the_folder() {
+    let mut h = Harness::new(auto_policy).await;
+    let ws = h.ws.clone();
+    let proj = ws.join("proj");
+    std::fs::create_dir_all(proj.join("sub")).unwrap();
+    std::fs::create_dir_all(ws.join("other")).unwrap();
+    std::fs::write(proj.join("notes.txt"), "v0\n").unwrap();
+    let a = create_in(&mut h, &proj).await;
+    let turn = prompt_turn(&mut h, a, "run: echo v1 > notes.txt").await;
+    let mut idle = vec![];
+    for (name, cwd) in [
+        ("same folder", proj.clone()),
+        ("parent folder", ws.clone()),
+        ("sub-folder", proj.join("sub")),
+    ] {
+        let b = create_in(&mut h, &cwd).await;
+        start_long_turn(&mut h, b).await;
+        let mark = h.seen.len();
+        let err = restore(&mut h, a, &format!("r-{name}"), &turn, false)
+            .await
+            .expect_err(name);
+        assert!(err.contains(BUSY), "{name}: {err}");
+        assert!(
+            pre_restore_snapshots(&h.seen[mark..]).is_empty(),
+            "{name}: a refused restore records nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(proj.join("notes.txt")).unwrap(),
+            "v1\n",
+            "{name}"
+        );
+        stop_turn(&mut h, b).await;
+        idle.push(b);
+    }
+    // Those chats are idle now; one is busy elsewhere.
+    let c = create_in(&mut h, &ws.join("other")).await;
+    start_long_turn(&mut h, c).await;
+    restore(&mut h, a, "r-ok", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(proj.join("notes.txt")).unwrap(),
+        "v0\n"
+    );
+    stop_turn(&mut h, c).await;
+}
+
+/// Folders are compared by where they really are: a chat whose folder is
+/// a symlink to this one is working in this folder.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_symlink() {
+    let mut h = Harness::new(auto_policy).await;
+    let real = h.ws.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let b = create_in(&mut h, &real).await;
+    // B's recorded folder becomes a link to where the files now are.
+    let moved = h.ws.join("moved");
+    std::fs::rename(&real, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &real).unwrap();
+    std::fs::write(moved.join("notes.txt"), "v0\n").unwrap();
+    let a = create_in(&mut h, &moved).await;
+    let turn = prompt_turn(&mut h, a, "run: echo v1 > notes.txt").await;
+    start_long_turn(&mut h, b).await;
+    let err = restore(&mut h, a, "r", &turn, false)
+        .await
+        .expect_err("same folder through a link");
+    assert!(err.contains(BUSY), "{err}");
+    stop_turn(&mut h, b).await;
+    restore(&mut h, a, "r2", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(moved.join("notes.txt")).unwrap(),
+        "v0\n"
+    );
+}
