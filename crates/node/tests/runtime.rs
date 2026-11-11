@@ -2488,3 +2488,147 @@ async fn hostile_nested_repo_config_does_not_run_on_checkpoint_or_undo() {
         .collect();
     assert!(ran.is_empty(), "nested repository config ran: {ran:?}");
 }
+
+// ---- A restore waits for other chats in the folder (PLAN.md T33, A.15) ----
+
+const BUSY: &str = "another chat is working in this folder right now";
+
+async fn create_in(h: &mut Harness, cwd: &std::path::Path) -> SessionId {
+    let sid = SessionId::new();
+    h.send(MasterToNode::Create {
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: format!("c-{sid}"),
+        session_id: sid,
+        title: "t".into(),
+        cwd: cwd.display().to_string(),
+        model: None,
+        approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+    });
+    until_in(h, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;
+    sid
+}
+
+/// Receive until `pred` matches an event of session `sid`.
+async fn until_in(h: &mut Harness, sid: SessionId, pred: impl Fn(&EventKind) -> bool) {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(20), h.link.from_node.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("link closed");
+        if let NodeToMaster::Event { event } = msg {
+            let k = event.typed().unwrap();
+            let mine = event.session_id == sid;
+            h.seen.push(event);
+            if mine && pred(&k) {
+                return;
+            }
+        }
+    }
+}
+
+/// Start a turn in `sid` that keeps running (a long command).
+async fn start_long_turn(h: &mut Harness, sid: SessionId) {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: format!("p-{sid}"),
+        session_id: sid,
+        text: "run: sleep 30".into(),
+        images: vec![],
+    });
+    until_in(h, sid, |k| matches!(k, EventKind::ToolCallStarted(_))).await;
+}
+
+async fn stop_turn(h: &mut Harness, sid: SessionId) {
+    h.send(MasterToNode::Cancel {
+        req_id: format!("x-{sid}"),
+        session_id: sid,
+    });
+    until_in(h, sid, |k| matches!(k, EventKind::TurnEnded(_))).await;
+}
+
+/// An undo is refused while another chat has a turn running in the same
+/// folder, in a folder containing it or in one inside it: it would write
+/// files under that turn's feet. The refusal records nothing and changes
+/// nothing. Once that chat is idle the undo runs, and a chat busy in an
+/// unrelated folder never blocks it.
+#[tokio::test]
+async fn a_restore_is_refused_while_another_chat_works_in_the_folder() {
+    let mut h = Harness::new(auto_policy).await;
+    let ws = h.ws.clone();
+    let proj = ws.join("proj");
+    std::fs::create_dir_all(proj.join("sub")).unwrap();
+    std::fs::create_dir_all(ws.join("other")).unwrap();
+    std::fs::write(proj.join("notes.txt"), "v0\n").unwrap();
+    let a = create_in(&mut h, &proj).await;
+    let turn = prompt_turn(&mut h, a, "run: echo v1 > notes.txt").await;
+    let mut idle = vec![];
+    for (name, cwd) in [
+        ("same folder", proj.clone()),
+        ("parent folder", ws.clone()),
+        ("sub-folder", proj.join("sub")),
+    ] {
+        let b = create_in(&mut h, &cwd).await;
+        start_long_turn(&mut h, b).await;
+        let mark = h.seen.len();
+        let err = restore(&mut h, a, &format!("r-{name}"), &turn, false)
+            .await
+            .expect_err(name);
+        assert!(err.contains(BUSY), "{name}: {err}");
+        assert!(
+            pre_restore_snapshots(&h.seen[mark..]).is_empty(),
+            "{name}: a refused restore records nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(proj.join("notes.txt")).unwrap(),
+            "v1\n",
+            "{name}"
+        );
+        stop_turn(&mut h, b).await;
+        idle.push(b);
+    }
+    // Those chats are idle now; one is busy elsewhere.
+    let c = create_in(&mut h, &ws.join("other")).await;
+    start_long_turn(&mut h, c).await;
+    restore(&mut h, a, "r-ok", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(proj.join("notes.txt")).unwrap(),
+        "v0\n"
+    );
+    stop_turn(&mut h, c).await;
+}
+
+/// Folders are compared by where they really are: a chat whose folder is
+/// a symlink to this one is working in this folder.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_symlink() {
+    let mut h = Harness::new(auto_policy).await;
+    let real = h.ws.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let b = create_in(&mut h, &real).await;
+    // B's recorded folder becomes a link to where the files now are.
+    let moved = h.ws.join("moved");
+    std::fs::rename(&real, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &real).unwrap();
+    std::fs::write(moved.join("notes.txt"), "v0\n").unwrap();
+    let a = create_in(&mut h, &moved).await;
+    let turn = prompt_turn(&mut h, a, "run: echo v1 > notes.txt").await;
+    start_long_turn(&mut h, b).await;
+    let err = restore(&mut h, a, "r", &turn, false)
+        .await
+        .expect_err("same folder through a link");
+    assert!(err.contains(BUSY), "{err}");
+    stop_turn(&mut h, b).await;
+    restore(&mut h, a, "r2", &turn, false).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(moved.join("notes.txt")).unwrap(),
+        "v0\n"
+    );
+}

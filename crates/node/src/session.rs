@@ -797,6 +797,7 @@ impl Session {
             .checkpoint_repo()
             .await
             .ok_or("checkpoints are not available for this folder any more")?;
+        self.check_folder_idle(&repo.root)?;
         let expected = if rewind { latest } else { after };
         for sha in [&before, &expected] {
             if !crate::git::exists(&repo, sha).await {
@@ -906,6 +907,41 @@ impl Session {
         }
         crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
         Ok(())
+    }
+
+    /// Refuse a restore while another session on this node has a turn
+    /// running in the folder the restore writes (`root`, the checkpoint's
+    /// folder: the repository's top for a folder inside one), in a folder
+    /// containing it, or in one inside it. Folders are compared by their
+    /// real paths. This session's own running turn (and so its sub-agents,
+    /// which run inside it) is refused before this; a sub-agent of another
+    /// session works in its own worktree and blocks only a restore of that.
+    /// Only restore is guarded: a turn that starts after this check is not.
+    fn check_folder_idle(&self, root: &std::path::Path) -> Result<(), String> {
+        let sessions: Vec<Arc<Session>> = self
+            .node
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .filter(|s| s.id != self.id)
+            .cloned()
+            .collect();
+        let real = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let root = real(root);
+        let busy = sessions.iter().filter(|s| s.is_running()).any(|s| {
+            let cwd = real(&s.cwd);
+            cwd.starts_with(&root) || root.starts_with(&cwd)
+        });
+        if busy {
+            Err(
+                "another chat is working in this folder right now; wait for it to finish \
+                 or cancel it"
+                    .into(),
+            )
+        } else {
+            Ok(())
+        }
     }
 
     /// Run a delegated sub-task in a new child session and wait for it.

@@ -516,7 +516,10 @@ touched by it: checkpoints leave it out, an undo neither restores, deletes
 nor recreates anything in it, and the chat says which repositories an undo
 left alone. Use git in that repository to undo changes there. Each
 checkpoint in the chat's log also lists the repositories it left out
-(`excluded`); the chat does not show that list yet.
+(`excluded`); the chat does not show that list yet. An undo is refused
+while another chat is working in the same folder (or in a folder that
+contains it, or one inside it); wait for that chat to finish, or cancel it,
+and undo again.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
