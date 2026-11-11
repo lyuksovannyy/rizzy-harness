@@ -163,12 +163,23 @@ fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
             .context("no data directory; pass --data-dir")?
             .join(BRAND),
     };
-    std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
+    // Made 0700 from the start (never visible to others under the umask
+    // for a moment); its parents as usual. An existing one must be this
+    // user's, and is made 0700; a chmod that fails stops the start (Gate 3
+    // review N-3).
+    if let Some(parent) = d.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
+    let mut mk = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
+    match mk.create(&d) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating {}", d.display())),
+    }
+    harness_master::secrets::check_data_dir(&d)?;
     // Absolute and real, once, here: everything below (the sandbox's temp
     // folder and protected folder among it) runs in other folders, where a
     // relative path would name something else (R.1, S-4).
@@ -586,8 +597,14 @@ fn start_sandbox(
         .sandbox
         .settings()
         .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
-    let s = harness_tools::sandbox::start(&settings, dir, &policy.protected_dirs, &node_toml)
-        .map_err(anyhow::Error::msg)?;
+    let s = harness_tools::sandbox::start(
+        &settings,
+        dir,
+        &policy.protected_dirs,
+        &policy.workspace_roots,
+        &node_toml,
+    )
+    .map_err(anyhow::Error::msg)?;
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
@@ -750,6 +767,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                     &p.sandbox.settings()?,
                     dir,
                     &p.protected_dirs,
+                    &p.workspace_roots,
                     &node_toml,
                 )
             })
@@ -768,6 +786,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                     &p.sandbox.settings()?,
                     dir,
                     &p.protected_dirs,
+                    &p.workspace_roots,
                     &dir.join("node.toml"),
                 )
             })

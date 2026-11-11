@@ -128,6 +128,12 @@ pub struct RoutinesHandle {
     bound: Mutex<HashMap<SessionId, runner::Bound>>,
     /// Runs waiting to try again after their node was offline.
     retries: Mutex<Vec<runner::Retry>>,
+    /// Held while a retry is recorded on its run and queued, and while a
+    /// tick takes the due retries: a run whose row already says "trying
+    /// again" is always in `retries` for the next tick (a tick in between
+    /// found the queue empty, and the run stayed pending until some later
+    /// tick).
+    queueing: tokio::sync::Mutex<()>,
     /// The webhook throttles.
     pub(crate) hooks: Mutex<buckets::HookLimits>,
     /// Set once the startup reconcile ran: nothing fires before it, so a
@@ -171,6 +177,7 @@ pub fn start_with(m: &Master, clock: Clock, spawn_loops: bool) {
         slots,
         bound: Mutex::new(HashMap::new()),
         retries: Mutex::new(Vec::new()),
+        queueing: tokio::sync::Mutex::new(()),
         hooks: Mutex::new(buckets::HookLimits::default()),
         ready,
     };

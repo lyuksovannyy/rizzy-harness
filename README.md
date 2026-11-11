@@ -626,6 +626,11 @@ directory, be inside it, or contain it: with the default data directory
 `allow_outside_workspace = true` or through a symlink. The shell runs in a
 sandbox that cannot open it either (see "The shell sandbox" below); its
 output is still scrubbed of the API token and known keys.
+`allow_outside_workspace = true` lets `write` and `edit` change any file
+of the node's user outside the data directory, `~/.bashrc` and
+`~/.gitconfig` included, which is the same as running a command outside
+the sandbox at your next shell: leave it off unless the chats on that
+node are ones you trust like your own shell.
 
 A chat's folder is remembered as the directory it was when the chat was
 made (its real path and its identity on disk). If that folder is later
@@ -714,6 +719,15 @@ write = ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.cache",
 `/sys`, `/var`, `/run`, `/nix/store` on NixOS. A shell sandbox entry may not
 contain, equal or be inside the data directory: the node refuses to start
 with such an entry, because Landlock cannot carve a folder out of a grant.
+The same holds for an entry that contains or equals a `workspace_roots`
+folder (every chat's commands would reach every other chat's folder), one
+inside another `write` entry (remove it: the outer entry already grants
+it), and one inside a workspace root whose path goes through a symbolic
+link below the root (list the real path instead). The node remembers
+where each entry really leads when it starts, and grants it to a command
+only while it still leads there: one replaced by a link (or below a
+folder replaced by one) is left out, and one that did not exist at start
+is granted once it exists at that same real path.
 For the same reason a data directory under `/usr`, `/etc` or `/opt` is
 refused. Graphify additionally needs its install (found automatically:
 its venv and the Python it was made from).

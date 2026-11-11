@@ -464,16 +464,40 @@ async fn the_api_token_needs_no_key_and_logout_ends_the_key() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    // A logout without the key does not end the login (the agent's server
-    // cannot sign the person out with the cookie alone either).
-    let (st, _) = call(&t, Method::POST, "/api/logout", None, &alex.cookie, None).await;
-    assert_eq!(st, StatusCode::OK, "the browser's cookie is cleared");
-    let (st, _) = as_login(&t, Method::GET, "/api/me", None, &alex).await;
-    assert_eq!(st, StatusCode::OK);
     let (st, _) = as_login(&t, Method::POST, "/api/logout", None, &alex).await;
     assert_eq!(st, StatusCode::OK);
     let (st, _) = as_login(&t, Method::GET, "/api/me", None, &alex).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED, "logged out");
+}
+
+/// Gate 3 fix review 2, R2-3: a page that lost its key (storage cleared)
+/// could not end its login, which then lived for 30 days. A logout with
+/// the cookie alone now ends that one login, and answers the same whether
+/// the cookie was live or not.
+#[tokio::test]
+async fn a_logout_with_the_cookie_alone_ends_that_login() {
+    let t = start().await;
+    let alex = claim(&t).await;
+    let other = login(&t).await;
+    let (st, v) = call(&t, Method::POST, "/api/logout", None, &alex.cookie, None).await;
+    assert_eq!((st, v.clone()), (StatusCode::OK, json!({"ok": true})));
+    let (st, _) = as_login(&t, Method::GET, "/api/me", None, &alex).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "the login lived on");
+    // Only that login: the person's other one is untouched.
+    let (st, _) = as_login(&t, Method::GET, "/api/me", None, &other).await;
+    assert_eq!(st, StatusCode::OK);
+    // A dead or made-up cookie gets the same answer.
+    let dead = format!(
+        "{}={}",
+        alex.cookie.split('=').next().unwrap(),
+        "0".repeat(64)
+    );
+    for c in [&alex.cookie, &dead] {
+        assert_eq!(
+            call(&t, Method::POST, "/api/logout", None, c, None).await,
+            (StatusCode::OK, v.clone())
+        );
+    }
 }
 
 type Socket =
@@ -513,6 +537,97 @@ fn subscribe(sid: &str) -> Message {
             .to_string()
             .into(),
     )
+}
+
+/// Gate 3 fix review 2, R2-1: the cookie alone took every one of the
+/// person's eight socket places (their page got 429), and the upgrade's
+/// status and `/api/favicon` told its holder whether the login was live.
+#[tokio::test]
+async fn a_cookie_alone_takes_no_socket_place_and_learns_nothing() {
+    let t = start().await;
+    let alex = claim(&t).await;
+    let dead = format!(
+        "{}={}",
+        alex.cookie.split('=').next().unwrap(),
+        "0".repeat(64)
+    );
+    // Twelve sockets on the cookie alone, none sends a key; and a dead one.
+    let mut held = Vec::new();
+    for _ in 0..12 {
+        held.push(open_socket(&t, &alex.cookie).await);
+    }
+    let mut d = open_socket(&t, &dead).await;
+    // The person's own page still gets its socket, and it works.
+    let mut s = open_socket(&t, &alex.cookie).await;
+    let hello = json!({"type": "login", "key": alex.key}).to_string();
+    s.send(Message::Text(hello.into())).await.unwrap();
+    s.send(Message::Text("hello".into())).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), s.next())
+        .await
+        .expect("the person's socket went quiet")
+        .unwrap()
+        .unwrap();
+    let Message::Text(text) = msg else {
+        panic!("{msg:?}")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["type"],
+        "error"
+    );
+    // A live cookie and a dead one end the same way, with nothing sent.
+    let (got, code) = drain(&mut held[0], Duration::from_secs(15)).await;
+    assert!(got.is_empty());
+    assert_eq!(
+        (got, code),
+        drain(&mut d, Duration::from_secs(15)).await,
+        "a live cookie ends unlike a dead one"
+    );
+    drop(held);
+
+    // The favicon takes the key (or a link), never the cookie alone.
+    let http = reqwest::Client::new();
+    let favicon = |cookie: Option<&str>, key: Option<&str>| {
+        let mut q = http.get(format!("{}/api/favicon?url=not-a-url", t.base));
+        if let Some(c) = cookie {
+            q = q.header("cookie", c);
+        }
+        if let Some(k) = key {
+            q = q.header(KEY_HEADER, k);
+        }
+        async move { q.send().await.unwrap().status() }
+    };
+    assert_eq!(favicon(None, None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(favicon(Some(&dead), None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        favicon(Some(&alex.cookie), None).await,
+        StatusCode::UNAUTHORIZED,
+        "a live cookie without its key gets past the login check"
+    );
+    assert_eq!(
+        favicon(Some(&alex.cookie), Some(&alex.key)).await,
+        StatusCode::BAD_REQUEST
+    );
+    // An <img> loads it through a link minted for this login.
+    let (st, v) = as_login(
+        &t,
+        Method::POST,
+        "/api/links",
+        Some(json!({"urls": ["/api/favicon?url=not-a-url"]})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let link = v["links"]["/api/favicon?url=not-a-url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no link: {v}"))
+        .to_string();
+    let r = http
+        .get(format!("{}{link}", t.base))
+        .header("cookie", &alex.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

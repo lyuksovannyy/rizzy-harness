@@ -284,3 +284,43 @@ fn open_secret_files_stop_the_server() {
         assert!(err.contains(named), "{file}: {err}");
     }
 }
+
+/// Gate 3 review N-3: the data directory was chmod-ed with the error
+/// ignored and its owner never checked, so a directory of another user
+/// was used as it was. Now that stops the server, naming the directory.
+#[cfg(unix)]
+#[test]
+fn a_data_dir_of_another_user_stops_the_server() {
+    use std::os::unix::fs::MetadataExt;
+    let theirs = Path::new("/usr/share");
+    if std::fs::metadata(theirs).unwrap().uid() == nix::unistd::geteuid().as_raw() {
+        eprintln!("SKIPPED: {} belongs to this user", theirs.display());
+        return;
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_rizzy-harness"))
+        .args(["--data-dir", theirs.to_str().unwrap(), "doctor"])
+        .env("HARNESS_LOG", "error")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run harness");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("owned by another user"), "{err}");
+    assert!(err.contains("/usr/share"), "{err}");
+
+    // A new one is made private whatever the umask.
+    let data = tempfile::tempdir().unwrap();
+    let fresh = data.path().join("fresh");
+    let st = Command::new("sh")
+        .args(["-c", "umask 000; exec \"$0\" --data-dir \"$1\" doctor"])
+        .arg(env!("CARGO_BIN_EXE_rizzy-harness"))
+        .arg(&fresh)
+        .env("HARNESS_LOG", "error")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    let _ = st;
+    assert_eq!(std::fs::metadata(&fresh).unwrap().mode() & 0o777, 0o700);
+}

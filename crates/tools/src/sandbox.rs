@@ -97,8 +97,11 @@ pub struct Settings {
 #[derive(Debug)]
 pub struct Sandbox {
     exe: PathBuf,
+    /// The system folders ([`SYSTEM_READ`]) that exist.
     read: Vec<PathBuf>,
-    write: Vec<PathBuf>,
+    /// node.toml's `[sandbox] read` and `write`.
+    extra_read: Vec<Extra>,
+    extra_write: Vec<Extra>,
     network: Network,
     best_effort: bool,
     /// Per-session temp directories live under it (inside the data dir).
@@ -139,6 +142,129 @@ fn exposes<'a>(p: &Path, protected: &'a [PathBuf]) -> Option<&'a PathBuf> {
     })
 }
 
+/// The start-up checks of node.toml's `[sandbox] read`/`write` entries
+/// against the workspace roots and each other (Gate 3 fix reviews 5 and 6,
+/// R1d-1 and R4-1). Refused, naming the key and the path:
+///
+/// * an entry that equals or holds a `workspace_roots` entry: every command
+///   would get every other chat's folder;
+/// * an entry inside another `write` entry: its parent is writable to every
+///   command, so a command could replace it by a link; it is never needed,
+///   the outer entry already grants it;
+/// * an entry below a workspace root whose path holds a symbolic link
+///   anywhere below the root (each component `lstat`ed): a chat there may
+///   have put that link in place of a real folder while the node was down,
+///   and the entry would be granted through it. List the real path instead.
+///
+/// An entry inside a root is not refused otherwise (with the default root,
+/// the home folder, every toolchain entry the README lists is inside it);
+/// while the node runs each entry is granted only while it still resolves
+/// where it did at start ([`Extra::grant`]).
+pub fn check_extras_against_roots(settings: &Settings, roots: &[PathBuf]) -> Result<(), String> {
+    let entries: Vec<(&str, &PathBuf)> = settings
+        .read
+        .iter()
+        .map(|p| ("read", p))
+        .chain(settings.write.iter().map(|p| ("write", p)))
+        .collect();
+    for (key, p) in &entries {
+        let what = if *key == "write" {
+            "read and change"
+        } else {
+            "read"
+        };
+        let rp = real(p);
+        if let Some(r) = roots
+            .iter()
+            .find(|r| r.starts_with(&rp) || real(r).starts_with(&rp))
+        {
+            return Err(format!(
+                "node.toml [sandbox] {key}: {} holds {}, a workspace_roots entry, so every \
+                 chat's commands could {what} every other chat's folder; list a folder that \
+                 does not contain a workspace root",
+                p.display(),
+                r.display()
+            ));
+        }
+        for w in &settings.write {
+            let rw = real(w);
+            if rp != rw && rp.starts_with(&rw) {
+                return Err(format!(
+                    "node.toml [sandbox] {key}: {} is inside the [sandbox] write entry {}; every \
+                     command may change that folder, so it could replace this entry by a link; \
+                     remove it (the write entry already grants it)",
+                    p.display(),
+                    w.display()
+                ));
+            }
+        }
+        let lexical = normalize(p);
+        for r in roots {
+            let below = [normalize(r), real(r)]
+                .into_iter()
+                .find_map(|base| Some((lexical.strip_prefix(&base).ok()?.to_path_buf(), base)));
+            let Some((rest, base)) = below else { continue };
+            let mut at = base;
+            for c in rest.components() {
+                at.push(c);
+                match std::fs::symlink_metadata(&at) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        return Err(format!(
+                            "node.toml [sandbox] {key}: {} goes through the symbolic link {} \
+                             inside the workspace root {}; a chat there could have put that link \
+                             in place of a real folder; list the real path instead",
+                            p.display(),
+                            at.display(),
+                            r.display()
+                        ));
+                    }
+                    Ok(_) => {}
+                    // Not there yet: nothing below it can be a link either.
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A node.toml `[sandbox] read`/`write` entry, as it resolved when the node
+/// started (R1d-1).
+#[derive(Debug)]
+struct Extra {
+    /// Its real path at start (canonical, or normalized if it did not exist).
+    real: PathBuf,
+    label: &'static str,
+}
+
+impl Extra {
+    fn new(p: &Path, key: &str) -> Self {
+        Self {
+            real: real(p),
+            label: if key == "write" {
+                "a node.toml [sandbox] write entry"
+            } else {
+                "a node.toml [sandbox] read entry"
+            },
+        }
+    }
+
+    /// Its grant for the next command: only while it still resolves to
+    /// where it did at start (a link put in its place, or in place of a
+    /// folder above it, resolves elsewhere and gets nothing), bound to what
+    /// is there now, so the wrapper refuses a swap after this look. A file
+    /// rewritten by renaming a new one over it keeps its grant; an entry
+    /// missing now gets nothing until it is back.
+    fn grant(&self) -> Option<Grant> {
+        let now = self.real.canonicalize().ok()?;
+        if now != self.real {
+            return None;
+        }
+        let id = harness_core::folder::Identity::of(&now).ok()?;
+        Some(Grant::identified(&now, id, self.label))
+    }
+}
+
 impl Sandbox {
     /// `exe` is the harness binary (resolved once at start); `protected` the
     /// folders no grant may expose. Refuses a `read`/`write` entry or a
@@ -161,7 +287,7 @@ impl Sandbox {
                 ));
             }
         }
-        let mut read: Vec<PathBuf> = SYSTEM_READ
+        let read: Vec<PathBuf> = SYSTEM_READ
             .iter()
             .map(PathBuf::from)
             .filter(|p| p.exists())
@@ -176,9 +302,9 @@ impl Sandbox {
                 }
                 if let Some(d) = exposes(p, protected) {
                     return Err(format!(
-                        "node.toml [sandbox] {key}: {} would make the harness's own data \
-                         directory {} visible to the agent; list a folder that neither contains \
-                         it nor is inside it",
+                        "node.toml [sandbox] {key}: {} would make {} (the harness's own data \
+                         directory, or a protected_dirs entry) visible to the agent; list a \
+                         folder that neither contains it nor is inside it",
                         p.display(),
                         d.display()
                     ));
@@ -195,11 +321,19 @@ impl Sandbox {
                 ));
             }
         }
-        read.extend(settings.read.iter().cloned());
         Ok(Self {
             exe,
             read,
-            write: settings.write.clone(),
+            extra_read: settings
+                .read
+                .iter()
+                .map(|p| Extra::new(p, "read"))
+                .collect(),
+            extra_write: settings
+                .write
+                .iter()
+                .map(|p| Extra::new(p, "write"))
+                .collect(),
             network: settings.network,
             best_effort: settings.mode == Mode::BestEffort,
             tmp_root,
@@ -224,9 +358,16 @@ impl Sandbox {
         if status {
             c.arg("--status");
         }
-        // node.toml's extras and the system folders: not session-writable.
-        let extra_rw: Vec<Grant> = self.write.iter().map(|p| Grant::system(p)).collect();
-        let extra_ro: Vec<Grant> = self.read.iter().map(|p| Grant::system(p)).collect();
+        // The system folders: not session-writable. node.toml's extras may
+        // lie where a session can write (inside a workspace root, inside
+        // another `write` entry): each by its identity (R1d-1).
+        let extra_rw: Vec<Grant> = self.extra_write.iter().filter_map(Extra::grant).collect();
+        let extra_ro: Vec<Grant> = self
+            .read
+            .iter()
+            .map(|p| Grant::system(p))
+            .chain(self.extra_read.iter().filter_map(Extra::grant))
+            .collect();
         for g in rw.iter().chain(&extra_rw).chain(&devices()) {
             g.push_args(&mut c, "--rw");
         }
@@ -530,11 +671,13 @@ pub struct Started {
 /// (`current_exe`, canonical; a binary replaced by an upgrade is picked up
 /// at the same path, a deleted one makes every command fail closed), build
 /// the rules and run the self-test. `Err` is a configuration error (a
-/// `[sandbox]` entry that would expose the data directory).
+/// `[sandbox]` entry that would expose the data directory or a protected
+/// folder, or that holds a workspace root).
 pub fn start(
     settings: &Settings,
     data_dir: &Path,
     protected: &[PathBuf],
+    workspace_roots: &[PathBuf],
     node_toml: &Path,
 ) -> Result<Started, String> {
     if !data_dir.is_absolute() {
@@ -556,6 +699,7 @@ pub fn start(
             tmp_root: None,
         });
     }
+    check_extras_against_roots(settings, workspace_roots)?;
     let exe = std::env::current_exe()
         .and_then(|e| e.canonicalize())
         .map_err(|e| format!("cannot find the harness binary for {SUBCOMMAND}: {e}"));
@@ -639,15 +783,16 @@ pub fn reset_tmp(root: &Path) -> Result<(), String> {
 pub enum Expect {
     /// The directory or file with this identity, taken when the node pinned
     /// or made it (a session's folder, a sub-agent's folder and its `.git`,
-    /// the borrowed object store as accepted, a shadow, a temp folder). The
+    /// the borrowed object store as accepted, a shadow, a temp folder, a
+    /// node.toml `[sandbox] read`/`write` entry as it is now, R1d-1). The
     /// wrapper opens the path once without following a link at its last
     /// component, compares the opened descriptor's device and inode, and
     /// builds the rule from that same descriptor: whoever re-points the path
     /// gets the whole command refused, never a grant on the new target.
     Identity(harness_core::folder::Identity),
     /// A path no session can write (the system folders, the device files,
-    /// node.toml's `[sandbox] read`/`write`): opened as it is, links
-    /// followed (`/lib64` is a link on most systems).
+    /// graphify's install): opened as it is, links followed (`/lib64` is a
+    /// link on most systems).
     NotSessionWritable,
 }
 
@@ -977,6 +1122,113 @@ mod tests {
         assert!(Sandbox::new(exe, &s, None, &protected).is_err());
     }
 
+    /// The wrapper's arguments for a command with no grants of its own.
+    fn wrapper_args(sb: &Sandbox) -> Vec<String> {
+        sb.wrapper(&[], &[], false)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The `<expect>` the wrapper is given for `path`, if it is granted.
+    fn expect_of(args: &[String], path: &Path) -> Option<String> {
+        let p = path.to_string_lossy();
+        args.iter()
+            .position(|a| *a == p)
+            .map(|i| args[i - 1].clone())
+    }
+
+    /// Gate 3 fix review 5, R1d-1: a node.toml extra was granted as a
+    /// system path, opened following links. An extra inside a folder a
+    /// session can write (its own folder, another `write` entry) could be
+    /// replaced by a link, and the next command was granted the link's
+    /// target. Now an extra is granted only while it resolves to where it
+    /// did at start, bound to what is there now.
+    #[test]
+    fn an_extra_replaced_by_a_link_is_not_granted() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let registry = home.join("code/.cargo/registry");
+        let ssh = home.join(".ssh");
+        let gitconfig = home.join("code/.gitconfig");
+        std::fs::create_dir_all(&registry).unwrap();
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(&gitconfig, "[user]\n").unwrap();
+        let s = Settings {
+            read: vec![gitconfig.clone()],
+            write: vec![registry.clone()],
+            ..Default::default()
+        };
+        let sb = Sandbox::new("/bin/true".into(), &s, None, &[]).unwrap();
+        let args = wrapper_args(&sb);
+        for p in [&registry, &gitconfig] {
+            let e = expect_of(&args, p).unwrap_or_else(|| panic!("{} not granted", p.display()));
+            assert_ne!(e, "system", "{} is granted following links", p.display());
+        }
+
+        // A file rewritten the usual way (a new file renamed over it) is
+        // still the same entry: granted, with its new identity.
+        std::fs::write(home.join("code/.gitconfig.lock"), "[user]\nname = x\n").unwrap();
+        std::fs::rename(home.join("code/.gitconfig.lock"), &gitconfig).unwrap();
+        let id = harness_core::folder::Identity::of(&gitconfig).unwrap();
+        assert_eq!(
+            expect_of(&wrapper_args(&sb), &gitconfig).unwrap(),
+            format!("{}:{}:a node.toml [sandbox] read entry", id.dev, id.ino)
+        );
+
+        // A process of a session in `code` swaps the entry for a link.
+        std::fs::rename(&registry, home.join("code/.cargo/registry.old")).unwrap();
+        std::os::unix::fs::symlink(&ssh, &registry).unwrap();
+        // ...or a folder above it.
+        std::fs::rename(&gitconfig, home.join("gitconfig.old")).unwrap();
+        std::os::unix::fs::symlink(ssh.join("id_ed25519"), &gitconfig).unwrap();
+        let args = wrapper_args(&sb);
+        for p in [&registry, &gitconfig, &ssh, &ssh.join("id_ed25519")] {
+            assert_eq!(expect_of(&args, p), None, "{} is granted", p.display());
+        }
+    }
+
+    #[test]
+    fn an_extra_that_holds_a_workspace_root_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let code = home.join("code");
+        std::fs::create_dir_all(code.join("vendor")).unwrap();
+        let roots = [code.clone()];
+        for (key, bad) in [
+            ("read", code.clone()),
+            ("write", home.clone()),
+            ("read", code.join("vendor/..")),
+            ("write", PathBuf::from("/")),
+        ] {
+            let s = Settings {
+                read: if key == "read" {
+                    vec![bad.clone()]
+                } else {
+                    vec![]
+                },
+                write: if key == "write" {
+                    vec![bad.clone()]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            };
+            let e = check_extras_against_roots(&s, &roots).unwrap_err();
+            assert!(e.contains(&format!("[sandbox] {key}")), "{e}");
+            assert!(e.contains(&bad.display().to_string()), "{e}");
+            assert!(e.contains("workspace_roots"), "{e}");
+        }
+        // Inside a root is not refused: it is bound to its identity instead
+        // (`an_extra_replaced_by_a_link_is_not_granted`).
+        let s = Settings {
+            read: vec![code.join("vendor")],
+            write: vec![home.join(".cache")],
+            ..Default::default()
+        };
+        assert!(check_extras_against_roots(&s, &roots).is_ok());
+    }
+
     #[test]
     fn a_data_dir_under_a_system_folder_is_refused() {
         let s = Settings::default();
@@ -996,6 +1248,7 @@ mod tests {
                 &s,
                 Path::new("data"),
                 &[PathBuf::from("/abs/data")],
+                &[],
                 Path::new("/abs/node.toml"),
             )
             .unwrap_err();

@@ -365,6 +365,7 @@ fn start_reports_enforced_and_names_the_abi() {
         &Settings::default(),
         &f.data,
         std::slice::from_ref(&f.data),
+        &[],
         &f.data.join("node.toml"),
     )
     .unwrap();
@@ -381,6 +382,7 @@ fn start_reports_enforced_and_names_the_abi() {
         },
         &f.data,
         std::slice::from_ref(&f.data),
+        &[],
         &f.data.join("node.toml"),
     )
     .unwrap();

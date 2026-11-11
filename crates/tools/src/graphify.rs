@@ -144,6 +144,13 @@ fn install_dirs(bin: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// `graphify query`'s arguments for the model's question: the options
+/// first, then `--`, then the question, so a question that starts with `-`
+/// is never read as an option (Gate 3 review S-5).
+fn query_args<'a>(q: &'a str, graph: &'a str) -> Vec<&'a str> {
+    vec!["query", "--budget", "2000", "--graph", graph, "--", q]
+}
+
 async fn run(
     ctx: &ToolCtx,
     bin: &Path,
@@ -170,18 +177,29 @@ async fn run(
             owned: ctx.owned.clone(),
         },
     )?;
+    // In a process group of its own, killed as a whole on timeout, cancel
+    // or drop, as `bash` does: what graphify starts dies with it (S-5).
     cmd.env("GRAPHIFY_OUT", out)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true);
-    let fut = cmd.output();
+    let child = cmd.spawn().map_err(|e| format!("graphify: {e}"))?;
+    let mut group = crate::bash::KillGroupOnDrop(child.id().map(|p| p as i32));
     let o = tokio::select! {
-        r = tokio::time::timeout(timeout, fut) => match r {
+        r = tokio::time::timeout(timeout, child.wait_with_output()) => match r {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => return Err(format!("graphify: {e}")),
             Err(_) => return Err(format!("graphify timed out after {}s", timeout.as_secs())),
         },
         _ = ctx.cancel.cancelled() => return Err("[cancelled]".into()),
     };
+    // It exited: anything it left in its group goes now, and the guard is
+    // disarmed so a later drop cannot signal a reused group id.
+    if let Some(pgid) = group.0.take() {
+        crate::bash::signal_group(pgid, nix::sys::signal::Signal::SIGKILL);
+    }
     let text = String::from_utf8_lossy(&o.stdout).into_owned();
     if o.status.success() {
         Ok(text)
@@ -250,15 +268,7 @@ impl Tool for GraphQuery {
             }
         }
         let graph_s = graph.to_string_lossy().into_owned();
-        match run(
-            ctx,
-            &bin,
-            &["query", q, "--budget", "2000", "--graph", &graph_s],
-            &out,
-            QUERY_TIMEOUT,
-        )
-        .await
-        {
+        match run(ctx, &bin, &query_args(q, &graph_s), &out, QUERY_TIMEOUT).await {
             Ok(t) if t.trim().is_empty() => ToolOutcome::ok("(no match in the graph)"),
             Ok(t) => ToolOutcome::ok(t),
             Err(e) => ToolOutcome::err(e),
@@ -283,6 +293,93 @@ mod tests {
         // Allowed in node.toml: still needs the binary; without it, off.
         let t = GraphQuery::new(GraphifyState::new(true, std::env::temp_dir()));
         assert_eq!(t.enabled(&on), find_binary().is_some());
+    }
+
+    /// A fake `graphify` that prints its arguments one per line, starts a
+    /// grandchild that writes its pid to `pidfile`, and then waits.
+    fn fake(dir: &Path, pidfile: &Path, wait: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("graphify");
+        let tail = if wait {
+            "sleep 1000 & echo $! > \"$PIDFILE\"; wait"
+        } else {
+            ""
+        };
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nPIDFILE='{}'\nfor a in \"$@\"; do echo \"$a\"; done\n{tail}\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    /// Gate 3 review S-5: the model's question was a bare argument, so a
+    /// question that starts with `-` was read as an option.
+    #[tokio::test]
+    async fn the_question_is_never_an_option() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake(dir.path(), &dir.path().join("pid"), false);
+        let ctx = ToolCtx::new(dir.path());
+        let out = run(
+            &ctx,
+            &bin,
+            &query_args("--graph=/etc/passwd", "/g.json"),
+            dir.path(),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let args: Vec<&str> = out.lines().collect();
+        let q = args
+            .iter()
+            .position(|a| *a == "--graph=/etc/passwd")
+            .unwrap();
+        assert_eq!(args[q - 1], "--", "{args:?}");
+        assert_eq!(
+            q,
+            args.len() - 1,
+            "the question is the last argument: {args:?}"
+        );
+    }
+
+    /// Gate 3 review S-5: a timeout killed only graphify itself; what it
+    /// started went on running.
+    #[tokio::test]
+    async fn a_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let bin = fake(dir.path(), &pidfile, true);
+        let ctx = ToolCtx::new(dir.path());
+        let e = run(
+            &ctx,
+            &bin,
+            &["update", "."],
+            dir.path(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("timed out"), "{e}");
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = |pid: i32| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+                let st = s.rsplit(')').next().unwrap_or("").trim_start();
+                !(st.starts_with('Z') || st.starts_with('X') || st.starts_with('x'))
+            })
+        };
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while alive(pid) && std::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(pid), "graphify's child {pid} outlived the timeout");
     }
 
     #[test]

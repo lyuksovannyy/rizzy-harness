@@ -344,6 +344,227 @@ async fn a_turn_that_lost_its_grant_while_its_node_was_away_is_cancelled_on_retu
     );
 }
 
+/// Gate 3 fix review 2, R2-2: the sweep after a hello read the mirror once,
+/// before the replay; a turn that started while the link was down, so that
+/// only the replay says it runs, was never cancelled.
+#[tokio::test]
+async fn a_turn_known_only_from_the_replay_is_cancelled_when_it_lands() {
+    use harness_core::event::TurnStarted;
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (l1, c1, tx1) = open_link("n1", vec![]);
+    m.add_link(l1, false).await.unwrap();
+    // Bob's chat, mirrored up to its creation, idle.
+    store
+        .create_user(&harness_store::NewUser {
+            user_id: "bob".into(),
+            username: "bob".into(),
+            password_hash: "$argon2id$x".into(),
+            role: harness_store::Role::Member,
+            can_agentic: true,
+            must_change_password: false,
+        })
+        .unwrap();
+    let sid = SessionId::new();
+    send(&tx1, event(sid, 1, "")).await;
+    barrier(&store, &tx1).await;
+    store.claim_session(sid, Some("bob"), None).unwrap();
+    drop((tx1, c1));
+    wait_for(|| m.nodes().iter().all(|n| !n.connected)).await;
+
+    // While the node is away bob loses the grant, and the turn starts.
+    revoke_grant(&store, "bob");
+    harness_master::workspaces::cancel_revoked(&m, &["bob".to_string()]).await;
+    let (l2, mut c2, tx2) = open_link(
+        "n1",
+        vec![SessionHead {
+            session_id: sid,
+            head_seq: 2,
+        }],
+    );
+    m.add_link(l2, false).await.unwrap();
+    let last_seq = loop {
+        match tokio::time::timeout(Duration::from_secs(5), c2.recv()).await {
+            Ok(Some(MasterToNode::Resume {
+                session_id,
+                last_seq,
+            })) if session_id == sid => break last_seq,
+            Ok(Some(_)) => {}
+            other => panic!("no resume: {other:?}"),
+        }
+    };
+    assert_eq!(last_seq, 1);
+    let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+        turn_id: "t1".into(),
+        agent: None,
+    })
+    .into_parts();
+    tx2.send(NodeToMaster::Snapshot {
+        session_id: sid,
+        head_seq: 2,
+        events: vec![RawEvent {
+            session_id: sid,
+            seq: 2,
+            ts_ms: 2,
+            kind,
+            payload,
+        }],
+    })
+    .await
+    .unwrap();
+    assert!(
+        cancel_within(&mut c2, sid, 5).await,
+        "the turn the replay revealed was not cancelled"
+    );
+}
+
+/// The `session.create` a link received for the next create: (request id,
+/// session id).
+async fn next_create(c: &mut mpsc::Receiver<MasterToNode>) -> (String, SessionId) {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), c.recv()).await {
+            Ok(Some(MasterToNode::Create {
+                req_id, session_id, ..
+            })) => return (req_id, session_id),
+            Ok(Some(_)) => {}
+            other => panic!("no create: {other:?}"),
+        }
+    }
+}
+
+fn create_spec(owner: &str) -> harness_master::CreateSpec {
+    harness_master::CreateSpec {
+        node_id: Some("n1".into()),
+        title: "t".into(),
+        cwd: "/w".into(),
+        owner_id: Some(owner.into()),
+        ..Default::default()
+    }
+}
+
+/// Gate 3 review P-6: a create whose acknowledgement was late (or came
+/// before the node's `session_created`) left a chat nobody owned; only the
+/// API token could see or delete it. The master records the intended owner
+/// before it sends the create, and the late chat is that owner's.
+#[tokio::test(start_paused = true)]
+async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+
+    // The node answers the create before it says the chat exists.
+    let m2 = m.clone();
+    let made = tokio::spawn(async move { m2.create_session(create_spec("bob")).await });
+    let (req, sid) = next_create(&mut c).await;
+    tx.send(NodeToMaster::Ack {
+        req_id: req,
+        ok: true,
+        error: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(made.await.unwrap().unwrap(), sid);
+    send(&tx, event(sid, 1, "")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(
+        store.session(sid).unwrap().unwrap().owner_id.as_deref(),
+        Some("bob"),
+        "an ack before session_created left the chat without an owner"
+    );
+
+    // The node does not answer in time; the chat turns up later.
+    let m2 = m.clone();
+    let made = tokio::spawn(async move { m2.create_session(create_spec("carol")).await });
+    let (_, sid) = next_create(&mut c).await;
+    assert!(matches!(
+        made.await.unwrap(),
+        Err(harness_master::CommandError::Timeout)
+    ));
+    send(&tx, event(sid, 1, "")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(
+        store.session(sid).unwrap().unwrap().owner_id.as_deref(),
+        Some("carol"),
+        "a create that timed out left the chat without an owner"
+    );
+}
+
+/// Gate 3 fix review 6, N-2: a create that timed out and never landed left
+/// its intent row for good. An intent lives for `CREATE_INTENT_TTL`: an
+/// older one is removed by the next create and claims nothing.
+#[tokio::test]
+async fn a_create_intent_that_never_lands_is_removed_and_claims_nothing() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    let stale = SessionId::new();
+    let old = harness_core::now_ms() - harness_master::CREATE_INTENT_TTL_MS - 1;
+    store
+        .kv_set(
+            &format!("create-intent:{stale}"),
+            &serde_json::json!({"node": "n1", "owner": "mallory", "workspace": null, "at": old})
+                .to_string(),
+        )
+        .unwrap();
+    // The next create clears it.
+    let m2 = m.clone();
+    let made = tokio::spawn(async move { m2.create_session(create_spec("bob")).await });
+    let (req, sid) = next_create(&mut c).await;
+    send(&tx, event(sid, 1, "")).await;
+    tx.send(NodeToMaster::Ack {
+        req_id: req,
+        ok: true,
+        error: None,
+    })
+    .await
+    .unwrap();
+    made.await.unwrap().unwrap();
+    assert_eq!(
+        store.kv_get(&format!("create-intent:{stale}")).unwrap(),
+        None,
+        "the stale intent row stayed"
+    );
+    // And a chat that turns up that late is nobody's claim.
+    send(&tx, event(stale, 1, "")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.session(stale).unwrap().unwrap().owner_id, None);
+}
+
+/// Gate 3 review N-5: a command whose caller went away (an HTTP request
+/// that timed out) left its entry in the master's table of pending acks;
+/// and a model at create was forwarded to the node unchecked.
+#[tokio::test]
+async fn an_abandoned_command_leaves_no_ack_and_an_unknown_model_is_refused() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, _tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    let pending = tokio::time::timeout(
+        Duration::from_millis(200),
+        m.create_session(create_spec("bob")),
+    )
+    .await;
+    assert!(pending.is_err(), "the node never answers");
+    next_create(&mut c).await;
+    assert_eq!(m.pending_acks(), 0, "the abandoned command's ack stayed");
+
+    let mut spec = create_spec("bob");
+    spec.model = Some("nope::not-a-model".into());
+    let e = m.create_session(spec).await.unwrap_err();
+    assert!(e.to_string().contains("unknown model"), "{e}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), next_create(&mut c))
+            .await
+            .is_err(),
+        "the unknown model went to the node"
+    );
+}
+
 /// Gate 3 review P-3: a cancel that could not be queued (the node's queue
 /// is full) is tried again, so the turn does not outlive the revocation.
 #[tokio::test]

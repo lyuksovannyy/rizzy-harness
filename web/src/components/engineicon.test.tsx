@@ -4,31 +4,34 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { linked } from "../lib/links.setup";
 import { EngineIcon } from "./EngineIcon";
+import "./Linked";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 afterEach(() => vi.useRealTimers());
 
-function mount(origin: string) {
+async function mount(origin: string) {
   const host = document.createElement("div");
   document.body.append(host);
-  act(() => createRoot(host).render(<EngineIcon origin={origin} />));
+  await act(async () => createRoot(host).render(<EngineIcon origin={origin} />));
   return host;
 }
 
 const fail = (host: HTMLElement) => act(() => host.querySelector("img")!.dispatchEvent(new Event("error")));
 
 describe("EngineIcon", () => {
-  test("retries with backoff, then settles on the globe", () => {
+  test("loads through a link, retries with backoff, then settles on the globe", async () => {
+    const host = await mount("https://example.com");
+    // Gate 3 R2-1: the cookie alone no longer fetches an icon.
+    expect(host.querySelector("img")!.getAttribute("src")).toBe(linked("/api/favicon?url=https%3A%2F%2Fexample.com"));
     vi.useFakeTimers();
-    const host = mount("https://example.com");
-    expect(host.querySelector("img")!.getAttribute("src")).toBe("/api/favicon?url=https%3A%2F%2Fexample.com");
     for (const [n, wait] of [[1, 800], [2, 2000], [3, 5000]] as const) {
       fail(host);
       expect(host.querySelector("img")).toBeNull();
       act(() => vi.advanceTimersByTime(wait));
-      expect(host.querySelector("img")!.getAttribute("src")).toContain(`&try=${n}`);
+      expect(host.querySelector("img")!.getAttribute("src")).toContain(`&try=${n}&link=t`);
     }
     fail(host);
     expect(host.querySelector("img")).toBeNull();

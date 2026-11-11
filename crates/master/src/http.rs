@@ -419,12 +419,15 @@ async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<R
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
     // The session row goes, so a copy of the cookie is useless from now on.
-    // Only with the login key: the cookie alone (another port's server has
-    // it, P-1) cannot end the person's login. The browser's cookie is
-    // cleared either way.
-    if let Some(id) = auth::cookie_value(&headers)
-        && auth::holds_login(&m, &headers).await
-    {
+    // The cookie alone is enough (Gate 3 fix review 2, R2-3): a page that
+    // lost its key (storage cleared) must be able to end its login, which
+    // would otherwise live for 30 days. Ending a login never harms its
+    // owner and reveals nothing (the answer is the same whether the cookie
+    // was live, dead or made up); the worst a holder of the cookie (another
+    // local port's server, P-1) can do is sign the person out, which it
+    // could only repeat after they visit it again. It ends that one login,
+    // never the person's others. The browser's cookie is cleared either way.
+    if let Some(id) = auth::cookie_value(&headers) {
         auth::delete_ui_session(&m, &id).await;
     }
     (

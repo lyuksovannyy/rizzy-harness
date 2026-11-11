@@ -566,22 +566,41 @@ pub async fn cancel_revoked_on(m: &Master, node_id: &str) {
     }
 }
 
+/// The sweep for one session, once a replay of it has landed (Gate 3 fix
+/// review 2, R2-2): the hello's sweep read the mirror before the replay
+/// arrived, so a turn only the replay shows as running was missed.
+pub async fn cancel_revoked_session(m: &Master, sid: harness_core::SessionId) {
+    match m.inner.mirror.call(move |s| s.session(sid)).await {
+        Ok(row) => cancel_blocked(m, row.into_iter()).await,
+        Err(e) => {
+            tracing::warn!(session = %sid, error = %e, "revocation sweep: could not read the session")
+        }
+    }
+}
+
+/// Why `row`'s owner may no longer drive it, if so; `Err` when that could
+/// not be decided (a store error), so nothing is cancelled on a guess.
+async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, ()> {
+    let owner = row.owner_id.clone().unwrap_or_default();
+    match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
+        Ok(Some(u)) if !u.disabled => Ok(agentic_blocked(m, &Principal::from_user(u), row).await),
+        Ok(_) => Ok(Some("the account is disabled or gone".to_string())),
+        Err(e) => {
+            tracing::warn!(session = %row.session_id, error = %e, "revocation sweep: could not load the owner");
+            Err(())
+        }
+    }
+}
+
 /// Cancel every running agentic session in `rows` whose owner may no
 /// longer drive it.
 async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
     let running =
         rows.filter(|r| r.running && r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
     for row in running {
-        let owner = row.owner_id.clone().unwrap_or_default();
-        let blocked = match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
-            Ok(Some(u)) if !u.disabled => agentic_blocked(m, &Principal::from_user(u), &row).await,
-            Ok(_) => Some("the account is disabled or gone".to_string()),
-            Err(e) => {
-                tracing::warn!(session = %row.session_id, error = %e, "revocation sweep: could not load the owner");
-                continue;
-            }
+        let Ok(Some(why)) = blocked_reason(m, &row).await else {
+            continue;
         };
-        let Some(why) = blocked else { continue };
         tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
         cancel_retrying(m, row.session_id).await;
     }
@@ -614,6 +633,18 @@ async fn cancel_retrying(m: &Master, sid: harness_core::SessionId) {
         for attempt in 2..=CANCEL_TRIES {
             tokio::time::sleep(wait).await;
             wait *= 2;
+            // Still blocked? A grant given back meanwhile keeps its turn
+            // (R2-2).
+            let row = m.inner.mirror.call(move |s| s.session(sid)).await;
+            let still = match row {
+                Ok(Some(row)) if row.running => {
+                    matches!(blocked_reason(&m, &row).await, Ok(Some(_)))
+                }
+                _ => false,
+            };
+            if !still {
+                return;
+            }
             match m.cancel(sid).await {
                 Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {}
                 Err(e) => {

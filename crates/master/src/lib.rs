@@ -52,6 +52,10 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a create's intended owner is kept for a chat that comes
+/// late (Gate 3 review P-6; fix review 6 N-2): far past `ACK_TIMEOUT`,
+/// short enough that a create the node never makes leaves no row for good.
+pub const CREATE_INTENT_TTL_MS: i64 = 60 * 60 * 1000;
 /// How many sessions of a hello one store read covers.
 const HELLO_BATCH: usize = 256;
 /// What a remote node's `ack.error` may put into a log line or an API
@@ -145,6 +149,9 @@ pub struct MasterInner {
     /// Pending commands by request id, with the node each went to: only
     /// that node's ack settles it.
     acks: Mutex<HashMap<String, PendingAck>>,
+    /// Audit rows written for failed node handshakes, per node id and per
+    /// peer address (Gate 3 review L-7).
+    node_auth_audits: auth::limits::FailureMap,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
@@ -417,6 +424,35 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     }
 }
 
+/// The kv keys of creates' intended owners (Gate 3 review P-6).
+const CREATE_INTENT_PREFIX: &str = "create-intent:";
+
+fn create_intent_key(sid: SessionId) -> String {
+    format!("{CREATE_INTENT_PREFIX}{sid}")
+}
+
+/// Whether a stored intent is older than [`CREATE_INTENT_TTL_MS`] (one
+/// that cannot be read counts as old).
+fn intent_expired(v: &str, now: i64) -> bool {
+    serde_json::from_str::<serde_json::Value>(v)
+        .ok()
+        .and_then(|v| v["at"].as_i64())
+        .is_none_or(|at| now - at > CREATE_INTENT_TTL_MS)
+}
+
+/// Removes a command's pending-ack entry when its `send_command` ends in
+/// any way (an ack already took it out: removing again is a no-op).
+struct AckEntry<'a> {
+    master: &'a Master,
+    req_id: &'a str,
+}
+
+impl Drop for AckEntry<'_> {
+    fn drop(&mut self) {
+        lock(&self.master.inner.acks).remove(self.req_id);
+    }
+}
+
 /// Clears a session's resume-in-flight mark when dropped, unless disarmed:
 /// a snapshot that stops part way never leaves the session marked.
 struct ResumeGuard<'a> {
@@ -447,6 +483,7 @@ impl Master {
                 nodes: Mutex::new(HashMap::new()),
                 live,
                 acks: Mutex::new(HashMap::new()),
+                node_auth_audits: nodes::auth_audit_limit(),
                 auth,
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),
@@ -555,6 +592,12 @@ impl Master {
 
     pub fn pdf_reader(&self) -> Option<&pdf::PdfReader> {
         self.inner.pdf.get()
+    }
+
+    /// Commands still waiting for their node's ack (tests).
+    #[doc(hidden)]
+    pub fn pending_acks(&self) -> usize {
+        lock(&self.inner.acks).len()
     }
 
     /// The mirror store (tests and tools).
@@ -1065,6 +1108,15 @@ impl Master {
                 let head = self.inner.mirror.call(move |s| s.head_seq(sid)).await;
                 if landed && head.is_ok_and(|h| h < head_seq) {
                     guard.armed = false;
+                } else {
+                    // The replay is over: a turn it revealed as running (it
+                    // started while the link was down) gets the revocation
+                    // sweep the hello ran before it arrived (Gate 3 fix
+                    // review 2, R2-2).
+                    let this = self.clone();
+                    tokio::spawn(
+                        async move { workspaces::cancel_revoked_session(&this, sid).await },
+                    );
                 }
             }
             NodeToMaster::Ack { req_id, ok, error } => {
@@ -1135,6 +1187,9 @@ impl Master {
                         | "approval_requested"
                         | "approval_resolved"
                 );
+                if e.kind == "session_created" {
+                    self.claim_late(node_id, e.session_id).await;
+                }
                 if e.kind == "session_created"
                     && let Some(parent) = e.payload.get("parent_session").and_then(|v| v.as_str())
                 {
@@ -1181,6 +1236,44 @@ impl Master {
             }
         }
         landed
+    }
+
+    /// A chat this node just said it made, that the master asked it for
+    /// and whose create had not claimed it yet (an ack before the chat, or
+    /// none in time): claim it for whoever asked (Gate 3 review P-6). The
+    /// claim drops a parent of another owner, as on the usual path.
+    async fn claim_late(&self, node_id: &str, sid: SessionId) {
+        let node = node_id.to_string();
+        let res = self
+            .inner
+            .mirror
+            .call(move |s| {
+                let key = create_intent_key(sid);
+                let Some(v) = s.kv_get(&key)? else {
+                    return Ok(false);
+                };
+                if intent_expired(&v, harness_core::now_ms()) {
+                    s.kv_delete(&key)?;
+                    return Ok(false);
+                }
+                let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
+                if v["node"].as_str() != Some(node.as_str()) {
+                    return Ok(false);
+                }
+                s.claim_session(sid, v["owner"].as_str(), v["workspace"].as_str())?;
+                s.kv_delete(&key)?;
+                Ok::<_, harness_store::StoreError>(true)
+            })
+            .await;
+        match res {
+            Ok(true) => {
+                tracing::info!(node = %node_id, session = %sid, "a chat that arrived after its create was claimed for whoever asked for it")
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(node = %node_id, session = %sid, error = %e, "could not claim a late chat")
+            }
+        }
     }
 
     /// A `session_created` named `parent` and the mirror did not keep it
@@ -1245,6 +1338,13 @@ impl Master {
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
+        // However this call ends, its ack entry goes with it: also when the
+        // caller drops it half way (an HTTP request's timeout), which used
+        // to leave the entry for good (Gate 3 review N-5).
+        let _entry = AckEntry {
+            master: self,
+            req_id: &req_id,
+        };
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -1264,22 +1364,13 @@ impl Master {
             Some(Ok(())) => {}
             // The node is connected but has `TO_NODE_QUEUE` commands it
             // has not read yet: as good as not answering.
-            Some(Err(true)) => {
-                lock(&self.inner.acks).remove(&req_id);
-                return Err(CommandError::Timeout);
-            }
-            Some(Err(false)) | None => {
-                lock(&self.inner.acks).remove(&req_id);
-                return Err(CommandError::NodeOffline(node_id.into()));
-            }
+            Some(Err(true)) => return Err(CommandError::Timeout),
+            Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
-            Ok(Err(_)) | Err(_) => {
-                lock(&self.inner.acks).remove(&req_id);
-                Err(CommandError::Timeout)
-            }
+            Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }
     }
 
@@ -1320,24 +1411,72 @@ impl Master {
             .model
             .filter(|m| !m.trim().is_empty())
             .filter(|m| auto.model.as_deref() != Some(m.as_str()));
+        // Only a model this workspace lists goes to a node (Gate 3 review
+        // N-5); the approval mode is a closed enum already, and the node
+        // clamps it to its own policy.
+        if let Some(m) = &chosen
+            && r.find_model(m).is_none()
+        {
+            return Err(CommandError::Rejected(format!("unknown model {m:?}")));
+        }
         let agent = match &chosen {
             None => auto,
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
         let sid = SessionId::new();
-        self.send_command(&node_id, |req_id| MasterToNode::Create {
-            req_id,
-            session_id: sid,
-            title: spec.title,
-            cwd: spec.cwd,
-            model,
-            approval_mode: spec.approval_mode,
-            profile: Some(profile),
-            agent: Some(agent),
-            incognito: spec.incognito,
-        })
-        .await?;
+        // Who asked, recorded before the node hears of it: a session_created
+        // that arrives after the ack, or after the ack timed out, is claimed
+        // for them when it lands, instead of staying a chat nobody owns
+        // (Gate 3 review P-6).
+        let now = harness_core::now_ms();
+        let intent = (owner.is_some() || workspace.is_some()).then(|| {
+            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace, "at": now})
+                .to_string()
+        });
+        let key = create_intent_key(sid);
+        let v = intent.clone();
+        self.inner
+            .mirror
+            .call(move |s| {
+                // Intents older than their time, of creates no node ever
+                // made, go here (fix review 6 N-2): one prefix read per
+                // create, over a handful of rows.
+                for (k, old) in s.kv_prefix(CREATE_INTENT_PREFIX)? {
+                    if intent_expired(&old, now) {
+                        s.kv_delete(&k)?;
+                    }
+                }
+                match v {
+                    Some(v) => s.kv_set(&key, &v),
+                    None => Ok(()),
+                }
+            })
+            .await?;
+        let sent = self
+            .send_command(&node_id, |req_id| MasterToNode::Create {
+                req_id,
+                session_id: sid,
+                title: spec.title,
+                cwd: spec.cwd,
+                model,
+                approval_mode: spec.approval_mode,
+                profile: Some(profile),
+                agent: Some(agent),
+                incognito: spec.incognito,
+            })
+            .await;
+        match &sent {
+            // The node may still make it: the intent stays for that.
+            Ok(()) | Err(CommandError::Timeout) => {}
+            // It was refused or never sent: nothing will come.
+            Err(_) if intent.is_some() => {
+                let key = create_intent_key(sid);
+                let _ = self.inner.mirror.call(move |s| s.kv_delete(&key)).await;
+            }
+            Err(_) => {}
+        }
+        sent?;
         // The node's session_created is mirrored before its ack (same
         // ordered link), so the row exists: stamp owner and workspace in one
         // transaction, then tell the UIs (the first SessionsChanged went out
@@ -1351,6 +1490,11 @@ impl Master {
                     s.kv_set(&key, "1")?;
                 }
                 let mut dropped = None;
+                // A hostile or odd node may ack before the chat exists; then
+                // the intent stays and the chat is claimed when it lands.
+                if s.session(sid)?.is_some() {
+                    s.kv_delete(&create_intent_key(sid))?;
+                }
                 if owner.is_some() || workspace.is_some() {
                     // The claim drops a parent of another owner (L-1).
                     let named = s.session(sid)?.and_then(|r| r.parent_id);
@@ -1648,6 +1792,21 @@ impl Master {
             rewind,
         })
         .await
+    }
+
+    /// Delete every chat of `user_id` everywhere (their account is being
+    /// deleted, Gate 3 review P-6): on the mirror at once (with tombstones),
+    /// and on each owning node now or, for a node that is away, when it says
+    /// hello again. Runs in the background; failures are logged.
+    pub fn delete_sessions_of(&self, sids: Vec<SessionId>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            for sid in sids {
+                if let Err(e) = this.delete_session(sid).await {
+                    tracing::warn!(session = %sid, error = %e, "could not delete a deleted user's chat");
+                }
+            }
+        });
     }
 
     /// Delete a session everywhere. The mirror copy goes (with a tombstone)

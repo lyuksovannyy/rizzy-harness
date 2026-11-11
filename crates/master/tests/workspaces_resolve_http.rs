@@ -364,13 +364,17 @@ async fn wait_stopped(s: &Server, who: &str, sid: &str) {
 }
 
 /// Like `wait_stopped`, read from the store: for chats whose owner can no
-/// longer sign in.
+/// longer sign in. A chat that is gone has stopped too: deleting a user
+/// deletes their chats (Gate 3 P-6), and the row can be gone before this
+/// looks. That the node is told to delete it is tested in
+/// `deleting_a_user_deletes_their_chats_on_the_master_and_the_node`.
 async fn wait_stopped_in_store(s: &Server, sid: &str) {
     let sid = sid.parse().unwrap();
     for _ in 0..500 {
-        let row = s.master.inner_mirror().session(sid).unwrap().unwrap();
-        if !row.running {
-            return;
+        match s.master.inner_mirror().session(sid).unwrap() {
+            None => return,
+            Some(row) if !row.running => return,
+            Some(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

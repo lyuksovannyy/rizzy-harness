@@ -60,7 +60,7 @@ use subtle::ConstantTimeEq;
 
 use crate::Master;
 
-mod limits;
+pub(crate) mod limits;
 pub mod links;
 pub use limits::{
     BUSY, BUSY_RETRY_AFTER_S, FAILURE_MAP_CAPACITY, HASH_PERMITS, HASH_WAIT, HashError, Hasher,
@@ -860,13 +860,6 @@ async fn login_with_key(
         .flatten()
 }
 
-/// Whether the request's cookie and login key are a live login: logout
-/// ends the session row only then, so a client with the cookie alone
-/// cannot sign the person out either.
-pub async fn holds_login(master: &Master, headers: &HeaderMap) -> bool {
-    by_cookie(master, headers).await.is_some()
-}
-
 /// The user behind a cookie, its key not yet seen: a WebSocket upgrade,
 /// which a browser cannot give a header. Nothing is authenticated by this;
 /// the socket waits for the key ([`socket_key_matches`]). Read only.
@@ -909,20 +902,16 @@ pub fn relink(master: &Master, headers: &HeaderMap, target: &str) -> Option<Stri
         .mint(&hash, target, harness_core::now_ms())
 }
 
-/// A socket's first message named `key`: is it the login key of the
-/// session `session_hash`, still live and of `user_id`?
-pub async fn socket_key_matches(
-    master: &Master,
-    session_hash: &str,
-    user_id: &str,
-    key: &str,
-) -> bool {
+/// A cookie socket's first message named `key`: the user of the login
+/// whose cookie hashes to `session_hash`, if `key` is its login key and the
+/// login is live. The socket learns nothing of the cookie before this
+/// (Gate 3 fix review 2, R2-1), and a dead cookie and a wrong key are the
+/// same `None`.
+pub async fn socket_login(master: &Master, session_hash: &str, key: &str) -> Option<UserRow> {
     if !is_hex64(key) {
-        return false;
+        return None;
     }
-    login_with_key(master, session_hash.to_string(), sha256_hex(key))
-        .await
-        .is_some_and(|u| u.user_id == user_id)
+    login_with_key(master, session_hash.to_string(), sha256_hex(key)).await
 }
 
 pub async fn is_authenticated(master: &Master, headers: &HeaderMap) -> bool {

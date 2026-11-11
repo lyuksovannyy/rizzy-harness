@@ -69,7 +69,7 @@ infer = { version = "0.22.0", default-features = false }
 landlock = "=0.4.7"
 jiff = { version = "0.2.39", features = ["tzdb-bundle-always"] }
 mime_guess = "2.0.5"
-nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs", "dir", "resource"] }
+nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs", "dir", "resource", "user"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "multipart"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
