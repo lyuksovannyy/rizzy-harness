@@ -140,6 +140,7 @@ pub(super) async fn tick(h: &RoutinesHandle, m: &Master) {
     let now = h.clock.now();
     lift_cap_pauses(m, cfg.max_runs_per_user_per_day, now).await;
     let retries: Vec<Retry> = {
+        let _queued = h.queueing.lock().await;
         let mut list = lock(&h.retries);
         let (due, later) = list.drain(..).partition(|r| r.due <= now);
         *list = later;
@@ -784,6 +785,8 @@ async fn retry_later(
         ..Default::default()
     };
     let id = run.run_id.clone();
+    // The row and the queue change together for a tick (`queueing`).
+    let _queueing = h.queueing.lock().await;
     if let Ok(true) = m
         .inner
         .mirror
