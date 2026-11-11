@@ -795,7 +795,8 @@ Design and open questions: [docs/projects.md](docs/projects.md).
 ## Rich messages
 
 Replies render as Markdown: headings, lists, GFM tables (click a header to
-sort, **Copy CSV**), task lists, footnotes, callouts (`> [!NOTE]`, `[!TIP]`,
+sort, **Copy CSV**), task lists, footnotes (the only in-page links a reply
+can have: a `#…` link to anything else shows as plain text), callouts (`> [!NOTE]`, `[!TIP]`,
 `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`), code with its language, **Copy**
 and syntax highlighting once the reply is finished, and math written as
 `\( … \)` or `$$ … $$` (a single `$` stays a dollar sign). **Copy** on a
