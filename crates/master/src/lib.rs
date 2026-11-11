@@ -145,6 +145,9 @@ pub struct MasterInner {
     /// Pending commands by request id, with the node each went to: only
     /// that node's ack settles it.
     acks: Mutex<HashMap<String, PendingAck>>,
+    /// Audit rows written for failed node handshakes, per node id and per
+    /// peer address (Gate 3 review L-7).
+    node_auth_audits: auth::limits::FailureMap,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
@@ -447,6 +450,7 @@ impl Master {
                 nodes: Mutex::new(HashMap::new()),
                 live,
                 acks: Mutex::new(HashMap::new()),
+                node_auth_audits: nodes::auth_audit_limit(),
                 auth,
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),

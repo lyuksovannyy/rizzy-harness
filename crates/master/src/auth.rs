@@ -60,7 +60,7 @@ use subtle::ConstantTimeEq;
 
 use crate::Master;
 
-mod limits;
+pub(crate) mod limits;
 pub mod links;
 pub use limits::{
     BUSY, BUSY_RETRY_AFTER_S, FAILURE_MAP_CAPACITY, HASH_PERMITS, HASH_WAIT, HashError, Hasher,
