@@ -252,6 +252,129 @@ async fn frames_queued_from_a_node_that_is_then_revoked_are_not_applied() {
     assert_eq!(store.head_seq(other).unwrap(), 0);
 }
 
+/// A running agentic turn of `owner` (an account with the agentic grant)
+/// on node `n1`, mirrored through `tx`.
+async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &str) -> SessionId {
+    use harness_core::event::TurnStarted;
+    let sid = SessionId::new();
+    store
+        .create_user(&harness_store::NewUser {
+            user_id: owner.into(),
+            username: owner.into(),
+            password_hash: "$argon2id$x".into(),
+            role: harness_store::Role::Member,
+            can_agentic: true,
+            must_change_password: false,
+        })
+        .unwrap();
+    send(tx, event(sid, 1, "")).await;
+    let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+        turn_id: "t1".into(),
+        agent: None,
+    })
+    .into_parts();
+    send(
+        tx,
+        RawEvent {
+            session_id: sid,
+            seq: 2,
+            ts_ms: 2,
+            kind,
+            payload,
+        },
+    )
+    .await;
+    barrier(store, tx).await;
+    store.claim_session(sid, Some(owner), None).unwrap();
+    assert!(store.session(sid).unwrap().unwrap().running);
+    sid
+}
+
+fn revoke_grant(store: &Store, user: &str) {
+    store
+        .update_user(
+            user,
+            &harness_store::UserPatch {
+                can_agentic: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+/// The next `Cancel` for `sid` on `c`, within `secs`.
+async fn cancel_within(c: &mut mpsc::Receiver<MasterToNode>, sid: SessionId, secs: u64) -> bool {
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        match tokio::time::timeout_at(end, c.recv()).await {
+            Ok(Some(MasterToNode::Cancel { session_id, .. })) if session_id == sid => return true,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return false,
+        }
+    }
+}
+
+/// Gate 3 review P-3: the grant is revoked while the node's link is down;
+/// the sweep then cannot reach it. When the node is back (after its
+/// hello), the turn that lost its access is cancelled.
+#[tokio::test]
+async fn a_turn_that_lost_its_grant_while_its_node_was_away_is_cancelled_on_return() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (l1, c1, tx1) = open_link("n1", vec![]);
+    m.add_link(l1, false).await.unwrap();
+    let sid = running_turn(&store, &tx1, "bob").await;
+    drop((tx1, c1));
+    wait_for(|| m.nodes().iter().all(|n| !n.connected)).await;
+
+    revoke_grant(&store, "bob");
+    harness_master::workspaces::cancel_revoked(&m, &["bob".to_string()]).await;
+
+    let (l2, mut c2, _tx2) = open_link(
+        "n1",
+        vec![SessionHead {
+            session_id: sid,
+            head_seq: 2,
+        }],
+    );
+    m.add_link(l2, false).await.unwrap();
+    assert!(
+        cancel_within(&mut c2, sid, 5).await,
+        "the running turn was not cancelled after the node came back"
+    );
+}
+
+/// Gate 3 review P-3: a cancel that could not be queued (the node's queue
+/// is full) is tried again, so the turn does not outlive the revocation.
+#[tokio::test]
+async fn a_revocation_cancel_that_found_the_queue_full_is_retried() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    // A queue of one, which the master's welcome fills.
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(9);
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1);
+    tx.try_send(NodeToMaster::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        node_id: "n1".into(),
+        hostname: "h".into(),
+        version: "1".into(),
+        capabilities: vec![],
+        sessions: vec![],
+    })
+    .unwrap();
+    m.add_link(NodeLink { to_node, from_node }, false)
+        .await
+        .unwrap();
+    let sid = running_turn(&store, &tx, "bob").await;
+    revoke_grant(&store, "bob");
+    harness_master::workspaces::cancel_revoked(&m, &["bob".to_string()]).await;
+    // The node reads its queue only now.
+    assert!(
+        cancel_within(&mut commands, sid, 10).await,
+        "the cancel was dropped for good"
+    );
+}
+
 /// Gate 3 review P-7: on a diverged chat an allow is refused (it would
 /// make the node write a turn nobody sees), but a deny is how a person
 /// stops that turn, like cancel: it goes through.

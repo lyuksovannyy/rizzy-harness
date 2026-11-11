@@ -944,6 +944,12 @@ impl Master {
         let nid = node_id.clone();
         tokio::spawn(async move { artifacts::on_node_up(&this, &nid).await });
 
+        // A turn whose owner lost access while this node was away is
+        // cancelled now (Gate 3 review P-3).
+        let this = self.clone();
+        let nid = node_id.clone();
+        tokio::spawn(async move { workspaces::cancel_revoked_on(&this, &nid).await });
+
         let this = self.clone();
         let nid = node_id.clone();
         tokio::spawn(async move {

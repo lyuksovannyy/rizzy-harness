@@ -1531,6 +1531,18 @@ impl Store {
         rows.map(|r| Self::finish_session(r?)).collect()
     }
 
+    /// The sessions of `node_id` the mirror shows running: what the
+    /// revocation sweep looks at when the node's link comes up (Gate 3
+    /// review P-3). Filtered in SQL.
+    pub fn running_on(&self, node_id: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&Self::session_query(
+            "WHERE s.node_id = ?1 AND s.running = 1 ORDER BY s.updated_ms DESC",
+        ))?;
+        let rows = stmt.query_map(params![node_id], Self::session_from_row)?;
+        rows.map(|r| Self::finish_session(r?)).collect()
+    }
+
     pub fn session(&self, sid: SessionId) -> Result<Option<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&Self::session_query("WHERE s.session_id = ?1"))?;
