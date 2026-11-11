@@ -1296,6 +1296,7 @@ fn agent(
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        context_windows: Default::default(),
         effort: None,
         budget: Default::default(),
         ui: Default::default(),
@@ -1825,6 +1826,7 @@ impl harness_agent_native::Provider for Script {
             text: "done".into(),
             tool_calls,
             usage: None,
+            stop: Default::default(),
         })
     }
 }

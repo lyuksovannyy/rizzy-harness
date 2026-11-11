@@ -127,7 +127,15 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                     parts.push(ContentPart::ToolCall(ToolCall {
                         call_id: c.call_id.clone(),
                         fn_name: c.tool.clone(),
-                        fn_arguments: c.input.clone(),
+                        // A call whose arguments did not parse (cut by the
+                        // output limit) is kept as a string; Anthropic
+                        // refuses a `tool_use` whose input is not an
+                        // object. Its result says it did not run.
+                        fn_arguments: if c.input.is_object() {
+                            c.input.clone()
+                        } else {
+                            serde_json::Value::Object(Default::default())
+                        },
                         thought_signatures: None,
                     }));
                 }
@@ -182,22 +190,28 @@ fn provider_error(e: genai::Error) -> ProviderError {
         genai::Error::WebStream { error, .. } => Some(error.as_ref()),
         _ => None,
     };
-    let status = |g: &genai::Error| match g {
-        genai::Error::HttpError { status, body, .. } => Some(ProviderError::Status {
-            status: status.as_u16(),
-            body: body.clone(),
-        }),
-        genai::Error::WebModelCall {
-            webc_error: genai::webc::Error::ResponseFailedStatus { status, body, .. },
-            ..
-        } => Some(ProviderError::Status {
-            status: status.as_u16(),
-            body: body.clone(),
-        }),
-        _ => g.status().map(|s| ProviderError::Status {
-            status: s.as_u16(),
-            body: String::new(),
-        }),
+    let status = |g: &genai::Error| {
+        let hint = g.headers().map(RetryHint::from_headers).unwrap_or_default();
+        match g {
+            genai::Error::HttpError { status, body, .. } => Some(ProviderError::Status {
+                status: status.as_u16(),
+                body: body.clone(),
+                hint,
+            }),
+            genai::Error::WebModelCall {
+                webc_error: genai::webc::Error::ResponseFailedStatus { status, body, .. },
+                ..
+            } => Some(ProviderError::Status {
+                status: status.as_u16(),
+                body: body.clone(),
+                hint,
+            }),
+            _ => g.status().map(|s| ProviderError::Status {
+                status: s.as_u16(),
+                body: String::new(),
+                hint,
+            }),
+        }
     };
     if let Some(p) = status(&e).or_else(|| inner?.downcast_ref::<genai::Error>().and_then(status)) {
         return p;
@@ -206,6 +220,32 @@ fn provider_error(e: genai::Error) -> ProviderError {
         Some(r) if r.is_connect() || r.is_timeout() => ProviderError::Http(r.to_string()),
         _ if inner.is_some() => ProviderError::Stream(e.to_string()),
         _ => ProviderError::Http(e.to_string()),
+    }
+}
+
+/// Why the model stopped, from the provider's own value (the raw string;
+/// genai's own normalisation is not used, so this table is the whole
+/// rule). A value not listed, or none, is `Other`: never `End`.
+pub fn stop_reason(kind: ApiKind, raw: Option<&str>) -> StopReason {
+    let Some(raw) = raw else {
+        return StopReason::Other;
+    };
+    match (kind, raw) {
+        // Chat completions `finish_reason`; `model_length` (Mistral) and
+        // `max_tokens` (gateways relaying Anthropic) are compatible
+        // servers' spellings of the output limit.
+        (ApiKind::Openai, "stop") => StopReason::End,
+        (ApiKind::Openai, "tool_calls" | "function_call") => StopReason::ToolUse,
+        (ApiKind::Openai, "length" | "model_length" | "max_tokens") => StopReason::OutputLimit,
+        // Messages API `stop_reason`. We send no stop sequences, so one is
+        // an ordinary end. `model_context_window_exceeded`: the answer was
+        // cut because the context window filled.
+        (ApiKind::Anthropic, "end_turn" | "stop_sequence") => StopReason::End,
+        (ApiKind::Anthropic, "tool_use") => StopReason::ToolUse,
+        (ApiKind::Anthropic, "max_tokens" | "model_context_window_exceeded") => {
+            StopReason::OutputLimit
+        }
+        _ => StopReason::Other,
     }
 }
 
@@ -247,6 +287,10 @@ impl Provider for LlmProvider {
                     }
                 }
                 ChatStreamEvent::End(end) => {
+                    out.stop = stop_reason(
+                        self.kind,
+                        end.captured_stop_reason.as_ref().map(|s| s.raw()),
+                    );
                     if let Some(u) = end.captured_usage {
                         let d = u.prompt_tokens_details.as_ref();
                         let n = |v: Option<i32>| v.unwrap_or(0).max(0) as u64;
@@ -382,6 +426,49 @@ impl Provider for ModelRouter {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Each provider's documented values, and what is not documented.
+    /// OpenAI chat completions `finish_reason` (API reference, chat
+    /// completion object; `function_call` is the deprecated form) and the
+    /// values OpenAI-compatible servers add (`model_length`: Mistral;
+    /// `max_tokens`: gateways passing Anthropic's value through).
+    /// Anthropic `stop_reason` (Messages API reference, "Handling stop
+    /// reasons").
+    #[test]
+    fn stop_reasons_map_per_provider() {
+        use StopReason::*;
+        let table = [
+            (ApiKind::Openai, "stop", End),
+            (ApiKind::Openai, "tool_calls", ToolUse),
+            (ApiKind::Openai, "function_call", ToolUse),
+            (ApiKind::Openai, "length", OutputLimit),
+            (ApiKind::Openai, "model_length", OutputLimit),
+            (ApiKind::Openai, "max_tokens", OutputLimit),
+            (ApiKind::Openai, "content_filter", Other),
+            (ApiKind::Openai, "insufficient_system_resource", Other),
+            (ApiKind::Openai, "end_turn", Other),
+            (ApiKind::Openai, "STOP", Other),
+            (ApiKind::Anthropic, "end_turn", End),
+            (ApiKind::Anthropic, "stop_sequence", End),
+            (ApiKind::Anthropic, "tool_use", ToolUse),
+            (ApiKind::Anthropic, "max_tokens", OutputLimit),
+            (
+                ApiKind::Anthropic,
+                "model_context_window_exceeded",
+                OutputLimit,
+            ),
+            (ApiKind::Anthropic, "pause_turn", Other),
+            (ApiKind::Anthropic, "refusal", Other),
+            (ApiKind::Anthropic, "stop", Other),
+            (ApiKind::Anthropic, "", Other),
+        ];
+        for (kind, raw, want) in table {
+            assert_eq!(stop_reason(kind, Some(raw)), want, "{kind:?} {raw:?}");
+        }
+        for kind in [ApiKind::Openai, ApiKind::Anthropic] {
+            assert_eq!(stop_reason(kind, None), Other, "no value is not an end");
+        }
+    }
 
     #[test]
     fn base_url_gets_trailing_slash() {

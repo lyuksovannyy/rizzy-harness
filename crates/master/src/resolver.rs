@@ -324,6 +324,11 @@ impl Resolver {
             .filter(|m| !self.find_model(m).is_some_and(|m| m.effort))
             .cloned()
             .collect();
+        spec.context_windows = model
+            .iter()
+            .chain(&spec.fallbacks)
+            .filter_map(|m| Some((m.clone(), self.find_model(m)?.context?)))
+            .collect();
     }
 
     /// Resolve an agent id (or this scope's default agent) to the spec a
@@ -414,6 +419,7 @@ impl Resolver {
                     c.fallbacks = spec.fallbacks.clone();
                     c.unavailable = spec.unavailable.clone();
                     c.no_effort = spec.no_effort.clone();
+                    c.context_windows = spec.context_windows.clone();
                 }
                 c
             })

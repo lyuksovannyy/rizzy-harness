@@ -380,8 +380,18 @@ and listings never mark it. Testing a saved provider in the UI refreshes its
 listing too, but only with its saved key and preset: a test with a key typed
 into the form, not yet saved, changes neither the listing nor the marks.
 
-An agent has one model; one model may serve several agents. When a turn's
-model is unavailable, or its request fails before any output with a model
+An agent has one model; one model may serve several agents. A model call
+that fails before any output for a passing reason (rate limit 429, server
+error 500/502/503/504, Anthropic's overloaded 529, no connection, a stream
+that breaks before its first word) is retried up to 3 times, waiting 2, 4,
+then 8 seconds (with jitter), or what the provider's `Retry-After` asks; a
+cancel ends the wait at once. A `Retry-After` over 60 s (a quota window, say)
+is not retried: the agent's next fallback model answers at once, or without
+one the turn ends with a message naming the wait. A refused key, a missing
+permission, an exhausted quota or a bad request is not retried, and nothing
+is retried once part of the answer is on screen. The chat shows the turn as
+still running while it waits. When a turn's
+model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
 which model answered. An agent without an `[agent_models]` entry runs on
@@ -416,7 +426,8 @@ Chats and web tools (restart after changing):
 ```toml
 [chat]
 incognito_ttl_minutes = 1440         # incognito chats deleted after this idle time
-summarize_after_tokens = 24000       # 0 = never summarise older turns
+# summarize_after_tokens = 24000     # unset: the model's context window less a reserve
+                                     # (24000 when the window is unknown); 0 = never
 
 [web]
 search = "searxng"                   # none | searxng | brave
@@ -434,6 +445,21 @@ preset = "balanced"                  # fast | balanced | best (Ollama model name
 # embeddings_model = "nomic-embed-text"  # overrides the preset; required for provider
 # mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
+
+Older turns are summarised when the history nears the model's context window
+(the window from the provider's model listing or your `context` on a model,
+less a fifth of it, at least 16k, for the reply and tool results), measured
+with the token count the provider reported for the previous turn. Set
+`summarize_after_tokens` to use a fixed number instead. If a provider still
+refuses a request as too long, the turn summarises older turns, hides all but
+the newest large tool output, and tries once more; a second refusal ends the
+turn with a message saying so. A summary is only made by a model whose window
+holds what it reads: a long history is summarised in pieces, and a single turn
+larger than the window is left unsummarised rather than skipped. A summary
+that is not at least a tenth smaller than the history it replaces is thrown
+away (nothing is logged, the history stays as it was). After two failed or
+useless summaries in one turn, the turn does not try again; if the context
+then does not fit, the error says summarising was tried and did not help.
 
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.
@@ -670,6 +696,11 @@ own, smaller cap and says when the live stream was cut.
 asks for more is cut at that value, and the tool description the model sees
 states it. Neither an agent definition, a prompt nor the master can raise
 either; a value outside its range stops the node at start.
+
+When a model's answer reaches its output limit while it is writing a tool
+call, that call (and every other call in the same answer) is not run, even if
+it looks complete; the model is told to split the change into smaller calls.
+Three cut answers in a row end the turn with a message saying so.
 
 **File limits.** The file tools only open regular files: a FIFO, a device
 (`/dev/zero`), a socket or a directory is refused at once, also through a

@@ -85,6 +85,7 @@ fn spec(id: &str, tools: ToolSelection) -> AgentSpec {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        context_windows: Default::default(),
         effort: None,
         budget: Default::default(),
         ui: Default::default(),
