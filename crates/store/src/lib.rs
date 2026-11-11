@@ -1133,6 +1133,16 @@ impl Store {
     }
 
     /// The pinned key of a node that is not revoked.
+    /// Whether `node_id` is a registered node that was revoked (one indexed
+    /// read; an id with no row, such as the embedded node, is not).
+    pub fn node_is_revoked(&self, node_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_ms IS NOT NULL)",
+            params![node_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn node_key(&self, node_id: &str) -> Result<Option<String>> {
         Ok(self
             .lock()

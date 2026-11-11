@@ -398,3 +398,115 @@ async fn an_oversized_event_from_a_node_is_refused_and_freezes_the_chat() {
     assert_eq!(store.head_seq(other).unwrap(), 0);
     assert_eq!(store.diverged_seq(other).unwrap(), Some(1));
 }
+
+// --- Revocation and the link (Gate 3 review L-4) ---
+
+/// A registered node id in `store`.
+fn registered(store: &Store, n: usize) -> String {
+    let token = format!("tok-{n}");
+    store.join_token_create(&token, i64::MAX, None).unwrap();
+    store
+        .node_join(&token, 0, &format!("key-{n}"), &format!("box{n}"))
+        .unwrap()
+        .unwrap()
+}
+
+/// A session of node `id` in the mirror, for commands to aim at.
+fn session_on(store: &Store, id: &str) -> SessionId {
+    let sid = SessionId::new();
+    store.append(id, &created_by(sid, 1, None)).unwrap();
+    sid
+}
+
+/// Whether a command for `sid` reaches its node (the fake never acks, so a
+/// command that is sent times out; one that is not is `NodeOffline` at once).
+async fn reachable(m: &Master, sid: SessionId) -> bool {
+    !matches!(
+        m.cancel(sid).await,
+        Err(harness_master::CommandError::NodeOffline(_))
+    )
+}
+
+#[tokio::test]
+async fn a_revoked_node_cannot_link_and_gets_no_commands() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let id = registered(&store, 0);
+    let sid = session_on(&store, &id);
+
+    // Linked, then revoked: the link is down and nothing is sent to it.
+    let (l, mut c, _tx) = open_link(&id, vec![]);
+    m.add_link(l, false).await.unwrap();
+    assert!(m.is_connected(&id));
+    assert!(m.revoke_node(&id).await.unwrap());
+    assert!(!m.is_connected(&id));
+    assert!(!reachable(&m, sid).await);
+    while let Ok(msg) = c.try_recv() {
+        assert!(
+            matches!(msg, MasterToNode::Welcome { .. }),
+            "sent after the revoke: {msg:?}"
+        );
+    }
+
+    // Linking again is refused, in this process and in a new one (the
+    // store's record).
+    let (l, _c, _tx) = open_link(&id, vec![]);
+    let err = m.add_link(l, false).await.unwrap_err();
+    assert!(err.contains("revoked"), "{err}");
+    assert!(!m.is_connected(&id));
+    let fresh = master_on(&store);
+    let (l, _c, _tx) = open_link(&id, vec![]);
+    assert!(
+        fresh
+            .add_link(l, false)
+            .await
+            .unwrap_err()
+            .contains("revoked")
+    );
+    assert!(!fresh.is_connected(&id));
+}
+
+/// A node reconnects while it is revoked, over and over. Whatever the
+/// order in which `add_link` and `revoke_node` run, it never ends with a
+/// live link. Both start from a barrier on a multi-threaded runtime, so
+/// different interleavings occur across the iterations; which ones occur
+/// is up to the scheduler. What makes every interleaving safe is that
+/// `add_link` registers and `revoke_node` marks under the same lock; this
+/// test shows the outcome for the ones that happened, it cannot force the
+/// narrowest one (a revoke landing between `add_link`'s store read and its
+/// registration), and it does not cover `node_connection`'s own second
+/// look, which needs a TLS handshake (`remote_nodes.rs`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_revoked_while_it_reconnects_never_stays_linked() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (mut linked_first, mut refused) = (0, 0);
+    for n in 0..150 {
+        let id = registered(&store, n);
+        let sid = session_on(&store, &id);
+        let (l, _c, tx) = open_link(&id, vec![]);
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let (m1, g1) = (m.clone(), gate.clone());
+        let link = tokio::spawn(async move {
+            g1.wait().await;
+            m1.add_link(l, false).await
+        });
+        let (m2, g2, id2) = (m.clone(), gate.clone(), id.clone());
+        let revoke = tokio::spawn(async move {
+            g2.wait().await;
+            m2.revoke_node(&id2).await.unwrap()
+        });
+        let linked = link.await.unwrap();
+        assert!(revoke.await.unwrap());
+        match linked {
+            Ok(_) => linked_first += 1,
+            Err(_) => refused += 1,
+        }
+        assert!(!m.is_connected(&id), "iteration {n}: still linked");
+        assert!(!reachable(&m, sid).await, "iteration {n}: still reachable");
+        drop(tx);
+    }
+    // Not asserted (the scheduler decides), but printed so a run shows
+    // that both orders occurred.
+    eprintln!("linked before the revoke: {linked_first}, refused: {refused}");
+}

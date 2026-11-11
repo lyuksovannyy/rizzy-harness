@@ -157,6 +157,12 @@ pub struct MasterInner {
     builtin_memory: Mutex<Option<Arc<harness_memory::SqliteMemory>>>,
     /// Stop handles of live remote links, by node id (revoke drops them).
     remote_stops: Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// Nodes revoked while this process runs. Read and written only while
+    /// `nodes` is held (lock order: `nodes`, then this), so a link is
+    /// either registered before a revoke, which then takes it down, or
+    /// refused after it (Gate 3 review L-4). Revocations from before the
+    /// start are in the store (`nodes.revoked_ms`), read by `add_link`.
+    revoked: Mutex<HashSet<String>>,
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
@@ -421,6 +427,7 @@ impl Master {
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
                 remote_stops: Mutex::new(HashMap::new()),
+                revoked: Mutex::new(HashSet::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
                 voice_usage: Default::default(),
@@ -629,8 +636,11 @@ impl Master {
     /// Send a message that is never acked (`artifact.fetch`); false when
     /// the node has no link.
     pub(crate) fn send_raw(&self, node_id: &str, msg: MasterToNode) -> bool {
-        lock(&self.inner.nodes)
+        let nodes = lock(&self.inner.nodes);
+        let revoked = lock(&self.inner.revoked).contains(node_id);
+        nodes
             .get(node_id)
+            .filter(|_| !revoked)
             .and_then(|n| n.tx.as_ref())
             .is_some_and(|tx| tx.try_send(msg).is_ok())
     }
@@ -808,11 +818,29 @@ impl Master {
                 "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
             ));
         }
+        // A node revoked before this process started, or while its
+        // handshake ran (Gate 3 review L-4): `node_connection` checked the
+        // key before the revoke landed.
+        let id = node_id.clone();
+        if self
+            .inner
+            .mirror
+            .call(move |s| s.node_is_revoked(&id))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!("node {node_id} is revoked"));
+        }
         let _ = link.to_node.try_send(MasterToNode::Welcome {
             protocol_version: PROTOCOL_VERSION,
         });
         let generation = {
             let mut nodes = lock(&self.inner.nodes);
+            // Under `nodes`, as `revoke_node` writes it: a revoke either
+            // landed already (refused here) or finds this link registered.
+            if lock(&self.inner.revoked).contains(&node_id) {
+                return Err(format!("node {node_id} is revoked"));
+            }
             let entry = nodes.entry(node_id.clone()).or_insert_with(|| NodeConn {
                 info: NodeInfo {
                     node_id: node_id.clone(),
@@ -1123,8 +1151,13 @@ impl Master {
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
         let sent = {
             let nodes = lock(&self.inner.nodes);
+            // A revoked node gets nothing: no prompt, context or image
+            // (`revoke_node` also drops its sender; this holds even if a
+            // link were registered in a way that missed that).
+            let revoked = lock(&self.inner.revoked).contains(node_id);
             nodes
                 .get(node_id)
+                .filter(|_| !revoked)
                 .and_then(|n| n.tx.as_ref())
                 .map(|tx| match tx.try_send(msg) {
                     Ok(()) => Ok(()),
