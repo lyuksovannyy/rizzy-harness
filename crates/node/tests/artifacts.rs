@@ -79,7 +79,12 @@ async fn node(provider: Arc<dyn Provider>, edit: impl FnOnce(&mut NodePolicy)) -
         node_id: "local".into(),
         hostname: "h".into(),
         policy,
-        store: Store::open_in_memory().unwrap(),
+        // On disk, so a test can break the log from a second connection.
+        store: Store::open(
+            &dir.path().join("node.db"),
+            harness_store::Durability::Normal,
+        )
+        .unwrap(),
         backend: Arc::new(NativeBackend::new(
             provider,
             harness_tools::builtin(),
@@ -116,7 +121,7 @@ fn mock() -> Arc<dyn Provider> {
 
 impl Node {
     fn send(&self, m: MasterToNode) {
-        self.link.to_node.send(m).unwrap();
+        self.link.to_node.try_send(m).unwrap();
     }
 
     async fn next(&mut self) -> NodeToMaster {
@@ -187,6 +192,46 @@ fn events(ms: &[NodeToMaster]) -> Vec<EventKind> {
 
 fn turn_ended(m: &NodeToMaster) -> bool {
     matches!(m, NodeToMaster::Event { event: RawEvent { kind, .. } } if kind == "turn_ended")
+}
+
+/// A published file whose `artifact_staged` event cannot be written is not
+/// kept (nothing names it), and the turn ends: it is the turn's log.
+#[tokio::test]
+async fn a_stage_whose_event_cannot_be_written_is_released_and_ends_the_turn() {
+    let mut n = node(mock(), |_| {}).await;
+    std::fs::write(n.ws.join("app"), b"the binary").unwrap();
+    let sid = n.create().await;
+    let db = rusqlite::Connection::open(n.dir.path().join("node.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER break_log BEFORE INSERT ON events
+         WHEN NEW.kind = 'artifact_staged'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+    n.prompt("p", sid, "publish: app");
+    let ev = events(&n.until(turn_ended).await);
+    let Some(EventKind::TurnEnded(t)) = ev.last() else {
+        panic!("{ev:?}")
+    };
+    assert_eq!(t.reason, TurnEndReason::Error, "{ev:?}");
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, EventKind::ToolCallFinished(_))),
+        "{ev:?}"
+    );
+    let left: Vec<_> = walkdir::WalkDir::new(n.dir.path().join("data/artifacts-stage"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    assert!(
+        left.iter()
+            .all(|p| !p.to_string_lossy().contains("the binary")
+                && std::fs::read(p).map(|b| b != b"the binary").unwrap_or(true)),
+        "a stage nothing names was kept: {left:?}"
+    );
 }
 
 #[tokio::test]

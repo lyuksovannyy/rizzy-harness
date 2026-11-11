@@ -5,6 +5,9 @@
 //! timeouts, revocation, caps and the preview. Nodes are real runtimes on
 //! the scripted mock model.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -148,7 +151,8 @@ async fn send(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header(auth.0, auth.1);
+        .header(auth.0, auth.1)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -186,7 +190,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -399,6 +403,8 @@ async fn socket(t: &T, c: &str) -> Socket {
         .into_client_request()
         .unwrap();
     r.headers_mut().insert("cookie", c.parse().unwrap());
+    let origin = format!("http://{}", r.uri().authority().unwrap());
+    r.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
     s.send(Message::Text("hello".into())).await.unwrap();
     // The server answers the bad message: the socket is listening.
@@ -1187,7 +1193,16 @@ async fn agentic_runs_wait_for_approval_and_time_out() {
     assert_eq!(att["routines"][0]["kind"], "failed", "{att}");
     assert_eq!(att["routines"][0]["status"], "timed_out");
 
-    // A delegate's approval parks the run too.
+    // A delegate's approval parks the run too. Coder can change files, so
+    // it needs a repository for its worktree, or it is not started.
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&t.root)
+            .status()
+            .unwrap()
+            .success()
+    );
     let deleg = routine(
         &t,
         &alex,
@@ -1466,10 +1481,10 @@ async fn the_preview_shows_runs_and_the_rendered_prompt() {
 /// An agentic node "gone" that said hello and left at once.
 async fn offline_node(t: &T) {
     use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
-    let (to_node, _commands) = tokio::sync::mpsc::unbounded_channel::<MasterToNode>();
-    let (to_master, from_node) = tokio::sync::mpsc::unbounded_channel::<NodeToMaster>();
+    let (to_node, _commands) = tokio::sync::mpsc::channel::<MasterToNode>(1024);
+    let (to_master, from_node) = tokio::sync::mpsc::channel::<NodeToMaster>(1024);
     to_master
-        .send(NodeToMaster::Hello {
+        .try_send(NodeToMaster::Hello {
             protocol_version: PROTOCOL_VERSION,
             node_id: "gone".into(),
             hostname: "h".into(),

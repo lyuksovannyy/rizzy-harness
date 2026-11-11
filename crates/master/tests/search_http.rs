@@ -3,6 +3,9 @@
 //! published artifacts and their thumbnails), similar-chat suggestions,
 //! the per-viewer feature flags and the classifier store.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -169,7 +172,7 @@ async fn req(
         rb = rb.json(&b);
     }
     rb = match cookie {
-        Some(c) => rb.header("cookie", c),
+        Some(c) => rb.header("cookie", c).same_origin(),
         None => rb.bearer_auth("tok"),
     };
     let r = rb.send().await.unwrap();
@@ -953,6 +956,7 @@ async fn upload(t: &T, cookie: &str, name: &str, bytes: Vec<u8>) -> String {
     let r = reqwest::Client::new()
         .post(format!("{}/api/media", t.base))
         .header("cookie", cookie)
+        .same_origin()
         .header("x-file-name", name.replace(' ', "%20"))
         .body(bytes)
         .send()
@@ -968,6 +972,7 @@ async fn image(t: &T, cookie: &str, path: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{}{path}", t.base))
         .header("cookie", cookie)
+        .same_origin()
         .header("sec-fetch-dest", "image")
         .send()
         .await
@@ -1015,6 +1020,7 @@ async fn media_rows_carry_thumbnails_their_owner_can_load() {
     let r = reqwest::Client::new()
         .put(format!("{}/api/media/{orchard}/thumb", t.base))
         .header("cookie", &alex)
+        .same_origin()
         .body(png(b"thumb"))
         .send()
         .await
@@ -1140,6 +1146,7 @@ async fn published_artifacts_are_found_by_whoever_may_see_them() {
     let r = reqwest::Client::new()
         .put(format!("{}{thumb}", t.base))
         .header("cookie", &alex)
+        .same_origin()
         .body(png(b"thumb"))
         .send()
         .await

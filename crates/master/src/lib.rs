@@ -13,18 +13,23 @@ pub mod config;
 pub mod env;
 mod favicon;
 mod http;
+pub mod limits;
 pub mod media;
 pub mod model_cache;
 pub mod nodes;
 pub mod notices;
+pub mod outbound;
+pub mod pdf;
 pub mod prefs;
 pub mod presets;
 pub mod projects;
 pub mod providers;
 pub mod resolver;
+pub mod response;
 pub mod routines;
 pub mod search;
 pub mod secrets;
+pub mod serve;
 pub mod sniff;
 pub mod storage;
 pub mod voice;
@@ -43,7 +48,7 @@ use harness_store::{AppendOutcome, Store};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-pub use http::router;
+pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -108,7 +113,9 @@ pub struct NodeInfo {
 
 struct NodeConn {
     info: NodeInfo,
-    tx: Option<mpsc::UnboundedSender<MasterToNode>>,
+    /// Bounded (`NodeLink`): when it is full the node is not keeping up,
+    /// and sends fail at once rather than queue.
+    tx: Option<mpsc::Sender<MasterToNode>>,
     /// Sessions with a `resume` in flight, so a burst of gaps sends one.
     resuming: HashSet<SessionId>,
     /// Bumped on every (re)connect so a stale pump cannot mark a newer link down.
@@ -143,6 +150,8 @@ pub struct MasterInner {
     >,
     /// Sessions with a re-sent `session.delete` in flight.
     redeleting: Mutex<HashSet<SessionId>>,
+    /// Diverged sessions with a `session.cancel` in flight.
+    stopping: Mutex<HashSet<SessionId>>,
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
     /// The built-in store, when that is the backend (embedder switched live).
     builtin_memory: Mutex<Option<Arc<harness_memory::SqliteMemory>>>,
@@ -151,6 +160,10 @@ pub struct MasterInner {
     /// Fingerprint of the node listener's certificate, if it runs.
     node_listener: Mutex<Option<(u16, String)>>,
     transcriber: Mutex<Option<Arc<voice::Transcriber>>>,
+    /// Dictations running and used today, per account (FIX_PLAN 3.4).
+    voice_usage: Arc<voice::Usage>,
+    /// The out-of-process PDF reader; without it PDFs are refused.
+    pdf: OnceLock<pdf::PdfReader>,
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
@@ -163,6 +176,10 @@ pub struct MasterInner {
     pulls: artifact_pull::Pulls,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
+    /// Open UI sockets by user, so a login that ends closes them.
+    sockets: ws::Sockets,
+    /// Hosts an admin's provider test may reach besides public addresses.
+    outbound: Mutex<outbound::Outbound>,
 }
 
 /// What the UI asks for when starting a session.
@@ -330,6 +347,30 @@ pub enum CommandError {
     TooLarge(String),
 }
 
+/// Why a command to a diverged session is refused (PLAN.md §3).
+const DIVERGED: &str = "this chat's log diverged: two node processes wrote it with one node key \
+     (see the server log); delete the chat to clear it";
+
+/// The session a command would make its node write to. Cancel and delete
+/// are left out on purpose: they are how a diverged session is stopped.
+fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
+    match msg {
+        MasterToNode::Prompt { session_id, .. }
+        | MasterToNode::SelectVariant { session_id, .. }
+        | MasterToNode::SetAgent { session_id, .. }
+        | MasterToNode::Restore { session_id, .. }
+        | MasterToNode::ApprovalRespond { session_id, .. }
+        | MasterToNode::ArtifactStage { session_id, .. } => Some(*session_id),
+        MasterToNode::Welcome { .. }
+        | MasterToNode::Create { .. }
+        | MasterToNode::Cancel { .. }
+        | MasterToNode::Delete { .. }
+        | MasterToNode::Resume { .. }
+        | MasterToNode::ArtifactFetch { .. }
+        | MasterToNode::ArtifactRelease { .. } => None,
+    }
+}
+
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -348,16 +389,21 @@ impl Master {
                 providers: Mutex::new(None),
                 graphify: Mutex::new(None),
                 redeleting: Mutex::new(HashSet::new()),
+                stopping: Mutex::new(HashSet::new()),
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
                 remote_stops: Mutex::new(HashMap::new()),
                 node_listener: Mutex::new(None),
                 transcriber: Mutex::new(None),
+                voice_usage: Default::default(),
+                pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
                 artifact_throttle: Default::default(),
+                sockets: Default::default(),
+                outbound: Mutex::new(outbound::Outbound::from_env()),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -376,6 +422,17 @@ impl Master {
 
     pub fn provider_runtime(&self) -> Option<Arc<providers::ProviderRuntime>> {
         lock(&self.inner.providers).clone()
+    }
+
+    /// Where provider tests and model listings may connect
+    /// (`HARNESS_PLAIN_HTTP_HOSTS` unless set here).
+    pub fn outbound(&self) -> outbound::Outbound {
+        lock(&self.inner.outbound).clone()
+    }
+
+    /// Replace the listed hosts (tests list their 127.0.0.1 fakes).
+    pub fn set_outbound(&self, o: outbound::Outbound) {
+        *lock(&self.inner.outbound) = o;
     }
 
     pub fn set_graphify(
@@ -410,6 +467,30 @@ impl Master {
 
     pub fn transcriber(&self) -> Option<Arc<voice::Transcriber>> {
         lock(&self.inner.transcriber).clone()
+    }
+
+    /// How often an open UI socket re-checks its login (default 60 s;
+    /// tests shorten it). Counts for sockets opened afterwards.
+    pub fn set_socket_recheck(&self, every: Duration) {
+        self.inner.sockets.set_recheck(every);
+    }
+
+    /// UI sockets open right now, all users together.
+    pub fn socket_count(&self) -> usize {
+        self.inner.sockets.count()
+    }
+
+    pub fn voice_usage(&self) -> &Arc<voice::Usage> {
+        &self.inner.voice_usage
+    }
+
+    /// Set the PDF reader once (`serve`: the harness's own `pdf-text`).
+    pub fn set_pdf_reader(&self, r: pdf::PdfReader) {
+        let _ = self.inner.pdf.set(r);
+    }
+
+    pub fn pdf_reader(&self) -> Option<&pdf::PdfReader> {
+        self.inner.pdf.get()
     }
 
     /// The mirror store (tests and tools).
@@ -523,7 +604,7 @@ impl Master {
         lock(&self.inner.nodes)
             .get(node_id)
             .and_then(|n| n.tx.as_ref())
-            .is_some_and(|tx| tx.send(msg).is_ok())
+            .is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
     /// Whether `node_id`'s latest hello announced `cap`.
@@ -699,7 +780,7 @@ impl Master {
                 "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
             ));
         }
-        let _ = link.to_node.send(MasterToNode::Welcome {
+        let _ = link.to_node.try_send(MasterToNode::Welcome {
             protocol_version: PROTOCOL_VERSION,
         });
         let generation = {
@@ -741,6 +822,16 @@ impl Master {
                 .unwrap_or(false);
             if deleted {
                 self.redelete(&node_id, sid);
+                continue;
+            }
+            // Nothing it sends for a diverged session is taken (PLAN.md §3).
+            let diverged = self
+                .inner
+                .mirror
+                .call(move |s| s.diverged_seq(sid))
+                .await
+                .unwrap_or(None);
+            if diverged.is_some() {
                 continue;
             }
             let mirror_head = self
@@ -786,11 +877,16 @@ impl Master {
         if let Some(n) = nodes.get_mut(node_id)
             && n.resuming.insert(sid)
             && let Some(tx) = &n.tx
+            && tx
+                .try_send(MasterToNode::Resume {
+                    session_id: sid,
+                    last_seq,
+                })
+                .is_err()
         {
-            let _ = tx.send(MasterToNode::Resume {
-                session_id: sid,
-                last_seq,
-            });
+            // Not sent (node gone or not keeping up): the next gap or
+            // hello asks again.
+            n.resuming.remove(&sid);
         }
     }
 
@@ -904,6 +1000,22 @@ impl Master {
             Ok(AppendOutcome::Duplicate) => {}
             Ok(AppendOutcome::Gap { head }) => self.request_resume(node_id, e.session_id, head),
             Ok(AppendOutcome::Deleted) => self.redelete(node_id, e.session_id),
+            Ok(AppendOutcome::Diverged { seq, first }) => {
+                if first {
+                    // No content: the two versions may hold anything.
+                    tracing::error!(
+                        node = %node_id,
+                        session = %e.session_id,
+                        seq,
+                        "two writers sent different events under one seq (a copied node key or a node restored from an old disk); this session's mirror is frozen until it is deleted"
+                    );
+                    let _ = self.inner.live.send(Live::SessionsChanged);
+                }
+                self.stop_diverged(node_id, e.session_id);
+            }
+            Ok(AppendOutcome::Revoked) => {
+                tracing::warn!(node = %node_id, session = %e.session_id, seq = e.seq, "dropped a frame from a revoked node");
+            }
             Err(err) => {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
@@ -916,6 +1028,20 @@ impl Master {
         build: impl FnOnce(String) -> MasterToNode,
     ) -> Result<(), CommandError> {
         let req_id = new_id();
+        let msg = build(req_id.clone());
+        // A diverged session takes no events, so nothing may make its node
+        // write one (a turn would run with nobody seeing it). Cancel and
+        // delete still go through.
+        if let Some(sid) = writes_to(&msg)
+            && self
+                .inner
+                .mirror
+                .call(move |s| s.diverged_seq(sid))
+                .await?
+                .is_some()
+        {
+            return Err(CommandError::Rejected(DIVERGED.into()));
+        }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
         let sent = {
@@ -923,12 +1049,23 @@ impl Master {
             nodes
                 .get(node_id)
                 .and_then(|n| n.tx.as_ref())
-                .map(|tx| tx.send(build(req_id.clone())).is_ok())
-                .unwrap_or(false)
+                .map(|tx| match tx.try_send(msg) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(matches!(e, mpsc::error::TrySendError::Full(_))),
+                })
         };
-        if !sent {
-            lock(&self.inner.acks).remove(&req_id);
-            return Err(CommandError::NodeOffline(node_id.into()));
+        match sent {
+            Some(Ok(())) => {}
+            // The node is connected but has `TO_NODE_QUEUE` commands it
+            // has not read yet: as good as not answering.
+            Some(Err(true)) => {
+                lock(&self.inner.acks).remove(&req_id);
+                return Err(CommandError::Timeout);
+            }
+            Some(Err(false)) | None => {
+                lock(&self.inner.acks).remove(&req_id);
+                return Err(CommandError::NodeOffline(node_id.into()));
+            }
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
@@ -1311,6 +1448,25 @@ impl Master {
                 })
                 .await;
             lock(&this.inner.redeleting).remove(&sid);
+        });
+    }
+
+    /// A diverged session: tell its node to stop the running turn. Asked
+    /// again on later refused frames, one cancel in flight at a time.
+    fn stop_diverged(&self, node_id: &str, sid: SessionId) {
+        if !lock(&self.inner.stopping).insert(sid) {
+            return;
+        }
+        let this = self.clone();
+        let node = node_id.to_string();
+        tokio::spawn(async move {
+            let _ = this
+                .send_command(&node, |req_id| MasterToNode::Cancel {
+                    req_id,
+                    session_id: sid,
+                })
+                .await;
+            lock(&this.inner.stopping).remove(&sid);
         });
     }
 

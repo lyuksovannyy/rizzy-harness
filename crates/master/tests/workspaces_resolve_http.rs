@@ -3,6 +3,9 @@
 //! gates on prompts, approvals and restores; the revocation sweep; new
 //! chats announced after stamping; and each member's memory switch.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -73,8 +76,9 @@ fn config() -> Config {
     cfg
 }
 
-/// The built-in agents, plus Boss, who hands work to Helper; both may use
-/// every tool (`remember` included).
+/// The built-in agents, plus Boss, who hands work to Helper. Boss may use
+/// every tool; Helper only reads and remembers, so it needs no worktree
+/// (the folder is not a git repository).
 fn agents() -> harness_agents::AgentSet {
     let mut all = harness_agents::builtins();
     for (id, text) in [
@@ -82,7 +86,10 @@ fn agents() -> harness_agents::AgentSet {
             "boss",
             "---\nname: Boss\ntools: all\ndelegates: [helper]\n---\nHand work to Helper.\n",
         ),
-        ("helper", "---\nname: Helper\ntools: all\n---\nHelp.\n"),
+        (
+            "helper",
+            "---\nname: Helper\ntools: [read, remember]\n---\nHelp.\n",
+        ),
     ] {
         all.push(harness_agents::parse(id, text, false).unwrap());
     }
@@ -173,7 +180,7 @@ async fn send(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -661,6 +668,7 @@ async fn agentic_work_stops_when_access_goes() {
     let r = reqwest::Client::new()
         .post(format!("{}/api/attachments?name=notes.txt", s.base))
         .header("cookie", &carol)
+        .same_origin()
         .body("tram timetable".as_bytes().to_vec())
         .send()
         .await

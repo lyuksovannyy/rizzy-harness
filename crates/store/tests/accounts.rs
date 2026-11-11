@@ -83,6 +83,36 @@ fn ui_sessions_slide_at_most_once_a_minute() {
     );
 }
 
+/// An open WebSocket re-checks its login (FIX_PLAN 3.2) without using it:
+/// the check never moves the expiry, so an idle tab does not keep a login
+/// alive.
+#[test]
+fn ui_session_check_does_not_slide() {
+    use harness_store::UI_SESSION_TOUCH_MS as TOUCH;
+    let s = Store::open_in_memory().unwrap();
+    s.create_user(&user("u1", "alex", Role::Admin)).unwrap();
+    s.ui_session_create("h", "u1", 0, TTL).unwrap();
+    for now in [TOUCH, 10 * TOUCH, TTL - 1] {
+        assert_eq!(s.ui_session_check("h", now).unwrap().unwrap().user_id, "u1");
+    }
+    assert!(s.ui_session_check("h", TTL).unwrap().is_none(), "expired");
+    assert!(
+        s.ui_session_user("h", TTL, TTL).unwrap().is_none(),
+        "the checks did not slide it"
+    );
+    s.ui_session_create("d", "u1", 0, TTL).unwrap();
+    s.update_user(
+        "u1",
+        &UserPatch {
+            disabled: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(s.ui_session_check("d", 0).unwrap().is_none(), "disabled");
+    assert!(s.ui_session_check("no-such", 0).unwrap().is_none());
+}
+
 #[test]
 fn creating_a_ui_session_sweeps_expired_ones() {
     let s = Store::open_in_memory().unwrap();

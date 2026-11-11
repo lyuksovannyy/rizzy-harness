@@ -1,5 +1,8 @@
 //! "Needs you" list: pending approvals and unanswered questions.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -94,7 +97,10 @@ async fn approvals_and_questions_need_attention_until_handled() {
         .unwrap()
         .to_string();
     let req = |m: Method, p: &str, b: Option<Value>| {
-        let mut rb = c.request(m, format!("{base}{p}")).header("cookie", &ck);
+        let mut rb = c
+            .request(m, format!("{base}{p}"))
+            .header("cookie", &ck)
+            .same_origin();
         if let Some(b) = b {
             rb = rb.json(&b);
         }

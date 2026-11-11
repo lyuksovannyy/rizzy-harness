@@ -22,9 +22,22 @@ mod storage;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
+    router_with(master, crate::limits::Timeouts::default())
+}
+
+/// `router` with explicit request timeouts (tests shorten them).
+pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router {
     let api = Router::new()
-        .route("/api/setup", get(setup_status).post(setup))
-        .route("/api/login", post(login))
+        .route(
+            "/api/setup",
+            get(setup_status)
+                .post(setup)
+                .layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/api/login",
+            post(login).layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
+        )
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
@@ -178,11 +191,23 @@ pub fn router(master: Master) -> Router {
         .merge(hooks::routes())
         .merge(media::routes())
         .merge(artifacts::routes())
-        .merge(storage::routes());
+        .merge(storage::routes())
+        // Matched routes only (the embedded UI files are not handlers); which
+        // routes get which limit is the table in `limits.rs`.
+        .route_layer(axum::middleware::from_fn_with_state(
+            timeouts,
+            crate::limits::enforce,
+        ));
     api.fallback(crate::assets::serve)
         .layer(axum::middleware::from_fn_with_state(
             master.clone(),
             auth::guard,
+        ))
+        // Outermost: request ids, 500 bodies and cache/transport headers
+        // for every response, the guard's refusals included.
+        .layer(axum::middleware::from_fn_with_state(
+            master.clone(),
+            crate::response::finish,
         ))
         .with_state(master)
 }
@@ -191,7 +216,20 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let busy = self.0 == StatusCode::TOO_MANY_REQUESTS && self.1 == auth::BUSY;
+        let mut resp = (self.0, Json(json!({ "error": self.1 }))).into_response();
+        if busy {
+            // No password-hash permit came free in time (auth::Hasher).
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, auth::BUSY_RETRY_AFTER_S.into());
+        }
+        resp
+    }
+}
+
+impl From<auth::HashError> for ApiError {
+    fn from(e: auth::HashError) -> Self {
+        auth::AccountError::from(e).into()
     }
 }
 
@@ -267,6 +305,7 @@ impl From<auth::AccountError> for ApiError {
         let code = match &e {
             auth::AccountError::Invalid(_) => StatusCode::BAD_REQUEST,
             auth::AccountError::Taken => StatusCode::CONFLICT,
+            auth::AccountError::Busy => StatusCode::TOO_MANY_REQUESTS,
             auth::AccountError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, e.to_string())
@@ -320,21 +359,15 @@ struct SetupBody {
 }
 
 async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<Response> {
-    use auth::ClaimError;
-    let user = m
+    let user = match m
         .inner
         .auth
         .claim(&m.inner.mirror, &b.claim_code, b.username, b.password)
         .await
-        .map_err(|e| {
-            let code = match &e {
-                ClaimError::AlreadyClaimed => StatusCode::CONFLICT,
-                ClaimError::BadCode => StatusCode::FORBIDDEN,
-                ClaimError::Invalid(_) => StatusCode::BAD_REQUEST,
-                ClaimError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            ApiError(code, e.to_string())
-        })?;
+    {
+        Ok(u) => u,
+        Err(e) => return Ok(e.into_response()),
+    };
     tracing::info!(username = %user.username, "server claimed by owner");
     session_response(&m, &user.user_id).await
 }
@@ -356,42 +389,22 @@ struct LoginBody {
 }
 
 async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<Response> {
-    let name = b.username.trim().to_ascii_lowercase();
-    let now = harness_core::now_ms();
-    if m.inner.auth.login_throttled(&name, now) {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many failed attempts; try again in 15 minutes".into(),
-        ));
-    }
-    let lookup = name.clone();
-    let user = m
+    // Format, throttle, hash permit and verification: auth::Auth::login.
+    match m
         .inner
-        .mirror
-        .call(move |s| s.user_by_username(&lookup))
-        .await?;
-    let phc = user.as_ref().map(|u| u.password_hash.clone());
-    // Verified even for unknown users, so timing does not reveal usernames;
-    // disabled accounts get the same answer as a wrong password.
-    let ok = auth::verify_password(b.password, phc).await;
-    let user = match user {
-        Some(u) if ok && !u.disabled => u,
-        _ => {
-            m.inner.auth.record_login_failure(&name, now);
-            return Err(ApiError(
-                StatusCode::UNAUTHORIZED,
-                "wrong username or password".into(),
-            ));
-        }
-    };
-    m.inner.auth.clear_login_failures(&name);
-    session_response(&m, &user.user_id).await
+        .auth
+        .login(&m.inner.mirror, &b.username, b.password)
+        .await
+    {
+        Ok(user) => session_response(&m, &user.user_id).await,
+        Err(e) => Ok(e.into_response()),
+    }
 }
 
 async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
     // The session row goes, so a copy of the cookie is useless from now on.
     if let Some(id) = auth::cookie_value(&headers) {
-        auth::delete_ui_session(&m.inner.mirror, &id).await;
+        auth::delete_ui_session(&m, &id).await;
     }
     (
         [(header::SET_COOKIE, m.inner.auth.clear_cookie())],
@@ -565,13 +578,14 @@ async fn change_password(
         .call(move |s| s.user_by_id(&lookup))
         .await?
         .map(|u| u.password_hash);
-    if !auth::verify_password(b.current, phc).await {
+    let hasher = m.inner.auth.hasher();
+    if !auth::verify_password(hasher, b.current, phc).await? {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "current password is wrong".into(),
         ));
     }
-    auth::set_password(&m.inner.mirror, &uid, b.new, false).await?;
+    auth::set_password(&m, &uid, b.new, false).await?;
     // Every session was revoked; give this browser a fresh one.
     session_response(&m, &uid).await
 }
@@ -847,6 +861,7 @@ async fn create_user(
     require_admin(&m, &headers).await?;
     let u = auth::create_account(
         &m.inner.mirror,
+        m.inner.auth.hasher(),
         b.username.trim().to_ascii_lowercase(),
         b.password,
         b.role,
@@ -933,6 +948,9 @@ async fn update_user(
                 Ok::<_, harness_store::StoreError>(())
             })
             .await?;
+        if disable {
+            auth::close_sockets(&m, &target.user_id);
+        }
         // Disabled owners stop counting as owners, and whether the user may
         // drive their agentic chats (`blocked`) may have changed: running
         // ones that lost their access stop.
@@ -941,7 +959,7 @@ async fn update_user(
         ws::sweep_revoked(&m, vec![target.user_id.clone()]);
     }
     if let Some(pw) = b.password {
-        auth::set_password(&m.inner.mirror, &target.user_id, pw, true).await?;
+        auth::set_password(&m, &target.user_id, pw, true).await?;
     }
     Ok(Json(user_json(&load_user(&m, &id).await?)))
 }
@@ -960,6 +978,7 @@ async fn delete_user(
     // the workspaces that go with them go too, and their facts.
     let projects = crate::projects::ids(&m).await;
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
+    auth::close_sockets(&m, &target.user_id);
     // Their stored files lost their rows with the account; unlink them.
     crate::storage::on_user_deleted(&m).await;
     crate::projects::forget_gone(&m, projects).await;
@@ -1257,15 +1276,32 @@ async fn upload(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let a = crate::attachments::extract(&q.name, body.to_vec())
+    use crate::attachments::{MAX_UNSENT, MAX_UNSENT_BYTES};
+    let a = crate::attachments::extract(&q.name, body.to_vec(), m.pdf_reader())
         .await
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        .map_err(|e| {
+            let code = if e.busy() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            ApiError(code, e.to_string())
+        })?;
     let id = harness_core::new_id();
     let (aid, owner, att) = (id.clone(), who.user_id.clone(), a.clone());
-    m.inner
+    let stored = m
+        .inner
         .mirror
-        .call(move |s| s.attachment_put(&aid, owner.as_deref(), &att))
+        .call(move |s| s.attachment_put(&aid, owner.as_deref(), &att, MAX_UNSENT, MAX_UNSENT_BYTES))
         .await?;
+    if !stored {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "too many files waiting to be sent (at most {MAX_UNSENT}); send or remove some first"
+            ),
+        ));
+    }
     Ok(Json(json!({
         "attachment_id": id,
         "name": a.name,
@@ -1889,7 +1925,7 @@ async fn transcribe(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require(&m, &headers).await?;
+    let who = require(&m, &headers).await?;
     let t = m.transcriber().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1899,6 +1935,16 @@ async fn transcribe(
     if body.is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "no audio".into()));
     }
+    // Held until the answer (or the dropped request) ends.
+    let _slot = m
+        .voice_usage()
+        .begin(
+            who.user_id.as_deref().unwrap_or(""),
+            body.len() as u64,
+            t.limits(),
+            harness_core::now_ms(),
+        )
+        .map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
     let mime = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

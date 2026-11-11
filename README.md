@@ -57,7 +57,10 @@ to grant them per user. Print the claim code with:
 ```
 
 Scripts can call the API with `Authorization: Bearer <token>`, using the token
-printed by `rizzy-harness token`.
+printed by `rizzy-harness token`. Treat this token as an admin password: it acts
+as an administrator and can read and drive every user's chats, which is an
+accepted gap until per-user tokens exist (`PLAN.md`, T29). Do not give it to
+automation that only needs one user's access, and do not copy it if no script needs it.
 
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
@@ -296,10 +299,22 @@ min_free_mb = 1024                   # free space kept on the data disk
 
 Everything lives in the data directory (`~/.local/share/rizzy-harness`, or
 `--data-dir` / `HARNESS_DATA_DIR`). Back it up as a whole: the files under
-`blobs/` (Media and Artifacts) are encrypted with keys kept only in `master.db`,
-so neither is any use without the other. Deleting a file removes its key from
-the live database, but old copies of `master.db` pages can survive on SSDs and
-copy-on-write filesystems ([docs/media.md](docs/media.md)).
+`blobs/` (Media and Artifacts) are encrypted with per-file keys kept only in
+`master.db`, so neither is any use without the other. That is for deleting
+(crypto-shredding: a deleted file's key is gone from the live database), not
+for keeping the directory secret: whoever can read `master.db` can read every
+file, so use full-disk encryption for that. Old copies of `master.db` pages can
+survive on SSDs and copy-on-write filesystems ([docs/media.md](docs/media.md)).
+
+**Secret files must be private.** `serve` (and `node run`) refuse to start
+when a file holding a secret is readable or writable by group or others,
+naming it and the fix (`chmod 600 <file>`): `secrets.toml`, `api-token`,
+`claim-code`, the private keys in `keys/` (`*-key.der`, `node.key`) and the
+`.env` that `serve` reads. A symlink is judged by its target. The server
+creates all of these 0600 itself; this catches a copied or restored file. In
+Docker, the data directory's files keep their host mode through the bind
+mount: fix the mode on the host. (Unix only; on other systems nothing is
+checked.)
 
 `config.toml`: model providers. API keys never go in this file: reference an
 environment variable (`api_key_env`) or a key stored in the 0600
@@ -382,6 +397,17 @@ not set it by hand either.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
 
+**Local and LAN model servers need `HARNESS_PLAIN_HTTP_HOSTS`.** The
+provider and model tests in Settings and the model listing are requests the
+server makes to an admin-typed URL, so they reach public addresses only,
+checked on the address actually connected to. A model server on this machine,
+your LAN or a container network is allowed by host name or address, comma
+separated, then restart: `HARNESS_PLAIN_HTTP_HOSTS=localhost` for Ollama on
+this machine, `HARNESS_PLAIN_HTTP_HOSTS=ollama,192.168.1.20` for others. The
+same list allows plain `http://` with a key. A test of an unlisted private host
+fails with the exact value to add. (Chats themselves use the saved provider's
+URL as before.)
+
 Chats and web tools (restart after changing):
 
 ```toml
@@ -424,7 +450,9 @@ local_node_users = "admins"          # admins (default) | granted
 ```
 
 The embedded node runs as the server's own OS user, next to its data
-directory, and the agent's shell is not sandboxed yet. So by default only
+directory. Its shell is sandboxed (see "The shell sandbox"), but on kernels
+before Linux 7.1 it can still reach Unix sockets such as the session bus,
+which can start programs outside the sandbox. So by default only
 server admins (and the API token) may use it; other accounts with the
 agentic grant run their agentic sessions on a remote node (`node join`), and
 get "use a remote node, or ask the server admin" on the built-in one, also
@@ -439,22 +467,76 @@ Whisper server with an OpenAI-compatible API:
 url = "http://localhost:8000/v1"     # serves /audio/transcriptions
 model = "Systran/faster-whisper-small"
 # key_secret = "voice"               # if the service needs a key
+# daily_requests = 200               # dictations per account per UTC day (0 = no limit)
+# daily_mb = 100                     # MiB of audio per account per UTC day (0 = no limit)
 ```
+
+Each account dictates one recording at a time (a second one at once gets
+"one dictation at a time", 429) and within the daily limits above (then
+429 until midnight UTC). The counts are kept in memory: a server restart
+starts the day afresh.
+
+Files attached to a message (`+` in the composer) are read on the server:
+text, code, Markdown, CSV, JSON, and PDFs with a text layer. A file is a PDF
+only when its first bytes are `%PDF-`, whatever its name (`notes.pdf` with
+plain text in it is text). PDFs are never parsed inside the server: it
+starts its own binary as `rizzy-harness pdf-text`, which locks itself out of
+every file and the network (Landlock), limits its memory, and is killed after
+20 seconds; two run at once and a third waits up to 10 seconds ("the server
+is busy reading other PDFs"). This needs Linux 6.7 or newer with Landlock
+enabled on the server; elsewhere PDFs are refused with "this server cannot
+read PDFs safely", and text files still work. Each account can hold 20
+uploaded files not yet sent (8 MiB of text); unsent files are deleted after
+the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
-written into your folder or your `.git`, and your repository's own git
+written into your folder, no objects, refs, index or config are ever written
+into your `.git` (git may update the timestamps of existing object files
+there when a checkpoint reads content your repository already has), and
+your repository's own git
 config, hooks and filters are never run for a checkpoint or an undo (in a
 repository the private copy borrows your committed objects instead of
 storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
-back the exact bytes. Sub-agents that can write get a temporary git
-worktree; it is refused, and the sub-agent shares the folder, if the
-repository's own config defines filter commands (git-lfs's standard ones
-are allowed). Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it.
+back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
+a temporary git worktree, so the folder must be a git repository for
+them: elsewhere, or when the repository's own config defines filter
+commands (git-lfs's standard ones are allowed), such a sub-agent is not
+started and the agent that delegated is told why. Sub-agents that only
+read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
+undo or rewind changes a file it saves the folder as it is, your own edits
+since the turn included, as a checkpoint of its own, so "Undo anyway" loses
+nothing: restoring that checkpoint (its id is in the chat's log, phase
+`before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
+the undo. The chat has no button for it yet. An undo first checks that it
+has everything it will write: if the checkpoint needs content your
+repository no longer has (after you rewrote history and `git gc` cleaned
+it up), the undo is refused with that reason and your folder is left
+exactly as it was. If writing fails partway (a full disk, a read-only
+folder), the error names the checkpoint that holds your folder as it was;
+restoring it puts the folder back. If an undo would replace a folder by a
+file and that folder holds files no checkpoint has (build output your
+`.gitignore` skips, say), it is refused and names the folder; "Undo
+anyway" deletes them and says which. If a checkpoint cannot be taken, the
+chat says that turn cannot be undone.
+A git repository inside your
+folder (a sub-folder git treats as its own repository: a clone, a
+submodule, a worktree, or one made with `git init`) is not covered by undo
+and is never touched by it: checkpoints leave it out, and an undo neither
+restores, deletes nor recreates anything in it. Use git in that repository
+to undo changes there. The chat says so after an undo when such a
+repository appeared or went away during the turn; each checkpoint in the
+chat's log lists the repositories it left out (`excluded`), which the chat
+does not show yet. Files a checkpoint already holds stay covered even if a
+`.git` appears in their folder later: an undo puts them back and leaves the
+`.git` as it is. An undo is refused while another chat is working in the
+same folder (or in a folder that contains it, or one inside it), and no
+chat can start working in that folder while an undo runs there; wait a
+moment, or cancel the other chat, and try again.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
@@ -464,9 +546,9 @@ directory, be inside it, or contain it: with the default data directory
 `~/.local/share/rizzy-harness`, your home folder and `~/.local` are refused
 (use `~/projects/x` or similar). The file tools (`read`, `write`, `edit`,
 `grep`, `glob`, `outline`) never reach into the data directory, even with
-`allow_outside_workspace = true` or through a symlink. The shell is not
-confined yet: a command you approve can still read it, so its output is
-scrubbed of the API token and known keys.
+`allow_outside_workspace = true` or through a symlink. The shell runs in a
+sandbox that cannot open it either (see "The shell sandbox" below); its
+output is still scrubbed of the API token and known keys.
 
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
@@ -478,7 +560,78 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
+max_steps = 50                       # model calls one turn may make (1 .. 1000)
+bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
+
+[sandbox]
+mode = "required"                    # required | best-effort | off
+network = "on"                       # on | off (off: no TCP connect or bind)
+read = []                            # more read-only folders, e.g. "~/.cargo"
+write = []                           # more read-write folders, e.g. "~/.cache"
 ```
+
+**The shell sandbox.** `bash` (and graphify) run through `rizzy-harness
+sandbox-exec`, which locks itself into a Linux Landlock sandbox and then
+starts the command. A command may:
+
+- read and change the session folder, and its own temp folder (`TMPDIR`, a
+  fresh folder per chat, deleted with the chat);
+- read and run `/usr /bin /sbin /lib* /etc /opt` and read `/proc`;
+- use `/dev/null /dev/zero /dev/full /dev/random /dev/urandom`;
+- read the folders in `[sandbox] read`, read and change those in
+  `[sandbox] write`.
+
+Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
+`~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
+users' folders, not `/dev/tty`. A sub-agent's git worktree also gets the
+repository's `.git`, so `git status` and `git commit` work there. Programs
+cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
+fail inside the sandbox. From Linux 6.12 the shell also cannot signal
+processes outside it, and from Linux 7.1 it cannot connect to Unix sockets
+outside its folders (the session bus, the Docker socket, an ssh-agent); on
+older kernels it **can**, see "Limits" below.
+
+It needs Linux 6.2 or newer with Landlock enabled (`landlock` appears in
+`/sys/kernel/security/lsm`; `network = "off"` needs 6.7). `rizzy-harness
+doctor` shows whether it works and which Landlock version the kernel has.
+With `mode = "required"` (the default) a node where it does not work refuses
+agentic sessions with a message naming this setting; `node run` refuses to
+start, `serve` starts for chats only. `"best-effort"` uses whatever the
+kernel enforces and logs a warning; `"off"` runs the shell with every right
+of the node's OS user and logs that on every start.
+
+What breaks by default, and the fix: toolchains and caches under your home
+folder. A command that fails with `Permission denied` on a path under `~`
+needs that folder listed. The usual entries:
+
+```toml
+[sandbox]
+read  = ["~/.rustup", "~/.cargo/bin", "~/.nvm", "~/.local/bin", "~/.pyenv",
+         "~/.sdkman", "~/go/bin", "~/.gitconfig"]
+write = ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.cache",
+         "~/go/pkg", "~/.local/share/uv", "~/.gradle", "~/.m2"]
+```
+
+(`~/` is the node user's home; give `~/.cargo/registry` rather than all of
+`~/.cargo`, which may hold `credentials.toml`.) Also missing by default:
+`/tmp` (use `$TMPDIR`), `/dev/shm` (some Python and browser tests),
+`/sys`, `/var`, `/run`, `/nix/store` on NixOS. A shell sandbox entry may not
+contain, equal or be inside the data directory: the node refuses to start
+with such an entry, because Landlock cannot carve a folder out of a grant.
+For the same reason a data directory under `/usr`, `/etc` or `/opt` is
+refused. Graphify additionally needs its install (found automatically:
+its venv and the Python it was made from).
+
+Limits: Landlock does not cover UDP, so `network = "off"` still allows DNS
+and any UDP traffic; it does not hide that a file exists (`stat` and
+`test -e` still work on paths outside, only opening is denied); `/etc` is
+readable; the session folder's own `.git` is writable, so a command can
+change that repository's hooks and config (the file tools refuse to).
+Before Linux 7.1 a command can connect to Unix sockets such as
+`/run/user/<uid>/bus` or `/var/run/docker.sock`, and through them start
+programs outside the sandbox (`systemd-run --user`, `docker run -v
+/:/host`): on such kernels run the node as its own OS user, without
+membership in the `docker` group and without a login session.
 
 **The agent's environment.** The shell and every other program a tool
 starts get an empty environment plus `PATH HOME USER LOGNAME SHELL LANG
@@ -506,6 +659,30 @@ ends with `[output truncated: further output is not shown or stored]`; the
 command keeps running until it exits, times out or is cancelled, and the
 rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
+
+**Step and time limits.** A turn ends after `[limits] max_steps` model calls
+(default 50, 1 to 1000; a sub-agent's turn has the same cap) with the message
+"stopped after N steps (`max_steps` in node.toml)". `bash` runs at most
+`[limits] bash_timeout_max_s` seconds (default 3600, 1 to 3600): a call that
+asks for more is cut at that value, and the tool description the model sees
+states it. Neither an agent definition, a prompt nor the master can raise
+either; a value outside its range stops the node at start.
+
+**File limits.** The file tools only open regular files: a FIFO, a device
+(`/dev/zero`), a socket or a directory is refused at once, also through a
+symlink. `read` streams a file and stops after 32 MiB, saying where (use
+bash `tail` or `sed -n` for later parts); `grep` skips files over 8 MiB and
+says how many it skipped; `edit` and `outline` refuse files over 8 MiB.
+`edit` and `write` never change a file in place: they write a temporary
+file (`.rizzy-harness-write.<random>.tmp`, deleted on any error; one left
+after a crash can be removed) in the same folder and rename it over the
+original, so a crash, full disk or cancel leaves the old file whole. The
+file keeps its permission bits, but a hard link to it is split (the other
+name keeps the old content), extended attributes and ACLs are not carried
+over, and a file in a folder the node cannot write to cannot be changed.
+Cancelling a turn stops any tool: one that does not return by itself
+within 2 seconds is abandoned. A slow undo or delete in one chat never
+delays Stop or an approval answer, in that chat or any other.
 
 ### Token savings
 
@@ -634,6 +811,19 @@ data directory once on each device:
 ./target/release/rizzy-harness serve --bind 10.8.0.1:7777 --tls
 ```
 
+With `--tls` every response for a host name (not `localhost`, not an IP
+address) carries `Strict-Transport-Security: max-age=15552000` (180 days,
+this host only): the browser then refuses plain `http://` for that name. If
+you turn `--tls` off again, clear the name in the browser's HSTS settings or
+wait out the 180 days.
+
+The browser's `Origin` must match the server's scheme: a page served over
+`http://` cannot drive a `--tls` server, and the reverse. Behind a reverse
+proxy that terminates TLS for a plain-HTTP server, allow the proxy's origin
+with its scheme: `--allowed-host https://chat.example.com` (a bare
+`host:port` entry means the server's own scheme). `X-Forwarded-Proto` is not
+read.
+
 ## Central server in Docker
 
 Ready-made templates live in [`docker/`](docker/): **minimal** (the harness
@@ -696,6 +886,12 @@ printed commands on the other machine (same binary). That machine needs its own
 `config.toml` (provider + key) and `node.toml` (its workspace roots and
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
+
+Run each node from its own data directory. If two processes use one node's key
+(a copied data directory, a node restored from an old backup) and write the same
+chat differently, the server stops taking that chat's events, logs an error
+naming the chat and the node, and refuses new messages to it ("diverged").
+Delete the chat to clear it; the node's copy goes with it.
 
 ### Set up a node by hand
 

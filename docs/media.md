@@ -44,25 +44,74 @@ Media and Artifacts share one store (`crates/master/src/storage.rs`, `blobs.rs`;
   file without a row. Renames and inserts hold one process-wide lock that the sweeps also take,
   so a sweep never deletes a file whose row is about to be written.
 
-### Encryption at rest, deletion by crypto-shredding
+### Crypto-shredding, not encryption at rest
 
-- Each blob has its own random 32-byte key, stored only in its `blobs` row in master.db.
-- File format: `RZB1`, a 7-byte random nonce prefix, then the plaintext in 64 KiB segments,
-  each sealed with AES-256-GCM (aws-lc-rs, already linked for TLS) in the STREAM
-  construction: segment `i`'s nonce is the prefix, `i` big-endian and a last-segment flag; the
-  AAD is the blob id. Reordered, dropped or swapped segments, a truncated file and a file
-  renamed to another blob's id all fail to open.
-- Range reads decrypt only the segments they cover; memory stays flat (one segment at a time,
-  a few segments ahead of the socket).
-- **Deleting** a file is: delete the row (`secure_delete` overwrites it) → `wal_checkpoint
-  (TRUNCATE)` → unlink the file.
+The blob files are encrypted, but this is **not encryption at rest** in the sense of
+protecting the data directory: each file's key sits in master.db, in the same directory, and
+the server reads it without anything from the user. Its one purpose is **crypto-shredding**: a
+deleted file is unreadable once its key is gone, even where the file's own blocks survive on
+disk.
+
+- Each blob has its own random 32-byte key (`getrandom`), stored only in its `blobs` row
+  (`key` column) in master.db. The key never leaves the server process: not in an event, a
+  URL, a log line or a response.
+- **Deleting** a file is: delete the row (`secure_delete` overwrites the freed page) →
+  `wal_checkpoint(TRUNCATE)` → unlink the file. Deleting the row is what destroys the data:
+  the file without its key is noise.
+- API responses, stored files included, carry `Cache-Control: no-store`, so the browser keeps
+  no disk copy that would outlive a delete or a logout (PLAN.md T25).
 
 **What this guarantees:** after a delete, neither the live files under `blobs/` nor the live
 master.db and its WAL hold the data or its key; a backup of `blobs/` without master.db is
-unreadable. **What it does not:** a checkpoint releases disk blocks without overwriting them,
-so SSD wear-levelling or copy-on-write filesystems may still hold old copies of master.db
-pages, and with them old keys. Back up `blobs/` and master.db together: neither is useful
-without the other.
+unreadable. **What it does not:**
+
+- **No confidentiality against anyone who can read the data directory** (the server's OS user,
+  root, a backup of the whole directory, a stolen disk without full-disk encryption): they
+  have master.db and so every key. Use full-disk encryption for that.
+- A checkpoint releases disk blocks without overwriting them, so SSD wear-levelling or
+  copy-on-write filesystems may still hold old copies of master.db pages, and with them old
+  keys. A backup taken before the delete keeps both.
+- Back up `blobs/` and master.db together: neither is useful without the other.
+
+### On-disk format (`RZB1`)
+
+A hand-written construction over standard primitives (`crates/master/src/blobs.rs`): AES-256-GCM
+from aws-lc-rs in the STREAM construction (Hoang, Reyhanitabar, Rogaway, Vizár, "Online
+Authenticated-Encryption and its Nonce-Reuse Misuse-Resistance", 2015), the same scheme as
+RustCrypto's `aead::stream` with a 7-byte prefix.
+
+```
+file    = magic || prefix || segment_0 || ... || segment_(n-1)
+magic   = "RZB1"                          4 bytes (52 5a 42 31)
+prefix  = 7 random bytes, new per file
+segment = AES-256-GCM(key, nonce_i, aad = blob_id, plaintext_i) = ciphertext_i || tag_i (16 bytes)
+nonce_i = prefix || u32_be(i) || last_i   12 bytes; last_i = 0x01 for i = n-1, else 0x00
+```
+
+- `blob_id` is the blob's 32 lowercase hex characters, as ASCII bytes. It binds a file to its
+  row: a file renamed to another id fails to open.
+- `plaintext_i` is bytes `i·65536 .. min((i+1)·65536, size)` of the file. Every segment but
+  the last holds exactly 65,536 bytes; the last holds 1 to 65,536, or 0 for an empty file,
+  which is one empty, flagged segment. So `n = max(1, ceil(size / 65536))` and the file is
+  `11 + size + 16·n` bytes long. At most 2^32 segments (256 TiB).
+- The plaintext size is not in the file: it is the row's `size`, and a file whose length does
+  not match it is refused before any segment is read. A cut, extended, reordered or spliced
+  file fails its length check or a tag (the last-segment flag stops truncation at a segment
+  boundary). Nothing is released before its segment's tag is verified.
+- A range read decrypts only the segments it covers, one at a time: memory stays flat.
+- A (key, prefix) pair is never reused: both are new for every file, and a file is never
+  rewritten in place (a new version is a new blob).
+
+**Test vectors.** Key `000102…1f` (bytes 0 to 31), prefix `a0a1a2a3a4a5a6`, blob id
+`0193f1c2a4b57d6e8f9012345678abcd`. They were computed with OpenSSL's AES-256-GCM, not with
+this code, and `blobs::tests::format_test_vectors` checks that sealing produces exactly these
+bytes and that these bytes open to the plaintext:
+
+| plaintext | file (hex) or its SHA-256 |
+|---|---|
+| empty | `525a4231a0a1a2a3a4a5a6ec0085c3adf2159ee7fde2dab9242e17` |
+| `hello, blob` (11 bytes) | `525a4231a0a1a2a3a4a5a61f042572d72ac0a26f0aba828067ae508f0611ad3d30eb7817cad7` |
+| 65,537 bytes, byte `i` = `(31·i + ⌊i/251⌋) mod 256` (two segments, 65,580-byte file) | SHA-256 `fd91399c3137cab4a285044fe08c7327c500f9724e71d221836fe72df7a5290b`; last 17 bytes `eccf055a305983f558fe8cf7fba75bd9ee` |
 
 ### Dedupe
 
@@ -130,6 +179,17 @@ tar.gz, …; `bin` if unknown), the type it is served with, and `display`:
   server. The readers are bounds-checked and fuzzed with mutated and random input.
 - The browser never decodes an image above 40 MP or 16,384 px a side: the Media page shows an
   icon and offers Download instead (`web/src/lib/thumbs.ts`).
+
+## Documents attached to a message are not Media (T23)
+
+`POST /api/attachments` (the composer's `+`) keeps no file: it extracts text, stores it in
+master.db `attachments` until the message is sent, and the text then lives in the message's
+event. The same rule as above decides what a file is: a PDF only by `%PDF-` at offset 0,
+never by name. PDFs are read by the confined `rizzy-harness pdf-text` helper
+(`crates/master/src/pdf.rs`), never in the server; refusals: 422 (not readable, no text
+layer, over 20 s, no Landlock on the server), 503 (two PDFs already being read and no slot
+within 10 s), 429 (20 unsent files or 8 MiB of unsent text for this account). Unsent uploads
+expire with the incognito TTL.
 
 ## Serving stored files (T17)
 

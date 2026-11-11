@@ -1,6 +1,9 @@
 //! Storage over HTTP: each account's own meter and the server admin's
 //! numbers and limits (never names or contents).
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 
 use harness_core::Secret;
@@ -56,7 +59,7 @@ async fn send(
     rb = if c.starts_with("Bearer ") {
         rb.header("authorization", c)
     } else {
-        rb.header("cookie", c)
+        rb.header("cookie", c).same_origin()
     };
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -81,7 +84,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }
@@ -129,6 +132,7 @@ async fn upload(t: &T, c: &str, bytes: Vec<u8>) -> StatusCode {
     reqwest::Client::new()
         .post(format!("{}/api/media", t.base))
         .header("cookie", c)
+        .same_origin()
         .header("x-file-name", "a.png")
         .body(bytes)
         .send()

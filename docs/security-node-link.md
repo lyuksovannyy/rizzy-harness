@@ -22,7 +22,16 @@ node sends (`add_link`, `on_node_message`, `Store::append`).
   sub-agent session adopts an owner only from the same node, and artifact
   chunks are routed by `(node, request id)`.
 - **Revocation** rejects the key and drops a live link.
-- **Limits.** 8 MiB per frame, 10 s for each handshake step.
+- **Who proves what.** The master is authenticated only by TLS against the
+  pinned certificate; the node by signing the master's nonce. This is not a
+  mutual challenge-response (the master signs nothing itself).
+- **Limits.** 8 MiB per frame and message (`harness_protocol::MAX_FRAME`),
+  refused from the frame header before the payload is read; a violation
+  closes the link and logs the sizes only. On the master, 10 s for each
+  handshake step and at most 32 handshakes in progress. On the node, 10 s
+  for the TCP connect, 10 s for TLS plus the upgrade and 10 s for the
+  challenge exchange, each a deadline for the whole step.
+- **Back-pressure (FIX_PLAN 3.7).** See below.
 - **The node decides.** `node.toml` is authoritative on the node; the
   master's requests are clamped to it.
 
@@ -43,12 +52,67 @@ its whole environment minus the provider-key variables. Once a `.env` is
 loaded, that would include every key and URL it holds. Now every `HARNESS_*` variable and every name a `.env` sets is
 removed from tool processes, and the secret ones are also redacted.
 
+## Back-pressure (2026-11-10, FIX_PLAN 3.7, audit L1/L15)
+
+`NodeLink` is bounded in both directions, and each end of a remote link
+reads and writes its socket concurrently (`crates/link/src/pump.rs`), so
+two ends that both have a lot to say cannot deadlock on each other.
+
+| Queue | Bound | When full |
+|---|---|---|
+| Master, from one node (parsed, not yet stored) | 8 messages | the master stops reading that node's socket; TCP pushes back on the node. Worst case per node: (8 + 2) × 8 MiB with maximal frames, a few KiB in practice. Other nodes and the UI are not involved. |
+| Master, to one node (not yet written) | 64 commands | a new command fails at once (`Timeout`); a `resume` that does not fit is asked again on the next gap or hello |
+| Node, commands from the master | 64 | the node stops reading the master's socket |
+| Node, to the master | 256 messages | session actors (appending an event) and the command loop (acks, snapshots) wait. Nothing is dropped. If the link dies while they wait, the wait ends, the event is already in the node's log, and the next hello plus `resume` replays it. Artifact chunks alone are sent without waiting and dropped when full; the master's transfer times out and asks again. |
+
+Idle detection counts only time spent waiting on the peer: an end that is
+not reading because its own consumer is behind does not call the peer dead.
+A peer that sends nothing for 60 s while we read, or takes no byte of a frame
+for 60 s while we write, is dropped. `session.snapshot` batches stop at 500
+events or 2 MiB (a quarter of the frame limit), whichever comes first; one
+event over 2 MiB goes alone.
+
+`allow_remote_sessions`: T5 claimed the node decides "whether
+remote-created sessions are allowed at all". No such setting existed, and
+on a worker node every session is created by the master, so the setting
+would mean "run no sessions", which not running `node run` already does.
+The sentence was removed instead of adding the setting.
+
+Tests: `crates/link/tests/backpressure.rs` (a flooding node, a flooding
+master, a busy link that is not dead, a silent node, an oversized frame,
+three stalled handshakes) and `resume_batches_are_limited_by_bytes` in
+`crates/node/tests/runtime.rs`. They measure queue length and how far the
+flooding peer got, not process memory.
+
+## One writer per session (2026-11-11, ADOPTION_PLAN A.3)
+
+Two findings from the round-2 review (`final-review-ours.md`, missed 3 and 4):
+
+- **A repeated `seq` was acknowledged without looking at it.** Two processes
+  with one node key, or a node restored from an old disk, could send another
+  event under a stored `seq`; the master called it a duplicate and then took
+  the second writer's next in-order frame, mixing two logs silently. Now
+  `Store::append` compares the incoming event with the stored one (kind,
+  timestamp, payload as JSON values). A difference marks the session diverged
+  (`sessions.diverged_seq`) and every later append for it is refused. The
+  rule, what the node is told and what is refused: `PLAN.md` §3.
+- **A revoked node's queued frames were still applied** (up to the 8 the
+  master's queue holds): revoke stopped the pump, but `apply` checked only
+  ownership. `Store::append` now refuses a node whose `nodes.revoked_ms` is
+  set, in the transaction that would store the frame.
+
+Tests: `crates/store/tests/event_log.rs` (identical resend, divergent resend,
+sticky refusal, key order and float round trips, revoked writer) and
+`crates/master/tests/link_hardening.rs` (two links with one key, eight frames
+queued at revoke, a reconnect that replays). Not done here: a generation per
+connection and an epoch per session (ADOPTION_PLAN C.1).
+
 ## Left open
 
-- **Backpressure from nodes.** The master reads node frames into an
-  unbounded channel, so a registered (authenticated) node could make it
-  buffer without limit. The fix is a bounded `NodeLink::from_node`; it
-  touches about 30 call sites and is left for its own change.
+- **One event bigger than a frame.** Nothing caps a single event below
+  `MAX_FRAME`. Such an event breaks the link each time it is sent, live or in
+  a snapshot, so that node's link never settles. The cap belongs where events
+  are appended.
 - **Channel binding** uses the certificate fingerprint, not a TLS exporter
   (RFC 9266). Equivalent here, since losing the master's key is total
   anyway.

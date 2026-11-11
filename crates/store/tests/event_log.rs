@@ -421,3 +421,160 @@ fn an_open_message_names_the_agent_that_wrote_it() {
     assert_eq!(author("zz"), None);
     assert_eq!(s.open_message_author(SessionId::new(), "m1").unwrap(), None);
 }
+
+/// What the store holds for `sid`, in full.
+fn dump(s: &Store, sid: SessionId) -> Vec<RawEvent> {
+    s.events_after(sid, 0, 1000).unwrap()
+}
+
+fn delta(sid: SessionId, seq: u64, text: &str) -> RawEvent {
+    ev(
+        sid,
+        seq,
+        EventKind::AssistantDelta(AssistantDelta {
+            author: None,
+            variant: None,
+            turn_id: "t1".into(),
+            message_id: "m1".into(),
+            text: text.into(),
+        }),
+    )
+}
+
+#[test]
+fn a_repeated_seq_with_different_content_diverges_the_session_for_good() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    let evs = script(sid, 7);
+    for e in &evs {
+        assert_eq!(s.append("n", e).unwrap(), AppendOutcome::Applied);
+    }
+    let before = dump(&s, sid);
+
+    // An identical resend (a reconnect) is a duplicate, as before.
+    assert_eq!(s.append("n", &evs[6]).unwrap(), AppendOutcome::Duplicate);
+    assert_eq!(s.diverged_seq(sid).unwrap(), None);
+
+    // Same seq, other content: a second writer.
+    let other = delta(sid, 7, "not what the first copy said");
+    assert_eq!(
+        s.append("n", &other).unwrap(),
+        AppendOutcome::Diverged {
+            seq: 7,
+            first: true
+        }
+    );
+    assert_eq!(dump(&s, sid), before);
+    assert_eq!(s.diverged_seq(sid).unwrap(), Some(7));
+
+    // Sticky: the copy's next in-order frame is refused, and so is an
+    // identical resend and anything from the original writer.
+    let next = delta(sid, 8, "chunk8");
+    for e in [&next, &evs[6], &evs[2]] {
+        assert_eq!(
+            s.append("n", e).unwrap(),
+            AppendOutcome::Diverged {
+                seq: 7,
+                first: false
+            }
+        );
+    }
+    assert_eq!(dump(&s, sid), before);
+    assert_eq!(s.head_seq(sid).unwrap(), 7);
+
+    // Deleting the session is the way out; its tombstone then applies.
+    assert!(s.delete_session(sid, true).unwrap());
+    assert_eq!(s.diverged_seq(sid).unwrap(), None);
+    assert_eq!(s.append("n", &next).unwrap(), AppendOutcome::Deleted);
+}
+
+#[test]
+fn a_different_timestamp_or_kind_under_a_used_seq_diverges() {
+    for change in 0..2 {
+        let s = Store::open_in_memory().unwrap();
+        let sid = SessionId::new();
+        let evs = script(sid, 3);
+        for e in &evs {
+            s.append("n", e).unwrap();
+        }
+        let mut other = evs[2].clone();
+        if change == 0 {
+            other.ts_ms += 1;
+        } else {
+            other.kind = "assistant_message".into();
+        }
+        assert!(
+            matches!(
+                s.append("n", &other).unwrap(),
+                AppendOutcome::Diverged { seq: 3, .. }
+            ),
+            "change {change}"
+        );
+    }
+}
+
+#[test]
+fn key_order_and_float_round_trips_do_not_count_as_divergence() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    s.append("n", &created(sid)).unwrap();
+    // Floats as a model may write them in tool arguments. The live frame
+    // carries the node's in-memory value, a resend the value re-read from
+    // the node's log; both cross the wire as text. Without serde_json's
+    // `float_roundtrip` some of these come back a bit different.
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let floats: Vec<f64> = (0..2000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            f64::from_bits((x >> 2) | 0x3000_0000_0000_0000)
+        })
+        .collect();
+    let live = RawEvent {
+        session_id: sid,
+        seq: 2,
+        ts_ms: 2,
+        kind: "tool_call_started".into(),
+        payload: json!({"a": 1, "b": {"x": [1, 2], "y": "z"}, "f": floats}),
+    };
+    let wire = |e: &RawEvent| -> RawEvent {
+        serde_json::from_str(&serde_json::to_string(e).unwrap()).unwrap()
+    };
+    assert_eq!(s.append("n", &wire(&live)).unwrap(), AppendOutcome::Applied);
+    // The node re-reads its own log (text to value) and sends it again,
+    // with the members in another order.
+    let mut resent = wire(&wire(&live));
+    resent.payload = serde_json::from_str(&format!(
+        r#"{{"f": {}, "b": {{"y": "z", "x": [1, 2]}}, "a": 1}}"#,
+        serde_json::to_string(&resent.payload["f"]).unwrap()
+    ))
+    .unwrap();
+    assert_eq!(s.append("n", &resent).unwrap(), AppendOutcome::Duplicate);
+    assert_eq!(s.diverged_seq(sid).unwrap(), None);
+}
+
+#[test]
+fn a_revoked_nodes_frames_are_refused_at_append() {
+    let s = Store::open_in_memory().unwrap();
+    s.join_token_create("h", i64::MAX, None).unwrap();
+    let id = s.node_join("h", 0, "key", "box").unwrap().unwrap();
+    let sid = SessionId::new();
+    let evs = script(sid, 4);
+    s.append(&id, &evs[0]).unwrap();
+    assert!(s.node_revoke(&id, 1).unwrap());
+    for e in &evs[1..] {
+        assert_eq!(s.append(&id, e).unwrap(), AppendOutcome::Revoked);
+    }
+    // A new session from the revoked node is refused as well.
+    assert_eq!(
+        s.append(&id, &created(SessionId::new())).unwrap(),
+        AppendOutcome::Revoked
+    );
+    assert_eq!(s.head_seq(sid).unwrap(), 1);
+    // A writer with no row (the embedded node, a node's own log) is not.
+    assert_eq!(
+        s.append("local", &created(SessionId::new())).unwrap(),
+        AppendOutcome::Applied
+    );
+}

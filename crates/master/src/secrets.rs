@@ -18,8 +18,8 @@ pub enum SecretsError {
     Io(PathBuf, std::io::Error),
     #[error("{0} is not valid TOML: {1}")]
     Parse(PathBuf, toml::de::Error),
-    #[error("{0} must not be readable by group/others (chmod 600)")]
-    Permissions(PathBuf),
+    #[error("{0} holds secrets and is open to group or others (mode {1:03o}); run: chmod 600 {0}")]
+    Permissions(PathBuf, u32),
     #[error("secret names must be 1-64 characters: a-z, 0-9, _ -")]
     BadName,
 }
@@ -36,23 +36,59 @@ fn valid_name(n: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
+/// Refuse a file that holds secrets when its group or others have any
+/// access (`mode & 0o077`), checked before it is read. A symlink is judged
+/// by its target (`metadata` follows it, as `chmod` does). A missing file
+/// passes: there is nothing to read. Unix only; elsewhere there are no
+/// mode bits to check and this always passes.
+pub fn check_private(path: &Path) -> Result<(), SecretsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(md) => {
+                let mode = md.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    return Err(SecretsError::Permissions(path.into(), mode));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(SecretsError::Io(path.into(), e)),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// The private keys under `<data>/keys` (TLS keys `*-key.der`, the node
+/// key `node.key`), each through [`check_private`]. Certificates and the
+/// name list there are public.
+pub fn check_keys(data_dir: &Path) -> Result<(), SecretsError> {
+    let dir = data_dir.join("keys");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SecretsError::Io(dir, e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| SecretsError::Io(dir.clone(), e))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with("-key.der") || name.ends_with(".key") {
+            check_private(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn read(path: &Path) -> Result<File, SecretsError> {
+    check_private(path)?;
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(File::default()),
         Err(e) => return Err(SecretsError::Io(path.into(), e)),
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)
-            .map_err(|e| SecretsError::Io(path.into(), e))?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            return Err(SecretsError::Permissions(path.into()));
-        }
-    }
     toml::from_str(&text).map_err(|e| SecretsError::Parse(path.into(), e))
 }
 
@@ -83,8 +119,11 @@ pub fn set(path: &Path, name: &str, value: Option<&Secret<String>>) -> Result<()
     let text = toml::to_string(&f).expect("secrets serialize");
     let tmp = path.with_extension("toml.tmp");
     let io = |e| SecretsError::Io(tmp.clone(), e);
+    // A temp file left by a crash keeps its old mode when reopened, so it
+    // goes first and the new one is created 0600 (never chmod-ed later).
+    let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -130,13 +169,46 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(matches!(
                 get(&p, "provider-anthropic"),
-                Err(SecretsError::Permissions(_))
+                Err(SecretsError::Permissions(..))
             ));
         }
         assert!(matches!(
             set(&p, "Bad Name", None),
             Err(SecretsError::BadName)
         ));
+    }
+
+    /// AUDIT L7: private keys under `keys/` are checked, the public
+    /// certificates beside them are not.
+    #[cfg(unix)]
+    #[test]
+    fn keys_open_to_others_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_keys(dir.path()).is_ok(), "no keys yet");
+        let keys = dir.path().join("keys");
+        std::fs::create_dir(&keys).unwrap();
+        for (name, m) in [
+            ("ui-cert.pem", 0o644),
+            ("ui-cert.der", 0o644),
+            ("ui-names.txt", 0o644),
+            ("ui-key.der", 0o600),
+            ("node.key", 0o600),
+        ] {
+            std::fs::write(keys.join(name), "x").unwrap();
+            std::fs::set_permissions(keys.join(name), std::fs::Permissions::from_mode(m)).unwrap();
+        }
+        assert!(check_keys(dir.path()).is_ok());
+        for name in ["ui-key.der", "master-key.der", "node.key"] {
+            let p = keys.join(name);
+            std::fs::write(&p, "x").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+            let e = check_keys(dir.path()).unwrap_err().to_string();
+            assert!(e.contains(name) && e.contains("chmod 600"), "{e}");
+            assert!(e.contains("mode 640"), "{e}");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(check_private(&dir.path().join("missing")).is_ok());
     }
 
     #[test]

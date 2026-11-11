@@ -449,6 +449,12 @@ pub struct ApprovalRequested {
     pub tool: String,
     pub input: Value,
     pub reason: String,
+    /// "Allow for this turn" (`allow_session`) may be offered. The node sets
+    /// it on every request a person can answer; it would cover only this
+    /// exact call (tool and canonical argument) for the rest of the turn. A
+    /// policy denial carries it false and is resolved by the node at once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_allow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,6 +480,11 @@ pub enum CheckpointPhase {
     After,
     /// The turn's file changes were undone (back to its `before` snapshot).
     Restored,
+    /// The folder as it was just before a restore, written before the
+    /// restore changes any file. `turn_id` names the restore, not a turn:
+    /// its `after` event (the folder once restored) follows, so restoring
+    /// that id undoes the restore. `files`: the paths the restore writes.
+    BeforeRestore,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -484,6 +495,16 @@ pub struct Checkpoint {
     /// `after`: files the turn changed; `restored`: files put back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// Git repositories inside the folder (a sub-folder holding a `.git`
+    /// directory or file) that this snapshot left out and that undo never
+    /// touches. On `restored`: the ones the restore left alone. Relative
+    /// to the checkpoint's folder.
+    /// At most 50 names, control characters replaced; `excluded_more`
+    /// counts the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub excluded_more: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

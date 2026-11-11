@@ -10,6 +10,8 @@ const inWorkspace = (path: string, workspace: string | null | undefined) =>
 export interface ProjectSettings {
   /** The project's chats also recall the workspace's shared facts (once those exist). */
   workspace_memory: boolean;
+  /** Members may confirm their own fact proposals (otherwise a manager must). */
+  members_activate_facts: boolean;
   node_id: string | null;
   cwd: string | null;
 }

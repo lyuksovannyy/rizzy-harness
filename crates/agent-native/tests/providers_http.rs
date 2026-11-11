@@ -201,18 +201,22 @@ async fn list_models_both_kinds_and_bad_key() {
         v.into_iter().map(|m| m.id).collect::<Vec<_>>()
     };
     assert_eq!(
-        ids(list_models(ApiKind::Openai, &base, Some(&good), false)
-            .await
-            .unwrap()),
+        ids(
+            list_models(ApiKind::Openai, &base, Some(&good), false, &None)
+                .await
+                .unwrap()
+        ),
         ["model-a", "model-b"]
     );
     assert_eq!(
-        ids(list_models(ApiKind::Anthropic, &base, Some(&good), false)
-            .await
-            .unwrap()),
+        ids(
+            list_models(ApiKind::Anthropic, &base, Some(&good), false, &None)
+                .await
+                .unwrap()
+        ),
         ["model-a", "model-b"]
     );
-    let err = list_models(ApiKind::Openai, &base, Some(&bad), false)
+    let err = list_models(ApiKind::Openai, &base, Some(&bad), false, &None)
         .await
         .unwrap_err()
         .to_string();
@@ -261,9 +265,15 @@ async fn list_models_metadata_and_anthropic_pages() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let or = list_models(ApiKind::Openai, &format!("{base}/or/v1"), None, false)
-        .await
-        .unwrap();
+    let or = list_models(
+        ApiKind::Openai,
+        &format!("{base}/or/v1"),
+        None,
+        false,
+        &None,
+    )
+    .await
+    .unwrap();
     assert_eq!(or.len(), 1);
     let m = &or[0];
     assert_eq!((m.context, m.max_output), (Some(128000), Some(16384)));
@@ -272,9 +282,15 @@ async fn list_models_metadata_and_anthropic_pages() {
         (Some(true), Some(true), Some(true))
     );
 
-    let an = list_models(ApiKind::Anthropic, &format!("{base}/an/v1"), None, false)
-        .await
-        .unwrap();
+    let an = list_models(
+        ApiKind::Anthropic,
+        &format!("{base}/an/v1"),
+        None,
+        false,
+        &None,
+    )
+    .await
+    .unwrap();
     let ids: Vec<&str> = an.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, ["claude-a", "claude-b"]);
     let b = &an[1];
@@ -335,6 +351,7 @@ async fn list_models_refuses_cross_origin_redirects_and_huge_bodies() {
         &format!("{base}/r/v1"),
         Some(&key),
         false,
+        &None,
     )
     .await;
     assert!(r.is_err(), "the redirect is not followed: {r:?}");
@@ -343,10 +360,16 @@ async fn list_models_refuses_cross_origin_redirects_and_huge_bodies() {
         "the key went to another host"
     );
 
-    let err = list_models(ApiKind::Openai, &format!("{base}/big/v1"), None, false)
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = list_models(
+        ApiKind::Openai,
+        &format!("{base}/big/v1"),
+        None,
+        false,
+        &None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("too large"), "{err}");
 }
 
@@ -376,7 +399,7 @@ async fn list_models_probes_ollama_show() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let ms = list_models(ApiKind::Openai, &base, None, true)
+    let ms = list_models(ApiKind::Openai, &base, None, true, &None)
         .await
         .unwrap();
     assert_eq!(ms[0].id, "llava");

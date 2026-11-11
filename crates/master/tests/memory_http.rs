@@ -1,6 +1,9 @@
 //! Memory end to end: the model proposes, the user confirms, recall feeds the
 //! next prompt; incognito neither writes nor reads; other users see nothing.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -113,7 +116,7 @@ async fn req(
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", c).send().await.unwrap();
+    let r = rb.header("cookie", c).same_origin().send().await.unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }
@@ -347,6 +350,7 @@ async fn propose_confirm_recall() {
     let r = reqwest::Client::new()
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", cookie(&r))
+        .same_origin()
         .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
         .send()
         .await
@@ -485,7 +489,12 @@ async fn call(c: &C, method: Method, path: &str, body: Option<Value>) -> (Status
     if let Some(b) = body {
         rb = rb.json(&b);
     }
-    let r = rb.header("cookie", &c.admin).send().await.unwrap();
+    let r = rb
+        .header("cookie", &c.admin)
+        .same_origin()
+        .send()
+        .await
+        .unwrap();
     let st = r.status();
     (st, r.json().await.unwrap_or(Value::Null))
 }

@@ -6,6 +6,9 @@
 //! from the publishing session's own row only; nodes without the
 //! capability are never sent `artifact.*`.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -49,7 +52,7 @@ enum Mode {
 struct Fake {
     id: String,
     /// `None` once the link is closed.
-    tx: Arc<Mutex<Option<mpsc::UnboundedSender<NodeToMaster>>>>,
+    tx: Arc<Mutex<Option<mpsc::Sender<NodeToMaster>>>>,
     seen: Arc<Mutex<Vec<MasterToNode>>>,
     seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -64,9 +67,9 @@ fn fake_with(
     caps: &[&str],
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 ) -> (NodeLink, Fake) {
-    let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (tx, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
-    tx.send(NodeToMaster::Hello {
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
+    tx.try_send(NodeToMaster::Hello {
         protocol_version: PROTOCOL_VERSION,
         node_id: id.into(),
         hostname: "evil".into(),
@@ -143,7 +146,7 @@ fn created(node: &str, cwd: &str, parent: Option<SessionId>) -> EventKind {
 impl Fake {
     fn send(&self, m: NodeToMaster) {
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
-            let _ = tx.send(m);
+            let _ = tx.try_send(m);
         }
     }
 
@@ -261,10 +264,20 @@ impl Fake {
         })
     }
 
-    fn released(&self, stage: &str) -> bool {
-        self.saw(
-            |m| matches!(m, MasterToNode::ArtifactRelease { stage_id, .. } if stage_id == stage),
-        ) > 0
+    /// Whether the master told this node to delete `stage`. The master sends
+    /// that after it has recorded the version's final status, so a test that
+    /// has just seen the status must wait for the message, not look once.
+    async fn released(&self, stage: &str) -> bool {
+        for _ in 0..400 {
+            let seen = self.saw(
+                |m| matches!(m, MasterToNode::ArtifactRelease { stage_id, .. } if stage_id == stage),
+            );
+            if seen > 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
     }
 }
 
@@ -349,7 +362,8 @@ async fn start() -> T {
 async fn req(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", &t.alex);
+        .header("cookie", &t.alex)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -424,7 +438,7 @@ async fn an_honest_transfer_arrives_byte_for_byte() {
     let stage = node.publish(sid, "app", &bytes);
     let v = settled(&t, sid, 1).await;
     assert_eq!(v[0].status, "ready", "{:?}", v[0].error);
-    assert!(node.released(&stage));
+    assert!(node.released(&stage).await);
     assert!(node.saw(|m| matches!(m, MasterToNode::ArtifactFetch { len, .. } if *len <= harness_protocol::MAX_CHUNK)) >= 4,
         "three chunks and the busy retry");
     let path = format!(
@@ -434,6 +448,7 @@ async fn an_honest_transfer_arrives_byte_for_byte() {
     let r = reqwest::Client::new()
         .get(format!("{}{path}", t.base))
         .header("cookie", &t.alex)
+        .same_origin()
         .send()
         .await
         .unwrap();
@@ -488,7 +503,7 @@ async fn lying_chunks_fail_cleanly() {
             "{mode:?}: {:?}",
             v.error
         );
-        assert!(node.released(&stage), "{mode:?}");
+        assert!(node.released(&stage).await, "{mode:?}");
         assert!(t.store().known_blob_ids().unwrap().is_empty(), "{mode:?}");
         assert_eq!(tmp_files(&t), 0, "{mode:?}");
     }

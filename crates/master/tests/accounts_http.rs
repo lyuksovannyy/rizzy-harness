@@ -1,6 +1,9 @@
 //! Accounts over HTTP: claim, login, cookie sessions, logout, API token,
 //! and per-user visibility.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -94,7 +97,7 @@ async fn post(
         .post(format!("{}{path}", s.base))
         .json(&body);
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -113,7 +116,7 @@ async fn get(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new().get(format!("{}{path}", s.base));
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     if let Some(b) = bearer {
         rb = rb.bearer_auth(b);
@@ -137,7 +140,7 @@ async fn req(
         rb = rb.json(&b);
     }
     if let Some(c) = cookie {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     let r = rb.send().await.unwrap();
     let status = r.status();
@@ -804,6 +807,7 @@ async fn an_expired_session_is_refused_and_one_in_use_slides() {
     let r = reqwest::Client::new()
         .get(format!("{}/api/me", s.base))
         .header("cookie", format!("{}={old}", cookie_name()))
+        .same_origin()
         .send()
         .await
         .unwrap();

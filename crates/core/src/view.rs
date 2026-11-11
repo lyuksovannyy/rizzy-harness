@@ -97,6 +97,9 @@ pub struct ToolResult {
 pub struct ApprovalState {
     pub approval_id: String,
     pub reason: String,
+    /// Whether "allow for this turn" may be offered (see `ApprovalRequested`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_allow: bool,
     pub decision: Option<Decision>,
     pub by: Option<ResolvedBy>,
 }
@@ -141,6 +144,18 @@ pub struct CheckpointState {
     /// Files the turn changed.
     pub files: Vec<String>,
     pub restored: bool,
+    /// Repositories inside the folder that a snapshot of this checkpoint
+    /// left out, or that its restore left alone (undo never touches them).
+    /// Sorted, no duplicates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
+    /// The most any of its events said it did not name.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub excluded_more: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl SessionView {
@@ -285,6 +300,7 @@ impl SessionView {
                     *approval = Some(ApprovalState {
                         approval_id: a.approval_id,
                         reason: a.reason,
+                        turn_allow: a.turn_allow,
                         decision: None,
                         by: None,
                     });
@@ -306,8 +322,17 @@ impl SessionView {
             }
             EventKind::Checkpoint(c) => {
                 let st = self.checkpoints.entry(c.turn_id).or_default();
+                if !c.excluded.is_empty() {
+                    st.excluded.extend(c.excluded);
+                    st.excluded.sort();
+                    st.excluded.dedup();
+                }
+                st.excluded_more = st.excluded_more.max(c.excluded_more);
                 match c.phase {
-                    CheckpointPhase::Before => st.before = Some(c.git_ref),
+                    // A restore's own checkpoint is undone like a turn's.
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore => {
+                        st.before = Some(c.git_ref)
+                    }
                     CheckpointPhase::After => {
                         st.after = Some(c.git_ref);
                         st.files = c.files;
@@ -438,6 +463,7 @@ mod tests {
                     tool: "bash".into(),
                     input: json!({}),
                     reason: "r".into(),
+                    turn_allow: false,
                 }),
             ),
         ];

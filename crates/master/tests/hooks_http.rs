@@ -10,6 +10,9 @@
 //! tools and `remember` (so an untrusted turn can be seen to lose them), or
 //! a fake node that records what the master sends it.
 
+mod common;
+use common::SameOrigin as _;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -100,7 +103,7 @@ type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 #[derive(Clone)]
 struct Fake {
     seen: Seen,
-    to_master: mpsc::UnboundedSender<NodeToMaster>,
+    to_master: mpsc::Sender<NodeToMaster>,
     seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
 }
 
@@ -120,7 +123,9 @@ impl Fake {
             kind: kind.into(),
             payload,
         };
-        self.to_master.send(NodeToMaster::Event { event }).unwrap();
+        self.to_master
+            .try_send(NodeToMaster::Event { event })
+            .unwrap();
     }
 
     /// A chat of this node, a sub-agent's of `parent` when given.
@@ -143,10 +148,10 @@ impl Fake {
 }
 
 fn fake_chat_node() -> (NodeLink, Fake) {
-    let (to_node, mut commands) = mpsc::unbounded_channel::<MasterToNode>();
-    let (to_master, from_node) = mpsc::unbounded_channel::<NodeToMaster>();
+    let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
+    let (to_master, from_node) = mpsc::channel::<NodeToMaster>(1024);
     to_master
-        .send(NodeToMaster::Hello {
+        .try_send(NodeToMaster::Hello {
             protocol_version: PROTOCOL_VERSION,
             node_id: "master".into(),
             hostname: "h".into(),
@@ -184,7 +189,7 @@ fn fake_chat_node() -> (NodeLink, Fake) {
                     ok: true,
                     error: None,
                 };
-                node.to_master.send(ack).unwrap();
+                node.to_master.try_send(ack).unwrap();
             }
         }
     });
@@ -271,7 +276,8 @@ async fn req(
 ) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
-        .header("cookie", c);
+        .header("cookie", c)
+        .same_origin();
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -295,7 +301,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
         .post(format!("{}{path}", t.base))
         .json(&body);
     if let Some(c) = c {
-        rb = rb.header("cookie", c);
+        rb = rb.header("cookie", c).same_origin();
     }
     rb.send().await.unwrap()
 }

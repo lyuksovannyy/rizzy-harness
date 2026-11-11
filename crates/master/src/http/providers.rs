@@ -153,7 +153,7 @@ pub(super) async fn test_provider(
         });
     let key = typed.or(saved);
     let ollama = p.id == "ollama";
-    match crate::providers::list_models(p.kind, &base, key.as_ref(), ollama).await {
+    match crate::providers::list_models(p.kind, &base, key.as_ref(), ollama, &m.outbound()).await {
         Ok(models) => {
             // A saved provider at this URL keeps it as its listing.
             if own
@@ -746,17 +746,32 @@ pub(super) async fn test_model(
         _ => e,
     };
     let started = std::time::Instant::now();
-    let reply = match (crate::providers::api_kind(kind), b.memory) {
+    let api = crate::providers::api_kind(kind);
+    // Public addresses only, unless the operator listed the host (AUDIT L3).
+    let dns = match api {
+        None => None,
+        Some(_) => match m.outbound().provider_call(&base).await {
+            Ok(dns) => dns,
+            Err(e) => return fail(e),
+        },
+    };
+    let reply = match (api, b.memory) {
         (None, _) => Ok("OK".to_string()),
-        (Some(k), false) => harness_agent_native::models::test_chat(k, &base, key.as_ref(), model)
-            .await
-            .map_err(|e| e.to_string()),
+        (Some(k), false) => {
+            harness_agent_native::models::test_chat(k, &base, key.as_ref(), model, &dns)
+                .await
+                .map_err(|e| e.to_string())
+        }
         (Some(_), true) => {
             let style = match kind {
                 ProviderKind::Anthropic => harness_memory::ApiStyle::Anthropic,
                 _ => harness_memory::ApiStyle::Openai,
             };
-            harness_memory::Embedder::new(&base, model, key.clone())
+            let mut embedder = harness_memory::Embedder::new(&base, model, key.clone());
+            if let Some(r) = dns {
+                embedder = embedder.with_resolver(r);
+            }
+            embedder
                 .with_style(style)
                 .embed(&["test".to_string()])
                 .await

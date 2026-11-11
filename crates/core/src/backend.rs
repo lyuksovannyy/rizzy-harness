@@ -16,7 +16,10 @@ use crate::refs::SharedRefs;
 #[async_trait::async_trait]
 pub trait TurnHost: Send + Sync {
     /// Append an event to the session log (assigns seq, persists, publishes).
-    async fn emit(&self, kind: EventKind);
+    /// The log is written first: on `Err` nothing the event describes may
+    /// happen, and the backend ends the turn (no further tool body, no
+    /// further model request).
+    async fn emit(&self, kind: EventKind) -> Result<(), LogError>;
 
     /// Ask whether a tool call may run. The host applies node policy first
     /// and only asks the user if policy requires it. Emits the approval events.
@@ -25,12 +28,15 @@ pub trait TurnHost: Send + Sync {
     /// Run `task` as `agent` in a new child session on this node and wait for
     /// its turn to end. `started` is called with the child's id as soon as it
     /// exists (so the UI can link to it while it works). The child labels its
-    /// web results from `refs`, the caller's book.
+    /// web results from `refs`, the caller's book. `observed` is the URL
+    /// provenance the caller holds (the user's words and trusted tool
+    /// results, never the task): the child's `web_fetch` may follow these.
     async fn delegate(
         &self,
         _agent: crate::agent::AgentSpec,
         _task: String,
         _refs: SharedRefs,
+        _observed: std::sync::Arc<Vec<String>>,
         _cancel: CancellationToken,
         _started: Box<dyn FnOnce(crate::SessionId) + Send>,
     ) -> Result<DelegateOutcome, String> {
@@ -49,6 +55,12 @@ pub trait TurnHost: Send + Sync {
         Vec::new()
     }
 }
+
+/// An event could not be appended to the session log (full disk, I/O
+/// error, a broken database). Holds the store's reason, never the payload.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the session log could not be written ({0})")]
+pub struct LogError(pub String);
 
 /// An image's bytes for the model (`TurnHost::images`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +121,9 @@ pub struct TurnExtra {
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
     /// `None` means the book comes from this session's own log.
     pub refs: Option<SharedRefs>,
+    /// A delegated sub-task's inherited URL provenance (see
+    /// `TurnHost::delegate`). Set only by the node, never from the protocol.
+    pub observed: Option<std::sync::Arc<Vec<String>>>,
     /// The images sent with this turn's message (their bytes come from
     /// `TurnHost::images`).
     pub images: Vec<crate::event::ImageRef>,

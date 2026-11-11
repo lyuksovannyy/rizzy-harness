@@ -54,17 +54,27 @@ pub fn is_public(ip: IpAddr) -> bool {
                 || o[0] >= 240) // reserved
         }
         IpAddr::V6(v6) => {
+            // `::ffff:a.b.c.d` is that IPv4 address: judge it as such.
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public(IpAddr::V4(v4));
             }
             let s = v6.segments();
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
+            // Ranges that embed or tunnel to an IPv4 address (6to4, Teredo,
+            // IPv4-compatible, SIIT, NAT64) are refused whole, not decoded:
+            // no page we want to read lives there.
+            !(v6.is_multicast()
+                || s[..6] == [0; 6] // ::/96: unspecified, loopback, IPv4-compatible
+                || s[..4] == [0, 0, 0, 0] && s[4] == 0xffff && s[5] == 0 // ::ffff:0:a.b.c.d (SIIT)
+                || (s[0] == 0x64 && s[1] == 0xff9b) // NAT64, 64:ff9b::/32 incl. the local-use /48
+                || (s[..4] == [0x100, 0, 0, 0]) // 100::/64 discard-only
+                || s[0] == 0x2002 // 6to4, embeds an IPv4 address
+                || (s[0] == 0x2001 && s[1] < 0x200) // 2001::/23: Teredo, benchmarking, ORCHID, ...
+                || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
+                || (s[0] == 0x3fff && s[1] < 0x1000) // documentation, 3fff::/20
+                || s[0] == 0x5f00 // SRv6 SIDs
                 || (s[0] & 0xfe00) == 0xfc00 // unique local
                 || (s[0] & 0xffc0) == 0xfe80 // link local
-                || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
-                || (s[0] == 0x64 && s[1] == 0xff9b)) // NAT64 can reach private v4
+                || (s[0] & 0xffc0) == 0xfec0) // site local, deprecated
         }
     }
 }
@@ -113,6 +123,21 @@ fn check_url(u: &url::Url, allow_private: bool) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// The resolver behind `web_fetch`, for the server's other clients that
+/// must reach public addresses only (provider and model tests, AUDIT L3).
+/// It checks the address that is connected to, so DNS rebinding does not
+/// get past it; IP-literal hosts never reach a resolver, so check those
+/// with [`check_public_url`].
+pub fn public_only_resolver() -> Arc<dyn reqwest::dns::Resolve> {
+    Arc::new(PublicOnly)
+}
+
+/// The URL check behind `web_fetch`: http(s), no credentials, and no
+/// private, loopback or `localhost` host when it is a literal.
+pub fn check_public_url(u: &url::Url) -> Result<(), String> {
+    check_url(u, false)
 }
 
 /// HTTP client for model-chosen URLs. `allow_private` exists for tests only;
@@ -609,6 +634,83 @@ mod tests {
         for ip in ["1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
             assert!(is_public(ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    /// Every IPv6 range that can carry or reach a non-public address (audit
+    /// L12), one example each, and a few ordinary public addresses.
+    #[test]
+    fn ipv6_transition_and_special_ranges() {
+        for (ip, what) in [
+            ("2002:7f00:1::", "6to4 of 127.0.0.1"),
+            ("2002:a00:1::", "6to4 of 10.0.0.1"),
+            ("2002:a9fe:a9fe::", "6to4 of 169.254.169.254"),
+            (
+                "2002:808:808::",
+                "6to4 of a public v4 (refused whole: stricter)",
+            ),
+            ("2001::1", "Teredo"),
+            ("2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo, real form"),
+            ("::7f00:1", "IPv4-compatible 127.0.0.1"),
+            ("::a00:1", "IPv4-compatible 10.0.0.1"),
+            ("::808:808", "IPv4-compatible, public v4"),
+            ("::ffff:127.0.0.1", "IPv4-mapped loopback"),
+            ("::ffff:10.0.0.1", "IPv4-mapped private"),
+            ("::ffff:169.254.169.254", "IPv4-mapped metadata"),
+            ("::ffff:0:7f00:1", "SIIT-translated 127.0.0.1"),
+            ("64:ff9b::a00:1", "NAT64 of 10.0.0.1"),
+            ("64:ff9b::808:808", "NAT64 of a public v4"),
+            ("64:ff9b:1::a00:1", "NAT64 local-use"),
+            ("fc00::1", "unique local"),
+            ("fd12:3456::1", "unique local"),
+            ("fe80::1", "link local"),
+            ("fec0::1", "site local (deprecated)"),
+            ("ff02::1", "multicast"),
+            ("2001:db8::1", "documentation"),
+            ("3fff::1", "documentation"),
+            ("::", "unspecified"),
+            ("::1", "loopback"),
+            ("100::1", "discard-only"),
+            ("2001:2::1", "benchmarking"),
+            ("5f00::1", "SRv6 SIDs"),
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}: {what}");
+        }
+        for ip in [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2a00:1450:4001:81b::200e",
+            "2620:fe::fe",
+        ] {
+            assert!(is_public(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    /// A different URL must not "match" a seen one by spelling.
+    #[test]
+    fn provenance_normalisation() {
+        let obs = vec![
+            "see https://Allowed.example/Page?q=1#frag and https://xn--bcher-kva.example/"
+                .to_string(),
+        ];
+        let ok = |s: &str| provenance_ok(&url::Url::parse(s).unwrap(), &obs);
+        // Same URL, other spelling: host case, default port, fragment, IDN.
+        assert!(ok("https://ALLOWED.example/Page?q=1"));
+        assert!(ok("https://allowed.example:443/Page?q=1"));
+        assert!(ok("https://allowed.example/Page?q=1#other"));
+        assert!(ok("https://bücher.example/"));
+        // Different URL.
+        assert!(!ok("https://allowed.example/page?q=1")); // path case matters
+        assert!(!ok("https://allowed.example:8443/Page?q=1")); // other port
+        assert!(!ok("https://allowed.example./Page?q=1")); // trailing dot
+        assert!(!ok("https://allowed.example.evil.test/Page?q=1"));
+        assert!(!ok("https://evil.test/https://allowed.example/Page?q=1"));
+        assert!(!ok("https://allowed.example@evil.test/Page?q=1"));
+        assert!(!ok("https://evil.test/#https://allowed.example/Page?q=1"));
+        // A seen userinfo trick vouches for nothing but itself.
+        let obs = vec!["http://allowed.example@evil.test/".to_string()];
+        let ok = |s: &str| provenance_ok(&url::Url::parse(s).unwrap(), &obs);
+        assert!(!ok("http://evil.test/"));
+        assert!(!ok("http://allowed.example/"));
     }
 
     #[test]
