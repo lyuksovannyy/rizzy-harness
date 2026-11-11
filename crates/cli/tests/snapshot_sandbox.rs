@@ -307,3 +307,48 @@ async fn checkpoints_undo_and_a_sub_agent_folder_work_confined() {
     );
     assert!(child.join(".git/index").is_file());
 }
+
+/// R1c-1, the node's own git: its grant on the borrowed object store
+/// carries the identity the store had when it was accepted. Replaced by a
+/// link afterwards (to `~/.ssh`-like folder, or to the data directory), the
+/// next confined git call is refused, naming the grant, and reads nothing
+/// there; the next checkpoint repository no longer borrows.
+#[tokio::test]
+async fn the_nodes_git_never_follows_a_replaced_object_store() {
+    let f = fixture();
+    if !f.landlock() {
+        return;
+    }
+    for target in [f.victim.clone(), f.data.clone()] {
+        let objects = f.proj.join(".git/objects");
+        let away = f.proj.join(".git/objects.r");
+        let (o, a, t) = (objects.clone(), away.clone(), target.clone());
+        let e = harness_node::testing::snapshot_after(
+            &f.proj,
+            &f.data.join("checkpoints"),
+            Some(f.sandbox()),
+            std::slice::from_ref(&f.data),
+            move || {
+                std::fs::rename(&o, &a).unwrap();
+                std::os::unix::fs::symlink(&t, &o).unwrap();
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            e.contains("the folder granted as the repository's object store was replaced"),
+            "{e}"
+        );
+        // A new handle sees the link and does not borrow at all.
+        harness_node::testing::snapshot_files(
+            &f.proj,
+            &f.data.join("checkpoints"),
+            Some(f.sandbox()),
+            std::slice::from_ref(&f.data),
+        )
+        .await
+        .unwrap();
+        std::fs::remove_file(&objects).unwrap();
+        std::fs::rename(&away, &objects).unwrap();
+    }
+}

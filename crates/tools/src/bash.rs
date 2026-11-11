@@ -339,8 +339,11 @@ mod tests {
     fn pid_alive(pid: i32) -> bool {
         match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => {
+                // Zombie (`Z`) and dead (`X`, shown for a moment while it is
+                // reaped) are both gone; reading `X` as alive made
+                // `cancel_kills_process_tree` fail about 1 run in 100.
                 let state = stat.rsplit(')').next().unwrap_or("").trim_start();
-                !state.starts_with('Z')
+                !(state.starts_with('Z') || state.starts_with('X') || state.starts_with('x'))
             }
             Err(_) => false,
         }
@@ -603,14 +606,19 @@ mod tests {
         assert!(!r.ok);
         assert!(r.output.contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(10));
-        // Give the kernel a moment to reap.
-        for _ in 0..50 {
-            if !pid_alive(pid) {
-                break;
-            }
+        // The group got SIGKILL before the call returned; the orphaned
+        // grandchild is then reaped by whoever adopts it (init or a
+        // subreaper). Wait for that with a deadline, not a fixed pause.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pid_alive(pid) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(!pid_alive(pid), "grandchild {pid} survived cancel");
+        assert!(
+            !pid_alive(pid),
+            "grandchild {pid} survived cancel: {:?} {:?}",
+            std::fs::read_to_string(format!("/proc/{pid}/stat")),
+            std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        );
     }
 
     /// The agent loop abandons a tool that outlives a cancel by dropping its

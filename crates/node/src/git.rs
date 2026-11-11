@@ -36,6 +36,8 @@
 //! process group) when the call is dropped.
 
 use std::path::{Path, PathBuf};
+
+use harness_core::folder::Identity;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -68,8 +70,13 @@ pub struct Repo {
     /// (`[sandbox] mode = "off"`) and in tests.
     jail: Jail,
     /// The user's object store this shadow borrows (its alternates), for
-    /// the jail's read-only grant.
-    borrowed: Option<PathBuf>,
+    /// the jail's read-only grant, with the identity it had when it was
+    /// accepted for borrowing (R1c-1).
+    borrowed: Option<(PathBuf, Identity)>,
+    /// The identities of the work tree and the shadow when this handle was
+    /// made: every jail grant of them carries these (R1c-1).
+    root_id: Identity,
+    shadow_id: Option<Identity>,
     /// The work tree is written by git (filling a sub-agent's new folder,
     /// which no session can reach yet): read-write in the jail.
     tree_rw: bool,
@@ -148,10 +155,12 @@ impl Repo {
         self.shadow.is_some()
     }
 
-    /// The same shadow with another work tree (a sub-agent's folder).
+    /// The same shadow with another work tree (a sub-agent's folder, which
+    /// the node made and no session can reach: its identity now).
     fn with_root(&self, root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            root_id: Identity::of(root).unwrap_or(Identity { dev: 0, ino: 0 }),
             ..self.clone()
         }
     }
@@ -305,20 +314,35 @@ fn git_program() -> PathBuf {
 fn command_std(repo: &Repo, index: Option<&Path>) -> std::process::Command {
     let base = match (&repo.jail.0, &repo.shadow) {
         (Some(s), Some(dir)) => {
-            let mut rw = vec![dir.clone()];
+            // Each grant with the identity the node took when it made this
+            // handle: the wrapper opens it once and refuses the call if it
+            // is another directory now (R1c-1).
+            use harness_tools::sandbox::Grant;
+            let shadow = match repo.shadow_id {
+                Some(id) => Grant::identified(dir, id, "the checkpoint store"),
+                None => Grant::system(dir),
+            };
+            let root = Grant::identified(&repo.root, repo.root_id, "the session's folder");
+            let mut rw = vec![shadow];
             let mut ro = Vec::new();
             if repo.tree_rw {
-                rw.push(repo.root.clone());
+                rw.push(root);
             } else {
-                ro.push(repo.root.clone());
+                ro.push(root);
             }
-            ro.extend(repo.borrowed.iter().cloned());
+            ro.extend(
+                repo.borrowed
+                    .iter()
+                    .map(|(p, id)| Grant::identified(p, *id, "the repository's object store")),
+            );
             if let Some(i) = index
                 && let Some(parent) = i.parent()
                 && !parent.starts_with(dir)
                 && !(repo.tree_rw && parent.starts_with(&repo.root))
             {
-                rw.push(parent.to_path_buf());
+                // A private index of the node's own, elsewhere in the data
+                // directory: no session can write there.
+                rw.push(Grant::system(parent));
             }
             let mut c = s.helper(&rw, &ro);
             c.arg(git_program());
@@ -439,6 +463,7 @@ impl Repo {
 }
 
 /// The bytes snapshot `sha` holds at `path` (tests in `crates/cli`).
+#[cfg(feature = "testing")]
 pub(crate) async fn blob_at(repo: &Repo, sha: &str, path: &str) -> Option<Vec<u8>> {
     run_raw(
         repo,
@@ -452,6 +477,7 @@ pub(crate) async fn blob_at(repo: &Repo, sha: &str, path: &str) -> Option<Vec<u8
 
 /// `(mode, path)` of every entry snapshot `sha` holds (tests in
 /// `crates/cli`).
+#[cfg(feature = "testing")]
 pub(crate) async fn tree_listing(repo: &Repo, sha: &str) -> Vec<(String, String)> {
     run_raw(repo, &["ls-tree", "-r", "-z", sha], None, None)
         .await
@@ -734,7 +760,7 @@ async fn repo_for_with(
             let mut line = objects.to_string_lossy().into_owned().into_bytes();
             line.push(b'\n');
             write_if_changed(&alternates, &line).await;
-            Some(objects.clone())
+            i.objects_id.map(|id| (objects.clone(), id))
         }
         _ => {
             let _ = tokio::fs::remove_file(&alternates).await;
@@ -759,6 +785,8 @@ async fn repo_for_with(
     };
     exclude.extend(global_excludes(&root, &dir, user).await);
     write_if_changed(&dir.join("info/exclude"), &exclude).await;
+    let root_id = Identity::of(&root)?;
+    let shadow_id = Identity::of(&dir).ok();
     Ok(Some((
         Repo {
             root,
@@ -768,6 +796,8 @@ async fn repo_for_with(
             scratch: false,
             jail: Jail(bounds.sandbox.clone()),
             borrowed,
+            root_id,
+            shadow_id,
             tree_rw: false,
         },
         found,
@@ -785,6 +815,8 @@ fn dummy_repo() -> Repo {
         scratch: true,
         jail: Jail::default(),
         borrowed: None,
+        root_id: Identity { dev: 0, ino: 0 },
+        shadow_id: None,
         tree_rw: false,
     }
 }
@@ -2351,10 +2383,12 @@ pub struct ChildFolder {
     dir: PathBuf,
     /// The user's object store the child's git may read (its alternates),
     /// canonical; read-only in the child's sandbox.
-    objects: Option<PathBuf>,
+    objects: Option<(PathBuf, Identity)>,
     /// The folder as made: its result is snapshotted only while it is still
     /// that directory.
     pin: harness_core::folder::FolderPin,
+    /// Its `.git` as made (for the child's grant).
+    git_id: Identity,
 }
 
 impl ChildFolder {
@@ -2362,7 +2396,9 @@ impl ChildFolder {
     pub fn owned(&self) -> harness_core::folder::OwnedFolder {
         harness_core::folder::OwnedFolder {
             top: self.path.clone(),
+            top_id: self.pin.identity(),
             git: self.path.join(".git"),
+            git_id: self.git_id,
             objects: self.objects.clone(),
         }
     }
@@ -2516,14 +2552,15 @@ impl SubRepo {
                 run(&into, &["read-tree", h], Some(&git.join("index"))).await?;
             }
             pin.check()?;
-            Ok::<_, String>(pin)
+            Ok::<_, String>((pin, Identity::of(&git)?))
         }
         .await;
         match made {
-            Ok(pin) => Ok(ChildFolder {
+            Ok((pin, git_id)) => Ok(ChildFolder {
                 path,
                 dir,
-                objects: self.user.objects.clone(),
+                objects: self.user.objects.clone().zip(self.user.objects_id),
+                git_id,
                 pin,
             }),
             Err(e) => {

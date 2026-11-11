@@ -92,12 +92,15 @@ enum Cmd {
     /// then exec the command. The node starts bash and graphify this way
     /// (node.toml `[sandbox]`).
     SandboxExec {
-        /// A file or folder the command may read and change.
-        #[arg(long, value_name = "PATH")]
-        rw: Vec<PathBuf>,
-        /// A file or folder the command may read and execute.
-        #[arg(long, value_name = "PATH")]
-        ro: Vec<PathBuf>,
+        /// A file or folder the command may read and change, with what the
+        /// node expects there: `<dev>:<ino>:<label>` (its identity; any other
+        /// directory there refuses the command) or `system` (a folder no
+        /// session can write).
+        #[arg(long, num_args = 2, value_names = ["EXPECT", "PATH"], action = clap::ArgAction::Append)]
+        rw: Vec<std::ffi::OsString>,
+        /// A file or folder the command may read and execute, the same way.
+        #[arg(long, num_args = 2, value_names = ["EXPECT", "PATH"], action = clap::ArgAction::Append)]
+        ro: Vec<std::ffi::OsString>,
         /// Deny TCP connect and bind (needs Landlock ABI 4).
         #[arg(long)]
         no_network: bool,
@@ -845,10 +848,16 @@ fn main() -> anyhow::Result<()> {
             command,
         } = Cli::parse().cmd
     {
+        let grants = |pairs: &[std::ffi::OsString]| {
+            harness_tools::sandbox::Grant::parse_pairs(pairs).unwrap_or_else(|e| {
+                eprintln!("{}: {e}", harness_tools::sandbox::SUBCOMMAND);
+                std::process::exit(2)
+            })
+        };
         std::process::exit(harness_tools::sandbox::exec(
             harness_tools::sandbox::ExecRequest {
-                rw,
-                ro,
+                rw: grants(&rw),
+                ro: grants(&ro),
                 no_network,
                 best_effort,
                 status,

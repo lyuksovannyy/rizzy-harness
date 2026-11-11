@@ -25,6 +25,10 @@ pub(crate) struct UserRepo {
     /// directory, not a link, holding no `info/alternates` or
     /// `info/http-alternates` (git follows those chains), and `HEAD` read.
     pub objects: Option<PathBuf>,
+    /// The identity of [`Self::objects`] when it was accepted (R1c-1): every
+    /// sandbox grant of it carries this, so a store replaced since is never
+    /// granted.
+    pub objects_id: Option<harness_core::folder::Identity>,
     /// Why [`Self::objects`] is `None` (for a sub-agent's refusal).
     pub no_borrow: Option<String>,
     /// `<top>/.git/info/exclude`, when a regular file reached by no link.
@@ -182,12 +186,22 @@ fn read(top: &Path) -> Result<UserRepo, String> {
     } else {
         None
     };
+    let objects_id = if no_borrow.is_none() {
+        harness_core::folder::Identity::of(&objects).ok()
+    } else {
+        None
+    };
+    let no_borrow = match (no_borrow, objects_id) {
+        (None, None) => Some("its object store could not be read".to_string()),
+        (n, _) => n,
+    };
     let file = |p: PathBuf| {
         (plain(&p) && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file())).then_some(p)
     };
     Ok(UserRepo {
         top: top.to_path_buf(),
         objects: no_borrow.is_none().then_some(objects),
+        objects_id,
         no_borrow,
         exclude: file(git.join("info/exclude")),
         index: file(git.join("index")),

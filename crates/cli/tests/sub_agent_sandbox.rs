@@ -32,6 +32,9 @@ struct Fixture {
     child: PathBuf,
     /// A sibling child's folder.
     sibling: PathBuf,
+    /// The child's folder as the node passes it: identities taken once,
+    /// when the folder was made and the object store accepted (R1c-1).
+    owned: OwnedFolder,
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -100,6 +103,14 @@ fn fixture() -> Fixture {
     child_folder(&repo, &child);
     child_folder(&repo, &sibling);
     std::fs::write(sibling.join("sibling.txt"), "SIBLING-WORK\n").unwrap();
+    let id = |p: &Path| harness_core::folder::Identity::of(p).unwrap();
+    let owned = OwnedFolder {
+        top: child.clone(),
+        top_id: id(&child),
+        git: child.join(".git"),
+        git_id: id(&child.join(".git")),
+        objects: Some((repo.join(".git/objects"), id(&repo.join(".git/objects")))),
+    };
     Fixture {
         _dir: dir,
         data,
@@ -108,6 +119,7 @@ fn fixture() -> Fixture {
         other,
         child,
         sibling,
+        owned,
     }
 }
 
@@ -133,10 +145,9 @@ impl Fixture {
             tmp: None,
         }
         .for_session("s1");
-        ctx.owned = owned.map(|top| OwnedFolder {
-            top: top.to_path_buf(),
-            git: top.join(".git"),
-            objects: Some(self.repo.join(".git/objects")),
+        ctx.owned = owned.map(|top| {
+            assert_eq!(top, self.owned.top);
+            self.owned.clone()
         });
         ctx.pin = Some(harness_core::folder::FolderPin::at(cwd).unwrap());
         ctx
@@ -344,4 +355,130 @@ async fn the_file_tools_and_the_shell_refuse_a_replaced_folder() {
     assert!(b.output.contains("folder was replaced"), "{}", b.output);
     assert!(!b.output.contains("SSH-KEY-CANARY"), "{}", b.output);
     assert!(!victim.join("planted").exists());
+}
+
+/// R1c-1, inverted from the fix review's proof: a process the parent left
+/// running replaces the user's object store, or the `.git` that holds it,
+/// by a link to the user's `~/.ssh` or to the node's data directory. The
+/// child's next commands are never granted the link's target: the node
+/// leaves out a store that is not the one it accepted (the child loses
+/// history), and the wrapper checks the identity on the descriptor it
+/// opens.
+#[tokio::test]
+async fn a_replaced_object_store_is_never_granted_to_a_child() {
+    for (what, target) in [
+        ("objects", "ssh"),
+        ("objects", "data"),
+        (".git", "ssh"),
+        (".git", "data"),
+    ] {
+        let f = fixture();
+        if !f.landlock() {
+            return;
+        }
+        let key = f.home.join(".ssh/id_ed25519");
+        std::fs::write(f.data.join("node-key"), "NODE-KEY-CANARY\n").unwrap();
+        let out = f.child(&format!("cat {}; echo rc=$?", key.display())).await;
+        assert!(!out.contains("SSH-KEY-CANARY"), "{out}");
+        let dest = match target {
+            "ssh" => f.home.join(".ssh"),
+            _ => f.data.clone(),
+        };
+        // The parent's own shell may do this in its folder; for `.git`, the
+        // fake one beside it is made by the test (outside the parent's grant).
+        let cmd = if what == "objects" {
+            format!(
+                "mv .git/objects .git/objects.r && ln -s {} .git/objects; echo rc=$?",
+                dest.display()
+            )
+        } else {
+            let evil = f.repo.parent().unwrap().join("evil");
+            std::fs::create_dir(&evil).unwrap();
+            std::os::unix::fs::symlink(&dest, evil.join("objects")).unwrap();
+            "mv .git .git.r && ln -s ../evil .git; echo rc=$?".to_string()
+        };
+        let out = f.bash(&f.repo, None, &cmd).await;
+        assert!(out.contains("rc=0"), "{what}->{target}: {out}");
+        let out = f
+            .child(&format!(
+                "cat {k}; cat {d}/node-key; ls {r}/.git/objects/; echo end",
+                k = key.display(),
+                d = f.data.display(),
+                r = f.repo.display()
+            ))
+            .await;
+        assert!(out.contains("end"), "{what}->{target}: {out}");
+        assert!(
+            !out.contains("SSH-KEY-CANARY") && !out.contains("NODE-KEY-CANARY"),
+            "{what}->{target}: the child read the link's target: {out}"
+        );
+        // Nor listed it (`ls` of the replaced store prints no names).
+        assert!(
+            !out.lines().any(|l| l == "id_ed25519" || l == "node-key"),
+            "{what}->{target}: {out}"
+        );
+    }
+}
+
+/// The wrapper itself refuses a grant whose folder is not the one the node
+/// expects, naming it, and runs nothing: here the session's folder,
+/// replaced between the node's pin check and the wrapper's open.
+#[tokio::test]
+async fn the_wrapper_refuses_a_grant_that_was_replaced_and_names_it() {
+    use harness_tools::sandbox::Grant;
+    let f = fixture();
+    if !f.landlock() {
+        return;
+    }
+    let ws = f.repo.join("sub");
+    std::fs::create_dir(&ws).unwrap();
+    let pin = harness_core::folder::FolderPin::at(&ws).unwrap();
+    pin.check().unwrap();
+    // The swap, after the check.
+    std::fs::rename(&ws, ws.with_extension("r")).unwrap();
+    std::os::unix::fs::symlink(f.home.join(".ssh"), &ws).unwrap();
+    let out = f
+        .sandbox()
+        .helper(
+            &[Grant::identified(
+                &ws,
+                pin.identity(),
+                "the session's folder",
+            )],
+            &[],
+        )
+        .arg("true")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    // 125: the wrapper refused before running anything.
+    assert_eq!(out.status.code(), Some(125), "{err}");
+    assert!(
+        err.contains("the folder granted as the session's folder was replaced"),
+        "{err}"
+    );
+    // The same grant, not replaced: it runs.
+    std::fs::remove_file(&ws).unwrap();
+    std::fs::rename(ws.with_extension("r"), &ws).unwrap();
+    let out = f
+        .sandbox()
+        .helper(
+            &[Grant::identified(
+                &ws,
+                pin.identity(),
+                "the session's folder",
+            )],
+            &[],
+        )
+        .arg("sh")
+        .arg("-c")
+        .arg(format!("touch {}/ok", ws.display()))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ws.join("ok").exists());
 }

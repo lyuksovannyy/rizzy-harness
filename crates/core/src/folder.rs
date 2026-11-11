@@ -57,6 +57,14 @@ impl FolderPin {
         &self.path
     }
 
+    /// The pinned directory's identity (for a sandbox grant).
+    pub fn identity(&self) -> Identity {
+        Identity {
+            dev: self.dev,
+            ino: self.ino,
+        }
+    }
+
     /// The folder's canonical path, if it is still the pinned directory:
     /// the path canonicalises to itself (no link anywhere on it leads
     /// elsewhere) and the directory there has the same device and inode.
@@ -75,6 +83,38 @@ impl FolderPin {
     }
 }
 
+/// What a directory is, independent of the path that reaches it: device
+/// and inode (R.1, R1c-1). A sandbox grant carries the identity the node
+/// expects, and the wrapper compares it with the descriptor it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Identity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl Identity {
+    /// The identity of what is at `path` now, not following a link at its
+    /// last component. For folders the node itself made, or pinned and
+    /// checked a moment ago.
+    pub fn of(path: &Path) -> Result<Self, String> {
+        let (dev, ino) = identity_any(path)?;
+        Ok(Self { dev, ino })
+    }
+}
+
+#[cfg(unix)]
+fn identity_any(p: &Path) -> Result<(u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok((md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity_any(p: &Path) -> Result<(u64, u64), String> {
+    std::fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok((0, 0))
+}
+
 /// A folder the node made for one session only (a sub-agent's folder under
 /// the node's sessions folder, which is protected like the data
 /// directory): the session may work in it although it lies in a protected
@@ -83,12 +123,16 @@ impl FolderPin {
 pub struct OwnedFolder {
     /// The folder's top (canonical); the session's folder is it or inside.
     pub top: PathBuf,
+    pub top_id: Identity,
     /// Its own git directory (`<top>/.git`), which the session's shell may
     /// write; the node never runs git with it.
     pub git: PathBuf,
+    pub git_id: Identity,
     /// The user's object store that git directory borrows from, read-only
-    /// to the session's shell (`None`: none).
-    pub objects: Option<PathBuf>,
+    /// to the session's shell, with the identity it had when the node
+    /// accepted it for borrowing (`None`: none). A store replaced since is
+    /// not granted: the child loses history, never gains another folder.
+    pub objects: Option<(PathBuf, Identity)>,
 }
 
 #[cfg(unix)]

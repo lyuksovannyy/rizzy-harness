@@ -289,8 +289,8 @@ async fn a_nested_sandbox_exec_gains_nothing() {
         ..Default::default()
     };
     let cmd = format!(
-        "{EXE} sandbox-exec --status --best-effort --rw / -- cat {data}/api-token; \
-         {EXE} sandbox-exec --rw / -- sh -c 'echo nested-ran; touch {home}/planted'; echo end",
+        "{EXE} sandbox-exec --status --best-effort --rw system / -- cat {data}/api-token; \
+         {EXE} sandbox-exec --rw system / -- sh -c 'echo nested-ran; touch {home}/planted'; echo end",
         data = f.data.display(),
         home = f.home.display()
     );

@@ -179,7 +179,7 @@ impl Inner {
 
 /// What the sandbox tests in `crates/cli` drive directly (they have the
 /// `sandbox-exec` binary; this crate's tests do not). Not an API.
-#[doc(hidden)]
+#[cfg(feature = "testing")]
 pub mod testing {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -228,6 +228,23 @@ pub mod testing {
         let snap = sub.base(child).await?;
         let sessions = crate::sessions_dir(base).ok_or("no sessions folder")?;
         Ok(sub.make_folder(child, &snap, &sessions).await?.path)
+    }
+
+    /// The checkpoint repository of `folder` is made (the object store is
+    /// accepted for borrowing then), `between` runs, then a snapshot is
+    /// taken with that same handle.
+    pub async fn snapshot_after(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+        between: impl FnOnce(),
+    ) -> Result<String, String> {
+        let repo = crate::git::checkpoint_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("no checkpoint repository")?;
+        between();
+        crate::git::snapshot(&repo, "refs/harness/t/s/after", "test").await
     }
 
     /// A turn and its undo: snapshot `folder`, run `change` on it, snapshot
