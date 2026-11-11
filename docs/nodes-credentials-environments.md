@@ -1,53 +1,64 @@
 # Nodes, credentials and environments: design note
 
 Status: **proposal, nothing built.** For after Gate 3 of `FIX_PLAN.md` (feature freeze until
-then). Depends on pull request 4 (`integration/gate3`: the Landlock sandbox, the bounded node
-link, the PDF helper) being merged. The decisions were made by the owner on 2026-11-10 and
-2026-11-11; the answers to this note's first open questions are in. What is marked
-**recommendation** in §4.10 and §9 awaits the owner's yes. Costs and conflicts with the code
-are stated, not argued away.
+then). The decisions were made by the owner on 2026-11-10 and 2026-11-11. What is marked
+**recommendation** awaits the owner's yes; the questions that block the build are in §9.
+Costs and conflicts with the code are stated, not argued away.
 
-Code citations marked `gate3:` are read on branch `integration/gate3` (`git show
-integration/gate3:<path>`); unmarked ones are as the first version of this note cited them, on
-`main`.
+Citations: every claim about current code added on 2026-11-11 was read on `main` at merge
+`976670e` (which includes pull request 4). Citations in §1 rows P1 to P8 and in the passages
+kept from the first version were made against an older `main` and were not all re-checked;
+line numbers there may have moved.
 
-**What changed on 2026-11-11** (the owner: any node may be attached to several workspaces,
-built around that, and `local` is an ordinary node under the rule; ADOPTION_PLAN C.12):
+**What changed on 2026-11-11.** First answer (ADOPTION_PLAN O3, C.12): any node may be
+attached to several workspaces, and the design is built around that.
 
-- A node is **attached** to one or more workspaces. The first version's workspace column on `nodes` is gone; a
-  `workspace_nodes` table holds one row per attachment (§4.1).
+- A node is **attached** to one or more workspaces; a `workspace_nodes` table holds one row
+  per attachment. The first version's workspace column on `nodes` is gone (§4.1).
 - Each attachment is its own pair code, and **the node keeps its own list of the workspaces it
-  serves** in a file only its CLI widens. The node refuses a session for any workspace not on
-  it, so the master cannot attach a node alone (§4.4, §4.10.1).
+  serves**; only its own pairing flow, with its owner's yes, adds to it. The node refuses a
+  session for any workspace not on it (§4.4, §4.10.1).
 - Every session names its workspace on the wire; node and master both check it (§4.10.1).
-- Each attached workspace gets its own **data root** on the node; the shell sandbox, the file
-  tools and container mounts never reach another workspace's root (§4.10.3).
-- **Recommendation:** a node attached to more than one workspace refuses host sessions
-  unless `node.toml` allows them; containers are the separated path (§4.10.3).
-- Grants are keyed by `(workspace, provider)`; `node_key_grants` gains `workspace_id` in its
-  key (§4.1, §4.3).
-- A per-workspace **share** of the node's command slots and running containers (§4.10.4).
-- **Detach** (one workspace leaves a node) is new; removing a node is now detaching it from
-  every workspace (§4.10.5, §4.8).
-- `local` is attached to the first admin's Personal workspace; other attachments only from
-  the server's own CLI, and host sessions on it stay server-admin-only (§4.10.6).
-- A draft threat-model row and the tests the build is committed to (§5, §8).
+- Grants are keyed by `(workspace, provider)` (§4.3); a per-workspace share of the node
+  (§4.10.4); detach and revoke (§4.10.5); a draft threat-model row and committed tests (§5,
+  §8).
 
-**Summary.** Today a node is global, holds its own provider key in its own `config.toml`, and
-runs every session in a folder on the host. This note makes a node serve the workspaces it is
-attached to, each attachment made by a pair code the node shows and that workspace's owner or
-admin types, and recorded on the node itself. It moves model credentials to the workspace
-(bring your own key, nothing server-wide for chat models) and gives a node just the keys a
-turn needs, in memory only, usable only by sessions of the workspace that owns them. It adds
-**environments**: a per-workspace volume on one node in which sessions run inside rootless
-Podman containers, each in its own git worktree. Workspaces that share a node are separated by
-a data root per workspace, a sandbox profile that never grants another root, and a share of
-the node's capacity; on the host, under one Unix user, that separation has named holes, so a
-shared node runs host sessions only when its owner says so. Deleting an environment never
-migrates anything. It classifies every session, gives people time to save, and archives the
-sessions. To continue elsewhere you **fork**. Forge accounts come through per-user
-**Connections**. **Model aliases** let agent definitions and helper slots name a group of
-models instead of a provider-specific id.
+Second answer (the owner, later the same day), finished here:
+
+- **Two trees on the node.** Session files live in `<base>/<workspace-id>/<session-id>/files/`;
+  node internals live in `<data>/ws/<workspace-id>/`. The node derives a session's folder
+  from the two ids; **the master no longer sends a folder**, and `workspace_roots` goes
+  (§4.11).
+- **A session of a project with a repository works in a git worktree** of one bare repository
+  per project in the workspace's directory (§4.11.2).
+- **A folder that already exists on the machine** is used only through a link the node's
+  owner makes on the node's command line (§4.11.3).
+- **No conversation at rest on the node.** The node still writes every event first, durably,
+  into a per-workspace **spool**, and deletes it once the master has acknowledged it; the
+  master's log becomes the durable record, and the master sends a session's history to the
+  node when it is opened (§4.12). Memory only, the owner's first inclination, is priced as the
+  alternative (Q2).
+- **`local` is shareable like any other node**, attached to further workspaces by the usual
+  pair flow; my earlier restriction is withdrawn (§4.10.6). This changes T11, with the owner's
+  explicit yes of 2026-11-11.
+- Host sessions on a node with several workspaces: re-decided with the new layout (§4.10.3,
+  Q1).
+
+**Summary.** Today a node is global, holds its own provider key in its own `config.toml`,
+runs every session in a folder on the host that the client names, and keeps every
+conversation in its own database for good. This note makes a node serve the workspaces it is
+attached to, each attachment made by a pair code the node shows, that workspace's owner or
+admin types, and the node's owner confirms. Every session gets its own folder under its
+workspace's directory, derived on the node, so the path decides the workspace. The node keeps
+no conversation at rest: it spools each event until the master has stored it. Model
+credentials move to the workspace (bring your own key) and reach a node per turn, in memory
+only, usable only by that workspace's sessions. **Environments** add a per-workspace volume
+in which sessions run inside rootless Podman containers. Workspaces on one machine share a
+Unix user; the sandbox gives them separate files, and what it cannot separate is named and,
+below a kernel that closes the known escape, keeps host sessions off a shared node unless its
+owner allows them. Deleting an environment never migrates anything; it classifies, schedules
+and archives, and you **fork** to continue. Forge accounts come through per-user
+**Connections**. **Model aliases** let agent definitions and slots name a group of models.
 
 Terms used below:
 
@@ -56,16 +67,23 @@ Terms used below:
 - **Attachment**: one (workspace, node) pair, made by one pair code, recorded on the master
   (`workspace_nodes`) and on the node (its attached list). A session may run only where both
   records agree.
-- **Attached list**: the node's own file of the workspaces it serves (§4.10.1).
-- **Data root**: the folder on the node that belongs to one attached workspace: its
-  environments, caches and checkpoints (§4.10.3).
-- **Shared node**: a node with more than one attachment.
+- **Attached list**: the node's own file of the workspaces it serves, with their links
+  (`<data>/attachments.toml`, §4.10.1).
+- **Shared node**: a node with more than one attachment. `local` always counts as shared
+  (§4.10.6).
+- **Base directory**: the one folder on the node under which every workspace's session folders
+  live (`[node] workspaces_dir`, §4.11).
+- **Session folder**: `<base>/<workspace-id>/<session-id>/`; its `files/` is the session's
+  working folder.
+- **Linked folder**: a folder that already exists on the machine, made usable by one
+  workspace by the node's owner (`node link`, §4.11.3).
+- **Spool**: the node's durable store of events the master has not yet acknowledged (§4.12).
 - **Host session**: a session whose shell runs on the node's machine under Landlock, not in a
   container.
 - **Pair code**: a short, single-use code the node shows and a workspace owner or admin types
   into the master's UI to attach that node to that workspace.
 - **Grant**: what the master sends a node so one turn of one session can call its models.
-- **Environment**: a named volume (checkout plus caches) on one node, belonging to one
+- **Environment**: a named volume (repository plus caches) on one node, belonging to one
   workspace. The container that uses it is disposable.
 - **Forge**: the git host a repository lives on (GitHub, GitLab, Gitea...).
 - **Connection**: a forge account attached in the harness, either by a user (theirs, saved per
@@ -75,40 +93,48 @@ Terms used below:
 
 | # | Problem | Evidence |
 |---|---|---|
-| P1 | Nodes are global. Any server admin's join token registers a node every agentic user can pick; nothing ties a node to a workspace. | `nodes` has no owner or workspace (`crates/store/src/lib.rs:280-286`); `join_tokens` only `created_by` (`:288-292`); join token is admin-only (`crates/master/src/http.rs:1790-1808`); `/api/nodes` filters only the local node (`http.rs:425-434`). |
-| P2 | Every remote node holds a long-lived provider key on disk. | `node_run` loads its own `config.toml` and starts a `ProviderRuntime` (`crates/cli/src/main.rs:509-512`); the README says to put "provider and key" next to `node.toml` (`README.md:694-698`, `:719`). Research: "a prompt-injected `bash` on `main` can read the node's `config.toml`" (`research/harnesses-round-1.md` §7, "The central tension"). |
-| P3 | Model chains name models the remote node may not have. | The master resolves through `resolver_for` and sends `model` (`crates/master/src/lib.rs:969-991`); the node resolves it against one router built from its own file (`crates/cli/src/main.rs:451-466`). |
-| P4 | Providers are server-wide. Team workspaces only overlay chains; Personal workspaces have no settings. | `providers.rs:1-3` ("the whole server uses"); `Config.providers` (`crates/master/src/config.rs:16`); `overlay` (`crates/master/src/resolver.rs:27-54`); Personal gets the server's (`resolver.rs:95-112`). |
-| P5 | Two sessions in one folder undo each other's changes. | `checkpoints_keep` is "per working folder" (`crates/node/src/policy.rs:20-21`); shadow repo keyed by work-tree path (`crates/node/src/git.rs:542-545`); `prune` keeps the latest N groups of the whole repository (`git.rs:821-863`). |
-| P6 | No isolation beyond Landlock: the shell runs on the host as the node user. | `Confinement` is `Unconfined`, `Confined` or `Refused` (`gate3:crates/tools/src/sandbox.rs:279-292`); residuals: pathname Unix sockets before ABI 9, UDP, DNS (`:17-26`). |
-| P7 | No forge credentials exist; "Connections" is a placeholder. | `web/src/components/Sidebar.tsx:129-130`. |
-| P8 | No archived or read-only session state, no fork. | `sessions` columns (`crates/store/src/lib.rs:224-244`); read-only is only computed from grants and roles (`crates/master/src/workspaces.rs:429`). |
-| P9 | Nothing on a node knows which workspace a session belongs to, so two workspaces on one node are not separated at all. | `session.create` carries no workspace (`gate3:crates/protocol/src/lib.rs:131-150`); the cwd comes from the client (`gate3:crates/master/src/http.rs:1228`) and is accepted anywhere under any `workspace_roots` entry, `$HOME` by default (`gate3:crates/node/src/policy.rs:251-276`, `:166`); caches in `[sandbox] write` are read-write to every session (`gate3:crates/tools/src/sandbox.rs:215-217`); full findings in §4.10.2. |
+| P1 | Nodes are global. Any server admin's join token registers a node every agentic user can pick; nothing ties a node to a workspace. | `nodes` has no owner or workspace (`crates/store/src/lib.rs:293-299`); join tokens (`:301`); `/api/nodes` filters only the local node (`crates/master/src/http.rs:438-450`). |
+| P2 | Every remote node holds a long-lived provider key on disk. | `node_run` loads its own `config.toml` and starts a `ProviderRuntime` (`crates/cli/src/main.rs`, `node_run`); the README says to put "provider and key" next to `node.toml`. Research: "a prompt-injected `bash` on `main` can read the node's `config.toml`" (`research/harnesses-round-1.md` §7, "The central tension"). |
+| P3 | Model chains name models the remote node may not have. | The master resolves through `resolver_for` and sends `model`; the node resolves it against one router built from its own file (first version's citations). |
+| P4 | Providers are server-wide. Team workspaces only overlay chains; Personal workspaces have no settings. | `providers.rs:1-3` ("the whole server uses"); `Config.providers` (`crates/master/src/config.rs:16`); `overlay` (`crates/master/src/resolver.rs`). |
+| P5 | Two sessions in one folder undo each other's changes. | `checkpoints_keep` is "per working folder" (`crates/node/src/policy.rs:20-21`); shadow repository keyed by folder path (`crates/node/src/git.rs:568-572`). |
+| P6 | No isolation beyond Landlock: the shell runs on the host as the node user. | `Confinement` is `Unconfined`, `Confined` or `Refused` (`crates/tools/src/sandbox.rs:279-292`); residuals: pathname Unix sockets before ABI 9, UDP, DNS (`:17-26`). |
+| P7 | No forge credentials exist; "Connections" is a placeholder. | `web/src/components/Sidebar.tsx` (first version's citation). |
+| P8 | No archived or read-only session state, no fork. | `sessions` columns (`crates/store/src/lib.rs:234-256`). |
+| P9 | Nothing on a node ties a session to a workspace, so two workspaces on one node are not separated at all. | `session.create` carries no workspace and a client-chosen `cwd` (`crates/protocol/src/lib.rs:131-150`; `crates/master/src/http.rs:1240`), accepted anywhere under any `workspace_roots` entry, `$HOME` by default (`crates/node/src/policy.rs:251-276`, `:166`); full findings in §4.10.2. |
+| P10 | Every conversation stays on every node's disk for good, in a file its owner can read. | The node's store is the authoritative log, `synchronous=FULL` (`PLAN.md` §1, §2 "Durability"; `crates/cli/src/main.rs:524`); the master's mirror is `Normal` because "it can always re-fetch from the node" (`crates/store/src/lib.rs:49-54`; `crates/cli/src/main.rs:260`). |
 
 ## 2. The decisions, with their costs
 
 | Decision | Cost |
 |---|---|
-| **Podman** for session containers and self-hosting; Docker only for self-hosting. | Rootless Podman needs setuid `newuidmap`, `/etc/subuid` and a user runtime directory; the README's unit (`NoNewPrivileges=yes`, `nologin` user, `README.md:706`, `:742-749`) must change. Docker hosts get no container sessions. |
-| **Chat-model keys per workspace (BYOK)**, no global store, nothing copied. Onboarding writes its first provider into the first admin's Personal workspace. **R1 (reading, to confirm):** the `HARNESS_PROVIDER_*` settings seed that Personal workspace. | `providers`, `default_model`, `[agent_models]` (`config.rs:16-24`) and `HARNESS_DEFAULT_MODEL` (`crates/master/src/env.rs:35`) go; Personal workspaces gain settings; notices and the model cache go per workspace. `.env` seeds apply at config load (`env.rs:1-15`), before any account exists, so R1 needs a seed deferred to the claim (§4.4). |
-| **Embeddings and voice are harness (server-wide) settings** with their own endpoints. They never reuse a workspace provider. Onboarding offers Ollama (the default) or a custom API endpoint for embeddings, and no "reuse the provider you just added". | Voice already has its own URL and key (`config.rs:236-243`). Embeddings lose `source = "provider"` and `provider_id` (`config.rs:285-292`, `:304`) and the onboarding path that reuses the provider. |
-| **A1 (to confirm):** title generation, summarisation and the vision bridge use the workspace's models. | Summarisation already uses the turn's model on the node (`crates/agent-native/src/lib.rs:1058`); I found no title generator or vision bridge on `main` (`crates/master/src/lib.rs:229-235` refuses instead): slots to add. |
-| **Every workspace node is trusted by each workspace it is attached to and may receive that workspace's grants.** Attaching it (an owner or admin types its pair code) is the act of trust. A grant carries only the keys the turn needs, held in memory only, kept out of the command log and redacted, usable only by a session of the workspace that owns the keys. A restarted node needs the master before it can run a turn. `node.toml` may refuse grants or use local keys. **No proxy now**, but the hand-over is a grant that a proxy can fill later. | A node's operator can read the keys its turns use, for every workspace it serves; a stolen node key yields the API keys of every attached workspace; detaching cannot un-send keys (the UI lists which to rotate). |
-| **No long-lived secret in a shell command**; the node generates its own key pair; the private key is kept under systemd encrypted credentials, else in a 0600 file. **A2 (to confirm):** "PAM" read as systemd encrypted credentials. | `systemd-creds encrypt` needs root, so the systemd path is a second, root step (§4.4). |
-| **A3 (to confirm):** an offline node finishes its running turn; a new turn waits. | Grants must outlive the longest turn (§4.3). |
-| **Nodes are attached to workspaces, one or several** (owner, 2026-11-11), and carry their own permissions (host shell, containers). One key, one link, one link generation per node, whatever the number of attachments. | Reverses "per-workspace node access ... dropped ... could be bypassed through Personal" (`PLAN.md:1765-1768`); the bypass is closed by a workspace check at create and before every prompt, on the master and on the node (§4.10.1). Two workspaces now share a machine, a Unix user, a node process and a link: separation has to be built and tested (§4.10.3), and on the host it has holes the sandbox cannot close. One node per workspace would have had that separation for free. |
-| **Private per-user node** (own confirm code, model access by proxy) is experimental and comes last; restricting by source IP was dropped. **Landlock stays**; containers are a further `Confinement` kind. | Two execution paths to test and document. |
+| **Podman** for session containers and self-hosting; Docker only for self-hosting. | Rootless Podman needs setuid `newuidmap`, `/etc/subuid` and a user runtime directory; the README's systemd unit (`NoNewPrivileges=yes`, `nologin` user) must change. Docker hosts get no container sessions. |
+| **Chat-model keys per workspace (BYOK)**, no global store, nothing copied. Onboarding writes its first provider into the first admin's Personal workspace. **R1 (reading, to confirm):** the `HARNESS_PROVIDER_*` settings seed that Personal workspace. | `providers`, `default_model`, `[agent_models]` and `HARNESS_DEFAULT_MODEL` go; Personal workspaces gain settings; notices and the model cache go per workspace. `.env` seeds apply at config load, before any account exists, so R1 needs a seed deferred to the claim (§4.4). |
+| **Embeddings and voice are harness (server-wide) settings** with their own endpoints. They never reuse a workspace provider. Onboarding offers Ollama (the default) or a custom API endpoint for embeddings, and no "reuse the provider you just added". | Voice already has its own URL and key. Embeddings lose `source = "provider"` and `provider_id` and the onboarding path that reuses the provider. |
+| **A1 (to confirm):** title generation, summarisation and the vision bridge use the workspace's models. | Summarisation already uses the turn's model on the node; I found no title generator or vision bridge (first version): slots to add. |
+| **Every workspace node is trusted by each workspace it is attached to and may receive that workspace's grants.** Attaching it is the act of trust. A grant carries only the keys the turn needs, in memory only, kept out of the log and redacted, usable only by a session of that workspace. `node.toml` may refuse grants or use local keys. **No proxy now**. | A node's operator can read the keys its turns use, for every workspace it serves; a stolen node key yields the API keys of every attached workspace; detaching cannot un-send keys (the UI lists which to rotate). |
+| **No long-lived secret in a shell command**; the node generates its own key pair; the private key is kept under systemd encrypted credentials, else in a 0600 file. **A2 (to confirm).** | `systemd-creds encrypt` needs root, so the systemd path is a second, root step (§4.4). |
+| **A3 (to confirm):** an offline node finishes its running turn; a new turn waits. | Grants must outlive the longest turn (§4.3); the spool must hold that turn's events (§4.12). |
+| **Nodes are attached to workspaces, one or several** (owner, 2026-11-11). One key, one link, one link generation per node. | Reverses "per-workspace node access ... dropped" (`PLAN.md` §5). Two workspaces share a machine, a Unix user, a node process and a link: separation is built and tested (§4.10.3), and on the host it has holes the sandbox cannot close. One node per workspace would have had it for free. |
+| **The path decides the workspace** (owner, 2026-11-11): `<base>/<workspace-id>/<session-id>/files/`, derived on the node; the master sends no folder (§4.11). | Today's "open my checkout in `~/code/foo`" becomes a one-time `node link` on the node (§4.11.3); projects stop carrying a folder path (`crates/master/src/projects.rs:131`). |
+| **No conversation at rest on the node** (owner, 2026-11-11): a spool of unacknowledged events; the master's log is the durable record (§4.12). | The master must store with `synchronous=FULL` and acknowledge each event; it sends histories to nodes; a master that loses its database loses every conversation, so the master must be backed up. `PLAN.md` §1 to §3 change (§4.12.5). |
+| **`local` is an ordinary, shareable node** (owner, 2026-11-11). | A sandbox escape on `local` reaches the master process, every workspace's keys and the database. T11 changes (§4.10.6). |
+| **Private per-user node** (own confirm code, model access by proxy) is experimental and comes last. **Landlock stays**; containers are a further `Confinement` kind. | Two execution paths to test and document. |
 | **Environments**: the volume is kept; the node builds the invocation; the image comes from an allow-list, plus a setup script; one worktree per session; files are shared within the workspace, chats stay private. | File tools run in the node process and the shell runs in the container, so paths and file ownership must agree (§4.6). Shared files change T10 (§5). |
-| **Deletion**: no migration. Sessions are classified (a)/(b)/(c); other users are named, with their counts; autosave is optional, the deleter's choice. Anything unsafe forces a schedule (7 days by default, at least 1). Sessions are then archived; to continue, fork. **A4 (to confirm):** nothing unsafe may be deleted immediately. **A5 (confirmed):** a repository with no forge remote is class `c`. | Needs Connections (P7), a git path with network access (forbidden today, §4.7), archive and fork (P8). The names and counts in the dialog and autosaving colleagues' files need T10 changed (§5). My dissent is recorded in §9. |
-| **Forge accounts through Connections, per user**, plus one workspace account added by admins. The workspace account makes the co-author line link properly. | OAuth needs a registered app per forge and a callback a loopback master often cannot receive. Users have no e-mail today (`users`, `crates/store/src/lib.rs:303-312`), which the plain fallback needs (§4.7). |
-| **Model aliases** per workspace: a value with `::` is a concrete model, anything else an alias, never `@`. Named by capability or family; checked by capability. | "Alias" already means an agent handle on `feat/agent-roster` (`crates/agents/src/lib.rs:9` there), so always say "model alias". |
+| **Deletion**: no migration. Sessions are classified (a)/(b)/(c); other users are named, with their counts; autosave is optional, the deleter's choice. Anything unsafe forces a schedule (7 days by default, at least 1). Sessions are then archived; to continue, fork. **A4 (to confirm):** nothing unsafe may be deleted immediately. **A5 (confirmed):** a repository with no forge remote is class `c`. | Needs Connections (P7), a git path with network access (§4.7), archive and fork (P8). The names and counts in the dialog and autosaving colleagues' files need T10 changed (§5). |
+| **Forge accounts through Connections, per user**, plus one workspace account added by admins. | OAuth needs a registered app per forge and a callback a loopback master often cannot receive. Users have no e-mail today, which the plain fallback needs (§4.7). |
+| **Model aliases** per workspace: a value with `::` is a concrete model, anything else an alias, never `@`. | "Alias" already means an agent handle (`crates/agents`), so always say "model alias". |
 
 ## 3. What does not change
 
 The node dials out over TLS to a pinned certificate and signs a nonce bound to it
 (`crates/link/src/identity.rs:60-64`); a node joins only once per key, in one transaction
-(`crates/store/src/lib.rs:867-927`); the event log, replication and hardened git (T19) stay.
-A node has one key and one link however many workspaces it serves.
+(`crates/store/src/lib.rs:945`). **The node is still the single writer** of its sessions: it
+assigns `seq` and appends each event durably before the effect it describes
+(`crates/node/src/session.rs:223-263`). Replication by `seq` with the divergence rule stays
+(`crates/store/src/lib.rs:552-740`), and so does hardened git (T19). A node has one key and
+one link however many workspaces it serves. What moves is where the long-term copy of the
+log lives (§4.12).
 
 ## 4. Design
 
@@ -128,6 +154,21 @@ CREATE TABLE workspace_nodes (               -- one row per attachment
   state        TEXT NOT NULL,                -- pending_node | active | detaching
   PRIMARY KEY (workspace_id, node_id));
 CREATE INDEX workspace_nodes_by_node ON workspace_nodes(node_id);
+
+CREATE TABLE node_links (                    -- linked folders the node reported (§4.11.3)
+  node_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+  name TEXT NOT NULL,                        -- the link's name; the master never sees the path
+  reported_ms INTEGER NOT NULL,
+  PRIMARY KEY (node_id, workspace_id, name),
+  FOREIGN KEY (workspace_id, node_id) REFERENCES workspace_nodes ON DELETE CASCADE);
+-- A cache of what the node said in its last hello, for the UI. Never an authority.
+
+-- sessions (existing table): `cwd` stops being an input. New columns:
+--   files_kind TEXT NOT NULL      -- plain | project | link | environment
+--   link_name  TEXT               -- with files_kind = link
+--   (project and environment are already linked through session_projects / session_environments)
+-- projects (existing): `cwd` goes; gains `repo_url TEXT` (a forge URL, or NULL for an
+--   empty repository created on the node) and `default_branch TEXT`.
 
 CREATE TABLE workspace_providers (           -- non-secret provider config, per workspace
   workspace_id TEXT REFERENCES workspaces ON DELETE CASCADE,
@@ -162,6 +203,7 @@ CREATE TABLE workspace_forge_accounts (      -- added by owner/admin; token in w
   PRIMARY KEY (workspace_id, host));
 CREATE TABLE environments (
   env_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, node_id TEXT NOT NULL,
+  project_id TEXT,                           -- uses that project's repository (§4.11.2)
   name TEXT NOT NULL, image TEXT NOT NULL,   -- allow-list name
   repo_url TEXT, setup TEXT NOT NULL DEFAULT '', created_by TEXT, created_ms INTEGER,
   state TEXT NOT NULL,                       -- active | scheduled | deleting | gone
@@ -178,13 +220,17 @@ CREATE TABLE session_forks (
   session_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, through_seq INTEGER NOT NULL);
 ```
 
+`master.db` is opened with `Durability::Full` instead of `Normal`
+(`crates/cli/src/main.rs:260`): it is now the only durable copy of a conversation (§4.12).
+Nothing new is stored for hydration: the master sends the events it already mirrors.
+
 What cascades and what does not:
 
-| Event | `workspace_nodes` | Sessions of that pair | Environments |
+| Event | `workspace_nodes` | Sessions of that pair | Environments and session folders |
 |---|---|---|---|
-| Detach (§4.10.5) | Row goes to `detaching`, deleted when the pair's environments are gone | Archived, epochs bumped (C.1), grants dropped | §4.8 flow scoped to the pair; `RESTRICT` keeps the row until it ends |
+| Detach (§4.10.5) | Row goes to `detaching`, deleted when the pair's environments and folders are gone | Archived, epochs bumped (C.1), grants dropped | §4.8 flow scoped to the pair; `RESTRICT` keeps the row until it ends |
 | Node revoked | Every row of the node deleted in the revoke transaction (the `nodes` row stays with `revoked_ms`, so `CASCADE` does not fire) | Same, for every workspace | Same, for every workspace; "forget" if the node is dead |
-| Workspace deleted | Refused (409) while any of its environments exist; otherwise every attachment is detached first, then the workspace row goes and `CASCADE` removes what is left | Already archived by the detaches | None exist |
+| Workspace deleted | Refused (409) while any of its environments exist; otherwise every attachment is detached first, then the row goes and `CASCADE` removes what is left | Already archived by the detaches | None exist |
 
 In `config.toml` (harness settings), `[memory]` keeps `embeddings_url` and
 `embeddings_model` and gains `embeddings_key_secret`. `source` is `ollama` (the default) or
@@ -192,55 +238,51 @@ In `config.toml` (harness settings), `[memory]` keeps `embeddings_url` and
 
 Notes:
 
-- **Keys leave `secrets.toml`.** Today keys are `provider-<id>` in one 0600 file
-  (`crates/master/src/providers.rs:34-36`, `crates/master/src/secrets.rs:48-52`, `:91`).
-  Workspace keys and every Connection token are sealed with AES-256-GCM (`aws-lc-rs`, already a
-  dependency, `PLAN.md:468-472`) under a key-encryption key in `<data>/keys/secrets.key`
-  (0600). A copied `master.db` alone then leaks no key, and deleting a workspace or a user
-  removes theirs by cascade. `secrets.toml` keeps the harness keys (embeddings, voice, web
-  search).
-- **Archived is master-side state, not an event.** The node that owns the log may be gone, and
-  only it may append. An archived session refuses prompt, approval, restore and set-agent with
-  409, whatever the node says.
+- **Keys leave `secrets.toml`.** Workspace keys and every Connection token are sealed with
+  AES-256-GCM (`aws-lc-rs`, already a dependency) under a key-encryption key in
+  `<data>/keys/secrets.key` (0600). A copied `master.db` alone then leaks no key, and deleting
+  a workspace or a user removes theirs by cascade. `secrets.toml` keeps the harness keys
+  (embeddings, voice, web search).
+- **Archived is master-side state, not an event.** The node that owns the session may be
+  gone, and only it may append. An archived session refuses prompt, approval, restore and
+  set-agent with 409, whatever the node says.
 - **Workspace check (master).** Create and every prompt, approval, restore and set-agent
   require an `active` row in `workspace_nodes` for the chat's effective workspace
-  (`EFFECTIVE_WS`, `gate3:crates/store/src/lib.rs:381-387`) and the session's node, and that
-  this workspace equals the one the session was created in. A member who leaves falls back to
+  (`EFFECTIVE_WS`, `crates/store/src/lib.rs:384-390`) and the session's node, and that this
+  workspace equals the one the session was created in. A member who leaves falls back to
   Personal; their chats on the team's nodes then fail the check and become blocked, the way
-  `agentic_blocked` works (`gate3:crates/master/src/workspaces.rs:429`). The node checks again
+  `agentic_blocked` works (`crates/master/src/workspaces.rs:473`). The node checks again
   (§4.10.1).
 - **Who may do what.** Attach and detach nodes, create and delete environments, and manage
   providers, model aliases and the workspace forge account all need `settings` in that
-  workspace (owner and admin, `workspaces.rs:74-82`). Using a node or environment needs
-  `agentic` plus the account grant (T11). Revoking a node outright is a server admin's act
-  (it ends every workspace's use of it). Users manage their own Connections.
+  workspace (owner and admin). Using a node or environment needs `agentic` plus the account
+  grant (T11). Revoking a node outright is a server admin's act. Users manage their own
+  Connections.
 - **What a workspace's admins see of a node:** its label, hostname, key prefix, connection
-  state, capabilities, this workspace's share and this workspace's sessions and environments.
-  Never the other attachments, their count, their sessions, environments, grants or load. A
-  server admin sees every node with its attachment count, not the other workspaces' contents.
+  state, capabilities, this workspace's share, its link names, and this workspace's sessions
+  and environments. Never the other attachments, their count, their sessions, environments,
+  links, grants or load. A server admin sees every node with its attachment count.
 
 ### 4.2 Model aliases and slots
 
 - A value containing `::` is a concrete model; anything else is a model alias
-  (`[a-z][a-z0-9-]{0,31}`, never `@`). Agent frontmatter `model:`, `AgentChain` entries
-  (`config.rs:212-216`) and slots accept either.
+  (`[a-z][a-z0-9-]{0,31}`, never `@`). Agent frontmatter `model:`, `AgentChain` entries and
+  slots accept either.
 - An alias expands to its models in order. A chain is the expanded main entry, then the
-  expanded fallbacks, with duplicates removed and the result capped at `MAX_FALLBACKS`
-  (`config.rs:173`). The first available model that passes the slot's capability check runs,
-  and the `model_fallback` event shows which.
+  expanded fallbacks, with duplicates removed and the result capped at `MAX_FALLBACKS`. The
+  first available model that passes the slot's capability check runs, and the
+  `model_fallback` event shows which.
 - Built-ins `small`, `vision`, `long-context` exist in every workspace and stay empty until a
-  provider exists. The provider page proposes members from the reported capabilities
-  (`crates/master/src/providers.rs:129-154`).
-- Slots in `WorkspaceSettings` (`workspaces.rs:124-131`): `title`, `summary`,
-  `vision_bridge`. Saving a `vision_bridge` alias without a vision model is refused. `summary`
-  skips, at use time, any model whose context window is smaller than the turn's main model
-  (`research/harnesses-round-1.md` §8, "Model slots and memory scopes"). Slot output is
-  untrusted model text.
+  provider exists. The provider page proposes members from the reported capabilities.
+- Slots in `WorkspaceSettings`: `title`, `summary`, `vision_bridge`. Saving a `vision_bridge`
+  alias without a vision model is refused. `summary` skips, at use time, any model whose
+  context window is smaller than the turn's main model (`research/harnesses-round-1.md` §8,
+  "Model slots and memory scopes"). Slot output is untrusted model text.
 
 ### 4.3 Granting model access (protocol)
 
-New `MasterToNode` messages (beside `crates/protocol/src/lib.rs:123-258`). A grant is sent on
-the same ordered link just before the `session.prompt` that uses it.
+New `MasterToNode` messages (beside `crates/protocol/src/lib.rs:128`). A grant is sent on the
+same ordered link just before the `session.prompt` that uses it.
 
 ```rust
 "session.grant" { req_id, session_id, workspace_id, grant_id, expires_ms,
@@ -252,126 +294,119 @@ enum ModelAccess { Direct { kind, base_url, key: Secret<String> },
 ```
 
 - **Carries:** only the providers the turn can reach: the agent's chain, each delegate's
-  chain, `compare` models, and the `summary` and `vision_bridge` slots. The master's
-  `Resolver` works these out from the agent spec it already builds, for the session's
+  chain, `compare` models, and the `summary` and `vision_bridge` slots, for the session's
   effective workspace only.
 - **Never carries:** another workspace's keys, a forge token (sent separately, §4.7), or
-  anything that persists. A grant never goes into an event (it is not part of `AgentSpec`).
-  The node's audit row stays kind plus session id (`crates/node/src/lib.rs:303-311`).
+  anything that persists. A grant never goes into an event (it is not part of `AgentSpec`),
+  so never into the spool.
 - **Master side:** sent only to the session's node, only while that node has an `active`
   attachment to the session's workspace, is connected, is not revoked, and announced
-  `credentials:master` in `node.hello` (`protocol/src/lib.rs:74-83`). Each send updates
-  `node_key_grants` under `(node, workspace, secret)`.
+  `credentials:master` in `node.hello`. Each send updates `node_key_grants` under
+  `(node, workspace, secret)`.
 - **Node side, keyed by workspace.** `[credentials] model_keys` decides (§4.5). With
   `"master"` (the default) the node accepts a grant only if its `workspace_id` equals the
-  workspace the node recorded for `session_id` at create, and that workspace is on its
-  attached list. Keys go into an in-memory map keyed by `(workspace_id, provider_id)` and
-  bound to the grant's session (C.3 adds epoch and turn), and into the `SecretSet`. At
-  `session.prompt` the turn's router is built only from grants of that session; a grant of
-  workspace A can never be looked up for a session of B, because the lookup key includes the
-  session's own recorded workspace, not the one the message names. Keys are dropped on
-  `grant.drop`, at `expires_ms` (C.3 and O10 set the lifetime), on detach of that workspace,
-  and on link loss once the running turn ends (A3). With `"local"` or `"none"` the node does
-  not announce the capability, and it refuses a grant with an ack error. The backend takes a
-  router per turn instead of one provider for the whole node
-  (`crates/cli/src/main.rs:451-466`). This is the main code change on the node.
+  workspace the session's folder belongs to (§4.11) and that workspace is on its attached
+  list. Keys go into an in-memory map keyed by `(workspace_id, provider_id)` and bound to the
+  grant's session (C.3 adds epoch and turn), and into the `SecretSet`. At `session.prompt` the
+  turn's router is built only from grants of that session; the lookup key uses the session's
+  own workspace, not the one the message names. Keys are dropped on `grant.drop`, at
+  `expires_ms` (C.3, O10), on detach of that workspace, and on link loss once the running
+  turn ends (A3). With `"local"` or `"none"` the node does not announce the capability and
+  refuses a grant with an ack error. The backend takes a router per turn instead of one
+  provider for the whole node.
 - **Never in a child's environment.** Grants live in the node process only. The child
-  environment is built by `env_clear()` plus an allow-list (`gate3:crates/tools/src/env.rs`,
-  PLAN.md T3), and a grant is never an environment variable of the node itself, so no
-  allow-list entry can pass it. The `SecretSet` is node-wide: B's outputs are also scrubbed of
-  A's keys, which costs nothing and tells B nothing (the scrubber's marker names no key).
+  environment is `env_clear()` plus an allow-list (`crates/tools/src/env.rs:19`, PLAN.md T3),
+  and a grant is never an environment variable of the node itself.
 - **Removing a node or detaching a workspace:** a `grant.drop` for each live grant in scope,
-  then the existing link drop for a revoke (`gate3:crates/master/src/nodes.rs:57`). The
-  dialog then lists every key in `node_key_grants` for that workspace (for a revoke, each
-  workspace's admins see their own) and says: "rotate these keys at the provider; this node
-  may still hold them".
+  then the existing link drop for a revoke (`crates/master/src/nodes.rs:57`). The dialog then
+  lists every key in `node_key_grants` for that workspace and says: "rotate these keys at the
+  provider; this node may still hold them".
 - **The embedded `local` node** runs in the master process; it gets the same per-turn router
-  in-process, with nothing on the wire, and the same workspace keying (§4.10.6). The master's
-  chat runtime is not a workspace node: it is unchanged by this note except that it uses the
-  chat's workspace's providers.
+  in-process, with nothing on the wire, and the same workspace keying.
 
 ### 4.4 Attaching a node with a pair code
 
 **The node's owner starts it on the node; a workspace owner or admin types the code the node
 shows; the node's owner confirms; only then does the node write the attachment.** Each
-attachment is a separate run of this flow. The first one also registers the node's key.
+attachment is a separate run of this flow. The first one also registers the node's key. For
+`local`, see §4.10.6.
 
 1. An owner or admin opens the workspace's Nodes page and chooses "Attach node". The UI shows
    a command that carries no secret: `rizzy-harness node pair wss://host:port --fingerprint …`.
    It also shows an input for the pair code, and keeps the dialog open.
-2. On the node, `node pair` loads the node's key pair, or generates it on the first pairing
-   (`identity.rs:14-38`). It connects over TLS to the pinned fingerprint and sends
-   `Hello::Pair { public_key, hostname, signature }`, signing the master's nonce with the
-   domain tag it uses now (`gate3:crates/link/src/wire.rs:24-43` holds today's `Join` and
-   `Auth`). A pairing connection is never a link: it does not replace the running `node run`
-   link (today a second connection does, `gate3:crates/master/src/nodes.rs:209`) and does not
-   bump `link_gen`. The master keeps the request in memory and answers with a pair code: 8
-   characters from a 32-letter alphabet (40 bits), valid 10 minutes. The node prints the code
-   and the first 16 hex characters of its key.
+2. On the node, `node pair` loads the node's key pair, or generates it on the first pairing.
+   It connects over TLS to the pinned fingerprint and sends `Hello::Pair { public_key,
+   hostname, signature }`, signing the master's nonce (today's `Join` and `Auth` are in
+   `crates/link/src/wire.rs:24-43`). A pairing connection is never a link: it does not
+   replace the running link (today a second connection does,
+   `crates/master/src/nodes.rs:209`) and does not bump `link_gen`. The master keeps the
+   request in memory and answers with a pair code: 8 characters from a 32-letter alphabet (40
+   bits), valid 10 minutes. The node prints the code and the first 16 hex characters of its
+   key.
 3. The admin types the code into the dialog. The master burns the code first (C.5), then
    matches it to the pending request. It inserts the node row if the key is new, and a
-   `workspace_nodes` row for the dialog's workspace with `added_by` and state `pending_node`.
-   The UI shows the key prefix for comparison. The master sends `Paired { node_id,
-   workspace_id, workspace_name }` on the still-open connection.
+   `workspace_nodes` row with `added_by` and state `pending_node`. The UI shows the key prefix
+   for comparison. The master sends `Paired { node_id, workspace_id, workspace_name }` on the
+   still-open connection.
 4. The node's CLI shows `attach this node to workspace "<name>" (<id>) on <master
    fingerprint>? [y/N]` and the node's current attached list. On yes it adds the entry to its
-   attached list (§4.10.1) and sends `PairConfirmed`; the master sets the row `active`. On no,
-   a closed connection or 10 minutes without an answer, the master deletes the row. The node
-   checks `node.toml [attach]` (§4.5) before asking; a refusal there ends the flow with the
-   reason printed on the node and one opaque failure in the dialog.
+   attached list, creates `<base>/<workspace-id>/` and `<data>/ws/<workspace-id>/` (§4.11),
+   and sends `PairConfirmed`; the master sets the row `active`. On no, a closed connection or
+   10 minutes without an answer, the master deletes the row. The node checks `node.toml
+   [attach]` (§4.5) before asking.
 5. Properties: single use; 10 minutes; bound to the workspace whose authenticated admin
-   types it; needs the node owner's yes on the node; no secret in any shell command; the key
-   pair is the node's own. Limits: 5 wrong codes per dialog close it, at most 32 pending pair
-   requests in all, at most 4 per source address. Codes are compared as hashes in constant
-   time.
+   types it; needs the node owner's yes; no secret in any shell command; the key pair is the
+   node's own. Limits: 5 wrong codes per dialog close it, at most 32 pending pair requests in
+   all, at most 4 per source address. Codes are compared as hashes in constant time.
 6. Key at rest. With `--systemd-creds` the node writes the PKCS#8 bytes only to stdout,
    piped into `systemd-creds encrypt --name=node.key - /etc/credstore.encrypted/rizzy-harness-node.key`
-   run as root, and the unit gets `LoadCredentialEncrypted=node.key`. `node run` then reads
-   `$CREDENTIALS_DIRECTORY/node.key`. Without systemd it is today's 0600 file
-   (`crates/link/src/lib.rs:58-75`).
+   run as root, and the unit gets `LoadCredentialEncrypted=node.key`. Without systemd it is
+   today's 0600 file (`crates/link/src/lib.rs`).
 
 **What a replayed, guessed or misdirected code gets.**
 
 | Attempt | Result |
 |---|---|
 | A code typed a second time | Already burned: the one opaque failure ("code not valid"), counted against the dialog. |
-| A guessed code (40 bits, 5 tries per dialog, 10 minutes) | Not a practical attack. If it did hit, it would bind someone else's pending node to the guesser's workspace on the master only: the node's owner sees the wrong workspace name at step 4 and says no. |
-| A compromised master that binds the pairing to another workspace | Same: the node's owner sees the name. A compromised master can lie about the name; it already holds every key and chat (T6), so this adds nothing. |
+| A guessed code (40 bits, 5 tries per dialog, 10 minutes) | Not a practical attack. If it hit, it would bind someone else's pending node to the guesser's workspace on the master only: the node's owner sees the wrong workspace name at step 4 and says no. |
+| A compromised master that binds the pairing to another workspace | The node's owner sees the name. A compromised master can lie about the name; it already holds every key and chat (T6). |
 | A master that adds a `workspace_nodes` row with no pairing | The node refuses every session for that workspace: it is not on the node's list (§4.10.1). |
 
 **What a second workspace's admin learns from pairing: nothing about the first.** The pairing
 answer and the Nodes page carry only what any fresh node shows: hostname, key prefix,
 capabilities. The master does not say that the key is already known, and the node id is not
-shown in the UI (each workspace names the node with its own `label`). The node's CLI shows the
-full list to the node's owner only, on the node. Residuals: the hostname is the same in every
-workspace; the share (§4.10.4) is shown as an absolute number, from which the count of
-workspaces can sometimes be guessed; a member of both workspaces can match the two entries by
-key prefix. A user's agent on a shared host session can see other workspaces' processes in
-`/proc` (§4.10.2): that is not pairing, and it is why host sessions are off on a shared node.
+shown in the UI. Residuals: the hostname is the same in every workspace; the share
+(§4.10.4) is an absolute number from which the count of workspaces can sometimes be guessed; a
+member of both workspaces can match the two entries by key prefix.
 
 Code impact: pairing holds a connection for minutes, but today's handshake has a 10-second
-timeout and one shared 32-slot semaphore (`gate3:crates/master/src/nodes.rs:17-21`), so
-pairing gets its own. `join_tokens`, `create_join_token` and `POST /api/admin/nodes/join` go.
-`node join` becomes `node pair`, and `node detach` and `node workspaces` are new (§4.10.5).
+timeout and one shared 32-slot semaphore (`crates/master/src/nodes.rs:17-21`), so pairing
+gets its own. Join tokens, `create_join_token` and its endpoint go. `node join` becomes `node
+pair`; `node detach`, `node workspaces`, `node link`, `node unlink` and `node leave` are new.
 Separately (R1), `HARNESS_PROVIDER_*` is applied to the first admin's Personal workspace when
 the claim creates it.
 
 ### 4.5 `node.toml` additions
 
 ```toml
+[node]
+workspaces_dir = "~/Workspaces"   # the base directory (§4.11); see Q3 for the default
+# workspace_roots goes: no session folder is chosen by path any more (§4.11)
+
 [attach]
 max_workspaces = 4           # pairing beyond this is refused on the node
 allow = []                   # workspace ids; non-empty means only these may be attached
-workspace_data = "/home/rizzy-harness/workspaces"   # data roots live here, one per workspace
 
 [execution]
 host_shell = true            # sessions in a host folder, under [sandbox] (Landlock)
-host_shell_shared = false    # host sessions while attached to more than one workspace (§4.10.3)
+host_shell_shared = "abi9"   # host sessions on a shared node: "never" | "abi9" | "always" (§4.10.3)
 containers = false           # sessions in environments
 
 [limits]                     # beside today's tool_stream_bytes, max_steps, bash_timeout_max_s
 max_commands = 4             # tool child processes running at once, node-wide (§4.10.4)
 share = "borrow"             # "borrow" | "strict"
+spool_mb = 64                # unacknowledged events per workspace; beyond, appends fail (§4.12)
+history_mb = 64              # histories held in memory, all sessions together (§4.12)
 
 [credentials]
 model_keys = "master"        # "master": accept grants (memory only)
@@ -389,7 +424,7 @@ memory = "4g"
 cpus = 2
 pids = 1024
 setup_timeout_s = 900
-keep_deleted_days = 3        # deleted environments and detached data roots go to a trash first
+keep_deleted_days = 3        # deleted environments, session folders and detached workspaces go to a trash first
 [containers.images]          # allow-list: name -> pinned reference
 rust = "docker.io/library/rust@sha256:…"
 
@@ -398,30 +433,27 @@ push = false                 # let the node clone with and push using forge toke
 hosts = ["github.com"]       # the only hosts a forge token may be used against
 ```
 
-`model_keys` is the node deciding, not a second approval. Being attached to a workspace is the
-trust; this setting is what the node will accept. `"local"` is the operator's choice to keep a
-key on that machine, against the default of only the link key on disk; on a shared node every
-attached workspace's turns then use (and are billed to) that one key, and `node pair` says so.
+`model_keys` is the node deciding, not a second approval. `"local"` on a shared node makes
+every attached workspace's turns use, and be billed to, that one key, and `node pair` says so.
 As T5 says, nothing received over the protocol or HTTP widens these settings. These are
 refused with an ack error, each with a test (§8): an image not on the list, a network mode the
-node does not allow, a grant to a node that is not `"master"`, a session for a workspace not
-on the attached list, a host session on a shared node without `host_shell_shared`.
+node does not allow, a grant to a node that is not `"master"`, a session for a workspace not on
+the attached list, a host session on a shared node the rule does not allow.
 
 What `node.toml` can and cannot be overridden by: the attached list can only hold workspaces
 `[attach]` allows. If `node.toml` is edited to allow fewer than are attached, the node refuses
-to start and names the attachments to detach, rather than choosing which to drop. Nothing the
-master sends, and nothing in the attached list, raises a value here; an attachment entry may
-only narrow (its own host roots, §4.10.3). `workspace_data` must pass `check_protected`
-(`gate3:crates/node/src/policy.rs:303-334`) and must not lie under a folder the sandbox grants
-every command (`SYSTEM_READ`, `gate3:crates/tools/src/sandbox.rs:48-50`, or `[sandbox]
-read`/`write`). `environments_root` of the first version is replaced by
-`<workspace_data>/<workspace>/environments` (§4.10.3).
+to start and names the attachments to detach. Nothing the master sends, and nothing in the
+attached list, raises a value here. `workspaces_dir` must pass `check_protected`
+(`crates/node/src/policy.rs:303-334`), must not lie under a folder the sandbox grants every
+command (`SYSTEM_READ`, `crates/tools/src/sandbox.rs:48-50`, or `[sandbox] read`/`write`),
+and must neither contain nor be inside the data directory. On a shared node `[sandbox] write`
+and `allow_outside_workspace = true` stop the node at start (§4.10.3).
 
 ### 4.6 The container the node builds
 
-One container per session, on the environment's volume: processes, `/tmp` and signals stay
-apart, and the files are shared by decision within the workspace. Nothing from the master,
-the project or the repository enters the arguments except allow-list values:
+One container per session, on its environment's volume and its own session folder: processes,
+`/tmp` and signals stay apart. Nothing from the master, the project or the repository enters
+the arguments except allow-list values:
 
 ```
 podman run --detach --name rh-<env>-<session> --label rizzy.env=<env> --label rizzy.ws=<ws>
@@ -430,23 +462,27 @@ podman run --detach --name rh-<env>-<session> --label rizzy.env=<env> --label ri
   --read-only --tmpfs /tmp:size=1g,mode=1777 --tmpfs /run
   --network=pasta | none                       # host only if allow_host_network
   --memory=<m> --memory-swap=<m> --cpus=<n> --pids-limit=<p>
-  --mount type=bind,src=<wsroot>/environments/<env>,dst=<wsroot>/environments/<env>,relabel=private
-  --workdir <wsroot>/environments/<env>/worktrees/<session>
-  --env HOME=<wsroot>/environments/<env>/home --env <allow-listed names only>
+  --mount type=bind,src=<base>/<ws>/<session>,dst=<base>/<ws>/<session>,relabel=private
+  --mount type=bind,src=<repo>,dst=<repo>,relabel=private      # the environment's repository
+  --mount type=bind,src=<base>/<ws>/environments/<env>,dst=<same>,relabel=private  # cache/, home/
+  --workdir <base>/<ws>/<session>/files
+  --env HOME=<base>/<ws>/environments/<env>/home --env <allow-listed names only>
   --init --pull=never --log-driver=none
   <image@sha256:…> sleep infinity
 ```
 
-`<wsroot>` is `<workspace_data>/<workspace>` (§4.10.3). The only mount is one environment of
-the session's own workspace; the node checks, before `podman run`, that the mount source is
-inside the session's workspace root and inside no other.
+`<repo>` is the project's repository when the environment belongs to a project
+(`<base>/<ws>/projects/<project-id>.git`, §4.11.2), else
+`<base>/<ws>/environments/<env>/repo.git`. A container sees its own session folder, not its
+siblings' (an improvement on the first version, which mounted every session's worktree). Before
+`podman run` the node checks every mount source: real path inside `<base>/<ws>` of the
+session's own workspace, no symlink in the path, and inside no other workspace's directory.
 
-Why: `keep-id` so the node's file tools (in the node process) and checkpoint git can use what
-the container wrote; no privilege or capabilities (the floor in
-`research/round1/synth/02-permissions-sandbox-security.md` F15); `--read-only` so setup cannot
-persist outside the volume; no published ports; `--pull=never` (pulled by digest at creation);
-`relabel=private` for SELinux; the same absolute mount path because worktrees store absolute
-paths.
+Why: `keep-id` so the node's file tools and checkpoint git can use what the container wrote; no
+privilege or capabilities (the floor in `research/round1/synth/02-permissions-sandbox-security.md`
+F15); `--read-only` so setup cannot persist outside the volume; no published ports;
+`--pull=never` (pulled by digest at creation); `relabel=private` for SELinux; the same absolute
+mount paths because worktrees store absolute paths.
 
 Each `bash` call runs as `podman exec --workdir … <ctr> bash -c <cmd>`, with the allow-listed
 environment (T3). Killing the `podman exec` client may not kill the process inside, so the
@@ -459,13 +495,8 @@ environment's network setting and a timeout. It is never read from the repositor
 compose files are never read. Image layers are shared between workspaces on the node; they
 are read-only and pinned by digest, so sharing them leaks only which images exist.
 
-**Worktrees and checkpoints.** `<wsroot>/environments/<env>/` holds `repo.git` (bare clone),
-`worktrees/<session>` (branch `rizzy/<session-short>`, not detached like sub-agents,
-`git.rs:866-876`), `cache/` and `home/`. The shadow repository is keyed by work-tree path
-(`gate3:crates/node/src/git.rs:568-572`) under a per-workspace checkpoints folder
-(§4.10.3), so checkpoints, pruning and undo are per session; the no-checkpoint rule for
-`.git/harness-worktrees` (`git.rs:536-540`) keeps covering sub-agents only, which isolate
-inside the same container (`crates/node/src/session.rs:769-824`).
+**Checkpoints** are per session folder, in `<data>/ws/<ws>/checkpoints/` (§4.11). C.13
+redesigns what they hold.
 
 ### 4.7 Forge operations, Connections and commit identity
 
@@ -478,13 +509,13 @@ answer goes into `workspace_connection_choice`. Owners and admins also add the w
 own forge account (`workspace_forge_accounts`).
 
 **Git with network.** The hardened git refuses every transport (`protocol.allow=never`,
-`credential.helper=`; `crates/node/src/git.rs:59-70`). Clone, classification fetch and push
-use a separate path: `protocol.https.allow=always` on top of the same overrides, the URL given
+`credential.helper=`; `crates/node/src/git.rs`). Clone, classification fetch and push use a
+separate path: `protocol.https.allow=always` on top of the same overrides, the URL given
 explicitly (never the repository's `remote.*`), and the token as an `http.<url>.extraHeader`
 through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, never in `argv` (Landlock leaves `/proc` readable,
-`gate3:crates/tools/src/sandbox.rs:44-50`). It arrives in a `forge.grant` (one host, one
-operation, one session, so one workspace), only with `[forge] push = true` and the host in
-`[forge] hosts`.
+`crates/tools/src/sandbox.rs:44-50`). It arrives in a `forge.grant` (one host, one operation,
+one session, so one workspace), only with `[forge] push = true` and the host in `[forge]
+hosts`. The first clone of a project's repository uses the same path (§4.11.2).
 
 **Commit identity for autosave.** These rules are my reading of the owner's words: the
 workspace account pushes and commits, and the session owner's account gives the linked
@@ -494,55 +525,54 @@ co-author.
 |---|---|
 | Push credential | The workspace forge account's token. No workspace account for that host: no autosave (§9). |
 | Author and committer | The workspace forge account: its display name and the commit e-mail the forge links to it. |
-| `Co-authored-by` trailer | The session owner, from the account chosen in `workspace_connection_choice` for that host: `Co-authored-by: <display name> <commit e-mail>`. The forge links a co-author by that e-mail, so this is what makes the line link to the account. |
-| Fallback trailer | No connected account: `Co-authored-by: <harness display name> <e-mail>`. A co-author is shown, but it is not linked. The harness stores no e-mail today, so the fallback needs one (§9). |
+| `Co-authored-by` trailer | The session owner, from the account chosen in `workspace_connection_choice` for that host: `Co-authored-by: <display name> <commit e-mail>`. |
+| Fallback trailer | No connected account: `Co-authored-by: <harness display name> <e-mail>`. Shown, not linked. The harness stores no e-mail today, so the fallback needs one (§9). |
 | Message | `rizzy-harness autosave before environment deletion`, then the trailer. No session title. |
 
 ### 4.8 Deleting an environment
 
 New messages: `env.create`, `env.delete`, `env.classify` → `env.classification`, `env.save` →
 `env.saved`. Each names its workspace, and the node refuses one whose environment is not in
-that workspace's data root. `node.hello` lists the node's environments by workspace so the
+that workspace's directory. `node.hello` lists the node's environments by workspace so the
 master can reconcile. `env.classification` carries, per session: id, class, reason codes
 (`dirty`, `untracked`, `unpushed`, `stash`, `submodule`, `detached`, `in_progress_op`,
-`forge_unreachable`, `no_remote`) and counts. It never carries file names or content.
+`forge_unreachable`, `no_remote`) and counts. It never carries file names or content. The same
+classification serves deleting a session folder and detaching a workspace (§4.10.5, §4.11).
 
 **Classification (node, read-only git):**
 
-| Finding in the session's worktree | Class |
+| Finding in the session's `files/` | Class |
 |---|---|
-| Not a git repository, or a repository with no forge remote the environment may push to (nothing can be saved automatically; A5) | c |
+| Not a git repository, or a repository with no forge remote the session may push to (nothing can be saved automatically; A5) | c |
 | Clean status (untracked included, ignored excluded), no stash, no merge/rebase in progress, submodules clean, and HEAD reachable from a ref on the forge checked by `ls-remote` now | a |
 | Anything else, or the forge cannot be reached | b |
 
-A stash belongs to the repository, not to one worktree, so any stash in `repo.git` makes
-every session in the environment class `b`. Ignored files are never work and are never
-pushed; their owner sees how many there are.
+A stash belongs to the repository, not to one worktree, so any stash in the shared repository
+makes every session using it class `b`. Ignored files are never work and are never pushed;
+their owner sees how many there are.
 
 **The flow:**
 
 1. A user with `settings` opens "Delete environment", and the master sends `env.classify`. If
    the node is offline, only scheduling is offered, and classification runs at the deadline.
 2. The dialog lists the requester's own sessions by title with their class. For everyone
-   else it shows counts per class and, per user, name, handle and number of unsaved sessions
-   ("John Doe @john has 2 unsaved sessions"). The autosave choice is offered when the node has
-   `[forge] push` and the workspace has a forge account for the host.
+   else it shows counts per class and, per user, name, handle and number of unsaved sessions.
+   The autosave choice is offered when the node has `[forge] push` and the workspace has a
+   forge account for the host.
 3. If every session is class `a`, the requester may delete now or schedule. Any `b` or `c`
    means schedule only: 7 days by default, at least 1.
 4. **Grace period.** New sessions are refused (409, naming the deadline). Existing sessions
-   keep working so people can commit and push. Every affected user gets an in-app notice
-   (`crates/master/src/notices.rs:1-8` gains a kind) and a WebSocket event; there is no e-mail.
-   The requester or any other owner or admin can cancel. Every step writes an audit row.
-5. **Deadline** (master clock; the scheduler also runs at start): classify again. If autosave
-   was chosen, send `env.save` for every `b` session, then `env.delete`, then archive the
-   sessions. A failed push keeps that session `b` and delays the deletion once, by a day, with
-   a notice to the owner. After that the deletion goes ahead.
+   keep working so people can commit and push. Every affected user gets an in-app notice and a
+   WebSocket event. The requester or any other owner or admin can cancel. Every step writes an
+   audit row.
+5. **Deadline** (master clock): classify again. If autosave was chosen, send `env.save` for
+   every `b` session, then `env.delete`, then archive the sessions. A failed push keeps that
+   session `b` and delays the deletion once, by a day, with a notice to the owner.
 6. **Node offline at the deadline:** sessions are archived at once, the deletion is
    `waiting_node`, and the autosave (if chosen) and `env.delete` run at the next hello.
-   **Node dead:** an owner can "forget" the environment, and its files are lost with the
-   machine.
-7. On the node, `env.delete` stops the containers and moves the folder to the trash for
-   `keep_deleted_days`, then removes it.
+   **Node dead:** an owner can "forget" the environment.
+7. On the node, `env.delete` stops the containers and moves the folders to the trash for
+   `keep_deleted_days`, then removes them, with the checks of §4.11.4.
 
 **Autosave (`env.save`).** Commit the tracked changes and the untracked files that are not
 ignored. Skip secret-like names (the artifact list, T18), files over 10 MB and anything past
@@ -550,59 +580,62 @@ ignored. Skip secret-like names (the artifact list, T18), files over 10 MB and a
 force, never onto an existing branch. Commit with the identity in §4.7. Report skipped files to
 their owner only.
 
-**Detaching a workspace from a node** that hosts environments of that workspace first
-schedules deletion of each of them (§4.10.5); **revoking a node** does it for every workspace.
-The attachment is removed when its last environment is gone or forgotten.
+**Detaching a workspace** that has environments or session folders on a node first runs this
+flow for them (§4.10.5); **revoking a node** does it for every workspace.
 
 ### 4.9 Fork
 
 "Continue elsewhere" is for the session's owner only. The master creates a new session and
 sends the old history in `session.seed` batches: user and assistant text, each tool call cut
-to one line, at most 2 MiB per batch. The new node writes them as `history_imported` events in
-its own log, and `session_forks` links the two sessions. Files come back from the forge (the
-autosave branch, if there is one); a fork copies no files. The new session's node must be
-attached to the session's workspace; a fork never changes a session's workspace.
+to one line, at most 2 MiB per batch. The new node writes them as `history_imported` events,
+and `session_forks` links the two sessions. Files come back from the forge (the autosave
+branch, if there is one); a fork copies no files. The new session's node must be attached to
+the session's workspace; a fork never changes a session's workspace.
 
 ### 4.10 A node in several workspaces
 
 #### 4.10.1 The attached list and the checks
 
-**The node decides which workspaces it serves.** `<data>/attachments.toml`, 0600, in the node's
-data directory, which no session may include and no tool may touch
-(`gate3:crates/node/src/policy.rs:288-334`, PLAN.md T10):
+**The node decides which workspaces it serves.** `<data>/attachments.toml`, 0600, at the top
+of the node's data directory, which no session may include and no tool may touch
+(`crates/node/src/policy.rs:288-334`, PLAN.md T10):
 
 ```toml
 [[workspace]]
-id = "ws-…"                  # not a secret
+id = "0193f4c2…"             # harness_core::new_id(): UUID v7, 32 lowercase hex; not a secret
 name = "Team X"              # as the master named it at pairing; display only
 paired_ms = 1762819200000
 master = "sha256:…"          # the master certificate it was paired with
-host_roots = ["/srv/code/team-x"]   # optional; may only narrow (§4.10.3)
+
+[[workspace.link]]           # §4.11.3; written only by `node link`
+name = "foo"
+path = "/home/me/code/foo"
 ```
 
 | Rule | Why |
 |---|---|
-| Only `node pair` adds an entry, after the node owner's yes (§4.4). | Widening is the node owner's act on the node, never the master's. |
-| `node detach <id>` removes one, offline if need be (§4.10.5). The running node may also remove an entry when the master reports a detach (a narrowing). **Recommendation** (Q3). | A detach from the master's side must take effect on the node without waiting for its owner. Removing is narrowing, so it is allowed; adding never is. |
-| Writes go through a lock file and an atomic rename; `node run` re-reads the file when its modification time changes, at each check. | `node pair` runs while `node run` runs; no restart is needed to attach. |
+| Only `node pair` adds a workspace and only `node link` adds a link, each after the node owner's yes on the node. | Widening is the node owner's act, never the master's. |
+| `node detach <id>` and `node unlink` remove, offline if need be (§4.10.5). The running node also removes a workspace when the master reports a detach. | A detach from the master's side must take effect on the node without its owner; removing only narrows. |
+| Writes go through a lock file and an atomic rename; `node run` re-reads the file when its modification time changes, at each check. | `node pair` runs while `node run` runs; no restart is needed. |
 | A missing or unparseable file means "no workspace": every session is refused, with the reason. | Fail closed. |
-| The node announces its list in `node.hello` (`workspaces: [id…]`). | The master reconciles; it never adds an attachment from it. |
+| The node announces its workspace ids and, per workspace, its link names (never paths) in `node.hello`. | The master reconciles and shows link names; it never adds an attachment or a link from it. |
 
-**Where the workspace id lives in the protocol.** `session.create` gains a required
-`workspace_id` (beside `gate3:crates/protocol/src/lib.rs:131-150`); `session.prompt`,
-`session.grant`, `env.*` and the approval, restore and set-agent commands carry it too. It is
-not a secret: it is an opaque id that names a workspace, like `session_id`. The node stores it
-in its own session row in `node.db`, not in an event, because T10 keeps the workspace mapping
-master-side and the node must not assert it (T7).
+**Where the workspace id lives in the protocol.** `session.create` loses `cwd` and gains a
+required `workspace_id` and `files: Plain | Project { project_id, repo_url?, branch } | Link {
+name } | Environment { env_id }` (beside `crates/protocol/src/lib.rs:131-150`);
+`session.prompt`, `session.grant`, `env.*` and the approval, restore and set-agent commands
+carry `workspace_id` too. It is not a secret. The node keeps it implicitly: the session's
+folder is `<base>/<workspace-id>/<session-id>/`, so the path holds it, and a restart finds it
+there. It is not written into an event: T10 keeps the workspace mapping master-side.
 
 **The checks.**
 
 | Where | When | Check |
 |---|---|---|
 | Master | create, prompt, approval, restore, set-agent | An `active` `workspace_nodes` row for (effective workspace, node), and the effective workspace equals the session's (§4.1). |
-| Node | create | `workspace_id` is on the attached list; the cwd or environment is inside that workspace's root (§4.10.3); host sessions only as §4.10.3 allows. Stores the id. |
-| Node | every later command for the session | The command's `workspace_id` equals the stored one, and the stored one is still on the list. A mismatch is refused and logged: it means a master bug or a lying master. |
-| Master | `node.hello` | Attachments active on the master but missing from the node's list are shown as "the node no longer serves this workspace" and treated as a node-side detach (§4.10.5). Entries on the node's list with no master row are ignored, and the node is told so (`attachment.unknown`) so `node workspaces` can show it. |
+| Node | create | `workspace_id` is on the attached list; the folder is derived (§4.11), never taken from the message; a link name must be a link of that workspace; host sessions only as §4.10.3 allows. |
+| Node | every later command | The command's `workspace_id` equals the one in the session's folder path, and it is still on the list. A mismatch is refused and logged. |
+| Master | `node.hello` | Attachments active on the master but missing from the node's list are treated as a node-side detach (§4.10.5). Entries on the node's list with no master row are ignored, and the node is told (`attachment.unknown`). |
 
 **One of each per node.** One key, one link, one link generation (C.1). All attached
 workspaces' sessions travel on that link, each command naming its workspace. A reconnect
@@ -611,410 +644,556 @@ whose attachment is active and fences the rest (C.1's epoch).
 
 #### 4.10.2 What one session can reach of another workspace's today
 
-Established by reading `integration/gate3`, for two workspaces' sessions on one node as the
-code stands (one Unix user, `[sandbox] mode = "required"` enforced):
+Established by reading `main`, for two workspaces' sessions on one node as the code stands (one
+Unix user, `[sandbox] mode = "required"` enforced):
 
 | Path | What A reaches of B today | Evidence |
 |---|---|---|
-| Choosing the folder | **Anything.** A session may be created in any folder under any `workspace_roots` entry, `$HOME` by default; the cwd is whatever the client sent. A can simply open B's project folder. | `gate3:crates/node/src/policy.rs:14-15`, `:166`, `:251-276`; `gate3:crates/master/src/http.rs:1228` |
-| Shell (Landlock) | Not the whole filesystem. Read-write: the session's cwd, its own temp folder `<data>/sandbox-tmp/<session>` (0700), `[sandbox] write` and five device files. Read-only: `/usr /bin /sbin /lib* /etc /opt /proc` and `[sandbox] read`. So B's folder is unreachable unless it lies inside A's cwd, under one of those system folders, or under `[sandbox] read`/`write`. `/tmp` is not writable. | `gate3:crates/tools/src/sandbox.rs:11-15`, `:44-61`, `:203-226`, `:337-397`; `gate3:crates/cli/tests/sandbox.rs:167-188` |
-| Shared caches | **Read-write for every session of every workspace**: whatever `[sandbox] write` lists (`~/.cache`, `~/.npm`) is one folder for all. A poisons B's build cache. | `gate3:crates/tools/src/sandbox.rs:215-217`; `gate3:crates/node/src/policy.rs:65-66` |
-| `/proc` | Readable. Other domains' `environ`, `fd`, `mem`, `cwd` are denied (ptrace-class); tested only against the harness process itself. `cmdline`, `status` and `stat` of B's processes are not ptrace-gated, so A sees B's command lines. Not tested. | `gate3:crates/tools/src/sandbox.rs:44-47`; `gate3:crates/cli/tests/sandbox.rs:231-253` |
-| Signals | Denied outside the domain only with Landlock ABI 6 (best-effort); on an older kernel A can kill B's processes (same uid). Tested against the harness only. | `gate3:crates/tools/src/sandbox.rs:22-23`, `:614-619`; `gate3:crates/cli/tests/sandbox.rs:402` |
-| Unix sockets | Before ABI 9, A can connect to any pathname socket, including B's and the session bus, which starts programs outside the sandbox: a full escape to the node user. | `gate3:crates/tools/src/sandbox.rs:23-26`; gate3 `PLAN.md` T10, T11 (lines 463-464); `gate3:crates/cli/tests/sandbox.rs:371` |
-| Loopback network | With `network = "on"` (the default) A connects to whatever B's sessions listen on at `127.0.0.1`. With `"off"`, TCP is denied, UDP is not. Not tested between sessions. | `gate3:crates/tools/src/sandbox.rs:76-85` |
-| `read`/`grep`/`glob`/`write`/`edit` | Run in the node process, not under Landlock. Confined to the session's cwd by a path walk; with `allow_outside_workspace = true` (node-wide) they reach every path the node user can, except the data directory, so all of B. | `gate3:crates/tools/src/lib.rs:204-252`; `gate3:crates/node/src/policy.rs:17-19` |
-| Checkpoints | Shadow repositories `<data>/checkpoints/<hash of folder>.git`, node-wide and keyed by folder: sessions of A and B in one folder share one, and A's restore rewrites B's files (P5). Not reachable from the shell. | `gate3:crates/node/src/git.rs:568-572`; `gate3:crates/cli/src/main.rs:525` |
-| Git worktrees | A sub-agent worktree's shell gets read-write on the repository's `.git`. Cross-workspace only when the folder is shared. | `gate3:crates/tools/src/sandbox.rs:365-372` |
-| Other node state | `tool_output` is in memory per session with random ids; graphify output is keyed by folder hash (node-wide); the artifact stage is one node-wide folder inside the data directory, and a fetch looks a stage up by session and stage id together. None is reachable from the shell. | `gate3:crates/tools/src/outputs.rs:1-5`; `gate3:crates/tools/src/graphify.rs:48-53`; `gate3:crates/node/src/artifacts.rs:52`, `:790-814` |
-| Containers | Not built. Planned: one bind mount of one environment, own PID, mount and network namespaces, same uid as the node (`keep-id`). Whether rootless `pasta` lets a container reach the host's loopback is not established (test D14, C.6). | §4.6 |
-| Capacity | No node-wide cap on running turns or commands: one lane per session, any number of lanes. The link's queues are shared (64 in, 256 out on the node). | `gate3:crates/node/src/lib.rs:40-49`, `:282-330` |
-
-**What that means.** The largest hole is not the sandbox: it is that nothing ties a folder to a
-workspace. The sandbox itself is an allow-list and already keeps a session out of folders it
-was not given; what it shares between workspaces is the caches, `/proc` metadata, the loopback
-network, and, before ABI 9 (Linux 7.1, per `research/round2/synth/05-links-workers-protocols.md`
-§6.5), an escape to the node user through the session bus.
+| Choosing the folder | **Anything.** A session may be created in any folder under any `workspace_roots` entry, `$HOME` by default; the cwd is whatever the client sent. | `crates/node/src/policy.rs:14-15`, `:166`, `:251-276`; `crates/master/src/http.rs:1240` |
+| Shell (Landlock) | Not the whole filesystem. Read-write: the session's cwd, its temp folder `<data>/sandbox-tmp/<session>` (0700), `[sandbox] write`, five device files. Read-only: `/usr /bin /sbin /lib* /etc /opt /proc` and `[sandbox] read`. `/tmp` is not writable. | `crates/tools/src/sandbox.rs:11-15`, `:44-61`, `:203-226`, `:337-397`; `crates/cli/tests/sandbox.rs:167-188` |
+| Shared caches | Read-write for every session of every workspace: `[sandbox] write` is one folder for all. | `crates/tools/src/sandbox.rs:215-217`; `crates/node/src/policy.rs:65-66` |
+| `/proc` | Readable. Other domains' `environ`, `fd`, `mem`, `cwd` are denied (ptrace-class), tested only against the harness process. `cmdline`, `status`, `stat` of B's processes are not ptrace-gated: A sees B's command lines. Not tested. | `crates/tools/src/sandbox.rs:44-47`; `crates/cli/tests/sandbox.rs:231-253` |
+| Signals | Denied outside the domain only with Landlock ABI 6 (best-effort). Tested against the harness only. | `crates/tools/src/sandbox.rs:22-23`, `:614-619`; `crates/cli/tests/sandbox.rs:402` |
+| Unix sockets | Before ABI 9, any pathname socket, the session bus included, which starts programs outside the sandbox: a full escape to the node user. | `crates/tools/src/sandbox.rs:23-26`; `PLAN.md` T10, T11 (lines 484-485); `crates/cli/tests/sandbox.rs:371` |
+| Loopback network | With `network = "on"` (default) A connects to whatever B listens on at `127.0.0.1`. With `"off"`, TCP is denied, UDP is not. | `crates/tools/src/sandbox.rs:76-85` |
+| File tools | Run in the node process, not under Landlock; confined to the session's cwd by a path walk; with `allow_outside_workspace = true` they reach every path the node user can, except the data directory. | `crates/tools/src/lib.rs:204-252`; `crates/node/src/policy.rs:17-19` |
+| Checkpoints | `<data>/checkpoints/<hash of folder>.git`, keyed by folder: sessions in one folder share one, and a restore by one rewrites the other's files. Not reachable from the shell. | `crates/node/src/git.rs:568-572`; `crates/cli/src/main.rs:530` |
+| Conversations | Every session of every workspace is in `<data>/node.db` for good, readable by the node's owner. Not reachable from the shell (data directory). | `crates/cli/src/main.rs:524`; `PLAN.md` §1 |
+| Other node state | `tool_output` in memory per session; graphify output keyed by folder hash; the artifact stage is one folder in the data directory, a fetch looks a stage up by session and stage id. | `crates/tools/src/outputs.rs:1-5`; `crates/tools/src/graphify.rs:48-53`; `crates/node/src/artifacts.rs:52`, `:790-814` |
+| Capacity | No node-wide cap on running turns or commands: one lane per session, any number of lanes. The link's queues are shared (64 in, 256 out on the node). | `crates/node/src/lib.rs:40-49`, `:282-330` |
 
 #### 4.10.3 Separation: decided
 
-**A data root per workspace.**
+**Files are separated by construction.** Every session folder is under its own workspace's
+directory and is derived on the node (§4.11). The Landlock profile of a host session grants
+read-write to exactly its own `files/` and its own temp folder (plus its workspace's `cache/`
+and the git directory of its project repository, §4.11.2), read-only to `SYSTEM_READ` and
+`[sandbox] read`; other sessions' and other workspaces' folders are not granted, and Landlock is
+an allow-list. Before applying the profile the node checks, as today's `exposes` does
+(`crates/tools/src/sandbox.rs:132-140`), that no granted path equals, contains or is inside the
+data directory or another workspace's directory. The file tools' path walk
+(`crates/tools/src/lib.rs:217-252`) is the same boundary: the session's `files/` only. On a
+shared node `[sandbox] write` is refused (its entries become `<base>/<ws>/cache/` with
+`XDG_CACHE_HOME` pointing there) and `allow_outside_workspace = true` is refused.
 
-```
-<workspace_data>/<workspace_id>/          0700, created at pairing, removed at detach (to trash)
-  environments/<env>/                     volumes (§4.6)
-  cache/                                  this workspace's caches (replaces [sandbox] write)
-  home/                                   HOME for host sessions on a shared node
-<data>/checkpoints/<workspace_id>/<key>.git   shadows, per workspace, inside the data dir
-<data>/sandbox-tmp/<session>              unchanged (per session already)
-```
+**What stays shared under one Unix user**, whatever the layout:
 
-Host session folders: an attachment's `host_roots` (set by `node pair --root`, each inside a
-`workspace_roots` entry of `node.toml`). The node refuses, at pairing and at start, two
-attachments whose roots overlap (one equal to or inside another), a root under a folder the
-sandbox grants every command, and a root that contains the data directory or
-`workspace_data`. A host session's cwd must be inside its own workspace's `host_roots`. Host
-roots are the operator's folders and are never deleted by the harness.
-
-**The sandbox profile.** Landlock only adds rights, and a right on a folder covers everything
-below it; there is no deny rule. So "A cannot reach B's root" is built, not configured: the
-profile for a session of A grants exactly A's cwd (inside A's root), A's session temp folder,
-A's `cache/` (and `home/` on a shared node), the device files, `SYSTEM_READ` and `[sandbox]
-read`, and before applying it the node checks that no granted path equals, contains or is
-inside the data directory or **any other attached workspace's root**. This is today's
-`exposes` check (`gate3:crates/tools/src/sandbox.rs:132-140`) with the protected set
-extended by the other roots, computed per session. On a shared node `[sandbox] write` is
-refused at start (it would be one folder for all workspaces); its entries become per-workspace
-`cache/` with `XDG_CACHE_HOME` pointing there. `[sandbox] read` stays shared: it holds the node
-owner's toolchains, read-only, and must not overlap any root.
-
-**File tools.** `read`, `grep`, `glob`, `write`, `edit` run in the node process and are not
-under Landlock in any mode, the container mode included. Their separation is the path walk in
-`ToolCtx::resolve` (`gate3:crates/tools/src/lib.rs:217-252`), extended so that every other
-workspace's root is refused as the data directory is (`refuse_protected`). On a shared node
-`allow_outside_workspace = true` is refused at start: it would let A's tools read all of B.
-
-**Host sessions on a shared node: refused by default. Recommendation (Q1).** A node with more
-than one attachment refuses host sessions unless `[execution] host_shell_shared = true`, and
-even then only with `[sandbox] mode = "required"` enforced. With the key set, the node prints
-at start, and the Attach dialog shows, what stays open between workspaces under one Unix user:
-
-| Residual for host sessions under one Unix user | Closed by |
+| Residual for host sessions | Closed by |
 |---|---|
-| Before Landlock ABI 9, the session bus or any pathname socket starts a program outside the sandbox: A becomes the node user and reads B, every grant in memory included. | ABI 9 (Linux 7.1); or a container. |
-| A sees B's command lines and process list in `/proc`. | A container (own PID namespace); `hidepid` on `/proc` is the host's choice. |
-| A connects to anything B listens on at `127.0.0.1`; with network off, UDP still goes. | A container with its own network namespace (if D14 shows `pasta` keeps loopback apart); seccomp (O4) for UDP. |
-| Before ABI 6, A can signal B's processes. | ABI 6 (Linux 6.12); or a container. |
-| A fills the disk, the CPU or the memory B needs. | The share (§4.10.4) for slots; nothing for disk on a plain folder. |
-| A bug in the file tools' path walk is a read of B. | Nothing on the host or in a container: file tools run in the node process. Tests in §8. |
+| Before Landlock ABI 9 (Linux 7.1, `research/round2/synth/05-links-workers-protocols.md` §6.5), the session bus or any pathname socket starts a program outside the sandbox: A becomes the node user and reads B's files and every grant in the node's memory. | ABI 9; or a container. |
+| Before ABI 6, A can signal B's processes. | ABI 6, included in ABI 9. |
+| A sees B's command lines in `/proc`. | A container (own PID namespace); `hidepid` on `/proc`, the host's choice. |
+| A connects to anything B listens on at `127.0.0.1`; with network off, UDP still goes. | A container with its own network namespace (if test D14 confirms); seccomp (O4) for UDP. |
+| A fills the disk, CPU or memory B needs. | The share (§4.10.4) for slots; nothing for disk. |
+| A bug in the file tools' path walk is a read of B. | Nothing: file tools run in the node process in every mode. Tests in §8. |
 
-Containers are the separated path: B's volume is not mounted, B's processes are in another
-PID namespace, and the network is its own. They still share the uid with the node (an escape
-from the container is the node user) and the file tools' path walk.
+**Host sessions on a shared node: allowed from Landlock ABI 9, refused below it by default.
+Recommendation (Q1).** `[execution] host_shell_shared = "abi9"` (the default) allows host
+sessions on a shared node only when the sandbox self-test reports ABI 9 or newer enforced;
+below that they are refused with the reason; `"always"` allows them below ABI 9 (an explicit,
+logged choice); `"never"` refuses them. My first draft refused them always by default, because
+files were not separated; with the layout they are, and the decisive remaining hole is the
+escape, which ABI 9 closes. What is left at ABI 9 (command lines in `/proc`, loopback services,
+UDP, capacity) is a leak between people each workspace trusts with a shell, not a way into the
+other workspace's files or keys.
 
-The price of the other answer (host sessions allowed by default on a shared node): every
-shared node would carry the residuals above without its owner choosing them, and on kernels
-before 7.1 (most kernels in use today; not established per distribution), one prompt-injected agent in any
-workspace could read every other workspace's files and keys on that node. The price of this
-answer: until environments exist (N.4, months after N.1), a shared node runs host sessions
-only for owners who set the key; the common home case (my Personal workspace plus one team on
-my own machine) needs that one line. The separation a different Unix user per workspace would
-give is not planned: it needs root and a privileged helper on the node.
+Price of this answer: few kernels have ABI 9 today (not established per distribution), so in
+practice a shared node refuses host sessions until its kernel is new, unless its owner sets
+`"always"`; and at ABI 9 a prompt-injected agent in A can still reach B's unauthenticated
+services on loopback. Price of "allowed" by default: below ABI 9 one injected agent in any
+workspace reads every other workspace's files and keys on that node. Price of "refused" by
+default: the common home case (my Personal workspace and one team on my own machine) needs a
+setting or Podman even on a new kernel.
+
+Containers are the separated path for all of it: own mount, PID and network namespaces. They
+still share the uid with the node (an escape from the container is the node user) and the file
+tools' path walk. A different Unix user per workspace, the real separation for host sessions,
+is not planned: it needs root and a privileged helper.
 
 #### 4.10.4 A fair share of the node
 
 Shared by every workspace on the node: command slots (`[limits] max_commands`, new), running
-containers (`[containers] max_running`, new), environments (`max_environments`), the link, the
+containers (`[containers] max_running`, new), environments, the spool's disk, the link, the
 disk. Turns are not capped: a turn mostly waits for a model.
 
 | Resource | Rule | Bound for B while A is at its share |
 |---|---|---|
-| Command slots (a `bash` call or other child process), `share = "borrow"` (default, **recommendation**, Q4) | Each attached workspace is guaranteed `max(1, max_commands / n)` slots, n the number of attachments. A free slot may be borrowed by anyone. When a slot frees, a workspace below its guarantee gets it before any workspace at or above it. No command is preempted. | B's command starts when the first running command on the node ends: at most the shortest running command, capped by `bash_timeout_max_s`. |
-| Command slots, `share = "strict"` | Each workspace has `max(1, max_commands / n)` slots and never more. | B never waits for A. A alone uses only its share of the machine. |
-| Running containers | Strict: `max(1, max_running / n)` each. A container lives for its session and cannot be handed back. | B never waits for A. |
+| Command slots, `share = "borrow"` (default, **recommendation**, Q4) | Each attached workspace is guaranteed `max(1, max_commands / n)` slots. A free slot may be borrowed by anyone. When a slot frees, a workspace below its guarantee gets it first. No command is preempted. | B's command starts when the first running command on the node ends: at most the shortest running command, capped by `bash_timeout_max_s`. |
+| Command slots, `share = "strict"` | Each workspace has `max(1, max_commands / n)` slots and never more. | B never waits for A; A alone uses only its share. |
+| Running containers | Strict: `max(1, max_running / n)` each. | B never waits for A. |
 | Environments | Strict: `max(1, max_environments / n)` each. | B never waits for A. |
-| The link | Shared, first come. One call streams at most `tool_stream_bytes`; B.7 decides whether control frames need their own lane. | Not bounded per workspace; measured in B.10. |
-| Disk | A free-space floor for the whole node (§6). No per-workspace quota on a plain folder. | None: A can fill it, and B's new sessions are refused. Residual. |
+| Spool | `spool_mb` per workspace (§4.12). | A's full spool ends A's turns, not B's. |
+| The link | Shared, first come; one call streams at most `tool_stream_bytes`; B.7 decides whether control frames need a lane. | Not bounded per workspace; measured in B.10. |
+| Disk | A free-space floor for the whole node (§6). No per-workspace quota. | None. Residual. |
 
-`max_workspaces` must not exceed `max_commands` (refused at load), so every workspace has at
-least one slot. The caps live in `node.toml` only; the master is told the workspace's own share
-in `node.hello` and shows it. What a user sees when their workspace is at its share: the
-command's card shows "waiting for a free slot on this node (this workspace may run 2 at a
-time)" as a line of the tool's live output, which needs no new event type; the same text
-appears when a container cannot start. It never names another workspace or how many there are.
+`max_workspaces` must not exceed `max_commands` (refused at load). The caps live in `node.toml`
+only; the master is told the workspace's own share in `node.hello`. A user whose workspace is at
+its share sees, as a line of the tool's live output, "waiting for a free slot on this node (this
+workspace may run 2 at a time)"; it never names another workspace or how many there are.
 
 #### 4.10.5 Detach and revoke
 
 **Detach one workspace W from node N.** Allowed to W's owners and admins from the master, and to
-N's owner from N's CLI. The CLI path must always work, offline included: it is the machine
-owner's right to stop serving a workspace.
+N's owner from N's CLI, which must always work, offline included.
 
 | Step | From the master (W's admin) | From the node (`node detach W`) |
 |---|---|---|
-| 1 | Environments of W on N: the §4.8 flow, scoped to them; scheduled when anything is unsafe. The attachment goes to `detaching`; new sessions of W on N are refused (409). | The CLI runs the classification locally (read-only git) and prints it; the owner confirms. No autosave (no forge grant offline). |
-| 2 | At the deadline or at once if all safe: `env.delete` for each, then `workspace.detach { workspace_id }` to N. | The entry leaves the attached list at once; the running node kills W's running commands and refuses W's commands. |
-| 3 | N removes W from its list, kills W's commands, drops W's grants, moves W's data root to the trash. | W's data root goes to the trash. At the next hello the master sees W missing and does the master side: archive, bump epochs, drop the row. |
-| 4 | The master archives W's sessions on N, bumps their `owner_epoch` (C.1), drops the row. | |
+| 1 | Environments and session folders of W on N: the §4.8 flow; scheduled when anything is unsafe. The attachment goes to `detaching`; new sessions of W on N are refused (409). | The CLI runs the classification locally (read-only git) and prints it; the owner confirms. No autosave (no forge grant offline). |
+| 2 | At the deadline, or at once if all safe: `env.delete` for each, then `workspace.detach { workspace_id }` to N. | The entry leaves the attached list at once; the running node kills W's commands and refuses W's commands. |
+| 3 | N stops W's containers and commands, drops W's grants and W's histories in memory, flushes W's spool (§4.12; anything not acknowledged is sent first, or kept in the trash if the link is down), removes W from its list, then removes both trees (§4.11.4). | Same, minus the flush when offline: the unacknowledged spool goes to the trash with the folders. |
+| 4 | The master archives W's sessions on N, bumps their `owner_epoch` (C.1), drops the row. | At the next hello the master sees W missing and does step 4. |
 
-In both, the other workspaces' sessions on N keep running: the link stays, `link_gen` is not
-bumped, and nothing outside W's sessions, grants and data root is touched. A late append from
-one of W's sessions is refused by the epoch.
+The other workspaces' sessions on N keep running: the link stays, `link_gen` is not bumped, and
+nothing outside W's sessions, grants, spool and two directories is touched. A late append from
+one of W's sessions is refused by the epoch. Linked folders of W are never deleted: they are the
+owner's; the link entries go.
 
 **Revoke N.** A server admin, or N's owner by `node leave`. Every attachment is detached as
 above, the key is marked revoked, `link_gen` bumps and the link drops. The master revokes N by
-itself when it flaps more than 3 times in 10 minutes (§6), which stops every workspace's use of
-it at once. **Recommendation (Q5):** the last detach also revokes the node, so no pinned key
-outlives every attachment; `local` is the exception (§4.10.6).
+itself when it flaps more than 3 times in 10 minutes (§6). **Recommendation (Q5):** the last
+detach also revokes the node, so no pinned key outlives every attachment; `local` is the
+exception.
 
-**What survives on N's disk.** W's data root (environments, caches, `home/`) in
-`<data>/trash/` for `keep_deleted_days` (3 by default), then removed. W's sessions in `node.db`
-are deleted with it; the master's mirror keeps their history, archived and read-only. W's
-checkpoints go with the data root. Host roots, the operator's own folders, are never deleted.
-After a revoke the node's key file stays until its owner deletes the data directory.
+**What survives on N's disk.** W's two trees in the trash for `keep_deleted_days` (3 by
+default), then removed. After a revoke the node's key file stays until its owner deletes the
+data directory. Linked folders stay.
 
 #### 4.10.6 The `local` node
 
-`local` is an ordinary node under these rules, with one fact that no rule removes: it runs
-inside the master process, as the master's OS user, beside `master.db`, the key-encryption key
-and, once BYOK exists, every workspace's provider keys in memory
-(`gate3:crates/cli/src/main.rs:267-284`, `:472-532`). That is why it is admin-only today
-(gate3 `PLAN.md` T11, line 464; `[nodes] local_node_users`, `gate3:crates/master/src/config.rs:149`;
-`gate3:crates/master/src/workspaces.rs:402-421`).
+`local` is an ordinary node: attached to the first admin's Personal workspace at first start
+(when the claim creates it, `ensure_personal_workspaces`, `crates/cli/src/main.rs:263`), and to
+further workspaces by the pair flow (owner, 2026-11-11; my earlier restriction is withdrawn).
 
-- **At first start** it is attached to the first admin's Personal workspace, when the claim
-  creates it (`ensure_personal_workspaces`, `gate3:crates/cli/src/main.rs:263`).
-- **Its attached list** is `attachments.toml` in the master's data directory. The master
-  process could write it, since master and node are one process: "the node decides" holds for
-  `local` only as far as nothing over HTTP or the protocol writes it. **Recommendation (Q2):**
-  further attachments of `local` are made only by `rizzy-harness node attach-local <workspace>`
-  run on the server's machine as the server's user, never from the web UI. The UI shows that
-  command. This keeps the invariant literal, at the price of a shell on the server for that one
-  act.
-- **Host sessions on `local`** stay what T11 says: server admins only (`local_node_users =
-  "admins"`), whatever workspace the chat is in. In a team workspace, non-admin members may use
-  `local` for **container sessions only**, once N.4 exists.
+**Pairing a node with no terminal of its own.** The server's admins are `local`'s owner. A
+server admin starts the pairing either on the server-admin page ("This server's node", "Attach
+to a workspace"), which shows the pair code, or by `rizzy-harness node pair --local` on the
+server's machine. The workspace's owner or admin types the code as for any node. The node
+owner's yes (step 4 of §4.4) is then a second, separate act by a server admin on that page or in
+that terminal, after it shows the workspace's name. So "the master cannot attach a node by
+itself" holds for `local` in this sense: no workspace admin alone, and no code path without a
+server admin's yes, attaches it. It does not hold in the stronger sense: master and node are one
+process, and the yes arrives over HTTP. **That reading of "the node decides" for `local` is the
+owner's explicit decision of 2026-11-11** and must be written into `PLAN.md` T5 and T11 when
+built.
 
-What attaching `local` to a team workspace exposes: every agentic member's shell would sit, on
-the host, one Landlock rule away from every workspace's keys, every chat and the key that
-unseals the rest, with the session bus escape open before ABI 9 and the file tools running in
-the master's own address space. In a container, the shell is in another mount and PID
-namespace without the data directory; the file tools remain in the master process, guarded by
-the path walk. Options and their cost:
+**The same rule as any shared node, with `local` always counted as shared.** The master's own
+data (every workspace's keys in memory, `master.db`, the key-encryption key) sits beside
+`local`'s sessions as if it were one more tenant, so §4.10.3 applies to `local` from its first
+attachment: host sessions under `host_shell_shared` (ABI 9 by default), the session's own
+folder only, `[sandbox] write` and `allow_outside_workspace` refused.
 
-| Option | Cost |
+**The price, not softened.** A sandbox escape on any other node reaches that node: its
+sessions, its spool, the grants in its memory. On `local` it reaches the master process:
+**every workspace's provider keys, the database with every account and every conversation, and
+the key that unseals the rest** (`PLAN.md` T11, line 485; `crates/cli/src/main.rs:267-284`,
+`:477`). The file tools on `local` run in the master's own address space, guarded by the path
+walk. ABI 9 closes the known escape (the session bus); a kernel bug or a bug in the path walk
+does not need it.
+
+**What changes in T11.** "The embedded node is for server admins (`[nodes] local_node_users =
+"admins"`)" and the 403 for other accounts (`crates/master/src/workspaces.rs:445-470`) go; any
+agentic member of a workspace `local` is attached to may use it, under the shared-node rule.
+`local_node_users` goes from `config.toml` (`crates/master/src/config.rs:149`). This needed the
+owner's explicit yes, given on 2026-11-11.
+
+**Containers on `local`** change the picture for the shell: it runs in another mount, PID and
+network namespace, without the data directory mounted, so the session bus escape and `/proc`
+reading are gone. They do not change it for the file tools (in the master process) or for a
+container escape (the master's uid). **Recommendation:** the Attach dialog for `local` says
+this, and offers container sessions first where the node has them.
+
+### 4.11 The two trees on the node
+
+```
+<base>/                                   [node] workspaces_dir; created 0700 with a marker file
+  .rizzy-harness-base                     marks the folder as a base directory (§4.11.4)
+  <workspace-id>/                         0700; created at pairing
+    <session-id>/                         one per session, sub-agent sessions included
+      files/                              the session's working folder (its cwd)
+    projects/<project-id>.git             bare repository, one per project (§4.11.2)
+    environments/<env>/                   cache/, home/, and repo.git when not a project's
+    cache/                                host sessions' caches (replaces [sandbox] write)
+    .trash/                               removed sessions, kept keep_deleted_days
+<data>/                                   the node's data directory, never visible to a session
+  keys/node.key   attachments.toml   node.toml
+  ws/<workspace-id>/                      0700
+    spool.db                              unacknowledged events (§4.12)
+    checkpoints/<session-id>.git          checkpoint store, per session folder
+    tmp/<session-id>/                     the session's TMPDIR (today <data>/sandbox-tmp/<session>)
+    artifacts-stage/                      staged files (today <data>/artifacts-stage)
+```
+
+Ids are `harness_core::new_id()` (UUID v7, 32 lowercase hex, `crates/core/src/lib.rs:43-46`),
+which workspace ids already are (`crates/store/src/lib.rs:1780`). **Session ids are not**:
+`SessionId` is a `Uuid` whose `Display` is the hyphenated form (`crates/core/src/event.rs:13-31`),
+and today's temp folder name comes from it (`crates/agent-native/src/lib.rs:1841`). Directory
+names use the simple 32-hex form of both, and the node refuses any directory name that is not
+exactly `[0-9a-f]{32}` where an id is expected.
+
+#### 4.11.1 The path decides the workspace
+
+The master no longer sends a folder: `session.create` names the workspace and what the files are
+(§4.10.1), and the node derives `<base>/<workspace-id>/<session-id>/files/`. A `cwd` field from
+the master does not exist in the protocol type; a forged one is an unknown field, ignored, and
+has no effect (test in §8). **`workspace_roots` goes** (`crates/node/src/policy.rs:14-15`): the
+base directory and the linked folders (§4.11.3) replace it, so a session's folder can no
+longer be any folder under `$HOME`.
+
+The profile and the tool boundary are those of §4.10.3. A sub-agent session gets its own
+`<base>/<ws>/<child-id>/files/`: a worktree of the parent's project repository on its own
+branch when it can write, as A.4 requires on `main` (`crates/node/src/session.rs:1075-1078`);
+read-only children are granted the parent's `files/` read-only. That replaces today's
+worktrees under `<repo>/.git/harness-worktrees/` (`crates/tools/src/sandbox.rs:306-322`,
+`:365-372`). A writer child of a session with a plain `files/` is refused, as today.
+
+Checkpoints become per session folder (`<data>/ws/<ws>/checkpoints/<session-id>.git`), which
+ends P5 for derived folders: no two sessions share a folder any more, except through a linked
+folder (§4.11.3). C.13 decides what a checkpoint holds.
+
+#### 4.11.2 Projects
+
+A session of a project with a repository gets `files/` as a **git worktree** of
+`<base>/<ws>/projects/<project-id>.git`, a **bare** repository (it has no working tree of its
+own; every session is a worktree), on its own branch `rizzy/<session-short>`. A session with no
+repository gets a plain, empty `files/`.
+
+| Question | Decision |
 |---|---|
-| **Allowed for containers only; host sessions server-admin-only (recommended)** | Until N.4, `local` in a team workspace is usable only by server admins. |
-| Allowed with a warning, host sessions included | Every agentic member of that team is a server admin in effect: T11 is abandoned. **Needs the owner's explicit yes and a `PLAN.md` change.** |
-| Refused outright for any workspace but server admins' Personal ones | Simplest; a small install with one machine cannot let a team use it at all, even in containers. |
+| How the repository first arrives | Cloned from the forge through the creating user's Connection (the git path of §4.7, a `forge.grant` for one clone) when the project has a `repo_url`; otherwise created empty with one empty initial commit, so worktrees have a base. Before Connections exist (N.6), only empty repositories and linked folders. |
+| Later sessions | `git fetch` with a fresh grant, then `git worktree add -b rizzy/<short> files/ <base ref>`, all through hardened git (T19). |
+| What the shell must be granted | Read-write on the bare repository too: a commit writes objects and refs there. **So committed work is shared between all sessions of a project on that node**: a session can read a sibling's commits and branches through git, though not its uncommitted `files/`. This is the same as environments today and is accepted inside a workspace. A planted hook or config in the bare repository is C.8's residual; our git ignores both. |
+| Deleting a session | Classify its `files/` (§4.8 table). Class `a`: `git worktree remove`, delete the branch if it is reachable from the forge, remove the session folder. Class `b` or `c`: the owner confirms; the worktree is removed, the branch is renamed `rizzy/trash/<session-short>` and kept with the folder in `.trash/` for `keep_deleted_days`. |
+| Project deleted | Every session of it is deleted as above; then the bare repository goes to the trash. |
+
+#### 4.11.3 Linked folders
+
+Today's main single-user flow ("open my checkout in `~/code/foo`") is tied to no workspace by
+its path. It stays possible only as an explicit link **made by the node's owner** on the node:
+
+```
+rizzy-harness node link <workspace> <path> [--name foo]
+rizzy-harness node unlink <workspace> <name>
+```
+
+| Rule | Why |
+|---|---|
+| Recorded in `attachments.toml` under its workspace; never created, changed or widened by anything the master sends. The master knows only the name (§4.10.1). | The node decides; paths stay on the node, as OpenCodex keeps root ids and labels, not paths, on its hub (§7). |
+| The path must exist, be canonical (no symlink in it), pass `check_protected`, and not equal, contain or lie inside the base directory, the data directory or another link. | One folder belongs to at most one workspace; detach of another workspace can never reach it. |
+| A session on a link uses the folder itself as its cwd; its session folder holds no `files/`. The sandbox treats the linked folder as that workspace's: other workspaces' profiles and tools refuse it. | The link is the workspace's folder. |
+| Several sessions on one link share the folder, as today: A.15's restore refusal stays, and checkpoints are keyed per link. | That is P5, accepted for links. |
+| Allowed on a shared node under the same rule as host sessions (§4.10.3), since a link is a host folder. A container session never mounts a link. | No separate rule needed. |
+| Detach and revoke remove the link entries, never the folder. | It is the owner's. |
+
+For the `local` node the server admin runs `rizzy-harness node link` on the server's machine.
+The UI shows the command where it used to offer a folder picker. Cost: one command per folder,
+once; the web UI can no longer open an arbitrary folder, which is the point.
+
+#### 4.11.4 Removing a folder
+
+Before the node removes `<base>/<ws>`, `<base>/<ws>/<session>` or `<data>/ws/<ws>`, in this order:
+
+1. The id is exactly `[0-9a-f]{32}` and is the workspace (or session) being removed.
+2. The base directory's canonical path equals the configured one, it is not `/` or `$HOME`
+   itself, and it holds `.rizzy-harness-base`.
+3. The target is opened with `O_NOFOLLOW | O_DIRECTORY` relative to the base's handle; it must
+   be a directory, not a symlink, on the same filesystem.
+4. Its containers are stopped and no command of it runs.
+5. It is renamed into the same base's `.trash/<id>-<ms>` (atomic, same filesystem).
+6. After `keep_deleted_days`, the trash entry is removed without following links (std's
+   `remove_dir_all` on Linux does not follow symlinks inside the tree).
+
+A linked folder is never a target. A failure at any step stops the removal and is reported.
+
+### 4.12 No conversation at rest on the node
+
+#### 4.12.1 How the log works on `main`
+
+- A session's `append` assigns `seq = head + 1`, scrubs secrets, writes to `node.db` with
+  `synchronous=FULL`, then publishes on the link; the event stays in the store for good
+  (`crates/node/src/session.rs:223-263`; `crates/store/src/lib.rs:49-54`).
+- `emit` returns the append's error, and the first failure ends the turn (T28;
+  `crates/node/src/session.rs:265-286`).
+- The master applies events by `seq`, drops duplicates, marks a differing repeat diverged
+  (`crates/store/src/lib.rs:552-740`), and on a gap or hello sends `resume { session_id,
+  last_seq }`; the node replays from its store (`crates/master/src/lib.rs:902-918`;
+  `crates/node/src/lib.rs:808-850`).
+- **There is no acknowledgement of events.** The master never tells the node what it stored;
+  `ack` exists only for commands (`crates/protocol/src/lib.rs:103`).
+- The node rereads a session's whole log from its store when it loads the session, at the start
+  of every prompt, at restore and at variant selection (`crates/node/src/session.rs:141`,
+  `:190`, `:422`, `:492`, `:737`, `:787`).
+- The mirror is `synchronous=NORMAL` because it "can always re-fetch from the node"
+  (`crates/cli/src/main.rs:260`; `PLAN.md` §2 "Durability").
+
+#### 4.12.2 The design: a spool, not a store
+
+| Part | Decision |
+|---|---|
+| Writer | Unchanged: the session actor assigns `seq` and appends before any effect. |
+| Where the append goes | `<data>/ws/<ws>/spool.db`: the same store code, `synchronous=FULL`, `secure_delete` on (already set for every store, `crates/store/src/lib.rs:525`). The append is fsynced before it is published, as today. |
+| Acknowledgement | New `session.stored { session_id, through_seq }`, master to node, sent only after the mirror transaction that holds that `seq` has committed with `synchronous=FULL`. Batched: at most every 200 ms or 64 events per session. |
+| Deletion | On `session.stored` the node deletes that session's spool rows up to `through_seq`. When a workspace's spool is empty, it runs `wal_checkpoint(TRUNCATE)` (`crates/store/src/lib.rs:1194`), so no deleted event lingers in the WAL. |
+| At rest | Only events the master has not stored, normally none. |
+| History | The node holds the folded history of active sessions in memory. On open or resume the master sends it: new `session.history { session_id, head_seq, events, last }`, in batches of at most 2 MiB (as snapshots today), master to node. |
+| Memory bound | `[limits] history_mb` (64 MiB by default) for all histories together; a session with no running turn and no command for 10 minutes is dropped first; a session whose history alone exceeds the bound is refused with the reason. With no active session the node holds none, so idle RSS stays under the 50 MB invariant. |
+| Reload cost | One `session.history` transfer: 500 events or 2 MiB per batch over the link, then a fold. A long session with stored deltas can be tens of MiB (deltas are stored events today, AUDIT D5); fix plan 4.8 decides whether hydration may skip them (not established that the fold is the same without them: `crates/core/src/view.rs:216`, `:282` fold deltas). |
+| Spool limit | `[limits] spool_mb` per workspace (64 MiB). At the limit the append fails, and the failed-append rule ends the turn (T28): no effect without its event. |
+
+#### 4.12.3 Spool against memory only (Q2)
+
+The owner leaned to "only in memory". What breaks with it, exactly:
+
+| Case | Spool (recommended) | Memory only |
+|---|---|---|
+| A tool's result when the link drops | Durable in the spool, sent at reconnect. | Lost if the node restarts before reconnecting: the effect happened, its record did not. |
+| "The log is written first" | Kept: the spool append is the append. | Either every effect waits for the master's `session.stored` (a round trip before every tool start and approval, and the turn stops the moment the link drops), or "written" means "in this process's memory", which a crash erases. |
+| Node restart mid-turn | The spool holds the turn's tail; the master sends the rest; the node closes the open turn (§4.12.4). | The tail since the last acknowledgement is gone; the master's copy ends mid-turn with no record of which tool ran. |
+| Disk | Unacknowledged events only, normally nothing; `secure_delete` and WAL truncation. | Nothing. |
+| Cost to build | A table, an ack message, deletion, the limit. | About the same code, and every effect path must wait for the master. |
+
+**Recommendation: the spool.** It keeps "the log is written first" true without a round trip per
+effect, and what it leaves at rest is seconds of events while the link is up.
+
+#### 4.12.4 What changes, case by case
+
+| Case | Afterwards |
+|---|---|
+| Node restart mid-turn | At start the node has only its spools. Each session with spooled events is announced in `node.hello` with its spool head. The master sends `session.history` up to its own head; the node checks the spool tail is contiguous (`seq` = master head + 1 ...), sends it, then closes the open turn as `recover_interrupted` does today (`crates/node/src/session.rs:170`). Until the master answers, those sessions wait. |
+| Link drop mid-turn | The turn goes on; events accumulate in the spool up to `spool_mb`; at the limit the turn stops (T28). At reconnect the spool is sent and acknowledged. A3's grant lifetime still bounds the turn. |
+| Failed append ends the turn | Unchanged: the spool append is the append. |
+| Divergence (two writers under one key) | Both processes take their head from the master; both append `head + 1` with different content; the master's rule catches it, as today. A node restored from an old disk has an old spool whose `seq` the master already holds with other content: diverged, refused. |
+| Rewind and restore | Need the checkpoint events: from the history in memory, or from the master by hydration. Without a link and without the history in memory, refused with the reason. |
+| Sub-agent sessions | Sessions like any other: own spool rows, acknowledged, histories in memory while the parent's turn runs. |
+| Incognito chats | Spooled like any other, acknowledged, deleted; the master purges after its TTL. Today they sit in `node.db` until then. |
+| Deleting a session | The master deletes its mirror; the node drops the history and the spool rows and removes the folder (§4.11.4). |
+| A node offline from the master | Cannot open an old session (it has no history). It cannot receive a prompt either, so this costs only offline inspection. |
+| A master that loses its database | Loses every conversation; before, nodes held copies. It already holds every account and key: **back up the master**; the README says so. |
+| A master restored from an older backup | Its head is below events the node already deleted: those events are gone, and the node continues at the master's head + 1. The UI shows the gap as the end of the restored history. |
+| The master's write load | Every event is fsynced on the master, deltas included. B.10 measures the cost; batching the acknowledgement keeps the commits grouped. |
+
+#### 4.12.5 What still lives on the node, and what changes in `PLAN.md`
+
+The claim is **no conversation at rest**, not nothing at rest. Still on the node: the session's
+files, the project repositories, the checkpoint store (it holds file contents), session temp
+folders, staged artifacts, and for a moment the spool. A shared node's owner can no longer read
+other workspaces' chats from disk; they still control the process and its memory, which is the
+trust every workspace extends to its nodes, as decided.
+
+`PLAN.md` sentences that change when this is built (the owner proposed it, so the explicit yes
+exists; `CLAUDE.md`'s "one writer per session" wording stays true, since the writer does not
+move):
+
+| `PLAN.md` | Today | Becomes |
+|---|---|---|
+| §1 diagram | "node store (node.db): authoritative event log" | "node spool: events until the master has stored them" |
+| §1, first bullet | "It mirrors the node's log and forwards commands." | "It holds the durable log, sends histories to nodes, and forwards commands." |
+| §1 "Data dir" | "`master.db`, `node.db`…" and "The embedded node keeps its **own** `node.db`…" | `node.db` replaced by per-workspace spools; the embedded node spools like any other. |
+| §2 "Durability" | "The mirror uses `synchronous=NORMAL` ... it can always re-fetch from the node." | "The master's log uses `synchronous=FULL`; the node deletes an event once the master has stored it." |
+| §3 message lists | no event acknowledgement, no history | add `session.stored` and `session.history`; `session.create` loses `cwd`, gains `workspace_id` and `files`. |
+| §3 "Flow control" | "the next hello and `resume` replay from the node's log" | "… from the node's spool". |
+| T7 residual | "its own log keeps the session" | "its spool keeps the unacknowledged events". |
+| T28 | "The node's store cannot append" | "The node's spool cannot append". |
 
 ## 5. Invariants
 
 | Invariant (`CLAUDE.md`) | Effect | Mechanism or change |
 |---|---|---|
-| The node decides | Kept, and widened in scope | `[credentials] model_keys`, `[execution]`, `[attach]`, `[limits]`, `[containers]` and `[forge]` are local to the node, and the master cannot widen them. Which workspaces a node serves is the node's attached list, widened only by its CLI with its owner's yes (§4.10.1). For `local` this holds only if attachments are made from the server's CLI (Q2). Who may attach is also a master-side rule (owner or admin plus a pair code), and it only narrows. |
-| The master never runs tools | Unaffected | Git, forge pushes and containers run on the node. The future proxy would relay model calls, not tools. |
-| One writer per session | Kept | Archive and fork links are master-side tables. A fork is a new session, and its own node writes the imported history. Detach fences by epoch. |
-| Chats are private to their owner | **Changed, needs the owner's explicit yes when built** | Members using a shared environment see its files. The deletion dialog names other users and their unsaved counts. Autosave pushes other users' files. `PLAN.md` T10 (line 369) must say all three. A shared node adds nothing here: separation between workspaces is about files and keys, not chats, which stay on the master. |
-| No secret in an event, URL or log line | Kept | Grants stay outside `AgentSpec` and events. Audit rows hold kind plus id. Forge tokens exist only in git's environment. No shell command carries a secret, the pair code included. The workspace id on the wire is not a secret. |
-| Nothing the model writes is trusted | Kept | Setup scripts come from the master. Compose files and the repository's remote config are never read. Slot output is untrusted. |
+| The node decides | Kept, widened in scope; read differently for `local` | `node.toml` and the attached list decide; the list is widened only by `node pair` and `node link` with the node owner's yes. Folders are derived on the node. For `local` the yes is a server admin's separate act over HTTP or the server's CLI (owner's decision, 2026-11-11, §4.10.6). |
+| The master never runs tools | Unaffected | Git, forge pushes and containers run on the node. Hydration sends events, not work. |
+| One writer per session | Kept | The node still assigns `seq` and appends first; only the durable copy moves to the master (§4.12). Detach fences by epoch. |
+| Chats are private to their owner | **Changed, needs the owner's explicit yes when built** | Members using a shared environment or project repository see its files and commits; the deletion dialog names other users; autosave pushes other users' files. T10 must say all three. A shared node adds nothing: chats live on the master and, now, not on nodes. |
+| No secret in an event, URL or log line | Kept | Grants stay outside events, so outside the spool. Forge tokens exist only in git's environment. Link paths stay on the node. |
+| Nothing the model writes is trusted | Kept | Setup scripts come from the master. Compose files and the repository's remote config are never read. |
 | `unsafe` forbidden | Unaffected | Podman and `systemd-creds` are child processes. |
-| Loopback by default | Kept | Containers publish no ports. `network = "host"` needs `allow_host_network`. On a shared node, loopback is reachable between host sessions (§4.10.3). |
-| Harness stays light | Kept | Containers and `conmon` are separate processes. The share scheduler is a counter per workspace. Measure node RSS with 8 containers. |
-| First-load bundle budget | Kept | The new pages and dialogs are lazy chunks. Run `pnpm size` in every phase. |
-
-`PLAN.md` lines that change: 341-346 (pairing), 363 (T3), 365 (T5: the attached list), 367
-(T7: a node key obtains grants of every attached workspace; attaching needs a pair code and the
-node's yes), 369 (T10), 370 (T11: `local` attached per §4.10.6), 373 (T9: the share), 394-396
-(secrets file), 427-432 (model registry), 499-502 (R2), 1765-1768 (per-workspace node access),
-and §3's message list (319-331). On `integration/gate3` the rows sit at lines 455-484.
+| Loopback by default | Kept | Containers publish no ports. Loopback is reachable between host sessions (§4.10.3). |
+| Harness stays light | Kept | Histories in memory are bounded and dropped when idle (§4.12.2). Measure node RSS with 8 containers and with `history_mb` full. |
+| First-load bundle budget | Kept | The new pages and dialogs are lazy chunks. |
 
 **Draft row for `PLAN.md`** (to add when N.1 is built; number assigned then):
 
 | # | Threat | Mitigation |
 |---|---|---|
-| T-shared | A node shared between workspaces: a session, agent or member of workspace A reaches workspace B's files, keys, processes or capacity on the same machine | A node serves only the workspaces on its own attached list (`<data>/attachments.toml`, widened only by `node pair` with the node owner's yes), and checks every command's workspace against it and against the session's recorded workspace; the master also requires an active `workspace_nodes` row. Each workspace has its own data root; a session's Landlock profile and container mounts are checked to include no other workspace's root, and the file tools refuse other roots as they refuse the data directory. On a shared node `[sandbox] write` and `allow_outside_workspace` are refused, and host sessions are refused unless `host_shell_shared = true`. Grants are keyed by workspace and bound to the session. Command slots, containers and environments are shared per workspace (`[limits] share`). Detaching one workspace archives and fences only its sessions. **Residual:** host sessions under one Unix user (when allowed) see each other's `/proc` metadata and loopback services, can signal each other before ABI 6, and escape to the node user through the session bus before ABI 9; file tools are a userspace path check in every mode; disk is not shared fairly; a stolen node key or a root operator gets every attached workspace's grants; a second workspace may guess the count of workspaces from its share. |
+| T-shared | A node shared between workspaces: a session, agent or member of workspace A reaches workspace B's files, keys, conversations, processes or capacity on the same machine | A node serves only the workspaces on its own attached list, widened only by `node pair` with its owner's yes, and checks every command's workspace against it and against the workspace in the session's folder path; the master also requires an active `workspace_nodes` row. Session folders are derived on the node as `<base>/<workspace>/<session>/files/`; the master sends no folder; a linked folder is made only by `node link` on the node and belongs to one workspace. A session's Landlock profile grants only its own folder, temp folder, workspace cache and project repository, checked against the data directory and every other workspace's directory; file tools use the same boundary; container mounts are checked the same way. On a shared node (`local` always) `[sandbox] write` and `allow_outside_workspace` are refused, and host sessions need Landlock ABI 9 unless `host_shell_shared = "always"`. Grants are keyed by workspace and bound to the session. No conversation is kept on the node beyond the events the master has not stored. Command slots, containers, environments and spools are shared per workspace. Detaching one workspace fences only its sessions and removes only its two directories, after checking ids, the base marker and that no link is followed. **Residual:** host sessions under one Unix user see each other's `/proc` command lines and loopback services (and, when allowed below ABI 9, can escape to the node user); file tools are a userspace path check in every mode; committed work in a project repository is shared by its sessions; disk is not shared fairly; root or a stolen node key gets every attached workspace's grants; on `local` an escape reaches the master process, every key and every conversation. |
 
-Existing rows that change: T5 (adds the attached list), T7 (a stolen key reaches every attached
-workspace), T9 (the share), T10 (workspace roots on a node; T10's privacy changes above are
-separate), T11 (`local`).
+Existing rows that change: T5 (the attached list, links, derived folders), T7 (a stolen key
+reaches every attached workspace; spool wording), T9 (the share), T10 (workspace directories;
+its privacy changes above are separate), T11 (`local` shareable, `local_node_users` gone),
+T28 (spool wording).
 
 ## 6. How this breaks
 
 - **A hostile repository or prompt-injected agent edits the environment's configuration**
-  (`.git/config`, `compose.yaml`, `.devcontainer`). None of these is read. It can still poison
-  the shared `cache/` for other sessions of the same workspace (§9); another workspace's cache
-  is out of reach (§4.10.3).
-- **A node's operator reads the keys.** Root on any workspace node can read the keys its
-  turns use from memory, for every workspace it serves. Attaching a node is the admin vouching
-  for that machine, and the Attach dialog says so. An operator who does not want this sets
-  `model_keys = "none"` or `"local"`.
+  (`.git/config`, `compose.yaml`, `.devcontainer`). None of these is read. It can poison the
+  shared `cache/` or a project's bare repository for other sessions of the same workspace;
+  another workspace's are out of reach.
+- **A node's operator reads the keys or the files.** Root on any workspace node can read the
+  keys its turns use from memory, the session folders and checkpoints, for every workspace it
+  serves; since §4.12, not the conversations from disk. Attaching a node is the admin vouching
+  for that machine, and the Attach dialog says so.
 - **Pair-code abuse.** Anyone who reaches the node port can open pair requests. The caps in
-  §4.4 limit this, an admin types only the code their own node shows, the key prefix is shown
-  on both sides, and the node's owner confirms the workspace name. Guessing a pending code
-  (40 bits, 5 tries per dialog) is not a practical attack.
-- **A master that attaches a node by itself.** It can write `workspace_nodes`; the node
-  refuses every session for a workspace not on its own list (§4.10.1). For `local`, see Q2.
-- **A stolen node key.** The thief can connect as the node and receive grants for turns that
-  users of every attached workspace start on it. With C.1 each connection bumps `link_gen`, so
-  the two copies kick each other off and the loser's queued frames are dropped. The master
-  revokes a node that flaps more than 3 times in 10 minutes and tells every attached
-  workspace's admins, who must pair it again. With a TPM, systemd credentials make the key
-  useless on another machine.
-- **A revoked or detached node still holds keys.** Only rotation fixes this; the dialog lists
-  the keys from `node_key_grants`, per workspace.
-- **One workspace on a shared node reaches another.** §4.10.2 and §4.10.3: the folder rule,
-  the profile check and the tool path check close the files; the residual table is printed when
-  host sessions are allowed; containers are the separated path.
-- **One workspace starves another.** The share in §4.10.4 bounds command and container waits;
-  disk and link bandwidth are not shared fairly.
+  §4.4 limit this, the key prefix is shown on both sides, and the node's owner confirms the
+  workspace name.
+- **A master that attaches a node or links a folder by itself.** It can write
+  `workspace_nodes`; the node refuses every session for a workspace not on its list, and no
+  message creates a link. For `local`, see §4.10.6.
+- **A master that sends a folder.** There is no field for it; the node derives the folder.
+- **A stolen node key.** The thief can connect as the node and receive grants and histories for
+  every attached workspace's sessions it is sent. With C.1 each connection bumps `link_gen`,
+  so the copies kick each other off. The master revokes a node that flaps more than 3 times in
+  10 minutes. Note: with §4.12 the thief also receives histories on resume, which before it
+  could only read from the node's own disk.
+- **A revoked or detached node still holds keys.** Only rotation fixes this.
+- **One workspace on a shared node reaches another.** §4.10.2, §4.10.3: derived folders, the
+  profile check and the tool path check close the files; the residuals are named.
+- **One workspace starves another.** §4.10.4 bounds command and container waits; disk and link
+  bandwidth are not shared fairly.
+- **Detach or delete removes the wrong folder.** §4.11.4: id format, base marker, no symlink
+  followed, rename into the same base's trash first; linked folders are never targets.
+- **The link drops for long.** The spool grows to `spool_mb`, then the turn stops (§4.12.4).
+- **The master's disk fills or its store fails.** It stops acknowledging; nodes' spools grow and
+  their turns stop at the limit. No event is lost.
+- **The master loses its database.** Every conversation is lost; back up the master.
 - **An admin deletes an environment to destroy colleagues' work.** Anything unsafe forces at
-  least a day of grace. Everyone affected is notified, another owner can cancel, the node keeps
-  a trash, and there are audit rows. Left over: a sole owner can still destroy the work after a
-  day. A node owner's offline `node detach` destroys it after `keep_deleted_days`; that is the
-  machine owner's right, and the CLI shows the classification first.
+  least a day of grace; everyone affected is notified; another owner can cancel; the node keeps
+  a trash; there are audit rows. A node owner's offline `node detach` destroys it after
+  `keep_deleted_days`, the machine owner's right; the CLI shows the classification first.
 - **Autosave pushes secrets or huge files.** Ignored files are never pushed; secret-like names
   and the size caps are skipped. An untracked `config.local.json` holding a token is still
-  pushed, to a branch that every reader of the repository can see. This happens for other
-  users' sessions too, by the deleter's choice. A failed push, or a forge that cannot be
-  reached: §4.8 step 5.
+  pushed, to a branch every reader of the repository can see.
 - **The dialog as disclosure.** Names and counts tell an admin who works in the environment.
   Decided, and it needs the T10 change.
-- **Wrong commit identity.** A user may connect an account they do not own. Device flow
-  proves the login. A personal access token proves the account but not the e-mail it claims,
-  so the commit e-mail is read from the forge's API, never typed in.
-- **Two sessions in one environment.** Undo and processes are kept apart. `cache/` and `home/`
-  are shared within the workspace. Pushes are serialised per environment.
-- **Full disk.** A plain bind mount has no quota. Below a free-space floor the node refuses
-  new sessions and environments (as with artifacts, T18), and it reserves space for
-  classification and autosave. On a shared node one workspace can drive another below the
-  floor.
+- **Wrong commit identity.** The commit e-mail is read from the forge's API, never typed in.
+- **Full disk.** Below a free-space floor the node refuses new sessions and environments, and
+  reserves space for classification, autosave and the spool.
 - **Podman missing, rootless not available, or the harness running in a container.** The node
-  announces `containers` only after a self-test passes (run, exec, kill, `keep-id` ownership).
-  When the harness itself runs in a container (`HARNESS_CONTAINER`,
-  `crates/cli/src/net.rs:51-53`, `Dockerfile:33`), container execution is refused.
-- **Image supply chain.** Only digests from `node.toml` are used, and a tag is refused at load.
-  The UI shows each image's age.
-- **Clocks.** Only the master's clock sets deadlines. The only thing the node deletes on its
-  own is its trash.
-- **A restart mid-detach.** The master's row stays `detaching` and the step runs again at
-  start; the node's list is rewritten by atomic rename, so it holds the workspace or not, never
-  half.
-- **Wrong classification.** Unpushed commits on a branch that exists on the forge are caught,
-  because the check is reachability, not whether the branch exists. A stash, a dirty submodule
-  or a detached HEAD gives `b`. Files outside the worktree are lost, and the dialog says so.
-  Any later change on the forge is caught by classifying again at the deadline.
-- **A cancel that does not reach the process inside the container** would break T9. The
+  announces `containers` only after a self-test passes. When the harness itself runs in a
+  container (`HARNESS_CONTAINER`, `crates/cli/src/net.rs`), container execution is refused.
+- **Image supply chain.** Only digests from `node.toml` are used; a tag is refused at load.
+- **Clocks.** Only the master's clock sets deadlines. The node deletes on its own only its
+  trash and acknowledged spool rows.
+- **A restart mid-detach.** The master's row stays `detaching` and the step runs again; the
+  node's list is rewritten by atomic rename; a folder is either in place or in the trash.
+- **Wrong classification.** Reachability, not branch existence; a stash, a dirty submodule or a
+  detached HEAD gives `b`; classify again at the deadline.
+- **A cancel that does not reach the process inside the container** would break T9; the
   wrapper in §4.6 handles it, with a test.
 
 ## 7. What the others do
 
-These are documentation-level findings from `research/`, to be checked by a source-code
-round, except where a permalink is given.
+Documentation-level findings from `research/`, to be checked by a source-code round, except
+where a permalink is given.
 
 | Pattern | Who (source) | Copy or avoid |
 |---|---|---|
-| Key sent per session, never written | Cline SSH remote (`research/harnesses-round-1.md` §7 "Keeping credentials away from the execution side", pattern 4) | Copy, and add per-turn scope and a rotation list. |
-| Inference proxied by the control side | OpenClaw cloud workers, Oh My Pi `auth-gateway`, OpenCodex hub (same section, pattern 3) | Last phase. Our master already sees every event (§7 "The central tension"). |
-| Pairing codes; per-dispatch credentials; fencing | OpenCodex one-time pairing code with 429 after failures, OpenClaw device pairing and owner-epoch fencing, Claude Code work orders (`research/round1/synth/09-remote-distributed-architecture.md` §2.0 and §2.4; `research/round2/synth/05-links-workers-protocols.md` §6.1, §6.6) | Copy the pairing limits, burning the code first, and fencing. |
-| The executor declares, the hub narrows | OpenCodex: the executor posts its capabilities and root ids and labels (no paths) at pairing, and the hub refuses a later presence claiming more (`05` §6.3; https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/remote-control/workspace-hub.ts#L427-L463) | Copy: the node's attached list and its host roots are the node's declaration. |
-| One worker, one tenant | OpenClaw binds a provisioned box to one environment inside the pairing transaction (`05` §2 "OpenClaw", "Cloud workers" item 1; https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/gateway/worker-environments/node-enrollment.ts#L85-L106) | The owner chose otherwise; this is the separation we give up. |
-| A worker serving several tenants | Not found: `05` §6.1 to §6.6 describe no surveyed project that binds one worker to more than one tenant. | Nothing to copy; our design here is our own and is tested as such. |
-| Container floor | OpenHands drops every capability but lets the client override its limits; Hermes skips approvals and checkpoints in containers (`research/round1/synth/02-permissions-sandbox-security.md` F15) | Copy the floor; avoid both mistakes. |
-| Environment = image plus setup | Warp (fresh container, idempotent setup), Claude Code (setup snapshot kept about 7 days) (`09-…` §2.5) | Copy the idempotent-setup rule. |
-| Moving work between machines | Codex Handoff, Warp handoff; the Claude Code runner "loses unpushed work" (`09-…` §2.0) | Classify, save and fork instead. |
-| One "small model" key for several slots | Claude Code (`harnesses-round-1.md` §8 "What we should not copy") | Avoid: an alias is a per-slot default. |
+| Key sent per session, never written | Cline SSH remote (`research/harnesses-round-1.md` §7, pattern 4) | Copy, with per-turn scope and a rotation list. |
+| Inference proxied by the control side | OpenClaw cloud workers, Oh My Pi `auth-gateway`, OpenCodex hub (same section, pattern 3) | Last phase. |
+| Pairing codes; per-dispatch credentials; fencing | OpenCodex, OpenClaw, Claude Code (`research/round1/synth/09-remote-distributed-architecture.md` §2.0, §2.4; `research/round2/synth/05-links-workers-protocols.md` §6.1, §6.6) | Copy the pairing limits, burning the code first, and fencing. |
+| The executor declares, the hub narrows | OpenCodex: the executor posts capabilities and root ids and labels (no paths) at pairing; the hub refuses a later presence claiming more (`05` §6.3; https://github.com/lidge-jun/opencodex/blob/ddee2c20030c1f0ec852202256be877397e8f396/src/remote-control/workspace-hub.ts#L427-L463) | Copy: the attached list and link names are the node's declaration; paths stay on the node. |
+| Acknowledge only after durable admission | OpenClaw updates its ack cursor only after its check; Hermes acks after durable admission (`05` §6.4) | Copy for `session.stored`: only after the mirror commit with `FULL`. |
+| One worker, one tenant | OpenClaw binds a provisioned box to one environment in the pairing transaction (`05` §2 "OpenClaw", "Cloud workers" item 1; https://github.com/openclaw/openclaw/blob/8bac830dcb8ff99055ba71558dd369a989cc7881/src/gateway/worker-environments/node-enrollment.ts#L85-L106) | The owner chose otherwise; this is the separation we give up. |
+| A worker serving several tenants | Not found: `05` §6.1 to §6.6 describe no project that binds one worker to more than one tenant. | Our own design, tested as such. |
+| Container floor | OpenHands, Hermes (`research/round1/synth/02-permissions-sandbox-security.md` F15) | Copy the floor; avoid their overrides. |
+| Environment = image plus setup | Warp, Claude Code (`09-…` §2.5) | Copy the idempotent-setup rule. |
+| Moving work between machines | Codex, Warp; Claude Code "loses unpushed work" (`09-…` §2.0) | Classify, save and fork instead. |
 
 ## 8. Build order
 
-Each phase is useful alone; tests are written first and fail before it. Phase 3 shrinks (no
-trust mark); old phase 6 splits into Connections (6) and deletion (7); the experimental phase
-moves from 7 to 8. On 2026-11-11 phases 1, 3, 4 and 7 grew for several workspaces; the order
-is unchanged.
+Each phase is useful alone; tests are written first and fail before it. The order of the first
+version is kept; phase 1 grew twice on 2026-11-11, and phase 1b is new.
 
 | Phase | What | Tests (abuse cases marked *) | Size |
 |---|---|---|---|
-| 1 | Workspace nodes with pair codes: `workspace_nodes`, `link_gen`, `Hello::Pair` with the node's confirmation, its own pairing cap and timeout, `join_tokens` removed; the attached list, `node pair`/`detach`/`workspaces`/`leave`; `workspace_id` on every session command, checked on master and node; per-workspace data roots and host roots, the sandbox and file-tool checks against other roots, `[sandbox] write` and `allow_outside_workspace` refused on a shared node, host sessions refused there by default; the command share; detach for host sessions; `local` attached to the first admin's Personal workspace; a Nodes page per workspace. | A code typed in workspace A attaches the node to A. *A reused or expired code is refused. *A 6th wrong code closes the dialog. *A 33rd pending request is dropped. *A Personal chat that names a team node gets 403 at create and at prompt. *A member who leaves is blocked. *A non-member gets 404. Plus the C.12 tests below for N.1. | L (was M) |
-| 2 | BYOK: `workspace_providers`, sealed `workspace_secrets`, Personal settings, server model settings removed, onboarding writing to Personal, the R1 seed, embeddings on their own endpoint (Ollama or custom), model aliases and slots, a per-turn router in the master. | *Workspace B cannot use A's provider id. *No key appears in plain text in `config.toml` or `master.db`. Onboarding offers no "reuse provider" for embeddings. A `vision_bridge` alias without a vision model is refused. The summary slot skips a model with a smaller window. | L |
-| 3 | Grants: `[credentials] model_keys`, `session.grant`/`grant.drop` keyed by workspace, a per-turn router on the node, `node_key_grants` per workspace, the systemd credentials option. | *`model_keys = "none"` or `"local"` refuses a grant. *The key bytes are absent from `node.db`, its WAL and the audit table. *A turn with agent X and delegate Y receives exactly those providers. *After a restart, a turn waits for its grant. Detaching or removing lists the keys it received. Plus the C.12 tests for N.3. | M (+half a day) |
-| 4 | Environments: `[containers]`, the image allow-list, a container per session in its workspace's root, a worktree per session, checkpoints per worktree, the self-test, the container and environment shares. | *`podman inspect` shows no privilege, no capabilities, only the volume mounted, `keep-id`. *An image off the list is refused. *A repository `compose.yaml` changes nothing. Restore in session 1 leaves session 2's files alone. *Cancel kills `sleep` inside the container within 2 s. *Low disk refuses a new session. Plus the C.12 tests for N.4. | L (+1 day) |
-| 5 | Archived state and fork. | *An archived chat refuses with 409 even while its node is online. *A fork by a non-owner gets 404. A fork's first events are `history_imported`. *A fork onto a node not attached to the session's workspace is refused. | M |
-| 6 | Connections: user accounts, the workspace account, the "use existing or add" prompt, the forge git path, `forge.grant`. | *Another user cannot see or use my connection. *A token never appears in `argv` (read `/proc/<pid>/cmdline` during a clone). *A host not in `[forge] hosts` is refused. The commit e-mail comes from the forge API. | L |
-| 7 | Classification, scheduled deletion, autosave; detach with environments, from the master and from the node's CLI; node revocation. | The classification table, case by case. *Immediate deletion is refused when anything is unsafe; the minimum is 1 day. *Autosave never pushes an ignored or secret-named file, never forces, never writes onto an existing branch. Author, committer and trailer match §4.7, and so does the fallback. Node offline at the deadline: archived now, deleted at the next hello. Plus the C.12 tests for N.7. | L (+1 to 2 days) |
-| 8 | Experimental: `ModelAccess::Proxy` (measure load on a small home server first), then the private per-user node with its own confirm code. | *A proxy token does not work for another session. *A confirm code is single-use and binds one user. | L |
+| 1 | Workspace nodes with pair codes: `workspace_nodes`, `link_gen`, `Hello::Pair` with the node's confirmation, the attached list, `node pair`/`detach`/`workspaces`/`leave`; `workspace_id` on every session command; **the two trees**, derived session folders, `workspace_roots` removed, `node link`/`unlink`, sub-agent worktrees as session folders, per-session checkpoints and temp folders under `<data>/ws/`; the sandbox and file-tool boundaries; the shared-node rules; the command share; detach and the removal checks; `local` pairing from the server-admin page and `node pair --local`, `local_node_users` removed; a Nodes page per workspace. | The first version's phase 1 tests (codes reused, expired, a 6th wrong code, a 33rd request, 403 for a Personal chat naming a team node, a member who leaves, a non-member) plus the C.12 tests below. | L+ (about 8 to 9 days; was M) |
+| 1b | **The spool**: per-workspace `spool.db`, `session.stored`, deletion and WAL truncation, `session.history`, histories in memory with `history_mb`, restart recovery from spool plus master, `master.db` at `FULL`, B.10's measurement of the master's fsyncs. | The spool tests below. | L (4 to 5 days) |
+| 2 | BYOK, aliases, slots (unchanged). | *Workspace B cannot use A's provider id. *No key appears in plain text in `config.toml` or `master.db`. | L |
+| 3 | Grants keyed by workspace. | *`model_keys = "none"` or `"local"` refuses a grant. *Key bytes absent from the spool, its WAL and the audit table. *A turn with agent X and delegate Y receives exactly those providers. *After a restart, a turn waits for its grant. | M (+half a day) |
+| 4 | Environments in the new layout, mount checks, container and environment shares. | *`podman inspect` shows no privilege, no capabilities, only the session folder, the repository and the environment mounted, `keep-id`. *An image off the list is refused. *A repository `compose.yaml` changes nothing. *Cancel kills `sleep` inside within 2 s. *Low disk refuses a new session. | L (+1 day) |
+| 5 | Archived state and fork. | *An archived chat refuses with 409 even while its node is online. *A fork by a non-owner gets 404. *A fork onto a node not attached to the session's workspace is refused. | M |
+| 6 | Connections, the forge git path, `forge.grant`, **the first clone of a project's repository**. | *Another user cannot use my connection. *A token never appears in `argv`. *A host not in `[forge] hosts` is refused. | L (+1 day) |
+| 7 | Classification, scheduled deletion, autosave; detach with environments and session folders, from the master and from the node's CLI; session deletion with its worktree and branch; node revocation. | The classification table, case by case; autosave rules; offline deadline. | L (+2 days) |
+| 8 | Experimental: proxy, private per-user node. | *A proxy token does not work for another session. | L |
 
-Phases 3 and 4 can run in parallel after 2, and 6 after 1.
+Phases 3 and 4 can run in parallel after 2, and 6 after 1. Phase 1b may run beside 2.
 
-**The C.12 tests the build is committed to** (abuse cases; each written first, failing on the
-old code):
+**The tests the build is committed to** (abuse cases; each written first, failing on the old
+code):
 
 | Task | Test |
 |---|---|
-| N.1 | *A `session.create` for a workspace not on the node's attached list is refused by the node even when the master has an active `workspace_nodes` row and sends it. |
-| N.1 | *A command naming workspace B for a session the node recorded as A is refused and logged. |
-| N.1 | *A host session of A cannot read or write a file in B's host root: `cat`, `ls`, `touch`, `ln` and `mv` from `bash`, and `read`, `grep`, `glob`, `write`, `edit` from the tools, all refused. |
-| N.1 | *A session of A created with a cwd inside B's root, or inside an overlapping root, is refused at create. |
-| N.1 | *On a shared node, `[sandbox] write` and `allow_outside_workspace = true` stop the node at start; a host session without `host_shell_shared` is refused with the key's name. |
-| N.1 | *A second workspace's admin pairing a node already attached to A sees the same fields as for a fresh node: no other workspace id, name, count, session or environment in the pairing answer or the Nodes page. |
-| N.1 | *Detaching A (from the master, and from `node detach` with the master unreachable) leaves B's running `sleep` alive and B's next prompt answered; A's later appends are refused. |
-| N.1 | *With `max_commands = 2`, `share = "borrow"`, A running `sleep 1` and `sleep 30`: B's command starts within 1.5 s, before any queued command of A; with `share = "strict"`, B's command starts at once while A has five queued. |
+| N.1 | *A `session.create` for a workspace not on the node's attached list is refused by the node even when the master has an active `workspace_nodes` row. |
+| N.1 | *A `session.create` carrying a `cwd` (or any path) is created in `<base>/<ws>/<session>/files/` and nowhere else; the forged path is not touched. |
+| N.1 | *A command naming workspace B for a session whose folder is in A is refused and logged. |
+| N.1 | *A host session cannot read or write a sibling session's `files/` in the same workspace, nor any folder of another workspace: `cat`, `ls`, `touch`, `ln`, `mv` from `bash`, and `read`, `grep`, `glob`, `write`, `edit` from the tools, all refused. |
+| N.1 | *No message from the master creates, changes or widens a linked folder; a link whose path contains, or is inside, the base, the data directory or another link is refused by `node link`. |
+| N.1 | *On a shared node, `[sandbox] write` and `allow_outside_workspace = true` stop the node at start; below ABI 9 with `host_shell_shared = "abi9"`, a host session is refused naming the key; `local` applies the rule with one attachment. |
+| N.1 | *A second workspace's admin pairing a node already attached to A sees nothing of A in the pairing answer or the Nodes page. |
+| N.1 | *Detaching A (from the master, and from `node detach` with the master unreachable) leaves B's running `sleep` alive and B's next prompt answered; A's later appends are refused; `<base>/<A>` and `<data>/ws/<A>` end in the trash and then gone; a file outside both trees, a linked folder, and a symlink planted in `<base>/<A>` pointing outside are all untouched. |
+| N.1 | *With `max_commands = 2`, `share = "borrow"`, A running `sleep 1` and `sleep 30`: B's command starts within 1.5 s; with `"strict"`, at once. |
 | N.1 | One link drop and reconnect resumes sessions of A and of B, each to its head, with no frame applied twice. |
+| N.1b | *After the master has sent `session.stored` for a session, a canary string from its messages is found nowhere under the data directory (spool, its WAL, any file), by a byte search. |
+| N.1b | *A link dropped while a tool runs: the tool's result is in the master's log after reconnect, exactly once. |
+| N.1b | *A node killed mid-turn and restarted recovers the turn's tail from its spool and the rest from the master, and closes the open turn once. |
+| N.1b | *A spool at `spool_mb` ends the turn with no effect after the failed append; B's turns on the node continue. |
+| N.1b | *`session.stored` is sent only after the mirror commit: with a mirror whose commit fails, the node deletes nothing. |
 | N.3 | *A grant whose `workspace_id` is A is refused for a session of B on the same node, and a correct grant for A is not used by B's next turn. |
-| N.3 | *No grant value appears in `/proc/<pid>/environ` of any child of either workspace (test D10, grant case). |
-| N.4 | *A container session of A has no mount of B's root (`podman inspect`), and `ls` of B's volume path inside it fails. |
-| N.4 | *An `env.create` naming workspace B with A's session, or a mount source outside the session's workspace root, is refused by the node. |
+| N.3 | *No grant value appears in `/proc/<pid>/environ` of any child (test D10, grant case). |
+| N.4 | *A container session of A has no mount of a sibling session or of any folder of B (`podman inspect`), and `ls` of those paths inside it fails. |
+| N.4 | *An `env.create` naming workspace B with A's session, or a mount source outside the session's workspace directory, is refused by the node. |
 | N.4 | *With `max_running = 2` and two workspaces, A cannot start a second container while B's first starts at once. |
-| N.7 | *Detaching A with an unsafe environment schedules it; B's environment on the same node is not classified, scheduled or touched. |
-| N.7 | *After a detach, A's data root is in the trash and gone after `keep_deleted_days`; B's root is untouched. |
+| N.7 | *Detaching A with an unsafe session folder or environment schedules it; B's are not classified or touched. |
+| N.7 | *Deleting a session of class `b` keeps its branch as `rizzy/trash/…` and its folder in the trash for `keep_deleted_days`. |
 
-**What it costs**, against the first version: phase 1 grows from M to L (about three days: the
-attached list and CLI, workspace on the wire, roots and profile checks, the command share, host
-detach); phase 3 by half a day (keying and the check); phase 4 by about a day (roots, mount
-check, container and environment shares); phase 7 by one to two days (detach scoped to a pair,
-the offline CLI detach with local classification). About six to seven days in all, most of it
-in phase 1, which is on the critical path.
+**What it costs**, against the first version: phase 1 from M to about 8 to 9 days (attachments
+about 3, the two trees and derived folders 2, links 1, sub-agent and checkpoint moves 1 to 2,
+`local` pairing half a day); phase 1b new, 4 to 5 days; phase 3 half a day; phase 4 a day;
+phase 6 a day (first clone); phase 7 two days. About 17 to 19 days in all over the first
+version, most of it on the critical path before N.2.
 
-If time is short, cut in this order: the `borrow` share (ship `strict` only: about a day less,
-and a lone workspace uses half the machine); `node attach-local` (keep `local` on the first
-admin's Personal workspace only); per-workspace labels; the CLI's local classification before an
-offline detach (print a warning instead). Do not cut the attached list, the workspace check on
-the node, the root checks or the default refusal of host sessions: they are the separation.
+If time is short, cut in this order: the `borrow` share (ship `strict`); `local` pairing from
+the web page (keep `node pair --local`); project repositories cloned from the forge (empty
+repositories and links only until N.6); per-workspace labels; local classification before an
+offline detach. Do not cut the attached list, derived folders, the workspace check on the node,
+the removal checks, the shared-node rule or the spool's acknowledgement-after-commit: they are
+the separation and the durability.
 
 ## 9. Questions for the owner, and what remains
 
-**Blocking the build** (each with my recommendation; the build of N.1 starts from these):
+**Blocking the build:**
 
 | # | Decision | Recommended | If you choose the other |
 |---|---|---|---|
-| Q1 | Host sessions on a node attached to more than one workspace | **Refused unless `[execution] host_shell_shared = true`**, and then only with the sandbox enforced; containers are the separated path (§4.10.3). | Allowed by default: every shared node carries the residuals of §4.10.3 unasked, and before Linux 7.1 one injected agent in any workspace can read every other workspace's files and keys on that node. |
-| Q2 | How `local` is attached beyond the first admin's Personal workspace, and what for | **Only by `rizzy-harness node attach-local` on the server's machine; non-admins get container sessions only; host sessions on `local` stay server-admin-only** (§4.10.6). | From the web UI: the master widens its own node over HTTP, against "the node decides" (**needs your explicit yes**). Host sessions for team members: T11 is abandoned and every agentic member of that team is admin-equivalent (**needs your explicit yes and a `PLAN.md` change**). |
-| Q3 | May the running node remove an entry from its attached list when the master reports a detach? | **Yes: removing narrows; only `node pair` adds.** | Only the CLI writes the list: a master-side detach takes effect on the node only through the master's own refusal until the node's owner runs `node detach`, and `node workspaces` shows a stale entry. |
-| Q4 | The command share's default | **`borrow` with priority for a workspace below its guarantee**; `strict` as a setting (§4.10.4). | `strict` by default: simpler and B never waits for A, but a node with two attachments gives a lone user half its slots. |
-| Q5 | The last detach of a node | **Also revokes it** (except `local`), so no pinned key outlives every attachment. | The key stays pinned with no workspace: re-attaching needs no new key, and a stolen copy of it can still connect and wait. |
+| Q1 | Host sessions on a node with several workspaces (and on `local` always) | **Allowed from Landlock ABI 9, refused below by default** (`host_shell_shared = "abi9"`), `"always"` as an explicit choice (§4.10.3). | Allowed by default: below ABI 9 one injected agent in any workspace reads every other workspace's files and keys on that node, and on `local` the master's. Refused by default: the home case needs a setting or Podman even on a new kernel. |
+| Q2 | Spool or memory only (§4.12.3) | **The spool**: events are durable until the master has stored them, then deleted. | Memory only: either a round trip to the master before every tool start and approval, with turns stopping the moment the link drops, or tool results lost when a node restarts while disconnected. |
+| Q3 | The default base directory | **A dedicated folder, `~/Workspaces`**, with the base marker; `$HOME` refused as a base. | `$HOME`: 32-hex folders appear directly in the home folder beside everything else (seen by file managers, indexers and backups); the base cannot carry the "holds only ours" marker rule, so detach relies on the id check alone; `$HOME` contains the default data directory, which the base rules must then special-case. |
+| Q4 | The command share's default | **`borrow`** with priority for a workspace below its guarantee; `strict` as a setting. | `strict`: simpler, B never waits for A, but a lone user on a node with two attachments gets half its slots. |
+| Q5 | The last detach of a node | **Also revokes it** (except `local`). | The key stays pinned with no workspace; re-attaching needs no new key, and a stolen copy can still connect and wait. |
 
-**To confirm, not blocking:**
+**To confirm, not blocking:** A1, A2, A3, A4; R1; commit identity (§4.7) and its four open
+points (author or co-author; autosave without a workspace account; what a user's own connection
+may do; the fallback e-mail); which forges first, and whether device flow is enough;
+unanswered from the first round: per-user caches against a shared `cache/`, environments only
+for container sessions, workspace deletion refused while environments exist, always "model
+alias".
 
-- A1 (slots use the workspace's models), A2 (systemd credentials, 0600 fallback), A3 (an
-  offline node finishes its turn), A4 (no immediate deletion while anything is unsafe).
-- R1: the `HARNESS_PROVIDER_*` settings seed the first admin's Personal workspace. This is
-  my reading of the owner's "yes".
-- Commit identity (§4.7) is my reading: the workspace account pushes and commits, and the
-  owner's connected account is the linked co-author. Still unclear:
-  - Should the session owner be the git *author*, with the workspace account only
-    committing?
-  - With no workspace account for the host, is there no autosave, or does the owner's own
-    connection push?
-  - What does a user's own connection do beyond identity: clone private repositories, push
-    from their sessions?
-  - Which e-mail does the plain fallback use, given that accounts have none today?
-- Which forges in the first build (GitHub only, or GitLab and Gitea too), and is device flow
-  enough, or does a forge need a callback URL?
-- Unanswered from the first round: per-user caches against shared `cache/` (cache
-  poisoning between members of one workspace); environments only for container sessions;
-  workspace deletion refused while environments exist; always saying "model alias", never just
-  "alias".
-
-**Recorded dissent (decided; not blockers).** The owner kept these as written:
+**Recorded dissent (decided; not blockers):**
 
 - Autosave of other users' sessions is the deleter's choice. I would have saved only the
-  requester's sessions and those whose owner opted in.
+  requester's and opted-in sessions.
 - The dialog names users with their counts. I would have shown totals only.
-- New workspaces start with no provider. I would have kept the `demo` provider in every
-  workspace.
-- A node may serve several workspaces (O3). I recommended one workspace per node, which
-  separates workspaces for free; this note builds the owner's choice and prices it (§4.10.3).
-
-The first two need the T10 change in §5, and that needs the owner's explicit yes when it is
-built.
+- New workspaces start with no provider. I would have kept `demo` in every workspace.
+- A node may serve several workspaces (O3). I recommended one workspace per node.
+- `local` is shareable (2026-11-11). I recommended keeping host sessions on it for server
+  admins: on `local`, a sandbox escape is the whole server.
 
 **Not verified:**
 
-- where chat titles come from today;
-- whether `podman exec` passes signals to the process inside (§4.6 assumes not);
+- whether `podman exec` passes signals to the process inside;
 - whether `systemd-creds` works for user services on the distributions in the README;
 - which forges offer device flow;
 - that Landlock denies `environ`, `fd` and `mem` of a sibling session's processes (tested only
-  against the harness itself, `gate3:crates/cli/tests/sandbox.rs:231-253`), and that
-  `cmdline` of them is readable (kernel behaviour, not tested here);
+  against the harness, `crates/cli/tests/sandbox.rs:231-253`) and that their `cmdline` is
+  readable (kernel behaviour, not tested here);
 - whether rootless `pasta` keeps a container off the host's loopback (test D14);
-- which kernels the distributions in the README ship, so how many nodes sit below Landlock
-  ABI 6 and ABI 9 today.
+- which kernels the README's distributions ship, so how many nodes reach Landlock ABI 9;
+- whether the session fold gives the same view without stored deltas (decides hydration size);
+- what the master's per-event fsync costs on a small home server (B.10).
