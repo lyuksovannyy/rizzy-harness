@@ -629,6 +629,13 @@ own, smaller cap and says when the live stream was cut.
 symlink. `read` streams a file and stops after 32 MiB, saying where (use
 bash `tail` or `sed -n` for later parts); `grep` skips files over 8 MiB and
 says how many it skipped; `edit` and `outline` refuse files over 8 MiB.
+`edit` and `write` never change a file in place: they write a temporary
+file (`.rizzy-harness-write.<random>.tmp`, deleted on any error; one left
+after a crash can be removed) in the same folder and rename it over the
+original, so a crash, full disk or cancel leaves the old file whole. The
+file keeps its permission bits, but a hard link to it is split (the other
+name keeps the old content), extended attributes and ACLs are not carried
+over, and a file in a folder the node cannot write to cannot be changed.
 Cancelling a turn stops any tool: one that does not return by itself
 within 2 seconds is abandoned. A slow undo or delete in one chat never
 delays Stop or an approval answer, in that chat or any other.

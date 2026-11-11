@@ -49,7 +49,7 @@ pub const MAX_GREP_FILE_BYTES: u64 = 8 << 20;
 /// Flags for every file a tool opens: opening a FIFO never waits for the
 /// other end, and a terminal never becomes the node's controlling one.
 /// Neither changes anything for a regular file.
-fn open_flags() -> i32 {
+pub(crate) fn open_flags() -> i32 {
     (nix::fcntl::OFlag::O_NONBLOCK | nix::fcntl::OFlag::O_NOCTTY).bits()
 }
 
