@@ -18,14 +18,21 @@ pub struct Glob;
 fn root(ctx: &ToolCtx, input: &Value) -> Result<PathBuf, String> {
     match input.get("path").and_then(|v| v.as_str()) {
         Some(p) => ctx.resolve(p),
-        None => Ok(ctx.workspace.clone()),
+        None => ctx.workspace_dir(),
     }
 }
 
 /// Links are not followed (the `ignore` default), and a protected folder
 /// (the data directory) is never entered: a search rooted above it, which
 /// outside mode allows, skips it.
-fn walker(root: &PathBuf, protected: &std::sync::Arc<Vec<PathBuf>>) -> ignore::Walk {
+///
+/// `own` is a sub-agent's node-owned folder (inside the protected sessions
+/// folder by design): it alone is searched although protected.
+fn walker(
+    root: &PathBuf,
+    protected: &std::sync::Arc<Vec<PathBuf>>,
+    own: Option<PathBuf>,
+) -> ignore::Walk {
     let protected = protected.clone();
     ignore::WalkBuilder::new(root)
         .hidden(false)
@@ -33,7 +40,9 @@ fn walker(root: &PathBuf, protected: &std::sync::Arc<Vec<PathBuf>>) -> ignore::W
         .git_global(false)
         .follow_links(false)
         .filter_entry(move |e| {
-            e.file_name() != ".git" && !in_protected(e.path(), e.file_type(), &protected)
+            e.file_name() != ".git"
+                && (own.as_ref().is_some_and(|o| e.path().starts_with(o))
+                    || !in_protected(e.path(), e.file_type(), &protected))
         })
         .build()
 }
@@ -102,8 +111,11 @@ impl Tool for Grep {
             },
             None => None,
         };
-        let ws = ctx.workspace.clone();
+        let ws = ctx
+            .workspace_dir()
+            .unwrap_or_else(|_| ctx.workspace.clone());
         let protected = ctx.protected.clone();
+        let own = ctx.owned.as_ref().map(|o| o.top.clone());
         let cancel = ctx.cancel.clone();
         let bounded = ctx.savings.bounded_reads;
         let max_results = if bounded {
@@ -114,7 +126,7 @@ impl Tool for Grep {
         let res = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
             let mut skipped = 0usize;
-            'files: for entry in walker(&root, &protected).flatten() {
+            'files: for entry in walker(&root, &protected, own).flatten() {
                 if cancel.is_cancelled() {
                     return Err(());
                 }
@@ -220,8 +232,11 @@ impl Tool for Glob {
             Ok(g) => g.compile_matcher(),
             Err(e) => return ToolOutcome::err(format!("bad glob: {e}")),
         };
-        let ws = ctx.workspace.clone();
+        let ws = ctx
+            .workspace_dir()
+            .unwrap_or_else(|_| ctx.workspace.clone());
         let protected = ctx.protected.clone();
+        let own = ctx.owned.as_ref().map(|o| o.top.clone());
         let max_files = if ctx.savings.bounded_reads {
             BOUNDED_GLOB_RESULTS
         } else {
@@ -230,7 +245,7 @@ impl Tool for Glob {
         let cancel = ctx.cancel.clone();
         let res = tokio::task::spawn_blocking(move || {
             let mut found: Vec<(SystemTime, String)> = Vec::new();
-            for entry in walker(&root, &protected).flatten() {
+            for entry in walker(&root, &protected, own).flatten() {
                 if cancel.is_cancelled() {
                     return None;
                 }

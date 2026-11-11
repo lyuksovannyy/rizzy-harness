@@ -141,6 +141,12 @@ pub(crate) struct Stages {
     allow_outside: bool,
     index: Mutex<HashMap<(SessionId, String), Arc<Stage>>>,
     fetches: Arc<Semaphore>,
+    /// The node's checkpoint store: whether a published file's repository
+    /// has uncommitted changes is asked of its shadow there, never of
+    /// `git status` in the user's repository (R.1, S-1).
+    checkpoints: Option<PathBuf>,
+    /// The sandbox that git runs in (R1b-2).
+    git_sandbox: Option<Arc<harness_tools::sandbox::Sandbox>>,
 }
 
 fn private_dir(p: &Path) -> io::Result<()> {
@@ -529,6 +535,18 @@ impl Packer<'_> {
 }
 
 impl Stages {
+    /// Use the checkpoint store under `dir` for a published file's
+    /// repository state (see [`Stages::checkpoints`]).
+    pub(crate) fn with_checkpoints(
+        mut self,
+        dir: Option<PathBuf>,
+        sandbox: Option<Arc<harness_tools::sandbox::Sandbox>>,
+    ) -> Self {
+        self.checkpoints = dir;
+        self.git_sandbox = sandbox;
+        self
+    }
+
     /// Open the stage under `cfg.stage_dir` and rebuild its index from the
     /// records on disk. Stages of sessions this node does not host, and
     /// anything that does not read back, are deleted.
@@ -551,6 +569,8 @@ impl Stages {
             allow_outside: policy.allow_outside_workspace,
             index: Mutex::new(HashMap::new()),
             fetches: Arc::new(Semaphore::new(FETCHES)),
+            checkpoints: None,
+            git_sandbox: None,
         };
         for entry in std::fs::read_dir(&stages.dir)?.flatten() {
             let dir = entry.path();
@@ -765,7 +785,21 @@ impl Stages {
             meta.toolchain = toolchain;
             meta.package = package;
         }
-        meta.git = crate::git::describe(&dir)
+        // The repository is looked for up to the workspace root (else the
+        // chat's folder), never above.
+        let ceiling = self
+            .roots
+            .iter()
+            .filter(|r| dir.starts_with(r))
+            .max_by_key(|r| r.components().count())
+            .cloned()
+            .unwrap_or_else(|| src.root.clone());
+        let bounds = crate::git::Bounds {
+            ceiling: Some(ceiling),
+            protected: vec![self.data_dir.clone()],
+            sandbox: self.git_sandbox.clone(),
+        };
+        meta.git = crate::git::describe(&dir, self.checkpoints.as_deref(), &bounds)
             .await
             .map(|(commit, branch, dirty)| GitInfo {
                 commit,
@@ -1043,6 +1077,9 @@ pub(crate) struct Sink {
     pub stages: Arc<Stages>,
     pub session: SessionId,
     pub cwd: PathBuf,
+    /// The session's folder as pinned (R.1, T4): checked before every
+    /// publish, so a replaced folder publishes nothing.
+    pub pin: Option<harness_core::folder::FolderPin>,
     pub count: Arc<AtomicUsize>,
 }
 
@@ -1054,7 +1091,18 @@ impl ArtifactSink for Sink {
                 "at most {MAX_PER_TURN} files can be published in one turn"
             ));
         }
-        let src = self.stages.check(&self.cwd, &req.path, StagedBy::Agent)?;
+        let cwd = match &self.pin {
+            Some(pin) => pin.check()?,
+            None => {
+                return Err(format!(
+                    "{}: {}",
+                    harness_core::folder::REPLACED,
+                    self.cwd.display()
+                ));
+            }
+        };
+        self.node.cfg.policy.check_session(&cwd)?;
+        let src = self.stages.check(&cwd, &req.path, StagedBy::Agent)?;
         let staged = self
             .stages
             .stage(

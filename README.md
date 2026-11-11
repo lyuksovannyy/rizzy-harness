@@ -552,10 +552,20 @@ storing them again, and honours `.gitignore`, `.git/info/exclude` and your
 global git ignore file). The
 first checkpoint of a large repository reads every file once. Undo writes
 back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
-a temporary git worktree, so the folder must be a git repository for
-them: elsewhere, or when the repository's own config defines filter
-commands (git-lfs's standard ones are allowed), such a sub-agent is not
-started and the agent that delegated is told why. Sub-agents that only
+a folder of their own, a copy of yours that the node keeps in its data
+directory (`sessions/<id>/files`), so your folder must be a git
+repository (inside the node's `workspace_roots`, with a plain `.git`
+directory) for them: elsewhere such a sub-agent is not started and the
+agent that delegated is told why. The copy holds the folder as it is,
+your uncommitted work included, and a git repository of its own whose
+history is yours (`git log` works; `git status` shows your uncommitted
+work as changes against `HEAD`), as bytes: your repository's filters are
+not applied (an LFS repository's files arrive as the real files, line
+endings are not converted). No other chat can reach it, and it is
+deleted when the sub-agent ends. When the sub-agent ends, the files it changed are written into
+the folder; if you or another sub-agent changed one of them meanwhile,
+nothing is written and the agent is told. None of this runs your
+repository's config, hooks, filters or attributes. Sub-agents that only
 read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
@@ -617,6 +627,14 @@ directory, be inside it, or contain it: with the default data directory
 sandbox that cannot open it either (see "The shell sandbox" below); its
 output is still scrubbed of the API token and known keys.
 
+A chat's folder is remembered as the directory it was when the chat was
+made (its real path and its identity on disk). If that folder is later
+replaced, by a link to somewhere else or by another directory of the same
+name (deleted and cloned again, say), the chat refuses to work there
+("this session's folder was replaced"): start a new chat in the folder.
+Every turn also checks the folder against `workspace_roots` again, so
+narrowing node.toml applies to existing chats.
+
 ```toml
 max_approval_mode = "ask"            # ask_all | ask | auto
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
@@ -652,13 +670,22 @@ starts the command. A command may:
 
 Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
 `~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
-users' folders, not `/dev/tty`. A sub-agent's git worktree also gets the
-repository's `.git`, so `git status` and `git commit` work there. Programs
+users' folders, not `/dev/tty`. A sub-agent works in its own folder in
+the node's data directory (with its own git repository there, so `git
+status`, `add`, `commit`, `diff` and `log` work), and may only read your
+repository's object store for its history: nothing of your `.git` is
+writable to it, and no other chat can open its folder. Programs
 cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
 fail inside the sandbox. From Linux 6.12 the shell also cannot signal
 processes outside it, and from Linux 7.1 it cannot connect to Unix sockets
 outside its folders (the session bus, the Docker socket, an ssh-agent); on
 older kernels it **can**, see "Limits" below.
+
+The node's own git, which takes the checkpoints and fills a sub-agent's
+folder, runs in the same sandbox: it may read the chat's folder (and your
+repository's object store), write only its own checkpoint store, and
+nothing else. With `mode = "off"` it is not confined either; `doctor`
+says which ("checkpoint git").
 
 It needs Linux 6.2 or newer with Landlock enabled (`landlock` appears in
 `/sys/kernel/security/lsm`; `network = "off"` needs 6.7). `rizzy-harness

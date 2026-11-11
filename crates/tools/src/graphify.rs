@@ -160,12 +160,14 @@ async fn run(
         bin.as_os_str(),
         &args,
         &ctx.workspace,
+        ctx.pin.as_ref(),
         &ctx.env,
         &ctx.protected,
         crate::sandbox::Grants {
             workspace_write: false,
             owned_write: vec![out.to_path_buf()],
             read: install_dirs(bin),
+            owned: ctx.owned.clone(),
         },
     )?;
     cmd.env("GRAPHIFY_OUT", out)

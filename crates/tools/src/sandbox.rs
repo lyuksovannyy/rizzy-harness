@@ -149,6 +149,18 @@ impl Sandbox {
         tmp_root: Option<PathBuf>,
         protected: &[PathBuf],
     ) -> Result<Self, String> {
+        // Every grant is passed to the wrapper, which runs in the session
+        // folder: a relative path there would name a folder inside it (and
+        // a link planted there could lead anywhere, R.1 S-4).
+        for p in tmp_root.iter().chain(protected) {
+            if !p.is_absolute() {
+                return Err(format!(
+                    "the sandbox needs absolute paths for the harness's own folders; {} is \
+                     relative (start the harness with an absolute --data-dir)",
+                    p.display()
+                ));
+            }
+        }
         let mut read: Vec<PathBuf> = SYSTEM_READ
             .iter()
             .map(PathBuf::from)
@@ -200,7 +212,7 @@ impl Sandbox {
     }
 
     /// The wrapper's command line up to and including `--`.
-    fn wrapper(&self, rw: &[PathBuf], ro: &[PathBuf], status: bool) -> std::process::Command {
+    fn wrapper(&self, rw: &[Grant], ro: &[Grant], status: bool) -> std::process::Command {
         let mut c = std::process::Command::new(&self.exe);
         c.arg(SUBCOMMAND);
         if self.best_effort {
@@ -212,17 +224,55 @@ impl Sandbox {
         if status {
             c.arg("--status");
         }
-        for p in rw.iter().chain(&self.write) {
-            c.arg("--rw").arg(p);
+        // node.toml's extras and the system folders: not session-writable.
+        let extra_rw: Vec<Grant> = self.write.iter().map(|p| Grant::system(p)).collect();
+        let extra_ro: Vec<Grant> = self.read.iter().map(|p| Grant::system(p)).collect();
+        for g in rw.iter().chain(&extra_rw).chain(&devices()) {
+            g.push_args(&mut c, "--rw");
         }
-        for d in DEVICES {
-            c.arg("--rw").arg(d);
-        }
-        for p in self.read.iter().chain(ro) {
-            c.arg("--ro").arg(p);
+        for g in extra_ro.iter().chain(ro) {
+            g.push_args(&mut c, "--ro");
         }
         c.arg("--");
         c
+    }
+
+    /// The wrapper for one of the node's own helpers (its git for
+    /// checkpoints, R.1 R1b-2), up to and including `--`: exactly `rw` and
+    /// `ro` on top of the system folders ([`SYSTEM_READ`]) and the device
+    /// files, and none of node.toml's `[sandbox] read`/`write` (those are
+    /// for the agent's toolchains). Nothing here checks the grants against
+    /// the protected folders: the caller passes only its own folders, each
+    /// with the identity it expects (R1c-1).
+    pub fn helper(&self, rw: &[Grant], ro: &[Grant]) -> std::process::Command {
+        let mut c = std::process::Command::new(&self.exe);
+        c.arg(SUBCOMMAND);
+        if self.best_effort {
+            c.arg("--best-effort");
+        }
+        if self.network == Network::Off {
+            c.arg("--no-network");
+        }
+        for g in rw.iter().chain(&devices()) {
+            g.push_args(&mut c, "--rw");
+        }
+        let system: Vec<Grant> = SYSTEM_READ
+            .iter()
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .map(Grant::system)
+            .collect();
+        for g in system.iter().chain(ro) {
+            g.push_args(&mut c, "--ro");
+        }
+        c.arg("--");
+        c
+    }
+
+    /// Whether this sandbox only does what the kernel enforces
+    /// (`best-effort`): on a kernel without Landlock it confines nothing.
+    pub fn is_best_effort(&self) -> bool {
+        self.best_effort
     }
 
     /// Run a fixed check through the wrapper: a file in a granted folder
@@ -235,7 +285,7 @@ impl Sandbox {
         let canary = canary_dir.join("sandbox-canary");
         std::fs::write(&canary, "the sandbox must not read this\n")
             .map_err(|e| format!("{}: {e}", canary.display()))?;
-        let mut c = self.wrapper(&[scratch.to_path_buf()], &[], true);
+        let mut c = self.wrapper(&[Grant::made(scratch, "the self-test folder")?], &[], true);
         c.args([
             "sh",
             "-c",
@@ -301,24 +351,9 @@ pub struct Grants {
     pub owned_write: Vec<PathBuf>,
     /// More read-only folders (checked against the protected ones).
     pub read: Vec<PathBuf>,
-}
-
-/// The git directory of a sub-agent worktree, when `cwd` is inside one:
-/// `<repo>/.git/harness-worktrees/<id>/…` → `<repo>/.git`. Judged from the
-/// path alone, never from a `.git` file's contents (repository content
-/// could name any folder there).
-pub fn worktree_git_dir(cwd: &Path) -> Option<PathBuf> {
-    let mut p = cwd;
-    while let Some(parent) = p.parent() {
-        if parent.file_name() == Some(OsStr::new("harness-worktrees"))
-            && let Some(git) = parent.parent()
-            && git.file_name() == Some(OsStr::new(".git"))
-        {
-            return Some(git.to_path_buf());
-        }
-        p = parent;
-    }
-    None
+    /// A sub-agent's node-owned folder (see `harness_core::folder::
+    /// OwnedFolder`), when the session is one.
+    pub owned: Option<harness_core::folder::OwnedFolder>,
 }
 
 impl Confinement {
@@ -335,16 +370,30 @@ impl Confinement {
     }
 
     /// `program args…` in `workspace`, with exactly the allow-listed
-    /// environment `env`, confined as this says.
+    /// environment `env`, confined as this says. With `pin` (the session's
+    /// folder as pinned at its creation), a folder that is no longer that
+    /// directory is refused before anything is granted or started; the
+    /// command then starts in the checked real path.
+    #[allow(clippy::too_many_arguments)]
     pub fn command(
         &self,
         program: &OsStr,
         args: &[&OsStr],
         workspace: &Path,
+        pin: Option<&harness_core::folder::FolderPin>,
         env: &crate::ToolEnv,
         protected: &[PathBuf],
         grants: Grants,
     ) -> Result<tokio::process::Command, String> {
+        if let Self::Refused(why) = self {
+            return Err(why.to_string());
+        }
+        let ws = match pin {
+            Some(p) => p.check()?,
+            None => workspace
+                .canonicalize()
+                .map_err(|e| format!("workspace {}: {e}", workspace.display()))?,
+        };
         let std_cmd = match self {
             Self::Refused(why) => return Err(why.to_string()),
             Self::Unconfined => {
@@ -353,27 +402,77 @@ impl Confinement {
                 c
             }
             Self::Confined { sandbox, tmp } => {
-                let ws = workspace
-                    .canonicalize()
-                    .map_err(|e| format!("workspace {}: {e}", workspace.display()))?;
                 let all: Vec<PathBuf> =
                     sandbox.protected.iter().chain(protected).cloned().collect();
-                let mut rw = grants.owned_write.clone();
-                let mut ro = Vec::new();
-                let mut checked = vec![ws.clone()];
-                checked.extend(grants.read.iter().cloned());
-                if grants.workspace_write {
-                    rw.push(ws.clone());
-                    // A sub-agent's worktree keeps its git metadata in the
-                    // main repository's `.git`: `git status`/`commit` need it.
-                    if let Some(git) = worktree_git_dir(&ws) {
-                        checked.push(git.clone());
-                        rw.push(git);
-                    }
-                } else {
-                    ro.push(ws.clone());
+                // Every grant carries the identity the node expects (R1c-1):
+                // the session's folder its pin's, the node's own folders
+                // theirs, the system and node.toml folders the marker that
+                // no session can write them.
+                let ws_id = match pin {
+                    Some(p) => p.identity(),
+                    None => harness_core::folder::Identity::of(&ws)?,
+                };
+                let mut rw: Vec<Grant> = grants
+                    .owned_write
+                    .iter()
+                    .map(|p| Grant::made(p, "the tool's output folder"))
+                    .collect::<Result<_, _>>()?;
+                let mut ro: Vec<Grant> = Vec::new();
+                // A sub-agent's own folder lies in the node's protected
+                // sessions folder by design: it alone is exempt from the
+                // check, and only for the session the node made it for (the
+                // node passes it; nothing is judged from the path or from a
+                // file the session can write).
+                let owned = grants.owned.as_ref().filter(|o| ws.starts_with(&o.top));
+                let mut checked = Vec::new();
+                if owned.is_none() {
+                    checked.push(ws.clone());
                 }
-                ro.extend(grants.read.iter().cloned());
+                checked.extend(grants.read.iter().cloned());
+                let ws_grant = Grant::identified(&ws, ws_id, "the session's folder");
+                if grants.workspace_write {
+                    rw.push(ws_grant);
+                } else {
+                    ro.push(ws_grant);
+                }
+                // The child's own git directory is in its folder; when the
+                // child works in a sub-folder, `.git` is granted too (its git
+                // writes the index and objects there) and the rest of the
+                // folder read-only. The user's object store, which that git
+                // directory borrows for history, is read-only, and granted
+                // only while it is still the store the node accepted: one
+                // replaced since (a link put in its place by a process of the
+                // parent's) is left out, so the child loses history and gains
+                // nothing; the wrapper checks the identity again on the
+                // descriptor it opens. Nothing of the user's `.git` is
+                // writable (R.1, PLAN.md T32).
+                if let Some(o) = owned {
+                    if ws != o.top {
+                        ro.push(Grant::identified(
+                            &o.top,
+                            o.top_id,
+                            "the sub-agent's folder",
+                        ));
+                        if grants.workspace_write {
+                            rw.push(Grant::identified(
+                                &o.git,
+                                o.git_id,
+                                "the sub-agent's git directory",
+                            ));
+                        }
+                    }
+                    if let Some((objects, id)) = &o.objects
+                        && harness_core::folder::Identity::of(objects).ok() == Some(*id)
+                    {
+                        checked.push(objects.clone());
+                        ro.push(Grant::identified(
+                            objects,
+                            *id,
+                            "the repository's object store",
+                        ));
+                    }
+                }
+                ro.extend(grants.read.iter().map(|p| Grant::system(p)));
                 for p in &checked {
                     if let Some(d) = exposes(p, &all) {
                         return Err(format!(
@@ -385,7 +484,7 @@ impl Confinement {
                 }
                 if let Some(t) = tmp {
                     make_private_dir(t)?;
-                    rw.push(t.clone());
+                    rw.push(Grant::made(t, "the session's temp folder")?);
                 }
                 let mut c = sandbox.wrapper(&rw, &ro, false);
                 c.arg(program);
@@ -397,7 +496,7 @@ impl Confinement {
             }
         };
         let mut c = tokio::process::Command::from(std_cmd);
-        c.args(args).current_dir(workspace);
+        c.args(args).current_dir(&ws);
         Ok(c)
     }
 }
@@ -438,6 +537,12 @@ pub fn start(
     protected: &[PathBuf],
     node_toml: &Path,
 ) -> Result<Started, String> {
+    if !data_dir.is_absolute() {
+        return Err(format!(
+            "the data directory {} is a relative path; the sandbox needs it absolute",
+            data_dir.display()
+        ));
+    }
     let tmp_root = data_dir.join("sandbox-tmp");
     if settings.mode == Mode::Off {
         return Ok(Started {
@@ -528,11 +633,117 @@ pub fn reset_tmp(root: &Path) -> Result<(), String> {
     make_private_dir(root)
 }
 
+/// What a grant expects to find at its path (R.1, R1c-1). Every grant
+/// names one, so a new grant cannot forget the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    /// The directory or file with this identity, taken when the node pinned
+    /// or made it (a session's folder, a sub-agent's folder and its `.git`,
+    /// the borrowed object store as accepted, a shadow, a temp folder). The
+    /// wrapper opens the path once without following a link at its last
+    /// component, compares the opened descriptor's device and inode, and
+    /// builds the rule from that same descriptor: whoever re-points the path
+    /// gets the whole command refused, never a grant on the new target.
+    Identity(harness_core::folder::Identity),
+    /// A path no session can write (the system folders, the device files,
+    /// node.toml's `[sandbox] read`/`write`): opened as it is, links
+    /// followed (`/lib64` is a link on most systems).
+    NotSessionWritable,
+}
+
+/// One folder or file the wrapper is asked to grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    pub path: PathBuf,
+    pub expect: Expect,
+    /// What it is, for the refusal ("the folder granted as <label> was
+    /// replaced").
+    pub label: String,
+}
+
+impl Grant {
+    pub fn system(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            expect: Expect::NotSessionWritable,
+            label: "system".into(),
+        }
+    }
+
+    pub fn identified(path: &Path, id: harness_core::folder::Identity, label: &str) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            expect: Expect::Identity(id),
+            label: label.into(),
+        }
+    }
+
+    /// A folder the node made itself (no session can write where it lies):
+    /// its identity now.
+    pub fn made(path: &Path, label: &str) -> Result<Self, String> {
+        Ok(Self::identified(
+            path,
+            harness_core::folder::Identity::of(path)?,
+            label,
+        ))
+    }
+
+    /// `--rw|--ro <expect> <path>`: `<expect>` is `system`, or
+    /// `<dev>:<ino>:<label>`.
+    fn push_args(&self, c: &mut std::process::Command, flag: &str) {
+        let spec = match self.expect {
+            Expect::NotSessionWritable => "system".to_string(),
+            Expect::Identity(id) => format!("{}:{}:{}", id.dev, id.ino, self.label),
+        };
+        c.arg(flag).arg(spec).arg(&self.path);
+    }
+
+    /// The grants of `sandbox-exec`'s arguments: pairs of `<expect> <path>`.
+    pub fn parse_pairs(pairs: &[OsString]) -> Result<Vec<Self>, String> {
+        if !pairs.len().is_multiple_of(2) {
+            return Err("a grant is `<expect> <path>`".into());
+        }
+        pairs
+            .chunks(2)
+            .map(|c| {
+                let spec = c[0].to_str().ok_or("a grant's identity is not text")?;
+                let path = PathBuf::from(&c[1]);
+                if spec == "system" {
+                    return Ok(Self::system(&path));
+                }
+                let mut it = spec.splitn(3, ':');
+                let (Some(dev), Some(ino), label) = (it.next(), it.next(), it.next()) else {
+                    return Err(format!("bad grant identity {spec:?}"));
+                };
+                let dev = dev
+                    .parse()
+                    .map_err(|_| format!("bad grant identity {spec:?}"))?;
+                let ino = ino
+                    .parse()
+                    .map_err(|_| format!("bad grant identity {spec:?}"))?;
+                Ok(Self::identified(
+                    &path,
+                    harness_core::folder::Identity { dev, ino },
+                    label.unwrap_or("a folder"),
+                ))
+            })
+            .collect()
+    }
+}
+
+/// The device files, as grants.
+fn devices() -> Vec<Grant> {
+    DEVICES
+        .iter()
+        .map(|d| Grant::system(Path::new(d)))
+        .collect()
+}
+
 /// The arguments of `sandbox-exec`.
 #[derive(Debug, Default)]
 pub struct ExecRequest {
-    pub rw: Vec<PathBuf>,
-    pub ro: Vec<PathBuf>,
+    pub rw: Vec<Grant>,
+    pub ro: Vec<Grant>,
     pub no_network: bool,
     pub best_effort: bool,
     /// Print a [`STATUS_PREFIX`] line on stderr before running the command.
@@ -578,12 +789,58 @@ pub fn restrict_self(req: &ExecRequest) -> Result<String, String> {
     imp::restrict(req)
 }
 
+/// Open a grant's path for its Landlock rule, once (`O_PATH`): `None` when
+/// nothing is there (a grant that does not exist gives nothing). A grant
+/// with an expected identity is opened without following a link at its
+/// last component, and the opened descriptor must have that device and
+/// inode, else the whole command is refused, naming the grant (R1c-1).
+/// Returns the descriptor and whether it is a directory.
+pub(crate) fn open_grant(g: &Grant) -> Result<Option<(std::os::fd::OwnedFd, bool)>, String> {
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::SFlag;
+    let mut flags = OFlag::O_PATH | OFlag::O_CLOEXEC;
+    if matches!(g.expect, Expect::Identity(_)) {
+        flags |= OFlag::O_NOFOLLOW;
+    }
+    let fd = match nix::fcntl::open(&g.path, flags, nix::sys::stat::Mode::empty()) {
+        Ok(fd) => fd,
+        Err(nix::errno::Errno::ENOENT) if g.expect == Expect::NotSessionWritable => {
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(match g.expect {
+                Expect::Identity(_) => format!(
+                    "the folder granted as {} was replaced or removed ({}: {})",
+                    g.label,
+                    g.path.display(),
+                    std::io::Error::from(e)
+                ),
+                Expect::NotSessionWritable => {
+                    format!("{}: {}", g.path.display(), std::io::Error::from(e))
+                }
+            });
+        }
+    };
+    let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("{}: {e}", g.path.display()))?;
+    if let Expect::Identity(id) = g.expect
+        && (st.st_dev as u64 != id.dev || st.st_ino as u64 != id.ino)
+    {
+        return Err(format!(
+            "the folder granted as {} was replaced ({} is not the one the node checked)",
+            g.label,
+            g.path.display()
+        ));
+    }
+    let is_dir = SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT == SFlag::S_IFDIR;
+    Ok(Some((fd, is_dir)))
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::ExecRequest;
     use landlock::{
-        ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd,
-        Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope,
+        ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset,
+        RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope,
     };
 
     /// Must be enforced in full (see the module docs).
@@ -619,20 +876,20 @@ mod imp {
             .map_err(e)?;
         let read = AccessFs::from_read(NEWEST);
         let all = AccessFs::from_all(NEWEST);
-        for (paths, access) in [(&req.ro, read), (&req.rw, all)] {
-            for p in paths {
-                let meta = match std::fs::metadata(p) {
-                    Ok(m) => m,
+        for (grants, access) in [(&req.ro, read), (&req.rw, all)] {
+            for g in grants {
+                // Opened once; the identity is checked on this descriptor
+                // and the rule is built from it, so the path is never
+                // resolved twice (R1c-1).
+                let Some((fd, is_dir)) = super::open_grant(g)? else {
                     // Nothing to grant; without a rule it stays denied.
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(format!("{}: {err}", p.display())),
+                    continue;
                 };
-                let access: BitFlags<AccessFs> = if meta.is_dir() {
+                let access: BitFlags<AccessFs> = if is_dir {
                     access
                 } else {
                     access & AccessFs::from_file(NEWEST)
                 };
-                let fd = PathFd::new(p).map_err(|e| e.to_string())?;
                 created = created.add_rule(PathBeneath::new(fd, access)).map_err(e)?;
             }
         }
@@ -729,24 +986,35 @@ mod tests {
     }
 
     #[test]
-    fn worktree_git_dir_comes_from_the_path_only() {
-        assert_eq!(
-            worktree_git_dir(Path::new("/r/.git/harness-worktrees/abc/sub")),
-            Some(PathBuf::from("/r/.git"))
-        );
-        assert_eq!(
-            worktree_git_dir(Path::new("/r/.git/harness-worktrees/abc")),
-            Some(PathBuf::from("/r/.git"))
-        );
-        assert_eq!(
-            worktree_git_dir(Path::new("/r/.git/harness-worktrees")),
-            None
-        );
-        assert_eq!(
-            worktree_git_dir(Path::new("/r/harness-worktrees/abc")),
-            None
-        );
-        assert_eq!(worktree_git_dir(Path::new("/r/src")), None);
+    fn a_relative_data_dir_is_refused_in_every_mode() {
+        for mode in [Mode::Required, Mode::BestEffort, Mode::Off] {
+            let s = Settings {
+                mode,
+                ..Default::default()
+            };
+            let e = start(
+                &s,
+                Path::new("data"),
+                &[PathBuf::from("/abs/data")],
+                Path::new("/abs/node.toml"),
+            )
+            .unwrap_err();
+            assert!(e.contains("relative"), "{mode:?}: {e}");
+        }
+        for (tmp, protected) in [
+            (
+                Some(PathBuf::from("data/sandbox-tmp")),
+                PathBuf::from("/abs/data"),
+            ),
+            (
+                Some(PathBuf::from("/abs/data/sandbox-tmp")),
+                PathBuf::from("data"),
+            ),
+        ] {
+            let e = Sandbox::new("/bin/true".into(), &Settings::default(), tmp, &[protected])
+                .unwrap_err();
+            assert!(e.contains("relative"), "{e}");
+        }
     }
 
     #[test]
@@ -757,6 +1025,7 @@ mod tests {
                 OsStr::new("true"),
                 &[],
                 Path::new("/"),
+                None,
                 &Default::default(),
                 &[],
                 Grants::default(),

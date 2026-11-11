@@ -311,29 +311,47 @@ impl NodePolicy {
             return Err(format!("cwd {cwd} is not a directory"));
         }
         self.check_protected(&p)?;
-        let ok = self.workspace_roots.iter().any(|root| {
-            root.canonicalize()
-                .map(|r| p.starts_with(r))
-                .unwrap_or(false)
-        });
-        if ok {
-            Ok(p)
-        } else {
-            Err(format!(
-                "cwd {} is outside the folders this node allows (workspace_roots in node.toml)",
-                p.display()
-            ))
-        }
+        self.check_roots(&p)?;
+        Ok(p)
     }
 
-    /// What is checked again before every turn and restore of an agentic
-    /// session: the sandbox still works here (see [`Self::sandbox_refusal`])
-    /// and the folder does not include a protected one.
+    /// The workspace root (canonical) that holds `dir` (already canonical),
+    /// or a refusal naming `workspace_roots`.
+    pub fn root_of(&self, dir: &Path) -> Result<PathBuf, String> {
+        self.workspace_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .filter(|r| dir.starts_with(r))
+            // The innermost root: the walk for a repository stops there.
+            .max_by_key(|r| r.components().count())
+            .ok_or_else(|| {
+                format!(
+                    "cwd {} is outside the folders this node allows (workspace_roots in \
+                     node.toml)",
+                    dir.display()
+                )
+            })
+    }
+
+    fn check_roots(&self, dir: &Path) -> Result<(), String> {
+        self.root_of(dir).map(|_| ())
+    }
+
+    /// What is checked again before every turn, restore, delegation and
+    /// publish of an agentic session (`cwd` is its folder as the pin
+    /// checked it): the sandbox still works here (see
+    /// [`Self::sandbox_refusal`]), the folder does not include a protected
+    /// one, and it is still inside `workspace_roots` (node.toml may have
+    /// been narrowed since the session was made).
     pub fn check_session(&self, cwd: &Path) -> Result<(), String> {
         if let Some(why) = &self.sandbox_refusal {
             return Err(why.clone());
         }
-        self.check_protected(cwd)
+        self.check_protected(cwd)?;
+        let real = cwd
+            .canonicalize()
+            .map_err(|e| format!("cwd {}: {e}", cwd.display()))?;
+        self.check_roots(&real)
     }
 
     /// Add `dir` to [`Self::protected_dirs`] (canonicalized; a folder that

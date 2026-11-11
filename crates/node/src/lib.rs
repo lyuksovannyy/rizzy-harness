@@ -99,6 +99,11 @@ pub struct NodeConfig {
     /// Publishing files as artifacts (worker nodes); `None` for the chat
     /// runtime, which never publishes.
     pub artifacts: Option<artifacts::StageConfig>,
+    /// The Landlock sandbox the node's own git runs in when it reads a
+    /// session's folder (checkpoints, sub-agents' bases and results, a
+    /// published file's state; R.1 R1b-2). `None`: unconfined (`[sandbox]
+    /// mode = "off"`, and tests).
+    pub git_sandbox: Option<Arc<harness_tools::sandbox::Sandbox>>,
 }
 
 /// Both ends of a link as seen from the master: commands in, messages out.
@@ -172,6 +177,122 @@ impl Inner {
     }
 }
 
+/// What the sandbox tests in `crates/cli` drive directly (they have the
+/// `sandbox-exec` binary; this crate's tests do not). Not an API.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use harness_tools::sandbox::Sandbox;
+
+    fn bounds(sandbox: Option<Arc<Sandbox>>, protected: &[PathBuf]) -> crate::git::Bounds {
+        crate::git::Bounds {
+            ceiling: None,
+            protected: protected.to_vec(),
+            sandbox,
+        }
+    }
+
+    /// A checkpoint of `folder` (as a turn takes one) in the store `base`,
+    /// with the node's git in `sandbox`; then the bytes the snapshot holds
+    /// at `path`, if any.
+    pub async fn snapshot_holds(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+        ref_name: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let repo = crate::git::checkpoint_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("no checkpoint repository")?;
+        let sha = crate::git::snapshot(&repo, ref_name, "test").await?;
+        Ok(crate::git::blob_at(&repo, &sha, path).await)
+    }
+
+    /// A sub-agent's folder made from `folder` (its base snapshot, then
+    /// the fill), with the node's git in `sandbox`; returns the folder and
+    /// removes nothing (the caller's temp directory does).
+    pub async fn sub_agent_folder(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+        child: &str,
+    ) -> Result<PathBuf, String> {
+        let sub = crate::git::sub_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("not a repository")?;
+        let snap = sub.base(child).await?;
+        let sessions = crate::sessions_dir(base).ok_or("no sessions folder")?;
+        Ok(sub.make_folder(child, &snap, &sessions).await?.path)
+    }
+
+    /// The checkpoint repository of `folder` is made (the object store is
+    /// accepted for borrowing then), `between` runs, then a snapshot is
+    /// taken with that same handle.
+    pub async fn snapshot_after(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+        between: impl FnOnce(),
+    ) -> Result<String, String> {
+        let repo = crate::git::checkpoint_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("no checkpoint repository")?;
+        between();
+        crate::git::snapshot(&repo, "refs/harness/t/s/after", "test").await
+    }
+
+    /// A turn and its undo: snapshot `folder`, run `change` on it, snapshot
+    /// again, undo (unforced), all with the node's git in `sandbox`.
+    pub async fn turn_and_undo(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+        change: impl FnOnce(),
+    ) -> Result<Vec<String>, String> {
+        use crate::git;
+        let repo = git::checkpoint_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("no checkpoint repository")?;
+        let before = git::snapshot(&repo, "refs/harness/t/u/before", "before").await?;
+        change();
+        let after = git::snapshot(&repo, "refs/harness/t/u/after", "after").await?;
+        let diff = git::restore_diff(&repo, &before, &after).await?;
+        let now = git::snapshot(&repo, "refs/harness/t/r/before", "now").await?;
+        let plan = git::restore_plan(&repo, &diff, &now, true).await?;
+        git::secure_blobs(&repo, &plan).await?;
+        git::restore_paths(&repo, &plan, git::WriteLimits::UNDO).await
+    }
+
+    /// The files a snapshot of `folder` lists (a turn's checkpoint).
+    pub async fn snapshot_files(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+    ) -> Result<Vec<(String, String)>, String> {
+        let repo = crate::git::checkpoint_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("no checkpoint repository")?;
+        let sha = crate::git::snapshot(&repo, "refs/harness/t/files", "test").await?;
+        Ok(crate::git::tree_listing(&repo, &sha).await)
+    }
+}
+
+/// Where sub-agents' folders live: `<data>/sessions`, beside the checkpoint
+/// store `checkpoints` (R.1 follow-up; the per-session layout of
+/// docs/nodes-credentials-environments.md §4.11 puts every session there).
+pub(crate) fn sessions_dir(checkpoints: &std::path::Path) -> Option<std::path::PathBuf> {
+    let abs = std::path::absolute(checkpoints).ok()?;
+    Some(abs.parent()?.join("sessions"))
+}
+
 #[derive(Clone)]
 pub struct NodeRuntime {
     inner: Arc<Inner>,
@@ -179,13 +300,22 @@ pub struct NodeRuntime {
 
 impl NodeRuntime {
     /// Open the runtime and recover any turns interrupted by a crash.
-    pub async fn start(cfg: NodeConfig) -> Result<Self, harness_store::StoreError> {
+    pub async fn start(mut cfg: NodeConfig) -> Result<Self, harness_store::StoreError> {
         // Lock files a killed git left in a checkpoint repository, and kept
         // copies a power loss damaged (A.18). Before any session runs.
         if let Some(base) = cfg.checkpoints_dir.clone() {
             let b = base.clone();
             let _ = tokio::task::spawn_blocking(move || git::sweep_stale_locks(&b)).await;
             git::check_kept_packs(&base).await;
+            // Sub-agents' folders: protected like the data directory (no
+            // session folder may hold them, no file tool or sandbox grant
+            // reaches them) except for the one child each belongs to. The
+            // folders of sub-agents that were running when the node stopped
+            // are gone with their sessions.
+            if let Some(s) = sessions_dir(&base) {
+                let _ = std::fs::remove_dir_all(&s);
+                cfg.policy.protect(&s);
+            }
         }
         let rows = cfg.store.call(|s| s.sessions()).await?;
         let hosted: std::collections::HashSet<SessionId> =
@@ -465,9 +595,10 @@ impl NodeRuntime {
             .clone()
             .ok_or("publishing is off on this node")?;
         let s = self.session(sid).ok_or("unknown session")?;
-        let cwd = s
-            .publish_cwd()
+        s.publish_cwd()
             .ok_or("this chat cannot save files as artifacts")?;
+        // Pinned folder and node policy, as before a turn (R.1, T4).
+        let cwd = s.checked_folder()?;
         let name = name
             .map(|n| harness_core::artifacts::check_name(&n))
             .transpose()?;
@@ -741,6 +872,7 @@ impl NodeRuntime {
                 agent_id: agent.map(|a| a.agent_id),
                 incognito,
                 parent_session: None,
+                owned: None,
             },
         )
         .await
@@ -877,7 +1009,10 @@ fn open_stages(
         return None;
     }
     match artifacts::Stages::open(sc, &cfg.policy, hosted) {
-        Ok(s) => Some(Arc::new(s)),
+        Ok(s) => Some(Arc::new(s.with_checkpoints(
+            cfg.checkpoints_dir.clone(),
+            cfg.git_sandbox.clone(),
+        ))),
         Err(e) => {
             tracing::warn!(error = %e, dir = %sc.stage_dir.display(), "cannot open the artifact stage; publishing is off");
             None
