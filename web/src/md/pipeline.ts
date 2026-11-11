@@ -216,7 +216,8 @@ const SAFE_SCHEME = /^(?:https?|mailto):/i;
 
 /**
  * react-markdown's URL hook. Only http(s), mailto and in-page fragments
- * (GFM footnotes) survive; anything else becomes "" and the link renders as
+ * survive (Link keeps a fragment a link only when it names one of the same
+ * message's footnotes); anything else becomes "" and the link renders as
  * text. A data: image keeps only its scheme, so the chip can say what it was
  * without the payload going anywhere.
  */

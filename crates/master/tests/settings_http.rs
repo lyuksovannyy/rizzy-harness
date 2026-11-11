@@ -249,16 +249,17 @@ async fn settings_defaults_validation_and_isolation() {
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
     .await;
     assert_eq!(bob["username"], "bob");
+    let pw = bob["password"].as_str().unwrap();
     let (_, bc, _) = req(
         &t,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob", "password": pw})),
         None,
     )
     .await;
@@ -266,7 +267,7 @@ async fn settings_defaults_validation_and_isolation() {
         &t,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;

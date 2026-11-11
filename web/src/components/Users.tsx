@@ -1,15 +1,54 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Me, Role, User } from "../types";
+
+/** A temporary password the server just made (AUDIT L14). It lives only in
+ * this component's state, which closing the dialog clears: never in a
+ * store, a toast, the log or a URL. */
+interface Shown {
+  username: string;
+  password: string;
+}
+
+function TempPassword({ shown, onClose }: { shown: Shown; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const d = dialog.current;
+    if (d && typeof d.showModal === "function" && !d.open) d.showModal();
+  }, []);
+  const copy = () =>
+    navigator.clipboard
+      ?.writeText(shown.password)
+      .then(() => setCopied(true))
+      .catch(() => {});
+  return (
+    <dialog ref={dialog} className="workspace-dialog stack" aria-label="Temporary password" onClose={onClose}>
+      <p>
+        Temporary password for <b>{shown.username}</b>. They must change it when they first sign in.
+      </p>
+      <code className="temp-password">{shown.password}</code>
+      <p className="muted">It will not be shown again: copy it now and give it to them privately.</p>
+      <div className="row end">
+        <button type="button" onClick={() => void copy()}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+        <button type="button" className="primary" autoFocus onClick={onClose}>
+          Done
+        </button>
+      </div>
+    </dialog>
+  );
+}
 
 /** Admin-only account management. Admins never see other users' chats. */
 export function Users({ me }: { me: Me }) {
   const [users, setUsers] = useState<User[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [role, setRole] = useState<Role>("member");
   const [agentic, setAgentic] = useState(false);
+  const [shown, setShown] = useState<Shown | null>(null);
 
   const load = useCallback(() => {
     api
@@ -32,9 +71,9 @@ export function Users({ me }: { me: Me }) {
   const create = (e: React.FormEvent) => {
     e.preventDefault();
     void run(async () => {
-      await api.createUser({ username: username.trim(), password, role, can_agentic: agentic });
+      const u = await api.createUser({ username: username.trim(), role, can_agentic: agentic });
+      setShown({ username: u.username, password: u.password });
       setUsername("");
-      setPassword("");
       setAgentic(false);
       setRole("member");
     });
@@ -43,11 +82,12 @@ export function Users({ me }: { me: Me }) {
   return (
     <section className="stack">
       <p className="muted">
-        Only admins create accounts. New users get a temporary password and must change it at first
-        login. Agentic access runs shell commands on worker nodes: grant it only to people you would
-        give a shell.
+        Only admins create accounts. The server makes each new user a temporary password, shown to you
+        once, which they must change at first login. Agentic access runs shell commands on worker
+        nodes: grant it only to people you would give a shell.
       </p>
       {err && <div className="error-text">{err}</div>}
+      {shown && <TempPassword shown={shown} onClose={() => setShown(null)} />}
       <table className="users">
         <thead>
           <tr>
@@ -95,8 +135,11 @@ export function Users({ me }: { me: Me }) {
                     <div className="row end">
                       <button
                         onClick={() => {
-                          const pw = prompt(`New temporary password for ${u.username} (10+ characters):`);
-                          if (pw) void run(() => api.updateUser(u.user_id, { password: pw }));
+                          if (!confirm(`Reset ${u.username}'s password? They are signed out everywhere.`)) return;
+                          void run(async () => {
+                            const r = await api.resetPassword(u.user_id);
+                            setShown({ username: r.username, password: r.password });
+                          });
                         }}
                       >
                         Reset password
@@ -126,13 +169,6 @@ export function Users({ me }: { me: Me }) {
         <h3>Add user</h3>
         <div className="row">
           <input placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} />
-          <input
-            type="text"
-            placeholder="temporary password (10+)"
-            autoComplete="off"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
           <select aria-label="Server role" value={role} onChange={(e) => setRole(e.target.value as Role)}>
             <option value="member">User</option>
             <option value="admin">Server admin</option>
@@ -146,7 +182,7 @@ export function Users({ me }: { me: Me }) {
             />
             agentic access
           </label>
-          <button className="primary" disabled={!username.trim() || password.length < 10}>
+          <button className="primary" disabled={!username.trim()}>
             Create
           </button>
         </div>

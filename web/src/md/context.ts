@@ -36,11 +36,14 @@ export interface UiInfo {
   /** The message stopped mid-stream (its turn was cancelled, failed or
    * interrupted), so Rust never stored its blocks. */
   cut: boolean;
+  /** This message's prefix for the ids the renderer makes (footnotes): the
+   * only targets its `#` links may have (AUDIT L14). */
+  fn: string;
 }
 
 export const NO_BLOCKS: readonly UiBlock[] = [];
 
-export const UiCtx = createContext<UiInfo>({ messageId: null, blocks: NO_BLOCKS, from: null, cut: false });
+export const UiCtx = createContext<UiInfo>({ messageId: null, blocks: NO_BLOCKS, from: null, cut: false, fn: "" });
 
 /** Where each progress block of the conversation stands in its turn
  * (ui/blocks.ts progressSlots). Conversation provides it above every
@@ -52,6 +55,8 @@ export interface InputInfo {
   state: InputState;
   /** Hosts of the web pages read since the user's last message. */
   notice: string[];
+  /** An incognito chat: the answer being typed is kept nowhere (AUDIT L14). */
+  incognito?: boolean;
 }
 
 /** The input blocks of the conversation, by message id (ui/blocks.ts

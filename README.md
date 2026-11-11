@@ -47,8 +47,12 @@ cargo build --release
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
 (so nobody else can take over a fresh server), creates your **admin**
 account, and walks you through connecting an AI provider, your name and time
-zone, and a search engine. Admins add other people under Settings → Server → **Users**; new accounts get a temporary
-password and must change it at first login. Everyone sees only their own
+zone, and a search engine. Admins add other people under Settings → Server → **Users**; the server makes each new
+account a temporary password (and a new one on **Reset password**), shows it to the admin
+once with a copy button, and the user must change it at first login. Nobody chooses a
+temporary password, and it is never shown again; a reset also signs the user out
+everywhere. Scripts do the same with `POST /api/users` (`{"username": …}`) and
+`POST /api/users/{id}/password`; each answer carries the password in its `password` field. Everyone sees only their own
 chats. Agentic sessions run shell commands on a worker node, so an admin has
 to grant them per user. Print the claim code with:
 
@@ -155,6 +159,12 @@ The **account menu** has your Profile, Settings, Log out and the
 role, **+ New workspace…** and Workspace settings). It is a keyboard menu:
 Enter or ↓ opens it, → opens Workspaces, Esc goes back. Design notes:
 [docs/sidebar-search.md](docs/sidebar-search.md).
+
+What you type and have not sent stays in this browser as a draft of that
+chat, for your account only. Logging out (or a login that ended) clears every
+draft in the browser, with your recent folders and test events; deleting a
+chat deletes its draft, here or on another device; incognito chats keep no
+draft.
 
 ## Routines
 
@@ -802,7 +812,8 @@ Design and open questions: [docs/projects.md](docs/projects.md).
 ## Rich messages
 
 Replies render as Markdown: headings, lists, GFM tables (click a header to
-sort, **Copy CSV**), task lists, footnotes, callouts (`> [!NOTE]`, `[!TIP]`,
+sort, **Copy CSV**), task lists, footnotes (the only in-page links a reply
+can have: a `#…` link to anything else shows as plain text), callouts (`> [!NOTE]`, `[!TIP]`,
 `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`), code with its language, **Copy**
 and syntax highlighting once the reply is finished, and math written as
 `\( … \)` or `$$ … $$` (a single `$` stays a dollar sign). **Copy** on a
@@ -1092,13 +1103,29 @@ readable; each needs another agent before its next message. Design notes: [docs/
 
 ## Development
 
-```bash
-cargo test --workspace
-```
+The Rust checks CI runs (`cargo deny` needs `cargo install cargo-deny`):
 
 ```bash
-cd web && pnpm test && pnpm typecheck
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
 ```
+
+The web checks CI runs, with Node 22 and the pnpm that `web/package.json`
+pins (`packageManager`, 12.17.0 today). Corepack, which ships with Node,
+provides that pnpm: run `corepack enable` once (or call `corepack pnpm …`).
+
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm typecheck && pnpm test && pnpm build && pnpm size
+```
+
+`pnpm size` fails when the first load is over its budget in
+`web/scripts/size.mjs` (a hard limit), and records what each change adds to
+the total. The Rust build embeds `web/dist`; without it, `cargo build` still
+works and the server shows "UI not built".
 
 UI dev server with hot reload (proxies `/api` to a running `rizzy-harness serve`):
 

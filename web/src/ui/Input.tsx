@@ -28,9 +28,14 @@ export const replyOf = (p: InputProps, values: Record<string, FormValue>): FormR
   values,
 });
 
-// Session storage can be full, off or blocked; a lost draft is fine.
+// Session storage can be full, off or blocked; a lost draft is fine. An
+// incognito chat keeps none, and sign-out clears them all (lib/drafts).
 export function loadDraft(p: InputProps): unknown {
   try {
+    if (p.info.incognito) {
+      sessionStorage.removeItem(draftKey(p));
+      return null;
+    }
     const raw = sessionStorage.getItem(draftKey(p));
     return raw === null ? null : JSON.parse(raw);
   } catch {
@@ -40,7 +45,7 @@ export function loadDraft(p: InputProps): unknown {
 
 export function saveDraft(p: InputProps, draft: unknown, empty: boolean) {
   try {
-    if (empty) sessionStorage.removeItem(draftKey(p));
+    if (empty || p.info.incognito) sessionStorage.removeItem(draftKey(p));
     else sessionStorage.setItem(draftKey(p), JSON.stringify(draft));
   } catch {
     /* not kept */

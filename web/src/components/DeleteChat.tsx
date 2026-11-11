@@ -2,6 +2,7 @@
 // that also offers the viewer's Media files that came from the chat.
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { dropDraft } from "../lib/drafts";
 import { t } from "../lib/i18n";
 import { mediaApi } from "../lib/media";
 
@@ -48,7 +49,11 @@ export function DeleteChat(props: {
   };
   const confirm = async () => {
     setBusy(true);
-    await api.deleteSession(sessionId, { media: withMedia && !!files?.n }).catch(() => {});
+    // Its unsent draft goes with it (other tabs: pruneDrafts).
+    await api
+      .deleteSession(sessionId, { media: withMedia && !!files?.n })
+      .then(() => dropDraft(sessionId))
+      .catch(() => {});
     location.hash = "#/";
   };
 

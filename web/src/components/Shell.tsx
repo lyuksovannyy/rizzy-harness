@@ -1,5 +1,6 @@
 import { Menu } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
+import { pruneDrafts } from "../lib/drafts";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
@@ -220,7 +221,10 @@ export function Shell(props: {
   const refreshSessions = useCallback(() => {
     api
       .sessions(workspaceId)
-      .then((r) => setSessions(r.sessions))
+      .then((r) => {
+        setSessions(r.sessions);
+        pruneDrafts(r.sessions);
+      })
       .catch(unauthorized);
     refreshAttention();
   }, [workspaceId, unauthorized, refreshAttention]);
@@ -313,6 +317,7 @@ export function Shell(props: {
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     live.onWorkspacesChanged = workspacesChanged;
     live.onProjectsChanged = refreshProjects;
+    live.onLoginEnded = () => void api.me().catch(unauthorized);
     refreshProjects();
     refreshSessions();
     refreshNodes();

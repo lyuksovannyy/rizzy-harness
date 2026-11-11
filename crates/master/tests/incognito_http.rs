@@ -266,17 +266,21 @@ async fn attachments_are_owned_and_used_once() {
     let id = a["attachment_id"].as_str().unwrap().to_string();
 
     // Another account cannot use alex's upload.
-    req(
+    let pw = req(
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         &alex,
     )
-    .await;
+    .await
+    .1["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let r = reqwest::Client::new()
         .post(format!("{}/api/login", t.base))
-        .json(&json!({"username": "bob", "password": "temporary pw"}))
+        .json(&json!({"username": "bob", "password": pw}))
         .send()
         .await
         .unwrap();
@@ -291,7 +295,7 @@ async fn attachments_are_owned_and_used_once() {
         .post(format!("{}/api/me/password", t.base))
         .header("cookie", &bob)
         .same_origin()
-        .json(&json!({"current": "temporary pw", "new": "bobs own password"}))
+        .json(&json!({"current": pw, "new": "bobs own password"}))
         .send()
         .await
         .unwrap();

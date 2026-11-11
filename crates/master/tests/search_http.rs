@@ -267,16 +267,17 @@ async fn new_user(t: &T, admin: &str, name: &str) -> String {
         t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name})),
         Some(admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let pw = v["password"].as_str().unwrap().to_string();
     let (_, temp, _) = req(
         t,
         Method::POST,
         "/api/login",
-        Some(json!({"username": name, "password": "temporary pw"})),
+        Some(json!({"username": name, "password": pw})),
         None,
     )
     .await;
@@ -284,7 +285,7 @@ async fn new_user(t: &T, admin: &str, name: &str) -> String {
         t,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "a password of my own"})),
+        Some(json!({"current": pw, "new": "a password of my own"})),
         temp.as_deref(),
     )
     .await;
@@ -423,19 +424,23 @@ async fn similar_chats_are_strict_safe_and_private() {
     }
 
     // Another user cannot find alex's chats.
-    req(
+    let pw = req(
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&admin),
     )
-    .await;
+    .await
+    .2["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (_, bc, _) = req(
         &t,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob", "password": pw})),
         None,
     )
     .await;
@@ -443,7 +448,7 @@ async fn similar_chats_are_strict_safe_and_private() {
         &t,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;

@@ -409,19 +409,23 @@ async fn admin_configures_provider_live() {
     assert!(!std::fs::read_to_string(&secrets).unwrap().contains(KEY));
 
     // Members cannot see or change providers.
-    req(
+    let pw = req(
         &t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob"})),
         Some(&t.admin),
     )
-    .await;
+    .await
+    .2["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (_, bc, _) = req(
         &t,
         Method::POST,
         "/api/login",
-        Some(json!({"username": "bob", "password": "temporary pw"})),
+        Some(json!({"username": "bob", "password": pw})),
         None,
     )
     .await;
@@ -429,7 +433,7 @@ async fn admin_configures_provider_live() {
         &t,
         Method::POST,
         "/api/me/password",
-        Some(json!({"current": "temporary pw", "new": "bobs own password"})),
+        Some(json!({"current": pw, "new": "bobs own password"})),
         Some(&bc.unwrap()),
     )
     .await;
