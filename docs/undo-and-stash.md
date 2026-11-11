@@ -511,7 +511,7 @@ The last dot keeps the final extension, so editors still know the file type. The
 | `stash_list` | read-only | This chat's unexpired stashes: id, date, turn, files, size, expiry. |
 | `stash_show` | read-only | One file of a stash as base, stashed or current version, or a diff between two of them. Same size limits as `read`. |
 | `stash_apply` | mutating, approval | Unstash files of one stash, exactly as §3.4; conflicts as the approval mode decides. |
-| `stash_delete` | mutating, approval | Delete one stash. The card says what is lost: how many files, from when, the turn. It cannot be undone. |
+| `stash_delete` | mutating, **always asks** | Delete one stash. The card says what is lost: how many files, from when, the turn. It cannot be undone. Unlike other mutating tools it asks the person in every approval mode, `Auto` included, and is refused where no person can answer: a stash is the person's own saved work, and under `Auto` an ordinary mutating tool would delete it unasked. (Set on 2026-11-12 while writing; the owner said the agent may delete a stash and has not yet confirmed this floor.) |
 
 - The tools reach only the stashes of the agent's own chat, in its folder.
 - **No tool creates a stash or changes its contents.** Only an undo the person chose creates one.
@@ -620,7 +620,7 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 | The node is off at a stash's expiry midnight | Removed at the next start. Unusable from the expiry instant on. |
 | A very large stash | Costs its files' compressed size for up to 30 days, shown in the list and the total. Building it is bounded by the 60 s snapshot limit (`git.rs`, `SNAPSHOT_TIMEOUT`). |
 | A stash holding a secret (an edited `.env`) | File content on the node's disk, with the same exposure as the checkpoint store, for up to 30 days. Events carry paths and sizes only. |
-| A routine, with no person | No undo tool. `stash_apply` and `stash_delete` follow the routine's approval rules (O6). Conflicts are skipped under `Ask` and `AskAll`; under `Auto` the agent decides. |
+| A routine, with no person | No undo tool. `stash_apply` follows the routine's approval rules (O6); `stash_delete` is refused, because it always needs a person. Conflicts are skipped under `Ask` and `AskAll`; under `Auto` the agent decides. |
 | A turn that changes 5,000 files | Completes. It warns at its end and on its undo (§2.6), and its undo completes too. |
 | Hostile repository config | The only new call in the user's repository is `rev-parse`, which runs nothing; the merge runs in the shadow. |
 
