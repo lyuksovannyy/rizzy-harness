@@ -311,7 +311,10 @@ impl SessionView {
             EventKind::Checkpoint(c) => {
                 let st = self.checkpoints.entry(c.turn_id).or_default();
                 match c.phase {
-                    CheckpointPhase::Before => st.before = Some(c.git_ref),
+                    // A restore's own checkpoint is undone like a turn's.
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore => {
+                        st.before = Some(c.git_ref)
+                    }
                     CheckpointPhase::After => {
                         st.after = Some(c.git_ref);
                         st.files = c.files;

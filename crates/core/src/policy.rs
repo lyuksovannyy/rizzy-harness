@@ -52,6 +52,12 @@ impl Decision {
     }
 }
 
+/// Model calls one turn may make when node.toml does not say, and the range
+/// node.toml may set it in (`[limits] max_steps`).
+pub const DEFAULT_MAX_STEPS: usize = 50;
+pub const MIN_MAX_STEPS: usize = 1;
+pub const MAX_MAX_STEPS: usize = 1000;
+
 #[cfg(test)]
 mod tests {
     use super::*;

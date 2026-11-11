@@ -3,7 +3,9 @@
 //! Every tool is cancellable through `ToolCtx::cancel`. Path-taking tools are
 //! confined to the workspace unless the node policy says otherwise.
 
+pub mod approval;
 mod bash;
+pub use bash::{DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S};
 pub mod env;
 pub mod filter;
 mod fs;
@@ -25,6 +27,7 @@ use harness_core::refs::SharedRefs;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+pub use approval::{CallKey, call_key};
 pub use bash::Bash;
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
@@ -49,7 +52,7 @@ pub const MAX_GREP_FILE_BYTES: u64 = 8 << 20;
 /// Flags for every file a tool opens: opening a FIFO never waits for the
 /// other end, and a terminal never becomes the node's controlling one.
 /// Neither changes anything for a regular file.
-fn open_flags() -> i32 {
+pub(crate) fn open_flags() -> i32 {
     (nix::fcntl::OFlag::O_NONBLOCK | nix::fcntl::OFlag::O_NOCTTY).bits()
 }
 
@@ -143,6 +146,9 @@ pub struct ToolCtx {
     /// user's chats). Canonical paths, from the node's policy.
     pub protected: Arc<Vec<PathBuf>>,
     pub timeout: Duration,
+    /// The longest a `bash` call may run, whatever it asks for (node.toml
+    /// `[limits] bash_timeout_max_s`).
+    pub bash_timeout_max: Duration,
     /// The environment of every child process a tool starts (an allow-list).
     pub env: ToolEnv,
     /// Text this conversation got from the user and from tools, never text
@@ -175,6 +181,7 @@ impl ToolCtx {
             allow_outside_workspace: false,
             protected: Arc::default(),
             timeout: Duration::from_secs(600),
+            bash_timeout_max: Duration::from_secs(bash::DEFAULT_TIMEOUT_MAX_S),
             env: ToolEnv::default(),
             observed: Arc::default(),
             savings: Default::default(),
@@ -485,6 +492,11 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     /// JSON Schema of the input object.
     fn schema(&self) -> Value;
+    /// The schema shown to the model on this node: the same, with this
+    /// node's `bash` timeout ceiling in the text that states one.
+    fn schema_for(&self, _bash_timeout_max: Duration) -> Value {
+        self.schema()
+    }
     fn risk(&self) -> ToolRisk;
     /// Offered to the model only when this returns true (tools that exist
     /// for a token-saving method are off with it).

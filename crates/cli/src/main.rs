@@ -499,6 +499,8 @@ async fn agentic_node(
         NativeConfig {
             tool_env,
             tool_stream_bytes: policy.limits.tool_stream_bytes,
+            max_steps: policy.limits.max_steps,
+            bash_timeout_max: std::time::Duration::from_secs(policy.limits.bash_timeout_max_s),
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),
@@ -678,7 +680,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
             .map(|p| {
                 format!(
                     "max approval mode {:?}, {} workspace root(s); tool environment: {}, LC_*{}{}; \
-                     streamed output per call {} bytes",
+                     streamed output per call {} bytes; {} steps per turn; bash timeout ceiling {} s",
                     p.max_approval_mode,
                     p.workspace_roots.len(),
                     harness_tools::env::CORE_VARS.join(" "),
@@ -688,7 +690,9 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                         " + env_pass "
                     },
                     p.env_pass.join(" "),
-                    p.limits.tool_stream_bytes
+                    p.limits.tool_stream_bytes,
+                    p.limits.max_steps,
+                    p.limits.bash_timeout_max_s
                 )
             })
             .map_err(|e| e.to_string()),

@@ -84,6 +84,29 @@ three stalled handshakes) and `resume_batches_are_limited_by_bytes` in
 `crates/node/tests/runtime.rs`. They measure queue length and how far the
 flooding peer got, not process memory.
 
+## One writer per session (2026-11-11, ADOPTION_PLAN A.3)
+
+Two findings from the round-2 review (`final-review-ours.md`, missed 3 and 4):
+
+- **A repeated `seq` was acknowledged without looking at it.** Two processes
+  with one node key, or a node restored from an old disk, could send another
+  event under a stored `seq`; the master called it a duplicate and then took
+  the second writer's next in-order frame, mixing two logs silently. Now
+  `Store::append` compares the incoming event with the stored one (kind,
+  timestamp, payload as JSON values). A difference marks the session diverged
+  (`sessions.diverged_seq`) and every later append for it is refused. The
+  rule, what the node is told and what is refused: `PLAN.md` §3.
+- **A revoked node's queued frames were still applied** (up to the 8 the
+  master's queue holds): revoke stopped the pump, but `apply` checked only
+  ownership. `Store::append` now refuses a node whose `nodes.revoked_ms` is
+  set, in the transaction that would store the frame.
+
+Tests: `crates/store/tests/event_log.rs` (identical resend, divergent resend,
+sticky refusal, key order and float round trips, revoked writer) and
+`crates/master/tests/link_hardening.rs` (two links with one key, eight frames
+queued at revoke, a reconnect that replays). Not done here: a generation per
+connection and an epoch per session (ADOPTION_PLAN C.1).
+
 ## Left open
 
 - **One event bigger than a frame.** Nothing caps a single event below

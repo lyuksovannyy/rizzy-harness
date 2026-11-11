@@ -89,6 +89,9 @@ fn outputs(evs: &[RawEvent]) -> Vec<String> {
 #[tokio::test]
 async fn ultracode_delegates_in_parallel_within_caps() {
     let (m, ws, _d) = setup().await;
+    // Coder and Writer can change files: they need a repository for their
+    // worktrees, or they are not started.
+    git(&ws, &["init", "-q"]);
     let sid = session(&m, &ws, "ultracode").await;
     m.prompt(
         sid,
@@ -159,6 +162,7 @@ async fn ultracode_delegates_in_parallel_within_caps() {
 #[tokio::test]
 async fn cancelling_the_parent_cancels_children() {
     let (m, ws, _d) = setup().await;
+    git(&ws, &["init", "-q"]);
     let sid = session(&m, &ws, "ultracode").await;
     m.prompt(
         sid,

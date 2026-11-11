@@ -1076,9 +1076,20 @@ impl ArtifactSink for Sink {
             sha256: staged.sha256.clone(),
             packed: staged.packed.is_some(),
         };
-        let s = self.node.session(self.session).ok_or("the chat is gone")?;
-        s.record(EventKind::ArtifactStaged(Box::new(staged)))
-            .await?;
+        let stage_id = staged.stage_id.clone();
+        let recorded = match self.node.session(self.session) {
+            // The turn's own log: a failure ends the turn.
+            Some(s) => s
+                .emit(EventKind::ArtifactStaged(Box::new(staged)))
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("the chat is gone".into()),
+        };
+        if let Err(e) = recorded {
+            // No event names the copy: drop it.
+            let _ = self.stages.release(self.session, &stage_id);
+            return Err(e);
+        }
         Ok(published)
     }
 }

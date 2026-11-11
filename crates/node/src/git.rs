@@ -717,32 +717,47 @@ pub async fn exists(repo: &Repo, sha: &str) -> bool {
 /// differs between `from` and `expected` (what the folder should look like
 /// now). Refuses, listing them, if any of those files changed since
 /// `expected`, unless `force`. Undo: `from` = before the turn, `expected`
-/// = after it. Rewind: `expected` = the latest state.
+/// = after it. Rewind: `expected` = the latest state. (The session splits
+/// this in two, `restore_plan` and `restore_paths`, to snapshot and log
+/// between them.)
+#[cfg(test)]
 pub async fn restore(
     repo: &Repo,
     from: &str,
     expected: &str,
     force: bool,
 ) -> Result<Vec<String>, String> {
+    let now = if force {
+        None
+    } else {
+        Some(worktree_tree(repo).await?)
+    };
+    let touched = restore_plan(repo, from, expected, now.as_deref()).await?;
+    restore_paths(repo, from, &touched).await
+}
+
+/// The paths a restore of `from` over `expected` writes, with their status
+/// letter. With `now` (a tree or snapshot of the folder as it is), refuses,
+/// listing them, if any of those files differ there from `expected`.
+pub async fn restore_plan(
+    repo: &Repo,
+    from: &str,
+    expected: &str,
+    now: Option<&str>,
+) -> Result<Vec<(char, String)>, String> {
     let touched = changed(repo, from, expected).await?;
-    if touched.is_empty() {
-        return Ok(vec![]);
-    }
-    let paths: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
-    if !force {
-        let now = worktree_tree(repo).await?;
+    if let Some(now) = now.filter(|_| !touched.is_empty()) {
         let mut args = vec![
-            "diff".to_string(),
-            "--no-ext-diff".into(),
-            "--no-textconv".into(),
-            "--name-only".into(),
-            expected.into(),
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            expected,
             now,
-            "--".into(),
+            "--",
         ];
-        args.extend(paths.iter().cloned());
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let since = run(repo, &refs, None).await?;
+        args.extend(touched.iter().map(|(_, p)| p.as_str()));
+        let since = run(repo, &args, None).await?;
         if !since.is_empty() {
             return Err(format!(
                 "these files changed after the turn; undo would overwrite that: {}",
@@ -750,6 +765,20 @@ pub async fn restore(
             ));
         }
     }
+    Ok(touched)
+}
+
+/// Write `from`'s version of every path in `touched` (from
+/// `restore_plan`) into the folder; paths `from` does not have are deleted.
+pub async fn restore_paths(
+    repo: &Repo,
+    from: &str,
+    touched: &[(char, String)],
+) -> Result<Vec<String>, String> {
+    if touched.is_empty() {
+        return Ok(vec![]);
+    }
+    let paths: Vec<String> = touched.iter().map(|(_, p)| p.clone()).collect();
     // Write the old versions through a private index.
     let (_, idx) = temp_index(repo).await?;
     let res = async {
@@ -764,7 +793,7 @@ pub async fn restore(
             args.extend(restore);
             run(repo, &args, Some(&idx)).await?;
         }
-        for (st, p) in &touched {
+        for (st, p) in touched {
             if *st == 'A' {
                 let _ = tokio::fs::remove_file(repo.root.join(p)).await;
             }
@@ -777,8 +806,9 @@ pub async fn restore(
     Ok(paths)
 }
 
-/// A checkpoint group: a turn's refs (`.../before`, `/after`, `/restored`)
-/// or a sub-agent's (`/base`, `/result`).
+/// A checkpoint group: a turn's refs (`.../before`, `/after`), a restore's
+/// (the same two names: the folder before and after it) or a sub-agent's
+/// (`/base`, `/result`).
 fn group_of(ref_name: &str) -> &str {
     ref_name
         .rsplit_once('/')
@@ -813,6 +843,11 @@ async fn record_order(repo: &Repo, ref_name: &str) {
         text.push('\n');
         let _ = tokio::fs::write(&f, text).await;
     }
+}
+
+/// Delete one ref (best effort).
+pub async fn delete_ref(repo: &Repo, ref_name: &str) {
+    let _ = run(repo, &["update-ref", "-d", ref_name], None).await;
 }
 
 /// Keep only the `keep` most recent checkpoints (groups). In a shadow
@@ -1235,6 +1270,35 @@ mod tests {
         p
     }
 
+    /// `exec` of a script this test just wrote, tolerating ETXTBSY.
+    ///
+    /// Writing the script and executing it in one process races with other
+    /// test threads: a thread that forks while our write descriptor is open
+    /// gives the child a copy, held until that child's `exec`, and the kernel
+    /// refuses to execute a file with a writer (`Text file busy`). The
+    /// descriptor is close-on-exec, so the window is tiny, but it cannot be
+    /// closed from here, and renaming does not help (same inode). A failed
+    /// spawn ran nothing, so retrying it is safe; only ETXTBSY is retried,
+    /// and only for a bounded time.
+    async fn exec_script(
+        fake: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<std::process::Output, String> {
+        let mut tries = 0;
+        loop {
+            let mut c = hardened(fake);
+            c.args(args);
+            match exec(c, None, timeout).await {
+                Err(e) if e.contains("Text file busy") && tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                r => return r,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_hung_git_is_killed_at_the_timeout() {
         let d = tempfile::tempdir().unwrap();
@@ -1245,7 +1309,7 @@ mod tests {
             &format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display()),
         );
         let t = std::time::Instant::now();
-        let e = exec(hardened(&fake), None, Duration::from_millis(300))
+        let e = exec_script(&fake, &[], Duration::from_millis(300))
             .await
             .unwrap_err();
         assert!(e.contains("did not finish"), "{e}");
@@ -1268,9 +1332,7 @@ mod tests {
     async fn git_gets_a_clean_environment_and_the_overrides() {
         let d = tempfile::tempdir().unwrap();
         let fake = fake_git(d.path(), "env; echo ARGS \"$@\"");
-        let mut c = hardened(&fake);
-        c.arg("status");
-        let out = exec(c, None, GIT_TIMEOUT).await.unwrap();
+        let out = exec_script(&fake, &["status"], GIT_TIMEOUT).await.unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let allowed = [
             "PATH", "HOME", "LANG", "TMPDIR", "PWD", "SHLVL", "_", "OLDPWD",
