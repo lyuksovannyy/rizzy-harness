@@ -510,3 +510,196 @@ async fn a_node_revoked_while_it_reconnects_never_stays_linked() {
     // that both orders occurred.
     eprintln!("linked before the revoke: {linked_first}, refused: {refused}");
 }
+
+// --- The hello, snapshots and acks (Gate 3 review L-5, L-6, L-8, L-9) ---
+
+fn heads(n: usize) -> Vec<SessionHead> {
+    (0..n)
+        .map(|_| SessionHead {
+            session_id: SessionId::new(),
+            head_seq: 1,
+        })
+        .collect()
+}
+
+fn resumes(c: &mut mpsc::Receiver<MasterToNode>) -> usize {
+    let mut n = 0;
+    while let Ok(m) = c.try_recv() {
+        n += usize::from(matches!(m, MasterToNode::Resume { .. }));
+    }
+    n
+}
+
+/// L-5. A hello listing 60,000 sessions starts a long pass over them; the
+/// node reconnects meanwhile. The old link's pass stops at its next batch
+/// and sends nothing on the new link, so passes never stack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_stops_the_old_hellos_pass() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    const N: usize = 60_000;
+    // Room for every resume, so the count below shows how far it got.
+    let (tx1, from_node) = mpsc::channel::<NodeToMaster>(9);
+    let (to_node, mut c1) = mpsc::channel::<MasterToNode>(N + 16);
+    tx1.try_send(NodeToMaster::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        node_id: "n1".into(),
+        hostname: "h".into(),
+        version: "1".into(),
+        capabilities: vec![],
+        sessions: heads(N),
+    })
+    .unwrap();
+    let l1 = NodeLink { to_node, from_node };
+    let m1 = m.clone();
+    let first = tokio::spawn(async move { m1.add_link(l1, false).await });
+    // The first pass is under way: resumes reach the first link.
+    wait_for(|| {
+        if let Ok(MasterToNode::Resume { .. }) = c1.try_recv() {
+            return true;
+        }
+        false
+    })
+    .await;
+    let (l2, mut c2, _tx2) = open_link("n1", vec![]);
+    m.add_link(l2, false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), first)
+        .await
+        .expect("the old pass stops")
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(resumes(&mut c2), 0, "the old pass sent on the new link");
+    // The first pass was cut short (timing: it needs a few hundred batches,
+    // the second link a few milliseconds).
+    let sent = 1 + resumes(&mut c1);
+    assert!(sent < N, "the old pass ran to the end ({sent})");
+    drop(tx1);
+}
+
+/// L-6. A hello entry is acted on only for the node's own sessions: another
+/// node's live or deleted session gets no `resume` (which would reveal its
+/// length) and no `session.delete`. The node's own deleted session is still
+/// deleted again.
+#[tokio::test]
+async fn a_hello_naming_another_nodes_sessions_learns_nothing() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (theirs, gone, mine) = (SessionId::new(), SessionId::new(), SessionId::new());
+    for (node, sid) in [("n1", theirs), ("n1", gone), ("n2", mine)] {
+        store.append(node, &created_by(sid, 1, None)).unwrap();
+    }
+    store.delete_session(gone, true).unwrap();
+    store.delete_session(mine, true).unwrap();
+    let named = |sid| SessionHead {
+        session_id: sid,
+        head_seq: 50,
+    };
+    let (l, mut c, _tx) = open_link("n2", vec![named(theirs), named(gone), named(mine)]);
+    m.add_link(l, false).await.unwrap();
+    let mut deleted = Vec::new();
+    for _ in 0..50 {
+        while let Ok(msg) = c.try_recv() {
+            match msg {
+                MasterToNode::Resume { session_id, .. } => {
+                    panic!("resume for {session_id}")
+                }
+                MasterToNode::Delete { session_id, .. } => deleted.push(session_id),
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(deleted, vec![mine]);
+    // Its events for the other node's deleted session are refused as for a
+    // live one, without a delete either.
+    let (l, mut c, tx) = open_link("n3", vec![]);
+    m.add_link(l, false).await.unwrap();
+    send(&tx, created_by(gone, 1, None)).await;
+    barrier(&store, &tx).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    while let Ok(msg) = c.try_recv() {
+        assert!(!matches!(msg, MasterToNode::Delete { .. }), "{msg:?}");
+    }
+}
+
+/// L-8. A snapshot that does not reach the head it announced (here it
+/// skips an event) used to leave the session marked as resuming, so no
+/// later gap asked again. Now the next gap sends a new `resume`.
+#[tokio::test]
+async fn a_snapshot_that_falls_short_lets_the_next_gap_ask_again() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let sid = SessionId::new();
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    send(&tx, created_by(sid, 1, None)).await;
+    send(&tx, event(sid, 2, "d2")).await;
+    // A gap: the master asks to resume from 2.
+    send(&tx, event(sid, 4, "d4")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(resumes(&mut c), 1);
+    // The answer skips seq 3.
+    tx.send(NodeToMaster::Snapshot {
+        session_id: sid,
+        head_seq: 5,
+        events: vec![event(sid, 4, "d4"), event(sid, 5, "d5")],
+    })
+    .await
+    .unwrap();
+    send(&tx, event(sid, 6, "d6")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(store.head_seq(sid).unwrap(), 2);
+    assert!(resumes(&mut c) >= 1, "the next gap asked again");
+}
+
+/// L-9. What a remote node says when it refuses a command reaches log
+/// lines and API responses: one line, bounded, without control
+/// characters. Its capabilities are bounded too.
+#[tokio::test]
+async fn what_a_remote_node_answers_is_cleaned() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let mut caps: Vec<String> = (0..1000).map(|i| format!("cap-{i}")).collect();
+    caps.insert(0, "x".repeat(10_000));
+    caps.insert(1, "artifacts".into());
+    let (tx, from_node) = mpsc::channel::<NodeToMaster>(16);
+    let (to_node, mut c) = mpsc::channel::<MasterToNode>(16);
+    tx.try_send(NodeToMaster::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        node_id: "n1".into(),
+        hostname: "h".into(),
+        version: "1".into(),
+        capabilities: caps,
+        sessions: vec![],
+    })
+    .unwrap();
+    m.add_link(NodeLink { to_node, from_node }, false)
+        .await
+        .unwrap();
+    assert!(m.node_has("n1", "artifacts"));
+    assert!(m.node_has("n1", "cap-10"));
+    assert!(!m.node_has("n1", "cap-900"), "at most 64 are kept");
+
+    let sid = session_on(&store, "n1");
+    let m2 = m.clone();
+    let cancel = tokio::spawn(async move { m2.cancel(sid).await });
+    let req_id = loop {
+        match c.recv().await.unwrap() {
+            MasterToNode::Cancel { req_id, .. } => break req_id,
+            _ => continue,
+        }
+    };
+    let noisy = format!("no\u{1b}[2J\nway {}", "z".repeat(1 << 20));
+    tx.send(NodeToMaster::Ack {
+        req_id,
+        ok: false,
+        error: Some(noisy),
+    })
+    .await
+    .unwrap();
+    let err = cancel.await.unwrap().unwrap_err().to_string();
+    assert!(err.chars().count() <= 300, "{} chars", err.chars().count());
+    assert!(!err.chars().any(char::is_control), "{err:?}");
+    assert!(err.starts_with("no [2J way z"), "{err:?}");
+}

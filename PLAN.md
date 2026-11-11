@@ -421,9 +421,16 @@ Master → node
 with the stored event at that `seq` (kind, timestamp, payload as parsed JSON,
 so key order does not count): equal → drop (duplicate), different → the
 session has **diverged**; `seq > mirror_head + 1` → drop and send `resume{last_seq:
-mirror_head}` (at most one outstanding per session). On hello, the master
-sends `resume` for every session where `node.head_seq > mirror_head` (not for
-a diverged one), and creates mirror rows for sessions it has never seen.
+mirror_head}` (at most one outstanding per session; the mark is cleared
+whenever a snapshot batch does not all land or reaches the announced head,
+so a short snapshot never blocks later resumes). On hello, the master
+sends `resume` for every session of **that node** where `node.head_seq >
+mirror_head` (not for a diverged one), and creates mirror rows for sessions
+it has never seen; an entry naming another node's session, live or deleted,
+gets nothing (no `resume` that would reveal its length, no `session.delete`).
+The hello's list is read in batches of 256 sessions, one store read each,
+and the pass stops as soon as the node has a newer link, so reconnects do
+not stack passes. Re-sent deletes are keyed by node and session.
 This makes the link self-healing with no ordering assumptions beyond
 per-session FIFO.
 

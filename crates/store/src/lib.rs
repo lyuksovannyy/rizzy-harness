@@ -85,6 +85,20 @@ pub enum AppendOutcome {
     },
 }
 
+/// A session a node lists in its hello, as the mirror sees it
+/// (`Store::hello_states`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelloState {
+    /// Mirrored up to this `seq` (0: not mirrored yet).
+    Head(u64),
+    /// Deleted here: the node is told again.
+    Deleted,
+    /// Diverged or refused: nothing is asked for.
+    Frozen,
+    /// Another node's session: nothing is revealed or sent.
+    Foreign,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub session_id: SessionId,
@@ -286,7 +300,10 @@ CREATE TABLE IF NOT EXISTS events (
 -- that was offline during the delete cannot resurrect them.
 CREATE TABLE IF NOT EXISTS deleted_sessions (
     session_id TEXT PRIMARY KEY,
-    ts_ms      INTEGER NOT NULL
+    ts_ms      INTEGER NOT NULL,
+    -- The node that owned it, so only that node is told it was deleted
+    -- (NULL when the mirror never had a row for it).
+    node_id    TEXT
 );
 -- Uploaded documents waiting to be sent with a message (text extracted).
 -- Consumed (deleted) when the message is sent: the text then lives in the
@@ -654,13 +671,25 @@ impl Store {
             )
             .optional()?;
         if existing.is_none() {
-            let deleted: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM deleted_sessions WHERE session_id = ?1)",
-                params![sid],
-                |r| r.get(0),
-            )?;
-            if deleted {
-                return Ok(AppendOutcome::Deleted);
+            let deleted: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT node_id FROM deleted_sessions WHERE session_id = ?1",
+                    params![sid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match deleted {
+                // Another node's deleted session: refused as for a live one,
+                // without saying it was deleted (Gate 3 review L-6).
+                Some(Some(node)) if node != owner => {
+                    return Err(StoreError::WrongOwner {
+                        session_id: e.session_id,
+                        owner: node,
+                        claimed: owner.to_string(),
+                    });
+                }
+                Some(_) => return Ok(AppendOutcome::Deleted),
+                None => {}
             }
         }
         let head = match &existing {
@@ -961,6 +990,13 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let id = sid.to_string();
+        let node: Option<String> = tx
+            .query_row(
+                "SELECT node_id FROM sessions WHERE session_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
         tx.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
         let indexed = tx.execute("DELETE FROM chat_fts WHERE session_id = ?1", params![id])?;
         if indexed > 0 {
@@ -982,8 +1018,10 @@ impl Store {
         )?;
         if tombstone {
             tx.execute(
-                "INSERT OR REPLACE INTO deleted_sessions (session_id, ts_ms) VALUES (?1, ?2)",
-                params![id, harness_core::now_ms()],
+                "INSERT INTO deleted_sessions (session_id, ts_ms, node_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET ts_ms = ?2,
+                     node_id = COALESCE(?3, deleted_sessions.node_id)",
+                params![id, harness_core::now_ms(), node],
             )?;
         }
         // Rows that name the chat without a foreign key (it is deleted on
@@ -1496,6 +1534,41 @@ impl Store {
             .optional()?
             .map(Self::finish_session)
             .transpose()
+    }
+
+    /// What the mirror knows of each of `sids`, as `node` should see it in
+    /// its hello (one read for the batch). Another node's session, live or
+    /// deleted, is `Foreign`: nothing about it is revealed or sent
+    /// (Gate 3 review L-6).
+    pub fn hello_states(&self, node: &str, sids: &[SessionId]) -> Result<Vec<HelloState>> {
+        let conn = self.lock();
+        let mut live = conn.prepare_cached(
+            "SELECT node_id, head_seq, diverged_seq IS NOT NULL FROM sessions WHERE session_id = ?1",
+        )?;
+        let mut gone =
+            conn.prepare_cached("SELECT node_id FROM deleted_sessions WHERE session_id = ?1")?;
+        let mut out = Vec::with_capacity(sids.len());
+        for sid in sids {
+            let id = sid.to_string();
+            let row: Option<(String, i64, bool)> = live
+                .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?;
+            let state = match row {
+                Some((n, _, _)) if n != node => HelloState::Foreign,
+                Some((_, _, true)) => HelloState::Frozen,
+                Some((_, head, false)) => HelloState::Head(head as u64),
+                None => match gone
+                    .query_row(params![id], |r| r.get::<_, Option<String>>(0))
+                    .optional()?
+                {
+                    Some(Some(n)) if n != node => HelloState::Foreign,
+                    Some(_) => HelloState::Deleted,
+                    None => HelloState::Head(0),
+                },
+            };
+            out.push(state);
+        }
+        Ok(out)
     }
 
     /// `(session_id, head_seq)` for every session, ordered by id.

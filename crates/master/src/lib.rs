@@ -44,7 +44,7 @@ use harness_core::event::Profile;
 use harness_core::{RawEvent, SessionId, new_id};
 use harness_node::NodeLink;
 use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
-use harness_store::{AppendOutcome, Store};
+use harness_store::{AppendOutcome, HelloState, Store};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -52,6 +52,15 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How many sessions of a hello one store read covers.
+const HELLO_BATCH: usize = 256;
+/// What a remote node's `ack.error` may put into a log line or an API
+/// response: one line of at most this many characters.
+const MAX_ACK_ERROR: usize = 300;
+/// A remote node's capabilities: at most this many, each an identifier of
+/// at most `MAX_CAPABILITY` bytes (longer ones are dropped, not cut).
+const MAX_CAPABILITIES: usize = 64;
+const MAX_CAPABILITY: usize = 64;
 /// The maintenance loop's first pass waits this long, so it never competes
 /// with startup, then runs every `MAINTENANCE_EVERY`.
 const MAINTENANCE_FIRST: Duration = Duration::from_secs(60);
@@ -148,8 +157,9 @@ pub struct MasterInner {
             std::path::PathBuf,
         )>,
     >,
-    /// Sessions with a re-sent `session.delete` in flight.
-    redeleting: Mutex<HashSet<SessionId>>,
+    /// Sessions with a re-sent `session.delete` in flight, by node: one
+    /// node's resend never stands in for, or blocks, another's.
+    redeleting: Mutex<HashSet<(String, SessionId)>>,
     /// Diverged sessions with a `session.cancel` in flight.
     stopping: Mutex<HashSet<SessionId>>,
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
@@ -402,6 +412,23 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::ArtifactRelease { .. } => None,
+    }
+}
+
+/// Clears a session's resume-in-flight mark when dropped, unless disarmed:
+/// a snapshot that stops part way never leaves the session marked.
+struct ResumeGuard<'a> {
+    master: &'a Master,
+    node_id: &'a str,
+    sid: SessionId,
+    armed: bool,
+}
+
+impl Drop for ResumeGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.master.resume_done(self.node_id, self.sid);
+        }
     }
 }
 
@@ -807,11 +834,17 @@ impl Master {
                 "remote node {node_id} may not serve the chat profile"
             ));
         }
-        // What a remote node says about itself is shown in the UI.
-        let (hostname, version) = if embedded {
-            (hostname, version)
+        // What a remote node says about itself is shown in the UI; its
+        // capabilities are kept for the life of the link.
+        let (hostname, version, capabilities) = if embedded {
+            (hostname, version, capabilities)
         } else {
-            (clean_label(&hostname, 64), clean_label(&version, 64))
+            let caps = capabilities
+                .into_iter()
+                .filter(|c| c.len() <= MAX_CAPABILITY && !c.chars().any(char::is_control))
+                .take(MAX_CAPABILITIES)
+                .collect();
+            (clean_label(&hostname, 64), clean_label(&version, 64), caps)
         };
         if protocol_version != PROTOCOL_VERSION {
             return Err(format!(
@@ -867,37 +900,40 @@ impl Master {
         };
         let _ = self.inner.live.send(Live::NodesChanged);
 
-        // Ask for everything we have not mirrored yet.
-        for h in sessions {
-            let sid = h.session_id;
-            let deleted = self
-                .inner
-                .mirror
-                .call(move |s| s.is_deleted(sid))
-                .await
-                .unwrap_or(false);
-            if deleted {
-                self.redelete(&node_id, sid);
-                continue;
+        // Ask for everything we have not mirrored yet: in batches of one
+        // store read each, and only while this link is the node's newest, so
+        // a reconnect stops the old link's pass instead of stacking a second
+        // one on it (a hello can list about 127,000 sessions; Gate 3 review
+        // L-5). Only the node's own sessions are acted on (L-6).
+        for batch in sessions.chunks(HELLO_BATCH) {
+            if !self.is_generation(&node_id, generation) {
+                tracing::info!(node = %node_id, "a newer link took over; stopped reading the old hello");
+                break;
             }
-            // Nothing it sends for a diverged session is taken (PLAN.md §3).
-            let diverged = self
+            let ids: Vec<SessionId> = batch.iter().map(|h| h.session_id).collect();
+            let node = node_id.clone();
+            let states = match self
                 .inner
                 .mirror
-                .call(move |s| s.diverged_seq(sid))
+                .call(move |s| s.hello_states(&node, &ids))
                 .await
-                .unwrap_or(None);
-            if diverged.is_some() {
-                continue;
-            }
-            let mirror_head = self
-                .inner
-                .mirror
-                .call(move |s| s.head_seq(sid))
-                .await
-                .unwrap_or(0);
-            if h.head_seq > mirror_head {
-                self.request_resume(&node_id, sid, mirror_head);
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(node = %node_id, error = %e, "could not read the hello's sessions");
+                    break;
+                }
+            };
+            for (h, state) in batch.iter().zip(states) {
+                match state {
+                    HelloState::Deleted => self.redelete(&node_id, h.session_id),
+                    HelloState::Head(mirror) if h.head_seq > mirror => {
+                        self.request_resume_on(&node_id, Some(generation), h.session_id, mirror)
+                    }
+                    // Nothing it sends for a frozen session is taken (PLAN.md
+                    // §3); another node's session is not this node's business.
+                    HelloState::Head(_) | HelloState::Frozen | HelloState::Foreign => {}
+                }
             }
         }
 
@@ -928,9 +964,29 @@ impl Master {
         Ok(node_id)
     }
 
+    /// Whether `generation` is `node_id`'s newest link.
+    fn is_generation(&self, node_id: &str, generation: u64) -> bool {
+        lock(&self.inner.nodes)
+            .get(node_id)
+            .is_some_and(|n| n.generation == generation)
+    }
+
     fn request_resume(&self, node_id: &str, sid: SessionId, last_seq: u64) {
+        self.request_resume_on(node_id, None, sid, last_seq)
+    }
+
+    /// `request_resume`, sent only while `generation` (when given) is the
+    /// node's newest link.
+    fn request_resume_on(
+        &self,
+        node_id: &str,
+        generation: Option<u64>,
+        sid: SessionId,
+        last_seq: u64,
+    ) {
         let mut nodes = lock(&self.inner.nodes);
         if let Some(n) = nodes.get_mut(node_id)
+            && generation.is_none_or(|g| g == n.generation)
             && n.resuming.insert(sid)
             && let Some(tx) = &n.tx
             && tx
@@ -952,26 +1008,55 @@ impl Master {
         }
     }
 
+    /// Why a node refused a command, as it reaches log lines and API
+    /// responses: from a remote node one line of at most `MAX_ACK_ERROR`
+    /// characters with controls and hidden characters removed (Gate 3
+    /// review L-9). The embedded node's own errors are kept as written.
+    fn ack_error(&self, node_id: &str, error: Option<String>) -> String {
+        let Some(e) = error else {
+            return "rejected".into();
+        };
+        let embedded = lock(&self.inner.nodes)
+            .get(node_id)
+            .is_some_and(|n| n.info.embedded);
+        if embedded {
+            return e;
+        }
+        match harness_core::text::clean_line(&e, MAX_ACK_ERROR) {
+            e if e.is_empty() => "rejected".into(),
+            e => e,
+        }
+    }
+
     async fn on_node_message(&self, node_id: &str, msg: NodeToMaster) {
         match msg {
-            NodeToMaster::Event { event } => self.apply(node_id, event).await,
+            NodeToMaster::Event { event } => {
+                self.apply(node_id, event).await;
+            }
             NodeToMaster::Snapshot {
                 session_id,
                 head_seq,
                 events,
             } => {
+                // The resume stays in flight only while batches keep
+                // landing and more are due; every other way out of here
+                // (an event not taken, the head reached, a store error, a
+                // panic) clears it, so the next gap asks again (Gate 3
+                // review L-8).
+                let mut guard = ResumeGuard {
+                    master: self,
+                    node_id,
+                    sid: session_id,
+                    armed: true,
+                };
+                let mut landed = true;
                 for e in events {
-                    self.apply(node_id, e).await;
+                    landed &= self.apply(node_id, e).await;
                 }
                 let sid = session_id;
-                let head = self
-                    .inner
-                    .mirror
-                    .call(move |s| s.head_seq(sid))
-                    .await
-                    .unwrap_or(0);
-                if head >= head_seq {
-                    self.resume_done(node_id, session_id);
+                let head = self.inner.mirror.call(move |s| s.head_seq(sid)).await;
+                if landed && head.is_ok_and(|h| h < head_seq) {
+                    guard.armed = false;
                 }
             }
             NodeToMaster::Ack { req_id, ok, error } => {
@@ -990,7 +1075,7 @@ impl Master {
                     let _ = tx.send(if ok {
                         Ok(())
                     } else {
-                        Err(error.unwrap_or_else(|| "rejected".into()))
+                        Err(self.ack_error(node_id, error))
                     });
                 }
             }
@@ -1025,11 +1110,13 @@ impl Master {
         }
     }
 
-    /// The replication rule (PLAN.md §3).
-    async fn apply(&self, node_id: &str, e: RawEvent) {
+    /// The replication rule (PLAN.md §3). True when the event is in the
+    /// mirror now (taken, or already there).
+    async fn apply(&self, node_id: &str, e: RawEvent) -> bool {
         let owner = node_id.to_string();
         let ev = e.clone();
         let res = self.inner.mirror.call(move |s| s.append(&owner, &ev)).await;
+        let landed = matches!(res, Ok(AppendOutcome::Applied | AppendOutcome::Duplicate));
         match res {
             Ok(AppendOutcome::Applied) => {
                 let structural = matches!(
@@ -1085,6 +1172,7 @@ impl Master {
                 tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "rejected event");
             }
         }
+        landed
     }
 
     /// A `session_created` named `parent` and the mirror did not keep it
@@ -1591,7 +1679,8 @@ impl Master {
 
     /// A node still has a session we deleted (it was offline): tell it again.
     fn redelete(&self, node_id: &str, sid: SessionId) {
-        let first = lock(&self.inner.redeleting).insert(sid);
+        let key = (node_id.to_string(), sid);
+        let first = lock(&self.inner.redeleting).insert(key.clone());
         if !first {
             return;
         }
@@ -1604,7 +1693,7 @@ impl Master {
                     session_id: sid,
                 })
                 .await;
-            lock(&this.inner.redeleting).remove(&sid);
+            lock(&this.inner.redeleting).remove(&key);
         });
     }
 
