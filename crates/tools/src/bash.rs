@@ -23,19 +23,42 @@ pub const MAX_TIMEOUT_MAX_S: u64 = 3600;
 /// Grace period between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
-/// SIGKILLs a process group when dropped while still armed; for a
-/// contained command (the second field) its whole namespace, init first
-/// (`contain::kill_namespace`, review T8A-2).
-pub(crate) struct KillGroupOnDrop(pub(crate) Option<i32>, pub(crate) bool);
+/// SIGKILLs a process group when dropped while still armed. A contained
+/// command needs none: its [`ShellChild::Contained`] guard kills the whole
+/// namespace when dropped.
+pub(crate) struct KillGroupOnDrop(pub(crate) Option<i32>);
 
 impl Drop for KillGroupOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0.take() {
-            if self.1 {
-                crate::contain::kill_namespace(pgid);
-            } else {
-                signal_group(pgid, Signal::SIGKILL);
-            }
+            signal_group(pgid, Signal::SIGKILL);
+        }
+    }
+}
+
+/// A started shell command. A contained one is only ever held as
+/// [`crate::contain::ContainedChild`], whose drop kills its namespace through
+/// `kill_namespace` (review R-1).
+pub enum ShellChild {
+    Plain(tokio::process::Child),
+    Contained(crate::contain::ContainedChild),
+}
+
+impl std::ops::Deref for ShellChild {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Plain(c) => c,
+            Self::Contained(c) => c,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ShellChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Plain(c) => c,
+            Self::Contained(c) => c,
         }
     }
 }
@@ -209,8 +232,8 @@ impl Tool for Bash {
         // If this call is dropped before it reaped the group itself (the
         // agent loop abandons a tool that outlives a cancel), the whole
         // group dies, not only the shell `kill_on_drop` covers. Contained,
-        // the namespace dies, its init killed first.
-        let mut group = KillGroupOnDrop(pgid, contained);
+        // the child's own guard kills the namespace, its init first.
+        let mut group = KillGroupOnDrop(pgid.filter(|_| !contained));
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
         let out_task = tokio::spawn(pump(

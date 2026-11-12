@@ -970,3 +970,145 @@ fn doctor_marks_each_containment_state() {
         assert!(c.starts_with("FAIL ") && c.contains("does not hold"), "{c}");
     }
 }
+
+// ---- R-1 (re-check of the fixes): the answer nobody reads ----
+
+/// This process's bubblewrap child whose command ends in `sleep <secs>`.
+fn our_bwrap(secs: u32) -> Option<i32> {
+    let me = std::process::id();
+    let tail = format!("\0sleep\0{secs}\0");
+    std::fs::read_dir(format!("/proc/{me}/task"))
+        .ok()?
+        .filter_map(|t| t.ok())
+        .flat_map(|t| {
+            std::fs::read_to_string(format!(
+                "/proc/{me}/task/{}/children",
+                t.file_name().to_string_lossy()
+            ))
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|p| p.parse::<i32>().ok())
+            .collect::<Vec<_>>()
+        })
+        .find(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
+                c.ends_with(tail.as_bytes())
+                    && c.split(|b| *b == 0)
+                        .next()
+                        .is_some_and(|a| a.ends_with(b"bwrap"))
+            })
+        })
+}
+
+/// The re-check's proof inverted. The spawner had already put the child
+/// into the reply when the caller stopped waiting (the `select!` in
+/// `bash.rs` takes the cancel or the timeout, or the call is dropped): the
+/// reply was dropped with the bare child inside and only tokio's
+/// `kill_on_drop` killed bubblewrap, leaving the namespace running at the
+/// first to third try. The reply now carries `ContainedChild`, whose drop
+/// kills the namespace: no try leaves a survivor. `T8A_TRIES` sets the
+/// count (default 100).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_nobody_reads_is_killed_with_its_namespace() {
+    const SECS: u32 = 975_302;
+    let tries: u32 = std::env::var("T8A_TRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let conf = Confinement::Confined {
+        sandbox: sb,
+        tmp: None,
+    };
+    let reaper = Reaper(vec![SECS]);
+    let mut survivors = Vec::new();
+    for attempt in 1..=tries {
+        let (mut cmd, _) = conf
+            .shell(
+                "sleep".as_ref(),
+                &[SECS.to_string().as_ref()],
+                &f.ws,
+                None,
+                &Default::default(),
+                std::slice::from_ref(&f.data),
+                Grants {
+                    workspace_write: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut fut = Box::pin(harness_tools::contain::spawn_for_test(cmd));
+        // The caller waits once, as `select!` does, then is not woken again
+        // before its cancel.
+        assert!(futures::poll!(&mut fut).is_pending());
+        let by = Instant::now() + Duration::from_millis(500);
+        let mut bwrap_pid = None;
+        while Instant::now() < by {
+            bwrap_pid = bwrap_pid.or_else(|| our_bwrap(SECS));
+            if bwrap_pid.and_then(init_of).is_some_and(leads_a_session) {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        drop(fut);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let left = sleeps(SECS);
+        if !left.is_empty() {
+            survivors.push(attempt);
+            for pid in left {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+    eprintln!(
+        "an unread answer: {} of {tries} namespaces survived",
+        survivors.len()
+    );
+    drop(reaper);
+    assert!(
+        survivors.is_empty(),
+        "namespaces survived an unread answer at tries {survivors:?} of {tries}"
+    );
+}
+
+/// N-2's claim, from the re-check: a caller that stops waiting before the
+/// spawner answered has its late child killed, namespace and all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_abandoned_before_the_answer_is_killed() {
+    const SECS: u32 = 975_301;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let conf = Confinement::Confined {
+        sandbox: sb,
+        tmp: None,
+    };
+    let _reaper = Reaper(vec![SECS]);
+    for _ in 0..30 {
+        let (mut cmd, _) = conf
+            .shell(
+                "sleep".as_ref(),
+                &[SECS.to_string().as_ref()],
+                &f.ws,
+                None,
+                &Default::default(),
+                std::slice::from_ref(&f.data),
+                Grants::default(),
+            )
+            .unwrap();
+        cmd.process_group(0).kill_on_drop(true);
+        let mut fut = Box::pin(harness_tools::contain::spawn_for_test(cmd));
+        assert!(futures::poll!(&mut fut).is_pending());
+        drop(fut);
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(sleeps(SECS).is_empty(), "left: {:?}", sleeps(SECS));
+}

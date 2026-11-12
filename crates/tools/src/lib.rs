@@ -29,7 +29,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub use approval::{CallKey, call_key};
-pub use bash::Bash;
+pub use bash::{Bash, ShellChild};
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;

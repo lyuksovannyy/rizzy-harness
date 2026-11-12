@@ -246,7 +246,62 @@ pub(crate) fn term_namespace_with(bwrap_pid: i32, init_of: impl Fn(i32) -> Optio
     let _ = killpg(Pid::from_raw(target), Signal::SIGTERM);
 }
 
-type Reply = tokio::sync::oneshot::Sender<std::io::Result<tokio::process::Child>>;
+/// A spawned contained command (review R-1). There is no other way to hold
+/// one: the spawner hands this out, never the bare child, so wherever it is
+/// dropped while bubblewrap still runs (an answer nobody reads, a call
+/// dropped mid-run, an early return, a panic) the whole namespace is killed
+/// through [`kill_namespace`], never by tokio's `kill_on_drop` alone, which
+/// kills bubblewrap only. Once the child has been reaped nothing is sent:
+/// its number may belong to another process by then.
+#[derive(Debug)]
+pub struct ContainedChild(tokio::process::Child);
+
+impl ContainedChild {
+    /// Wait for it and collect its output, like `Child::wait_with_output`,
+    /// without giving the child up while it may still run.
+    pub async fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+        async fn read(p: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            if let Some(mut p) = p {
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        }
+        let (out, err) = (self.0.stdout.take(), self.0.stderr.take());
+        let (status, stdout, stderr) = tokio::join!(self.0.wait(), read(out), read(err));
+        Ok(std::process::Output {
+            status: status?,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+impl std::ops::Deref for ContainedChild {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ContainedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ContainedChild {
+    fn drop(&mut self) {
+        // `Ok(None)`: still running and not reaped, so the number is still
+        // bubblewrap's. A reaped child (`Ok(Some)`) is left alone.
+        if let (Ok(None), Some(pid)) = (self.0.try_wait(), self.0.id()) {
+            kill_namespace(pid as i32);
+        }
+    }
+}
+
+type Reply = tokio::sync::oneshot::Sender<std::io::Result<ContainedChild>>;
 
 struct Job {
     cmd: tokio::process::Command,
@@ -260,7 +315,7 @@ static SPAWNER: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
 /// before the process does, so `--die-with-parent` fires only when the node
 /// dies (see the module docs). The child is registered with the caller's
 /// tokio runtime.
-pub(crate) async fn spawn(cmd: tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+pub(crate) async fn spawn(cmd: tokio::process::Command) -> std::io::Result<ContainedChild> {
     let tx = SPAWNER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Job>();
         std::thread::Builder::new()
@@ -269,17 +324,13 @@ pub(crate) async fn spawn(cmd: tokio::process::Command) -> std::io::Result<tokio
                 // Ends only when every sender is gone, which the static
                 // never is: this thread lives as long as the process.
                 while let Ok(mut job) = rx.recv() {
-                    let r = {
-                        let _rt = job.handle.enter();
-                        job.cmd.spawn()
-                    };
-                    // The caller stopped waiting (cancel, timeout, a dropped
-                    // call): nobody will kill this one, so kill it here.
-                    if let Err(Ok(child)) = job.reply.send(r)
-                        && let Some(pid) = child.id()
-                    {
-                        kill_namespace(pid as i32);
-                    }
+                    // A caller that stopped waiting gets nothing; the guard
+                    // dropped here (inside the caller's runtime, so tokio
+                    // can still reap it), or with the unread answer, kills
+                    // the namespace.
+                    let _rt = job.handle.enter();
+                    let r = job.cmd.spawn().map(ContainedChild);
+                    let _ = job.reply.send(r);
                 }
             })
             .expect("start the containment spawner thread");
@@ -294,7 +345,7 @@ pub(crate) async fn spawn(cmd: tokio::process::Command) -> std::io::Result<tokio
 async fn spawn_via(
     tx: &Mutex<mpsc::Sender<Job>>,
     cmd: tokio::process::Command,
-) -> std::io::Result<tokio::process::Child> {
+) -> std::io::Result<ContainedChild> {
     let (reply, rx) = tokio::sync::oneshot::channel();
     let job = Job {
         cmd,
@@ -315,9 +366,7 @@ async fn spawn_via(
 /// For tests of the spawner: spawn `cmd` the way a contained `bash` call
 /// does.
 #[doc(hidden)]
-pub async fn spawn_for_test(
-    cmd: tokio::process::Command,
-) -> std::io::Result<tokio::process::Child> {
+pub async fn spawn_for_test(cmd: tokio::process::Command) -> std::io::Result<ContainedChild> {
     spawn(cmd).await
 }
 

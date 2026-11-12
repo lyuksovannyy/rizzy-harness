@@ -631,11 +631,13 @@ impl Confinement {
     pub async fn spawn(
         mut cmd: tokio::process::Command,
         contained: bool,
-    ) -> std::io::Result<tokio::process::Child> {
+    ) -> std::io::Result<crate::bash::ShellChild> {
         if contained {
-            crate::contain::spawn(cmd).await
+            crate::contain::spawn(cmd)
+                .await
+                .map(crate::bash::ShellChild::Contained)
         } else {
-            cmd.spawn()
+            cmd.spawn().map(crate::bash::ShellChild::Plain)
         }
     }
 
