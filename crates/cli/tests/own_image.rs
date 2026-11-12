@@ -368,6 +368,9 @@ fn serve(exe: &Path, data: &Path, bind: &str, log: &Path) -> Result<Server, Stri
         .args(["--data-dir", data.to_str().unwrap()])
         .args(["serve", "--bind", bind])
         .env("HARNESS_LOG", "info")
+        // Not the test's own folder (`crates/cli`): whatever the node writes
+        // into its working directory stays in the fixture.
+        .current_dir(data.parent().unwrap())
         .stdout(std::process::Stdio::piped())
         .stderr(std::fs::File::create(log).unwrap())
         .spawn()
@@ -544,4 +547,187 @@ async fn a_second_start_doctor_and_a_restart_leave_the_node_alone() {
     let r = s.run(&f.ws, "run: echo A-AGAIN").await;
     assert!(r.contains("A-AGAIN\n"), "{r}");
     assert_eq!(image_names(&f.data), Vec::<String>::new());
+}
+
+// ---- 5. re-check R-1: a binary the node can run but not read ----
+
+/// A copy of the harness binary with mode 311 (execute, no read): the node
+/// still holds a descriptor of it (`O_PATH` needs no read permission), so
+/// after the file at its path is replaced by a recording script, the guard
+/// and `sandbox-exec` are still the node's image: the command runs and the
+/// script never runs. Before (a descriptor opened for reading, which mode
+/// 311 refuses, so the node started every guard by the path), the script
+/// ran as the guard. In both bind modes, and through a real `serve`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_binary_the_node_cannot_read_runs_only_as_its_image() {
+    for binds in [Binds::Fd, Binds::Path] {
+        let f = fixture(false);
+        let exe = f.binary(&f.root.join("bin/rizzy-harness"));
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o311)).unwrap();
+        let Some(sb) = f.contained(&exe, Form::Full, binds, Network::On) else {
+            return;
+        };
+        let ctx = f.ctx(Arc::new(sb), "s1");
+        let r = run(&ctx, "echo first").await;
+        assert!(r.contains("first\n"), "{binds:?}: {r}");
+        let log = f.root.join("ran-as");
+        let next = f.root.join("bin/next");
+        impostor(&next, &log);
+        std::fs::rename(&next, &exe).unwrap();
+        let r = run(&ctx, "echo after").await;
+        let wrote = std::fs::read_to_string(&log).unwrap_or_default();
+        eprintln!("{binds:?}: {r:?}; the script wrote {wrote:?}");
+        assert!(wrote.is_empty(), "{binds:?}: the script ran: {wrote}");
+        assert!(r.contains("after\n"), "{binds:?}: {r}");
+    }
+    // The real node, started from a mode 311 binary.
+    let f = fixture(false);
+    let exe = f.binary(&f.root.join("bin/rizzy-harness"));
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o311)).unwrap();
+    node_files(&f);
+    let s = serve(&exe, &f.data, "127.0.0.1:0", &f.root.join("serve.log")).unwrap();
+    let first = s.run(&f.ws, "run: echo pid=$$").await;
+    if !first.contains("pid=2\n") {
+        assert!(!bwrap::required(), "the shell is not contained: {first}");
+        return;
+    }
+    let log = f.root.join("ran-as");
+    let next = f.root.join("bin/next");
+    impostor(&next, &log);
+    std::fs::rename(&next, &exe).unwrap();
+    let r = s.run(&f.ws, "run: echo after-the-upgrade").await;
+    let wrote = std::fs::read_to_string(&log).unwrap_or_default();
+    eprintln!("serve: {r:?}; the script wrote {wrote:?}");
+    assert!(wrote.is_empty(), "the script ran: {wrote}");
+    assert!(r.contains("after-the-upgrade\n"), "{r}");
+}
+
+// ---- 6. re-check R-4: the helpers and the uncontained shell ----
+
+/// The node's helper wrapper (`Sandbox::helper`: its checkpoint git,
+/// graphify) and a shell left to Landlock alone are started from the node's
+/// image too: after the binary at the path is replaced by a recording
+/// script, and after it is deleted, both still run, and the script never
+/// runs as their wrapper. Before, both were started by the path: the
+/// script ran as `sandbox-exec`, and a deleted binary failed them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_helpers_and_the_uncontained_shell_run_from_the_image() {
+    let f = fixture(false);
+    let exe = f.binary(&f.root.join("bin/rizzy-harness"));
+    let sb = f.plain(&exe, Network::On);
+    if let Err(e) = sb.probe(&f.data.join("sandbox-tmp/probe"), &f.data) {
+        assert!(!bwrap::required(), "Landlock does not work here: {e}");
+        return;
+    }
+    let sb = Arc::new(sb);
+    let ctx = f.ctx(sb.clone(), "s1");
+    let log = f.root.join("ran-as");
+    for step in ["as installed", "replaced", "deleted"] {
+        match step {
+            "replaced" => {
+                let next = f.root.join("bin/next");
+                impostor(&next, &log);
+                std::fs::rename(&next, &exe).unwrap();
+            }
+            "deleted" => std::fs::remove_file(&exe).unwrap(),
+            _ => {}
+        }
+        let out = sb
+            .helper(&[], &[])
+            .arg("/usr/bin/echo")
+            .arg("HELPER-RAN")
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.contains("HELPER-RAN\n"), "{step}: the helper: {out}");
+        let r = run(&ctx, "echo SHELL-RAN").await;
+        assert!(r.contains("SHELL-RAN\n"), "{step}: the shell: {r}");
+        let wrote = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(wrote.is_empty(), "{step}: the script ran: {wrote}");
+    }
+}
+
+/// A real `serve` from its build tree: a turn's checkpoint is taken after
+/// the binary was replaced and after it was deleted (no "checkpoint failed"
+/// in the node's log), and the file put at the binary's path never runs.
+/// Before, every checkpoint after the deletion failed ("git: No such file
+/// or directory") while commands ran on, and the replacement ran as the
+/// checkpoint git's wrapper.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_keeps_its_checkpoints_after_a_rebuild_and_a_deletion() {
+    let f = fixture(false);
+    let exe = f.binary(&f.ws.join("target/debug/rizzy-harness"));
+    node_files(&f);
+    let log = f.root.join("serve.log");
+    let s = serve(&exe, &f.data, "127.0.0.1:0", &log).unwrap();
+    let first = s.run(&f.ws, "run: echo one > a.txt; echo pid=$$").await;
+    if !first.contains("pid=2\n") {
+        assert!(!bwrap::required(), "the shell is not contained: {first}");
+        return;
+    }
+    let record = f.root.join("ran-as");
+    let next = f.root.join("next");
+    impostor(&next, &record);
+    std::fs::rename(&next, &exe).unwrap();
+    let r = s
+        .run(&f.ws, "run: echo two > b.txt; echo AFTER-THE-REBUILD")
+        .await;
+    assert!(r.contains("AFTER-THE-REBUILD\n"), "{r}");
+    std::fs::remove_file(&exe).unwrap();
+    let r = s
+        .run(&f.ws, "run: echo three > c.txt; echo AFTER-THE-DELETION")
+        .await;
+    assert!(r.contains("AFTER-THE-DELETION\n"), "{r}");
+    // A turn's checkpoint is taken after its tool call: wait for the last.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let text = std::fs::read_to_string(&log).unwrap();
+    let failed: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            l.contains("checkpoint failed")
+                || l.contains("no checkpoint")
+                || l.contains("checkpoint copies failed")
+        })
+        .collect();
+    let wrote = std::fs::read_to_string(&record).unwrap_or_default();
+    eprintln!("checkpoint warnings: {failed:?}; the replacement wrote: {wrote:?}");
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(wrote.is_empty(), "the replacement ran: {wrote}");
+}
+
+// ---- 7. re-check R-2: what the agent is told at mode 000 ----
+
+/// The image's mode set to 000 (T8F-5, open by decision): the tool result
+/// names the node's own binary and says to restore its mode, not "failed to
+/// spawn bash"; and so does a helper's failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_mode_000_the_messages_name_the_nodes_binary() {
+    let f = fixture(false);
+    let exe = f.binary(&f.root.join("bin/rizzy-harness"));
+    let Some(sb) = f.contained(&exe, Form::Full, Binds::Fd, Network::On) else {
+        return;
+    };
+    let sb = Arc::new(sb);
+    let ctx = f.ctx(sb.clone(), "s1");
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0)).unwrap();
+    let r = run(&ctx, "echo RAN").await;
+    let e = sb
+        .helper(&[], &[])
+        .arg("/usr/bin/true")
+        .output()
+        .map(|_| ())
+        .unwrap_err();
+    let helper = harness_tools::sandbox::explain_spawn(sb.helper(&[], &[]).get_program(), &e);
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    eprintln!("the tool result: {r}\nthe helper: {helper}");
+    let path = exe.display().to_string();
+    for m in [&r, &helper] {
+        assert!(!m.contains("spawn bash"), "{m}");
+        assert!(
+            m.contains("the node's own binary") && m.contains(&path),
+            "{m}"
+        );
+        assert!(m.contains("chmod"), "{m}");
+    }
 }

@@ -37,6 +37,11 @@ use serde::{Deserialize, Serialize};
 /// The subcommand name of the wrapper.
 pub const SUBCOMMAND: &str = "sandbox-exec";
 
+/// What to tell when `program` could not be started (stub, re-check R-2).
+pub fn explain_spawn(program: &OsStr, e: &std::io::Error) -> String {
+    format!("{}: {e}", program.to_string_lossy())
+}
+
 /// `sandbox-exec`, first: close every descriptor above 2 this process was
 /// given (T.8f, review T8F-2). A contained `sandbox-exec` is started from a
 /// descriptor of the node's image that its guard left open (and, with
