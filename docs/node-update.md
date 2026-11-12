@@ -210,7 +210,9 @@ README gains that variant.
 at the path. `CommandExt::exec` is safe Rust and already used (`crates/tools/src/sandbox.rs:904-920`),
 but a re-exec keeps the old process's PID, environment, signal mask, limits and any descriptor a
 dependency opened without close-on-exec, and when the new build dies nothing is left to roll back
-to. A hand-started node prints "updated; start me again" and exits.
+to. A hand-started node prints "updated; start me again" and exits. Either way, exit or re-exec,
+every contained shell command still running dies at that instant by SIGKILL (its bubblewrap
+namespace dies with the node, T.8a): the drain (§7) is what gives them their grace.
 
 ### 6.3 Rollback
 

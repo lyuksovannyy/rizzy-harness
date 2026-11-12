@@ -738,7 +738,10 @@ user without a login session (no session bus, no `docker` group, as
 - A command killed by a signal reports exit code 128 + the signal (137
   for SIGKILL) instead of "signal".
 - On cancel or timeout the command still gets SIGTERM first and 2 s to
-  exit, then everything left is killed.
+  exit, then everything left is killed. When the node process itself
+  exits, restarts or re-executes itself, every running command is killed
+  at once, without that grace: stop a node with its normal shutdown so
+  running turns end first.
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
