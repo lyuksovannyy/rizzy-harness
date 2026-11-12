@@ -162,11 +162,25 @@ async fn say(t: &T, sid: &str, text: &str) {
     assert_eq!(st, StatusCode::OK, "{v}");
     for _ in 0..300 {
         if t.rec.reqs.lock().unwrap().len() > before {
-            return;
+            return idle(t, sid).await;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("no model request");
+}
+
+/// Wait until the session's turn has ended. The model request is recorded
+/// before the turn is over, so a caller that prompts again straight away
+/// was answered 409 "a turn is already running" on a loaded machine.
+async fn idle(t: &T, sid: &str) {
+    for _ in 0..1000 {
+        let (_, v) = call(t, Method::GET, &format!("/api/sessions/{sid}"), None).await;
+        if v["running"] == false {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("session {sid} kept running");
 }
 
 fn last_request(t: &T) -> (String, Vec<String>) {
