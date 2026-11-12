@@ -830,7 +830,8 @@ pub fn contained_line(
             bwrap.display()
         ),
         crate::contain::Form::SharedProc => format!(
-            "contained without a /proc of its own ({}: a PID namespace per command, but a              fresh /proc could not be mounted, so /proc lists this machine's processes",
+            "contained without a /proc of its own ({}: a PID namespace per command, but a \
+             fresh /proc could not be mounted, so /proc lists this machine's processes",
             bwrap.display()
         ),
     };
@@ -847,7 +848,12 @@ pub fn contained_line(
     };
     (
         format!(
-            "{what}) WITH A GAP: on this kernel (Landlock ABI {abi}, below 9) a command can              still start a process outside the containment, which then outlives it and runs              without the sandbox, by asking a service of this user over a Unix socket (the              session bus at /run/user/<uid>/bus, a container runtime's socket){abstract_too}.              Closed by Linux 7.1 or newer (Landlock ABI 9), or by the planned file view (T.8c);              README, \"The shell sandbox\""
+            "{what}) WITH A GAP: on this kernel (Landlock ABI {abi}, below 9) a command can \
+             still start a process outside the containment, which then outlives it and runs \
+             without the sandbox, by asking a service of this user over a Unix socket (the \
+             session bus at /run/user/<uid>/bus, a container runtime's socket){abstract_too}. \
+             Closed by Linux 7.1 or newer (Landlock ABI 9), or by the planned file view (T.8c); \
+             README, \"The shell sandbox\""
         ),
         ContainLevel::Warn,
     )
@@ -1066,16 +1072,20 @@ fn containment(
             let full = Contain::new(bwrap.clone(), Form::Full);
             let shared = Contain::new(bwrap.clone(), Form::SharedProc);
             let found = match sandbox.probe_containment(&full, scratch) {
-                Ok(()) => Ok(full),
+                Ok(()) => Ok((full, None)),
                 Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
-                    Ok(()) => Ok(shared),
+                    Ok(()) => Ok((shared, Some(full_err))),
                     Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
                 },
             };
             match found {
-                Ok(c) => {
+                Ok((c, proc_err)) => {
                     return match decide(c.form(), abi, &bwrap, settings.contain, node_toml) {
-                        Ok((line, level)) => {
+                        Ok((mut line, level)) => {
+                            // Why the fresh /proc failed (the shared form).
+                            if let Some(e) = proc_err {
+                                line.push_str(&format!("; a fresh /proc failed: {e}"));
+                            }
                             (sandbox.with_containment(c), Contained::Yes(line, level))
                         }
                         Err(msg) => (sandbox, Contained::Refuse(msg)),
@@ -1763,6 +1773,17 @@ mod tests {
             9
         );
         assert_eq!(effective_abi("landlock unavailable"), 0);
+        // Review R-2: a lost line continuation left runs of spaces; every
+        // line, in every form and range, is single-spaced.
+        for form in [Form::Full, Form::SharedProc] {
+            for abi in [0, 4, 6, 8, 9, 10] {
+                let (line, _) = contained_line(form, abi, b);
+                assert!(!line.contains("  "), "{form:?} {abi}: {line}");
+                if let Err(e) = decide(form, abi, b, ContainMode::Required, toml) {
+                    assert!(!e.contains("  "), "{form:?} {abi}: {e}");
+                }
+            }
+        }
     }
 
     #[test]
