@@ -114,8 +114,15 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
     await p.focus('.composer textarea');
     await p.keyboard.press('Control+k');
     await p.waitForSelector(`${panel}[open]`);
-    check(await p.evaluate((sel) => document.activeElement === document.querySelector(sel), input), 'focus is in the search input');
+    // The panel is a lazy chunk (13ca3e9): until it loads, a stand-in box
+    // (no combobox role) holds focus and keeps what is typed. Either box must
+    // have focus at once, and the loaded panel must take over focus and text.
+    check(await p.evaluate(() => !!document.activeElement?.matches('dialog.search-panel[open] input')), 'focus is in the search input');
     await p.keyboard.type('worker thr');
+    await p.waitForFunction(
+      (sel) => document.activeElement === document.querySelector(sel) && document.activeElement.value === 'worker thr',
+      input, { timeout: 10000 },
+    ).catch(() => { throw new Error('the loaded search panel has focus and the typed text'); });
     await p.waitForSelector('.search-row mark');
     const row = (await p.innerText('.search-row')).replace(/\s+/g, ' ');
     log('search hit:', row.slice(0, 70));
