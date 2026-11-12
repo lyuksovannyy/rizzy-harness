@@ -44,10 +44,11 @@ async function skipOnboarding(page) {
     '[web]', 'search = "searxng"', `searxng_url = "${sx}"`, '',
   ].join('\n'));
   const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7796'], { detached: true, stdio: 'ignore' });
+  let p = null;
   try {
     const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
-    const p = await b.newPage({ viewport: { width: 1280, height: 860 } });
+    p = await b.newPage({ viewport: { width: 1280, height: 860 } });
     await keyed(p);
     const errors = [];
     p.on('pageerror', (e) => errors.push(e.message));
@@ -84,6 +85,9 @@ async function skipOnboarding(page) {
     await ask('what is in my notes?');
     await p.waitForSelector('.msg.user .chip:has-text("notes.md")');
     await p.waitForSelector('.msg.assistant >> text=buy oat milk on friday');
+    // The composer ignores Enter while a turn runs (Composer.tsx, submit),
+    // and the text can show before the turn ends.
+    await p.waitForFunction(() => !document.querySelector('.send.stop'));
     log('attachment text reached the model');
     // A binary file is refused with a clear message.
     fs.writeFileSync(`${S}/blob.bin`, Buffer.from([0, 1, 2, 3]));
@@ -136,6 +140,12 @@ async function skipOnboarding(page) {
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);
     await b.close();
+  } catch (e) {
+    if (p) {
+      await p.screenshot({ path: `${S}/p6-fail.png` }).catch(() => {});
+      fs.writeFileSync(`${S}/p6-fail.html`, await p.content().catch(() => ''));
+    }
+    throw e;
   } finally {
     process.kill(-srv.pid, 'SIGKILL');
     searx.close();
