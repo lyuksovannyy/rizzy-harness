@@ -1,21 +1,23 @@
 // Phase 8 end-to-end with two real processes: a master with a node listener
 // and a remote node that joins with a one-time command from the UI, runs an
-// approved tool, serves Ultracode's parallel sub-agents, and is revoked.
+// approved tool, serves the Senior Teamlead's parallel sub-agents, and is revoked.
 // Usage: node web/e2e/phase8.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, pickAgent } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e8-'));
-const A = `${S}/master`, B = `${S}/remote`;
-for (const d of [A, B, `${B}/ws`]) fs.mkdirSync(d, { recursive: true });
+// The remote node's project sits outside its data directory: a session
+// folder inside the data directory is refused since 9a889d2.
+const A = `${S}/master`, B = `${S}/remote`, W = `${S}/remote-ws`;
+for (const d of [A, B, `${W}`]) fs.mkdirSync(d, { recursive: true });
 fs.writeFileSync(`${A}/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 10\nmodels = [{ id = "mock" }]\n');
 fs.writeFileSync(`${A}/node.toml`, `workspace_roots = ["${A}"]\n`);
 fs.writeFileSync(`${B}/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 10\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${B}/node.toml`, `workspace_roots = ["${B}/ws"]\n`);
+fs.writeFileSync(`${B}/node.toml`, `workspace_roots = ["${W}"]\n`);
 const URL_ = 'http://127.0.0.1:7794/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
@@ -67,34 +69,38 @@ let PAGE = null;
     await p.waitForSelector('h1.greeting');
     await p.fill('.composer textarea', 'run: echo remote-ok > out.txt && cat out.txt');
     await p.click('.mode-switch button:has-text("Agentic")');
+    // The default Assistant has no bash since the roster (9c32186).
+    await pickAgent(p);
     await p.selectOption('.agentic-row select', nodeId);
-    await p.fill('.agentic-row input', `${B}/ws`);
+    await p.fill('.agentic-row input', `${W}`);
     await p.click('.composer .send');
     await p.waitForSelector('.approval');
     await p.click('.approval button:has-text("Allow")');
     await p.waitForSelector('text=Tool said: remote-ok');
-    check(fs.readFileSync(`${B}/ws/out.txt`, 'utf8').trim() === 'remote-ok', 'file written on the remote node');
+    check(fs.readFileSync(`${W}/out.txt`, 'utf8').trim() === 'remote-ok', 'file written on the remote node');
     log('tool ran on the remote node after approval');
 
-    // Ultracode: parallel sub-agents in child sessions.
+    // Parallel sub-agents in child sessions. Ultracode was replaced by the
+    // Senior Teamlead in the roster (9c32186).
     await p.click('.new-chat');
     await p.waitForSelector('h1.greeting');
-    await p.fill('.composer textarea', 'delegate: scout=look around | writer=draft a note');
+    // Two read-only sub-agents: Writer can change files since the roster, and
+    // a sub-agent that changes files needs a git repository (it works on its
+    // own copy), which this plain folder is not.
+    await p.fill('.composer textarea', 'delegate: scout=look around | reviewer=check the notes');
     await p.click('.mode-switch button:has-text("Agentic")');
-    // The composer's agent picker is a listbox button, not a native select.
-    await p.click('.composer button.select-button[aria-label^="agent:"]');
-    await p.click('[role=listbox][aria-label=agent] [role=option]:has-text("Ultracode")');
+    await pickAgent(p, 'Senior Teamlead');
     await p.selectOption('.agentic-row select', nodeId);
-    await p.fill('.agentic-row input', `${B}/ws`);
+    await p.fill('.agentic-row input', `${W}`);
     await p.click('.composer .send');
-    await p.waitForSelector('.tool >> text=@writer: draft a note');
+    await p.waitForSelector('.tool >> text=@reviewer: check the notes');
     await p.waitForFunction(() => document.querySelectorAll('.tool.tool-ok').length >= 2);
-    await p.screenshot({ path: `${S}/p8-2-ultracode.png` });
+    await p.screenshot({ path: `${S}/p8-2-teamlead.png` });
     const recents = await p.innerText('.sidebar');
     check(!recents.includes('@scout:'), 'sub-agent sessions stay out of Recents');
-    await p.click('.tool:has-text("@writer: draft") .child-link');
+    await p.click('.tool:has-text("@reviewer: check") .child-link');
     await p.waitForSelector('text=Back to the main session');
-    await p.waitForSelector('text=You said: draft a note');
+    await p.waitForSelector('text=You said: check the notes');
     log('child session reachable from the tool card');
 
     // Revoke: the node is cut off and its process stops.
@@ -129,4 +135,4 @@ let PAGE = null;
       }
     }
   }
-})().catch((e) => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });
+})().catch((e) => { console.error('FAILED:', e.message.split('\n').slice(0, 3).join(' | ')); process.exit(1); });

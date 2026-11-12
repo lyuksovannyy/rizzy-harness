@@ -56,4 +56,13 @@ async function keyed(target) {
   });
 }
 
-module.exports = { claimCode, createOwner, keywordsOnly, keyed };
+/** Pick the composer's agent. Since the eight-agent roster (9c32186) the
+ * default Assistant has no file or command tools, so an agentic chat that
+ * runs a command or publishes must name the Software Developer. */
+async function pickAgent(p, name = 'Software Developer') {
+  await p.click('.composer button.select-button[aria-label^="agent:"]');
+  await p.click(`[role=listbox][aria-label=agent] [role=option]:has-text("${name}")`);
+  await p.waitForSelector(`.composer button.select-button[aria-label="agent: ${name}"]`);
+}
+
+module.exports = { claimCode, createOwner, keywordsOnly, keyed, pickAgent };

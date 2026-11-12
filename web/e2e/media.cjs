@@ -107,22 +107,27 @@ async function imagesInChats(p) {
   await p.keyboard.press('Escape');
   log('media delete: "Still in 1 chat" shown, cancelled');
 
-  // Deleting the chat asks, then offers the Media files that came from it.
+  // Deleting the chat asks in one dialog (13ca3e9 replaced the two native
+  // confirms), with an unticked box for the Media files that came from it.
   await p.goto(`${URL_}#/s/${sid}`);
   await p.waitForSelector('.conversation .bubble-images');
-  const asked = [];
-  const answer = (d) => {
-    asked.push(d.message());
-    d.accept();
-  };
-  p.on('dialog', answer);
   await p.click('button[aria-label="Delete chat"]');
+  await p.waitForSelector('dialog.delete-chat[open]');
+  const box = p.locator('dialog.delete-chat input[type=checkbox]');
+  // The box appears once the dialog has counted the chat's files.
+  if (sent.length) await box.waitFor({ timeout: 10000 }).catch(() => {});
+  const offered = (await box.count()) === 1;
+  const asked = (await p.innerText('dialog.delete-chat')).replace(/\s+/g, ' ');
+  check(sent.length === 0 || offered, `the dialog offered the chat's Media files (${asked})`);
+  if (offered) {
+    check(!(await box.isChecked()), 'the Media box starts unticked');
+    await box.check();
+  }
+  await p.click('dialog.delete-chat button.danger:has-text("Delete")');
   await p.waitForSelector('h1.greeting');
-  p.off('dialog', answer);
-  log('chat delete asked:', asked.join(' | '));
+  log('chat delete asked:', asked);
   const left = await p.evaluate(async (sid) => (await (await fetch(`/api/media?session=${sid}&limit=60`)).json()).items.length, sid);
   check(left === 0, `the chat's Media files went with it (${left} left)`);
-  check(sent.length === 0 || asked.length === 2, 'the dialog offered the chat\'s Media files');
   const kept = await p.evaluate(async () => (await (await fetch('/api/media?limit=60')).json()).items.map((m) => m.name));
   check(kept.includes('pattern.png'), 'the uploaded picture stays in Media');
   log('chat deleted with its Media files; uploads stay:', kept.join(', '));
@@ -252,4 +257,4 @@ async function imagesInChats(p) {
   } finally {
     process.kill(-srv.pid, 'SIGKILL');
   }
-})().catch((e) => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });
+})().catch((e) => { console.error('FAILED:', e.message.split('\n').slice(0, 3).join(' | ')); process.exit(1); });

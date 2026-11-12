@@ -48,4 +48,4 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     await b.close();
   }
   log('screenshots in', S);
-})().catch((e) => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });
+})().catch((e) => { console.error('FAILED:', e.message.split('\n').slice(0, 3).join(' | ')); process.exit(1); });

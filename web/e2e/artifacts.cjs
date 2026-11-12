@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
+const { createOwner, keywordsOnly, keyed, pickAgent } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2eart-'));
 const R = `${S}/ws`;
@@ -65,6 +65,8 @@ let PAGE = null;
       await p.fill('.composer textarea', text);
       await p.click('.mode-switch button:has-text("Agentic")');
       await p.fill('.agentic-row input', R);
+      // The default Assistant has no bash or publish since the roster (9c32186).
+      await pickAgent(p);
       await p.click('.composer .send');
       await p.waitForSelector('.conversation');
     };
@@ -118,6 +120,7 @@ let PAGE = null;
     await p.fill('.composer textarea', 'publish: target/release/myapp as projapp');
     await p.click('.mode-switch button:has-text("Agentic")');
     await p.fill('.agentic-row input', R);
+    await pickAgent(p);
     await p.click('.composer .send');
     await p.waitForSelector('.conversation');
     await p.click('.approval button.primary:has-text("Allow")');
@@ -145,4 +148,4 @@ let PAGE = null;
   } finally {
     process.kill(-srv.pid, 'SIGKILL');
   }
-})().catch((e) => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });
+})().catch((e) => { console.error('FAILED:', e.message.split('\n').slice(0, 3).join(' | ')); process.exit(1); });

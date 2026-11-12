@@ -23,7 +23,7 @@ const FINAL = {
   cards: 1,
   framed: 1,
   snapshots: ['Working through 3 steps · 0/3 · Step 1', 'Working through 3 steps · 1/3 · Step 2'],
-  snapshotFrom: ['from General', 'from General'],
+  snapshotFrom: ['from Software Developer', 'from Software Developer'],
   done: 3,
   steps: 3,
   status: 'Done',

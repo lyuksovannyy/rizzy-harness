@@ -68,7 +68,11 @@ function chat(p, repo) {
         await p.waitForSelector('h1.greeting');
       }
       await p.click(`.mode-switch button:has-text("${mode}")`);
-      if (mode === 'Agentic') await p.fill('.agentic-row input', repo);
+      if (mode === 'Agentic') {
+        await p.fill('.agentic-row input', repo);
+        // The default Assistant has no bash since the roster (9c32186).
+        await require('../onboard.cjs').pickAgent(p);
+      }
     },
     /** Sends a message without waiting for the answer. */
     async type(text) {
