@@ -1,0 +1,8 @@
+# The one local image of experiment B.11: Debian 13 (the published harness
+# image's base) plus the tools the tests call. Built as localhost/rh-b11:tools.
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git procps gcc libc6-dev libcap2-bin kmod iproute2 python3 \
+      bubblewrap podman uidmap ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
