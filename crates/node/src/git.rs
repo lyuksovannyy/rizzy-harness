@@ -683,6 +683,10 @@ async fn global_excludes(root: &Path, shadow: &Path, env: &UserGitEnv) -> Vec<u8
     v
 }
 
+/// Serializes making a shadow repository (the check for `HEAD` and the
+/// `git init` after it).
+static MAKE_SHADOW: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn repo_for_with(
     cwd: &Path,
     shadow_base: Option<&Path>,
@@ -727,6 +731,13 @@ async fn repo_for_with(
         Shadow::Checkpoints => base.join(format!("{key}.git")),
         Shadow::SubAgents => base.join(format!("{key}-sub.git")),
     };
+    // One at a time from the check to the end of `git init`: two delegations
+    // of one turn, or two sessions in one repository, ask for the same
+    // shadow at once, and a second `git init` on a half-made one fails
+    // ("cannot copy … hooks/…sample …: File exists"). The node is the only
+    // process that makes these, so a lock in the process is enough; it is
+    // held for one `git init` (bounded by `GIT_TIMEOUT`), once per shadow.
+    let making = MAKE_SHADOW.lock().await;
     if !dir.join("HEAD").exists() {
         let format = info.as_ref().map_or("sha1", |i| i.format);
         let mut c = hardened(Path::new("git"));
@@ -743,6 +754,7 @@ async fn repo_for_with(
         )
         .await;
     }
+    drop(making);
     let _ = tokio::fs::create_dir_all(dir.join("info")).await;
     let _ = tokio::fs::create_dir_all(dir.join("objects/info")).await;
     let shadow_format = tokio::fs::read_to_string(dir.join("harness-format"))
@@ -2820,6 +2832,42 @@ mod tests {
         h.config("filter.evil.required", "true");
         h.turn_and_undo().await;
         assert_eq!(h.marked(), Vec::<String>::new());
+    }
+
+    /// Two delegations of one turn (or two sessions in one repository)
+    /// ask for the same shadow repository at once. Both saw no `HEAD` and
+    /// both ran `git init` on it; the loser failed with "cannot copy
+    /// '…/hooks/pre-applypatch.sample' …: File exists" and its sub-agent
+    /// was not started (seen on CI in
+    /// `teamlead_delegates_in_parallel_within_caps`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_shadow_repository_is_made_once_under_concurrent_first_use() {
+        for round in 0..8 {
+            let h = Hostile::new();
+            let asks: Vec<_> = (0..8)
+                .map(|_| {
+                    let (repo, base) = (h.repo.clone(), h.base.clone());
+                    tokio::spawn(
+                        async move { sub_repo(&repo, Some(&base), &Bounds::default()).await },
+                    )
+                })
+                .collect();
+            for (i, a) in asks.into_iter().enumerate() {
+                let got = a.await.unwrap();
+                assert!(
+                    matches!(got, Ok(Some(_))),
+                    "round {round}, ask {i}: {:?}",
+                    got.err()
+                );
+            }
+            let made = std::fs::read_dir(&h.base)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with("-sub.git"))
+                .filter(|e| e.path().join("HEAD").exists())
+                .count();
+            assert_eq!(made, 1, "round {round}: one shadow for the repository");
+        }
     }
 
     #[tokio::test]
