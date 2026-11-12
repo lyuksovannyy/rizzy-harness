@@ -19,7 +19,12 @@ pub struct Remote {
 /// Run until `stop`. `attach` connects the node runtime and returns its
 /// channels (called once per connection; it replays `hello` with heads, so
 /// the master resumes whatever it missed while the link was down).
-/// A rejection (revoked key) ends the loop with an error.
+/// A rejection ends the loop with an error: each one the master sends needs
+/// a person to act (a revoked or unknown key: join again; another protocol
+/// version: upgrade the older side), so trying again changes nothing.
+/// Everything else (a master that is down or restarting, a network error,
+/// a TLS failure, a timeout, a link dropped after `accepted`) is retried
+/// with backoff up to 30 s.
 ///
 /// The channels are bounded: when the runtime's command queue is full the
 /// master's socket is not read, so a master cannot make the node buffer
@@ -77,6 +82,7 @@ pub async fn connect_node(
         Hello::Auth {
             node_id: remote.node_id.clone(),
             signature,
+            protocol_version: harness_protocol::PROTOCOL_VERSION,
         }
     })
     .await

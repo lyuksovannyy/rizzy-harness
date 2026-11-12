@@ -891,10 +891,11 @@ impl Master {
                 .collect();
             (clean_label(&hostname, 64), clean_label(&version, 64), caps)
         };
-        if protocol_version != PROTOCOL_VERSION {
-            return Err(format!(
-                "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
-            ));
+        // A remote node was refused for its version before `accepted`
+        // (`nodes.rs`, with the reason); this catches a `node.hello` that
+        // says otherwise than its `auth` did, and the in-process links.
+        if let Some(why) = nodes::protocol_refusal(protocol_version) {
+            return Err(why);
         }
         // A node revoked before this process started, or while its
         // handshake ran (Gate 3 review L-4): `node_connection` checked the

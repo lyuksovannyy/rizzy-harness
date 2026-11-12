@@ -3,10 +3,13 @@
 //! ```text
 //! master -> node   {"type":"challenge","nonce":"<32 bytes hex>"}
 //! node   -> master {"type":"join","token","public_key","hostname","signature"}
-//!                | {"type":"auth","node_id","signature"}
+//!                | {"type":"auth","node_id","signature","protocol_version"}
 //! master -> node   {"type":"accepted","node_id"} | {"type":"rejected","reason"}
 //! ```
 //! `signature` signs `identity::auth_message(nonce, master_fingerprint)`.
+//! A `rejected` ends the node's reconnect loop (`client::run`): every
+//! refusal the master sends needs a person (a revoked or unknown key, a
+//! spent token, another protocol version).
 
 use std::sync::Arc;
 
@@ -39,7 +42,17 @@ pub enum Hello {
     Auth {
         node_id: String,
         signature: String,
+        /// The node's `harness_protocol::PROTOCOL_VERSION`, so the master
+        /// can refuse another one with the reason before `accepted`
+        /// (A.19). A node built before the field sends none: it speaks
+        /// protocol 1, the only one there was.
+        #[serde(default = "first_protocol")]
+        protocol_version: u32,
     },
+}
+
+fn first_protocol() -> u32 {
+    1
 }
 
 pub type ServerStream = WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>;
