@@ -476,7 +476,17 @@ fn only_the_shell_is_contained() {
             Grants::default(),
         )
         .unwrap();
-    assert_eq!(args(&plain), Path::new(EXE).as_os_str());
+    // Not contained: `sandbox-exec` itself, started from the node's image
+    // too (T.8f re-check R-4), no guard.
+    assert!(
+        args(&plain).to_string_lossy().starts_with("/proc/self/fd/"),
+        "{:?}",
+        args(&plain)
+    );
+    assert_eq!(
+        plain.as_std().get_args().next(),
+        Some(std::ffi::OsStr::new("sandbox-exec"))
+    );
     let (shell, contained) = conf
         .shell(
             "true".as_ref(),
