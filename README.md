@@ -697,8 +697,9 @@ nothing else: the system folders above (read-only; `/bin`, `/lib` and the
 like are the same links as on your machine), the `[sandbox] read` and
 `write` entries, its session folder and temp folder, a `/dev` of its own
 (null, zero, full, random, urandom, a terminal device and `/dev/shm` of its
-own; none of your machine's devices), `/proc`, an empty read-only `/tmp`,
-and the harness binary at `/.rizzy-harness/rizzy-harness`. Everything else
+own; none of your machine's devices), `/proc` and an empty read-only
+`/tmp`. The harness binary is not in it: the wrapper is started from the
+node's own running image through a descriptor. Everything else
 **does not exist** for it: `ls ~/.ssh` says "No such file or directory",
 not "Permission denied"; another chat's folder, the data directory and the
 target of a link that points out of the session folder are not there
@@ -885,18 +886,27 @@ it does not work:
 - `"off"`: never use it (logged on every start); as with `"auto"`'s
   fallback, there is no guard and no confirmed end.
 
-**Keep the harness binary out of every session's reach.** A contained
-command's guard and its wrapper are the node's own running image, which
-the guard mounts into the file view: replacing the file at the binary's
-path changes nothing for them (if the binary is deleted or replaced by an
-upgrade while the node runs, contained commands are refused with "restart
-the node" until it is restarted). But the node's own helpers (its checkpoint
-git, graphify), and the shell wherever it is not contained, start the
-wrapper from the binary's path. If a workspace root or a `[sandbox] write`
-entry holds the binary (a node run from its own build tree, with a session
-on that tree), one command can replace it and the next of those runs the
-agent's program in place of the wrapper, without the file sandbox. `doctor` and the log warn ("a session can replace the
-harness binary"), and `contain = "required"` refuses to start. Install the
+**Keep the harness binary out of every session's reach.** Once started,
+the node runs its binary only through a descriptor of its own running
+image, never through the binary's path: a contained command's guard and
+wrapper, the wrapper of its own helpers (its checkpoint git, graphify) and
+of a shell left to Landlock alone. Replacing, deleting or upgrading the file
+at that path changes nothing for them, wherever the binary and the data
+directory are and whatever its mode lets the node do (execute permission is
+enough). **After a rebuild or an upgrade, a running node keeps running the
+build it started with, silently, until you restart it**; nothing in the
+log or in `doctor` says that the binary on disk is newer. If the node could
+not get that descriptor, it says so on the `shell containment` line of its
+log and of `doctor` ("the node holds no descriptor of its own binary"), it
+then starts them by the path, and `contain = "required"` refuses to start.
+If a workspace root or a `[sandbox] write` entry holds the binary (a node
+run from its own build tree, with a session on that tree), a command that
+keeps a name of the file the node runs (`ln`, before a rebuild) can change
+its mode (`chmod 000`), after which no contained command and no checkpoint
+of any session starts, the agent is told that the node's own binary could
+not be executed, and the node cannot be restarted until you restore the
+mode. `doctor` and the log warn ("a session can replace the harness
+binary"), and `contain = "required"` refuses to start. Install the
 binary in a folder outside every workspace root and write entry (for
 example `/usr/local/bin`; `~/.cargo/bin` is inside a workspace root of
 `$HOME`).

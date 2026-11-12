@@ -164,7 +164,8 @@ pub fn main() -> i32 {
     let args: Vec<OsString> = std::env::args_os().skip(2).collect();
     let Some(at) = args.iter().position(|a| a == "--") else {
         eprintln!(
-            "{SUBCOMMAND}: usage: {SUBCOMMAND} [--mark DIR --mark-session KEY] -- PROGRAM ARGS…"
+            "{SUBCOMMAND}: usage: {SUBCOMMAND} [--node PID] [--mark DIR --mark-session KEY] -- \
+             PROGRAM ARGS…"
         );
         return 125;
     };
@@ -270,12 +271,26 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
 /// opened `O_PATH` without following a link at its last component, whose
 /// device and inode must be the ones the node checked: a folder swapped
 /// since refuses the command; one swapped after this open is caught by
-/// bubblewrap, which compares what it mounted with the descriptor. The
-/// [`crate::contain::IMAGE_TOKEN`] becomes a descriptor of this process's
-/// own running image (the node's: it started this guard from it). Not
-/// close-on-exec, so bubblewrap inherits them; bubblewrap closes those it
-/// binds with `--bind-fd` before the command starts. Any other `@rizzy`
-/// word, or one in another place, refuses the command.
+/// bubblewrap, which compares what it mounted with the descriptor. These
+/// are not close-on-exec, so bubblewrap inherits them, and it closes those
+/// it binds before the command starts.
+///
+/// The program bubblewrap runs (the word after its first `--`) is
+/// [`crate::contain::IMAGE_TOKEN`]: it becomes `/proc/self/fd/<n>`, `<n>` a
+/// descriptor of this process's own running image (the node's: the node
+/// started this guard from it), opened `O_PATH` on `/proc/self/exe`, not
+/// close-on-exec (T.8f). bubblewrap names no such descriptor, so it leaves
+/// it open in the command's process and `execve` there runs that inode:
+/// `sandbox-exec` is the node's image whatever any path holds now (a
+/// rebuild, an upgrade, a session's file: reviews T8E-5, T8F-3), and there
+/// is no path of it to bind. `sandbox-exec` closes it, and every other
+/// descriptor above 2, before anything else (review T8F-2). Any other
+/// `@rizzy` word in the options refuses the command. Another program after
+/// the options is passed through unchanged: the node always sends the
+/// token, and tests of the view without Landlock run the guard with another
+/// program there (`mount_view.rs` `without_the_wrapper`, `contain.rs`'s
+/// Landlock ABI 4 stand-in), so a guard that runs only its image would
+/// remove those tests, not a way in (only the node starts a guard).
 fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>), String> {
     use crate::contain::{FD_TOKEN, IMAGE_TOKEN};
     use nix::fcntl::OFlag;
@@ -288,69 +303,53 @@ fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::Owned
             continue;
         };
         let opt = i.checked_sub(1).and_then(|j| args[j].to_str());
-        let by_fd = matches!(opt, Some("--bind-fd" | "--ro-bind-fd"));
-        let fd = if word == IMAGE_TOKEN && (by_fd || opt == Some("--ro-bind")) {
-            let fd = nix::fcntl::open(
-                "/proc/self/exe",
-                OFlag::O_PATH,
-                nix::sys::stat::Mode::empty(),
-            )
-            .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?;
-            // bubblewrap binds a descriptor through the path it names, which
-            // a deleted file no longer has (an upgrade that replaced the
-            // binary under a running node). Never the file now at the path:
-            // that is what a session could have put there (T8E-5).
-            let at = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
-                .map_err(|e| format!("its own image: {e}"))?;
-            if at.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
-                return Err(format!(
-                    "the harness binary this node runs was deleted or replaced since the node \
-                     started ({}); restart the node. The command was not started",
-                    at.display()
-                ));
-            }
-            fd
-        } else if let (Some(id), true) = (word.strip_prefix(FD_TOKEN), by_fd) {
-            let bad = || format!("a bad view argument {word:?}");
-            let (dev, ino) = id.split_once(':').ok_or_else(bad)?;
-            let (dev, ino): (u64, u64) = (
-                dev.parse().map_err(|_| bad())?,
-                ino.parse().map_err(|_| bad())?,
-            );
-            let dest = args
-                .get(i + 1)
-                .map(std::path::Path::new)
-                .filter(|p| p.is_absolute())
-                .ok_or_else(bad)?;
-            let fd = nix::fcntl::open(
-                dest,
-                OFlag::O_PATH | OFlag::O_NOFOLLOW,
-                nix::sys::stat::Mode::empty(),
-            )
-            .map_err(|e| {
-                format!(
-                    "the folder granted at {} was replaced or removed ({e}); the command was \
-                     not started",
-                    dest.display()
-                )
-            })?;
-            let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("{}: {e}", dest.display()))?;
-            if st.st_dev as u64 != dev || st.st_ino as u64 != ino {
-                return Err(format!(
-                    "the folder granted at {} was replaced (it is not the one the node checked); \
-                     the command was not started",
-                    dest.display()
-                ));
-            }
-            fd
-        } else {
-            return Err(format!("a bad view argument {word:?}"));
+        let bad = || format!("a bad view argument {word:?}");
+        let (Some(id), Some("--bind-fd" | "--ro-bind-fd")) = (word.strip_prefix(FD_TOKEN), opt)
+        else {
+            return Err(bad());
         };
-        out[i] = if by_fd {
-            fd.as_raw_fd().to_string().into()
-        } else {
-            format!("/proc/self/fd/{}", fd.as_raw_fd()).into()
-        };
+        let (dev, ino) = id.split_once(':').ok_or_else(bad)?;
+        let (dev, ino): (u64, u64) = (
+            dev.parse().map_err(|_| bad())?,
+            ino.parse().map_err(|_| bad())?,
+        );
+        let dest = args
+            .get(i + 1)
+            .map(std::path::Path::new)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(bad)?;
+        let fd = nix::fcntl::open(
+            dest,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|e| {
+            format!(
+                "the folder granted at {} was replaced or removed ({e}); the command was not \
+                 started",
+                dest.display()
+            )
+        })?;
+        let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("{}: {e}", dest.display()))?;
+        if st.st_dev as u64 != dev || st.st_ino as u64 != ino {
+            return Err(format!(
+                "the folder granted at {} was replaced (it is not the one the node checked); the \
+                 command was not started",
+                dest.display()
+            ));
+        }
+        out[i] = fd.as_raw_fd().to_string().into();
+        fds.push(fd);
+    }
+    // The program: the node's own image, through a descriptor.
+    if end < args.len() && args.get(end + 1).is_some_and(|p| p == IMAGE_TOKEN) {
+        let fd = nix::fcntl::open(
+            "/proc/self/exe",
+            OFlag::O_PATH,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?;
+        out[end + 1] = format!("/proc/self/fd/{}", fd.as_raw_fd()).into();
         fds.push(fd);
     }
     Ok((out, fds))
