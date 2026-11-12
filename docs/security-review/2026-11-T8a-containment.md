@@ -312,3 +312,131 @@ crates/cli/tests/support/review_t8a/session_bus.sh target/debug/rizzy-harness   
 The tests find their processes by a unique `sleep <n>` command line and kill
 them by pid. `session_bus.sh` starts one transient unit in the user's systemd
 and stops it; its scratch folder is under `$TMPDIR`.
+
+## 7. Re-check of the fixes (2026-11-12)
+
+A delta read of `56f0df2..a13e67f` (six commits), not a second full review.
+Same machine. No unit was started in the user's systemd this time.
+
+### Verdict
+
+**Fit after one small fix (R-1), or fit to merge if the owner accepts it as a
+stated residual.** The High finding is answered honestly, the Low one is
+closed on every path but one, and nothing the fixes added lets a command
+signal a process that is not its own.
+
+| Finding | Result |
+|---|---|
+| T8A-1 (the claim below ABI 9) | **Fixed as asked** (the text, `doctor`, `required`); the hole stays open until T.8c, and is now said everywhere. One cosmetic fault in the warning itself (R-2), one nuance from ABI 9 on (R-3). |
+| T8A-2 (kill before the init's death signal) | **Partly.** `kill_namespace` closes it on the three paths it is called from: 0 survivors in 200 tries of the author's test here. One kill path does not call it (R-1). The node-killed window is stated with the measured numbers. |
+| N-1 (`bwrap` from `PATH`) | **Fixed.** |
+| N-2 (spawner) | **Fixed** (fails closed; the wait is raced), apart from R-1, which lives in that race. |
+| N-3, N-5, N-6 | **Fixed** (docs; a `warn` mark). |
+| N-4 (tests) | **Fixed**, with two small gaps named below. |
+
+### New findings
+
+- **R-1. Low. The answer nobody reads is killed without its namespace.**
+  `crates/tools/src/contain.rs:278` kills a late child with `kill_namespace`
+  only when `reply.send` fails, that is, when the caller stopped waiting
+  *before* the spawner answered. When the answer is already in the channel and
+  the caller then stops waiting (`crates/tools/src/bash.rs:188`: the `select!`
+  takes the cancel or the timeout; or the call is dropped while it waits), the
+  reply is dropped with the child inside. What kills it is tokio's
+  `kill_on_drop`: SIGKILL to bubblewrap alone, which is T8A-2's kill. In the
+  50 microseconds after the init's `setsid` the namespace is left running
+  while the node reports the call as cancelled. `PLAN.md` T9 says every kill
+  goes through `kill_namespace`; this one does not.
+  Proof: `review_r1_an_answer_nobody_reads_is_killed_without_its_namespace`
+  (in `proofs/2026-11-T8a-containment-fixes.patch`) polls the spawn once, as
+  `select!` does, and drops it the instant the init leads its session:
+  bubblewrap dead, init and command running, on the first try in each of five
+  runs. Reaching it for real needs a cancel in the 0.1 ms the spawn takes and
+  a caller that is then scheduled half a millisecond late, so Low.
+  Smallest fix: let the reply carry the guard, not the bare child (the
+  spawner wraps the child with `KillGroupOnDrop(pid, true)`, or a small type
+  whose `Drop` calls `kill_namespace`), so a reply dropped anywhere kills the
+  namespace; then invert the test.
+- **R-2. Note. The warning most nodes will print has runs of 14 spaces.**
+  `crates/tools/src/sandbox.rs:831` and `:848`: a lost line continuation
+  leaves "a command can              still start …" in the `WITH A GAP` line
+  and "but a              fresh /proc" in the shared-`/proc` line, which also
+  lost the reason the fresh `/proc` failed. The unit test checks substrings
+  only. Proof: `review_r2_the_warning_line_has_runs_of_spaces`.
+- **R-3. Note. From ABI 9 the full claim still depends on `node.toml`.**
+  Landlock's pathname-socket right is part of every read-write grant, so a
+  service's socket inside a `[sandbox] write` entry is reachable on every
+  kernel (inside a `read` entry it is refused), and `doctor` says ok. An
+  operator who lists `/tmp` (the README names it as missing by default) hands
+  the command X11's, tmux's and ssh-agent's sockets. Proof:
+  `review_r3_a_socket_inside_a_write_entry_is_reachable_on_every_kernel`.
+  One sentence under "The condition" is enough.
+
+### The six questions
+
+1. **`kill_namespace`** (`contain.rs:222`). No early return: stop, kill the
+   init, kill the group, errors ignored. It is only called while bubblewrap is
+   the caller's unreaped child (the drop guard is disarmed after the reap, the
+   grace path calls it before the last `wait`, the spawner holds the child),
+   so the group id cannot be reused. The stop is asynchronous, but a fork that
+   races a group signal either finishes first, and the init is then in the
+   group and in `children`, or is restarted and never happens; either way the
+   SIGKILLs reach it. The init's number can be stale only if bubblewrap reaps
+   it between the read and the kill *and* the pid space wraps in those
+   microseconds: the residual T9 already names for SIGTERM, now with SIGKILL.
+   A pidfd would remove it. A node that dies between the stop and the kills
+   leaves bubblewrap stopped only if bubblewrap had not yet set its own death
+   signal (its first 0.3 ms); it then never runs the command. A setuid
+   bubblewrap: not tested (by the kernel's rule the node may signal it, its
+   real uid is the node's).
+2. **The ABI gate** (`sandbox.rs:951`). The number is the wrapper's own status
+   line from the start-up probe on the host; the kernel is the same inside
+   bubblewrap. A failed probe (`best-effort` without Landlock, Landlock off at
+   boot) gives 0: a warning naming both socket kinds, and `required` refuses.
+   `required` with `best-effort` and an ABI below 9 goes through the same
+   `decide` and refuses. The text is true for each range (below 6, 6 to 8, 9
+   and up), R-2 and R-3 aside.
+3. **The `bwrap` rule** (`contain.rs:165`). The check is on the canonical path
+   and every folder above it, and that canonical path is what is executed
+   later, with no second lookup. A chain of user-owned links to
+   `/usr/bin/bwrap` is taken as `/usr/bin/bwrap`; a user-owned copy is skipped
+   and named; a file that is not executable no longer shadows the real one.
+   Not caught: POSIX ACLs (the code says so, the README does not), and a
+   user-mounted file system below a root-owned sticky folder such as `/tmp`,
+   which can present itself as root's (below `$HOME` it is caught by the
+   folder above it). An agent can do neither. `[sandbox] bwrap` skips the
+   check entirely (absolute and a file is all), and the README says "taken as
+   given".
+4. **The spawner race.** A cancel that wins before the answer: the late child
+   is killed by the spawner with its namespace and reaped by tokio (30 of 30,
+   none left, no zombie after 1 s:
+   `a_spawn_abandoned_before_the_answer_is_killed_by_the_spawner`, which the
+   branch lacks). After the answer: R-1. The result is reported once.
+5. **The new tests** would each fail if its claim were false; none is
+   vacuous under `HARNESS_REQUIRE_BWRAP=1`. Gaps: the window test calls
+   `kill_namespace` directly, so a `bash.rs` that passed `false` to its drop
+   guard would still pass; nothing drives the cancel-during-spawn branch of
+   `bash.rs`; the line test does not look at the whole line (R-2).
+6. **The docs** are true for each kernel range, including what `required` now
+   promises and what stays open until T.8c. Two sentences to correct: T9's
+   "every kill" (R-1) and the missing word on write entries (R-3).
+
+### Run
+
+With `HARNESS_REQUIRE_BWRAP=1`: `contain` 18 passed (`T8A_TRIES=200`),
+`sandbox` 13, `sub_agent_sandbox` 7, `harness-tools --lib` 102; the four
+re-check tests; `cargo fmt --all --check`; clippy on the tools and cli crates
+with the proofs applied (clean).
+
+```bash
+git apply docs/security-review/proofs/2026-11-T8a-containment-fixes.patch
+cargo test -p harness --test review_t8a_fixes -- --nocapture
+```
+
+### Not tested
+
+A kernel below ABI 9 (the warning and `required`'s refusal there are covered
+by the unit test of `decide`, not by a run); a setuid bubblewrap; a kernel
+without the `children` file (the author's test injects its absence); ACLs and
+a FUSE mount on the `bwrap` path (by reading); CI; `cargo test --workspace`,
+`cargo deny check`, the web checks.
