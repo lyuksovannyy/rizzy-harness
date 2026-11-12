@@ -79,8 +79,11 @@ pub enum Mode {
 pub enum Network {
     #[default]
     On,
-    /// Deny TCP connect and bind (Landlock ABI 4). UDP, and so DNS, is not
-    /// covered by Landlock.
+    /// Deny TCP connect and bind (Landlock ABI 4), and run the agent's
+    /// contained shell in a network namespace of its own (bubblewrap, T.8b),
+    /// which closes UDP and DNS too. Where the shell is not contained (the
+    /// Landlock-only fallback, `contain = "off"`) and for the node's own
+    /// helpers, only TCP: Landlock does not cover UDP, and so DNS.
     Off,
 }
 
@@ -116,7 +119,12 @@ pub struct Sandbox {
     /// The agent shell's containment, when the node has one (set once at
     /// start, from node.toml and the probe; nothing per session or per
     /// call can change it).
-    contain: Option<crate::contain::Contain>,
+    contain: std::sync::OnceLock<crate::contain::Contain>,
+    /// Set only where an `auto` start found a bubblewrap and could not use
+    /// it in full (review T8B-1, re-check R-1): Landlock alone, or contained
+    /// in the network-off gap. The way up, which is the only way the node
+    /// ever moves.
+    step_up: Option<StepUp>,
     /// The harness binary as it was when first opened, held open for the
     /// process's life: the guard is started from it (`/proc/self/fd/<n>`),
     /// so a command
@@ -384,19 +392,144 @@ impl Sandbox {
             best_effort: settings.mode == Mode::BestEffort,
             tmp_root,
             protected: protected.to_vec(),
-            contain: None,
+            contain: std::sync::OnceLock::new(),
+            step_up: None,
         })
     }
 
     /// This sandbox with the agent's shell contained by `c` (bubblewrap).
-    pub fn with_containment(mut self, c: crate::contain::Contain) -> Self {
-        self.contain = Some(c);
+    pub fn with_containment(self, c: crate::contain::Contain) -> Self {
+        let _ = self.contain.set(c);
         self
     }
 
-    /// The agent shell's containment, if any.
+    /// The agent shell's containment, if any (now: an `auto` node that
+    /// started without one can gain one later, [`StepUp`]).
     pub fn containment(&self) -> Option<&crate::contain::Contain> {
-        self.contain.as_ref()
+        self.contain.get()
+    }
+
+    /// Whether a contained command with the network off gets its network
+    /// namespace now: the containment's own setting, or the gap left later
+    /// (review T8B-1).
+    pub fn network_namespace(&self, c: &crate::contain::Contain) -> bool {
+        c.network_namespace() || self.step_up.as_ref().is_some_and(StepUp::net_taken)
+    }
+
+    /// Whether this node is as far up as it can go: contained, and with the
+    /// network off in a network namespace of its own.
+    fn fully_up(&self) -> bool {
+        self.contain
+            .get()
+            .is_some_and(|c| self.network == Network::On || self.network_namespace(c))
+    }
+
+    /// When a shell command is started on a node below where it could be
+    /// (re-check R-1: Landlock alone after a failed start, or contained in
+    /// the network-off gap) and the last probe is at least the interval
+    /// old: run the start's probes again on a thread of their own, bounded
+    /// ([`LATER_PROBE_BOUND`]), one at a time. The command that noticed does
+    /// not wait (re-check R-2): it starts in the mode the node is in, and
+    /// the commands started after a probe passed get the step up. Only the
+    /// node's own start sets this up, and nothing ever moves the node down.
+    fn step_up_if_due(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some(st) = &self.step_up else {
+            return;
+        };
+        if self.fully_up() || !st.due() {
+            return;
+        }
+        if st
+            .running
+            .compare_exchange(false, true, SeqCst, SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("sandbox-step-up".into())
+            .spawn(move || {
+                me.step_up_now();
+                if let Some(st) = &me.step_up {
+                    st.running.store(false, SeqCst);
+                }
+            });
+        if spawned.is_err() {
+            st.running.store(false, SeqCst);
+        }
+    }
+
+    /// One later probe ([`Self::step_up_if_due`]).
+    fn step_up_now(&self) {
+        use crate::contain::{Contain, Form};
+        let Some(st) = &self.step_up else {
+            return;
+        };
+        let net_off = self.network == Network::Off;
+        let scratch = |what: &str| st.scratch.join(format!("probe-{what}-{}", st.now_ms()));
+        let bound = Some(LATER_PROBE_BOUND);
+        if let Some(c) = self.contain.get() {
+            // Contained in the network gap: only the namespace is missing.
+            let with = Contain::new(c.bwrap().to_path_buf(), c.form());
+            if self
+                .probe_containment_within(&with, &scratch("net"), bound)
+                .is_ok()
+            {
+                st.net.store(true, std::sync::atomic::Ordering::SeqCst);
+                network_log(
+                    "shell containment: bubblewrap makes a network namespace now; with \
+                     [sandbox] network = \"off\" commands started from now on run in one of \
+                     their own (no UDP or DNS out; a command already running stays as it \
+                     started)",
+                );
+            }
+            return;
+        }
+        // Landlock alone since the start: the start's probes, in its order.
+        let mut net_err = None;
+        for net in if net_off {
+            &[true, false][..]
+        } else {
+            &[true][..]
+        } {
+            for form in [Form::Full, Form::SharedProc] {
+                let c = Contain::new(st.bwrap.clone(), form);
+                let c = if *net {
+                    c
+                } else {
+                    c.without_network_namespace()
+                };
+                match self.probe_containment_within(&c, &scratch("contain"), bound) {
+                    Ok(()) => {
+                        let _ = self.contain.set(c);
+                        let net_line = match (net_off, *net) {
+                            (false, _) => String::new(),
+                            (true, true) => {
+                                ", each in a network namespace of its own (no UDP or DNS out)"
+                                    .into()
+                            }
+                            (true, false) => format!(
+                                ", but network off WITH A GAP: the probe with --unshare-net \
+                                 failed ({}), so UDP and DNS still go out; probed again later",
+                                net_err.unwrap_or_default()
+                            ),
+                        };
+                        network_log(&format!(
+                            "shell containment: bubblewrap works now; commands started from \
+                             now on run contained ({}: a PID namespace per command, the guard, \
+                             Landlock inside){net_line}; a command already running stays as it \
+                             started",
+                            st.bwrap.display()
+                        ));
+                        return;
+                    }
+                    Err(e) if *net && net_err.is_none() => net_err = Some(e),
+                    Err(_) => {}
+                }
+            }
+        }
     }
 
     pub fn network(&self) -> Network {
@@ -419,7 +552,13 @@ impl Sandbox {
             session: session.to_owned(),
         });
         let mut c = match contain {
-            Some((b, cwd)) => b.command(&self.exe, self.image, cwd, mark.as_ref()),
+            Some((b, cwd)) => b.command(
+                &self.exe,
+                self.image,
+                cwd,
+                mark.as_ref(),
+                self.network == Network::Off && self.network_namespace(b),
+            ),
             None => std::process::Command::new(&self.exe),
         };
         c.arg(SUBCOMMAND);
@@ -553,11 +692,25 @@ impl Sandbox {
 
     /// Run a fixed check through bubblewrap and the wrapper, as a shell
     /// command runs: the command must be in a PID namespace of its own
-    /// and, for [`crate::contain::Form::Full`], see its own `/proc`.
+    /// and, for [`crate::contain::Form::Full`], see its own `/proc`; with
+    /// the network off, in a network namespace with only its own `lo`
+    /// (T.8b), so a bubblewrap that cannot make one is not used.
     pub fn probe_containment(
         &self,
         contain: &crate::contain::Contain,
         scratch: &Path,
+    ) -> Result<(), String> {
+        self.probe_containment_within(contain, scratch, None)
+    }
+
+    /// The same, killed and counted as failed after `bound` (the later
+    /// probes, re-check R-2: on the deadline the node's end of the guard's
+    /// channel is closed, which is the guard's kill order).
+    fn probe_containment_within(
+        &self,
+        contain: &crate::contain::Contain,
+        scratch: &Path,
+        bound: Option<std::time::Duration>,
     ) -> Result<(), String> {
         std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
         let ok = scratch.join("granted");
@@ -574,23 +727,37 @@ impl Sandbox {
         // kill order) until the probe has ended.
         let (keep, theirs) = std::os::unix::net::UnixStream::pair()
             .map_err(|e| format!("the guard's channel: {e}"))?;
-        c.args(["sh", "-c", &crate::contain::probe_script(full), "sh"])
-            .arg(&ok)
-            .env_clear()
+        let net = self.network == Network::Off && self.network_namespace(contain);
+        c.args(["sh", "-c", &crate::contain::probe_script(full, net), "sh"])
+            .arg(&ok);
+        if net {
+            // The node's own namespace, which the command's must not be.
+            let ours = std::fs::read_link("/proc/self/ns/net")
+                .map_err(|e| format!("/proc/self/ns/net: {e}"))?;
+            c.arg(ours);
+        }
+        c.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(scratch)
             .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
                 theirs,
             )));
-        let out = c.output();
-        drop(keep);
+        c.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let out = run_bounded(c, keep, bound);
         let _ = std::fs::remove_dir_all(scratch);
-        let out = out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        match out.status.code() {
+        let (status, stderr) =
+            out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
+        let stderr = String::from_utf8_lossy(&stderr);
+        match status.code() {
             Some(0) => Ok(()),
             Some(4) => Err("the command was not in a PID namespace of its own".into()),
             Some(5) => Err("/proc is not the namespace's own".into()),
+            Some(6) => Err(
+                "the probe's own check failed, not bubblewrap: the command's \
+                 /proc/self/ns/net was the node's, or could not be read"
+                    .into(),
+            ),
             code => Err(format!(
                 "{} failed (exit {code:?}): {}",
                 contain.bwrap().display(),
@@ -825,7 +992,11 @@ impl Confinement {
                     make_private_dir(t)?;
                     rw.push(Grant::made(t, "the session's temp folder")?);
                 }
-                let contain = sandbox.contain.as_ref().filter(|_| shell);
+                if shell {
+                    // Beside the command, never in its way (re-check R-1, R-2).
+                    sandbox.step_up_if_due();
+                }
+                let contain = sandbox.contain.get().filter(|_| shell);
                 contained = contain.is_some();
                 let session = tmp
                     .as_ref()
@@ -1042,8 +1213,9 @@ fn check_binary_reach(
     roots: &[PathBuf],
     node_toml: &Path,
 ) {
+    // Contained now, or able to contain later (re-check R-1).
     let contained = matches!(&s.confinement, Confinement::Confined { sandbox, .. }
-        if sandbox.containment().is_some());
+        if sandbox.containment().is_some() || sandbox.step_up.is_some());
     let Some(dir) = binary_reach(exe, settings, roots).filter(|_| contained) else {
         return;
     };
@@ -1070,6 +1242,160 @@ fn check_binary_reach(
     }
 }
 
+/// [`start_with_exe`] with the interval after which a node in the
+/// network-off gap probes the namespace again given (tests; the node uses
+/// [`STEP_UP_INTERVAL`]).
+#[doc(hidden)]
+pub fn start_with_exe_retrying(
+    exe: PathBuf,
+    settings: &Settings,
+    data_dir: &Path,
+    protected: &[PathBuf],
+    node_toml: &Path,
+    retry: std::time::Duration,
+) -> Result<Started, String> {
+    start_inner(exe, settings, data_dir, protected, node_toml, retry)
+}
+
+/// The way up of an `auto` node that found a bubblewrap at start and could
+/// not use it in full (review T8B-1, re-check R-1): from Landlock alone to
+/// contained, and from the network-off gap to the namespace. When the last
+/// probe was, whether one is running, and whether the namespace was taken
+/// later. One per node, in its `Sandbox`; only its start makes one.
+#[derive(Debug)]
+struct StepUp {
+    /// The bubblewrap the start found (and could not use).
+    bwrap: PathBuf,
+    retry: std::time::Duration,
+    since: std::time::Instant,
+    /// Milliseconds after `since` of the last probe.
+    last_ms: std::sync::atomic::AtomicU64,
+    /// A probe is running (one at a time).
+    running: std::sync::atomic::AtomicBool,
+    /// The network namespace was taken after the start. Set once, never
+    /// cleared.
+    net: std::sync::atomic::AtomicBool,
+    /// Where the probes make their folders (the node's temp root).
+    scratch: PathBuf,
+}
+
+impl StepUp {
+    fn new(bwrap: PathBuf, retry: std::time::Duration, scratch: PathBuf) -> Self {
+        Self {
+            bwrap,
+            retry,
+            since: std::time::Instant::now(),
+            last_ms: 0.into(),
+            running: false.into(),
+            net: false.into(),
+            scratch,
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.since.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn net_taken(&self) -> bool {
+        self.net.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether a probe is due; claims it, so only one caller probes.
+    fn due(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.now_ms();
+        let last = self.last_ms.load(SeqCst);
+        let retry = u64::try_from(self.retry.as_millis()).unwrap_or(u64::MAX);
+        now.saturating_sub(last) >= retry
+            && self
+                .last_ms
+                .compare_exchange(last, now, SeqCst, SeqCst)
+                .is_ok()
+    }
+}
+
+/// How long a later probe ([`StepUp`]) may take before it is killed and
+/// counted as failed (re-check R-2). The start's own probes have no bound:
+/// a cold start of the binary on a slow disk can take longer.
+pub const LATER_PROBE_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run a probe (`c`, a guard's command line, whose stdin is the other end
+/// of `keep`): its exit status and stderr. With `bound`, past it the
+/// node's end `keep` is closed (the guard's kill order) and the probe
+/// counts as failed; a guard that then does not exit within a second is
+/// left to a thread that reaps it, and the probe's output is not read.
+fn run_bounded(
+    mut c: std::process::Command,
+    keep: std::os::unix::net::UnixStream,
+    bound: Option<std::time::Duration>,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Read;
+    let Some(bound) = bound else {
+        let out = c.output();
+        drop(keep);
+        return out.map(|o| (o.status, o.stderr));
+    };
+    let mut child = c.spawn()?;
+    drop(c);
+    let wait = |child: &mut std::process::Child, until: std::time::Instant| loop {
+        match child.try_wait() {
+            Ok(Some(s)) => return Some(s),
+            Ok(None) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => return None,
+        }
+    };
+    let started = std::time::Instant::now();
+    if let Some(status) = wait(&mut child, started + bound) {
+        drop(keep);
+        let mut err = Vec::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_end(&mut err);
+        }
+        return Ok((status, err));
+    }
+    drop(keep);
+    let ended = wait(
+        &mut child,
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    if ended.is_none() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "the probe did not answer within {:.1} s and was killed",
+            bound.as_secs_f64()
+        ),
+    ))
+}
+
+/// Where the node's one line on leaving the gap goes: the node sets its
+/// logger ([`set_network_log`]); otherwise stderr.
+static NETWORK_LOG: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Set where [`Sandbox`] logs its change from the network-off gap to the
+/// namespace (the node: its log). Once per process.
+pub fn set_network_log(f: fn(&str)) {
+    let _ = NETWORK_LOG.set(f);
+}
+
+fn network_log(line: &str) {
+    match NETWORK_LOG.get() {
+        Some(f) => f(line),
+        None => eprintln!("{line}"),
+    }
+}
+
+/// How long an `auto` node below where it could be (Landlock alone after a
+/// failed start, or the network-off gap) waits between its later probes
+/// (review T8B-1, re-check R-1).
+pub const STEP_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// [`start`] with the wrapper binary given (`start` passes its own; a test
 /// passes the harness binary, since its own executable is the test).
 /// The caller has checked the `[sandbox]` entries against the roots.
@@ -1079,6 +1405,24 @@ pub fn start_with_exe(
     data_dir: &Path,
     protected: &[PathBuf],
     node_toml: &Path,
+) -> Result<Started, String> {
+    start_inner(
+        exe,
+        settings,
+        data_dir,
+        protected,
+        node_toml,
+        STEP_UP_INTERVAL,
+    )
+}
+
+fn start_inner(
+    exe: PathBuf,
+    settings: &Settings,
+    data_dir: &Path,
+    protected: &[PathBuf],
+    node_toml: &Path,
+    retry: std::time::Duration,
 ) -> Result<Started, String> {
     let tmp_root = data_dir.join("sandbox-tmp");
     let sandbox = Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?;
@@ -1100,6 +1444,7 @@ pub fn start_with_exe(
         abi,
         &tmp_root.join(format!("probe-contain-{}", std::process::id())),
         node_toml,
+        retry,
     );
     let sandbox = Arc::new(sandbox);
     let mut started = match landlock {
@@ -1131,6 +1476,20 @@ pub fn start_with_exe(
         Contained::Yes(s, level) => {
             started.contain_summary = s;
             started.contain_level = level;
+            let net_ns = sandbox.containment().is_some_and(|c| c.network_namespace());
+            if settings.network == Network::Off && net_ns {
+                started.contain_summary.push_str(
+                    "; network off: a network namespace of its own per command (only its own \
+                     loopback: no TCP, UDP or DNS out",
+                );
+                // Review N-1: a resolver on a named socket is outside it.
+                started.contain_summary.push_str(if abi >= ABI_PATHNAME_SOCKETS {
+                    ")"
+                } else {
+                    ", but below Landlock ABI 9 a resolver that answers over a named Unix socket \
+                     can still look names up for a command)"
+                });
+            }
             // Review R-3: a read-write grant carries Landlock's socket right,
             // so a `write` entry that holds the usual socket folders hands
             // the command other programs' sockets on every kernel.
@@ -1149,6 +1508,11 @@ pub fn start_with_exe(
         Contained::No(s) => {
             started.contain_summary = s;
             started.contain_level = ContainLevel::Warn;
+            if settings.network == Network::Off {
+                started
+                    .contain_summary
+                    .push_str(&format!("; {NETWORK_OFF_UNCONTAINED}"));
+            }
         }
         Contained::Refuse(msg) => {
             started.contain_level = ContainLevel::Refused;
@@ -1205,6 +1569,32 @@ fn socket_write_entries(settings: &Settings) -> Vec<PathBuf> {
         .collect()
 }
 
+/// What the containment line adds where the shell is contained but
+/// bubblewrap could not make a network namespace (`why`) and the network
+/// is off (T.8b, `contain = "auto"`): a gap, as below Landlock ABI 9.
+fn network_gap_line(why: &str, abi: u32, retry: std::time::Duration) -> String {
+    let abstract_sockets = if abi >= ABI_ABSTRACT_SOCKETS {
+        "abstract Unix sockets outside are closed by Landlock (ABI 6 or newer)"
+    } else {
+        "abstract Unix sockets outside (X11 and others) can be reached (Landlock below ABI 6)"
+    };
+    format!(
+        "; network off WITH A GAP: the probe with --unshare-net failed at start, twice, though \
+         the one without it passed ({why}), so commands run contained without a network \
+         namespace: TCP is stopped by Landlock, but UDP and DNS still go out, and \
+         {abstract_sockets}. The node probes again beside a shell command at most every {} s, \
+         and commands started after a probe passed get the namespace (logged). contain = \
+         \"required\" refuses this",
+        retry.as_secs()
+    )
+}
+
+/// What the containment line adds where the shell is not contained and the
+/// network is off (T.8b): Landlock alone covers only TCP.
+const NETWORK_OFF_UNCONTAINED: &str = "WARNING: [sandbox] network = \"off\" without the \
+     containment stops TCP only: UDP and DNS still go out (Landlock does not cover them; the \
+     network namespace needs bubblewrap)";
+
 enum Contained {
     Yes(String, ContainLevel),
     No(String),
@@ -1213,11 +1603,12 @@ enum Contained {
 
 /// Find bubblewrap and probe its two forms, the full one first (T.8a).
 fn containment(
-    sandbox: Sandbox,
+    mut sandbox: Sandbox,
     settings: &Settings,
     abi: u32,
     scratch: &Path,
     node_toml: &Path,
+    retry: std::time::Duration,
 ) -> (Sandbox, Contained) {
     use crate::contain::{Contain, ContainMode, Form};
     if settings.contain == ContainMode::Off {
@@ -1239,32 +1630,84 @@ fn containment(
         Some(p) => Err(format!("bubblewrap not found at {}", p.display())),
         None => crate::contain::find_bwrap(),
     };
-    let why = match found {
-        Err(e) => e,
+    // The temp root, where the start's own probes and the later ones go.
+    let temp_root = scratch.parent().unwrap_or(scratch).to_path_buf();
+    let (why, found_bwrap) = match found {
+        Err(e) => (e, None),
         Ok(bwrap) => {
-            let full = Contain::new(bwrap.clone(), Form::Full);
-            let shared = Contain::new(bwrap.clone(), Form::SharedProc);
-            let found = match sandbox.probe_containment(&full, scratch) {
-                Ok(()) => Ok((full, None)),
-                Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
-                    Ok(()) => Ok((shared, Some(full_err))),
-                    Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
-                },
+            let probe = |net_ns: bool| {
+                let mk = |form| {
+                    let c = Contain::new(bwrap.clone(), form);
+                    if net_ns {
+                        c
+                    } else {
+                        c.without_network_namespace()
+                    }
+                };
+                let (full, shared) = (mk(Form::Full), mk(Form::SharedProc));
+                match sandbox.probe_containment(&full, scratch) {
+                    Ok(()) => Ok((full, None)),
+                    Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
+                        Ok(()) => Ok((shared, Some(full_err))),
+                        Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
+                    },
+                }
             };
-            match found {
-                Ok((c, proc_err)) => {
+            let mut found = probe(true);
+            // T.8b: bubblewrap works but not with `--unshare-net`. Tried once
+            // more first (review T8B-1: a failure of the moment is not a
+            // failure of the namespace). Then `required` refuses; `auto`
+            // still contains (more than Landlock alone), with the gap named,
+            // and probes again later ([`StepUp`]). Decided by the node's own
+            // probes, never per call.
+            let mut net_err = None;
+            if settings.network == Network::Off
+                && let Err(e) = &found
+                && let Ok(without) = probe(false)
+            {
+                match probe(true) {
+                    Ok(again) => found = Ok(again),
+                    Err(again) => {
+                        net_err = Some(format!("{e}; once more: {again}"));
+                        found = Ok(without);
+                    }
+                }
+            }
+            match (found, net_err) {
+                (Ok(_), Some(e)) if settings.contain == ContainMode::Required => {
+                    return (
+                        sandbox,
+                        Contained::Refuse(format!(
+                            "this node refuses agentic sessions: [sandbox] network = \"off\" and \
+                             contain = \"required\" in {}, and the probe with --unshare-net \
+                             failed, twice, though the one without it passed ({e}); a command \
+                             without the network namespace would send UDP and DNS out. Restart \
+                             the node to probe again, or set contain = \"auto\" to run contained \
+                             with that gap until a later probe passes",
+                            node_toml.display()
+                        )),
+                    );
+                }
+                (Ok((c, proc_err)), net_err) => {
                     return match decide(c.form(), abi, &bwrap, settings.contain, node_toml) {
-                        Ok((mut line, level)) => {
+                        Ok((mut line, mut level)) => {
                             // Why the fresh /proc failed (the shared form).
                             if let Some(e) = proc_err {
                                 line.push_str(&format!("; a fresh /proc failed: {e}"));
                             }
-                            (sandbox.with_containment(c), Contained::Yes(line, level))
+                            let mut sandbox = sandbox.with_containment(c);
+                            if let Some(e) = net_err {
+                                line.push_str(&network_gap_line(&e, abi, retry));
+                                level = ContainLevel::Warn;
+                                sandbox.step_up =
+                                    Some(StepUp::new(bwrap.clone(), retry, temp_root));
+                            }
+                            (sandbox, Contained::Yes(line, level))
                         }
                         Err(msg) => (sandbox, Contained::Refuse(msg)),
                     };
                 }
-                Err(e) => e,
+                (Err(e), _) => (e, Some(bwrap)),
             }
         }
     };
@@ -1279,13 +1722,30 @@ fn containment(
                 node_toml.display()
             )),
         ),
-        _ => (
-            sandbox,
-            Contained::No(format!(
-                "NOT CONTAINED, running with Landlock alone ([sandbox] contain = \"auto\"): \
-                 {why}. Processes a command leaves behind can outlive it; {advice}"
-            )),
-        ),
+        _ => {
+            // Re-check R-1: a bubblewrap was found and failed every probe,
+            // perhaps only for a moment: probe again later, step up once
+            // one passes. Never with none found.
+            let later = match found_bwrap {
+                Some(bwrap) => {
+                    sandbox.step_up = Some(StepUp::new(bwrap, retry, temp_root));
+                    format!(
+                        "; the node probes bubblewrap again beside a shell command at most \
+                         every {} s, and commands started after a probe passed run contained \
+                         (logged)",
+                        retry.as_secs()
+                    )
+                }
+                None => String::new(),
+            };
+            (
+                sandbox,
+                Contained::No(format!(
+                    "NOT CONTAINED, running with Landlock alone ([sandbox] contain = \"auto\"): \
+                     {why}. Processes a command leaves behind can outlive it; {advice}{later}"
+                )),
+            )
+        }
     }
 }
 
