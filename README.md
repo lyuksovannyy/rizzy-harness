@@ -711,7 +711,11 @@ unchanged. When the command ends, is cancelled, times out, or the node
 process dies (even by `kill -9`), every process it started ends too,
 including ones that detached themselves (`setsid`, `nohup … &`, a daemon's
 double fork). bubblewrap changes nothing about which files a command may
-open; it only adds the process boundary.
+open; it only adds the process boundary. Each command has a small guard
+process of its own between the node and bubblewrap that lives exactly as
+long as the command: it ends everything and confirms it before a cancel
+returns, and it ends the command when the node dies, even in the first
+millisecond after a start.
 
 **The condition.** On a kernel older than Linux 7.1 (Landlock ABI below 9:
 Ubuntu 24.04, Debian 13 and most kernels in use today) a command can still
@@ -746,10 +750,18 @@ a command notices:
 - A command killed by a signal reports exit code 128 + the signal (137
   for SIGKILL) instead of "signal".
 - On cancel or timeout the command still gets SIGTERM first and 2 s to
-  exit, then everything left is killed. When the node process itself
-  exits, restarts or re-executes itself, every running command is killed
-  at once, without that grace: stop a node with its normal shutdown so
-  running turns end first.
+  exit, then everything left is killed, and the call returns only once
+  all of it is gone. A process the kernel cannot end yet (stuck in a read
+  from a stalled network or FUSE file system, which ignores even SIGKILL
+  until the read returns) is not reported as cancelled: the result says
+  it is still alive 2 s after the kill, and its guard keeps killing it
+  until it ends. When the node process itself exits, restarts or
+  re-executes itself, every running command is killed at once, without
+  that grace: stop a node with its normal shutdown so running turns end
+  first. If a command was left running anyway (its guard killed by hand in
+  the moment before bubblewrap protected itself), the node ends it at its
+  next start and says so in the log ("ended a command a previous run of
+  this node left running").
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 

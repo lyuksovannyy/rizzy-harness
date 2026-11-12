@@ -628,6 +628,13 @@ async fn a_command_cannot_reach_signal_or_outlive_its_guard() {
         .map(|l| l.to_string_lossy().into_owned())
         .find(|l| l.starts_with("socket:"))
         .expect("the guard's channel");
+    let rss = std::fs::read_to_string(format!("/proc/{guard}/status"))
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with("VmRSS"))
+        .unwrap_or_default()
+        .to_string();
+    eprintln!("the guard's memory while its command runs: {rss}");
     std::fs::write(&gpid, guard.to_string()).unwrap();
     let r = tokio::time::timeout(Duration::from_secs(20), h)
         .await

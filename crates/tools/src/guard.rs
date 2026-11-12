@@ -73,8 +73,11 @@ pub const TERM_GRACE: Duration = Duration::from_secs(2);
 /// report reaches the tool result.
 pub const CONFIRM_BOUND: Duration = Duration::from_secs(2);
 
-/// How often the kill is repeated while something is left.
+/// How often the kill is repeated while something is left: often until
+/// [`CONFIRM_BOUND`], then seldom (a process stuck for hours costs two
+/// wakeups a second).
 const REPEAT: Duration = Duration::from_millis(20);
+const REPEAT_STUCK: Duration = Duration::from_millis(500);
 
 /// What the guard tells the node after a kill order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,14 +203,36 @@ fn kill_all(bwrap: Option<i32>) {
     if let Some(b) = bwrap {
         crate::contain::kill_namespace(b);
     }
-    let me = std::process::id();
-    for pid in std::fs::read_to_string(format!("/proc/{me}/task/{me}/children"))
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter_map(|p| p.parse::<i32>().ok())
-    {
+    for pid in own_children() {
         let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
     }
+}
+
+/// This process's children: from the `children` file, or, on a kernel
+/// without it, every `/proc` entry whose parent is this process. Each is
+/// unreaped, so its number is still its own.
+fn own_children() -> Vec<i32> {
+    let me = std::process::id() as i32;
+    if let Ok(list) = std::fs::read_to_string(format!("/proc/{me}/task/{me}/children")) {
+        return list
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect();
+    }
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+                s.rsplit(')')
+                    .next()
+                    .and_then(|f| f.split_whitespace().nth(1))
+                    .and_then(|p| p.parse::<i32>().ok())
+                    == Some(me)
+            })
+        })
+        .collect()
 }
 
 fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
@@ -270,7 +295,10 @@ fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
                 PollTimeout::try_from(left.max(Duration::from_millis(1)))
                     .unwrap_or(PollTimeout::MAX)
             }
-            Phase::Killing(..) => PollTimeout::try_from(REPEAT).unwrap_or(PollTimeout::MAX),
+            Phase::Killing(_, reported) => {
+                PollTimeout::try_from(if reported { REPEAT_STUCK } else { REPEAT })
+                    .unwrap_or(PollTimeout::MAX)
+            }
         };
         let (sig_ready, ctl_ready) = {
             let mut fds = vec![PollFd::new(sfd.as_fd(), PollFlags::POLLIN)];

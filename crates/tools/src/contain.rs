@@ -334,6 +334,7 @@ impl ContainedChild {
         let Some(mut ctl) = self.ctl.take() else {
             return Stopped::Unconfirmed("the stop was already ordered".into());
         };
+        let started = std::time::Instant::now();
         if graceful {
             let _ = ctl.write_all(&[TERM]).await;
         }
@@ -359,16 +360,20 @@ impl ContainedChild {
             }
             Ok(Some(Report::StillAlive(d))) => Stopped::StillAlive(d),
             Ok(None) => {
+                use std::os::unix::process::ExitStatusExt;
                 let status =
                     tokio::time::timeout(std::time::Duration::from_secs(1), self.child.wait())
                         .await;
-                Stopped::Unconfirmed(format!(
-                    "its guard ended without a report ({})",
-                    match status {
-                        Ok(Ok(s)) => s.to_string(),
-                        _ => "status unknown".into(),
+                match status {
+                    // A guard that exits on its own has reaped everything
+                    // first (it ended with the command, just before the
+                    // order): that is the confirmation.
+                    Ok(Ok(s)) if s.signal().is_none() => Stopped::Ended(started.elapsed()),
+                    Ok(Ok(s)) => {
+                        Stopped::Unconfirmed(format!("its guard was killed without a report ({s})"))
                     }
-                ))
+                    _ => Stopped::Unconfirmed("its guard ended without a report".into()),
+                }
             }
             Err(_) => Stopped::Unconfirmed(format!(
                 "its guard did not answer within {} s",
