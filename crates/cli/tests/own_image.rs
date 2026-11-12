@@ -504,7 +504,7 @@ async fn a_node_run_from_its_build_tree_survives_a_rebuild() {
 
 /// The review's `d_a_second_node_and_doctor` and `g_a_restart`, for what
 /// still applies without a link: a second start of another build on the
-/// same data directory (it fails on the port that is taken) and `doctor`,
+/// same data directory (refused by the lock since A.20) and `doctor`,
 /// of either build, do not stop the running node's contained commands; a
 /// restart works; nothing named `node-image*` is ever made in the data
 /// directory. With T.8f's first design the failed second start replaced
@@ -522,8 +522,11 @@ async fn a_second_start_doctor_and_a_restart_leave_the_node_alone() {
         eprintln!("SKIPPED: the shell is not contained here: {first}");
         return;
     }
+    // Since A.20 B ends on A's lock of the data directory, before its start
+    // touches anything there (before, it failed later, on the port).
     let e = serve(&b, &f.data, &s.addr, &f.root.join("b.log")).err();
-    assert!(e.is_some(), "B started on A's port");
+    let e = e.expect("B started beside A");
+    assert!(e.contains("is in use by serve"), "{e}");
     for exe in [&a, &b] {
         let out = std::process::Command::new(exe)
             .args(["--data-dir", f.data.to_str().unwrap(), "doctor"])

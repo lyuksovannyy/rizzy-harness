@@ -330,6 +330,22 @@ for keeping the directory secret: whoever can read `master.db` can read every
 file, so use full-disk encryption for that. Old copies of `master.db` pages can
 survive on SSDs and copy-on-write filesystems ([docs/media.md](docs/media.md)).
 
+**One process per data directory.** `serve`, `node run` and `node join` hold
+a lock on `<data>/lock` for as long as they run. A second one started on the
+same directory (typing `serve` twice, a `node run` pointed at the server's
+directory) ends at once with one line naming the directory and the running
+holder's pid, and changes nothing there; before, it emptied the running
+node's session temp folders, removed its sub-agents' folders and closed its
+running turns as interrupted. The kernel releases the lock however the holder
+ends (`kill -9`, a crash), so nothing stale is left to clean up; the file
+itself stays and only names the last holder. `doctor`, `token`, `claim-code`
+and `graphify` take no lock and work beside a running server; `doctor` says
+whether the lock is held and by which pid. A server and a node on the same
+machine need a data directory each (`--data-dir`): both keep `node.db`,
+`checkpoints/` and `sandbox-tmp/` in theirs. On a file system without file
+locks (some NFS or FUSE mounts) the start goes on with a warning and nothing
+stops a second process: start only one there.
+
 **Secret files must be private.** `serve` (and `node run`) refuse to start
 when a file holding a secret is readable or writable by group or others,
 naming it and the fix (`chmod 600 <file>`): `secrets.toml`, `api-token`,
@@ -799,9 +815,8 @@ a command notices:
   says so in the log ("ended a command a previous run of this node left
   running"). One the kernel cannot end yet (stuck in I/O) is logged
   "STILL ALIVE": it has been killed and ends when the kernel releases it.
-  A second node started on the same data directory leaves the running
-  node's commands alone; other parts of such a start still disturb it (its
-  temp folders are emptied), so never start two on one data directory.
+  A second server or node started on the same data directory is refused
+  before it touches anything (see "One process per data directory").
 - `/dev` is its own and `/tmp` is empty and read-only; use `TMPDIR` (the
   chat's temp folder, which compilers, `mktemp` and most tools already
   use). Your home folder is there only as far as a `[sandbox] read` or
@@ -1239,7 +1254,8 @@ printed commands on the other machine (same binary). That machine needs its own
 limits: the node, not the master, decides what may run there). Revoke a node in
 the same place.
 
-Run each node from its own data directory. If two processes use one node's key
+Run each node from its own data directory, also a node on the master's own
+machine (a second process on one data directory is refused). If two processes use one node's key
 (a copied data directory, a node restored from an old backup) and write the same
 chat differently, the server stops taking that chat's events, logs an error
 naming the chat and the node, and refuses new messages to it ("diverged").
