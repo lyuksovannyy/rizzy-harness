@@ -1377,6 +1377,10 @@ fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
+        // The test's own git starts no background work: after a commit git
+        // may run its maintenance detached, and its `maintenance.lock`
+        // then comes and goes in a listing taken as "before".
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -1906,6 +1910,10 @@ fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
+        // The test's own git starts no background work: after a commit git
+        // may run its maintenance detached, and its `maintenance.lock`
+        // then comes and goes in a listing taken as "before".
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
