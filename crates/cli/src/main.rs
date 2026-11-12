@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod lock;
 mod net;
 
 use anyhow::{Context, bail};
@@ -796,6 +797,11 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
         }
     };
     check("data dir", Ok(dir.display().to_string()));
+    match lock::status(dir) {
+        Ok(lock::Status::Unsupported(m)) => println!("warn  data dir lock: {m}"),
+        Ok(lock::Status::Free(m) | lock::Status::Held(m)) => check("data dir lock", Ok(m)),
+        Err(m) => check("data dir lock", Err(m)),
+    }
     for bin in ["bash", "git"] {
         let found = std::process::Command::new(bin)
             .arg("--version")
@@ -1058,6 +1064,19 @@ async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
     let dir = data_dir(&cli.data_dir)?;
+    // One process per data directory (A.20), before anything else touches
+    // it: held until this function returns, released by the kernel however
+    // the process ends. `doctor`, `token`, `claim-code` and `graphify` run
+    // beside a live server or node and take none.
+    let role = match &cli.cmd {
+        Cmd::Serve { .. } => Some("serve"),
+        Cmd::Node { cmd: NodeCmd::Run } => Some("node run"),
+        Cmd::Node {
+            cmd: NodeCmd::Join { .. },
+        } => Some("node join"),
+        _ => None,
+    };
+    let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
     match cli.cmd {
         Cmd::Serve {
             bind,

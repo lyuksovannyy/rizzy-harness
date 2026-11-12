@@ -1610,6 +1610,29 @@ async fn a_second_start_leaves_the_live_nodes_commands_alone() {
         .await
     });
     wait_for("the command", || !sleeps(SECS).is_empty()).await;
+    // Since A.20 a live node holds `<data>/lock` and a second start ends
+    // before its sweep: this test holds it as the live node would, and the
+    // start is refused at once.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.data.join("lock"))
+        .unwrap();
+    held.try_lock().unwrap();
+    let data = f.data.clone();
+    let (listening, log) = tokio::task::spawn_blocking(move || serve_once(&data))
+        .await
+        .unwrap();
+    let log = log.join("\n");
+    assert!(!listening, "the second start served beside the lock: {log}");
+    assert!(log.contains("is in use by"), "{log}");
+    assert!(!log.contains("previous run"), "{log}");
+    // The sweep's own rule still holds where the lock does not (a file
+    // system without locks starts with a warning): with the lock free, the
+    // start sweeps and must still leave the live node's command alone.
+    drop(held);
     let data = f.data.clone();
     let (listening, log) = tokio::task::spawn_blocking(move || serve_once(&data))
         .await
