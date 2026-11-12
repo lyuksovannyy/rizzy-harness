@@ -374,3 +374,330 @@ only. `finding_*` pass when the finding reproduces; a fix turns the named
 assertions around. No process outlives a test: every command runs through
 the bash tool to its end (checked afterwards with `pgrep -af` for the scratch
 folder's name, the two stand-ins and `inside.py`: none).
+
+## 7. Re-check of the fixes (2026-11-12)
+
+Re-checked: `cacf33b` (`fbd96cd` tests, `b81f0bc` the fixes, `d2cd9fa`
+documents, `f84ee60`, `f8c4ae4`, `cacf33b`; `2904ec2` is a merge and not my
+subject). Read `git diff fe7522d..HEAD -- crates/tools crates/cli README.md
+PLAN.md` in full, then attacked what it added. Same machine, same rules. No
+product or test source changed by me.
+
+### Verdict
+
+**T8B-2 is closed. T8B-1 is closed for the failure it was shown with and
+open for the likelier one.** The probe now judges the namespace by identity,
+and a node that started in the gap leaves it by its own later probe and never
+goes back; both do what the builder says, also with 24 commands at once.
+What is left: the second try and the later probes exist only for "bubblewrap
+works, but not with `--unshare-net`". A failing moment that hits bubblewrap
+as such, which is what a full process table or no memory does, still decides
+for the node's life, now with no namespace of any kind (R-1). And the later
+probe runs inside whichever tool call is next, before that call's timeout
+starts, with no bound (R-2).
+
+| Id | Status | What changed, and the limit |
+|---|---|---|
+| T8B-1 | **Partly closed** | Closed: a second try at start; a node in the gap probes again before a command at most every 60 s and takes the namespace for good; `required` names bubblewrap's error. Open: R-1 (the fallback is still for life), R-2 (the probe's bound). |
+| T8B-2 | **Closed** | The probe compares `/proc/self/ns/net` with the node's own; the interface list is not read. Holds in both forms and for a node that is itself in another namespace. Limit, by design: R-4. |
+| T8B-3 | **Open, by the owner's decision** | Not counted again. The documents state it truthfully: `README.md` ("After the start-up line nothing in the chat says a node is in that gap"), `PLAN.md` R2 ("OPEN (review T8B-3, Low)"), `ADOPTION_PLAN.md` N.10. |
+| N-1 | **Closed, two sentences left** | DNS is now "over the network" with the named-socket resolver stated as not tested; the web tools are named; the line reference is right. Left: see "The documents" below. |
+| N-2 | **Closed** | The DNS test's comment says what it proves. |
+| N-3 | Open, unchanged | Families whose modules are not loaded were not opened. |
+| N-4 | Open, unchanged | `network_off.rs` still uses `tempfile::tempdir()`; a rule of this machine, not a product matter. |
+| N-5 | Open, unchanged | `doctor` starts the sandbox three times. |
+| N-6 | Unchanged | 23 of 23 guard tests pass on `cacf33b` (101 s). |
+| N-7 | Unchanged | The later probe costs one probe per interval, and only in the gap. |
+| N-8 | Unchanged | |
+| R-1 | **New, Medium** (claim 4; the open part of T8B-1) | Four failed runs of bubblewrap at start leave an `auto` node on Landlock alone for its life; nothing probes again. |
+| R-2 | **New, Low** | The gap's later probe is unbounded and runs in the next tool call, ahead of its timeout and its cancel. |
+| R-3 | **New, Note** (older than the fix; I missed it the first time) | A program on the node's `PATH` inside a `[sandbox] write` entry decides every later probe. |
+| R-4 | **New, Note** | Identity proves another namespace, not an empty one. |
+| R-5 | **New, Note** | The tests and two wordings. |
+
+### The five questions
+
+**1. The identity check.** The link is `net:[<inode>]` of the namespace
+itself: the same text for the same namespace from any `/proc`, another for
+another live namespace. The node's own namespace is alive as long as the
+node, so its number cannot be reused under it.
+
+- *Different, yet the host's network reachable:* not with bubblewrap.
+  `--unshare-net` is a new namespace with nothing in it but `lo`; bubblewrap
+  never joins or bridges another, and a command has no capability to do so
+  (section 3). With a `[sandbox] bwrap` that is not bubblewrap, yes: R-4.
+- *A node in a namespace of its own:* held.
+  `held_a_node_in_a_namespace_of_its_own_still_gets_one_per_command` runs
+  `doctor` under `unshare --user --net`: the machine's `net:[4026531833]`,
+  the node's `net:[4026534581]`, and `ok    shell containment: … network off:
+  a network namespace of its own per command`.
+- *Equal or unreadable where the namespace is new:* equal, no. Unreadable:
+  only when the `readlink` the script finds does not work (R-3); `readlink`
+  on `/proc/self/ns/net` needs no Landlock right and works in both forms
+  (`the_shared_proc_form_gets_the_namespace_too`, and section 3's proofs,
+  which still pass).
+
+**2. `NetGap`.** `held_many_commands_at_once_one_probe_and_none_in_the_gap_afterwards`,
+24 sessions at once on a multi-threaded runtime, three waves:
+
+```
+runs of bubblewrap at start:
+net=1 probe=1
+net=1 probe=1
+net=0 probe=1
+net=1 probe=1
+net=1 probe=1
+shell containment: bubblewrap makes a network namespace now; with [sandbox] network = "off" every
+  command from now on runs in one of its own (no UDP or DNS out), the gap of the start is closed
+wave 0: 24 commands at once, 23 in the host's namespace; probes so far: 1
+wave 1: 24 commands at once, 0 in the host's namespace; probes so far: 1
+wave 2: 24 commands at once, 0 in the host's namespace; probes so far: 1
+with bubblewrap refusing again, the tool result is: "bwrap: Creating new namespace failed:
+  Resource temporarily unavailable\n\n[exit code: 1]"
+```
+
+- One caller probes (the compare-and-swap holds); the 23 beside it do not
+  wait and run in the gap, which is where the node still was. No command
+  built after the flag was set ran without the namespace.
+- After the node has the namespace, a bubblewrap that refuses it makes the
+  command fail with bubblewrap's own message and exit 1. That is honest and
+  it is the safe direction; there is no other.
+- *Pass wrongly:* no. The script runs only after bubblewrap has made the
+  namespace, so nothing a command leaves can make a probe pass where there
+  is none. *Fail wrongly, or never pass:* R-3. *Never run:* on the fallback,
+  R-1. *The clock:* a monotonic `Instant` of the node; a command cannot move
+  it. *The probe's files:* `sandbox-tmp/probe-net-<ms>`, beside the sessions'
+  own temp folders (named by session id), in no session's grant.
+- *A probe that hangs, the thread, the worst case:* R-2.
+
+**3. Back to the gap, or the namespace without a probe.** Neither. `taken` is
+stored once, after `probe_containment` returned `Ok` for a `Contain` with the
+namespace, and is never cleared; `net_gap` is set only by the start;
+`Contain::net_ns` is `true` only where one of the start's two tries passed.
+`a_node_with_the_namespace_never_loses_it` and the last line above agree.
+
+**4. The documents.** Two sentences say more than is true:
+
+- `PLAN.md` T4 and `ADOPTION_PLAN.md` T.8b: "T8B-1 ... fixed". It is fixed
+  for a failure of `--unshare-net`; R-1 is the same finding on the path that
+  got no retry. Say "the gap is left by a later probe; the Landlock-only
+  fallback is still decided once at start".
+- The gap line and `README.md` ("with bubblewrap's error"): where the probe
+  exits 6, the line reads "bubblewrap failed with --unshare-net at start,
+  twice, ... (the command was not in a network namespace of its own; ...)".
+  bubblewrap did not fail there, and "not in a namespace of its own" is also
+  said when the link could not be read (R-3's output).
+
+One wording: the log line "every command from now on" is true of commands
+started from now on; one that was already running stays in the host's
+network until it ends.
+
+**5. The first review's two proofs.** Both now fail at their first assertion,
+for the right reason:
+
+```
+finding_an_extra_interface_…: auto (Ok): contained (…); network off: a network namespace of its own
+  per command (only its own loopback: no TCP, UDP or DNS out)
+  assertion `left == right` failed  left: Ok  right: Warn        (review_t8b_proofs.rs:529)
+finding_one_failed_probe_…: the node's line at start (Ok): contained (…); network off: a network
+  namespace of its own per command (…)
+  assertion `left == right` failed  left: Ok  right: Warn        (review_t8b_proofs.rs:426)
+```
+
+The first: the script no longer reads `/proc/net/dev`, so the stand-in has
+nothing to replace. The second: the start's second try passes.
+
+### R-1. Medium. A failing moment that hits bubblewrap itself still decides for the node's life
+
+**The claim it breaks.** Claim 4, and "T8B-1 fixed".
+
+**The mechanism.** `containment` (`sandbox.rs`): the second try and the
+`NetGap` are reached only through `let Ok(without) = probe(false)`. When the
+probe without the namespace fails too, the code falls to `(Err(e), _) => e`
+and returns `Contained::No`: Landlock alone, `net_gap: None`,
+`leave_gap_if_possible` returns at once for good. A failure of the moment
+does not look at bubblewrap's options: `fork` refused at the process limit
+or no memory fails the run with `--unshare-net` and the run without it
+alike, milliseconds apart. The first review's proof failed only the runs
+with the flag; that is the pattern the fix covers.
+
+On this path the node loses more than in the gap: no PID namespace, no
+guard, and with the network off UDP and DNS out, for its whole life.
+
+**Reproduction.** `run_rust_proofs.sh recheck finding_r1`. The stand-in
+fails its first four runs whatever the options, then is the real bubblewrap.
+The retry interval is 100 ms and each command waits 300 ms. Real output:
+
+```
+the node's line at start (Warn): NOT CONTAINED, running with Landlock alone ([sandbox] contain =
+  "auto"): …/bwrap-fails-four-times failed (exit Some(1)): bwrap: Creating new namespace failed:
+  Resource temporarily unavailable; without a new /proc: … Processes a command leaves behind can
+  outlive it; …; WARNING: [sandbox] network = "off" without the containment stops TCP only: UDP and
+  DNS still go out (Landlock does not cover them; the network namespace needs bubblewrap)
+a second start says (Ok): contained (…); network off: a network namespace of its own per command
+  (only its own loopback: no TCP, UDP or DNS out)
+command 0: "pid=1317996 ns=net:[4026531833]\nsent\n\n[exit code: 0]"; the host's listener heard ["alone-0"]
+command 1: "pid=1318006 ns=net:[4026531833]\nsent\n\n[exit code: 0]"; the host's listener heard ["alone-1"]
+command 2: "pid=1318015 ns=net:[4026531833]\nsent\n\n[exit code: 0]"; the host's listener heard ["alone-2"]
+```
+
+As in T8B-1, not shown: a command causing the moment; the start is the
+moment that counts. The fall to Landlock alone after a failed start is
+T.8a's and was there before; it is counted here because with the network off
+it is the same loss as T8B-1 by the likelier cause, and because the retry
+that now exists stops one branch short of it.
+
+**The smallest fix I would accept.** One way out for both: an `auto` node
+that found a bubblewrap at start and could not use it keeps what it needs to
+try again (the path), and before a shell command, at most every interval,
+runs the start's probes again; from the first that passes it contains, with
+the namespace when the network is off, and logs it. Never back. `required`
+is unchanged (it refuses).
+
+**The test that should exist.** That stand-in: the command after the
+interval prints `pid=2` and a namespace that is not the host's, and the
+host's listener hears nothing.
+
+### R-2. Low. The later probe has no bound and runs in the next tool call
+
+**The mechanism.** `leave_gap_if_possible` is called from `Confinement::build`
+(`sandbox.rs`), which the bash tool calls synchronously before it creates
+its deadline (`bash.rs:201`; the `sleep(timeout)` is at `:225`). The probe is
+`Command::output()`: it waits for bubblewrap as long as bubblewrap takes.
+The agent loop polls the tool in the session's own task (`coalesce`,
+`agent-native/src/lib.rs`), so while the probe waits that task cannot see
+its timeout, a cancel or the abandon after `TOOL_CANCEL_GRACE`, and one
+runtime thread is held. Other sessions are not held (the compare-and-swap
+lets them pass), until the next interval, when the next command claims the
+probe and is held the same way.
+
+**Reproduction.** `run_rust_proofs.sh recheck finding_r2`. The stand-in
+sleeps 6 s before it answers a run with `--unshare-net`. Interval 2 s. Real
+output:
+
+```
+A (timeout 1 s, cancelled at 0.5 s): returned after 6.0 s: "hi\n\n[exit code: 0]"
+B (0.3 s later, another session): returned after 0.0 s: "hi\n\n[exit code: 0]"
+C (one interval later): returned after 6.0 s: "hi\n\n[exit code: 0]"
+```
+
+**How bad.** Normally the probe is about 5 ms once a minute, and only in the
+gap. I found nothing a contained command can do to slow it: the probe's
+processes are outside its PID namespace and its files outside its grant.
+What makes it wait is the machine (the data directory or `PATH` on a mount
+that does not answer, a machine that swaps). Then every minute one more
+session and one more runtime thread stop, with no way to cancel. The start's
+probes are unbounded too, but they hold a start, not a chat.
+
+**The smallest fix I would accept.** Give the probe a bound and do not make
+the command wait for it: spawn it, wait at most 2 s, and on the deadline
+drop the node's end of the guard's channel (that is the kill order) and
+count the probe as failed. Better: run it on a blocking thread and let the
+command that triggered it start in the gap, as the 23 beside it do.
+
+**The test that should exist.** The slow stand-in: A returns within its own
+timeout.
+
+### R-3. Note. A program on `PATH` inside a `write` entry decides the probe
+
+Older than the fix, and I missed it in the first review; the fix adds
+`readlink` to the programs concerned. The probes run `sh`, `cat` and
+`readlink` by name with the node's `PATH`, inside the wrapper, which grants
+node.toml's `[sandbox] read` and `write` entries. A session's own folder is
+not granted to the probe, so a program left there is not found. A `write`
+entry that holds a folder on the node's `PATH` ahead of the system's is.
+The README's example lists `~/.cargo/bin`, `~/.local/bin` and `~/go/bin`
+under `read`, so this needs a node.toml that departs from it
+(`write = ["~/.cargo"]`).
+
+`run_rust_proofs.sh recheck note_r3`: one contained command of a node with
+the namespace leaves a `readlink` that exits 1 in such a folder; the next
+`doctor`:
+
+```
+before: ok    shell containment: contained (/usr/bin/bwrap: …); network off: a network namespace of
+  its own per command (only its own loopback: no TCP, UDP or DNS out)
+the command: "ns=net:[4026534585]\nleft\n\n[exit code: 0]"
+after: warn  shell containment: contained (/usr/bin/bwrap: …); network off WITH A GAP: bubblewrap
+  failed with --unshare-net at start, twice, though it works without it (the command was not in a
+  network namespace of its own; without a new /proc: the command was not in a network namespace of
+  its own; once more: …), so commands run contained without a network namespace: …
+```
+
+Only in the failing direction (see question 2), and the later probe fails
+the same way, so the node stays in the gap. The same folder also lets a
+command replace `bash` for every later call, inside the sandbox, which is
+why this is a note. Fix: the probes take `sh`, `cat` and `readlink` by the
+rule bubblewrap is taken by (`contain::trusted`), or run with the system
+folders as their `PATH`; `start` warns about a `write` entry that holds a
+`PATH` folder, as it does for `/tmp` and `/run/user/<uid>`.
+
+### R-4. Note. Another namespace is not an empty namespace
+
+By reading; not tested. The old check ("only `lo`") was wrong about tunnel
+devices and right about one thing: it would have refused a namespace that
+has a way out. The new one asks only "not the node's". With bubblewrap the
+two are the same. With a `[sandbox] bwrap` that is a wrapper giving the new
+namespace an interface to the outside (user-mode networking), the node would
+print "only its own loopback: no TCP, UDP or DNS out" over a namespace that
+has more. node.toml's `bwrap` is the owner's choice and "taken as it is";
+one sentence at that key is enough, or the probe additionally fails when
+`/proc/net/route` lists a route (a new namespace has none: one header line
+here; a tunnel module's fallback devices are down and add none, which I did
+not run).
+
+### R-5. Note. The tests and two wordings
+
+- `an_extra_interface_in_a_new_namespace_still_counts_as_one` failed before
+  the fix, as it should. Since the fix its stand-in changes nothing (the
+  script it rewrites no longer contains `</proc/net/dev`), so it now tests
+  plain bubblewrap; it would still catch the list coming back. Its comment
+  should say so.
+- No test for R-1 and R-2; the proofs here are theirs once inverted.
+- The two wordings under "The documents" above.
+
+### What I could not test
+
+As in section 4, unchanged: a kernel with tunnel devices in a new namespace
+(the fix no longer depends on it), a kernel below Landlock ABI 9 with a
+resolver on a named socket, families whose modules are not loaded, a real
+full process table, nesting in a container, a setuid bubblewrap, a real
+`node run` (so the one log line on leaving the gap was seen on stderr, not
+in the node's log: `main.rs:608` sets the logger). New: R-4's wrapper with
+user-mode networking; a probe held by a real stalled mount rather than a
+stand-in that sleeps.
+
+### The claims again
+
+1. Own namespace, nothing out, abstract sockets gone: **holds** (section 3's
+   proofs pass unchanged on `cacf33b`).
+2. Network on, nothing changes: **holds** (`Contain::args` adds the flag only
+   for `net_off`; `network_on_is_unchanged`).
+3. Only the node's setting decides: **holds.** The new state (`NetGap`) is
+   the node's own, set by its start and its own probes; no call, session or
+   message reaches it. `start_with_exe_retrying` is for tests.
+4. `required` refuses, `auto` warns, never silently on: **holds for a
+   failure of `--unshare-net`; does not hold for a failing moment over every
+   probe (R-1).** Silent after the start: T8B-3, open by decision and
+   documented.
+5. The guard, the kill and its confirmation: **hold** (23 of 23). R-2 is a
+   command that starts late, not one that escapes its guard.
+6. The documents: **hold but for two sentences** ("T8B-1 fixed"; "bubblewrap
+   failed" on the probe's own exit).
+
+### Running the re-check
+
+```sh
+CARGO_TARGET_DIR=<target> crates/cli/tests/support/review_t8b/run_rust_proofs.sh recheck          # all five
+CARGO_TARGET_DIR=<target> crates/cli/tests/support/review_t8b/run_rust_proofs.sh recheck finding_ # R-1, R-2
+CARGO_TARGET_DIR=<target> crates/cli/tests/support/review_t8b/run_rust_proofs.sh                  # the first review's
+```
+
+`recheck_t8b_proofs.rs`: five tests, all pass here (19 s). The first
+review's file: its three `held_`/`note_` tests pass, its two `finding_`
+tests fail as shown above. The only processes that outlast a tool call are
+the two `sleep 6` of R-2's stand-in (A's probe and C's), which the test
+waits for. Afterwards:
+`pgrep -af` for the scratch folder's name and the stand-ins' names found
+nothing, the scratch folder under the shared target was removed, and the
+temporary copies in `crates/cli/tests/` are gone.
