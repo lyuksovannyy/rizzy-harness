@@ -626,7 +626,7 @@ fn start_sandbox(
         .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
     // A node in the network-off gap logs, once, that it left it (T8B-1).
     harness_tools::sandbox::set_network_log(|l| tracing::info!("{l}"));
-    let s = harness_tools::sandbox::start(
+    let mut s = harness_tools::sandbox::start(
         &settings,
         dir,
         &policy.protected_dirs,
@@ -634,6 +634,8 @@ fn start_sandbox(
         &node_toml,
     )
     .map_err(anyhow::Error::msg)?;
+    // T.8f: the node's link to its own image, which the file view binds.
+    s.link_image(dir);
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
@@ -880,6 +882,12 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                 &p.workspace_roots,
                 &dir.join("node.toml"),
             )
+        })
+        // Whether the node could keep its image by a link (T.8f), tried
+        // under another name: a running node's link is left alone.
+        .map(|mut s| {
+            s.try_link_image(dir);
+            s
         });
     match &containment {
         Ok(s) if s.contain_level == ContainLevel::Warn => {

@@ -47,7 +47,12 @@
 //! which runs before every contained command, Landlock or not, opens the
 //! mounted folder without following a link and refuses the command if it
 //! is not the one the node checked. The image is bound from a descriptor
-//! the guard opens on its own `/proc/self/exe` in both cases.
+//! the guard opens in both cases: on the node's link to its image in the
+//! data directory (T.8f, [`crate::image`]), checked against the guard's own
+//! `/proc/self/exe`, so a binary replaced under the running node does not
+//! stop commands; where the node could not make the link, on
+//! `/proc/self/exe`, and then the command is refused once the image has no
+//! path left.
 //!
 //! **Which thread spawns** no longer matters. `PR_SET_PDEATHSIG` fires when
 //! the *thread* that forked bwrap exits; T.8a therefore spawned every

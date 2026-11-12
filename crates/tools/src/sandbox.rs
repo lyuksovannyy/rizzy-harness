@@ -627,12 +627,35 @@ impl Sandbox {
             crate::contain::Form::Full => "/proc of its own",
             crate::contain::Form::SharedProc => "this machine's /proc",
         };
+        // T.8f: whether a rebuild under the running node stops commands.
+        let image = match self.image_link.get() {
+            Some(crate::image::ImageLink::Linked(p)) => format!(
+                "kept by its link {}: a rebuild or upgrade of the binary under the running node \
+                 does not stop contained commands",
+                p.display()
+            ),
+            Some(crate::image::ImageLink::Possible(p)) => format!(
+                "kept by a link the node makes at {}: a rebuild or upgrade of the binary under \
+                 the running node does not stop contained commands",
+                p.display()
+            ),
+            other => format!(
+                "bound through the binary's own path, as no link {} could be made in the data \
+                 directory ({}): after a rebuild or upgrade of the binary under the running \
+                 node, every contained command is refused until the node is restarted",
+                crate::image::LINK,
+                match other {
+                    Some(crate::image::ImageLink::NotMade(why)) => why.as_str(),
+                    _ => "not made",
+                }
+            ),
+        };
         format!(
             "a contained command sees only: read-only {system}; links {links}; [sandbox] read \
              {read}; read-write [sandbox] write {write}; its session's folder (read-write) and \
              temp folder; /dev of its own; {proc}; an empty /tmp; the harness binary at \
-             {VIEW_EXE} (read-only, the node's running image). Nothing else of this machine is \
-             there ({how})"
+             {VIEW_EXE} (read-only, the node's running image, {image}). Nothing else of this \
+             machine is there ({how})"
         )
     }
 
@@ -1298,8 +1321,11 @@ impl Started {
 }
 
 /// Set up the node's sandbox once at start: resolve the wrapper binary
-/// (`current_exe`, canonical; a binary replaced by an upgrade is picked up
-/// at the same path, a deleted one makes every command fail closed), build
+/// (`current_exe`, canonical; the node's helpers and an uncontained shell
+/// pick up a binary replaced by an upgrade at the same path; a contained
+/// command runs the node's own image, kept by the link the node makes with
+/// [`Started::link_image`], or, where it could not, is refused once that
+/// image has no path left: T.8f), build
 /// the rules and run the self-test; then find bubblewrap and probe the
 /// shell's containment (T.8a). `Err` is a configuration error (a
 /// `[sandbox]` entry that would expose the data directory or a protected

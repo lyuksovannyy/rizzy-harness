@@ -169,7 +169,8 @@ pub fn main() -> i32 {
     let args: Vec<OsString> = std::env::args_os().skip(2).collect();
     let Some(at) = args.iter().position(|a| a == "--") else {
         eprintln!(
-            "{SUBCOMMAND}: usage: {SUBCOMMAND} [--mark DIR --mark-session KEY] -- PROGRAM ARGS…"
+            "{SUBCOMMAND}: usage: {SUBCOMMAND} [--node PID] [--image LINK] [--mark DIR \
+             --mark-session KEY] -- PROGRAM ARGS…"
         );
         return 125;
     };
@@ -286,13 +287,18 @@ fn run(
 /// since refuses the command; one swapped after this open is caught by
 /// bubblewrap, which compares what it mounted with the descriptor. The
 /// [`crate::contain::IMAGE_TOKEN`] becomes a descriptor of this process's
-/// own running image (the node's: it started this guard from it). Not
+/// own running image (the node's: it started this guard from it): opened
+/// on `image`, the node's link to it (T.8f, [`crate::image`]), where the
+/// node made one, and only while that link is this image (device and inode
+/// against `/proc/self/exe`; else the command is refused, as for a grant);
+/// without one, on `/proc/self/exe`, refused once the image has no path
+/// left. Not
 /// close-on-exec, so bubblewrap inherits them; bubblewrap closes those it
 /// binds with `--bind-fd` before the command starts. Any other `@rizzy`
 /// word, or one in another place, refuses the command.
 fn open_view(
     args: &[OsString],
-    _image: Option<&std::path::Path>,
+    image: Option<&std::path::Path>,
 ) -> Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>), String> {
     use crate::contain::{FD_TOKEN, IMAGE_TOKEN};
     use nix::fcntl::OFlag;
@@ -306,7 +312,12 @@ fn open_view(
         };
         let opt = i.checked_sub(1).and_then(|j| args[j].to_str());
         let by_fd = matches!(opt, Some("--bind-fd" | "--ro-bind-fd"));
-        let fd = if word == IMAGE_TOKEN && (by_fd || opt == Some("--ro-bind")) {
+        let fd = if let (Some(link), true) = (
+            image,
+            word == IMAGE_TOKEN && (by_fd || opt == Some("--ro-bind")),
+        ) {
+            own_image_link(link)?
+        } else if word == IMAGE_TOKEN && (by_fd || opt == Some("--ro-bind")) {
             let fd = nix::fcntl::open(
                 "/proc/self/exe",
                 OFlag::O_PATH,
@@ -316,13 +327,16 @@ fn open_view(
             // bubblewrap binds a descriptor through the path it names, which
             // a deleted file no longer has (an upgrade that replaced the
             // binary under a running node). Never the file now at the path:
-            // that is what a session could have put there (T8E-5).
+            // that is what a session could have put there (T8E-5). This node
+            // keeps no link to its image (T.8f): it could not make one.
             let at = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
                 .map_err(|e| format!("its own image: {e}"))?;
             if at.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
                 return Err(format!(
                     "the harness binary this node runs was deleted or replaced since the node \
-                     started ({}); restart the node. The command was not started",
+                     started ({}); restart the node (it could not keep its image by a link in its \
+                     data directory: the file view line of its log, or doctor, says why). The \
+                     command was not started",
                     at.display()
                 ));
             }
@@ -371,6 +385,47 @@ fn open_view(
         fds.push(fd);
     }
     Ok((out, fds))
+}
+
+/// The node's link to its image (T.8f), opened without following a link
+/// at its name, if it is this process's own running image (the node's).
+/// The data directory it is in is in no grant; a difference here is a
+/// second node started on the same data directory (task A.20) or the link
+/// removed, and the command is refused rather than bound to another file.
+fn own_image_link(link: &std::path::Path) -> Result<std::os::fd::OwnedFd, String> {
+    use nix::fcntl::OFlag;
+    use std::os::unix::fs::MetadataExt;
+    let refuse = |why: String| {
+        format!(
+            "the node's link to its own image ({}) {why}; restart the node. The command was not \
+             started",
+            link.display()
+        )
+    };
+    let own = std::fs::metadata("/proc/self/exe")
+        .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?;
+    let fd = nix::fcntl::open(
+        link,
+        OFlag::O_PATH | OFlag::O_NOFOLLOW,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|e| {
+        refuse(format!(
+            "cannot be opened ({e}): it was removed since the node started"
+        ))
+    })?;
+    let st = nix::sys::stat::fstat(&fd).map_err(|e| refuse(e.to_string()))?;
+    let regular = nix::sys::stat::SFlag::from_bits_truncate(st.st_mode)
+        & nix::sys::stat::SFlag::S_IFMT
+        == nix::sys::stat::SFlag::S_IFREG;
+    if !regular || st.st_dev as u64 != own.dev() || st.st_ino as u64 != own.ino() {
+        return Err(refuse(
+            "is not the image this node runs: it was replaced since the node started (a second \
+             node started on this data directory does that)"
+                .into(),
+        ));
+    }
+    Ok(fd)
 }
 
 /// SIGKILL what is left: the namespace through bubblewrap while it is
