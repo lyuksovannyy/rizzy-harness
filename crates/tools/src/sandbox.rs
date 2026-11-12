@@ -66,6 +66,15 @@ pub fn close_inherited() {
     }
 }
 
+/// The self-test's canary in `dir` (the data directory): a name of this
+/// process's own. With one fixed name, a `doctor` run beside a starting
+/// node removed that node's canary in the middle of its self-test, and a
+/// canary that is gone reads as "could not be read", which is what the test
+/// takes for a working sandbox.
+fn canary_file(dir: &Path) -> PathBuf {
+    dir.join(format!("sandbox-canary-{}", std::process::id()))
+}
+
 /// Exit code of `sandbox-exec` when it cannot confine the command as asked
 /// (the command did not run).
 pub const EXIT_UNCONFINED: i32 = 125;
@@ -821,7 +830,7 @@ impl Sandbox {
         std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
         let ok = scratch.join("granted");
         std::fs::write(&ok, "ok").map_err(|e| format!("{}: {e}", ok.display()))?;
-        let canary = canary_dir.join("sandbox-canary");
+        let canary = canary_file(canary_dir);
         std::fs::write(&canary, "the sandbox must not read this\n")
             .map_err(|e| format!("{}: {e}", canary.display()))?;
         // The checks are the wrapper's own (review R-3): no program found
@@ -2585,6 +2594,19 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two processes probing in one data directory (a node starting and a
+    /// `doctor` beside it) must not share a canary file.
+    #[test]
+    fn the_canary_is_this_processes_own() {
+        let dir = Path::new("/data");
+        let name = canary_file(dir);
+        assert_eq!(name.parent(), Some(dir));
+        assert_eq!(
+            name.file_name().and_then(|n| n.to_str()),
+            Some(format!("sandbox-canary-{}", std::process::id()).as_str())
+        );
+    }
 
     /// Re-check R-1: a node with no descriptor of its own binary says so,
     /// with the reason, on its containment line (`auto`), and `required`
