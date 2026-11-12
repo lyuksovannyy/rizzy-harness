@@ -286,7 +286,10 @@ async fn helper_runs_detached_children() {
 /// single-threaded process, starts bubblewrap, and the node's side is a
 /// channel the kernel closes only when the process dies: a command
 /// spawned from a thread that ends at once runs to its end, through the
-/// tool's path and directly from the ending thread alike.
+/// tool's path and directly from the ending thread alike. The guard also
+/// watches its parent process (review T8E-1); a thread that ends is not
+/// the parent process ending, which the 2 s command (several of the
+/// guard's 500 ms looks) shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_command_outlives_the_thread_that_started_it() {
     let f = fixture();
@@ -299,7 +302,7 @@ async fn a_command_outlives_the_thread_that_started_it() {
         let (mut c, contained) = conf
             .shell(
                 "sh".as_ref(),
-                &["-c".as_ref(), "sleep 1; echo survived".as_ref()],
+                &["-c".as_ref(), "sleep 2; echo survived".as_ref()],
                 &f.ws,
                 None,
                 &Default::default(),
@@ -394,7 +397,7 @@ async fn exit_codes_output_and_the_graceful_stop_are_unchanged() {
     let r = run(&ctx, json!({"command": "sleep 100", "timeout_secs": 1})).await;
     assert!(
         r.output
-            .contains("[timed out after 1s: process group killed]"),
+            .contains("[timed out after 1s: the command and everything it started were killed; its guard confirmed the end"),
         "{}",
         r.output
     );
@@ -486,8 +489,13 @@ fn only_the_shell_is_contained() {
         )
         .unwrap();
     assert!(contained);
-    // Its guard (T.8e), which starts bubblewrap.
-    assert_eq!(args(&shell), Path::new(EXE).as_os_str());
+    // Its guard (T.8e), which starts bubblewrap: from the binary this
+    // process opened (review T8E-5), named as the binary for `ps`.
+    assert!(
+        args(&shell).to_string_lossy().starts_with("/proc/self/fd/"),
+        "{:?}",
+        args(&shell)
+    );
     let argv: Vec<_> = shell.as_std().get_args().collect();
     assert_eq!(argv[0], harness_tools::guard::SUBCOMMAND);
     let at = argv.iter().position(|a| *a == "--").unwrap();

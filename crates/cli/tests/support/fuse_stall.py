@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """A FUSE file system the test controls (T.8e): one file, `stall`, whose
-every READ is never answered while this process lives. A process reading it
+every READ is never answered while this process lives, and one name,
+`hang`, whose every LOOKUP is never answered (a `chdir` into it waits, as
+into a folder on a network mount whose server went away). A process reading it
 waits in the kernel; once SIGKILLed it waits *uninterruptibly* (the request
 is already in user space, `fs/fuse/dev.c` `request_wait_answer`), so the
 kernel cannot end it until this process lets it go.
@@ -8,7 +10,8 @@ kernel cannot end it until this process lets it go.
     fuse_stall.py <mountpoint>
 
 Mounts through the setuid `fusermount3` (no root), prints `mounted` when it
-serves and `read` when a READ is held, and exits when its stdin closes:
+serves, `read` when a READ is held and `lookup` when a LOOKUP of `hang`
+is held, and exits when its stdin closes:
 closing /dev/fuse aborts the connection and every held READ fails with
 ENOTCONN, which releases the reader. The caller unmounts
 (`fusermount3 -u -z <mountpoint>`). Writes no file.
@@ -71,6 +74,9 @@ while True:
         major, minor, readahead, _ = struct.unpack_from("<IIII", body)
         reply(unique, 0, struct.pack("<IIIIHHIIHHII", 7, 31, readahead, 0, 16, 12,
                                      4096, 1, 0, 0, 0, 0) + b"\0" * 24)
+    elif op == 1 and node == 1 and body.rstrip(b"\0") == b"hang":
+        held.append(unique)  # never answered
+        print("lookup", flush=True)
     elif op == 1:  # LOOKUP
         if node == 1 and body.rstrip(b"\0") == b"stall":
             reply(unique, 0, struct.pack("<QQQQII", 2, 0, 0, 0, 0, 0) + attr(2))

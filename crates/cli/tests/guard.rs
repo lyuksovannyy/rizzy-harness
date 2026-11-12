@@ -1,8 +1,11 @@
 //! The guard that watches every contained command until it is dead
 //! (ADOPTION_PLAN T.8e). Each contained `bash` call runs as node, guard,
 //! `bwrap`, init, `sandbox-exec`, `bash`; the guard's stdin is a channel
-//! whose other end only the node holds, and its closing is the kill order
-//! the kernel delivers even when the node dies.
+//! whose other end the node holds, and its closing is the kill order the
+//! kernel delivers when the node dies; the guard also watches its parent,
+//! for a node that dies while a child of it holds a copy of that end.
+//! The `review T8E-*` sections are the proofs of
+//! `docs/security-review/2026-11-T8e-guard.md`, inverted.
 //!
 //! Through the real `rizzy-harness` binary, the real `bwrap` and the real
 //! bash tool. Where bubblewrap does not work they skip with a printed
@@ -230,8 +233,11 @@ fn describe(pids: &[i32]) -> String {
 /// The review's `kill_window.py node`, through the node's own code: a
 /// helper process (this test binary re-run) spawns one contained command
 /// the way the bash tool does and says so; the test SIGKILLs it 0 to 1 ms
-/// later. Before the guard, 20 of 20 namespaces survived a kill 0 to
-/// 500 us after the spawn (bubblewrap's init sets its death signal late).
+/// later. On `main` before the guard, 170 of 200 namespaces survived
+/// (bubblewrap's init sets its death signal late). (A first version read
+/// one byte of the helper's stdout, which libtest's "running 1 test" line
+/// supplied, so some kills landed before the spawn; the helper now writes
+/// a line of its own.)
 /// `T8E_TRIES` sets the count (default 200).
 #[test]
 fn a_kill_of_the_node_just_after_a_spawn_leaves_nothing() {
@@ -259,10 +265,9 @@ fn a_kill_of_the_node_just_after_a_spawn_leaves_nothing() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        // The helper writes its line after its spawn returned.
         let mut out = helper.stdout.take().unwrap();
-        let mut b = [0u8; 1];
-        // The helper writes one byte after its spawn returned.
-        out.read_exact(&mut b).expect("the helper never spawned");
+        spawned(&mut out);
         let until = Instant::now() + Duration::from_micros(u64::from(attempt % 11) * 100);
         while Instant::now() < until {
             std::hint::spin_loop();
@@ -286,6 +291,20 @@ fn a_kill_of_the_node_just_after_a_spawn_leaves_nothing() {
     );
 }
 
+/// The line the helper node writes once its spawn returned.
+const SPAWNED: &[u8] = b"\nT8E-SPAWNED\n";
+
+/// Read the helper's stdout up to its [`SPAWNED`] line (and keep the pipe
+/// open: a helper that writes into a closed pipe dies).
+fn spawned(out: &mut std::process::ChildStdout) {
+    let mut seen = Vec::new();
+    let mut b = [0u8; 1];
+    while !seen.ends_with(SPAWNED) {
+        out.read_exact(&mut b).expect("the helper never spawned");
+        seen.push(b[0]);
+    }
+}
+
 /// Not a test on its own: the node of the test above. It spawns one
 /// contained command through the node's code, writes one byte, and waits
 /// to be killed.
@@ -305,8 +324,21 @@ async fn helper_node_spawns_one_command() {
     };
     let cmd = f.shell(f.sandbox_unprobed(), &script);
     let child = Confinement::spawn(cmd, true).await.unwrap();
+    // With `T8E_HELPER_HANG`, one more child started the way the node's
+    // git is (`node/src/git.rs`: `current_dir(<the session's folder>)`),
+    // into a folder that does not answer: it waits in `chdir`, before
+    // `exec`, holding a copy of every descriptor of this node (review
+    // T8E-1).
+    if let Some(hang) = std::env::var_os("T8E_HELPER_HANG") {
+        tokio::spawn(async move {
+            let mut git = tokio::process::Command::new("true");
+            git.current_dir(hang);
+            let _ = git.spawn();
+        });
+    }
+    // A line of its own: libtest writes "running 1 test" first.
     let mut out = std::io::stdout();
-    out.write_all(b"x").unwrap();
+    out.write_all(SPAWNED).unwrap();
     out.flush().unwrap();
     tokio::time::sleep(Duration::from_secs(1000)).await;
     drop(child);
@@ -317,8 +349,12 @@ async fn helper_node_spawns_one_command() {
 /// The moment a cancel returns, nothing of the command is left: not the
 /// detached children (they ignore SIGTERM, so the kill after the grace is
 /// what ends them), not bubblewrap, its init or the guard. No allowance
-/// for a kernel that is still tearing the namespace down: the guard
-/// reaped it before the call returned.
+/// for a kernel that is still tearing the namespace down.
+///
+/// This guards the contract and proves nothing about the guard: it passes
+/// on `main` before T.8e too (review N-4), where the kernel happened to be
+/// done by the time the call returned. What the guard adds, the wait for a
+/// confirmed end, is proved by the FUSE test below, which fails on `main`.
 #[tokio::test]
 async fn cancel_returns_only_after_everything_ended() {
     let f = fixture();
@@ -414,18 +450,25 @@ impl Stall {
 
     /// Wait until the server holds a READ.
     fn held(&mut self) {
+        self.expect("read");
+    }
+
+    /// Wait until the server prints `what` (`read`, `lookup`).
+    fn expect(&mut self, what: &str) {
         assert_eq!(
             self.lines.next().map(|l| l.unwrap()).as_deref(),
-            Some("read"),
-            "the server never saw the read"
+            Some(what),
+            "the server never saw the {what}"
         );
     }
 
-    /// Close the server's stdin: it exits, the kernel aborts the
-    /// connection and the held READ fails.
+    /// End the server (its stdin closed, and SIGKILL: a process stuck
+    /// before `exec` may hold a copy of that pipe): the kernel aborts the
+    /// connection and every held request fails.
     fn release(&mut self) {
         if let Some(mut s) = self.server.take() {
             drop(s.stdin.take());
+            let _ = s.kill();
             let _ = s.wait();
         }
     }
@@ -589,7 +632,13 @@ async fn a_kill_of_the_guard_alone_ends_the_namespace() {
         .await
         .expect("the call never returned")
         .unwrap();
-    assert!(r.output.contains("[exit code: signal]"), "{}", r.output);
+    // Not a plain exit code: the guard died, and the tool said so after
+    // it looked for what the guard left (review N-7, T8E-2).
+    assert!(
+        r.output.contains("its guard was killed (signal 9)"),
+        "{}",
+        r.output
+    );
 }
 
 /// A command cannot reach, signal or outlive its guard, and does not hold
@@ -879,5 +928,512 @@ async fn the_guard_costs_little_per_command() {
         dw < d_o + Duration::from_millis(15),
         "the guard adds {:?}",
         dw.saturating_sub(d_o)
+    );
+}
+
+// ---- review T8E-1: a child of the node waiting before `exec` ----
+
+/// The reviewer's proof inverted (`docs/security-review/2026-11-T8e-guard.md`
+/// T8E-1). The node has one contained command and one more child, started
+/// the way its git is, waiting in `chdir` into a folder that does not
+/// answer: before `exec`, so it holds a copy of the node's end of every
+/// guard's channel. The node is SIGKILLed; the channel does not close. The
+/// guard must learn of the node's death another way (its parent changes):
+/// the command is gone within 2 s.
+#[test]
+fn a_node_killed_while_a_child_waits_before_exec_leaves_nothing() {
+    const SECS: u32 = 974_861;
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let mnt = f.ws.parent().unwrap().join("mnt-hang");
+    let Some(mut stall) = Stall::mount(&mnt) else {
+        return;
+    };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let mut node = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "helper_node_spawns_one_command", "--nocapture"])
+        .env("T8E_HELPER_DATA", &f.data)
+        .env("T8E_HELPER_WS", &f.ws)
+        .env("T8E_HELPER_SCRIPT", format!("sleep {SECS}"))
+        .env("T8E_HELPER_HANG", mnt.join("hang"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut out = node.stdout.take().unwrap();
+    spawned(&mut out);
+    stall.expect("lookup");
+    let by = Instant::now() + Duration::from_secs(20);
+    while sleeps(SECS).is_empty() {
+        assert!(Instant::now() < by, "the command never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let t = Instant::now();
+    node.kill().unwrap(); // SIGKILL
+    let _ = node.wait();
+    let l = gone_within(&f.ws, &[SECS], Duration::from_secs(2));
+    eprintln!(
+        "node SIGKILLed with a child stuck before exec: {} after {:?}",
+        if l.is_empty() { "nothing left" } else { "LEFT" },
+        t.elapsed()
+    );
+    stall.release();
+    assert!(
+        l.is_empty(),
+        "still running 2 s after the node died:\n{}",
+        describe(&l)
+    );
+}
+
+/// The second line for T8E-1: a guard of this node's data directory whose
+/// parent is not this node (here one started without `--node`, the
+/// stand-in for a guard that has not noticed its node died) is told to
+/// kill (SIGTERM, its kill order) by the sweep at start, and its command
+/// ends. The sweep names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_node_ends_a_guard_whose_node_died() {
+    const SECS: u32 = 974_862;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let cmd = f.shell(sb, &format!("sleep {SECS}"));
+    let std = cmd.as_std();
+    // From the path: the program is this process's own descriptor.
+    let mut argv: Vec<std::ffi::OsString> = vec![EXE.into()];
+    let mut it = std.get_args();
+    while let Some(a) = it.next() {
+        if a == "--node" {
+            it.next();
+        } else {
+            argv.push(a.into());
+        }
+    }
+    // Orphaned, its stdin a pipe this test holds open (so the channel does
+    // not close): `<&9` overrides the `/dev/null` a shell gives `&`.
+    let mut sh = std::process::Command::new("sh")
+        .args(["-c", "exec 9<&0; \"$@\" <&9 >/dev/null 2>&1 &", "sh"])
+        .args(&argv)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let held = sh.stdin.take();
+    sh.wait().unwrap();
+    wait_for("the command", || !sleeps(SECS).is_empty()).await;
+    let guard = guard_of(&f.ws).expect("the guard");
+    let root = f.data.join("sandbox-tmp");
+    let swept = tokio::task::spawn_blocking(move || harness_tools::contain::sweep(&root))
+        .await
+        .unwrap();
+    drop(held);
+    eprintln!("the sweep: {swept:?}");
+    assert!(
+        swept
+            .iter()
+            .any(|s| s.pid == guard && s.ended && s.session == "s1"),
+        "{swept:?}"
+    );
+    let l = left(&f.ws, &[SECS]);
+    assert!(l.is_empty(), "left:\n{}", describe(&l));
+}
+
+// ---- review T8E-2: a guard that dies in its first millisecond ----
+
+/// `kill_windows.py guard` through the bash tool: the guard is SIGKILLed 0
+/// to 1 ms after its bubblewrap appears, the node alive. Before, 61 of 260
+/// namespaces ran on until the node's next start. Now the tool sees its
+/// guard die of a signal, ends what the guard left for that session
+/// before it returns, and says so: nothing is left when it has returned.
+/// Meanwhile another command of the same session runs under its live
+/// guard, and that sweep must not touch it. `T8E_TRIES` (default 60).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guard_killed_in_its_first_millisecond_leaves_nothing_once_the_tool_returned() {
+    const SECS: u32 = 974_871;
+    const OTHER: u32 = 974_872;
+    let tries: u32 = std::env::var("T8E_TRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS, OTHER]);
+    let other_ctx = f.ctx(sb.clone());
+    let other_cancel = other_ctx.cancel.clone();
+    let other = tokio::spawn(async move {
+        Bash.run(&other_ctx, json!({"command": format!("sleep {OTHER}")}))
+            .await
+    });
+    wait_for("the other command", || !sleeps(OTHER).is_empty()).await;
+    let other_guard = guard_of(&f.ws).expect("the other guard");
+    let mut survivors = Vec::new();
+    for attempt in 0..tries {
+        let ctx = f.ctx(sb.clone());
+        let h = tokio::spawn(async move {
+            Bash.run(&ctx, json!({"command": format!("sleep {SECS}")}))
+                .await
+        });
+        let ws = f.ws.clone();
+        let killed = tokio::task::spawn_blocking(move || {
+            let by = Instant::now() + Duration::from_secs(5);
+            loop {
+                let g = pids().into_iter().find(|p| {
+                    *p != other_guard && {
+                        let c = cmdline(*p);
+                        c.split(|b| *b == 0).nth(1)
+                            == Some(harness_tools::guard::SUBCOMMAND.as_bytes())
+                            && c.windows(ws.as_os_str().len())
+                                .any(|w| w == ws.as_os_str().as_encoded_bytes())
+                    }
+                });
+                if let Some(g) = g
+                    && !children(g).is_empty()
+                {
+                    let until =
+                        Instant::now() + Duration::from_micros(u64::from(attempt % 11) * 100);
+                    while Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(g),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                    return true;
+                }
+                if Instant::now() > by {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(killed, "try {attempt}: no guard to kill");
+        let r = tokio::time::timeout(Duration::from_secs(10), h)
+            .await
+            .expect("the call never returned")
+            .unwrap();
+        assert!(
+            r.output.contains("its guard was killed"),
+            "try {attempt}: {}",
+            r.output
+        );
+        let l: Vec<i32> = left(&f.ws, &[SECS])
+            .into_iter()
+            .filter(|p| *p != other_guard && !is_under(*p, other_guard))
+            .collect();
+        if !l.is_empty() {
+            survivors.push((attempt, describe(&l)));
+            kill_all(&l);
+        }
+    }
+    let other_alive = !sleeps(OTHER).is_empty() && alive(other_guard);
+    other_cancel.cancel();
+    let r = other.await.unwrap();
+    eprintln!(
+        "a guard SIGKILLed 0 to 1 ms after its bubblewrap appeared: {} of {tries} namespaces \
+         left once the tool returned",
+        survivors.len()
+    );
+    assert!(
+        other_alive,
+        "the sweep ended the other command: {}",
+        r.output
+    );
+    assert!(survivors.is_empty(), "{survivors:?}");
+}
+
+/// Whether `pid` descends from `ancestor`.
+fn is_under(pid: i32, ancestor: i32) -> bool {
+    let mut p = pid;
+    for _ in 0..64 {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{p}/stat")) else {
+            return false;
+        };
+        let Some(pp) = stat
+            .rsplit(')')
+            .next()
+            .and_then(|f| f.split_whitespace().nth(1))
+            .and_then(|x| x.parse::<i32>().ok())
+        else {
+            return false;
+        };
+        if pp == ancestor {
+            return true;
+        }
+        if pp <= 1 {
+            return false;
+        }
+        p = pp;
+    }
+    false
+}
+
+/// A stop signal to the guard (SIGTERM, the sweep's kill order) is not the
+/// command's own exit: the result says its guard was told to stop, not a
+/// plain `[exit code: 137]` (review N-7).
+#[tokio::test]
+async fn a_stop_signal_to_the_guard_is_not_reported_as_the_commands_exit() {
+    const SECS: u32 = 974_875;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let ctx = f.ctx(sb);
+    let h = tokio::spawn(async move {
+        Bash.run(&ctx, json!({"command": format!("sleep {SECS}")}))
+            .await
+    });
+    wait_for("the command", || !sleeps(SECS).is_empty()).await;
+    let guard = guard_of(&f.ws).unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(guard),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    let r = h.await.unwrap();
+    assert!(!r.output.contains("[exit code: 137]"), "{}", r.output);
+    assert!(
+        r.output.contains("its guard was told to stop"),
+        "{}",
+        r.output
+    );
+    assert!(left(&f.ws, &[SECS]).is_empty());
+}
+
+// ---- review T8E-3: a guard that does not answer ----
+
+/// The node's own bound for a guard that does not answer, with the drain
+/// after it and a margin, fits inside the agent loop's grace for a
+/// cancelled tool: the real constants, not copies.
+#[test]
+fn the_stop_and_its_drain_fit_the_loops_grace() {
+    let need = harness_tools::contain::STOP_BOUND
+        + harness_tools::contain::SWEEP_IN_STOP
+        + harness_tools::contain::STUCK_DRAIN
+        + Duration::from_millis(200);
+    assert!(
+        need <= harness_agent_native::TOOL_CANCEL_GRACE,
+        "{need:?} > {:?}",
+        harness_agent_native::TOOL_CANCEL_GRACE
+    );
+}
+
+/// The reviewer's proof inverted (T8E-3): the guard cannot answer (it is
+/// stopped, the stand-in for one that is starved or frozen). The tool's
+/// result comes inside the loop's grace, says the end is not confirmed,
+/// and does not say "cancelled".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guard_that_does_not_answer_is_reported_within_the_loops_grace() {
+    const SECS: u32 = 974_881;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let ctx = f.ctx(sb);
+    let cancel = ctx.cancel.clone();
+    let mut h = tokio::spawn(async move {
+        Bash.run(&ctx, json!({"command": format!("sleep {SECS}")}))
+            .await
+    });
+    wait_for("the command", || !sleeps(SECS).is_empty()).await;
+    let guard = guard_of(&f.ws).unwrap();
+    let pid = nix::unistd::Pid::from_raw(guard);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGSTOP).unwrap();
+    let t = Instant::now();
+    cancel.cancel();
+    let r = tokio::time::timeout(harness_agent_native::TOOL_CANCEL_GRACE, &mut h).await;
+    let took = t.elapsed();
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGCONT).unwrap();
+    let r = match r {
+        Ok(r) => r.unwrap(),
+        Err(_) => panic!(
+            "no answer inside the loop's grace ({took:?}): the loop records [cancelled]; \
+             later: {}",
+            h.await.unwrap().output
+        ),
+    };
+    eprintln!(
+        "answered after {took:?}: {}",
+        r.output.lines().last().unwrap_or_default()
+    );
+    assert!(r.output.contains("not confirmed"), "{}", r.output);
+    assert!(!r.output.contains("[cancelled"), "{}", r.output);
+    let l = gone_within(&f.ws, &[SECS], Duration::from_secs(3));
+    assert!(l.is_empty(), "left:\n{}", describe(&l));
+}
+
+// ---- review T8E-4: the sweep and a leftover the kernel cannot end yet ----
+
+/// A namespace a dead node and a dead guard left, whose command is in a
+/// FUSE read the kernel will not interrupt: the sweep kills it but must not
+/// call it ended while the reader lives, and the next start must still
+/// name it. Once the read is released, a sweep finds it gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_does_not_call_a_stuck_leftover_ended() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mnt = f.ws.join("mnt");
+    let Some(mut stall) = Stall::mount(&mnt) else {
+        return;
+    };
+    let _clean = Cleanup(f.ws.clone(), vec![]);
+    let file = mnt.join("stall");
+    orphan(&bwrap_argv(&f, sb, &format!("cat {}", file.display())));
+    tokio::task::block_in_place(|| stall.held());
+    let root = f.data.join("sandbox-tmp");
+    let sweep = |root: PathBuf| async move {
+        tokio::task::spawn_blocking(move || harness_tools::contain::sweep(&root))
+            .await
+            .unwrap()
+    };
+    let first = sweep(root.clone()).await;
+    eprintln!("first start: {first:?}");
+    assert!(!first.is_empty(), "the sweep found nothing");
+    assert!(first.iter().all(|s| !s.ended), "called ended: {first:?}");
+    let second = sweep(root.clone()).await;
+    eprintln!("second start: {second:?}");
+    assert!(
+        !second.is_empty() && second.iter().all(|s| !s.ended),
+        "the second start does not name it: {second:?}"
+    );
+    tokio::task::block_in_place(|| stall.release());
+    let l = gone_within(&f.ws, &[], Duration::from_secs(2));
+    assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
+    let third = sweep(root).await;
+    eprintln!("after the release: {third:?}");
+    assert!(third.iter().all(|s| s.ended), "{third:?}");
+}
+
+// ---- review T8E-5: the binary a command may replace ----
+
+/// The reviewer's proof inverted (T8E-5): the harness binary lies in the
+/// session's folder (a node run from its build tree). One command
+/// replaces it; the next command's guard must still be the node's own
+/// image, not the agent's file. (Its `sandbox-exec`, started inside the
+/// namespace from the path, is the replacement: that is the residual
+/// `doctor` names, closed by T.8c's mount view.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replaced_binary_does_not_run_as_the_guard() {
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let bin = f.ws.join("target/debug");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("rizzy-harness");
+    if std::fs::hard_link(EXE, &exe).is_err() {
+        std::fs::copy(EXE, &exe).unwrap();
+    }
+    let sb = Sandbox::new(
+        exe.clone(),
+        &Settings::default(),
+        Some(f.data.join("sandbox-tmp")),
+        std::slice::from_ref(&f.data),
+    )
+    .unwrap();
+    let sb = Arc::new(
+        bwrap::contained(sb, &f.data.join("sandbox-tmp/probe-contain"))
+            .ok()
+            .expect("bubblewrap"),
+    );
+    let _clean = Cleanup(f.ws.clone(), vec![]);
+    let outside = f.data.parent().unwrap().join("written-outside-the-sandbox");
+    let ctx = f.ctx(sb);
+    let replace = format!(
+        "mv target/debug/rizzy-harness target/debug/old && printf '%s\\n' '#!/bin/sh' \
+         'echo \"ran as $1\" >> {}' 'exit 0' > target/debug/rizzy-harness && \
+         chmod +x target/debug/rizzy-harness && echo replaced",
+        outside.display()
+    );
+    let r1 = Bash.run(&ctx, json!({"command": replace})).await;
+    assert!(r1.output.contains("replaced"), "{}", r1.output);
+    let r2 = Bash.run(&ctx, json!({"command": "echo second"})).await;
+    let wrote = std::fs::read_to_string(&outside).unwrap_or_default();
+    eprintln!(
+        "command 2: {}; written outside: {wrote:?}",
+        r2.output.replace('\n', " | ")
+    );
+    assert!(
+        !wrote.contains("sandbox-guard"),
+        "the replaced binary ran as the guard: {wrote}"
+    );
+}
+
+/// `doctor` warns when the harness binary lies where a session can write
+/// (a `[sandbox] write` entry here), and `contain = "required"` refuses.
+#[test]
+fn doctor_warns_when_a_session_can_replace_the_binary() {
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let dir = Path::new(EXE).parent().unwrap().canonicalize().unwrap();
+    let doctor = |toml: String| {
+        std::fs::write(f.data.join("node.toml"), toml).unwrap();
+        let out = std::process::Command::new(EXE)
+            .args(["--data-dir", f.data.to_str().unwrap(), "doctor"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.contains(" shell containment: "))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let line = doctor(format!("[sandbox]\nwrite = [\"{}\"]\n", dir.display()));
+    assert!(line.starts_with("warn "), "{line}");
+    assert!(line.contains("can replace the harness binary"), "{line}");
+    let line = doctor(format!(
+        "[sandbox]\ncontain = \"required\"\nwrite = [\"{}\"]\n",
+        dir.display()
+    ));
+    assert!(line.starts_with("FAIL "), "{line}");
+}
+
+// ---- review N-4: the sweep through the node's own start ----
+
+/// A namespace left for this data directory is ended by a real node start
+/// (`serve`, which runs `start_sandbox`), and the log names it.
+#[test]
+fn the_node_start_sweeps_what_a_dead_node_left() {
+    const SECS: u32 = 974_891;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    orphan(&bwrap_argv(&f, sb, &format!("sleep {SECS}")));
+    let by = Instant::now() + Duration::from_secs(20);
+    while sleeps(SECS).is_empty() {
+        assert!(Instant::now() < by, "the leftover never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut serve = std::process::Command::new(EXE)
+        .args(["--data-dir", f.data.to_str().unwrap()])
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .env("HARNESS_LOG", "warn")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufReader::new(serve.stdout.take().unwrap()).lines();
+    let err = serve.stderr.take().unwrap();
+    let log = std::thread::spawn(move || {
+        std::io::BufReader::new(err)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>()
+    });
+    let listening = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .any(|l| l.contains("listening on"));
+    let gone = sleeps(SECS).is_empty();
+    let _ = serve.kill();
+    let _ = serve.wait();
+    let log = log.join().unwrap().join("\n");
+    assert!(listening, "the node never served: {log}");
+    assert!(gone, "the leftover still runs after the start: {log}");
+    assert!(
+        log.contains("ended a command a previous run of this node left running")
+            && log.contains("session s1"),
+        "{log}"
     );
 }
