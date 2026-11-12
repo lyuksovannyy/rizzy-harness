@@ -1430,9 +1430,8 @@ async fn the_sweep_does_not_call_a_stuck_leftover_ended() {
 /// The reviewer's proof inverted (T8E-5): the harness binary lies in the
 /// session's folder (a node run from its build tree). One command
 /// replaces it; the next command's guard must still be the node's own
-/// image, not the agent's file. (Its `sandbox-exec`, started inside the
-/// namespace from the path, is the replacement: that is the residual
-/// `doctor` names, closed by T.8c's mount view.)
+/// image, not the agent's file. (Its `sandbox-exec` is the node's image
+/// too, started through a descriptor since T.8f: `own_image.rs`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replaced_binary_does_not_run_as_the_guard() {
     let f = fixture();

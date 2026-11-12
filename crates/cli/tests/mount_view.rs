@@ -351,9 +351,10 @@ async fn outside_the_grants_is_absent_in_every_form_and_bind() {
 /// No descriptor of the view's reaches the command: bubblewrap closes those
 /// it bound with `--bind-fd`, and nothing else of the guard's is inherited.
 /// A descriptor of a host folder would lead out of the view (`openat(fd,
-/// "..")`). With the older binds the image's `O_PATH` descriptor stays
-/// open (bubblewrap does not close a source given by path); it names the
-/// harness binary, which the view shows anyway, and is never a folder.
+/// "..")`). The descriptor of the node's image that `sandbox-exec` is
+/// started from does not reach the command either: `sandbox-exec` closes
+/// every descriptor above 2 first (T.8f; `own_image.rs` checks it by
+/// identity).
 #[tokio::test]
 async fn no_descriptor_of_a_folder_reaches_the_command() {
     for binds in [Binds::Fd, Binds::Path] {
@@ -674,12 +675,13 @@ async fn a_replaced_binary_does_not_run_as_sandbox_exec() {
     assert!(r2.output.contains("second"), "{}", r2.output);
 }
 
-/// The binary deleted under the running node (an upgrade that replaced
-/// it): its image has no path that bubblewrap could bind, and the file now
-/// at the path is not the node's. Every contained command is refused, with
-/// the reason, and nothing runs; the node runs again after a restart.
+/// The binary deleted under the running node and a new one copied to its
+/// path (an upgrade): contained commands still run, from the node's own
+/// image (T.8f: `sandbox-exec` is started through a descriptor, so the
+/// image needs no path). Before T.8f every contained command was refused
+/// with "restart the node".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_deleted_binary_refuses_the_command_with_the_reason() {
+async fn a_deleted_binary_changes_nothing_for_contained_commands() {
     let f = fixture();
     if f.sandbox().is_none() {
         return;
@@ -707,8 +709,7 @@ async fn a_deleted_binary_refuses_the_command_with_the_reason() {
         .run(&ctx, json!({ "command": "echo RAN-AFTER-DELETE" }))
         .await;
     eprintln!("{}", r.output);
-    assert!(!r.output.contains("RAN-AFTER-DELETE\n"), "{}", r.output);
-    assert!(r.output.contains("restart the node"), "{}", r.output);
+    assert!(r.output.contains("RAN-AFTER-DELETE\n"), "{}", r.output);
 }
 
 /// Helper for the next test (does nothing unless its variable is set): a

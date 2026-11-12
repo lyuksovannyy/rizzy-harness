@@ -8,7 +8,9 @@
 //! by bubblewrap, under a guard of its own: `<harness> sandbox-guard --mark
 //! … -- bwrap --die-with-parent --new-session --unshare-pid --proc /proc
 //! --dev /dev <the file view> --remount-ro / --chdir <folder> --
-//! /.rizzy-harness/rizzy-harness sandbox-exec … -- bash -c <cmd>`. When the namespace's first process (bwrap's init) dies, the
+//! /proc/self/fd/<n> sandbox-exec … -- bash -c <cmd>` (`<n>`: the guard's
+//! descriptor of the node's image, T.8f). When the namespace's first
+//! process (bwrap's init) dies, the
 //! kernel kills every process in it, whatever its session or signal mask.
 //!
 //! **The guard** ([`crate::guard`], T.8e) is bubblewrap's parent and holds
@@ -30,9 +32,11 @@
 //! links such as `/bin -> usr/bin` as links), node.toml's `[sandbox] read`
 //! and `write` entries, the session's own grants, a private `/dev`
 //! (`--dev`), `/proc` (its own, or the outer one in [`Form::SharedProc`]),
-//! an empty `/tmp`, and the node's own running image at [`VIEW_EXE`], from
-//! which `sandbox-exec` is started. A path that is not granted does not
-//! exist for the command. Landlock inside keeps the same rules as before,
+//! and an empty `/tmp`. A path that is not granted does not exist for the
+//! command. Nothing of the harness binary is in it: `sandbox-exec` is the
+//! node's own running image, started through a descriptor the guard holds
+//! and bubblewrap passes on unnamed (T.8f, [`IMAGE_TOKEN`]), so no path of
+//! it is bound, resolved or executed. Landlock inside keeps the same rules as before,
 //! a second layer where the kernel has it.
 //!
 //! **What is bound is what the node checked.** A grant with an identity
@@ -46,13 +50,7 @@
 //! ([`Binds::Path`]) the grant is bound by its path and `sandbox-exec`,
 //! which runs before every contained command, Landlock or not, opens the
 //! mounted folder without following a link and refuses the command if it
-//! is not the one the node checked. The image is bound from a descriptor
-//! the guard opens in both cases: on the node's link to its image in the
-//! data directory (T.8f, [`crate::image`]), checked against the guard's own
-//! `/proc/self/exe`, so a binary replaced under the running node does not
-//! stop commands; where the node could not make the link, on
-//! `/proc/self/exe`, and then the command is refused once the image has no
-//! path left.
+//! is not the one the node checked.
 //!
 //! **Which thread spawns** no longer matters. `PR_SET_PDEATHSIG` fires when
 //! the *thread* that forked bwrap exits; T.8a therefore spawned every
@@ -95,29 +93,18 @@ pub enum Form {
     SharedProc,
 }
 
-/// Where the harness binary is inside the file view: the node's own
-/// running image, bound read-only (T.8c; review T8E-5). `sandbox-exec` is
-/// started from here, so no path a command can write is executed in its
-/// place.
-pub const VIEW_EXE: &str = "/.rizzy-harness/rizzy-harness";
-
 /// In bubblewrap's options, the guard replaces `@rizzy-fd:<dev>:<ino>`
 /// (after `--bind-fd` or `--ro-bind-fd`, the destination next) with a
 /// descriptor it opened on the destination's path, without following a
 /// link, and checked against that identity ([`crate::guard`]).
 pub const FD_TOKEN: &str = "@rizzy-fd:";
-/// And `@rizzy-image` with a descriptor of its own running image (after
-/// `--ro-bind-fd`: the number; after `--ro-bind`: `/proc/self/fd/<n>`,
-/// which bubblewrap resolves in its own descriptor table).
+/// And the program bubblewrap runs, `@rizzy-image`, with
+/// `/proc/self/fd/<n>`: a descriptor of its own running image (the node's)
+/// that it opened not close-on-exec and bubblewrap leaves open, so
+/// `sandbox-exec` is that inode whatever any path holds (T.8f; reviews
+/// T8E-5, T8F-3). Its `argv[0]` is that path too (bubblewrap's `--argv0` is
+/// not used: not known to be in every version a node may have).
 pub const IMAGE_TOKEN: &str = "@rizzy-image";
-
-/// The node's own image, for [`Contain::command`]: the descriptor the guard
-/// is started from, and the node's link to it (T.8f), where it made one.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Image<'a> {
-    pub fd: Option<std::os::fd::RawFd>,
-    pub link: Option<&'a Path>,
-}
 
 /// How the grants that carry an identity get into the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,18 +249,16 @@ impl Contain {
     /// `<exe> sandbox-guard --node <pid> [--mark …] -- bwrap <args> --
     /// <exe>`: the guard, which starts bubblewrap in `cwd` (T.8e).
     ///
-    /// The guard is started from `image.fd`, a descriptor of the binary this
+    /// The guard is started from `image`, a descriptor of the binary this
     /// process holds for its life, opened when the first sandbox was made
     /// (for the node, `/proc/self/exe`: its own running image), as
     /// `/proc/self/fd/<n>`, resolved by `execve` in the forked child before
     /// the close-on-exec descriptor closes: whatever is at `exe` now, a
     /// command that can write there cannot replace its guard (review
     /// T8E-5). Without it (it could not be opened), `exe`. Its `argv[0]` is
-    /// `exe`, for `ps`. `sandbox-exec` inside the namespace is started from
-    /// [`VIEW_EXE`], where the guard binds its own running image (T.8c):
-    /// through `image.link` where the node made one (T.8f, passed as the
-    /// guard's `--image`; the guard binds it only while it is that image),
-    /// else through the path the image's descriptor names.
+    /// `exe`, for `ps`. `sandbox-exec` inside the namespace is the guard's
+    /// own running image, started through a descriptor of it
+    /// ([`IMAGE_TOKEN`], T.8f), never through a path.
     ///
     /// The file view holds `view` and the fixed parts ([`Self::args`]).
     /// With `net_off` (`[sandbox] network = "off"`, decided by the node's
@@ -282,30 +267,27 @@ impl Contain {
     pub(crate) fn command(
         &self,
         exe: &Path,
-        image: Image<'_>,
+        image: Option<std::os::fd::RawFd>,
         cwd: &Path,
         mark: Option<&Mark>,
         net_off: bool,
         view: &[Mount],
     ) -> std::process::Command {
         use std::os::unix::process::CommandExt;
-        let mut c = match image.fd {
+        let mut c = match image {
             Some(fd) => std::process::Command::new(format!("/proc/self/fd/{fd}")),
             None => std::process::Command::new(exe),
         };
         c.arg0(exe).arg(crate::guard::SUBCOMMAND);
         c.arg(crate::guard::NODE)
             .arg(std::process::id().to_string());
-        if let Some(l) = image.link {
-            c.arg(crate::guard::IMAGE).arg(l);
-        }
         if let Some(m) = mark {
             m.push_args(&mut c);
         }
         c.arg("--")
             .arg(&self.bwrap)
             .args(self.args(cwd, net_off, view))
-            .arg(VIEW_EXE);
+            .arg(IMAGE_TOKEN);
         c
     }
 
@@ -385,13 +367,6 @@ impl Contain {
                 }
             }
         }
-        // The node's own image, last: nothing granted can cover it.
-        a.push(match self.binds {
-            Binds::Fd => "--ro-bind-fd".into(),
-            Binds::Path => "--ro-bind".into(),
-        });
-        a.push(IMAGE_TOKEN.into());
-        a.push(VIEW_EXE.into());
         a.extend(["--remount-ro", "/"].map(OsString::from));
         // `net_off` is the node's `Sandbox`'s decision: its setting, and
         // whether this node is in the network-off gap (review T8B-1).
@@ -1150,7 +1125,8 @@ mod tests {
 
     /// T.8c: the host's root is never bound; each mount is bound at its own
     /// path, a checked one by descriptor (newer bubblewrap) or by path
-    /// (older), the image last, then the root made read-only.
+    /// (older), the root made read-only last; the harness binary is not in
+    /// it (T.8f).
     #[test]
     fn the_view_binds_only_what_it_is_given() {
         let id = harness_core::folder::Identity { dev: 7, ino: 42 };
@@ -1192,13 +1168,17 @@ mod tests {
                 Binds::Path => ["--bind", "/h/ws", "/h/ws"],
             };
             assert!(s.windows(3).any(|w| w == ws), "{s:?}");
-            let img = s.iter().position(|x| *x == IMAGE_TOKEN).unwrap();
-            assert_eq!(s[img + 1], VIEW_EXE);
+            assert!(
+                !s.iter()
+                    .any(|x| x.contains("rizzy-image") || x.contains("rizzy-harness")),
+                "{s:?}"
+            );
             let ro = s
                 .windows(2)
                 .position(|w| w == ["--remount-ro", "/"])
                 .unwrap();
-            assert!(ro > img, "{s:?}");
+            let ws_at = s.windows(3).position(|w| w == ws).unwrap();
+            assert!(ro > ws_at, "{s:?}");
         }
         assert_eq!(parse_version("bubblewrap 0.13.1"), Some((0, 13)));
         assert_eq!(parse_version("bubblewrap 0.9.0"), Some((0, 9)));

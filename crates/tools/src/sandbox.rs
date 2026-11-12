@@ -37,6 +37,32 @@ use serde::{Deserialize, Serialize};
 /// The subcommand name of the wrapper.
 pub const SUBCOMMAND: &str = "sandbox-exec";
 
+/// `sandbox-exec`, first: close every descriptor above 2 this process was
+/// given (T.8f, review T8F-2). A contained `sandbox-exec` is started from a
+/// descriptor of the node's image that its guard left open (and, with
+/// binds by path, nothing else closes descriptors on the way), and the
+/// command must hold nothing of the image, the view or the guard. The list
+/// is `/proc/self/fd` (taken whole, then closed); without `/proc`, every
+/// number below the descriptor limit. Nothing opened before this is needed
+/// after it.
+pub fn close_inherited() {
+    let fds: Vec<i32> = match std::fs::read_dir("/proc/self/fd") {
+        Ok(d) => d
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .filter(|&n| n > 2)
+            .collect(),
+        Err(_) => {
+            let max = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)
+                .map_or(1024, |(soft, _)| soft.min(1 << 16));
+            (3..max as i32).collect()
+        }
+    };
+    for fd in fds {
+        // The listing's own descriptor is among them, already closed.
+        let _ = nix::unistd::close(fd);
+    }
+}
+
 /// Exit code of `sandbox-exec` when it cannot confine the command as asked
 /// (the command did not run).
 pub const EXIT_UNCONFINED: i32 = 125;
@@ -135,10 +161,6 @@ pub struct Sandbox {
     /// (review T8E-5). For the node itself it is `/proc/self/exe`, its own
     /// running image.
     image: Option<std::os::fd::RawFd>,
-    /// The node's link to that image in its data directory, once made
-    /// (T.8f, [`crate::image`]): what the file view binds, so a binary
-    /// replaced under the running node does not stop contained commands.
-    image_link: std::sync::OnceLock<crate::image::ImageLink>,
 }
 
 /// The harness binary to start guards from, as a descriptor this process
@@ -383,7 +405,6 @@ impl Sandbox {
         }
         Ok(Self {
             image: open_image(&exe),
-            image_link: std::sync::OnceLock::new(),
             exe,
             read,
             extra_read: settings
@@ -403,38 +424,6 @@ impl Sandbox {
             contain: std::sync::OnceLock::new(),
             step_up: None,
         })
-    }
-
-    /// Make the node's link to its own running image, `<data_dir>/node-image`
-    /// (T.8f, [`crate::image::make`]), which the file view then binds. Once:
-    /// a later call returns the first result. Where it cannot be made, the
-    /// view binds the image through its own path as before.
-    pub fn link_image(&self, data_dir: &Path) -> &crate::image::ImageLink {
-        self.image_link.get_or_init(|| match self.image {
-            Some(fd) => crate::image::make(fd, data_dir),
-            None => crate::image::ImageLink::NotMade(
-                "the node holds no descriptor of its own image".into(),
-            ),
-        })
-    }
-
-    /// `doctor`'s trial of [`Self::link_image`]: whether the link could be
-    /// made, without touching the one a running node made.
-    pub fn try_link_image(&self, data_dir: &Path) -> &crate::image::ImageLink {
-        self.image_link.get_or_init(|| match self.image {
-            Some(fd) => crate::image::trial(fd, data_dir),
-            None => crate::image::ImageLink::NotMade(
-                "the node holds no descriptor of its own image".into(),
-            ),
-        })
-    }
-
-    /// The link to bind, where one was made.
-    fn bound_image(&self) -> Option<&Path> {
-        match self.image_link.get() {
-            Some(crate::image::ImageLink::Linked(p)) => Some(p),
-            _ => None,
-        }
     }
 
     /// This sandbox with the agent's shell contained by `c` (bubblewrap).
@@ -579,7 +568,7 @@ impl Sandbox {
     /// What a contained command's file view holds (T.8c), in words a person
     /// can check against node.toml: empty where the shell is not contained.
     pub fn view_line(&self) -> String {
-        use crate::contain::{Binds, Source, VIEW_EXE};
+        use crate::contain::{Binds, Source};
         let Some(c) = self.contain.get() else {
             return String::new();
         };
@@ -627,35 +616,14 @@ impl Sandbox {
             crate::contain::Form::Full => "/proc of its own",
             crate::contain::Form::SharedProc => "this machine's /proc",
         };
-        // T.8f: whether a rebuild under the running node stops commands.
-        let image = match self.image_link.get() {
-            Some(crate::image::ImageLink::Linked(p)) => format!(
-                "kept by its link {}: a rebuild or upgrade of the binary under the running node \
-                 does not stop contained commands",
-                p.display()
-            ),
-            Some(crate::image::ImageLink::Possible(p)) => format!(
-                "kept by a link the node makes at {}: a rebuild or upgrade of the binary under \
-                 the running node does not stop contained commands",
-                p.display()
-            ),
-            other => format!(
-                "bound through the binary's own path, as no link {} could be made in the data \
-                 directory ({}): after a rebuild or upgrade of the binary under the running \
-                 node, every contained command is refused until the node is restarted",
-                crate::image::LINK,
-                match other {
-                    Some(crate::image::ImageLink::NotMade(why)) => why.as_str(),
-                    _ => "not made",
-                }
-            ),
-        };
         format!(
             "a contained command sees only: read-only {system}; links {links}; [sandbox] read \
              {read}; read-write [sandbox] write {write}; its session's folder (read-write) and \
-             temp folder; /dev of its own; {proc}; an empty /tmp; the harness binary at \
-             {VIEW_EXE} (read-only, the node's running image, {image}). Nothing else of this \
-             machine is there ({how})"
+             temp folder; /dev of its own; {proc}; an empty /tmp. Nothing else of this machine \
+             is there ({how}). Its sandbox-exec is the node's own running image, started \
+             through a descriptor (no path of the harness binary is in the view): a rebuild or \
+             upgrade under the running node changes nothing for contained commands until the \
+             node is restarted"
         )
     }
 
@@ -691,10 +659,7 @@ impl Sandbox {
             // The file view (T.8c) holds exactly what Landlock grants below.
             Some((b, cwd)) => b.command(
                 &self.exe,
-                crate::contain::Image {
-                    fd: self.image,
-                    link: self.bound_image(),
-                },
+                self.image,
                 cwd,
                 mark.as_ref(),
                 self.network == Network::Off && self.network_namespace(b),
@@ -1301,33 +1266,11 @@ pub struct Started {
     pub tmp_root: Option<PathBuf>,
 }
 
-impl Started {
-    /// The node, once at start: make its link to its own running image in
-    /// `data_dir` (T.8f, [`Sandbox::link_image`]) and name the outcome in
-    /// [`Self::view_summary`]. Only the node: `doctor` uses
-    /// [`Self::try_link_image`], which leaves a running node's link alone.
-    pub fn link_image(&mut self, data_dir: &Path) {
-        if let Confinement::Confined { sandbox, .. } = &self.confinement {
-            sandbox.link_image(data_dir);
-            self.view_summary = sandbox.view_line();
-        }
-    }
-
-    /// `doctor`: whether the node could make its link here.
-    pub fn try_link_image(&mut self, data_dir: &Path) {
-        if let Confinement::Confined { sandbox, .. } = &self.confinement {
-            sandbox.try_link_image(data_dir);
-            self.view_summary = sandbox.view_line();
-        }
-    }
-}
-
 /// Set up the node's sandbox once at start: resolve the wrapper binary
 /// (`current_exe`, canonical; the node's helpers and an uncontained shell
 /// pick up a binary replaced by an upgrade at the same path; a contained
-/// command runs the node's own image, kept by the link the node makes with
-/// [`Started::link_image`], or, where it could not, is refused once that
-/// image has no path left: T.8f), build
+/// command's guard and `sandbox-exec` are the node's own running image,
+/// started through descriptors of it, until the node restarts: T.8f), build
 /// the rules and run the self-test; then find bubblewrap and probe the
 /// shell's containment (T.8a). `Err` is a configuration error (a
 /// `[sandbox]` entry that would expose the data directory or a protected
@@ -1396,14 +1339,14 @@ pub fn binary_reach(exe: &Path, settings: &Settings, roots: &[PathBuf]) -> Optio
         .cloned()
 }
 
-/// Review T8E-5: a contained command's guard is the node's own image
-/// (`/proc/self/exe`), but `sandbox-exec` inside the namespace is started
-/// from the binary's path. Where a session can write that path, one command
-/// can replace it and the next runs the agent's program in place of the
-/// wrapper, without Landlock (still inside the PID namespace and under its
-/// guard). Warned in the log and `doctor`; `contain = "required"` refuses.
-/// Closed by T.8c's file view (the binary bound read-only from the node's
-/// own image).
+/// Review T8E-5: where a session can write the binary's path, one command
+/// can replace it, and the node's helpers and a shell left to Landlock
+/// alone, which start `sandbox-exec` from that path, run the agent's
+/// program in its place, without Landlock. A contained command's guard and
+/// `sandbox-exec` are the node's own image, through descriptors (T.8e,
+/// T.8f), so they run no file at that path; but a session that owns a name
+/// of the image can change its mode and stop them all (review T8F-5).
+/// Warned in the log and `doctor`; `contain = "required"` refuses.
 fn check_binary_reach(
     s: &mut Started,
     exe: &Path,
@@ -1417,8 +1360,9 @@ fn check_binary_reach(
     let Some(dir) = binary_reach(exe, settings, roots).filter(|_| contained) else {
         return;
     };
-    // A contained command is not affected (its guard and its sandbox-exec
-    // are the node's running image, T.8e and T.8c); the node's own helpers
+    // A contained command runs no file at this path (its guard and its
+    // sandbox-exec are the node's running image, through descriptors, T.8e
+    // and T.8f), but the image's mode is the file's; the node's own helpers
     // (its checkpoint git, graphify) and a shell left to Landlock alone
     // still start sandbox-exec from this path.
     let why = format!(
@@ -1426,8 +1370,11 @@ fn check_binary_reach(
          [sandbox] write entry): the node's own helpers (its checkpoint git, graphify), and \
          shell commands whenever the shell is not contained, start sandbox-exec from that path, \
          so the agent's program would run in its place without the file sandbox (a contained \
-         command's guard and sandbox-exec are the node's own running image and are not \
-         affected). Install the binary where no session can write",
+         command's guard and sandbox-exec are the node's own running image, started through \
+         descriptors, so no file put at that path runs in their place); and a session that can \
+         write there can stop every contained command of every session, and the node's restart, \
+         by changing the mode of the file the node runs (chmod 000 on any name of it). Install \
+         the binary where no session can write",
         exe.display(),
         dir.display()
     );

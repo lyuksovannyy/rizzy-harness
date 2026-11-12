@@ -147,10 +147,6 @@ fn impostor(at: &Path, log: &Path) {
     std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn ino(p: &Path) -> u64 {
-    std::fs::symlink_metadata(p).unwrap().ino()
-}
-
 /// The names in the data directory that start with `node-image` (T.8f's
 /// first design made them; nothing may now).
 fn image_names(data: &Path) -> Vec<String> {
