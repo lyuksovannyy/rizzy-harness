@@ -1,0 +1,20 @@
+sbx/e before  setsid=alive nohup=alive dfork=alive noterm=alive plain=gone
+sbx/e +2s     setsid=alive nohup=alive dfork=alive noterm=alive plain=gone
+sbx/e +10s    setsid=alive nohup=alive dfork=alive noterm=alive plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+bw/e before  setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bw/e +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bw/e +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+bws/e before  setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bws/e +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bws/e +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=2
+pmexec/e before  setsid=alive nohup=alive dfork=alive noterm=alive plain=gone
+pmexec/e +2s     setsid=alive nohup=alive dfork=alive noterm=alive plain=gone
+pmexec/e +10s    setsid=alive nohup=alive dfork=alive noterm=alive plain=gone
+   left: containers=[rh-b11-c-200002:Up 12 seconds ] podman-clients=0 bwrap=0
+pmrun/e before  setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+pmrun/e +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+pmrun/e +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0

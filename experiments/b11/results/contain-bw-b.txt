@@ -1,0 +1,4 @@
+bw/b before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+bw/b +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bw/b +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0

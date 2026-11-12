@@ -41,7 +41,7 @@ for label, net in (("podman run -d (network none)", "none"), ("podman run -d (pa
 EOF
 ts=()
 for i in $(seq 1 10); do
-  s=$(date +%s%N); P=$(bws_start "$B11/info.json"); e=$(date +%s%N)
+  s=$(date +%s%N); bws_start "$B11/info.json"; P=$BWS_PID; e=$(date +%s%N)
   # ready = a command can join it
   bws "$P" true; f=$(date +%s%N)
   ts+=("$(( (e - s) / 1000 ))") ; kill -9 "$P"; wait 2>/dev/null
@@ -58,7 +58,7 @@ for i in "${!cmds[@]}"; do
   mapfile -d '' a < <(bw_args)
   python3 "$T" "bwrap-per-cmd $n" "$RUNS" "${a[@]}" bash -c "$c"
 done
-P=$(bws_start "$B11/info.json")
+bws_start "$B11/info.json"; P=$BWS_PID
 mapfile -d '' a < <(bws_args "$P")
 for i in "${!cmds[@]}"; do
   python3 "$T" "bwrap-session ${names[$i]}" "$RUNS" "${a[@]}" bash -c "${cmds[$i]}"
@@ -103,7 +103,7 @@ pasta=$(pgrep -f "^/usr/bin/pasta.*" -n)
 mem "podman session (pasta): conmon+ctr" "${pp[@]}"
 [ -n "$pasta" ] && mem "  + its pasta process" "$pasta"
 pm_rm rh-b11-mem1
-P=$(bws_start "$B11/info.json"); sleep 1
+bws_start "$B11/info.json"; P=$BWS_PID; sleep 1
 mem "bwrap session: bwrap x2 + sleep" "$(ps -o ppid= -p "$P" | tr -d ' ')" "$P" $(pgrep -P "$P")
 kill -9 "$P"; P=
 echo "sandbox-exec: nothing stays between commands (no process per session)"

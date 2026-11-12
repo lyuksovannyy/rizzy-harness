@@ -89,18 +89,17 @@ bw() { local -a a; mapfile -d '' a < <(bw_args); "${a[@]}" bash -c "$1"; }
 # some other process (measured: 1 run in 6 failed with "open
 # /proc/10/ns/ns failed"). Killing the holder's init kills every process of
 # the session, nested namespaces included.
-bws_start() { # bws_start <infofile>; prints the holder init's pid
+# The holder keeps --die-with-parent: its parent is the node (here: the
+# calling shell), so the session dies with the node. Call bws_start in the
+# shell that owns the session, not in $(…), or the holder's parent is a
+# subshell that exits at once and takes the holder with it.
+bws_start() { # bws_start <infofile>; sets BWS_PID to the holder init's pid
   local -a a; mapfile -d '' a < <(bw_args)
-  local -a b=(); local x
-  for x in "${a[@]}"; do
-    # no --die-with-parent: the session outlives one command
-    if [ "$x" = --die-with-parent ]; then b+=(--info-fd 3); else b+=("$x"); fi
-  done
   : >"$1"
-  "${b[@]}" sleep infinity 3>"$1" </dev/null >/dev/null 2>&1 &
+  "${a[@]}" --info-fd 3 sleep infinity 3>"$1" </dev/null >/dev/null 2>&1 &
   local i; for i in $(seq 1 200); do
     grep -q child-pid "$1" 2>/dev/null && break; sleep 0.01; done
-  sed -n 's/.*"child-pid": \([0-9]*\).*/\1/p' "$1"
+  BWS_PID=$(sed -n 's/.*"child-pid": \([0-9]*\).*/\1/p' "$1")
 }
 bws_args() { # bws_args <holder pid>: the per-command argv
   local a=(nsenter -t "$1" -U -p -m --preserve-credentials --
