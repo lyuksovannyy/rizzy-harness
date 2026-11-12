@@ -1330,11 +1330,10 @@ async fn a_replaced_binary_does_not_run_as_the_guard() {
         std::slice::from_ref(&f.data),
     )
     .unwrap();
-    let sb = Arc::new(
-        bwrap::contained(sb, &f.data.join("sandbox-tmp/probe-contain"))
-            .ok()
-            .expect("bubblewrap"),
-    );
+    let Ok(sb) = bwrap::contained(sb, &f.data.join("sandbox-tmp/probe-contain")) else {
+        panic!("bubblewrap worked a moment ago")
+    };
+    let sb = Arc::new(sb);
     let _clean = Cleanup(f.ws.clone(), vec![]);
     let outside = f.data.parent().unwrap().join("written-outside-the-sandbox");
     let ctx = f.ctx(sb);
