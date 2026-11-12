@@ -21,9 +21,12 @@
 //! is an error (`sandbox-exec` exits [`EXIT_UNCONFINED`] without running the
 //! command). Newer rights are added best-effort on top: device ioctls (ABI 5),
 //! abstract Unix socket and signal scoping (ABI 6), connecting to pathname
-//! Unix sockets (ABI 9). Below ABI 9 a pathname socket (`/run/user/<uid>/bus`,
-//! `/var/run/docker.sock`, an ssh-agent) can still be connected to: an open
-//! residual, see PLAN.md R2.
+//! Unix sockets (ABI 9). Below ABI 9 Landlock lets a pathname socket
+//! (`/run/user/<uid>/bus`, `/var/run/docker.sock`, an ssh-agent) be
+//! connected to. Where the shell is contained, its file view (T.8c,
+//! [`crate::contain`]) holds only the grants, so a socket outside them is
+//! not there; a socket inside a granted folder, and every socket with
+//! Landlock alone, is an open residual, see PLAN.md R2.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -536,6 +539,66 @@ impl Sandbox {
         self.network
     }
 
+    /// What a contained command's file view holds (T.8c), in words a person
+    /// can check against node.toml: empty where the shell is not contained.
+    pub fn view_line(&self) -> String {
+        use crate::contain::{Binds, Source, VIEW_EXE};
+        let Some(c) = self.contain.get() else {
+            return String::new();
+        };
+        let extra_rw: Vec<Grant> = self.extra_write.iter().filter_map(Extra::grant).collect();
+        let extra_ro: Vec<Grant> = self
+            .read
+            .iter()
+            .map(|p| Grant::system(p))
+            .chain(self.extra_read.iter().filter_map(Extra::grant))
+            .collect();
+        let mounts = view(&extra_rw, &extra_ro);
+        let list = |pick: &dyn Fn(&crate::contain::Mount) -> Option<String>| {
+            let v: Vec<String> = mounts.iter().filter_map(pick).collect();
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                v.join(", ")
+            }
+        };
+        let system =
+            list(&|m| (m.source == Source::Host && !m.write).then(|| m.path.display().to_string()));
+        let links = list(&|m| match &m.source {
+            Source::Symlink(t) => Some(format!("{} -> {}", m.path.display(), t.display())),
+            _ => None,
+        });
+        let read = list(&|m| {
+            (matches!(m.source, Source::Checked(_)) && !m.write)
+                .then(|| m.path.display().to_string())
+        });
+        let write = list(&|m| m.write.then(|| m.path.display().to_string()));
+        let version = crate::contain::binds_of(c.bwrap())
+            .1
+            .unwrap_or_else(|| c.bwrap().display().to_string());
+        let how = match c.binds() {
+            Binds::Fd => format!(
+                "{version}: each grant bound from a descriptor the guard opened and checked \
+                 against what the node checked"
+            ),
+            Binds::Path => format!(
+                "{version}, older than 0.10.0: each grant bound by its path and checked by \
+                 identity inside by sandbox-exec, which refuses the command on a difference"
+            ),
+        };
+        let proc = match c.form() {
+            crate::contain::Form::Full => "/proc of its own",
+            crate::contain::Form::SharedProc => "this machine's /proc",
+        };
+        format!(
+            "a contained command sees only: read-only {system}; links {links}; [sandbox] read \
+             {read}; read-write [sandbox] write {write}; its session's folder (read-write) and \
+             temp folder; /dev of its own; {proc}; an empty /tmp; the harness binary at \
+             {VIEW_EXE} (read-only, the node's running image). Nothing else of this machine is \
+             there ({how})"
+        )
+    }
+
     /// The wrapper's command line up to and including `--`; with
     /// `contain`, inside bubblewrap started in the given folder by its
     /// guard (T.8e), both marked with this node's temp root and `session`.
@@ -546,18 +609,33 @@ impl Sandbox {
         status: bool,
         contain: Option<(&crate::contain::Contain, &Path)>,
         session: &OsStr,
+        probe: Option<&Probe>,
     ) -> std::process::Command {
         let mark = self.tmp_root.as_ref().map(|root| crate::contain::Mark {
             root: root.clone(),
             session: session.to_owned(),
         });
+        // The system folders: not session-writable. node.toml's extras may
+        // lie where a session can write (inside a workspace root, inside
+        // another `write` entry): each by its identity (R1d-1).
+        let extra_rw: Vec<Grant> = self.extra_write.iter().filter_map(Extra::grant).collect();
+        let extra_ro: Vec<Grant> = self
+            .read
+            .iter()
+            .map(|p| Grant::system(p))
+            .chain(self.extra_read.iter().filter_map(Extra::grant))
+            .collect();
+        let all_rw: Vec<Grant> = rw.iter().chain(&extra_rw).cloned().collect();
+        let all_ro: Vec<Grant> = extra_ro.iter().chain(ro).cloned().collect();
         let mut c = match contain {
+            // The file view (T.8c) holds exactly what Landlock grants below.
             Some((b, cwd)) => b.command(
                 &self.exe,
                 self.image,
                 cwd,
                 mark.as_ref(),
                 self.network == Network::Off && self.network_namespace(b),
+                &view(&all_rw, &all_ro),
             ),
             None => std::process::Command::new(&self.exe),
         };
@@ -576,20 +654,13 @@ impl Sandbox {
         if status {
             c.arg("--status");
         }
-        // The system folders: not session-writable. node.toml's extras may
-        // lie where a session can write (inside a workspace root, inside
-        // another `write` entry): each by its identity (R1d-1).
-        let extra_rw: Vec<Grant> = self.extra_write.iter().filter_map(Extra::grant).collect();
-        let extra_ro: Vec<Grant> = self
-            .read
-            .iter()
-            .map(|p| Grant::system(p))
-            .chain(self.extra_read.iter().filter_map(Extra::grant))
-            .collect();
-        for g in rw.iter().chain(&extra_rw).chain(&devices()) {
+        if let Some(p) = probe {
+            p.push_args(&mut c);
+        }
+        for g in all_rw.iter().chain(&devices()) {
             g.push_args(&mut c, "--rw");
         }
-        for g in extra_ro.iter().chain(ro) {
+        for g in &all_ro {
             g.push_args(&mut c, "--ro");
         }
         c.arg("--");
@@ -644,25 +715,24 @@ impl Sandbox {
         let canary = canary_dir.join("sandbox-canary");
         std::fs::write(&canary, "the sandbox must not read this\n")
             .map_err(|e| format!("{}: {e}", canary.display()))?;
+        // The checks are the wrapper's own (review R-3): no program found
+        // by name.
+        let probe = Probe {
+            read: vec![ok.clone()],
+            unreadable: vec![canary.clone()],
+            ..Default::default()
+        };
         let mut c = self.wrapper(
             &[Grant::made(scratch, "the self-test folder")?],
             &[],
             true,
             None,
             OsStr::new("probe"),
+            Some(&probe),
         );
-        c.args([
-            "sh",
-            "-c",
-            "cat \"$1\" >/dev/null || exit 2; if cat \"$2\" >/dev/null 2>&1; then exit 3; fi",
-            "sh",
-        ])
-        .arg(&ok)
-        .arg(&canary)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .current_dir(scratch)
-        .stdin(std::process::Stdio::null());
+        c.env_clear()
+            .current_dir(scratch)
+            .stdin(std::process::Stdio::null());
         let out = c.output();
         let _ = std::fs::remove_file(&canary);
         let _ = std::fs::remove_dir_all(scratch);
@@ -715,29 +785,47 @@ impl Sandbox {
         std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
         let ok = scratch.join("granted");
         std::fs::write(&ok, "ok").map_err(|e| format!("{}: {e}", ok.display()))?;
+        // Beside the granted folder, in the node's temp root, granted to
+        // nothing: the view must not hold it (T.8c).
+        let mut outside = scratch.as_os_str().to_owned();
+        outside.push(".outside");
+        let outside = PathBuf::from(outside);
+        std::fs::write(&outside, "not in the view")
+            .map_err(|e| format!("{}: {e}", outside.display()))?;
         let full = contain.form() == crate::contain::Form::Full;
+        let net = self.network == Network::Off && self.network_namespace(contain);
+        // The wrapper's own checks, after it confined itself in the view it
+        // will use (no program found by name: review R-3).
+        let probe = Probe {
+            read: vec![ok.clone()],
+            pid_ns: true,
+            own_proc: full,
+            // The node's own namespace, which the command's must not be.
+            net_not: if net {
+                Some(
+                    std::fs::read_link("/proc/self/ns/net")
+                        .map_err(|e| format!("/proc/self/ns/net: {e}"))?
+                        .into_os_string(),
+                )
+            } else {
+                None
+            },
+            absent: vec![outside.clone()],
+            ..Default::default()
+        };
         let mut c = self.wrapper(
             &[Grant::made(scratch, "the self-test folder")?],
             &[],
             false,
             Some((contain, scratch)),
             OsStr::new("probe"),
+            Some(&probe),
         );
         // Through the guard, as every command: its channel stays open (no
         // kill order) until the probe has ended.
         let (keep, theirs) = std::os::unix::net::UnixStream::pair()
             .map_err(|e| format!("the guard's channel: {e}"))?;
-        let net = self.network == Network::Off && self.network_namespace(contain);
-        c.args(["sh", "-c", &crate::contain::probe_script(full, net), "sh"])
-            .arg(&ok);
-        if net {
-            // The node's own namespace, which the command's must not be.
-            let ours = std::fs::read_link("/proc/self/ns/net")
-                .map_err(|e| format!("/proc/self/ns/net: {e}"))?;
-            c.arg(ours);
-        }
         c.env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(scratch)
             .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
                 theirs,
@@ -746,11 +834,21 @@ impl Sandbox {
             .stderr(std::process::Stdio::piped());
         let out = run_bounded(c, keep, bound);
         let _ = std::fs::remove_dir_all(scratch);
+        let _ = std::fs::remove_file(&outside);
         let (status, stderr) =
             out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
         let stderr = String::from_utf8_lossy(&stderr);
         match status.code() {
             Some(0) => Ok(()),
+            Some(2) => Err(format!(
+                "the command could not read a granted file in the view: {}",
+                stderr.trim()
+            )),
+            Some(7) => Err(
+                "a file outside the grants was there for the command: the file view did not \
+                 hold"
+                    .into(),
+            ),
             Some(4) => Err("the command was not in a PID namespace of its own".into()),
             Some(5) => Err("/proc is not the namespace's own".into()),
             Some(6) => Err(
@@ -1002,8 +1100,14 @@ impl Confinement {
                     .as_ref()
                     .and_then(|t| t.file_name())
                     .unwrap_or(OsStr::new("-"));
-                let mut c =
-                    sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())), session);
+                let mut c = sandbox.wrapper(
+                    &rw,
+                    &ro,
+                    false,
+                    contain.map(|b| (b, ws.as_path())),
+                    session,
+                    None,
+                );
                 c.arg(program);
                 env.apply_std(&mut c);
                 if let Some(t) = tmp {
@@ -1092,18 +1196,21 @@ pub fn contained_line(
         );
     }
     let abstract_too = if abi < ABI_ABSTRACT_SOCKETS {
-        ", or over an abstract socket (X11 and others)"
+        "; and with the network on, any service of this user on an abstract socket (X11 and \
+         others: Landlock below ABI 6; the network off closes it)"
     } else {
         ""
     };
     (
         format!(
-            "{what}) WITH A GAP: on this kernel (Landlock ABI {abi}, below 9) a command can \
-             still start a process outside the containment, which then outlives it and runs \
-             without the sandbox, by asking a service of this user over a Unix socket (the \
-             session bus at /run/user/<uid>/bus, a container runtime's socket){abstract_too}. \
-             Closed by Linux 7.1 or newer (Landlock ABI 9), or by the planned file view (T.8c); \
-             README, \"The shell sandbox\""
+            "{what}) WITH A GAP: on this kernel (Landlock ABI {abi}, below 9) Landlock does not \
+             cover Unix sockets, so a command can still start a process outside the \
+             containment, which then outlives it and runs without the sandbox, by asking a \
+             service of this user over a socket it can reach: the file view (T.8c) keeps every \
+             socket outside the grants out of reach (the session bus at /run/user/<uid>/bus, a \
+             container runtime's socket), but not one inside a granted folder (the session's \
+             own, a [sandbox] read or write entry){abstract_too}. Closed by Linux 7.1 or newer \
+             (Landlock ABI 9); README, \"The shell sandbox\""
         ),
         ContainLevel::Warn,
     )
@@ -1124,6 +1231,9 @@ pub struct Started {
     pub contain_summary: String,
     /// How `doctor` and the log mark that line.
     pub contain_level: ContainLevel,
+    /// One line on what a contained command's file view holds (T.8c), for
+    /// the log and `doctor`; empty where the shell is not contained.
+    pub view_summary: String,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
 }
@@ -1170,6 +1280,7 @@ pub fn start(
                               behind can outlive it"
                 .into(),
             contain_level: ContainLevel::Warn,
+            view_summary: String::new(),
             tmp_root: None,
         });
     }
@@ -1219,11 +1330,17 @@ fn check_binary_reach(
     let Some(dir) = binary_reach(exe, settings, roots).filter(|_| contained) else {
         return;
     };
+    // A contained command is not affected (its guard and its sandbox-exec
+    // are the node's running image, T.8e and T.8c); the node's own helpers
+    // (its checkpoint git, graphify) and a shell left to Landlock alone
+    // still start sandbox-exec from this path.
     let why = format!(
         "a session can replace the harness binary {} (it is inside {}, a workspace root or \
-         [sandbox] write entry): the next command's sandbox-exec would then be the agent's \
-         program, without the file sandbox (its guard is the node's own running image and is \
-         not affected). Install the binary where no session can write",
+         [sandbox] write entry): the node's own helpers (its checkpoint git, graphify), and \
+         shell commands whenever the shell is not contained, start sandbox-exec from that path, \
+         so the agent's program would run in its place without the file sandbox (a contained \
+         command's guard and sandbox-exec are the node's own running image and are not \
+         affected). Install the binary where no session can write",
         exe.display(),
         dir.display()
     );
@@ -1457,6 +1574,7 @@ fn start_inner(
             summary: format!("enforced ({status})"),
             contain_summary: String::new(),
             contain_level: ContainLevel::Ok,
+            view_summary: String::new(),
             tmp_root: Some(tmp_root),
         },
         Ok(status) => Started {
@@ -1468,6 +1586,7 @@ fn start_inner(
             summary: format!("best-effort ({status}): only what the kernel enforces"),
             contain_summary: String::new(),
             contain_level: ContainLevel::Ok,
+            view_summary: String::new(),
             tmp_root: Some(tmp_root),
         },
         Err(e) => not_enforced(settings, e, node_toml, Some(sandbox.clone())),
@@ -1490,6 +1609,7 @@ fn start_inner(
                      can still look names up for a command)"
                 });
             }
+            path_write_warning(settings, &mut started);
             // Review R-3: a read-write grant carries Landlock's socket right,
             // so a `write` entry that holds the usual socket folders hands
             // the command other programs' sockets on every kernel.
@@ -1513,6 +1633,7 @@ fn start_inner(
                     .contain_summary
                     .push_str(&format!("; {NETWORK_OFF_UNCONTAINED}"));
             }
+            path_write_warning(settings, &mut started);
         }
         Contained::Refuse(msg) => {
             started.contain_level = ContainLevel::Refused;
@@ -1521,7 +1642,49 @@ fn start_inner(
             started.refusal = Some(msg);
         }
     }
+    started.view_summary = sandbox.view_line();
     Ok(started)
+}
+
+/// The folders on this node's `PATH` that lie inside a `[sandbox] write`
+/// entry: a command can put a program there that the node's own helpers,
+/// or a later command, find by name (T.8c; review R-3). Compared by real
+/// path.
+pub fn path_write_entries(settings: &Settings, path: &OsStr) -> Vec<(PathBuf, PathBuf)> {
+    let mut out = Vec::new();
+    for dir in std::env::split_paths(path).filter(|d| d.is_absolute()) {
+        let rd = real(&dir);
+        if let Some(w) = settings
+            .write
+            .iter()
+            .find(|w| rd.starts_with(real(w)) || dir.starts_with(w))
+        {
+            out.push((w.clone(), dir));
+        }
+    }
+    out
+}
+
+/// Adds the [`path_write_entries`] warning, for this process's `PATH`, to
+/// the containment line.
+fn path_write_warning(settings: &Settings, started: &mut Started) {
+    let found = path_write_entries(settings, &std::env::var_os("PATH").unwrap_or_default());
+    if found.is_empty() {
+        return;
+    }
+    let list: Vec<String> = found
+        .iter()
+        .map(|(w, d)| format!("{} holds {}", w.display(), d.display()))
+        .collect();
+    started.contain_summary.push_str(&format!(
+        "; WARNING: a [sandbox] write entry holds a folder on this node's PATH ({}): a command \
+         can put a program there that the node itself (its git, its helpers) or a later command \
+         finds by name. Take that folder off the node's PATH, or list it under [sandbox] read",
+        list.join("; ")
+    ));
+    if started.contain_level == ContainLevel::Ok {
+        started.contain_level = ContainLevel::Warn;
+    }
 }
 
 /// A working containment of `form` under `mode` on a kernel with
@@ -1765,6 +1928,7 @@ fn not_enforced(
             ),
             contain_summary: String::new(),
             contain_level: ContainLevel::Ok,
+            view_summary: String::new(),
             tmp_root,
         },
         _ => {
@@ -1786,6 +1950,7 @@ fn not_enforced(
                 summary: format!("REFUSING agentic sessions: {msg}"),
                 contain_summary: "not probed: the sandbox does not work".into(),
                 contain_level: ContainLevel::Warn,
+                view_summary: String::new(),
                 tmp_root,
             }
         }
@@ -1910,6 +2075,159 @@ fn devices() -> Vec<Grant> {
         .collect()
 }
 
+/// The file view of a contained command (T.8c): the same grants Landlock
+/// gets, as mounts at their own paths. Left out: the device files (the view
+/// has a private `/dev`), `/proc` (the containment's form decides it), and
+/// a path without an identity that does not exist now (Landlock grants
+/// nothing there either). A system folder that is a link to inside another
+/// one (`/bin -> usr/bin`) becomes the same link; any other is bound with
+/// its link followed, as Landlock's rule follows it. A path granted twice
+/// is bound once, by its identity if either grant has one. A mount is
+/// writable when it, or a folder above it in the view, is granted
+/// read-write: Landlock adds the rights of every rule above a path, so a
+/// read-only grant inside a read-write one is writable there too. Sorted so
+/// that a folder is bound before what is inside it.
+pub(crate) fn view(rw: &[Grant], ro: &[Grant]) -> Vec<crate::contain::Mount> {
+    use crate::contain::{Mount, Source};
+    let granted: Vec<&Path> = rw.iter().chain(ro).map(|g| g.path.as_path()).collect();
+    let mut out: Vec<Mount> = Vec::new();
+    for (g, write) in rw
+        .iter()
+        .map(|g| (g, true))
+        .chain(ro.iter().map(|g| (g, false)))
+    {
+        if g.path.starts_with("/dev") || g.path == Path::new("/proc") {
+            continue;
+        }
+        let source = match g.expect {
+            Expect::Identity(id) => Source::Checked(id),
+            Expect::NotSessionWritable => match std::fs::symlink_metadata(&g.path) {
+                Err(_) => continue,
+                Ok(md) if md.file_type().is_symlink() => {
+                    let inside = g.path.canonicalize().ok().is_some_and(|t| {
+                        granted
+                            .iter()
+                            .any(|o| *o != g.path.as_path() && t.starts_with(o))
+                    });
+                    match std::fs::read_link(&g.path) {
+                        Ok(target) if inside => Source::Symlink(target),
+                        _ => Source::Host,
+                    }
+                }
+                Ok(_) => Source::Host,
+            },
+        };
+        match out.iter_mut().find(|m| m.path == g.path) {
+            Some(m) => {
+                m.write |= write;
+                if matches!(source, Source::Checked(_)) {
+                    m.source = source;
+                }
+            }
+            None => out.push(Mount {
+                path: g.path.clone(),
+                write,
+                source,
+            }),
+        }
+    }
+    let writable: Vec<PathBuf> = rw.iter().map(|g| g.path.clone()).collect();
+    for m in &mut out {
+        if !matches!(m.source, Source::Symlink(_)) && writable.iter().any(|w| m.path.starts_with(w))
+        {
+            m.write = true;
+        }
+    }
+    out.sort_by_key(|m| m.path.components().count());
+    out
+}
+
+/// What `sandbox-exec --probe-…` checks after it confined itself, in place
+/// of running a command (the start's self-tests; review R-3: no program is
+/// found by name on `PATH`). Each failure has its own exit code.
+#[derive(Debug, Default, Clone)]
+pub struct Probe {
+    /// Must be readable (exit 2).
+    pub read: Vec<PathBuf>,
+    /// Must not be readable (exit 3).
+    pub unreadable: Vec<PathBuf>,
+    /// This process must be pid 2 of a PID namespace of its own: bwrap's
+    /// init is 1 (exit 4).
+    pub pid_ns: bool,
+    /// `/proc/self` must be that 2: `/proc` is the namespace's own (exit 5).
+    pub own_proc: bool,
+    /// `/proc/self/ns/net` must be readable and another than this, the
+    /// node's: by identity, not by the interface list (review T8B-2; exit
+    /// 6).
+    pub net_not: Option<OsString>,
+    /// Must not exist at all, not merely be unreadable: the file view (exit
+    /// 7).
+    pub absent: Vec<PathBuf>,
+}
+
+impl Probe {
+    fn push_args(&self, c: &mut std::process::Command) {
+        for p in &self.read {
+            c.arg("--probe-read").arg(p);
+        }
+        for p in &self.unreadable {
+            c.arg("--probe-unreadable").arg(p);
+        }
+        if self.pid_ns {
+            c.arg("--probe-pid-ns");
+        }
+        if self.own_proc {
+            c.arg("--probe-own-proc");
+        }
+        if let Some(n) = &self.net_not {
+            c.arg("--probe-net-not").arg(n);
+        }
+        for p in &self.absent {
+            c.arg("--probe-absent").arg(p);
+        }
+    }
+
+    /// Whether anything is asked (an empty probe is no probe).
+    pub fn is_empty(&self) -> bool {
+        self.read.is_empty()
+            && self.unreadable.is_empty()
+            && !self.pid_ns
+            && !self.own_proc
+            && self.net_not.is_none()
+            && self.absent.is_empty()
+    }
+
+    /// The checks, in this process: 0 when all hold, else the first
+    /// failure's exit code.
+    pub fn run(&self) -> i32 {
+        if self.read.iter().any(|p| std::fs::read(p).is_err()) {
+            return 2;
+        }
+        if self.unreadable.iter().any(|p| std::fs::read(p).is_ok()) {
+            return 3;
+        }
+        if self.pid_ns && std::process::id() != 2 {
+            return 4;
+        }
+        if self.own_proc && std::fs::read_link("/proc/self").ok() != Some(PathBuf::from("2")) {
+            return 5;
+        }
+        if let Some(node) = &self.net_not {
+            let ours = std::fs::read_link("/proc/self/ns/net").ok();
+            if !ours.is_some_and(|n| !n.as_os_str().is_empty() && n.as_os_str() != node) {
+                return 6;
+            }
+        }
+        let gone = |p: &PathBuf| {
+            std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        };
+        if !self.absent.iter().all(gone) {
+            return 7;
+        }
+        0
+    }
+}
+
 /// The arguments of `sandbox-exec`.
 #[derive(Debug, Default)]
 pub struct ExecRequest {
@@ -1919,19 +2237,28 @@ pub struct ExecRequest {
     pub best_effort: bool,
     /// Print a [`STATUS_PREFIX`] line on stderr before running the command.
     pub status: bool,
+    /// The start's self-test, run in place of a command (no command then).
+    pub probe: Probe,
     pub command: Vec<OsString>,
 }
 
-/// `sandbox-exec`: confine this process, then `exec` the command. Returns
-/// only on failure, with the exit code to use. Must run before any other
-/// thread exists (Landlock restricts the calling thread; `exec` then drops
-/// the others anyway).
+/// `sandbox-exec`: confine this process, then `exec` the command (or run
+/// the probe and return its result). Returns only on failure or after the
+/// probe, with the exit code to use. Must run before any other thread
+/// exists (Landlock restricts the calling thread; `exec` then drops the
+/// others anyway).
 pub fn exec(req: ExecRequest) -> i32 {
     use std::os::unix::process::CommandExt;
-    let Some((program, args)) = req.command.split_first() else {
+    let probe = !req.probe.is_empty();
+    if probe && !req.command.is_empty() {
+        eprintln!("{SUBCOMMAND}: a probe runs no command");
+        return 2;
+    }
+    let command = req.command.split_first();
+    if command.is_none() && !probe {
         eprintln!("{SUBCOMMAND}: no command given");
         return 2;
-    };
+    }
     match imp::restrict(&req) {
         Ok(status) => {
             if req.status {
@@ -1943,6 +2270,9 @@ pub fn exec(req: ExecRequest) -> i32 {
             return EXIT_UNCONFINED;
         }
     }
+    let Some((program, args)) = command else {
+        return req.probe.run();
+    };
     let err = std::process::Command::new(program).args(args).exec();
     eprintln!("{SUBCOMMAND}: {}: {err}", Path::new(program).display());
     if err.kind() == std::io::ErrorKind::NotFound {
@@ -2150,7 +2480,7 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false, None, OsStr::new("-"))
+        sb.wrapper(&[], &[], false, None, OsStr::new("-"), None)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -2439,6 +2769,134 @@ mod tests {
             vec![PathBuf::from("/tmp"), PathBuf::from("/run/user")]
         );
         assert!(socket_write_entries(&Settings::default()).is_empty());
+    }
+
+    /// T.8c: the view is the grants, at their own paths. A read-only grant
+    /// inside a read-write one is writable (Landlock adds the rights of the
+    /// rules above a path); the devices and `/proc` are left to the
+    /// containment; a path granted twice is bound once, by its identity; a
+    /// system link into another system folder is a link; a folder comes
+    /// before what is inside it.
+    #[test]
+    fn the_view_is_the_grants() {
+        use crate::contain::Source;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        let inner = ws.join("vendor");
+        std::fs::create_dir_all(&inner).unwrap();
+        let id = |p: &Path| harness_core::folder::Identity::of(p).unwrap();
+        let rw = vec![
+            Grant::identified(&ws, id(&ws), "the session's folder"),
+            Grant::system(Path::new("/dev/null")),
+        ];
+        let ro = vec![
+            Grant::system(Path::new("/usr")),
+            Grant::system(Path::new("/bin")),
+            Grant::system(Path::new("/proc")),
+            Grant::system(&root.join("missing")),
+            Grant::identified(&inner, id(&inner), "a node.toml [sandbox] read entry"),
+            Grant::system(&ws),
+        ];
+        let v = view(&rw, &ro);
+        let at = |p: &Path| v.iter().position(|m| m.path == p);
+        assert!(at(Path::new("/dev/null")).is_none() && at(Path::new("/proc")).is_none());
+        assert!(at(&root.join("missing")).is_none());
+        let w = &v[at(&ws).unwrap()];
+        assert!(w.write && w.source == Source::Checked(id(&ws)), "{w:?}");
+        assert_eq!(v.iter().filter(|m| m.path == ws).count(), 1);
+        let i = &v[at(&inner).unwrap()];
+        assert!(i.write, "a read grant inside a write grant: {i:?}");
+        assert!(at(&ws).unwrap() < at(&inner).unwrap());
+        let usr = &v[at(Path::new("/usr")).unwrap()];
+        assert!(!usr.write && usr.source == Source::Host);
+        if std::fs::symlink_metadata("/bin").is_ok_and(|m| m.file_type().is_symlink())
+            && Path::new("/bin")
+                .canonicalize()
+                .is_ok_and(|t| t.starts_with("/usr"))
+        {
+            let b = &v[at(Path::new("/bin")).unwrap()];
+            assert_eq!(
+                b.source,
+                Source::Symlink(std::fs::read_link("/bin").unwrap())
+            );
+        }
+    }
+
+    /// The probe's checks, in this process (outside any namespace).
+    #[test]
+    fn the_probe_checks_what_it_is_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        let gone = dir.path().join("gone");
+        assert!(Probe::default().is_empty());
+        let p = |probe: Probe| probe.run();
+        assert_eq!(
+            p(Probe {
+                read: vec![file.clone()],
+                absent: vec![gone.clone()],
+                ..Default::default()
+            }),
+            0
+        );
+        assert_eq!(
+            p(Probe {
+                read: vec![gone.clone()],
+                ..Default::default()
+            }),
+            2
+        );
+        assert_eq!(
+            p(Probe {
+                unreadable: vec![file.clone()],
+                ..Default::default()
+            }),
+            3
+        );
+        // Not pid 2 here.
+        assert_eq!(
+            p(Probe {
+                pid_ns: true,
+                ..Default::default()
+            }),
+            4
+        );
+        let ours = std::fs::read_link("/proc/self/ns/net").unwrap();
+        assert_eq!(
+            p(Probe {
+                net_not: Some(ours.into_os_string()),
+                ..Default::default()
+            }),
+            6
+        );
+        assert_eq!(
+            p(Probe {
+                absent: vec![file],
+                ..Default::default()
+            }),
+            7
+        );
+    }
+
+    /// T.8c, review R-3: a `PATH` folder inside a `write` entry is named,
+    /// by real path; one outside is not.
+    #[test]
+    fn a_path_folder_inside_a_write_entry_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let cargo = root.join(".cargo");
+        std::fs::create_dir_all(cargo.join("bin")).unwrap();
+        let s = Settings {
+            write: vec![cargo.clone()],
+            ..Default::default()
+        };
+        let path = std::env::join_paths([cargo.join("bin"), PathBuf::from("/usr/bin")]).unwrap();
+        assert_eq!(
+            path_write_entries(&s, &path),
+            vec![(cargo.clone(), cargo.join("bin"))]
+        );
+        assert!(path_write_entries(&s, OsStr::new("/usr/bin:relative")).is_empty());
     }
 
     #[test]

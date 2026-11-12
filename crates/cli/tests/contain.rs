@@ -581,20 +581,21 @@ fn connect_script(path: &Path, abstract_name: &str) -> String {
          \x20   s = socket.socket(socket.AF_UNIX)\n\
          \x20   try:\n\
          \x20       s.connect(a); print(\"unix-\" + \"connected\")\n\
-         \x20   except OSError as e: print(\"refused:\", e)\n\
+         \x20   except OSError as e: print(\"refused:\", type(e).__name__, e)\n\
          '",
         path.display()
     )
 }
 
-/// The review's proof through the real wrapper and the real `bash` tool,
-/// kept to record which side of the line this kernel is on (CI's kernel is
-/// expected below ABI 9): from ABI 9 nothing reaches the pathname socket,
-/// from ABI 6 nothing the abstract one; below, what the service starts
+/// The review's proof through the real wrapper and the real `bash` tool:
+/// the pathname socket is outside every grant, so it is not in the file
+/// view (T.8c) and nothing reaches it on any Landlock ABI; from ABI 6
+/// nothing reaches the abstract one either; below, what the service starts
 /// outlives the command, and `doctor` warns instead of claiming it
-/// (`the_containment_line_depends_on_the_landlock_abi`).
+/// (`the_containment_line_depends_on_the_landlock_abi`). Before T.8c the
+/// pathname socket was reachable below ABI 9.
 #[tokio::test]
-async fn a_service_outside_is_out_of_reach_only_from_landlock_abi_9() {
+async fn a_service_outside_is_out_of_reach_by_path_and_by_name_from_abi_6() {
     let f = fixture();
     let Some((sb, status)) = f.sandbox_and_status() else {
         return;
@@ -620,21 +621,23 @@ async fn a_service_outside_is_out_of_reach_only_from_landlock_abi_9() {
         if by_path { "RUNNING" } else { "not there" },
         if by_name { "RUNNING" } else { "not there" },
     );
-    assert_eq!(by_path, abi < 9, "{}", r.output);
+    assert!(!by_path, "{}", r.output);
     assert_eq!(by_name, abi < 6, "{}", r.output);
     drop(reaper);
 }
 
-/// RESIDUAL BELOW LANDLOCK ABI 9 (PLAN.md T9), shown on any kernel: the
-/// node's exact bubblewrap command line with the wrapper replaced by what
-/// an ABI 4 kernel enforces (`support/review_t8a/landlock_abi4.py`). The
-/// command is in its namespace and the file policy holds; one connect to
-/// each socket makes the service start a process, and the node's kill
-/// leaves those two. Closed by T.8c's file view (and a network namespace
-/// for abstract sockets); until then `doctor` names it and `contain =
-/// "required"` refuses on such a kernel. This test flips when it closes.
+/// RESIDUAL BELOW LANDLOCK ABI 6, WITH THE NETWORK ON (PLAN.md T9), shown
+/// on any kernel: the node's command line, through its guard, with the
+/// wrapper replaced by what an ABI 4 kernel enforces
+/// (`support/review_t8a/landlock_abi4.py`, copied into the session folder
+/// so that it is in the file view). The command is in its namespace and the
+/// file policy holds. Before T.8c one connect to each socket made the
+/// service start two processes that the node's kill left; with the file
+/// view the pathname socket is not there, and only the abstract one (not a
+/// file, so no view covers it) still reaches the service. Closed by ABI 6,
+/// or by the network off (T.8b). This test flips when that closes.
 #[tokio::test]
-async fn below_abi_9_a_service_outside_still_outlives_the_kill() {
+async fn below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside() {
     use std::ffi::OsString;
     const ABI4: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -651,6 +654,8 @@ async fn below_abi_9_a_service_outside_still_outlives_the_kill() {
     );
     let secret = f.root.join("home/secret");
     std::fs::write(&secret, "outside the session folder").unwrap();
+    let stand_in = f.ws.join("landlock_abi4.py");
+    std::fs::copy(ABI4, &stand_in).unwrap();
     let reaper = Reaper(vec![975_111, 975_112, 975_113, 975_114]);
     service(&bus, &name, 975_111, 975_112);
     let script = format!(
@@ -678,45 +683,50 @@ async fn below_abi_9_a_service_outside_still_outlives_the_kill() {
         .unwrap();
     assert!(contained);
     let node = node.as_std();
-    // bubblewrap's part of it, without the guard (T.8e): this test kills
-    // bubblewrap's group itself, as the node did before.
+    // The guard's command line, with `<image> sandbox-exec` after
+    // bubblewrap's `--` replaced by the stand-in.
     let all: Vec<OsString> = node.get_args().map(OsString::from).collect();
-    let bwrap_at = all.iter().position(|a| a == "--").unwrap() + 1;
-    let argv = &all[bwrap_at + 1..];
-    let at = argv.iter().position(|a| a == EXE).unwrap();
-    assert_eq!(argv[at + 1], "sandbox-exec");
-    let mut old = std::process::Command::new(&all[bwrap_at]);
-    old.args(&argv[..at])
-        .args(["python3", "-I", ABI4])
-        .args(&argv[at + 2..])
+    let guard_end = all.iter().position(|a| a == "--").unwrap();
+    let bwrap_end = guard_end + 1 + all[guard_end + 1..].iter().position(|a| a == "--").unwrap();
+    assert_eq!(all[bwrap_end + 1], harness_tools::contain::VIEW_EXE);
+    assert_eq!(all[bwrap_end + 2], "sandbox-exec");
+    let mut old = tokio::process::Command::new(node.get_program());
+    old.args(&all[..=bwrap_end])
+        .args(["python3".as_ref(), "-I".as_ref(), stand_in.as_os_str()])
+        .args(&all[bwrap_end + 3..])
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .current_dir(&f.ws)
-        .stdin(std::process::Stdio::null())
+        .current_dir("/")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    std::os::unix::process::CommandExt::process_group(&mut old, 0);
-    let child = old.spawn().unwrap();
-    let bwrap_pid = child.id() as i32;
+    let mut child = harness_tools::contain::spawn_for_test(old).await.unwrap();
     let by = Instant::now() + Duration::from_secs(20);
-    while reaper.0.iter().any(|s| sleeps(*s).is_empty()) {
-        assert!(Instant::now() < by, "the four processes never started");
-        std::thread::sleep(Duration::from_millis(10));
+    while [975_112, 975_113, 975_114]
+        .iter()
+        .any(|s| sleeps(*s).is_empty())
+    {
+        assert!(Instant::now() < by, "the processes never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // The node's kill at the end of a cancel or a timeout.
-    let _ = nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(bwrap_pid),
-        nix::sys::signal::Signal::SIGKILL,
-    );
-    let out = child.wait_with_output().unwrap();
+    let stopped = child.stop(false).await;
+    let out = child.wait_with_output().await.unwrap();
     let out =
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    eprintln!("{stopped:?}: {out}");
     assert!(!out.contains("FILE-POLICY-BROKEN"), "{out}");
+    assert!(
+        out.contains("FileNotFoundError"),
+        "the pathname socket was there: {out}"
+    );
     none_left(&Reaper(vec![975_113, 975_114]), "inside the namespace").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
-        !sleeps(975_111).is_empty() && !sleeps(975_112).is_empty(),
-        "closed: nothing reached the sockets; flip this test and PLAN.md T9: {out}"
+        sleeps(975_111).is_empty(),
+        "the pathname socket reached the service: {out}"
+    );
+    assert!(
+        !sleeps(975_112).is_empty(),
+        "closed: nothing reached the abstract socket; flip this test and PLAN.md T9: {out}"
     );
     drop(reaper);
 }

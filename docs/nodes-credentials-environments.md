@@ -730,7 +730,7 @@ shared node `[sandbox] write` is refused (its entries become `<base>/<ws>/cache/
 
 | Residual for host sessions | Closed by |
 |---|---|
-| Before Landlock ABI 9 (Linux 7.1, `research/round2/synth/05-links-workers-protocols.md` §6.5), the session bus or any pathname socket starts a program outside the sandbox: A becomes the node user and reads B's files and every grant in the node's memory. | ABI 9; or a container; for pathname sockets also T.8c's mount view, in which a socket outside the grants does not exist (abstract sockets belong to the network namespace: ABI 6, or T.8b with the network off). |
+| Before Landlock ABI 9 (Linux 7.1, `research/round2/synth/05-links-workers-protocols.md` §6.5), the session bus or any pathname socket starts a program outside the sandbox: A becomes the node user and reads B's files and every grant in the node's memory. | ABI 9; or a container; for pathname sockets outside the grants also T.8c's mount view (built: a socket outside the grants does not exist for a contained command, `crates/cli/tests/mount_view.rs` `a_socket_outside_the_grants_cannot_be_reached`; a socket inside a granted folder stays reachable below ABI 9); abstract sockets belong to the network namespace: ABI 6, or T.8b with the network off. Not on the Landlock-only fallback. |
 | Before ABI 6, A can signal B's processes. | ABI 6, included in ABI 9; or T.8a's PID namespace, in which B's processes have no pid A can name. |
 | A sees B's command lines in `/proc`. | T.8a: bubblewrap's PID namespace with a fresh `/proc` (B.11 §4: a bwrap command saw 5 processes, a `sandbox-exec` command 422 with every command line); a container; `hidepid` on `/proc`, the host's choice. |
 | A connects to anything B listens on at `127.0.0.1`; with network off, UDP still goes. | With the network off: T.8b's network namespace closes TCP, UDP and DNS (B.11 §5). With the network on: nothing for host sessions, which share the host's network. A container: its own network namespace; test D14 is answered (§4.6, "Network"). seccomp (O4) only on the Landlock-only path. |
@@ -766,9 +766,9 @@ is not planned: it needs root and a privileged helper. B.11 confirmed the namesp
 on a shared node below ABI 9 because of the pathname-socket escape. What the namespaces change,
 step by step:
 
-| Residual | After T.8a (PID namespace) | After T.8b (network namespace, network off only; built, `crates/cli/tests/network_off.rs`) | After T.8c (mount view from the grants) |
+| Residual | After T.8a (PID namespace) | After T.8b (network namespace, network off only; built, `crates/cli/tests/network_off.rs`) | After T.8c (mount view from the grants; built, `crates/cli/tests/mount_view.rs`) |
 |---|---|---|---|
-| Pathname socket escape (the session bus) | unchanged | unchanged | **closed**: a socket that is not granted is not in the view |
+| Pathname socket escape (the session bus) | unchanged | unchanged | **closed for every socket outside the grants**, on every Landlock ABI and with Landlock unavailable: it is not in the view (`a_socket_outside_the_grants_cannot_be_reached`, with this kernel's Landlock and with an ABI 4 stand-in: `FileNotFoundError`, the service starts nothing; `contain.rs` `below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside`). **Open below ABI 9:** a socket inside a granted folder (the session's own folder, a `[sandbox] read` or `write` entry; the design above refuses `write` entries on a shared node). Open on the Landlock-only fallback, where there is no view |
 | Abstract Unix socket escape | unchanged | **closed with the network off**, on every Landlock ABI (abstract sockets are per network namespace: the host's answer `ECONNREFUSED`, `network_off_hides_the_hosts_abstract_sockets`) | unchanged with the network on (ABI 6 closes it) |
 | Signals to B | **closed** | | |
 | B's command lines | **closed** | | |
@@ -782,6 +782,13 @@ because that closes both known escapes without ABI 9. What stays is the same as 
 loopback services with the network on, capacity and the path walk, a leak between people who
 each trust the other with a shell, not a way into B's files or keys. Not to be relaxed before
 T.8c: T.8a and T.8b alone leave the pathname socket open, which is the full escape.
+
+**Status (2026-11-12): T.8c is built and its tests pass** (`crates/cli/tests/mount_view.rs`;
+`PLAN.md` T9 says what the view holds). The rule above still stands: nothing was
+relaxed, and the value proposed here is the owner's decision. What the view leaves below
+ABI 9 is a socket inside a folder the command is granted: its own session folder (only that
+session's own processes and the node user's own programs can put one there) and the node's
+`[sandbox] read` entries; on the Landlock-only fallback (no bubblewrap) nothing changed.
 
 #### 4.10.4 A fair share of the node
 

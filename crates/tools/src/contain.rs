@@ -1,14 +1,14 @@
-//! Process containment of the agent's shell (ADOPTION_PLAN T.8a, T.8e;
-//! PLAN.md T9).
+//! Process containment of the agent's shell and its file view
+//! (ADOPTION_PLAN T.8a, T.8e, T.8c; PLAN.md T9).
 //!
 //! Landlock decides what a command may open; it does nothing about
 //! processes. A child that calls `setsid` leaves the process group the tool
 //! signals, and every child outlives a `kill -9` of the node (experiment
 //! B.1). Here each agent `bash` call runs inside its own PID namespace made
 //! by bubblewrap, under a guard of its own: `<harness> sandbox-guard --mark
-//! … -- bwrap --die-with-parent --new-session --unshare-pid --dev-bind / /
-//! --proc /proc --chdir <folder> -- <harness> sandbox-exec … -- bash -c
-//! <cmd>`. When the namespace's first process (bwrap's init) dies, the
+//! … -- bwrap --die-with-parent --new-session --unshare-pid --proc /proc
+//! --dev /dev <the file view> --remount-ro / --chdir <folder> --
+//! /.rizzy-harness/rizzy-harness sandbox-exec … -- bash -c <cmd>`. When the namespace's first process (bwrap's init) dies, the
 //! kernel kills every process in it, whatever its session or signal mask.
 //!
 //! **The guard** ([`crate::guard`], T.8e) is bubblewrap's parent and holds
@@ -24,10 +24,30 @@
 //! is itself killed takes the namespace with it, and [`sweep`] ends at the
 //! next start what a doubly unlucky kill left.
 //!
-//! The file system is the one the command sees without bwrap (`/` bound as
-//! it is, devices included): Landlock inside still decides what is readable
-//! and writable (`docs/container-experiment.md` §8: `sandbox-exec` reaches
-//! full enforcement inside bwrap). Only `/proc` is the namespace's own.
+//! **The file view** (T.8c) is built from the node's grants and nothing
+//! else: a fresh root (bubblewrap's tmpfs, read-only once built) holding
+//! the system read set ([`crate::sandbox::SYSTEM_READ`]; the top-level
+//! links such as `/bin -> usr/bin` as links), node.toml's `[sandbox] read`
+//! and `write` entries, the session's own grants, a private `/dev`
+//! (`--dev`), `/proc` (its own, or the outer one in [`Form::SharedProc`]),
+//! an empty `/tmp`, and the node's own running image at [`VIEW_EXE`], from
+//! which `sandbox-exec` is started. A path that is not granted does not
+//! exist for the command. Landlock inside keeps the same rules as before,
+//! a second layer where the kernel has it.
+//!
+//! **What is bound is what the node checked.** A grant with an identity
+//! (the session's folder, its temp folder, a node.toml entry as it resolves
+//! now) is bound from a descriptor the guard opens without following a
+//! link and checks against that identity ([`Binds::Fd`], bubblewrap 0.10.0
+//! or newer, which mounts the descriptor through the path it names, then
+//! compares the mount with the descriptor and refuses on a difference): a
+//! folder swapped since the check refuses the command, and one swapped
+//! after the guard's open does too. With an older bubblewrap
+//! ([`Binds::Path`]) the grant is bound by its path and `sandbox-exec`,
+//! which runs before every contained command, Landlock or not, opens the
+//! mounted folder without following a link and refuses the command if it
+//! is not the one the node checked. The image is bound from a descriptor
+//! the guard opens on its own `/proc/self/exe` in both cases.
 //!
 //! **Which thread spawns** no longer matters. `PR_SET_PDEATHSIG` fires when
 //! the *thread* that forked bwrap exits; T.8a therefore spawned every
@@ -70,6 +90,107 @@ pub enum Form {
     SharedProc,
 }
 
+/// Where the harness binary is inside the file view: the node's own
+/// running image, bound read-only (T.8c; review T8E-5). `sandbox-exec` is
+/// started from here, so no path a command can write is executed in its
+/// place.
+pub const VIEW_EXE: &str = "/.rizzy-harness/rizzy-harness";
+
+/// In bubblewrap's options, the guard replaces `@rizzy-fd:<dev>:<ino>`
+/// (after `--bind-fd` or `--ro-bind-fd`, the destination next) with a
+/// descriptor it opened on the destination's path, without following a
+/// link, and checked against that identity ([`crate::guard`]).
+pub const FD_TOKEN: &str = "@rizzy-fd:";
+/// And `@rizzy-image` with a descriptor of its own running image (after
+/// `--ro-bind-fd`: the number; after `--ro-bind`: `/proc/self/fd/<n>`,
+/// which bubblewrap resolves in its own descriptor table).
+pub const IMAGE_TOKEN: &str = "@rizzy-image";
+
+/// How the grants that carry an identity get into the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binds {
+    /// `--bind-fd` / `--ro-bind-fd` (bubblewrap 0.10.0 and newer) on a
+    /// descriptor the guard opened and checked; bubblewrap compares the
+    /// mount with the descriptor and refuses on a difference, and closes
+    /// the descriptor before the command starts.
+    Fd,
+    /// `--bind` / `--ro-bind` by path (older bubblewrap): what the path
+    /// leads to at the mount is bound, and `sandbox-exec` refuses the
+    /// command if that is not what the node checked.
+    Path,
+}
+
+/// The bubblewrap version `bwrap --version` prints, and the binds it
+/// allows: [`Binds::Fd`] from 0.10.0 (the release that added `--bind-fd`;
+/// its source: `bubblewrap.c` of v0.9.0 has no `--bind-fd`, v0.10.0 has it),
+/// [`Binds::Path`] below it or when the version cannot be read. Asked once
+/// per path.
+pub fn binds_of(bwrap: &Path) -> (Binds, Option<String>) {
+    type Seen = std::sync::Mutex<Vec<(PathBuf, Binds, Option<String>)>>;
+    static SEEN: std::sync::OnceLock<Seen> = std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Ok(s) = seen.lock()
+        && let Some((_, b, v)) = s.iter().find(|(p, _, _)| p == bwrap)
+    {
+        return (*b, v.clone());
+    }
+    let version = std::process::Command::new(bwrap)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|v| !v.is_empty());
+    let binds = match version.as_deref().and_then(parse_version) {
+        Some(v) if v >= (0, 10) => Binds::Fd,
+        _ => Binds::Path,
+    };
+    if let Ok(mut s) = seen.lock() {
+        s.push((bwrap.to_path_buf(), binds, version.clone()));
+    }
+    (binds, version)
+}
+
+/// `bubblewrap 0.13.1` gives (0, 13).
+pub(crate) fn parse_version(v: &str) -> Option<(u32, u32)> {
+    let num = v
+        .split_whitespace()
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut it = num.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it
+        .next()?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Where a bound path in the view comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// A grant with the identity the node checked ([`Binds`]).
+    Checked(harness_core::folder::Identity),
+    /// A path no session can write (the system read set), bound as it is,
+    /// links followed, as Landlock grants it.
+    Host,
+    /// A top-level link of the host's (`/bin -> usr/bin`), made as a link
+    /// with the same target, which the view also holds.
+    Symlink(PathBuf),
+}
+
+/// One path of the file view, at the same path as on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    pub path: PathBuf,
+    pub write: bool,
+    pub source: Source,
+}
+
 /// A working bubblewrap and the form the probe found.
 #[derive(Debug, Clone)]
 pub struct Contain {
@@ -80,15 +201,30 @@ pub struct Contain {
     /// that `--unshare-net` fails here and `contain = "auto"` chose to
     /// contain without it.
     net_ns: bool,
+    /// How checked grants are bound (T.8c), from bubblewrap's version.
+    binds: Binds,
 }
 
 impl Contain {
     pub fn new(bwrap: PathBuf, form: Form) -> Self {
+        let (binds, _) = binds_of(&bwrap);
         Self {
             bwrap,
             form,
             net_ns: true,
+            binds,
         }
+    }
+
+    /// The same with the binds given (tests: the older bubblewrap's way on
+    /// a newer one).
+    pub fn with_binds(mut self, binds: Binds) -> Self {
+        self.binds = binds;
+        self
+    }
+
+    pub fn binds(&self) -> Binds {
+        self.binds
     }
 
     /// The same, never making a network namespace (the network-off gap).
@@ -120,10 +256,10 @@ impl Contain {
     /// the close-on-exec descriptor closes: whatever is at `exe` now, a
     /// command that can write there cannot replace its guard (review
     /// T8E-5). Without it (it could not be opened), `exe`. Its `argv[0]` is
-    /// `exe`, for `ps`. `sandbox-exec` inside the namespace is still started
-    /// from `exe` (there neither descriptor nor `/proc/self/exe` is the
-    /// node's); `sandbox::start` warns where a session can write it.
+    /// `exe`, for `ps`. `sandbox-exec` inside the namespace is started from
+    /// [`VIEW_EXE`], where the guard binds its own running image (T.8c).
     ///
+    /// The file view holds `view` and the fixed parts ([`Self::args`]).
     /// With `net_off` (`[sandbox] network = "off"`, decided by the node's
     /// [`crate::sandbox::Sandbox`], never per call) the command also gets a
     /// network namespace of its own (T.8b).
@@ -134,6 +270,7 @@ impl Contain {
         cwd: &Path,
         mark: Option<&Mark>,
         net_off: bool,
+        view: &[Mount],
     ) -> std::process::Command {
         use std::os::unix::process::CommandExt;
         let mut c = match image {
@@ -148,22 +285,31 @@ impl Contain {
         }
         c.arg("--")
             .arg(&self.bwrap)
-            .args(self.args(cwd, net_off))
-            .arg(exe);
+            .args(self.args(cwd, net_off, view))
+            .arg(VIEW_EXE);
         c
     }
 
-    /// `bwrap <args> -- <program>`, without the guard (tests, and the
-    /// measurement of what the guard costs).
+    /// `bwrap <args> -- <program>` with the host's whole file system (T.8a's
+    /// view, `--dev-bind / /`), without the guard: tests of the process
+    /// containment that do not need the file view.
     #[doc(hidden)]
     pub fn bwrap_command(&self, program: &Path, cwd: &Path) -> std::process::Command {
         let mut c = std::process::Command::new(&self.bwrap);
-        c.args(self.args(cwd, false)).arg(program);
+        c.args(["--die-with-parent", "--new-session", "--unshare-pid"])
+            .args(["--dev-bind", "/", "/"]);
+        if self.form == Form::Full {
+            c.args(["--proc", "/proc"]);
+        }
+        c.arg("--chdir").arg(cwd).arg("--").arg(program);
         c
     }
 
-    /// The arguments up to and including `--`.
-    fn args(&self, cwd: &Path, net_off: bool) -> Vec<OsString> {
+    /// The arguments up to and including `--`: the namespaces and the file
+    /// view (T.8c). The view's mounts are bound in `view`'s order (a folder
+    /// before what is inside it); the root is made read-only last, so
+    /// nothing outside the mounts can be created in it.
+    fn args(&self, cwd: &Path, net_off: bool, view: &[Mount]) -> Vec<OsString> {
         let mut a: Vec<OsString> = [
             // Through PR_SET_PDEATHSIG: bwrap dies with its guard (a
             // single-threaded process), and bwrap's init dies with bwrap.
@@ -173,17 +319,61 @@ impl Contain {
             // process group the node sends the graceful SIGTERM to.
             "--new-session",
             "--unshare-pid",
-            // The file system as it is; Landlock inside decides.
-            "--dev-bind",
-            "/",
-            "/",
         ]
         .iter()
         .map(OsString::from)
         .collect();
+        // `/proc`: the namespace's own, or where a fresh one cannot be
+        // mounted the outer one, bound as T.8a had it inside `/`.
         if self.form == Form::Full {
             a.extend(["--proc", "/proc"].map(OsString::from));
+        } else {
+            a.extend(["--dev-bind", "/proc", "/proc"].map(OsString::from));
         }
+        // A private `/dev` (null, zero, full, random, urandom, tty, a pts
+        // instance of its own, shm in the view's tmpfs): no host device.
+        // An empty `/tmp`: the command's temp folder is `TMPDIR`.
+        a.extend(["--dev", "/dev", "--dir", "/tmp"].map(OsString::from));
+        for m in view {
+            let path = m.path.as_os_str().to_owned();
+            match (&m.source, self.binds) {
+                (Source::Symlink(target), _) => {
+                    a.push("--symlink".into());
+                    a.push(target.as_os_str().to_owned());
+                    a.push(path);
+                }
+                (Source::Checked(id), Binds::Fd) => {
+                    a.push(if m.write { "--bind-fd" } else { "--ro-bind-fd" }.into());
+                    a.push(format!("{FD_TOKEN}{}:{}", id.dev, id.ino).into());
+                    a.push(path);
+                }
+                (Source::Checked(_), Binds::Path) => {
+                    a.push(if m.write { "--bind" } else { "--ro-bind" }.into());
+                    a.push(path.clone());
+                    a.push(path);
+                }
+                (Source::Host, _) => {
+                    a.push(
+                        if m.write {
+                            "--bind-try"
+                        } else {
+                            "--ro-bind-try"
+                        }
+                        .into(),
+                    );
+                    a.push(path.clone());
+                    a.push(path);
+                }
+            }
+        }
+        // The node's own image, last: nothing granted can cover it.
+        a.push(match self.binds {
+            Binds::Fd => "--ro-bind-fd".into(),
+            Binds::Path => "--ro-bind".into(),
+        });
+        a.push(IMAGE_TOKEN.into());
+        a.push(VIEW_EXE.into());
+        a.extend(["--remount-ro", "/"].map(OsString::from));
         // `net_off` is the node's `Sandbox`'s decision: its setting, and
         // whether this node is in the network-off gap (review T8B-1).
         if net_off {
@@ -269,28 +459,6 @@ pub(crate) fn trusted(file: &Path) -> Result<(), String> {
         at = p.parent();
     }
     Ok(())
-}
-
-/// The script the probe runs inside the namespace: `$$` is 2 only in a new
-/// PID namespace (bwrap's init is 1, the shell 2); with `own_proc`,
-/// `/proc/self` must be that same 2, so `/proc` is the namespace's own;
-/// with `own_net`, its network namespace (`/proc/self/ns/net`, the
-/// reader's own in either form of `/proc`) must be another than `$2`, the
-/// node's. By identity, not by the interface list: a kernel with a tunnel
-/// module puts `tunl0`, `sit0` and the like into every new namespace
-/// (review T8B-2).
-pub(crate) fn probe_script(own_proc: bool, own_net: bool) -> String {
-    let mut s = String::from("cat \"$1\" >/dev/null || exit 2; [ \"$$\" = 2 ] || exit 4;");
-    if own_proc {
-        s.push_str(" read -r p _ </proc/self/stat; [ \"$p\" = 2 ] || exit 5;");
-    }
-    if own_net {
-        // An unreadable link is no proof either.
-        s.push_str(
-            " n=$(readlink /proc/self/ns/net) && [ -n \"$n\" ] && [ \"$n\" != \"$2\" ] || exit 6;",
-        );
-    }
-    s
 }
 
 /// The host pid of the namespace's init, bwrap's only child (it is also
@@ -930,17 +1098,17 @@ mod tests {
     #[test]
     fn the_shared_proc_form_mounts_no_proc() {
         let full = Contain::new("/usr/bin/bwrap".into(), Form::Full);
-        let a = full.args(Path::new("/w"), false);
+        let a = full.args(Path::new("/w"), false, &[]);
         assert!(a.windows(2).any(|w| w[0] == "--proc" && w[1] == "/proc"));
         assert!(a.iter().any(|x| x == "--die-with-parent"));
         assert!(a.iter().any(|x| x == "--new-session"));
         assert_eq!(a.last().unwrap(), "--");
         let shared = Contain::new("/usr/bin/bwrap".into(), Form::SharedProc);
+        let a = shared.args(Path::new("/w"), false, &[]);
+        assert!(!a.iter().any(|x| x == "--proc"));
         assert!(
-            !shared
-                .args(Path::new("/w"), false)
-                .iter()
-                .any(|x| x == "--proc")
+            a.windows(3)
+                .any(|w| w[0] == "--dev-bind" && w[1] == "/proc" && w[2] == "/proc")
         );
     }
 
@@ -951,16 +1119,70 @@ mod tests {
         for form in [Form::Full, Form::SharedProc] {
             let c = Contain::new("/usr/bin/bwrap".into(), form);
             assert!(
-                !c.args(Path::new("/w"), false)
+                !c.args(Path::new("/w"), false, &[])
                     .iter()
                     .any(|x| x == "--unshare-net")
             );
-            let off = c.args(Path::new("/w"), true);
+            let off = c.args(Path::new("/w"), true, &[]);
             let at = off.iter().position(|x| x == "--unshare-net").unwrap();
             assert!(at < off.len() - 1 && off.last().unwrap() == "--");
         }
-        assert!(probe_script(true, true).contains("/proc/self/ns/net"));
-        assert!(!probe_script(true, false).contains("/proc/self/ns/net"));
-        assert!(!probe_script(true, true).contains("/proc/net/dev"));
+    }
+
+    /// T.8c: the host's root is never bound; each mount is bound at its own
+    /// path, a checked one by descriptor (newer bubblewrap) or by path
+    /// (older), the image last, then the root made read-only.
+    #[test]
+    fn the_view_binds_only_what_it_is_given() {
+        let id = harness_core::folder::Identity { dev: 7, ino: 42 };
+        let view = [
+            Mount {
+                path: "/usr".into(),
+                write: false,
+                source: Source::Host,
+            },
+            Mount {
+                path: "/bin".into(),
+                write: false,
+                source: Source::Symlink("usr/bin".into()),
+            },
+            Mount {
+                path: "/h/ws".into(),
+                write: true,
+                source: Source::Checked(id),
+            },
+        ];
+        for binds in [Binds::Fd, Binds::Path] {
+            let c = Contain::new("/usr/bin/bwrap".into(), Form::Full).with_binds(binds);
+            let a = c.args(Path::new("/h/ws"), false, &view);
+            let s: Vec<&str> = a.iter().map(|x| x.to_str().unwrap()).collect();
+            assert!(
+                !s.windows(2).any(|w| w[1] == "/" && w[0].contains("bind")),
+                "{s:?}"
+            );
+            assert!(
+                s.windows(3).any(|w| w == ["--ro-bind-try", "/usr", "/usr"]),
+                "{s:?}"
+            );
+            assert!(
+                s.windows(3).any(|w| w == ["--symlink", "usr/bin", "/bin"]),
+                "{s:?}"
+            );
+            let ws = match binds {
+                Binds::Fd => ["--bind-fd", "@rizzy-fd:7:42", "/h/ws"],
+                Binds::Path => ["--bind", "/h/ws", "/h/ws"],
+            };
+            assert!(s.windows(3).any(|w| w == ws), "{s:?}");
+            let img = s.iter().position(|x| *x == IMAGE_TOKEN).unwrap();
+            assert_eq!(s[img + 1], VIEW_EXE);
+            let ro = s
+                .windows(2)
+                .position(|w| w == ["--remount-ro", "/"])
+                .unwrap();
+            assert!(ro > img, "{s:?}");
+        }
+        assert_eq!(parse_version("bubblewrap 0.13.1"), Some((0, 13)));
+        assert_eq!(parse_version("bubblewrap 0.9.0"), Some((0, 9)));
+        assert_eq!(parse_version("nonsense"), None);
     }
 }
