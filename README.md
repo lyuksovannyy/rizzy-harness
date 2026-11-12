@@ -772,25 +772,41 @@ a command notices:
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
-**Network off.** With `network = "off"` a contained command also runs in a
-network namespace of its own: it has only its own loopback (`lo`), so no
-TCP, UDP or DNS reaches this machine's other addresses, its loopback
-services or anywhere else, and it cannot reach this machine's abstract Unix
-sockets (an X11 display, some D-Bus and IDE sockets), which belong to the
-network namespace. Landlock still refuses every TCP connect and bind inside
-it, its own loopback included, as before: a test server on `127.0.0.1`
-cannot be started with the network off; UDP to itself on `127.0.0.1` works.
-DNS lookups fail (`/etc/hosts` still answers). Where bubblewrap runs but
-cannot make a network namespace (the node's probe at start finds out),
-`contain = "required"` refuses with bubblewrap's error, and `"auto"` still
-contains every command (its own processes, the guard, Landlock inside)
-without the namespace: TCP is stopped by Landlock, but UDP and DNS go out,
-and abstract sockets are closed only from Linux 6.12 (Landlock ABI 6);
-`doctor` and the log mark the line `warn` ("network off WITH A GAP") and
-name bubblewrap's error. **Without the containment**
-(`"auto"`'s fallback, `contain = "off"`) and for graphify and the node's own
-git, `network = "off"` stops TCP only: **UDP and DNS still go out**, and
-`doctor` and the log say so on the containment line.
+**Network off.** `network = "off"` is about the node's shell (and
+graphify and the node's own git); the agent's web tools (`web_search`,
+`web_fetch`) are not affected: they have their own settings, `[web]` under
+"Chats and web tools" above. With `network = "off"` a contained command
+also runs in a network namespace of its own: it has only its own loopback
+(`lo`), so no TCP, UDP or DNS from it reaches this machine's other
+addresses, its loopback services or anywhere else, and it cannot reach
+this machine's abstract Unix sockets (an X11 display, some D-Bus and IDE
+sockets), which belong to the network namespace. Landlock still refuses
+every TCP connect and bind inside it, its own loopback included, as
+before: a test server on `127.0.0.1` cannot be started with the network
+off; UDP to itself on `127.0.0.1` works. DNS lookups over the network fail
+(`/etc/hosts` still answers). Not tested: a resolver that answers over a
+named Unix socket (systemd-resolved's, nscd's) is outside the namespace,
+and below Linux 7.1 (Landlock ABI 9) a command can still connect to such a
+socket and have names looked up for it, until the file view (T.8c) leaves
+it out; the containment line is a warning there already.
+
+The node checks at start that a command really gets a namespace of its
+own (its `/proc/self/ns/net` is not the node's). Where bubblewrap works but
+fails with `--unshare-net`, the node tries once more; if it fails again,
+`contain = "required"` refuses with bubblewrap's own error (restart the
+node to probe again), and `"auto"` still contains every command (its own
+processes, the guard, Landlock inside) without the namespace: TCP is
+stopped by Landlock, but UDP and DNS go out, and abstract sockets are
+closed only from Linux 6.12 (Landlock ABI 6). `doctor` and the start-up log
+mark the line `warn` ("network off WITH A GAP") with bubblewrap's error.
+Such a node probes again before a command, at most once a minute, and from
+the first probe that passes runs every command in a namespace of its own
+and logs one line saying so; it never goes back. After the start-up line
+nothing in the chat says a node is in that gap (planned: the chat shows
+the node's gaps). **Without the containment** (`"auto"`'s fallback,
+`contain = "off"`) and for graphify and the node's own git, `network =
+"off"` stops TCP only: **UDP and DNS still go out**, and `doctor` and the
+log say so on the containment line.
 
 It needs the `bubblewrap` package and unprivileged user namespaces. The
 node takes the first `bwrap` on its `PATH` that its own user cannot replace

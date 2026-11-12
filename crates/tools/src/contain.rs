@@ -184,7 +184,9 @@ impl Contain {
         if self.form == Form::Full {
             a.extend(["--proc", "/proc"].map(OsString::from));
         }
-        if net_off && self.net_ns {
+        // `net_off` is the node's `Sandbox`'s decision: its setting, and
+        // whether this node is in the network-off gap (review T8B-1).
+        if net_off {
             // T.8b: a network namespace with only its own loopback (which
             // bwrap brings up), so no UDP or DNS leaves either, which
             // Landlock's TCP rule inside does not cover. Abstract Unix
@@ -272,19 +274,20 @@ pub(crate) fn trusted(file: &Path) -> Result<(), String> {
 /// The script the probe runs inside the namespace: `$$` is 2 only in a new
 /// PID namespace (bwrap's init is 1, the shell 2); with `own_proc`,
 /// `/proc/self` must be that same 2, so `/proc` is the namespace's own;
-/// with `own_net`, `/proc/net/dev` (the reader's network namespace, in
-/// either form of `/proc`) must list `lo` and nothing else.
+/// with `own_net`, its network namespace (`/proc/self/ns/net`, the
+/// reader's own in either form of `/proc`) must be another than `$2`, the
+/// node's. By identity, not by the interface list: a kernel with a tunnel
+/// module puts `tunl0`, `sit0` and the like into every new namespace
+/// (review T8B-2).
 pub(crate) fn probe_script(own_proc: bool, own_net: bool) -> String {
     let mut s = String::from("cat \"$1\" >/dev/null || exit 2; [ \"$$\" = 2 ] || exit 4;");
     if own_proc {
         s.push_str(" read -r p _ </proc/self/stat; [ \"$p\" = 2 ] || exit 5;");
     }
     if own_net {
-        // Past the two header lines, one line per interface.
+        // An unreadable link is no proof either.
         s.push_str(
-            " n=0; { read -r _; read -r _; while IFS=': ' read -r i _; do \
-             [ \"$i\" = lo ] || exit 6; n=$((n+1)); done; } </proc/net/dev; \
-             [ \"$n\" = 1 ] || exit 6;",
+            " n=$(readlink /proc/self/ns/net) && [ -n \"$n\" ] && [ \"$n\" != \"$2\" ] || exit 6;",
         );
     }
     s
@@ -956,14 +959,8 @@ mod tests {
             let at = off.iter().position(|x| x == "--unshare-net").unwrap();
             assert!(at < off.len() - 1 && off.last().unwrap() == "--");
         }
-        // The gap `auto` chose at start: never the flag.
-        let gap = Contain::new("/usr/bin/bwrap".into(), Form::Full).without_network_namespace();
-        assert!(
-            !gap.args(Path::new("/w"), true)
-                .iter()
-                .any(|x| x == "--unshare-net")
-        );
-        assert!(probe_script(true, true).contains("/proc/net/dev"));
-        assert!(!probe_script(true, false).contains("/proc/net/dev"));
+        assert!(probe_script(true, true).contains("/proc/self/ns/net"));
+        assert!(!probe_script(true, false).contains("/proc/self/ns/net"));
+        assert!(!probe_script(true, true).contains("/proc/net/dev"));
     }
 }

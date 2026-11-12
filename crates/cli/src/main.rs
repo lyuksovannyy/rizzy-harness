@@ -604,6 +604,8 @@ fn start_sandbox(
         .sandbox
         .settings()
         .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
+    // A node in the network-off gap logs, once, that it left it (T8B-1).
+    harness_tools::sandbox::set_network_log(|l| tracing::info!("{l}"));
     let s = harness_tools::sandbox::start(
         &settings,
         dir,
