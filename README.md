@@ -764,8 +764,11 @@ a command notices:
   that sees it ends what was left before it returns and says so; if the
   node dies in that same moment, the node ends it at its next start and
   says so in the log ("ended a command a previous run of this node left
-  running"). A command the kernel cannot end yet is named at every start
-  until it has ended.
+  running"). One the kernel cannot end yet (stuck in I/O) is logged
+  "STILL ALIVE": it has been killed and ends when the kernel releases it.
+  A second node started on the same data directory leaves the running
+  node's commands alone; other parts of such a start still disturb it (its
+  temp folders are emptied), so never start two on one data directory.
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
