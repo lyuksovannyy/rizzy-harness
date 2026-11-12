@@ -607,7 +607,7 @@ async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
     assert_eq!(required.contain_level, ContainLevel::Refused);
     let why = required.refusal.unwrap();
     assert!(
-        why.contains("bubblewrap failed with --unshare-net")
+        why.contains("the probe with --unshare-net failed")
             && why.contains("Operation not permitted"),
         "{why}"
     );
@@ -812,9 +812,15 @@ async fn a_node_in_the_gap_takes_the_namespace_once_bubblewrap_makes_one() {
     assert!(out.contains(&host_ns()), "{out}");
     assert_eq!(arrived(std::slice::from_ref(&host))[0], ["gap"], "{out}");
 
-    // bubblewrap makes namespaces again; after the interval the node uses one.
+    // bubblewrap makes namespaces again. After the interval the next
+    // command starts the probe beside it, in the gap (re-check R-2: it does
+    // not wait); the commands started once it passed get the namespace.
     std::fs::remove_file(&flag).unwrap();
     tokio::time::sleep(retry + Duration::from_millis(200)).await;
+    let out = run_in(&f, &s.confinement, &send_cmd(&host, "trigger")).await;
+    assert!(out.contains("sent"), "{out}");
+    let _ = arrived(std::slice::from_ref(&host));
+    tokio::time::sleep(Duration::from_millis(1000)).await;
     for round in 0..2 {
         let out = run_in(&f, &s.confinement, &send_cmd(&host, "moved")).await;
         assert!(own_ns(&out), "round {round}: {out}");
