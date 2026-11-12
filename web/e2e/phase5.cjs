@@ -49,7 +49,10 @@ function fakeProvider() {
 
 (async () => {
   const fake = await fakeProvider();
-  const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7800'], { detached: true, stdio: 'ignore' });
+  // The fake provider listens on 127.0.0.1, a private address the server
+  // calls only when it is listed (6db12f8).
+  const env = { ...process.env, HARNESS_PLAIN_HTTP_HOSTS: '127.0.0.1' };
+  const srv = spawn(BIN, ['--data-dir', `${S}/data`, 'serve', '--bind', '127.0.0.1:7800'], { detached: true, stdio: 'ignore', env });
   try {
     const code = await claimCode(`${S}/data/claim-code`, URL_);
     const b = await chromium.launch();
@@ -76,16 +79,16 @@ function fakeProvider() {
     await p.click('button[aria-label="Test connection"]');
     await p.waitForSelector('.model-pick');
     log('models:', (await p.innerText('.model-pick ul')).replace(/\s+/g, ' '));
-    // Offer both models; fake-large is General's main model, so everyone's default.
+    // Offer both models; fake-large is Assistant's main model (General before 9c32186), so everyone's default.
     await p.check('.model-pick li:has-text("fake-small") input[type=checkbox]');
     await p.check('.model-pick li:has-text("fake-large") input[type=checkbox]');
     await p.click('button.agent-pick[aria-label$="(fake-large)"]');
-    await p.click('[role=menu] button[aria-label="General: main model"]');
+    await p.click('[role=menu] button[aria-label="Assistant: main model"]');
     await p.keyboard.press('Escape');
-    await p.waitForSelector('button.agent-pick[aria-label="For: General (fake-large)"]');
-    // Every offered model needs an agent: fake-small is General's fallback.
+    await p.waitForSelector('button.agent-pick[aria-label="For: Assistant (fake-large)"]');
+    // Every offered model needs an agent: fake-small is Assistant's fallback.
     await p.click('button.agent-pick[aria-label$="(fake-small)"]');
-    await p.click('[role=menu] button[aria-label="General: fallback"]');
+    await p.click('[role=menu] button[aria-label="Assistant: fallback"]');
     await p.keyboard.press('Escape');
     await p.screenshot({ path: `${S}/p5-1-provider.png` });
     await p.click('button.primary:has-text("Save and continue") >> visible=true');
