@@ -13,8 +13,10 @@ pub fn required() -> bool {
     std::env::var_os("HARNESS_REQUIRE_BWRAP").is_some_and(|v| v == "1")
 }
 
-/// `sb` with the full containment, as the node sets it up, or `None` (and
+/// `sb` with the full containment, as the node sets it up, or `sb` back (and
 /// a printed reason) where bubblewrap cannot contain a command here.
+/// (Both sides carry the sandbox back; a test helper, called once.)
+#[allow(clippy::result_large_err)]
 pub fn contained(sb: Sandbox, scratch: &Path) -> Result<Sandbox, Sandbox> {
     let why = match harness_tools::contain::find_bwrap() {
         Ok(bwrap) => {
