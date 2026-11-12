@@ -193,6 +193,26 @@ fn arrived(listeners: &[UdpSocket]) -> Vec<Vec<String>> {
 const INTERFACES: &str =
     "echo \"ifs=[$(sed -n 's/^ *\\([^:]*\\):.*/\\1/p' /proc/net/dev | tr '\\n' ' ')]\"; ";
 
+/// The network namespace the command is in, by identity (review T8B-2: the
+/// interface list is no proof; a kernel with a tunnel module puts `tunl0`
+/// and the like into every new namespace).
+const IDENTITY: &str = "echo \"ns=$(readlink /proc/self/ns/net)\"; ";
+
+/// What [`IDENTITY`] prints in this process's (the host's) namespace.
+fn host_ns() -> String {
+    format!(
+        "ns={}",
+        std::fs::read_link("/proc/self/ns/net")
+            .unwrap()
+            .to_string_lossy()
+    )
+}
+
+/// The command printed a namespace of its own, not the host's.
+fn own_ns(out: &str) -> bool {
+    out.contains("ns=net:[") && !out.contains(&host_ns())
+}
+
 // ---- UDP ----
 
 /// Network off: a datagram to the host's 127.0.0.1, `::1` or LAN address
@@ -247,7 +267,7 @@ async fn network_off_tcp_fails_and_only_loopback_is_there() {
             l
         })
         .collect();
-    let mut cmd = String::from(INTERFACES);
+    let mut cmd = format!("{INTERFACES}{IDENTITY}");
     for (i, l) in listeners.iter().enumerate() {
         let a = l.local_addr().unwrap();
         cmd.push_str(&format!(
@@ -262,6 +282,8 @@ async fn network_off_tcp_fails_and_only_loopback_is_there() {
         assert!(out.contains(&format!("refused {i}")), "{out}");
         assert!(l.accept().is_err(), "listener {i} got a connection: {out}");
     }
+    assert!(own_ns(&out), "not in a namespace of its own: {out}");
+    // The point of this test: nothing but its own loopback on this machine.
     assert!(
         out.contains("ifs=[lo ]"),
         "not only its own loopback: {out}"
@@ -296,19 +318,23 @@ try:
 except OSError as e:
     print("tcp-bind", type(e).__name__)
 "#;
-    let out = f.bash(sb, &format!("{INTERFACES} python3 -c '{py}'")).await;
-    assert!(out.contains("ifs=[lo ]"), "{out}");
+    let out = f.bash(sb, &format!("{IDENTITY} python3 -c '{py}'")).await;
+    assert!(own_ns(&out), "{out}");
     assert!(out.contains("udp-self self"), "loopback is not up: {out}");
     assert!(out.contains("tcp-bind PermissionError"), "{out}");
 }
 
 // ---- DNS ----
 
-/// Network off: a DNS lookup fails, and it cannot leave the machine: it
-/// runs only once the command is seen to have no interface but `lo` (on
-/// the old path the command prints `lookup-skipped` and this fails without
-/// sending anything). The name is under `.invalid` (RFC 6761) for good
-/// measure.
+/// Network off: what this proves is the namespace, with a lookup that
+/// sends nothing (review N-2). The lookup runs only once the command is
+/// seen to be in a namespace of its own with no interface but `lo`, so it
+/// cannot leave the machine (on the old path the command prints
+/// `lookup-skipped` and this fails without sending anything); and a name
+/// under `.invalid` (RFC 6761) fails on every machine anyway. Whether
+/// anything leaves is proved by the UDP test above, with a listener that
+/// would hear it; there is no way to test a real lookup here without
+/// leaving the machine.
 #[tokio::test]
 async fn network_off_dns_lookups_fail() {
     let f = fixture();
@@ -316,10 +342,12 @@ async fn network_off_dns_lookups_fail() {
         return;
     };
     let cmd = format!(
-        "{INTERFACES} if [ \"$(sed -n 's/^ *\\([^:]*\\):.*/\\1/p' /proc/net/dev)\" = lo ]; then \
+        "{IDENTITY}{INTERFACES} if [ \"$(readlink /proc/self/ns/net)\" != '{host}' ] && \
+         [ \"$(sed -n 's/^ *\\([^:]*\\):.*/\\1/p' /proc/net/dev)\" = lo ]; then \
          getent hosts rizzy-t8b-probe.invalid; echo \"lookup-exit=$?\"; \
          getent hosts localhost >/dev/null; echo \"files-exit=$?\"; \
-         else echo lookup-skipped; fi"
+         else echo lookup-skipped; fi",
+        host = host_ns().trim_start_matches("ns=")
     );
     let started = std::time::Instant::now();
     let out = f.bash(sb, &cmd).await;
@@ -410,7 +438,7 @@ async fn network_on_is_unchanged() {
     let (abs, name) = abstract_listener();
     let python = have_python();
     let probe = |tag: &str| {
-        let mut cmd = format!("{INTERFACES}{}", udp_probe(&listeners, tag));
+        let mut cmd = format!("{INTERFACES}{IDENTITY}{}", udp_probe(&listeners, tag));
         for (i, l) in tcp.iter().enumerate() {
             let a = l.local_addr().unwrap();
             cmd.push_str(&format!(
@@ -440,6 +468,7 @@ async fn network_on_is_unchanged() {
         assert!(after.contains(&format!("connected {i}")), "{after}");
     }
     assert!(!after.contains("ifs=[lo ]"), "{after}");
+    assert!(after.contains(&host_ns()), "{after}");
     assert!(!after.contains("abstract-ECONNREFUSED"), "{after}");
     drop(abs);
 }
@@ -560,12 +589,15 @@ async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
     ctx.protected = Arc::new(vec![f.data.clone()]);
     ctx.sandbox = auto.confinement.for_session("s1");
     let cmd = format!(
-        "echo self=$$; {INTERFACES} (exec 3<>/dev/tcp/127.0.0.1/{port}) && echo connected || \
+        "echo self=$$; {IDENTITY} (exec 3<>/dev/tcp/127.0.0.1/{port}) && echo connected || \
          echo refused"
     );
     let out = Bash.run(&ctx, json!({ "command": cmd })).await.output;
     assert!(out.contains("self=2"), "not in a PID namespace: {out}");
-    assert!(!out.contains("ifs=[lo ]"), "{out}");
+    assert!(
+        out.contains(&host_ns()),
+        "the gap is the host's namespace: {out}"
+    );
     assert!(
         out.contains("refused") && !out.contains("connected"),
         "{out}"
@@ -575,8 +607,247 @@ async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
     assert_eq!(required.contain_level, ContainLevel::Refused);
     let why = required.refusal.unwrap();
     assert!(
-        why.contains("network namespace") && why.contains("Operation not permitted"),
+        why.contains("bubblewrap failed with --unshare-net")
+            && why.contains("Operation not permitted"),
         "{why}"
     );
     assert!(matches!(required.confinement, Confinement::Refused(_)));
+}
+
+// ---- review T8B-1, T8B-2: the probe that chooses the namespace ----
+//
+// `docs/security-review/2026-11-T8b-network-off.md`. The stand-ins are the
+// real bubblewrap behind a script that changes one thing.
+
+fn stand_in(f: &Fixture, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = f.root.join(name);
+    std::fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// The node's start with `bwrap`, re-probing a gap after `retry`.
+fn start_node(
+    f: &Fixture,
+    network: Network,
+    contain: harness_tools::contain::ContainMode,
+    bwrap: &Path,
+    retry: Duration,
+) -> harness_tools::sandbox::Started {
+    harness_tools::sandbox::start_with_exe_retrying(
+        PathBuf::from(EXE),
+        &Settings {
+            network,
+            contain,
+            bwrap: Some(bwrap.to_path_buf()),
+            ..Default::default()
+        },
+        &f.data,
+        std::slice::from_ref(&f.data),
+        Path::new("/etc/rizzy/node.toml"),
+        retry,
+    )
+    .unwrap()
+}
+
+async fn run_in(f: &Fixture, c: &Confinement, cmd: &str) -> String {
+    let mut ctx = ToolCtx::new(&f.ws);
+    ctx.protected = Arc::new(vec![f.data.clone()]);
+    ctx.sandbox = c.clone().for_session("s1");
+    Bash.run(&ctx, json!({ "command": cmd })).await.output
+}
+
+fn udp_host() -> UdpSocket {
+    let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    s
+}
+
+/// A command that prints its namespace and sends `tag` to `host`.
+fn send_cmd(host: &UdpSocket, tag: &str) -> String {
+    let port = host.local_addr().unwrap().port();
+    format!("{IDENTITY} printf '{tag}' >/dev/udp/127.0.0.1/{port} && echo sent")
+}
+
+/// The stand-in that refuses `--unshare-net` while `flag` exists.
+fn refusing_while(f: &Fixture, flag: &Path) -> PathBuf {
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    stand_in(
+        f,
+        "bwrap-refuses-while-flagged",
+        &format!(
+            "for a; do if [ \"$a\" = --unshare-net ] && [ -e '{flag}' ]; then\n\
+             echo 'bwrap: Creating new namespace failed: Resource temporarily unavailable' >&2\n\
+             exit 1; fi; done\nexec '{real}' \"$@\"\n",
+            flag = flag.display(),
+            real = real.display()
+        ),
+    )
+}
+
+/// T8B-2: a fresh namespace that lists an interface besides `lo` (what a
+/// kernel with a tunnel module loaded makes: `tunl0`, `sit0`) is still a
+/// namespace of its own. The real bubblewrap with every option as given;
+/// only the list the node's probe script would read is one with `lo` and
+/// `tunl0`. Both `auto` and `required` end with the namespace.
+#[tokio::test]
+async fn an_extra_interface_in_a_new_namespace_still_counts_as_one() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    let sample = f.root.join("netdev-sample");
+    std::fs::write(
+        &sample,
+        "Inter-|   Receive |  Transmit\n face |bytes    packets\n    lo: 0 0 0 0 0 0 0 0 0 0 0 \
+         0 0 0 0 0\n tunl0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+    )
+    .unwrap();
+    let fake = stand_in(
+        &f,
+        "bwrap-extra-interface",
+        &format!(
+            "net=0; for a; do [ \"$a\" = --unshare-net ] && net=1; done\n\
+             if [ \"$net\" = 1 ]; then\n\
+             cp '{sample}' ./netdev\n\
+             n=$#; i=0\n\
+             while [ $i -lt $n ]; do a=$1; shift; i=$((i+1))\n\
+             case $a in *\"</proc/net/dev\"*) a=$(printf '%s' \"$a\" | sed 's|</proc/net/dev|<./netdev|');; esac\n\
+             set -- \"$@\" \"$a\"; done\nfi\nexec '{real}' \"$@\"\n",
+            sample = sample.display(),
+            real = real.display()
+        ),
+    );
+    for mode in [ContainMode::Auto, ContainMode::Required] {
+        let s = start_node(&f, Network::Off, mode, &fake, Duration::from_secs(60));
+        assert!(s.refusal.is_none(), "{mode:?}: {:?}", s.refusal);
+        assert!(
+            s.contain_summary.contains("a network namespace of its own")
+                && !s.contain_summary.contains("WITH A GAP"),
+            "{mode:?}: {}",
+            s.contain_summary
+        );
+        let host = udp_host();
+        let out = run_in(&f, &s.confinement, &send_cmd(&host, "extra")).await;
+        assert!(own_ns(&out), "{mode:?}: {out}");
+        assert!(arrived(&[host])[0].is_empty(), "{mode:?}: {out}");
+    }
+}
+
+/// T8B-1 (a): a with-namespace probe that fails at start for a moment (the
+/// stand-in fails its first two runs with `--unshare-net`, the two forms of
+/// one probe) is tried once more before the namespace is given up: the
+/// start ends with it.
+#[test]
+fn two_failed_probes_at_start_still_end_with_the_namespace() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    let count = f.root.join("count");
+    let fake = stand_in(
+        &f,
+        "bwrap-fails-twice",
+        &format!(
+            "n=$(cat '{count}' 2>/dev/null || echo 0)\n\
+             for a; do if [ \"$a\" = --unshare-net ] && [ \"$n\" -lt 2 ]; then\n\
+             echo $((n+1)) >'{count}'\n\
+             echo 'bwrap: Creating new namespace failed: Resource temporarily unavailable' >&2\n\
+             exit 1; fi; done\nexec '{real}' \"$@\"\n",
+            count = count.display(),
+            real = real.display()
+        ),
+    );
+    let s = start_node(
+        &f,
+        Network::Off,
+        ContainMode::Auto,
+        &fake,
+        Duration::from_secs(60),
+    );
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+    assert!(
+        s.contain_summary.contains("a network namespace of its own")
+            && !s.contain_summary.contains("WITH A GAP"),
+        "{}",
+        s.contain_summary
+    );
+}
+
+/// T8B-1 (b): a node in the gap moves to the namespace, once bubblewrap
+/// makes one, at the first contained command after the interval (injected
+/// here; 60 s in the node), and never back: with bubblewrap failing again
+/// later, the command does not run in the host's network.
+#[tokio::test]
+async fn a_node_in_the_gap_takes_the_namespace_once_bubblewrap_makes_one() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let flag = f.root.join("refuse");
+    std::fs::write(&flag, "").unwrap();
+    let fake = refusing_while(&f, &flag);
+    let retry = Duration::from_millis(1500);
+    let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, retry);
+    assert!(
+        s.contain_summary.contains("network off WITH A GAP"),
+        "{}",
+        s.contain_summary
+    );
+
+    // Within the interval: still the gap (the host hears it).
+    let host = udp_host();
+    let out = run_in(&f, &s.confinement, &send_cmd(&host, "gap")).await;
+    assert!(out.contains(&host_ns()), "{out}");
+    assert_eq!(arrived(std::slice::from_ref(&host))[0], ["gap"], "{out}");
+
+    // bubblewrap makes namespaces again; after the interval the node uses one.
+    std::fs::remove_file(&flag).unwrap();
+    tokio::time::sleep(retry + Duration::from_millis(200)).await;
+    for round in 0..2 {
+        let out = run_in(&f, &s.confinement, &send_cmd(&host, "moved")).await;
+        assert!(own_ns(&out), "round {round}: {out}");
+        assert!(
+            arrived(std::slice::from_ref(&host))[0].is_empty(),
+            "round {round}: {out}"
+        );
+    }
+
+    // bubblewrap fails again: the node does not move back to the gap.
+    std::fs::write(&flag, "").unwrap();
+    tokio::time::sleep(retry + Duration::from_millis(200)).await;
+    let out = run_in(&f, &s.confinement, &send_cmd(&host, "back")).await;
+    assert!(!out.contains(&host_ns()), "moved back to the gap: {out}");
+    assert!(arrived(&[host])[0].is_empty(), "{out}");
+}
+
+/// T8B-1: a node that started with the namespace never runs without it,
+/// whatever bubblewrap does later (no probe at run time can take it away).
+#[tokio::test]
+async fn a_node_with_the_namespace_never_loses_it() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let flag = f.root.join("refuse");
+    let fake = refusing_while(&f, &flag);
+    let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, Duration::ZERO);
+    assert!(
+        s.contain_summary.contains("a network namespace of its own"),
+        "{}",
+        s.contain_summary
+    );
+    std::fs::write(&flag, "").unwrap();
+    let host = udp_host();
+    let out = run_in(&f, &s.confinement, &send_cmd(&host, "lost")).await;
+    assert!(!out.contains(&host_ns()), "{out}");
+    assert!(arrived(&[host])[0].is_empty(), "{out}");
 }

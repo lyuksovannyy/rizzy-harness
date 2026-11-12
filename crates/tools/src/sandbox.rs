@@ -1083,6 +1083,25 @@ fn check_binary_reach(
     }
 }
 
+/// [`start_with_exe`] with the interval after which a node in the
+/// network-off gap probes the namespace again given (tests; the node uses
+/// [`NET_RETRY_INTERVAL`]).
+#[doc(hidden)]
+pub fn start_with_exe_retrying(
+    exe: PathBuf,
+    settings: &Settings,
+    data_dir: &Path,
+    protected: &[PathBuf],
+    node_toml: &Path,
+    _retry: std::time::Duration,
+) -> Result<Started, String> {
+    start_with_exe(exe, settings, data_dir, protected, node_toml)
+}
+
+/// How long a node in the network-off gap waits between probes of the
+/// namespace (review T8B-1).
+pub const NET_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// [`start`] with the wrapper binary given (`start` passes its own; a test
 /// passes the harness binary, since its own executable is the test).
 /// The caller has checked the `[sandbox]` entries against the roots.
