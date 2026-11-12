@@ -13,9 +13,12 @@
 //!
 //! **The guard** ([`crate::guard`], T.8e) is bubblewrap's parent and holds
 //! the command until it is dead: its stdin is one end of a socket pair
-//! whose other end only the node holds ([`ContainedChild`]). The channel
-//! closing, by the node to cancel or by the kernel when the node dies, is
-//! the kill order; the guard kills and repeats until it has reaped
+//! whose other end the node holds ([`ContainedChild`]; for the moment
+//! between `fork` and `exec`, so does every child the node forks). The
+//! channel closing, by the node to cancel or by the kernel when the node
+//! dies, is the kill order, and so is the guard's parent changing (review
+//! T8E-1: a child of the node waiting before `exec` keeps the channel
+//! open); the guard kills and repeats until it has reaped
 //! everything, and tells the node when it has, or that something is still
 //! alive. bubblewrap's `--die-with-parent` names the guard, so a guard that
 //! is itself killed takes the namespace with it, and [`sweep`] ends at the
@@ -87,17 +90,34 @@ impl Contain {
         &self.bwrap
     }
 
-    /// `<exe> sandbox-guard [--mark …] -- bwrap <args> -- <exe>`: the
-    /// guard, which starts bubblewrap in `cwd` (T.8e). `exe` is the harness
-    /// binary, resolved once at start, as for `sandbox-exec`.
+    /// `<exe> sandbox-guard --node <pid> [--mark …] -- bwrap <args> --
+    /// <exe>`: the guard, which starts bubblewrap in `cwd` (T.8e).
+    ///
+    /// The guard is started from `image`, a descriptor of the binary this
+    /// process holds for its life, opened when the first sandbox was made
+    /// (for the node, `/proc/self/exe`: its own running image), as
+    /// `/proc/self/fd/<n>`, resolved by `execve` in the forked child before
+    /// the close-on-exec descriptor closes: whatever is at `exe` now, a
+    /// command that can write there cannot replace its guard (review
+    /// T8E-5). Without it (it could not be opened), `exe`. Its `argv[0]` is
+    /// `exe`, for `ps`. `sandbox-exec` inside the namespace is still started
+    /// from `exe` (there neither descriptor nor `/proc/self/exe` is the
+    /// node's); `sandbox::start` warns where a session can write it.
     pub(crate) fn command(
         &self,
         exe: &Path,
+        image: Option<std::os::fd::RawFd>,
         cwd: &Path,
         mark: Option<&Mark>,
     ) -> std::process::Command {
-        let mut c = std::process::Command::new(exe);
-        c.arg(crate::guard::SUBCOMMAND);
+        use std::os::unix::process::CommandExt;
+        let mut c = match image {
+            Some(fd) => std::process::Command::new(format!("/proc/self/fd/{fd}")),
+            None => std::process::Command::new(exe),
+        };
+        c.arg0(exe).arg(crate::guard::SUBCOMMAND);
+        c.arg(crate::guard::NODE)
+            .arg(std::process::id().to_string());
         if let Some(m) = mark {
             m.push_args(&mut c);
         }
@@ -295,6 +315,23 @@ impl Mark {
     }
 }
 
+/// How long [`ContainedChild::stop`] waits for its guard's answer.
+/// The grace, the guard's bound, and 300 ms for a guard that is slow to
+/// answer: with [`STUCK_DRAIN`] it fits inside the agent loop's grace for a
+/// cancelled tool (`cli/tests/guard.rs` checks it against the real
+/// `TOOL_CANCEL_GRACE`), so its result is the one recorded (review T8E-3).
+pub const STOP_BOUND: std::time::Duration = crate::guard::TERM_GRACE
+    .saturating_add(crate::guard::CONFIRM_BOUND)
+    .saturating_add(std::time::Duration::from_millis(300));
+
+/// How long the sweep after an unconfirmed stop waits for what it killed
+/// (review T8E-2), inside the same budget.
+pub const SWEEP_IN_STOP: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// How long the bash tool waits for the output pipes after a stop that did
+/// not confirm the end (a process still alive holds them).
+pub const STUCK_DRAIN: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How a stop of a contained command ended, as its guard reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stopped {
@@ -329,7 +366,7 @@ impl ContainedChild {
     /// still alive [`crate::guard::CONFIRM_BOUND`] after the kill, or after
     /// a bound of its own when the guard does not answer at all.
     pub async fn stop(&mut self, graceful: bool) -> Stopped {
-        use crate::guard::{CONFIRM_BOUND, Report, TERM, TERM_GRACE};
+        use crate::guard::{Report, TERM};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let Some(mut ctl) = self.ctl.take() else {
             return Stopped::Unconfirmed("the stop was already ordered".into());
@@ -340,7 +377,7 @@ impl ContainedChild {
         }
         // The half-close is the order; the read half stays for the answer.
         let _ = ctl.shutdown().await;
-        let bound = TERM_GRACE + CONFIRM_BOUND + std::time::Duration::from_secs(1);
+        let bound = STOP_BOUND;
         let answer = tokio::time::timeout(bound, async move {
             let mut lines = tokio::io::BufReader::new(ctl).lines();
             while let Ok(Some(l)) = lines.next_line().await {
@@ -352,7 +389,7 @@ impl ContainedChild {
         })
         .await;
         match answer {
-            Ok(Some(Report::Ended(d))) => {
+            Ok(Some(Report::Ended(d, _))) => {
                 // It exits right after the report; reap it.
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(1), self.child.wait())
                     .await;
@@ -368,7 +405,10 @@ impl ContainedChild {
                     // A guard that exits on its own has reaped everything
                     // first (it ended with the command, just before the
                     // order): that is the confirmation.
-                    Ok(Ok(s)) if s.signal().is_none() => Stopped::Ended(started.elapsed()),
+                    // 125 is the guard's own failure, not that proof (N-6).
+                    Ok(Ok(s)) if s.signal().is_none() && s.code() != Some(125) => {
+                        Stopped::Ended(started.elapsed())
+                    }
                     Ok(Ok(s)) => {
                         Stopped::Unconfirmed(format!("its guard was killed without a report ({s})"))
                     }
@@ -376,10 +416,25 @@ impl ContainedChild {
                 }
             }
             Err(_) => Stopped::Unconfirmed(format!(
-                "its guard did not answer within {} s",
-                bound.as_secs()
+                "its guard did not answer within {:.1} s",
+                bound.as_secs_f64()
             )),
         }
+    }
+
+    /// After the guard exited on its own (the command's end, as the node
+    /// saw it): the report it left on the channel, if it was given a kill
+    /// order the node did not send (a signal to it, bubblewrap dying
+    /// first). `None` for an ordinary end.
+    pub async fn exit_report(&mut self) -> Option<crate::guard::Report> {
+        use tokio::io::AsyncBufReadExt;
+        let ctl = self.ctl.take()?;
+        let mut lines = tokio::io::BufReader::new(ctl).lines();
+        let line = tokio::time::timeout(std::time::Duration::from_millis(50), lines.next_line())
+            .await
+            .ok()?
+            .ok()??;
+        crate::guard::Report::parse(&line)
     }
 
     /// Wait for it and collect its output, like `Child::wait_with_output`,
@@ -445,31 +500,53 @@ pub async fn spawn_for_test(cmd: tokio::process::Command) -> std::io::Result<Con
 
 // ---- the sweep: what a dead node and a dead guard left ----
 
-/// A namespace [`sweep`] found and killed.
+/// What [`sweep`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// A namespace nothing alive holds (bubblewrap whose guard died, an
+    /// init whose bubblewrap died, or one a previous start killed and
+    /// recorded as not yet ended): killed.
+    Namespace,
+    /// A live guard of this node's data directory whose parent is not this
+    /// process (its node died while a child of it held the channel, review
+    /// T8E-1): told to kill (SIGTERM, its kill order).
+    Guard,
+}
+
+/// One thing [`sweep`] found and acted on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swept {
     pub pid: i32,
     pub session: String,
-    /// Gone within 2 s of the kill.
+    pub what: Left,
+    /// Gone within 2 s: the process and every child it was killed with have
+    /// no `/proc` entry, or are zombies, or their number now belongs to a
+    /// process started later. A killed init whose command line is empty
+    /// (released, waiting for a process the kernel cannot end yet) is not
+    /// gone (review T8E-4).
     pub ended: bool,
 }
 
 /// One `/proc` entry, as much as the sweep needs.
+#[derive(Clone)]
 struct Proc {
     pid: i32,
     ppid: i32,
     uid: u32,
+    /// Start time in clock ticks since boot: with the pid, it names one
+    /// process for good.
+    start: u64,
     argv: Vec<Vec<u8>>,
 }
 
 fn read_proc(pid: i32) -> Option<Proc> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let mut f = stat.rsplit(')').next()?.split_whitespace();
-    let state = f.next()?;
-    if matches!(state, "Z" | "X" | "x") {
+    let f: Vec<&str> = stat.rsplit(')').next()?.split_whitespace().collect();
+    if matches!(*f.first()?, "Z" | "X" | "x") {
         return None;
     }
-    let ppid = f.next()?.parse().ok()?;
+    let ppid = f.get(1)?.parse().ok()?;
+    let start = f.get(19)?.parse().ok()?;
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let uid = status
         .lines()
@@ -487,8 +564,15 @@ fn read_proc(pid: i32) -> Option<Proc> {
         pid,
         ppid,
         uid,
+        start,
         argv,
     })
+}
+
+/// Whether the process `pid` that started at `start` is gone: no entry, a
+/// zombie, or the number reused by a later process.
+fn gone(pid: i32, start: u64) -> bool {
+    read_proc(pid).is_none_or(|now| now.start != start)
 }
 
 impl Proc {
@@ -507,15 +591,17 @@ impl Proc {
     fn is_guard(&self) -> bool {
         self.argv.get(1).map(Vec::as_slice) == Some(crate::guard::SUBCOMMAND.as_bytes())
     }
+
+    fn session(&self) -> String {
+        self.value(crate::guard::MARK_SESSION)
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .unwrap_or_default()
+    }
 }
 
-/// The marked processes of this user that nothing alive holds: carrying
-/// `root`'s marker, not a guard, and whose parent does not carry it (a
-/// live guard, bubblewrap above its init, the init above `sandbox-exec`).
-/// What is left is bubblewrap whose guard died, or an init whose
-/// bubblewrap died, both orphans.
-fn orphans(root: &Path) -> Vec<Proc> {
-    let root = root.as_os_str().as_encoded_bytes();
+/// This user's processes carrying `root`'s marker (and, with `session`,
+/// that session's), this process excluded.
+fn marked(root: &[u8], session: Option<&str>) -> Vec<Proc> {
     let uid = nix::unistd::getuid().as_raw();
     let me = std::process::id() as i32;
     let Ok(dir) = std::fs::read_dir("/proc") else {
@@ -524,66 +610,197 @@ fn orphans(root: &Path) -> Vec<Proc> {
     dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|p| *p != me)
         .filter_map(read_proc)
-        .filter(|p| p.uid == uid && p.marked(root) && !p.is_guard())
-        .filter(|p| !read_proc(p.ppid).is_some_and(|parent| parent.marked(root)))
+        .filter(|p| p.uid == uid && p.marked(root))
+        .filter(|p| session.is_none_or(|s| p.session() == s))
         .collect()
+}
+
+/// What one sweep killed or told, and what to watch until it is gone.
+struct Acted {
+    pid: i32,
+    session: String,
+    what: Left,
+    /// The process and the children killed with it, by pid and start.
+    watch: Vec<(i32, u64)>,
+}
+
+/// Stop `p`, check it is still the one found, SIGKILL its children (its
+/// init first: T8A-2), then it. `None` when it is no longer that process.
+fn kill_orphan(p: &Proc, root: &[u8]) -> Option<Acted> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let pid = Pid::from_raw(p.pid);
+    kill(pid, Signal::SIGSTOP).ok()?;
+    match read_proc(p.pid) {
+        Some(now) if now.uid == p.uid && now.start == p.start && now.marked(root) => {}
+        _ => {
+            let _ = kill(pid, Signal::SIGCONT);
+            return None;
+        }
+    }
+    let mut watch = vec![(p.pid, p.start)];
+    let children =
+        std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", p.pid)).unwrap_or_default();
+    for c in children
+        .split_whitespace()
+        .filter_map(|c| c.parse::<i32>().ok())
+    {
+        if let Some(cp) = read_proc(c) {
+            watch.push((c, cp.start));
+        }
+        let _ = kill(Pid::from_raw(c), Signal::SIGKILL);
+    }
+    let _ = kill(pid, Signal::SIGKILL);
+    Some(Acted {
+        pid: p.pid,
+        session: p.session(),
+        what: Left::Namespace,
+        watch,
+    })
+}
+
+/// The orphans among `procs`: not a guard, and whose parent does not carry
+/// the marker (a live guard, bubblewrap above its init, the init above
+/// `sandbox-exec`).
+fn orphans<'a>(procs: &'a [Proc], root: &'a [u8]) -> impl Iterator<Item = &'a Proc> {
+    procs
+        .iter()
+        .filter(|p| !p.is_guard())
+        .filter(move |p| !read_proc(p.ppid).is_some_and(|parent| parent.marked(root)))
+}
+
+/// Wait up to `within` for everything in `acted` to be gone (none of it is this
+/// process's child: its reaper reaps it), and say which is.
+fn settle(acted: Vec<Acted>, within: std::time::Duration) -> Vec<(Acted, bool)> {
+    let done = |a: &Acted| a.watch.iter().all(|(p, s)| gone(*p, *s));
+    let by = std::time::Instant::now() + within;
+    while std::time::Instant::now() < by && !acted.iter().all(done) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    acted
+        .into_iter()
+        .map(|a| {
+            let d = done(&a);
+            (a, d)
+        })
+        .collect()
+}
+
+/// Where a start records what it killed and could not see end: beside the
+/// temp root, in the data directory (the temp root is emptied at start).
+fn leftovers_file(root: &Path) -> Option<PathBuf> {
+    Some(root.parent()?.join("sandbox-leftovers"))
 }
 
 /// At the node's start, before it serves (T.8e's second line): end every
 /// namespace a dead node left behind, found by the marker naming this
 /// node's temp root `root` (inside its data directory) among this user's
-/// own processes in `/proc`. A process without the marker, with another
-/// node's, or held by a live guard (one is its parent) is never touched; a
-/// process that carries this node's marker of its own accord is killed
-/// with them (only this user's processes can, and the marker names this
-/// node). Each is stopped and checked again before the kill, so a number
-/// reused in between is left alone; its init (bubblewrap's child) is
-/// killed first, then it.
+/// own processes in `/proc`, and tell every guard of this data directory
+/// whose parent is not this process to kill (SIGTERM). A process without
+/// the marker, with another node's, or held by a guard of this process is
+/// never touched; a process that carries this node's marker of its own
+/// accord is killed with them (only this user's processes can, and the
+/// marker names this node). Each orphan is stopped and checked again (same
+/// start time) before the kill, its init (bubblewrap's child) is killed
+/// first, then it. What is not gone 2 s later is recorded beside the temp
+/// root, killed again and named again at the next start, until it is.
 pub fn sweep(root: &Path) -> Vec<Swept> {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     let rb = root.as_os_str().as_encoded_bytes().to_vec();
-    let mut killed = Vec::new();
-    for p in orphans(root) {
-        let pid = Pid::from_raw(p.pid);
-        if kill(pid, Signal::SIGSTOP).is_err() {
+    let me = std::process::id() as i32;
+    let mut acted: Vec<Acted> = Vec::new();
+    // What an earlier start killed and did not see end.
+    let file = leftovers_file(root);
+    if let Some(text) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
+        for l in text.lines() {
+            let mut w = l.split_whitespace();
+            let (Some(pid), Some(start)) = (
+                w.next().and_then(|p| p.parse::<i32>().ok()),
+                w.next().and_then(|s| s.parse::<u64>().ok()),
+            ) else {
+                continue;
+            };
+            let session = w.next().unwrap_or_default().to_string();
+            if !gone(pid, start) {
+                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            }
+            acted.push(Acted {
+                pid,
+                session,
+                what: Left::Namespace,
+                watch: vec![(pid, start)],
+            });
+        }
+    }
+    let procs = marked(&rb, None);
+    for p in orphans(&procs, &rb) {
+        if acted.iter().any(|a| a.pid == p.pid) {
             continue;
         }
-        // Stopped, it cannot exit or exec; check it is still the one found.
-        match read_proc(p.pid) {
-            Some(now) if now.uid == p.uid && now.argv == p.argv && now.marked(&rb) => {}
-            _ => {
-                let _ = kill(pid, Signal::SIGCONT);
-                continue;
-            }
+        if let Some(a) = kill_orphan(p, &rb) {
+            acted.push(a);
         }
-        let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", p.pid))
-            .unwrap_or_default();
-        for c in children
-            .split_whitespace()
-            .filter_map(|c| c.parse::<i32>().ok())
-        {
-            let _ = kill(Pid::from_raw(c), Signal::SIGKILL);
+    }
+    for g in procs.iter().filter(|p| p.is_guard() && p.ppid != me) {
+        if kill(Pid::from_raw(g.pid), Signal::SIGTERM).is_ok() {
+            acted.push(Acted {
+                pid: g.pid,
+                session: g.session(),
+                what: Left::Guard,
+                watch: vec![(g.pid, g.start)],
+            });
         }
-        let _ = kill(pid, Signal::SIGKILL);
-        let session = p
-            .value(crate::guard::MARK_SESSION)
-            .map(|s| String::from_utf8_lossy(s).into_owned())
-            .unwrap_or_default();
-        killed.push((p, session));
     }
-    // Not this process's children: their reaper reaps them. Wait for that.
-    let by = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let gone = |p: &Proc| read_proc(p.pid).is_none_or(|now| now.argv != p.argv);
-    while std::time::Instant::now() < by && !killed.iter().all(|(p, _)| gone(p)) {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    let settled = settle(acted, std::time::Duration::from_secs(2));
+    if let Some(f) = &file {
+        let keep: String = settled
+            .iter()
+            .filter(|(a, done)| !done && a.what == Left::Namespace)
+            .flat_map(|(a, _)| {
+                a.watch
+                    .iter()
+                    .filter(|(p, s)| !gone(*p, *s))
+                    .map(|(p, s)| format!("{p} {s} {}\n", a.session))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if keep.is_empty() {
+            let _ = std::fs::remove_file(f);
+        } else {
+            let _ = std::fs::write(f, keep);
+        }
     }
-    killed
+    settled
         .into_iter()
-        .map(|(p, session)| Swept {
-            ended: gone(&p),
-            pid: p.pid,
-            session,
+        .map(|(a, ended)| Swept {
+            pid: a.pid,
+            session: a.session,
+            what: a.what,
+            ended,
+        })
+        .collect()
+}
+
+/// While the node runs (review T8E-2): end what a guard of `mark`'s session
+/// left when it died before it could (a signal in its first millisecond),
+/// or did not answer. Only orphans: a namespace under a live guard (another
+/// command of the same session) is never touched, and no guard is
+/// signalled. Blocks up to `within` when what it killed does not end.
+pub fn sweep_session(mark: &Mark, within: std::time::Duration) -> Vec<Swept> {
+    let rb = mark.root.as_os_str().as_encoded_bytes().to_vec();
+    let session = mark.session.to_string_lossy().into_owned();
+    let procs = marked(&rb, Some(&session));
+    let acted: Vec<Acted> = orphans(&procs, &rb)
+        .filter_map(|p| kill_orphan(p, &rb))
+        .collect();
+    settle(acted, within)
+        .into_iter()
+        .map(|(a, ended)| Swept {
+            pid: a.pid,
+            session: a.session,
+            what: a.what,
+            ended,
         })
         .collect()
 }

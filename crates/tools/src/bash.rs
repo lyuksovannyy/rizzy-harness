@@ -121,9 +121,25 @@ async fn pump<R: AsyncRead + Unpin>(
     }
 }
 
+/// What [`crate::contain::sweep_session`] found, for the tool result.
+fn sweep_note(found: &[crate::contain::Swept]) -> String {
+    if found.is_empty() {
+        return "the node found nothing of it outside a live guard".into();
+    }
+    let ended = found.iter().filter(|s| s.ended).count();
+    let alive = found.len() - ended;
+    let mut t = format!("the node ended {ended} namespace(s) it left");
+    if alive > 0 {
+        t.push_str(&format!(
+            ", and {alive} is still alive after the kill (the kernel cannot end it yet)"
+        ));
+    }
+    t
+}
+
 #[derive(Debug, PartialEq)]
 enum End {
-    Exited(Option<i32>),
+    Exited(Option<std::process::ExitStatus>),
     Cancelled,
     TimedOut,
 }
@@ -203,28 +219,12 @@ impl Tool for Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        // The spawn is raced against the cancel and the timeout (review
-        // N-2); it no longer waits on anything shared (T.8e: no spawner
-        // thread), and a contained command's guard starts in `/`.
+        // The spawn is a `fork` and `exec` on this thread; a contained
+        // command's guard starts in `/`, so it does not wait on the session's
+        // folder (the folder was resolved above, in this task).
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
-        let spawned = tokio::select! {
-            r = crate::sandbox::Confinement::spawn(cmd, contained) => r,
-            _ = ctx.cancel.cancelled() => {
-                return ToolOutcome {
-                    ok: false,
-                    output: "[cancelled before the command started]".into(),
-                    ..Default::default()
-                };
-            }
-            _ = &mut deadline => {
-                return ToolOutcome::err(format!(
-                    "the command did not start within {}s",
-                    timeout.as_secs()
-                ));
-            }
-        };
-        let mut child = match spawned {
+        let mut child = match crate::sandbox::Confinement::spawn(cmd, contained).await {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
         };
@@ -279,9 +279,7 @@ impl Tool for Bash {
                         }
                     }
                 }
-                status = child.wait() => {
-                    break End::Exited(status.ok().and_then(|s| s.code()));
-                }
+                status = child.wait() => break End::Exited(status.ok()),
                 _ = ctx.cancel.cancelled() => break End::Cancelled,
                 _ = &mut deadline => break End::TimedOut,
             }
@@ -289,14 +287,83 @@ impl Tool for Bash {
 
         // Contained: the guard's report of the stop (T.8e). A command that
         // exited needs none: its guard exits only after it has reaped
-        // everything the command started.
+        // everything the command started, unless it was killed itself.
         let mut stopped = None;
+        let mut guard_note = None;
         if let ShellChild::Contained(c) = &mut child {
-            if matches!(end, End::Cancelled | End::TimedOut) {
-                // The graceful stop first (SIGTERM to the command's session,
-                // the guard's 2 s grace), then the kill, repeated until the
-                // guard has reaped the namespace or reports it still alive.
-                stopped = Some(c.stop(true).await);
+            use crate::guard::{By, Report};
+            use std::os::unix::process::ExitStatusExt;
+            let killed = match &end {
+                End::Exited(Some(st)) => st.signal(),
+                _ => None,
+            };
+            match (&end, killed) {
+                (End::Cancelled | End::TimedOut, _) => {
+                    // The graceful stop first (SIGTERM to the command's
+                    // session, the guard's 2 s grace), then the kill, repeated
+                    // until the guard has reaped the namespace or reports it
+                    // still alive.
+                    stopped = Some(c.stop(true).await);
+                }
+                (_, Some(sig)) => {
+                    guard_note = Some(format!(
+                        "[its guard was killed (signal {sig}) before it confirmed the end"
+                    ));
+                }
+                _ => match c.exit_report().await {
+                    Some(Report::Ended(_, By::Signal)) => {
+                        guard_note = Some(
+                            "[stopped: its guard was told to stop (a signal to the guard) and \
+                             killed everything the command started; this is not the command's \
+                             own exit]"
+                                .into(),
+                        );
+                    }
+                    Some(Report::Ended(_, By::Bwrap)) => {
+                        guard_note = Some(
+                            "[bubblewrap was killed by a signal before its command ended; \
+                             the guard killed what was left]"
+                                .into(),
+                        );
+                    }
+                    _ => {}
+                },
+            }
+            // The guard died, or did not answer: what it left is ended here
+            // and now, not at the node's next start (review T8E-2). Only
+            // orphans of this session; a namespace under a live guard (this
+            // one's, if it is frozen; another command's) is never touched.
+            let within = if killed.is_some() {
+                Some(Duration::from_secs(2))
+            } else if matches!(stopped, Some(crate::contain::Stopped::Unconfirmed(_))) {
+                Some(crate::contain::SWEEP_IN_STOP)
+            } else {
+                None
+            };
+            if let (Some(within), Some(mark)) = (within, ctx.sandbox.mark()) {
+                let found = tokio::task::spawn_blocking(move || {
+                    crate::contain::sweep_session(&mark, within)
+                })
+                .await
+                .unwrap_or_default();
+                let what = sweep_note(&found);
+                match &mut stopped {
+                    Some(crate::contain::Stopped::Unconfirmed(why)) => {
+                        why.push_str("; ");
+                        why.push_str(&what);
+                    }
+                    _ => {
+                        if let Some(n) = &mut guard_note {
+                            n.push_str("; ");
+                            n.push_str(&what);
+                        }
+                    }
+                }
+            }
+            if let Some(n) = &mut guard_note
+                && !n.ends_with(']')
+            {
+                n.push(']');
             }
         } else if let Some(pgid) = pgid {
             match end {
@@ -327,7 +394,7 @@ impl Tool for Bash {
         // report reaches the loop inside its grace for a cancelled tool.
         let drain = match stopped {
             Some(crate::contain::Stopped::Ended(_)) | None => Duration::from_secs(2),
-            Some(_) => Duration::from_millis(100),
+            Some(_) => crate::contain::STUCK_DRAIN,
         };
         let _ = tokio::time::timeout(drain, async {
             while let Some((stream, s)) = rx.recv().await {
@@ -365,10 +432,20 @@ impl Tool for Bash {
             _ => cap(combined),
         };
         match end {
-            End::Exited(code) => {
+            End::Exited(status) => {
                 if output.is_empty() {
                     output = "(no output)".into();
                 }
+                if let Some(note) = guard_note {
+                    // Not the command's own exit: no exit code to report.
+                    return ToolOutcome {
+                        ok: false,
+                        output: format!("{output}\n{note}"),
+                        truncated,
+                        ..Default::default()
+                    };
+                }
+                let code = status.and_then(|s| s.code());
                 let code_str = code.map_or("signal".to_string(), |c| c.to_string());
                 ToolOutcome {
                     ok: code == Some(0),
@@ -406,7 +483,14 @@ impl Tool for Bash {
                             &how
                         }
                     ),
-                    _ => format!("[{how}: process group killed]"),
+                    // Contained: a namespace, killed, and its end confirmed.
+                    Some(crate::contain::Stopped::Ended(d)) => format!(
+                        "[{how}: the command and everything it started were killed; its guard \
+                         confirmed the end ({} ms)]",
+                        d.as_millis()
+                    ),
+                    // Not contained: a process group, unconfirmed.
+                    None => format!("[{how}: process group killed]"),
                 };
                 ToolOutcome {
                     ok: false,

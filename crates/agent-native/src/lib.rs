@@ -1924,9 +1924,21 @@ impl NativeBackend {
                 }
                 o
             }
-            Step::Cancelled => ToolOutcome::err("[cancelled]"),
+            // The tool did not return within its grace after the cancel and
+            // was abandoned: nobody confirmed that what it started has ended
+            // (review T8E-3), so the result does not say it was cancelled.
+            Step::Cancelled => ToolOutcome::err(abandoned_note()),
         }
     }
+}
+
+/// What a tool abandoned at `TOOL_CANCEL_GRACE` records.
+fn abandoned_note() -> String {
+    format!(
+        "[stop ordered; the tool did not return within {} s and was abandoned: whether what it \
+         started has ended is not known]",
+        TOOL_CANCEL_GRACE.as_secs()
+    )
 }
 
 #[cfg(test)]
@@ -2964,6 +2976,21 @@ mod tests {
             .await
             .expect("a tool that ignores cancel held the turn");
         assert_eq!(out.reason, TurnEndReason::Cancelled);
+        // Abandoned, not confirmed: the result does not claim an end
+        // (review T8E-3).
+        let finished: Vec<String> = host
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), 1, "{finished:?}");
+        assert!(!finished[0].contains("[cancelled"), "{}", finished[0]);
+        assert!(finished[0].contains("abandoned"), "{}", finished[0]);
     }
 
     /// A host whose log refuses one kind of event, as a full disk would.

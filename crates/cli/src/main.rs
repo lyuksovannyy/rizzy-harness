@@ -636,17 +636,36 @@ fn start_sandbox(
         // end (a guard killed in the moment before bubblewrap's init set
         // its death signal; T.8e).
         for w in harness_tools::contain::sweep(root) {
-            tracing::warn!(
-                "shell containment: ended a command a previous run of this node left running \
-                 (pid {}, session {}){}",
-                w.pid,
-                w.session,
-                if w.ended {
-                    ""
-                } else {
-                    "; it is still alive 2 s after the kill"
-                }
-            );
+            use harness_tools::contain::Left;
+            match (w.what, w.ended) {
+                (Left::Namespace, true) => tracing::warn!(
+                    "shell containment: ended a command a previous run of this node left \
+                     running (pid {}, session {})",
+                    w.pid,
+                    w.session
+                ),
+                (Left::Namespace, false) => tracing::error!(
+                    "shell containment: killed a command a previous run of this node left \
+                     running (pid {}, session {}), and it is STILL ALIVE 2 s after the kill \
+                     (the kernel cannot end it yet: it waits on I/O); it is named again at \
+                     the next start until it has ended",
+                    w.pid,
+                    w.session
+                ),
+                (Left::Guard, true) => tracing::warn!(
+                    "shell containment: told the guard of a previous run of this node to stop \
+                     (pid {}, session {}); its command has ended",
+                    w.pid,
+                    w.session
+                ),
+                (Left::Guard, false) => tracing::error!(
+                    "shell containment: told the guard of a previous run of this node to stop \
+                     (pid {}, session {}); it is still ending its command 2 s later (the \
+                     kernel cannot end it yet)",
+                    w.pid,
+                    w.session
+                ),
+            }
         }
         harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
     }

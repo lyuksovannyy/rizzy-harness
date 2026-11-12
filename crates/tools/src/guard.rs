@@ -2,19 +2,26 @@
 //! contained command, between the node and bubblewrap, that watches the
 //! command until it is dead.
 //!
-//! `rizzy-harness sandbox-guard [--mark <dir> --mark-session <key>] --
-//! <bwrap> <args…>`: the node starts it with stdin set to one end of a Unix
-//! socket pair whose other end only the node holds. The guard starts
-//! bubblewrap itself (stdin `/dev/null`, its own process group), gives it
-//! the command's stdout and stderr, keeps neither, and then waits on two
-//! things: its children, and the channel.
+//! `rizzy-harness sandbox-guard --node <pid> [--mark <dir> --mark-session
+//! <key>] -- <bwrap> <args…>`: the node starts it (from `/proc/self/exe`,
+//! its own running image) with stdin set to one end of a Unix socket pair
+//! whose other end the node holds. The guard starts bubblewrap itself
+//! (stdin `/dev/null`, its own process group), gives it the command's
+//! stdout and stderr, keeps neither, and then waits on its children, the
+//! channel, and its parent.
 //!
-//! **The channel closing is the kill order that cannot be lost.** The
-//! kernel closes it when the node dies in any way (`kill -9` included); the
-//! node half-closes it to cancel and keeps reading the answer. A [`TERM`]
-//! byte before the close asks for the graceful stop first: SIGTERM to the
-//! command's session, [`TERM_GRACE`], then the kill. SIGTERM, SIGINT or
-//! SIGHUP to the guard itself are kill orders too.
+//! **The kill order cannot be lost.** The channel closing is the fast
+//! path: the kernel closes it when the node dies and nothing else holds a
+//! copy; the node half-closes it to cancel and keeps reading the answer. A
+//! [`TERM`] byte before the close asks for the graceful stop first: SIGTERM
+//! to the command's session, [`TERM_GRACE`], then the kill. But a child of
+//! the node between `fork` and `exec` holds a copy of the node's end (one
+//! waiting in `chdir` into a folder that does not answer holds it for as
+//! long: review T8E-1), so the guard also looks at its parent: before it
+//! starts bubblewrap and at least every [`PARENT_LOOK`] after, a parent
+//! other than `--node` (the kernel reparents the guard when the node
+//! process dies, whoever holds descriptors) is the kill order. SIGTERM,
+//! SIGINT or SIGHUP to the guard itself are kill orders too.
 //!
 //! **"Nothing is left" is proved, not assumed.** The guard is a child
 //! subreaper (`PR_SET_CHILD_SUBREAPER`), so when bubblewrap dies before its
@@ -79,11 +86,45 @@ pub const CONFIRM_BOUND: Duration = Duration::from_secs(2);
 const REPEAT: Duration = Duration::from_millis(20);
 const REPEAT_STUCK: Duration = Duration::from_millis(500);
 
+/// How often the guard looks at its parent while nothing else wakes it
+/// (review T8E-1): the node's death is noticed within this, even when a
+/// child of the node holds a copy of the channel.
+pub const PARENT_LOOK: Duration = Duration::from_millis(500);
+
+/// The node's pid, in the guard's arguments: `getppid()` other than this
+/// is the kill order (review T8E-1).
+pub const NODE: &str = "--node";
+
+/// Who gave the kill order, when it was not the node through the channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum By {
+    /// The node: the channel closed, or a stop byte.
+    Node,
+    /// SIGTERM, SIGINT or SIGHUP to the guard.
+    Signal,
+    /// The guard's parent is no longer the node (the node died while a
+    /// child of it held the channel).
+    Parent,
+    /// bubblewrap died before its init: the guard ended what was left.
+    Bwrap,
+}
+
+impl By {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Signal => "signal",
+            Self::Parent => "parent",
+            Self::Bwrap => "bwrap",
+        }
+    }
+}
+
 /// What the guard tells the node after a kill order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Report {
     /// Everything was reaped, this long after the order arrived.
-    Ended(Duration),
+    Ended(Duration, By),
     /// Something was still not reaped this long after the order.
     StillAlive(Duration),
 }
@@ -91,16 +132,25 @@ pub enum Report {
 impl Report {
     fn line(self) -> String {
         match self {
-            Self::Ended(d) => format!("ended {}\n", d.as_millis()),
+            Self::Ended(d, by) => format!("ended {} {}\n", d.as_millis(), by.word()),
             Self::StillAlive(d) => format!("alive {}\n", d.as_millis()),
         }
     }
 
     pub fn parse(line: &str) -> Option<Self> {
-        let (what, ms) = line.trim().split_once(' ')?;
-        let d = Duration::from_millis(ms.parse().ok()?);
+        let mut w = line.split_whitespace();
+        let what = w.next()?;
+        let d = Duration::from_millis(w.next()?.parse().ok()?);
         match what {
-            "ended" => Some(Self::Ended(d)),
+            "ended" => {
+                let by = match w.next() {
+                    Some("signal") => By::Signal,
+                    Some("parent") => By::Parent,
+                    Some("bwrap") => By::Bwrap,
+                    _ => By::Node,
+                };
+                Some(Self::Ended(d, by))
+            }
             "alive" => Some(Self::StillAlive(d)),
             _ => None,
         }
@@ -122,7 +172,11 @@ pub fn main() -> i32 {
         eprintln!("{SUBCOMMAND}: no program");
         return 125;
     };
-    match run(program, &args[at + 2..]) {
+    let node = args[..at]
+        .windows(2)
+        .find(|w| w[0] == NODE)
+        .and_then(|w| w[1].to_str()?.parse::<i32>().ok());
+    match run(program, &args[at + 2..], node) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{SUBCOMMAND}: {e}");
@@ -140,7 +194,13 @@ enum Phase {
     Killing(Instant, bool),
 }
 
-fn run(program: &OsStr, args: &[OsString]) -> Result<i32, String> {
+fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, String> {
+    // A node that died before this ran: start nothing.
+    if let Some(n) = node
+        && nix::unistd::getppid().as_raw() != n
+    {
+        return Err(format!("its node {n} is gone; nothing started"));
+    }
     let ctl: UnixStream = std::io::stdin()
         .as_fd()
         .try_clone_to_owned()
@@ -154,6 +214,19 @@ fn run(program: &OsStr, args: &[OsString]) -> Result<i32, String> {
         .thread_set_mask()
         .map_err(|e| format!("sigprocmask: {e}"))?;
     nix::sys::prctl::set_child_subreaper(true).map_err(|e| format!("subreaper: {e}"))?;
+    // Made before the spawn (it needs no blocked signal), so nothing after
+    // the spawn can fail before the loop but the block itself (N-6).
+    let mut mask = SigSet::empty();
+    for s in [
+        Signal::SIGCHLD,
+        Signal::SIGTERM,
+        Signal::SIGINT,
+        Signal::SIGHUP,
+    ] {
+        mask.add(s);
+    }
+    let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
+        .map_err(|e| format!("signalfd: {e}"))?;
     let child = std::process::Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -166,20 +239,10 @@ fn run(program: &OsStr, args: &[OsString]) -> Result<i32, String> {
     // From here a child's end and a stop signal wait in the `signalfd`. One
     // that came before is not lost: the loop's first `waitpid` sees a child
     // that already ended, and a SIGTERM before this ended the guard (its
-    // default action; bubblewrap's death signal is the second line).
-    let mut mask = SigSet::empty();
-    for s in [
-        Signal::SIGCHLD,
-        Signal::SIGTERM,
-        Signal::SIGINT,
-        Signal::SIGHUP,
-    ] {
-        mask.add(s);
-    }
-    mask.thread_block()
-        .map_err(|e| format!("sigprocmask: {e}"))?;
-    let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
-        .map_err(|e| format!("signalfd: {e}"))?;
+    // default action: the window of review T8E-2, which the node closes by
+    // sweeping when it sees its guard die of a signal). If the block fails,
+    // the command is not left running unwatched: it is killed (N-6).
+    let blocked = mask.thread_block().is_ok();
     // The command's stdout and stderr are bubblewrap's now: the guard keeps
     // no copy (the node sees their end when the command's last holder
     // goes), and its stdin is the duplicate in `ctl`.
@@ -192,7 +255,7 @@ fn run(program: &OsStr, args: &[OsString]) -> Result<i32, String> {
         let _ = nix::unistd::dup2_stdout(&null);
         let _ = nix::unistd::dup2_stderr(&null);
     }
-    Ok(watch(bwrap, ctl, &sfd))
+    Ok(watch(bwrap, ctl, &sfd, node, !blocked))
 }
 
 /// SIGKILL what is left: the namespace through bubblewrap while it is
@@ -235,10 +298,23 @@ fn own_children() -> Vec<i32> {
         .collect()
 }
 
-fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
+fn watch(
+    bwrap: i32,
+    mut ctl: UnixStream,
+    sfd: &SignalFd,
+    node: Option<i32>,
+    kill_now: bool,
+) -> i32 {
     let mut phase = Phase::Running;
     let mut ordered: Option<Instant> = None;
+    let mut by = By::Node;
+    if kill_now {
+        phase = Phase::Killing(Instant::now(), false);
+        ordered = Some(Instant::now());
+        by = By::Signal;
+    }
     let mut bwrap_unreaped = true;
+    let mut bwrap_signaled = false;
     let mut status = 125;
     let mut ctl_open = true;
     loop {
@@ -252,6 +328,7 @@ fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
                 }
                 Ok(WaitStatus::Signaled(pid, sig, _)) if pid.as_raw() == bwrap => {
                     bwrap_unreaped = false;
+                    bwrap_signaled = true;
                     status = 128 + sig as i32;
                 }
                 Ok(WaitStatus::StillAlive) => break,
@@ -261,19 +338,34 @@ fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
                     // After a kill order, say so (to a node that is gone,
                     // or stopped listening, this fails, harmlessly).
                     if let Some(at) = ordered {
-                        let _ = ctl.write_all(Report::Ended(at.elapsed()).line().as_bytes());
+                        let _ = ctl.write_all(Report::Ended(at.elapsed(), by).line().as_bytes());
                     }
                     return status;
                 }
             }
         }
         let now = Instant::now();
-        // bubblewrap reaps its init before it exits; a child left after
-        // bubblewrap is an init whose bubblewrap died first: no one else
-        // will end it.
+        // A child left after bubblewrap: its init. bubblewrap exits with
+        // the status its init sent it, so on an ordinary end the init may
+        // still be exiting for a moment; after a bubblewrap killed by a
+        // signal, it is an init no one else will end. Either way it is
+        // killed and waited for; only the second is an order to report.
         if !bwrap_unreaped && !matches!(phase, Phase::Killing(..)) {
             phase = Phase::Killing(now, false);
-            ordered.get_or_insert(now);
+            if ordered.is_none() && bwrap_signaled {
+                ordered = Some(now);
+                by = By::Bwrap;
+            }
+        }
+        // The node is gone though the channel is open (a child of the node
+        // holds a copy of it: review T8E-1): the kernel reparented this
+        // process, whoever holds descriptors.
+        if let (Some(n), Phase::Running) = (node, phase)
+            && nix::unistd::getppid().as_raw() != n
+        {
+            phase = Phase::Killing(now, false);
+            ordered = Some(now);
+            by = By::Parent;
         }
         if let Phase::Grace(at) = phase
             && now.duration_since(at) >= TERM_GRACE
@@ -289,6 +381,9 @@ fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
             }
         }
         let timeout = match phase {
+            Phase::Running if node.is_some() => {
+                PollTimeout::try_from(PARENT_LOOK).unwrap_or(PollTimeout::MAX)
+            }
             Phase::Running => PollTimeout::NONE,
             Phase::Grace(at) => {
                 let left = TERM_GRACE.saturating_sub(now.duration_since(at));
@@ -348,7 +443,10 @@ fn watch(bwrap: i32, mut ctl: UnixStream, sfd: &SignalFd) -> i32 {
                     && !matches!(phase, Phase::Killing(..))
                 {
                     phase = Phase::Killing(Instant::now(), false);
-                    ordered.get_or_insert_with(Instant::now);
+                    if ordered.is_none() {
+                        ordered = Some(Instant::now());
+                        by = By::Signal;
+                    }
                 }
             }
         }
@@ -362,20 +460,15 @@ mod tests {
     #[test]
     fn reports_round_trip() {
         for r in [
-            Report::Ended(Duration::from_millis(12)),
+            Report::Ended(Duration::from_millis(12), By::Node),
+            Report::Ended(Duration::from_millis(3), By::Signal),
+            Report::Ended(Duration::from_millis(3), By::Parent),
+            Report::Ended(Duration::from_millis(3), By::Bwrap),
             Report::StillAlive(Duration::from_millis(2001)),
         ] {
             assert_eq!(Report::parse(&r.line()), Some(r));
         }
         assert_eq!(Report::parse("ended"), None);
         assert_eq!(Report::parse("gone 3"), None);
-    }
-
-    /// The bounds fit inside the agent loop's grace for a cancelled tool
-    /// (5 s, `harness_agent_native::TOOL_CANCEL_GRACE`, checked end to end
-    /// in `cli/tests/guard.rs`), with a second to spare.
-    #[test]
-    fn the_stop_fits_the_loops_grace() {
-        assert!(TERM_GRACE + CONFIRM_BOUND + Duration::from_secs(1) <= Duration::from_secs(5));
     }
 }
