@@ -311,6 +311,12 @@ binary and `node.toml` are root-owned is safer, and cannot use `auto`.
 A signal is a request; when the grace ends (the forced point, or a shorter supervisor timeout),
 cancelling and killing are allowed. Default timeouts cut the drain short (systemd 90 s, Docker
 10 s): the shipped unit sets `TimeoutStopSec=35min` with SIGTERM, compose `stop_grace_period: 35m`.
+The unit also needs `KillMode=mixed` for the drain to have anything to drain: with systemd's
+default (`control-group`) the stop signal goes to every process of the unit at once, every
+command's guard (T.8e) among them, and a guard takes SIGTERM, SIGINT and SIGHUP as its kill
+order, so every running command is killed the moment the stop begins (review T8E-2's N-2; on
+`main` before T.8e bubblewrap died of the same signal, no better). The README's unit does not
+set it yet (A.19).
 
 ### 7.2 The note and the answer
 

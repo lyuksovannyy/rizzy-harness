@@ -711,7 +711,11 @@ unchanged. When the command ends, is cancelled, times out, or the node
 process dies (even by `kill -9`), every process it started ends too,
 including ones that detached themselves (`setsid`, `nohup … &`, a daemon's
 double fork). bubblewrap changes nothing about which files a command may
-open; it only adds the process boundary.
+open; it only adds the process boundary. Each command has a small guard
+process of its own between the node and bubblewrap that lives exactly as
+long as the command: it ends everything and confirms it before a cancel
+returns, and it ends the command when the node dies, even in the first
+millisecond after a start.
 
 **The condition.** On a kernel older than Linux 7.1 (Landlock ABI below 9:
 Ubuntu 24.04, Debian 13 and most kernels in use today) a command can still
@@ -746,10 +750,25 @@ a command notices:
 - A command killed by a signal reports exit code 128 + the signal (137
   for SIGKILL) instead of "signal".
 - On cancel or timeout the command still gets SIGTERM first and 2 s to
-  exit, then everything left is killed. When the node process itself
-  exits, restarts or re-executes itself, every running command is killed
-  at once, without that grace: stop a node with its normal shutdown so
-  running turns end first.
+  exit, then everything left is killed, and the call returns only once
+  all of it is gone. A process the kernel cannot end yet (stuck in a read
+  from a stalled network or FUSE file system, which ignores even SIGKILL
+  until the read returns) is not reported as cancelled: the result says
+  it is still alive 2 s after the kill, and its guard keeps killing it
+  until it ends. When the node process itself exits, restarts or
+  re-executes itself, every running command is killed at once, without
+  that grace: stop a node with its normal shutdown so running turns end
+  first. If a command's guard is itself killed or stopped by a signal in
+  its first millisecond (before bubblewrap protects itself: `kill`, or a
+  service manager signalling every process of the node at once), the call
+  that sees it ends what was left before it returns and says so; if the
+  node dies in that same moment, the node ends it at its next start and
+  says so in the log ("ended a command a previous run of this node left
+  running"). One the kernel cannot end yet (stuck in I/O) is logged
+  "STILL ALIVE": it has been killed and ends when the kernel releases it.
+  A second node started on the same data directory leaves the running
+  node's commands alone; other parts of such a start still disturb it (its
+  temp folders are emptied), so never start two on one data directory.
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
@@ -769,7 +788,8 @@ Landlock line ("shell containment"). `contain` decides what happens where
 it does not work:
 
 - `"auto"` (default): run the shell as before, in the Landlock sandbox
-  alone, and say so once in the log and in `doctor`. Processes a command
+  alone, with no guard (nothing confirms that a cancelled command has
+  ended), and say so once in the log and in `doctor`. Processes a command
   detaches then **can** outlive it and the node, and `/proc` shows every
   process of the machine.
 - `"required"`: refuse agentic sessions unless the guarantee above holds
@@ -777,7 +797,20 @@ it does not work:
   refuses to start). It therefore refuses where bubblewrap does not run
   **and** on kernels below Linux 7.1 (the condition above). On such a
   kernel set `"auto"`: the shell is contained, with that gap named.
-- `"off"`: never use it (logged on every start).
+- `"off"`: never use it (logged on every start); as with `"auto"`'s
+  fallback, there is no guard and no confirmed end.
+
+**Keep the harness binary out of every session's reach.** A command's
+guard is the node's own running image, but the wrapper inside the
+namespace is started from the binary's path. If a workspace root or a
+`[sandbox] write` entry holds the binary (a node run from its own build
+tree, with a session on that tree), one command can replace it and the
+next command runs the agent's program in place of the wrapper, without the
+file sandbox. `doctor` and the log warn ("a session can replace the
+harness binary"), and `contain = "required"` refuses to start. Install the
+binary in a folder outside every workspace root and write entry (for
+example `/usr/local/bin`; `~/.cargo/bin` is inside a workspace root of
+`$HOME`).
 
 `mode = "required"` promises the Landlock file sandbox only; it does not
 require bubblewrap, so a node where bubblewrap cannot run keeps its shell.

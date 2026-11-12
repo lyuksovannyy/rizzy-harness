@@ -117,6 +117,41 @@ pub struct Sandbox {
     /// start, from node.toml and the probe; nothing per session or per
     /// call can change it).
     contain: Option<crate::contain::Contain>,
+    /// The harness binary as it was when first opened, held open for the
+    /// process's life: the guard is started from it (`/proc/self/fd/<n>`),
+    /// so a command
+    /// that later replaces the file at `exe` cannot replace its guard
+    /// (review T8E-5). For the node itself it is `/proc/self/exe`, its own
+    /// running image.
+    image: Option<std::os::fd::RawFd>,
+}
+
+/// The harness binary to start guards from, as a descriptor this process
+/// holds until it exits (so its number can never name another file): the
+/// running image when `exe` is this process's own binary (the node), else
+/// `exe` as it is when first asked for (a test, whose own image is the
+/// test binary). Opened once per path.
+fn open_image(exe: &Path) -> Option<std::os::fd::RawFd> {
+    use std::os::fd::AsRawFd;
+    type Images = std::sync::Mutex<Vec<(PathBuf, std::fs::File)>>;
+    static IMAGES: std::sync::OnceLock<Images> = std::sync::OnceLock::new();
+    let mut images = IMAGES.get_or_init(Default::default).lock().ok()?;
+    if let Some((_, f)) = images.iter().find(|(p, _)| p == exe) {
+        return Some(f.as_raw_fd());
+    }
+    let own = std::env::current_exe()
+        .and_then(|e| e.canonicalize())
+        .ok()
+        .is_some_and(|me| exe.canonicalize().is_ok_and(|e| e == me));
+    let path = if own {
+        Path::new("/proc/self/exe")
+    } else {
+        exe
+    };
+    let f = std::fs::File::open(path).ok()?;
+    let fd = f.as_raw_fd();
+    images.push((exe.to_owned(), f));
+    Some(fd)
 }
 
 /// Lexically normalized absolute path (`.` and `..` folded).
@@ -332,6 +367,7 @@ impl Sandbox {
             }
         }
         Ok(Self {
+            image: open_image(&exe),
             exe,
             read,
             extra_read: settings
@@ -368,19 +404,30 @@ impl Sandbox {
     }
 
     /// The wrapper's command line up to and including `--`; with
-    /// `contain`, inside bubblewrap started in the given folder.
+    /// `contain`, inside bubblewrap started in the given folder by its
+    /// guard (T.8e), both marked with this node's temp root and `session`.
     fn wrapper(
         &self,
         rw: &[Grant],
         ro: &[Grant],
         status: bool,
         contain: Option<(&crate::contain::Contain, &Path)>,
+        session: &OsStr,
     ) -> std::process::Command {
+        let mark = self.tmp_root.as_ref().map(|root| crate::contain::Mark {
+            root: root.clone(),
+            session: session.to_owned(),
+        });
         let mut c = match contain {
-            Some((b, cwd)) => b.command(&self.exe, cwd),
+            Some((b, cwd)) => b.command(&self.exe, self.image, cwd, mark.as_ref()),
             None => std::process::Command::new(&self.exe),
         };
         c.arg(SUBCOMMAND);
+        // In bubblewrap's command line (and its init's) too, where a
+        // restarted node's sweep looks for it.
+        if let (Some(_), Some(m)) = (contain, &mark) {
+            m.push_args(&mut c);
+        }
         if self.best_effort {
             c.arg("--best-effort");
         }
@@ -463,6 +510,7 @@ impl Sandbox {
             &[],
             true,
             None,
+            OsStr::new("probe"),
         );
         c.args([
             "sh",
@@ -520,14 +568,22 @@ impl Sandbox {
             &[],
             false,
             Some((contain, scratch)),
+            OsStr::new("probe"),
         );
+        // Through the guard, as every command: its channel stays open (no
+        // kill order) until the probe has ended.
+        let (keep, theirs) = std::os::unix::net::UnixStream::pair()
+            .map_err(|e| format!("the guard's channel: {e}"))?;
         c.args(["sh", "-c", &crate::contain::probe_script(full), "sh"])
             .arg(&ok)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(scratch)
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                theirs,
+            )));
         let out = c.output();
+        drop(keep);
         let _ = std::fs::remove_dir_all(scratch);
         let out = out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -575,6 +631,22 @@ pub struct Grants {
 }
 
 impl Confinement {
+    /// The marker of this confinement's contained commands (T.8e): the
+    /// node's temp root and the session; `None` when there is none.
+    pub fn mark(&self) -> Option<crate::contain::Mark> {
+        match self {
+            Self::Confined { sandbox, tmp } => Some(crate::contain::Mark {
+                root: sandbox.tmp_root.clone()?,
+                session: tmp
+                    .as_ref()
+                    .and_then(|t| t.file_name())
+                    .unwrap_or(OsStr::new("-"))
+                    .to_owned(),
+            }),
+            _ => None,
+        }
+    }
+
     /// This confinement for one session: its temp directory is
     /// `<tmp_root>/<key>`.
     pub fn for_session(&self, key: &str) -> Self {
@@ -626,16 +698,14 @@ impl Confinement {
         self.build(program, args, workspace, pin, env, protected, grants, true)
     }
 
-    /// Start a command from [`Self::shell`]: a contained one from the
-    /// process's spawner thread (`crate::contain::spawn`).
+    /// Start a command from [`Self::shell`]: a contained one with its
+    /// guard's control channel (`crate::contain::spawn`, T.8e).
     pub async fn spawn(
         mut cmd: tokio::process::Command,
         contained: bool,
     ) -> std::io::Result<crate::bash::ShellChild> {
         if contained {
-            crate::contain::spawn(cmd)
-                .await
-                .map(crate::bash::ShellChild::Contained)
+            crate::contain::spawn(cmd).map(crate::bash::ShellChild::Contained)
         } else {
             cmd.spawn().map(crate::bash::ShellChild::Plain)
         }
@@ -757,7 +827,12 @@ impl Confinement {
                 }
                 let contain = sandbox.contain.as_ref().filter(|_| shell);
                 contained = contain.is_some();
-                let mut c = sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())));
+                let session = tmp
+                    .as_ref()
+                    .and_then(|t| t.file_name())
+                    .unwrap_or(OsStr::new("-"));
+                let mut c =
+                    sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())), session);
                 c.arg(program);
                 env.apply_std(&mut c);
                 if let Some(t) = tmp {
@@ -767,7 +842,11 @@ impl Confinement {
             }
         };
         let mut c = tokio::process::Command::from(std_cmd);
-        c.args(args).current_dir(&ws);
+        // A contained command's guard starts in `/`: bubblewrap enters the
+        // folder (`--chdir`), so a folder that hangs (a stalled network
+        // mount) stalls the guard, never the node's spawn (review N-2).
+        c.args(args)
+            .current_dir(if contained { Path::new("/") } else { &ws });
         Ok((c, contained))
     }
 }
@@ -928,8 +1007,66 @@ pub fn start(
         .and_then(|e| e.canonicalize())
         .map_err(|e| format!("cannot find the harness binary for {SUBCOMMAND}: {e}"));
     match exe {
-        Ok(exe) => start_with_exe(exe, settings, data_dir, protected, node_toml),
+        Ok(exe) => {
+            let mut s = start_with_exe(exe.clone(), settings, data_dir, protected, node_toml)?;
+            check_binary_reach(&mut s, &exe, settings, workspace_roots, node_toml);
+            Ok(s)
+        }
         Err(e) => Ok(not_enforced(settings, e, node_toml, None)),
+    }
+}
+
+/// The workspace root or `[sandbox] write` entry that holds `exe`, if any:
+/// where a session can replace the harness binary (review T8E-5).
+pub fn binary_reach(exe: &Path, settings: &Settings, roots: &[PathBuf]) -> Option<PathBuf> {
+    let exe = real(exe);
+    roots
+        .iter()
+        .chain(&settings.write)
+        .find(|d| exe.starts_with(real(d)))
+        .cloned()
+}
+
+/// Review T8E-5: a contained command's guard is the node's own image
+/// (`/proc/self/exe`), but `sandbox-exec` inside the namespace is started
+/// from the binary's path. Where a session can write that path, one command
+/// can replace it and the next runs the agent's program in place of the
+/// wrapper, without Landlock (still inside the PID namespace and under its
+/// guard). Warned in the log and `doctor`; `contain = "required"` refuses.
+/// Closed by T.8c's file view (the binary bound read-only from the node's
+/// own image).
+fn check_binary_reach(
+    s: &mut Started,
+    exe: &Path,
+    settings: &Settings,
+    roots: &[PathBuf],
+    node_toml: &Path,
+) {
+    let contained = matches!(&s.confinement, Confinement::Confined { sandbox, .. }
+        if sandbox.containment().is_some());
+    let Some(dir) = binary_reach(exe, settings, roots).filter(|_| contained) else {
+        return;
+    };
+    let why = format!(
+        "a session can replace the harness binary {} (it is inside {}, a workspace root or \
+         [sandbox] write entry): the next command's sandbox-exec would then be the agent's \
+         program, without the file sandbox (its guard is the node's own running image and is \
+         not affected). Install the binary where no session can write",
+        exe.display(),
+        dir.display()
+    );
+    if settings.contain == crate::contain::ContainMode::Required {
+        let msg = format!(
+            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {}, and {why}",
+            node_toml.display()
+        );
+        s.contain_level = ContainLevel::Refused;
+        s.contain_summary = format!("REFUSING agentic sessions: {msg}");
+        s.confinement = Confinement::Refused(msg.clone().into());
+        s.refusal = Some(msg);
+    } else {
+        s.contain_summary.push_str(&format!("; WARNING: {why}"));
+        s.contain_level = ContainLevel::Warn;
     }
 }
 
@@ -1553,7 +1690,7 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false, None)
+        sb.wrapper(&[], &[], false, None, OsStr::new("-"))
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
