@@ -122,8 +122,12 @@ async function skipOnboarding(page) {
     await p.fill('dialog.search-panel input[role="combobox"]', 'okapi');
     await p.waitForSelector('dialog.search-panel >> text=No results');
     await p.keyboard.press('Escape');
-    p.once('dialog', (d) => d.accept());
+    // The confirm is an in-page dialog since 13ca3e9, with no Media offer
+    // for an incognito chat.
     await p.click('.incognito-banner button');
+    await p.waitForSelector('dialog.delete-chat[open]');
+    check((await p.locator('dialog.delete-chat input[type=checkbox]').count()) === 0, 'no Media offer for an incognito chat');
+    await p.click('dialog.delete-chat button.danger:has-text("Delete")');
     await p.waitForSelector('h1.greeting');
     const rows = await p.evaluate(() => fetch('/api/sessions').then((r) => r.json()));
     check(!rows.sessions.some((s) => s.incognito), 'deleted incognito chat is gone');
