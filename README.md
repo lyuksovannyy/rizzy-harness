@@ -758,10 +758,14 @@ a command notices:
   until it ends. When the node process itself exits, restarts or
   re-executes itself, every running command is killed at once, without
   that grace: stop a node with its normal shutdown so running turns end
-  first. If a command was left running anyway (its guard killed by hand in
-  the moment before bubblewrap protected itself), the node ends it at its
-  next start and says so in the log ("ended a command a previous run of
-  this node left running").
+  first. If a command's guard is itself killed or stopped by a signal in
+  its first millisecond (before bubblewrap protects itself: `kill`, or a
+  service manager signalling every process of the node at once), the call
+  that sees it ends what was left before it returns and says so; if the
+  node dies in that same moment, the node ends it at its next start and
+  says so in the log ("ended a command a previous run of this node left
+  running"). A command the kernel cannot end yet is named at every start
+  until it has ended.
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
@@ -781,7 +785,8 @@ Landlock line ("shell containment"). `contain` decides what happens where
 it does not work:
 
 - `"auto"` (default): run the shell as before, in the Landlock sandbox
-  alone, and say so once in the log and in `doctor`. Processes a command
+  alone, with no guard (nothing confirms that a cancelled command has
+  ended), and say so once in the log and in `doctor`. Processes a command
   detaches then **can** outlive it and the node, and `/proc` shows every
   process of the machine.
 - `"required"`: refuse agentic sessions unless the guarantee above holds
@@ -789,7 +794,20 @@ it does not work:
   refuses to start). It therefore refuses where bubblewrap does not run
   **and** on kernels below Linux 7.1 (the condition above). On such a
   kernel set `"auto"`: the shell is contained, with that gap named.
-- `"off"`: never use it (logged on every start).
+- `"off"`: never use it (logged on every start); as with `"auto"`'s
+  fallback, there is no guard and no confirmed end.
+
+**Keep the harness binary out of every session's reach.** A command's
+guard is the node's own running image, but the wrapper inside the
+namespace is started from the binary's path. If a workspace root or a
+`[sandbox] write` entry holds the binary (a node run from its own build
+tree, with a session on that tree), one command can replace it and the
+next command runs the agent's program in place of the wrapper, without the
+file sandbox. `doctor` and the log warn ("a session can replace the
+harness binary"), and `contain = "required"` refuses to start. Install the
+binary in a folder outside every workspace root and write entry (for
+example `/usr/local/bin`; `~/.cargo/bin` is inside a workspace root of
+`$HOME`).
 
 `mode = "required"` promises the Landlock file sandbox only; it does not
 require bubblewrap, so a node where bubblewrap cannot run keeps its shell.
