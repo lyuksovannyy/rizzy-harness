@@ -985,7 +985,7 @@ async fn a_stop_past_its_bound_exits_1_naming_the_sessions() {
     let status = s.proc.exited_within(Duration::from_secs(20));
     let log = s.proc.log();
     assert_eq!(status.and_then(|s| s.code()), Some(1), "{status:?}\n{log}");
-    assert!(log.contains(&sid) && log.contains("still running"), "{log}");
+    assert!(log.contains(&sid) && log.contains("not closed"), "{log}");
 }
 
 // ---- review N-11: `node run`'s second signal, the link down ----

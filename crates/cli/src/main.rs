@@ -536,10 +536,10 @@ fn stopped(left: Vec<String>) -> anyhow::Result<()> {
         return Ok(());
     }
     bail!(
-        "stopped after {} s with {} turn(s) still running (sessions {}): the next start \
-         closes them as interrupted",
-        stop::stop_wait().as_secs(),
+        "stopped with {} turn(s) not closed, still running after {} s or with an end the log \
+         could not take (sessions {}): the next start closes them as interrupted",
         left.len(),
+        stop::stop_wait().as_secs(),
         left.join(", ")
     )
 }
