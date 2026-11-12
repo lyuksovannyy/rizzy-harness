@@ -657,7 +657,7 @@ max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
-network = "on"                       # on | off (off: no TCP connect or bind)
+network = "on"                       # on | off (off: no network for the shell, see "Network off")
 read = []                            # more read-only folders, e.g. "~/.cargo"
 write = []                           # more read-write folders, e.g. "~/.cache"
 contain = "auto"                     # auto | required | off: run the shell in bubblewrap (see below)
@@ -772,6 +772,22 @@ a command notices:
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
+**Network off.** With `network = "off"` a contained command also runs in a
+network namespace of its own: it has only its own loopback (`lo`), so no
+TCP, UDP or DNS reaches this machine's other addresses, its loopback
+services or anywhere else, and it cannot reach this machine's abstract Unix
+sockets (an X11 display, some D-Bus and IDE sockets), which belong to the
+network namespace. Landlock still refuses every TCP connect and bind inside
+it, its own loopback included, as before: a test server on `127.0.0.1`
+cannot be started with the network off; UDP to itself on `127.0.0.1` works.
+DNS lookups fail (`/etc/hosts` still answers). Where bubblewrap runs but
+cannot make a network namespace, it is not used with the network off: the
+probe at start fails, `contain = "required"` refuses with the reason, and
+`"auto"` falls back to Landlock alone (below). **Without the containment**
+(`"auto"`'s fallback, `contain = "off"`) and for graphify and the node's own
+git, `network = "off"` stops TCP only: **UDP and DNS still go out**, and
+`doctor` and the log say so on the containment line.
+
 It needs the `bubblewrap` package and unprivileged user namespaces. The
 node takes the first `bwrap` on its `PATH` that its own user cannot replace
 (the file and every folder above it owned by root and not writable by
@@ -790,8 +806,9 @@ it does not work:
 - `"auto"` (default): run the shell as before, in the Landlock sandbox
   alone, with no guard (nothing confirms that a cancelled command has
   ended), and say so once in the log and in `doctor`. Processes a command
-  detaches then **can** outlive it and the node, and `/proc` shows every
-  process of the machine.
+  detaches then **can** outlive it and the node, `/proc` shows every
+  process of the machine, and with `network = "off"` UDP and DNS still go
+  out.
 - `"required"`: refuse agentic sessions unless the guarantee above holds
   in full, as `mode = "required"` does without Landlock (`node run`
   refuses to start). It therefore refuses where bubblewrap does not run
@@ -855,9 +872,10 @@ For the same reason a data directory under `/usr`, `/etc` or `/opt` is
 refused. Graphify additionally needs its install (found automatically:
 its venv and the Python it was made from).
 
-Limits: Landlock does not cover UDP, so `network = "off"` still allows DNS
-and any UDP traffic; it does not hide that a file exists (`stat` and
-`test -e` still work on paths outside, only opening is denied); `/etc` is
+Limits: Landlock does not cover UDP, so where the shell is not contained
+(and for graphify and the node's git) `network = "off"` still allows DNS
+and any UDP traffic ("Network off" above); Landlock does not hide that a
+file exists (`stat` and `test -e` still work on paths outside, only opening is denied); `/etc` is
 readable; the session folder's own `.git` is writable, so a command can
 change that repository's hooks and config (the file tools refuse to).
 Before Linux 7.1 a command can connect to Unix sockets such as

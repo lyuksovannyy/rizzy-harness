@@ -705,7 +705,7 @@ Unix user, `[sandbox] mode = "required"` enforced):
 | `/proc` | Readable. Other domains' `environ`, `fd`, `mem`, `cwd` are denied (ptrace-class), tested only against the harness process. `cmdline`, `status`, `stat` of B's processes are not ptrace-gated: A sees B's command lines. Not tested. | `crates/tools/src/sandbox.rs:44-47`; `crates/cli/tests/sandbox.rs:231-253` |
 | Signals | Denied outside the domain only with Landlock ABI 6 (best-effort). Tested against the harness only. | `crates/tools/src/sandbox.rs:22-23`, `:614-619`; `crates/cli/tests/sandbox.rs:402` |
 | Unix sockets | Before ABI 9, any pathname socket, the session bus included, which starts programs outside the sandbox: a full escape to the node user. | `crates/tools/src/sandbox.rs:23-26`; `PLAN.md` T10, T11 (lines 484-485); `crates/cli/tests/sandbox.rs:371` |
-| Loopback network | With `network = "on"` (default) A connects to whatever B listens on at `127.0.0.1`. With `"off"`, TCP is denied, UDP is not. | `crates/tools/src/sandbox.rs:76-85` |
+| Loopback network | With `network = "on"` (default) A connects to whatever B listens on at `127.0.0.1`. With `"off"`, TCP is denied, UDP is not (since T.8b, only where the shell is not contained). | `crates/tools/src/sandbox.rs:76-85` |
 | File tools | Run in the node process, not under Landlock; confined to the session's cwd by a path walk; with `allow_outside_workspace = true` they reach every path the node user can, except the data directory. | `crates/tools/src/lib.rs:204-252`; `crates/node/src/policy.rs:17-19` |
 | Checkpoints | `<data>/checkpoints/<hash of folder>.git`, keyed by folder: sessions in one folder share one, and a restore by one rewrites the other's files. Not reachable from the shell. | `crates/node/src/git.rs:568-572`; `crates/cli/src/main.rs:530` |
 | Conversations | Every session of every workspace is in `<data>/node.db` for good, readable by the node's owner. Not reachable from the shell (data directory). | `crates/cli/src/main.rs:524`; `PLAN.md` §1 |
@@ -766,13 +766,13 @@ is not planned: it needs root and a privileged helper. B.11 confirmed the namesp
 on a shared node below ABI 9 because of the pathname-socket escape. What the namespaces change,
 step by step:
 
-| Residual | After T.8a (PID namespace) | After T.8b (network namespace, network off only) | After T.8c (mount view from the grants) |
+| Residual | After T.8a (PID namespace) | After T.8b (network namespace, network off only; built, `crates/cli/tests/network_off.rs`) | After T.8c (mount view from the grants) |
 |---|---|---|---|
 | Pathname socket escape (the session bus) | unchanged | unchanged | **closed**: a socket that is not granted is not in the view |
-| Abstract Unix socket escape | unchanged | closed (abstract sockets are per network namespace) | unchanged with the network on (ABI 6 closes it) |
+| Abstract Unix socket escape | unchanged | **closed with the network off**, on every Landlock ABI (abstract sockets are per network namespace: the host's answer `ECONNREFUSED`, `network_off_hides_the_hosts_abstract_sockets`) | unchanged with the network on (ABI 6 closes it) |
 | Signals to B | **closed** | | |
 | B's command lines | **closed** | | |
-| Loopback services, UDP | unchanged | closed with the network off | unchanged with the network on |
+| Loopback services, UDP | unchanged | **closed with the network off** (TCP, UDP and DNS to the host's loopback and LAN address: `network_off_udp_never_reaches_the_host`, `network_off_tcp_fails_and_only_loopback_is_there`, `network_off_dns_lookups_fail`); open on the Landlock-only fallback | unchanged with the network on |
 | Capacity, the file tools' path walk | unchanged | unchanged | unchanged |
 
 Recommendation: keep `"abi9"` until T.8c is built and its tests pass. Then add a value (for
