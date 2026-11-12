@@ -16,6 +16,9 @@ found: the guard ends the namespace within milliseconds.
 Run "stalled": the same node also started one other child whose folder hangs
 (a FUSE folder this script stalls), then is SIGKILLed.
 Writes under target/review_t8e/ only; unmounts and kills what it started.
+
+Re-check (1e73622): the guard now also looks at its parent; "stalled" prints
+"command gone" after 0.5 s.
 """
 import os, signal, subprocess, sys, threading, time
 sys.dont_write_bytecode = True

@@ -9,6 +9,8 @@ a FUSE read the kernel will not interrupt (`support/fuse_stall.py`). Then a
 real node is started on that data directory (`serve`, loopback, its sweep
 runs before it serves) and its log is printed, with the state of the reader
 at that moment. The node is stopped again, the read released.
+
+Re-check (1e73622): both starts now log "STILL ALIVE".
 """
 import os, signal, subprocess, sys, time
 sys.dont_write_bytecode = True

@@ -488,14 +488,19 @@ async fn proof_t8e3_an_unconfirmed_stop_is_recorded_as_cancelled() {
         },
         if alive_then { "ALIVE" } else { "gone" }
     );
-    let r = h.await.unwrap();
+    let fixed = in_grace.is_ok();
+    let r = match in_grace {
+        Ok(r) => r.unwrap(),
+        Err(_) => h.await.unwrap(),
+    };
     eprintln!(
         "the tool's own answer came after {:?}: {}",
         t.elapsed(),
         r.output.lines().last().unwrap_or_default()
     );
+    signal(guard, nix::sys::signal::Signal::SIGCONT);
     assert!(
-        in_grace.is_err() && alive_then,
+        !fixed && alive_then,
         "FIXED: the answer came inside the loop's grace"
     );
     assert!(r.output.contains("not confirmed"), "{}", r.output);
@@ -615,4 +620,294 @@ async fn proof_t8e5_a_replaced_binary_runs_as_the_guard_outside_everything() {
         wrote.contains("sandbox-guard"),
         "FIXED: the replaced binary did not run as the guard"
     );
+}
+
+// ======================================================================
+// Re-check of the fixes (1e73622..306b612). The tests above now FAIL with
+// "FIXED: …" where a finding is closed; the ones below PASS WHEN THE NEW
+// FINDING REPRODUCES, as before.
+// ======================================================================
+
+/// This process's guards (its children whose second argument is the
+/// guard's subcommand), from every thread's `children` file.
+fn my_guards() -> Vec<i32> {
+    let me = std::process::id();
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{me}/task")) else {
+        return Vec::new();
+    };
+    tasks
+        .filter_map(|t| t.ok())
+        .flat_map(|t| {
+            std::fs::read_to_string(t.path().join("children"))
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|p| p.parse::<i32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|p| {
+            cmdline(*p).split(|b| *b == 0).nth(1)
+                == Some(harness_tools::guard::SUBCOMMAND.as_bytes())
+        })
+        .collect()
+}
+
+// ---- R-1: a second start on the same data directory ----
+
+/// Claim 3 ("never touching a process that is not its own leftover"). The
+/// start sweep now sends SIGTERM to every guard of its data directory whose
+/// parent is not the starting process (`contain.rs` `sweep`: `p.is_guard()
+/// && p.ppid != me`). A node that is alive is such a parent. Here this test
+/// is the live node with one running command; then `rizzy-harness serve` is
+/// started a second time on the same data directory (its sweep runs before
+/// it binds its port, `cli/src/main.rs:297` and `:350`). Before the fixes
+/// the same second start touched nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recheck_r1_a_second_start_kills_the_live_nodes_commands() {
+    const SECS: u32 = 977_221;
+    let f = fixture();
+    let sb = f.sandbox();
+    let _clean = Cleanup(f.data.clone(), vec![SECS]);
+    let ctx = f.ctx(sb, &f.ws);
+    let cancel = ctx.cancel.clone();
+    let t = Instant::now();
+    let h = tokio::spawn(async move {
+        Bash.run(&ctx, json!({"command": format!("sleep {SECS}; echo finished")}))
+            .await
+    });
+    while sleeps(SECS).is_empty() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let guard = guard_of(&f.data).expect("the guard");
+    eprintln!(
+        "the live node is pid {}; its command's guard {guard} has parent {} and `--node {}`",
+        std::process::id(),
+        stat(guard).map(|s| s[1].clone()).unwrap_or_default(),
+        String::from_utf8_lossy(
+            cmdline(guard)
+                .split(|b| *b == 0)
+                .skip_while(|a| *a != b"--node")
+                .nth(1)
+                .unwrap_or_default()
+        )
+    );
+    let data = f.data.clone();
+    let log = tokio::task::spawn_blocking(move || {
+        let mut serve = std::process::Command::new(EXE)
+            .args(["--data-dir", data.to_str().unwrap()])
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .env("HARNESS_LOG", "warn")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(serve.stdout.take().unwrap()).lines();
+        let err = serve.stderr.take().unwrap();
+        let log = std::thread::spawn(move || {
+            std::io::BufReader::new(err)
+                .lines()
+                .map_while(Result::ok)
+                .collect::<Vec<_>>()
+        });
+        let _ = lines
+            .by_ref()
+            .map_while(Result::ok)
+            .any(|l| l.contains("listening on"));
+        let _ = serve.kill();
+        let _ = serve.wait();
+        log.join().unwrap()
+    })
+    .await
+    .unwrap();
+    for l in log.iter().filter(|l| l.contains("containment")) {
+        eprintln!("the second start logged: {}", &l[l.find("shell").unwrap_or(0)..]);
+    }
+    let r = tokio::time::timeout(Duration::from_secs(5), h).await;
+    let killed = match &r {
+        Ok(r) => {
+            eprintln!(
+                "the live node's command, {:?} after its start: {}",
+                t.elapsed(),
+                r.as_ref().unwrap().output.replace('\n', " | ")
+            );
+            true
+        }
+        Err(_) => {
+            eprintln!("the live node's command still runs");
+            false
+        }
+    };
+    cancel.cancel();
+    assert!(
+        killed && sleeps(SECS).is_empty(),
+        "FIXED: the second start left the live node's command alone"
+    );
+}
+
+// ---- T8E-2 again: the guard dies while its bubblewrap is being started ----
+
+/// The in-call sweep (`contain::sweep_session`) skips whatever looks like a
+/// guard. Between `fork` and `exec` the guard's child still has the guard's
+/// command line. Is a guard killed in that moment (SIGKILL, or SIGTERM
+/// before it blocked its signals) survived by its namespace once the tool
+/// has returned? `REVIEW_TRIES` (default 300), the signal at 0 to 2.9 ms
+/// after the guard is first seen, half SIGKILL and half SIGTERM. Prints the
+/// count; passes either way (an observation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recheck_a_guard_killed_while_it_starts_bubblewrap() {
+    const SECS: u32 = 977_231;
+    let tries: u32 = std::env::var("REVIEW_TRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let f = fixture();
+    let sb = f.sandbox();
+    let _clean = Cleanup(f.data.clone(), vec![SECS]);
+    let (mut left_kill, mut left_term, mut died, mut notes) = (0, 0, 0, std::collections::BTreeMap::new());
+    for attempt in 0..tries {
+        let ctx = f.ctx(sb.clone(), &f.ws);
+        let cancel = ctx.cancel.clone();
+        let term = attempt % 2 == 1;
+        let delay = Duration::from_micros(u64::from(attempt / 2 % 30) * 100);
+        let h = tokio::spawn(async move {
+            Bash.run(&ctx, json!({"command": format!("sleep {SECS}")}))
+                .await
+        });
+        let hit = tokio::task::spawn_blocking(move || {
+            let by = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(g) = my_guards().first().copied() {
+                    let until = Instant::now() + delay;
+                    while Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
+                    signal(
+                        g,
+                        if term {
+                            nix::sys::signal::Signal::SIGTERM
+                        } else {
+                            nix::sys::signal::Signal::SIGKILL
+                        },
+                    );
+                    return Some(g);
+                }
+                if Instant::now() > by {
+                    return None;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(hit.is_some(), "no guard");
+        let r = tokio::time::timeout(Duration::from_secs(15), h)
+            .await
+            .expect("the call never returned")
+            .unwrap();
+        let last = r.output.lines().last().unwrap_or_default().to_string();
+        let key: String = last.chars().take(70).collect();
+        *notes.entry(key).or_insert(0u32) += 1;
+        if last.contains("its guard was killed") {
+            died += 1;
+        }
+        // The tool has returned: is anything of the command alive?
+        std::thread::sleep(Duration::from_millis(30));
+        let l: Vec<i32> = sleeps(SECS)
+            .into_iter()
+            .chain(holding(&f.data))
+            .collect();
+        if !l.is_empty() {
+            // Not a survivor if it is only slow to die: look again.
+            std::thread::sleep(Duration::from_millis(500));
+            let l: Vec<i32> = sleeps(SECS)
+                .into_iter()
+                .chain(holding(&f.data))
+                .collect();
+            if !l.is_empty() {
+                if term {
+                    left_term += 1;
+                } else {
+                    left_kill += 1;
+                }
+                eprintln!(
+                    "try {attempt} ({} at +{delay:?}): the tool said {last:?}; left: {:?}",
+                    if term { "SIGTERM" } else { "SIGKILL" },
+                    l.iter()
+                        .map(|p| format!(
+                            "{p} {}",
+                            String::from_utf8_lossy(&cmdline(*p))
+                                .replace('\0', " ")
+                                .chars()
+                                .take(60)
+                                .collect::<String>()
+                        ))
+                        .collect::<Vec<_>>()
+                );
+                for p in l {
+                    signal(p, nix::sys::signal::Signal::SIGKILL);
+                }
+            }
+        }
+        cancel.cancel();
+    }
+    eprintln!(
+        "{tries} tries, the signal 0 to 2.9 ms after the guard was first seen: the guard died of \
+         it in {died}; namespaces left once the tool had returned: {left_kill} (SIGKILL), \
+         {left_term} (SIGTERM)"
+    );
+    for (k, n) in notes {
+        eprintln!("  {n} x {k}");
+    }
+}
+
+// ---- the new bounds on a busy machine ----
+
+/// Question 5 of the re-check: the stop's 4.3 s, the in-call sweep and the
+/// drain, 4.7 s in all, against the loop's 5 s, while the command itself
+/// keeps every CPU busy four times over. The guard is stopped (it cannot
+/// answer). Prints when the tool answered and with what. An observation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recheck_the_bounds_on_a_busy_machine() {
+    const SECS: u32 = 977_241;
+    let f = fixture();
+    let sb = f.sandbox();
+    let _clean = Cleanup(f.data.clone(), vec![SECS]);
+    let ctx = f.ctx(sb, &f.ws);
+    let cancel = ctx.cancel.clone();
+    let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let cmd = format!(
+        "i=0; while [ $i -lt {} ]; do ( while :; do :; done ) & i=$((i+1)); done; sleep {SECS}",
+        4 * cpus
+    );
+    let mut h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": cmd})).await });
+    while sleeps(SECS).is_empty() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let guard = guard_of(&f.data).expect("the guard");
+    signal(guard, nix::sys::signal::Signal::SIGSTOP);
+    let t = Instant::now();
+    cancel.cancel();
+    let in_grace = tokio::time::timeout(harness_agent_native::TOOL_CANCEL_GRACE, &mut h).await;
+    let took = t.elapsed();
+    match in_grace {
+        Ok(r) => eprintln!(
+            "{} busy loops: the tool answered {took:?} after the cancel: {}",
+            4 * cpus,
+            r.unwrap().output.lines().last().unwrap_or_default()
+        ),
+        Err(_) => {
+            eprintln!(
+                "{} busy loops: no answer inside the loop's 5 s; the loop records the abandoned \
+                 note",
+                4 * cpus
+            );
+            signal(guard, nix::sys::signal::Signal::SIGCONT);
+            let _ = h.await;
+        }
+    }
+    signal(guard, nix::sys::signal::Signal::SIGCONT);
+    let left = gone_within(SECS, Duration::from_secs(5));
+    eprintln!("after the guard may run again: command {}", if left.is_empty() { "gone" } else { "LEFT" });
+    assert!(left.is_empty());
 }

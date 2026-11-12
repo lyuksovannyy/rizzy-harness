@@ -17,6 +17,11 @@
 
 A survivor is a `sleep <n>` unique to this run still alive 2 s later; each is
 killed by pid (with its namespace init) and counted per delay.
+
+Re-check (1e73622): `guard` and `term` still leave namespaces here, because
+this script is a node that does not sweep. The fix is in the bash tool, which
+sweeps the session when it sees its guard die; that is measured through the
+tool in review_t8e_proofs.rs `recheck_a_guard_killed_while_it_starts_bubblewrap`.
 """
 import os, signal, subprocess, sys, time
 sys.dont_write_bytecode = True

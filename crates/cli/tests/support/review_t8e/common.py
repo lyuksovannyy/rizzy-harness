@@ -38,6 +38,12 @@ def spawn_guard(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
     pair, the other end (close-on-exec) kept here; its own process group; cwd
     `/`. Returns (Popen, our end)."""
     ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    if "--node" not in argv:
+        # Since the fixes (1e73622): the guard is told its node's pid and
+        # takes any other parent as the kill order. The node is whoever
+        # spawns it: this process, now.
+        at = argv.index("sandbox-guard") + 1
+        argv = argv[:at] + ["--node", str(os.getpid())] + argv[at:]
     p = subprocess.Popen(argv, stdin=theirs.fileno(), stdout=stdout, stderr=stderr,
                          cwd="/", process_group=0, close_fds=False)
     theirs.close()
