@@ -2297,7 +2297,18 @@ async fn order_file(repo: &Repo) -> Option<PathBuf> {
     )
     .await
     .ok()
-    .map(|d| PathBuf::from(d).join("harness-checkpoints"))
+    .and_then(|d| order_path(&d))
+}
+
+/// The order file for git's answer to `rev-parse --git-common-dir`: only
+/// for one absolute path on one line. An empty or relative answer (a git
+/// that printed nothing) used to become the relative path
+/// `harness-checkpoints`, which was then written into the node's own
+/// working directory.
+fn order_path(answer: &str) -> Option<PathBuf> {
+    let dir = Path::new(answer.trim_end_matches(['\n', '\r']));
+    (dir.is_absolute() && !answer.trim_end_matches(['\n', '\r']).contains('\n'))
+        .then(|| dir.join("harness-checkpoints"))
 }
 
 static ORDER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -2868,6 +2879,25 @@ mod tests {
                 .count();
             assert_eq!(made, 1, "round {round}: one shadow for the repository");
         }
+    }
+
+    /// A git that answers nothing, or something that is not one absolute
+    /// path, gives no order file (it used to give `harness-checkpoints` in
+    /// the node's working directory).
+    #[test]
+    fn the_order_file_needs_an_absolute_git_directory() {
+        assert_eq!(order_path(""), None);
+        assert_eq!(order_path("\n"), None);
+        assert_eq!(order_path(".git"), None);
+        assert_eq!(order_path("/a/.git\n/b/.git"), None);
+        assert_eq!(
+            order_path("/a/.git\n"),
+            Some(PathBuf::from("/a/.git/harness-checkpoints"))
+        );
+        assert_eq!(
+            order_path("/a/.git"),
+            Some(PathBuf::from("/a/.git/harness-checkpoints"))
+        );
     }
 
     #[tokio::test]
