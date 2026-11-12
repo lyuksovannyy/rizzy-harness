@@ -183,10 +183,30 @@ impl Master {
                 public_key,
                 hostname,
                 signature,
+                protocol_version,
             }) => {
                 // Possession of the key first, then the token is spent.
                 if !identity::verify(&public_key, &signed, &signature) {
                     send_json(&mut ws, &reject("bad signature")).await?;
+                    return Ok(());
+                }
+                // A join of another protocol is refused with the reason
+                // before the token is spent, and only to whoever holds a
+                // valid token (review N-9): a stranger learns nothing.
+                if let Some(why) = protocol_refusal(protocol_version) {
+                    let h = token_hash(&token);
+                    let valid = self
+                        .inner
+                        .mirror
+                        .call(move |s| s.join_token_valid(&h, harness_core::now_ms()))
+                        .await?;
+                    let why = if valid {
+                        tracing::warn!("refused a node's join: {why}");
+                        why
+                    } else {
+                        "invalid or expired join token".to_string()
+                    };
+                    send_json(&mut ws, &reject(&why)).await?;
                     return Ok(());
                 }
                 let hostname: String = hostname

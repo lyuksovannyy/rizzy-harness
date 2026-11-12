@@ -1914,3 +1914,27 @@ async fn webhook_content_never_reaches_logs_or_audit() {
         );
     }
 }
+
+/// Review A19-2: a webhook call while the server stops is answered 503
+/// with the reason and records no run (it would only be ended at the next
+/// start, "never retried").
+#[tokio::test]
+async fn a_webhook_while_stopping_is_503_and_adds_no_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), false).await;
+    let alex = alex(&t).await;
+    let h = webhook(&t, &alex, "Hook", chat_spec("hello")).await;
+    t.master.begin_stop();
+    let (st, _, v) = post_hook(
+        &t,
+        &h.tid,
+        Some(&h.secret),
+        "text/plain",
+        b"x".to_vec(),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert!(v.to_string().contains("stopping"), "{v}");
+    assert!(runs(&t, &alex, &h.id).await.is_empty());
+}

@@ -28,6 +28,9 @@ struct RunningTurn {
     savings: harness_core::savings::Savings,
     /// Files this turn published (`publish` is capped per turn).
     publishes: Arc<std::sync::atomic::AtomicUsize>,
+    /// Set when the node's stop cancelled this turn (and nothing had
+    /// before it): its end is then `stopped` (review N-7).
+    by_stop: Arc<AtomicBool>,
 }
 
 pub(crate) struct Session {
@@ -480,11 +483,13 @@ impl Session {
         let agent = agent.map(|a| limits.bound_delegation(a));
         let turn_id = new_id();
         let cancel = CancellationToken::new();
+        let by_stop = Arc::new(AtomicBool::new(false));
         self.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: extra.savings.clone(),
             publishes: Arc::default(),
+            by_stop: by_stop.clone(),
         })?;
         // Claimed after a stop began: refused here, since the stop's
         // cancel may have passed this session already (A.19).
@@ -522,7 +527,7 @@ impl Session {
         };
         let this = self.clone();
         tokio::spawn(async move {
-            this.run_turn(msg, history, agent, compare, extra, cancel)
+            this.run_turn(msg, history, agent, compare, extra, cancel, by_stop)
                 .await;
         });
         Ok(())
@@ -636,6 +641,7 @@ impl Session {
     }
 
     /// Run a turn that `begin` recorded.
+    #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         self: Arc<Self>,
         msg: UserMessage,
@@ -644,6 +650,7 @@ impl Session {
         compare: Vec<String>,
         extra: TurnExtra,
         cancel: CancellationToken,
+        by_stop: Arc<AtomicBool>,
     ) -> (TurnEndReason, Option<Usage>) {
         let turn_id = msg.turn_id.clone();
         let user_text = msg.model_text();
@@ -698,15 +705,15 @@ impl Session {
             self.checkpoint_after(&turn_id, &root, &before).await;
             collect = Some(root);
         }
-        // A cancel during a stop of the node is the stop's (A.19).
-        let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
-            if self.node.is_stopping() {
-                TurnEndReason::Stopped
-            } else {
-                TurnEndReason::Cancelled
-            }
-        } else {
-            reason
+        // The end is decided by who cancelled (review N-7): the node's stop
+        // (`stopped`), or the person or the system before it
+        // (`cancelled`). A turn the model had completed keeps `completed`
+        // when the stop came during its after-turn checkpoint.
+        let reason = match (cancel.is_cancelled(), reason) {
+            (true, TurnEndReason::Error) | (false, _) => reason,
+            (true, TurnEndReason::Completed) if by_stop.load(Ordering::SeqCst) => reason,
+            (true, _) if by_stop.load(Ordering::SeqCst) => TurnEndReason::Stopped,
+            (true, _) => TurnEndReason::Cancelled,
         };
         self.end_turn(&turn_id, reason, usage.clone(), error).await;
         // The checkpoint repository's garbage collection, when due, runs
@@ -1316,6 +1323,12 @@ impl Session {
             .restoring
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        // Under the registry's lock, which the stop takes after setting its
+        // flag: either this sees the flag, or the stop sees this restore and
+        // waits for it (review A19-4).
+        if self.node.is_stopping() {
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
         if reg.iter().any(|r| overlaps(r, &root)) {
             return Err(UNDO_RUNNING.into());
         }
@@ -1367,6 +1380,11 @@ impl Session {
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        // No new sub-agent while the node stops (its parent is cancelled
+        // already; this is the window before the parent sees it).
+        if self.node.is_stopping() {
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
         let child_id = SessionId::new();
         let short: String = task.chars().take(60).collect();
         // The parent's folder is still its own before a child works there.
@@ -1419,11 +1437,13 @@ impl Session {
             .as_ref()
             .map(|t| t.savings.clone())
             .unwrap_or_default();
+        let by_stop = Arc::new(AtomicBool::new(false));
         if let Err(e) = child.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: savings.clone(),
             publishes: Arc::default(),
+            by_stop: by_stop.clone(),
         }) {
             if let Some(i) = iso {
                 crate::git::remove_folder(&i.child).await;
@@ -1456,7 +1476,7 @@ impl Session {
         };
         let (reason, usage) = child
             .clone()
-            .run_turn(msg, history, Some(agent), vec![], extra, cancel)
+            .run_turn(msg, history, Some(agent), vec![], extra, cancel, by_stop)
             .await;
         // Each session's log gates its own effects: the parent's turn goes
         // on, but nothing of a child whose log failed (or whose parent's
@@ -1688,6 +1708,23 @@ impl Session {
         }
     }
 
+    /// Mark the running turn as the stop's to end, unless it was cancelled
+    /// already (by its person, or its parent): `NodeRuntime::stop` marks
+    /// every running turn first and then cancels them.
+    pub(crate) fn mark_stopped(&self) {
+        if let Some(t) = self.turn.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
+            && !t.cancel.is_cancelled()
+        {
+            t.by_stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The last turn's end could not be written (it is still open in the
+    /// log; the next prompt or start closes it).
+    pub(crate) fn is_unclosed(&self) -> bool {
+        self.unclosed.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn respond(&self, approval_id: &str, decision: Decision) -> Result<(), String> {
         let tx = self
             .approvals
@@ -1851,12 +1888,15 @@ impl TurnHost for Session {
             return Decision::Deny;
         }
         let cancel = self.current_cancel().unwrap_or_default();
+        // The cancel first (review N-8): an answer that arrives with it,
+        // after a stop or a cancel began, allows nothing.
         let (decision, by) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => (Decision::Deny, ResolvedBy::Cancelled),
             r = rx => match r {
                 Ok(d) => (d, ResolvedBy::User),
                 Err(_) => (Decision::Deny, ResolvedBy::Cancelled),
             },
-            _ = cancel.cancelled() => (Decision::Deny, ResolvedBy::Cancelled),
         };
         self.approvals
             .lock()

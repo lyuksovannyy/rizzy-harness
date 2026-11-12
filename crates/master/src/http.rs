@@ -1225,25 +1225,46 @@ async fn prompt(
                 )
             })?
     };
-    m.prompt(
-        sid,
-        b.text,
-        crate::PromptOpts {
-            agent_id: b.agent_id,
-            effort: b.effort,
-            context: Some(
-                crate::prefs::Prefs::load(&m, who.user_id.as_deref())
-                    .await
-                    .model_context(&who.username, jiff::Timestamp::now()),
-            ),
-            attachments,
-            compare: b.compare,
-            reply: b.reply,
-            untrusted: flags.untrusted,
-            images,
-        },
-    )
-    .await?;
+    let taken = (!attachments.is_empty()).then(|| (b.attachments.clone(), attachments.clone()));
+    let sent = m
+        .prompt(
+            sid,
+            b.text,
+            crate::PromptOpts {
+                agent_id: b.agent_id,
+                effort: b.effort,
+                context: Some(
+                    crate::prefs::Prefs::load(&m, who.user_id.as_deref())
+                        .await
+                        .model_context(&who.username, jiff::Timestamp::now()),
+                ),
+                attachments,
+                compare: b.compare,
+                reply: b.reply,
+                untrusted: flags.untrusted,
+                images,
+            },
+        )
+        .await;
+    // A prompt the node certainly did not take gives its uploads back, so
+    // "send this again" works (review A19-8): a refusal (a stopping node,
+    // a turn already running) or one never sent (the node away, too
+    // large). Not after a timeout: the node may have taken it and only its
+    // answer was lost, and giving them back could let one file go twice.
+    if let (Err(e), Some((ids, atts))) = (&sent, taken)
+        && !matches!(e, CommandError::Timeout)
+    {
+        let owner = who.user_id.clone();
+        if let Err(e) = m
+            .inner
+            .mirror
+            .call(move |s| s.attachments_give_back(&ids, owner.as_deref(), &atts))
+            .await
+        {
+            tracing::warn!(error = %e, "could not give a refused message's uploads back");
+        }
+    }
+    sent?;
     Ok(Json(json!({ "ok": true })))
 }
 

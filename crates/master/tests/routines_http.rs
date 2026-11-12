@@ -77,6 +77,8 @@ struct T {
     master: Master,
     clock: Arc<AtomicI64>,
     root: String,
+    /// The chat runtime (a test stops it as the server's stop does).
+    chat: NodeRuntime,
 }
 
 /// A server on `store` with a chat runtime and an agentic node "local"
@@ -111,6 +113,7 @@ async fn serve(store: Store, dir: &Path, clock: Arc<AtomicI64>, claim: bool) -> 
         master,
         clock,
         root: root.display().to_string(),
+        chat,
     }
 }
 
@@ -1632,4 +1635,55 @@ async fn agentic_routines_on_the_local_node_are_for_admins() {
     assert!(v.to_string().contains("remote node"), "{v}");
     let (st, v) = create(&t, &alex, None, "a", agentic, every(60)).await;
     assert_eq!(st, StatusCode::CREATED, "{v}");
+}
+
+/// Review A19-2: a run whose turn a stop ended is no failure. It is put
+/// back and runs at the next start, once: five stops in a row leave the
+/// routine's failures at 0 and it unpaused, the run is the same row each
+/// time, and the sixth start completes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_cut_by_a_stop_is_no_failure_and_runs_once_at_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("master.db");
+    let clock = Arc::new(AtomicI64::new(t0()));
+    let open = || Store::open(&db, Durability::Normal).unwrap();
+    let mut t = serve(open(), dir.path(), clock.clone(), true).await;
+    let (mut alex, _) = alex(&t).await;
+    let id = routine(&t, &alex, None, "Long", chat_spec("slow: 100"), every(60)).await;
+    let run = started(&t, &alex, &id).await;
+    let mut kept = Vec::new();
+    for stop in 1..=5 {
+        wait_status(&t, &alex, &id, &run, "running").await;
+        t.master.begin_stop();
+        assert!(t.chat.stop(Duration::from_secs(20)).await.is_empty());
+        let v = wait_status(&t, &alex, &id, &run, "pending").await;
+        let r = t.master.inner_mirror().routine(&id).unwrap().unwrap();
+        assert_eq!(
+            (r.consecutive_failures, r.paused_reason.as_deref()),
+            (0, None),
+            "stop {stop}: {v}"
+        );
+        // While stopping, "run now" is refused and adds no run.
+        let (st, v) = run_now(&t, &alex, &id).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert!(v.to_string().contains("stopping"), "{v}");
+        assert_eq!(runs(&t, &alex, &id).await.len(), 1);
+        // The next start, on the same files.
+        let d = tempfile::tempdir().unwrap();
+        let next = serve(open(), d.path(), clock.clone(), false).await;
+        kept.push((t, d));
+        t = next;
+        alex = login(&t, "alex", "admin password").await;
+    }
+    let v = wait_status(&t, &alex, &id, &run, "completed").await;
+    let list = runs(&t, &alex, &id).await;
+    assert_eq!(list.len(), 1, "{list:#?}");
+    let r = t.master.inner_mirror().routine(&id).unwrap().unwrap();
+    assert_eq!((r.consecutive_failures, r.paused_reason), (0, None), "{v}");
+    // One prompt went to the chat that completed.
+    let evs = events(&t, &alex, v["session_id"].as_str().unwrap()).await;
+    assert_eq!(
+        evs.iter().filter(|e| e["kind"] == "turn_started").count(),
+        1
+    );
 }

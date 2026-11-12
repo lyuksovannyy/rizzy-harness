@@ -38,21 +38,38 @@ pub enum Hello {
         public_key: String,
         hostname: String,
         signature: String,
+        /// As in `auth`: a join of another protocol is refused with the
+        /// reason before its token is spent (review N-9).
+        protocol_version: u32,
     },
     Auth {
         node_id: String,
         signature: String,
         /// The node's `harness_protocol::PROTOCOL_VERSION`, so the master
         /// can refuse another one with the reason before `accepted`
-        /// (A.19). A node built before the field sends none: it speaks
-        /// protocol 1, the only one there was.
-        #[serde(default = "first_protocol")]
+        /// (A.19). Required: a hello without it is malformed (no
+        /// compatibility code before the first tag, review N-4).
         protocol_version: u32,
     },
 }
 
-fn first_protocol() -> u32 {
-    1
+/// The most characters of a master's `rejected` reason a node keeps
+/// (review A19-6): the master's own refusals are one line of about 150.
+pub const MAX_REASON_CHARS: usize = 300;
+
+/// What a node may print of text its master sent: one line, no control
+/// characters (no escape sequences, no forged log lines), at most `max`
+/// characters, cut with an ellipsis.
+pub fn printable(text: &str, max: usize) -> String {
+    let mut out: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(max)
+        .collect();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out.trim().to_string()
 }
 
 pub type ServerStream = WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>;
@@ -171,7 +188,8 @@ pub async fn node_handshake(
         Some(ServerMsg::Challenge { nonce }) => nonce,
         other => {
             return Err(LinkError::Protocol(format!(
-                "expected a challenge, got {other:?}"
+                "expected a challenge, got {}",
+                kind(other.as_ref())
             )));
         }
     };
@@ -179,7 +197,23 @@ pub async fn node_handshake(
     send_json(ws, &hello(sig)).await?;
     match recv_json::<_, ServerMsg>(ws).await? {
         Some(ServerMsg::Accepted { node_id }) => Ok(node_id),
-        Some(ServerMsg::Rejected { reason }) => Err(LinkError::Rejected(reason)),
-        other => Err(LinkError::Protocol(format!("unexpected {other:?}"))),
+        Some(ServerMsg::Rejected { reason }) => {
+            Err(LinkError::Rejected(printable(&reason, MAX_REASON_CHARS)))
+        }
+        other => Err(LinkError::Protocol(format!(
+            "unexpected {}",
+            kind(other.as_ref())
+        ))),
+    }
+}
+
+/// A handshake message by its kind only: what a master sent in it is not
+/// printed.
+fn kind(m: Option<&ServerMsg>) -> &'static str {
+    match m {
+        None => "the end of the connection",
+        Some(ServerMsg::Challenge { .. }) => "a challenge",
+        Some(ServerMsg::Accepted { .. }) => "an acceptance",
+        Some(ServerMsg::Rejected { .. }) => "a refusal",
     }
 }

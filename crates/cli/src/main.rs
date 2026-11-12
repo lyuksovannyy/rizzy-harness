@@ -471,9 +471,9 @@ async fn serve(
             stop::announce(name, "the server");
             signals.force_on_second();
             master.begin_stop();
-            let (mut left, more) = tokio::join!(chat.stop(stop::STOP_WAIT), async {
+            let (mut left, more) = tokio::join!(chat.stop(stop::stop_wait()), async {
                 match &local {
-                    Some(n) => n.stop(stop::STOP_WAIT).await,
+                    Some(n) => n.stop(stop::stop_wait()).await,
                     None => Vec::new(),
                 }
             });
@@ -538,7 +538,7 @@ fn stopped(left: Vec<String>) -> anyhow::Result<()> {
     bail!(
         "stopped after {} s with {} turn(s) still running (sessions {}): the next start \
          closes them as interrupted",
-        stop::STOP_WAIT.as_secs(),
+        stop::stop_wait().as_secs(),
         left.len(),
         left.join(", ")
     )
@@ -829,7 +829,7 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
             // away gets them replayed at the next hello.
             stop::announce(name, "the node");
             signals.force_on_second();
-            let left = node.stop(stop::STOP_WAIT).await;
+            let left = node.stop(stop::stop_wait()).await;
             node.flush(stop::FLUSH_WAIT).await;
             // The last message taken from the queue may still be on its way
             // out: a moment before the link closes (a lost one replays).
@@ -1112,28 +1112,14 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(harness_master::pdf::helper_main());
     }
     let loaded = load_dotenv()?;
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main(loaded))
-}
-
-async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("HARNESS_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .with_writer(std::io::stderr)
-        // No colour codes in `docker logs`, journald or files.
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .init();
+    init_tracing();
     let cli = Cli::parse();
     let dir = data_dir(&cli.data_dir)?;
     // One process per data directory (A.20), before anything else touches
-    // it: held until this function returns, released by the kernel however
-    // the process ends. `doctor`, `token`, `claim-code` and `graphify` run
-    // beside a live server or node and take none.
+    // it. Held here, outside the runtime, and never dropped: the process
+    // exits with it held and the kernel releases it only once the process
+    // is gone (review A19-1). `doctor`, `token`, `claim-code` and
+    // `graphify` run beside a live server or node and take none.
     let role = match &cli.cmd {
         Cmd::Serve { .. } => Some("serve"),
         Cmd::Node { cmd: NodeCmd::Run } => Some("node run"),
@@ -1143,6 +1129,46 @@ async fn async_main(dotenv_names: Vec<String>) -> anyhow::Result<()> {
         _ => None,
     };
     let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = rt.block_on(async_main(cli, dir, loaded));
+    // A blocking thread a cancelled tool left (a read on a mount that does
+    // not answer) would hold a plain drop of the runtime for ever.
+    rt.shutdown_timeout(stop::RUNTIME_SHUTDOWN);
+    let code = match &result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            if e.chain().any(|c| {
+                matches!(
+                    c.downcast_ref::<harness_link::LinkError>(),
+                    Some(harness_link::LinkError::Rejected(_))
+                )
+            }) {
+                stop::EXIT_REFUSED
+            } else {
+                1
+            }
+        }
+    };
+    // With the lock still held: it goes with the process, not before.
+    std::process::exit(code)
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("HARNESS_LOG")
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
+        // No colour codes in `docker logs`, journald or files.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .init();
+}
+
+async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Serve {
             bind,

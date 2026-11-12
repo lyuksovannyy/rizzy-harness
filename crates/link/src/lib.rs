@@ -36,7 +36,9 @@ pub enum LinkError {
     Key(String),
     #[error("protocol: {0}")]
     Protocol(String),
-    #[error("rejected: {0}")]
+    /// The master's `rejected` reason, made printable
+    /// (`wire::printable`).
+    #[error("the master refused this node: {0}")]
     Rejected(String),
 }
 

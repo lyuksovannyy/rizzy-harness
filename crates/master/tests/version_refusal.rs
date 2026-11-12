@@ -67,7 +67,9 @@ async fn auth(env: &Env, node_id: &str, key: &NodeKey, extra: Value) -> (Value, 
     let answer: Value = tokio::time::timeout(Duration::from_secs(10), recv_json(&mut ws))
         .await
         .expect("no answer to the hello")
-        .unwrap()
+        // A connection closed without an answer (a malformed hello).
+        .ok()
+        .flatten()
         .unwrap_or(Value::Null);
     (answer, ws)
 }
@@ -123,20 +125,57 @@ async fn a_protocol_mismatch_is_refused_before_accepted_with_the_reason() {
     assert_eq!(answer["type"], "accepted", "answered {answer}");
 }
 
-/// A node built before the field existed sends no version: it speaks
-/// protocol 1, the only one there was, and is taken as such.
+/// The version is a required field of the hello (review N-4: "absent is
+/// protocol 1" would be compatibility code): a hello without it is
+/// malformed and closed without an answer, as any other.
 #[tokio::test]
-async fn a_hello_without_a_version_is_protocol_1() {
+async fn a_hello_without_a_version_is_malformed() {
     let env = master().await;
     let (id, key) = joined(&env, "old").await;
     let (answer, _ws) = auth(&env, &id, &key, json!({})).await;
-    if PROTOCOL_VERSION == 1 {
-        assert_eq!(answer["type"], "accepted", "answered {answer}");
-    } else {
-        assert_eq!(answer["type"], "rejected", "answered {answer}");
-        let reason = answer["reason"].as_str().unwrap();
-        assert!(reason.contains("protocol 1"), "{reason}");
-    }
+    assert_eq!(answer, Value::Null, "answered {answer}");
+}
+
+/// Review N-9: a `node join` of another protocol is refused with the
+/// reason before its token is spent (the same token then joins a node of
+/// the right protocol), and a join with no valid token learns nothing of
+/// the version.
+#[tokio::test]
+async fn a_join_of_another_protocol_is_refused_before_its_token_is_spent() {
+    let env = master().await;
+    let key = NodeKey::load_or_create(&env.dir.path().join("j.key")).unwrap();
+    let token = env.master.create_join_token(None).await.unwrap();
+    let join_raw = |token: String, version: u32| {
+        let env = &env;
+        let key = &key;
+        async move {
+            let mut ws = connect_with(&env.url, &env.fp, Timing::default())
+                .await
+                .unwrap();
+            let challenge: Value = recv_json(&mut ws).await.unwrap().unwrap();
+            let nonce = challenge["nonce"].as_str().unwrap();
+            let signature = key.sign_hex(&harness_link::identity::auth_message(nonce, &env.fp));
+            let hello = json!({"type": "join", "token": token, "public_key": key.public_hex(),
+                               "hostname": "box", "signature": signature,
+                               "protocol_version": version});
+            send_json(&mut ws, &hello).await.unwrap();
+            let answer: Value = recv_json(&mut ws).await.unwrap().unwrap_or(Value::Null);
+            answer
+        }
+    };
+    let answer = join_raw(token.clone(), PROTOCOL_VERSION + 1).await;
+    assert_eq!(answer["type"], "rejected", "{answer}");
+    let reason = answer["reason"].as_str().unwrap();
+    assert!(reason.contains("the master is older"), "{reason}");
+    let stranger = join_raw("0".repeat(32), PROTOCOL_VERSION + 1).await;
+    assert_eq!(stranger["type"], "rejected", "{stranger}");
+    assert!(
+        !stranger["reason"].as_str().unwrap().contains("protocol"),
+        "{stranger}"
+    );
+    // The token was not spent by the refused join.
+    let id = join(&env.url, &env.fp, &token, "box", &key).await.unwrap();
+    assert_eq!(id, "box");
 }
 
 /// Whoever has not proved a registered key gets the one refusal anyone
@@ -147,7 +186,14 @@ async fn an_unauthenticated_peer_does_not_learn_the_version() {
     let env = master().await;
     let (id, _key) = joined(&env, "box").await;
     let stranger = NodeKey::load_or_create(&env.dir.path().join("stranger.key")).unwrap();
-    let plain = auth(&env, &id, &stranger, json!({})).await.0;
+    let plain = auth(
+        &env,
+        &id,
+        &stranger,
+        json!({"protocol_version": PROTOCOL_VERSION}),
+    )
+    .await
+    .0;
     assert_eq!(plain["type"], "rejected", "{plain}");
     for claim in [
         json!({"protocol_version": PROTOCOL_VERSION + 7}),

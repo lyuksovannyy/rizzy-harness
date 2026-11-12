@@ -18,6 +18,7 @@ use harness_protocol::{MasterToNode, NODE_STOPPING, NodeToMaster, PROTOCOL_VERSI
 use harness_store::Store;
 use tokio::sync::mpsc;
 
+pub use git::SNAPSHOT_TIMEOUT;
 pub use policy::NodePolicy;
 use session::Session;
 
@@ -926,8 +927,8 @@ impl NodeRuntime {
     /// cancel path (a command gets SIGTERM, then its guard's kill; a pending
     /// approval is denied) and ends `stopped`; then this waits for every
     /// turn and restore to end, at most `bound`. Returns the sessions whose
-    /// turn had not ended by then (the next start closes them as
-    /// `interrupted`). Idempotent.
+    /// turn had not ended by then, or ended without its end in the log
+    /// (the next start closes them as `interrupted`). Idempotent.
     pub async fn stop(&self, bound: Duration) -> Vec<SessionId> {
         self.inner.stopping.store(true, Ordering::SeqCst);
         let by = tokio::time::Instant::now() + bound;
@@ -935,29 +936,41 @@ impl NodeRuntime {
             // Read again each time: a prompt that claimed its turn just
             // before the flag was set is cancelled on the next pass (and
             // one after it refuses itself, `Session::prompt`).
-            let running: Vec<Arc<Session>> = self
+            let sessions: Vec<Arc<Session>> = self
                 .inner
                 .sessions
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .values()
-                .filter(|s| s.is_running())
                 .cloned()
                 .collect();
+            let running: Vec<&Arc<Session>> = sessions.iter().filter(|s| s.is_running()).collect();
+            // All marked before any is cancelled: a sub-agent cancelled by
+            // its parent's token is the stop's too (review N-7).
+            for s in &running {
+                s.mark_stopped();
+            }
             for s in &running {
                 s.cancel();
             }
+            // After the flag, under the registry's lock: a restore either
+            // registered before (and is waited for) or refuses itself
+            // (`Session::claim_folder`, review A19-4).
             let restoring = !self
                 .inner
                 .restoring
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .is_empty();
-            if running.is_empty() && !restoring {
-                return Vec::new();
-            }
-            if tokio::time::Instant::now() >= by {
-                return running.iter().map(|s| s.id()).collect();
+            let done = running.is_empty() && !restoring;
+            if done || tokio::time::Instant::now() >= by {
+                // A turn whose end could not be written is not closed
+                // either (review A19-5).
+                return sessions
+                    .iter()
+                    .filter(|s| s.is_running() || s.is_unclosed())
+                    .map(|s| s.id())
+                    .collect();
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

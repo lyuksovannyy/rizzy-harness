@@ -268,6 +268,9 @@ pub struct RunPatch {
     /// Only while the run has not finished: a late event never rewrites a
     /// result (a timeout recorded before the cancelled turn ends).
     pub only_active: bool,
+    /// Forget the run's chat and turn (a run a stop put back starts in a
+    /// new chat; the cut one stays as it is).
+    pub clear_chat: bool,
 }
 
 /// One routine's line in the owner's attention list: its newest unseen
@@ -950,6 +953,10 @@ impl Store {
         }
         if let Some(a) = p.attempt {
             set("attempt", Sql::Integer(a));
+        }
+        if p.clear_chat {
+            set("session_id", Sql::Null);
+            set("turn_id", Sql::Null);
         }
         if sets.is_empty() {
             return Ok(false);

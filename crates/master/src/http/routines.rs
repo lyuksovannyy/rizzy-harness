@@ -790,6 +790,12 @@ async fn run_now(
         runner::Manual::Started(run_id) => json!({ "run_id": run_id }),
         runner::Manual::Skipped(why) => json!({ "skipped": why }),
         runner::Manual::Blocked(why) => return Err(conflict(why)),
+        runner::Manual::Stopping => {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r::STOPPING.into(),
+            ));
+        }
         runner::Manual::Failed => {
             return Err(ApiError(
                 StatusCode::INTERNAL_SERVER_ERROR,

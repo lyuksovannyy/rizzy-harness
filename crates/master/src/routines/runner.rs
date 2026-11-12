@@ -728,6 +728,11 @@ async fn launch_failed(m: &Master, a: &Admitted, run: &RunRow, e: CommandError) 
     let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
     let r = &a.routine;
     match e {
+        // This server is stopping: a retry kept in memory would be lost
+        // with it; the run waits for the next start instead.
+        CommandError::NodeStopping if m.is_stopping() => {
+            put_back(m, &run.run_id, &r.owner_id).await
+        }
         CommandError::NodeOffline(_) | CommandError::NodeStopping | CommandError::Timeout => {
             retry_later(m, run, r, e.to_string(), a.event.clone()).await
         }
@@ -904,6 +909,8 @@ async fn block(m: &Master, r: &RoutineRow, run_id: Option<&str>, why: &str, now:
 /// Run now: start a run of `r` that no trigger owns.
 pub(crate) enum Manual {
     Started(String),
+    /// The server is stopping: no run is recorded (review A19-2).
+    Stopping,
     /// `overlap` or `cap`.
     Skipped(&'static str),
     Blocked(String),
@@ -916,6 +923,9 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow, sample: Option<Event>) -
     let Some(h) = handle(m) else {
         return Manual::Failed;
     };
+    if m.is_stopping() {
+        return Manual::Stopping;
+    }
     let run = NewRun {
         run_id: new_id(),
         routine_id: r.routine_id.clone(),
@@ -969,6 +979,8 @@ pub enum Fired {
     Skipped(&'static str),
     /// Its owner may no longer run it: blocked, and the routine paused.
     Paused,
+    /// The server is stopping: no run is recorded (review A19-2).
+    Stopping,
     Failed,
 }
 
@@ -978,6 +990,9 @@ pub(crate) async fn fire_event(m: &Master, t: &TriggerRow, r: &RoutineRow, event
     let Some(h) = handle(m) else {
         return Fired::Failed;
     };
+    if m.is_stopping() {
+        return Fired::Stopping;
+    }
     let now = h.clock.now();
     let claim = NewRun {
         run_id: new_id(),
@@ -1190,13 +1205,51 @@ async fn finalize(m: &Master, b: &Bound, end: &Value) {
         Some("completed") => ("completed", None),
         Some("cancelled") => ("cancelled", Some("the turn was cancelled".to_string())),
         Some("interrupted") => ("interrupted", Some("the turn was interrupted".to_string())),
-        Some("stopped") => (
-            "interrupted",
-            Some("the node was stopped while the turn ran".to_string()),
-        ),
+        // Not the run's failure (review A19-2): it is put back.
+        Some("stopped") => {
+            put_back(m, &b.run_id, &b.owner).await;
+            return;
+        }
         _ => ("error", Some("the turn ended with an error".to_string())),
     };
     end_run(m, &b.run_id, &b.routine_id, &b.owner, status, reason).await;
+}
+
+/// The reason of a run a stop put back. A `pending` run found with it at
+/// start is launched, not ended (`reconcile`).
+pub(crate) const PUT_BACK: &str =
+    "the node was stopped while the run's turn ran; it runs again when the server is back";
+
+/// Put back a run a stop cut or kept from starting: `pending` again, in a
+/// new chat, not counted against the routine. It runs once more, by
+/// exactly one of two paths: here at once when this server is not the one
+/// stopping (a remote node stopped: the launch then waits for it like any
+/// absent node), or at this server's next start (`reconcile`, which runs
+/// once per process before the scheduler's first tick). Either path moves
+/// the row out of `pending` (`launch`, or `retry_later`'s own reason)
+/// before anything could find it again.
+async fn put_back(m: &Master, run_id: &str, owner: &str) {
+    let patch = RunPatch {
+        status: Some("pending".into()),
+        reason: Some(Some(PUT_BACK.into())),
+        waiting_since_ms: Some(None),
+        clear_chat: true,
+        only_active: true,
+        ..Default::default()
+    };
+    let id = run_id.to_string();
+    let stored = m
+        .inner
+        .mirror
+        .call(move |s| s.run_update(&id, &patch))
+        .await;
+    if !matches!(stored, Ok(true)) {
+        return;
+    }
+    changed(m, owner);
+    if !m.is_stopping() {
+        spawn_execute(m, run_id.to_string(), None);
+    }
 }
 
 /// Bring active runs in line with the mirror: at startup, pending runs were
@@ -1214,7 +1267,10 @@ async fn reconcile(m: &Master, startup: bool) {
     };
     for run in runs {
         if run.status == "pending" {
-            if startup {
+            if startup && run.reason.as_deref() == Some(PUT_BACK) {
+                // Put back by the last process's stop: it runs now, once.
+                spawn_execute(m, run.run_id.clone(), None);
+            } else if startup {
                 let why = "the server restarted before the run started";
                 end_run_of(m, &run, "interrupted", why).await;
             }
