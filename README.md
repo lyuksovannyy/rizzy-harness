@@ -728,6 +728,9 @@ user without a login session (no session bus, no `docker` group, as
 
 - `/proc` lists only its own processes; `ps` shows a handful, `$$` is 2.
   The node's and the rest of the machine's processes are not visible.
+  Process 1 is bubblewrap's, and its command line (`/proc/1/cmdline`)
+  lists the command's own grants: its folder, its temp folder, the
+  `[sandbox] read`/`write` entries, the harness binary's path.
 - A program that daemonizes to keep running after the call (a dev server
   started with `setsid`, a `--daemon` flag) stops when the call ends. Run
   it in the foreground within one call, with a timeout.
