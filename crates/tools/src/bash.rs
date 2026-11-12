@@ -830,36 +830,30 @@ mod tests {
         let _ = c.wait();
     }
 
-    /// KNOWN GAP (design note C.11, built by T.8): a child that called
+    /// RESIDUAL WITHOUT CONTAINMENT (PLAN.md T9): a child that called
     /// `setsid` is not in the process group the tool signals, so it
-    /// survives a cancel. Once a containment (cgroup, PID namespace or
-    /// `/proc` walk) exists, this assertion flips to `!alive`.
+    /// survives a cancel. These tests run the shell unconfined, as a node
+    /// without bubblewrap does; contained, it dies (`cli/tests/contain.rs`).
     #[tokio::test]
     async fn a_setsid_child_survives_cancel() {
         let pf = tempfile::tempdir().unwrap();
         let pidfile = pf.path().join("pid");
         let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_603));
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_603, Stop::Cancel).await;
-        assert!(
-            alive,
-            "the setsid child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): same as above, ended by the timeout.
+    /// RESIDUAL WITHOUT CONTAINMENT: same as above, ended by the timeout.
     #[tokio::test]
     async fn a_setsid_child_survives_timeout() {
         let pf = tempfile::tempdir().unwrap();
         let pidfile = pf.path().join("pid");
         let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_604));
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_604, Stop::Timeout).await;
-        assert!(
-            alive,
-            "the setsid child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): same as above, ended by dropping the call
+    /// RESIDUAL WITHOUT CONTAINMENT: same as above, ended by dropping the call
     /// future (`KillGroupOnDrop` path).
     #[tokio::test]
     async fn a_setsid_child_survives_a_dropped_call() {
@@ -867,13 +861,10 @@ mod tests {
         let pidfile = pf.path().join("pid");
         let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_605));
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_605, Stop::Drop).await;
-        assert!(
-            alive,
-            "the setsid child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): `setsid -f` (forks, parent exits at once).
+    /// RESIDUAL WITHOUT CONTAINMENT: `setsid -f` (forks, parent exits at once).
     #[tokio::test]
     async fn a_setsid_f_child_survives_cancel() {
         let pf = tempfile::tempdir().unwrap();
@@ -883,13 +874,10 @@ mod tests {
             recording_sleep(&pidfile, 987_606)
         );
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_606, Stop::Cancel).await;
-        assert!(
-            alive,
-            "the setsid -f child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid -f child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): a classic double fork (subshell in the
+    /// RESIDUAL WITHOUT CONTAINMENT: a classic double fork (subshell in the
     /// background, then `setsid`), the shape of a daemon.
     #[tokio::test]
     async fn a_double_forked_setsid_daemon_survives_cancel() {
@@ -900,7 +888,7 @@ mod tests {
             recording_sleep(&pidfile, 987_607)
         );
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_607, Stop::Cancel).await;
-        assert!(alive, "the daemon died: the gap is closed, flip this test");
+        assert!(alive, "the daemon died: update PLAN.md T9");
     }
 
     /// Control: a double fork with `nohup` but without `setsid` is still in
@@ -930,9 +918,9 @@ mod tests {
     /// session actor or a restart: only that nothing in `bash.rs` can clean
     /// up after a SIGKILL of its process.
     ///
-    /// KNOWN GAP (C.11 / T.8): the ordinary child survives. A containment
-    /// that dies with the node (a cgroup, or a PID namespace whose init is
-    /// the node's helper) would flip this to `!alive`.
+    /// RESIDUAL WITHOUT CONTAINMENT (PLAN.md T9): the ordinary child
+    /// survives. Contained, it dies with the node
+    /// (`cli/tests/contain.rs`, `detached_children_end_when_the_node_is_killed`).
     #[tokio::test]
     async fn a_command_survives_sigkill_of_its_node() {
         const SECS: u32 = 987_609;
@@ -954,10 +942,7 @@ mod tests {
         let _ = helper.wait();
         tokio::time::sleep(Duration::from_secs(2)).await;
         let alive = is_our_sleep(reaper.pid, SECS);
-        assert!(
-            alive,
-            "the command died with its node: the gap is closed, flip this test"
-        );
+        assert!(alive, "the command died with its node: update PLAN.md T9");
     }
 
     /// Not a test on its own: the body of the helper process above. Without

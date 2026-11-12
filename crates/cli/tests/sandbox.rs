@@ -3,6 +3,13 @@
 //!
 //! On a kernel without Landlock these tests skip with a printed reason, but
 //! when `CI` is set they fail: a green CI run must mean they ran.
+//!
+//! The file-policy tests run twice where bubblewrap works: with Landlock
+//! alone (the fallback) and inside the shell's containment (T.8a), which
+//! must not change what a command may open.
+
+#[path = "support/bwrap.rs"]
+mod bwrap;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,6 +28,22 @@ struct Fixture {
     data: PathBuf,
     home: PathBuf,
     ws: PathBuf,
+    /// The shell runs inside bubblewrap (T.8a).
+    contained: bool,
+}
+
+/// One fixture per way the shell can run here: Landlock alone, and inside
+/// the containment where bubblewrap works.
+fn fixtures() -> Vec<Fixture> {
+    let mut all = vec![fixture()];
+    let mut f = fixture();
+    let sb = f.sandbox(Settings::default());
+    let sb = Arc::try_unwrap(sb).unwrap();
+    if bwrap::contained(sb, &f.data.join("sandbox-tmp/probe-contain")).is_ok() {
+        f.contained = true;
+        all.push(f);
+    }
+    all
 }
 
 fn fixture() -> Fixture {
@@ -40,20 +63,28 @@ fn fixture() -> Fixture {
         data,
         home,
         ws,
+        contained: false,
     }
 }
 
 impl Fixture {
     fn sandbox(&self, settings: Settings) -> Arc<Sandbox> {
-        Arc::new(
-            Sandbox::new(
-                PathBuf::from(EXE),
-                &settings,
-                Some(self.data.join("sandbox-tmp")),
-                std::slice::from_ref(&self.data),
-            )
-            .unwrap(),
+        let sb = Sandbox::new(
+            PathBuf::from(EXE),
+            &settings,
+            Some(self.data.join("sandbox-tmp")),
+            std::slice::from_ref(&self.data),
         )
+        .unwrap();
+        Arc::new(if self.contained {
+            let bwrap = harness_tools::contain::find_bwrap().unwrap();
+            sb.with_containment(harness_tools::contain::Contain::new(
+                bwrap,
+                harness_tools::contain::Form::Full,
+            ))
+        } else {
+            sb
+        })
     }
 
     fn ctx(&self, sandbox: Arc<Sandbox>, cwd: &Path) -> ToolCtx {
@@ -100,7 +131,13 @@ fn abi(status: &str) -> u32 {
 #[tokio::test]
 async fn ssh_key_and_api_token_are_permission_denied() {
     let Some(_) = landlock() else { return };
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        ssh_key_and_api_token_are_permission_denied_in(f).await;
+    }
+}
+
+async fn ssh_key_and_api_token_are_permission_denied_in(f: Fixture) {
     let cmd = format!(
         "export HOME={}; cat ~/.ssh/id_ed25519; cat {}/api-token; ls {}; echo end",
         f.home.display(),
@@ -124,7 +161,13 @@ async fn ssh_key_and_api_token_are_permission_denied() {
 #[tokio::test]
 async fn node_key_is_unreadable_from_the_shell() {
     let Some(_) = landlock() else { return };
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        node_key_is_unreadable_from_the_shell_in(f).await;
+    }
+}
+
+async fn node_key_is_unreadable_from_the_shell_in(f: Fixture) {
     let keys = f.data.join("keys");
     std::fs::create_dir_all(&keys).unwrap();
     let key = keys.join("node.key");
@@ -166,7 +209,13 @@ async fn node_key_is_unreadable_from_the_shell() {
 #[tokio::test]
 async fn writes_outside_the_project_are_denied() {
     let Some(_) = landlock() else { return };
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        writes_outside_the_project_are_denied_in(f).await;
+    }
+}
+
+async fn writes_outside_the_project_are_denied_in(f: Fixture) {
     let cmd = format!(
         "touch {home}/planted; truncate -s 0 {data}/api-token; rm -f {data}/api-token; \
          mv {data}/api-token ./stolen; ln {data}/api-token ./hard; echo x > /tmp/rizzy-sbx-$$; \
@@ -191,7 +240,13 @@ async fn writes_outside_the_project_are_denied() {
 #[tokio::test]
 async fn a_build_in_the_project_works() {
     let Some(_) = landlock() else { return };
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        a_build_in_the_project_works_in(f).await;
+    }
+}
+
+async fn a_build_in_the_project_works_in(f: Fixture) {
     std::fs::write(
         f.ws.join("hello.c"),
         "#include <stdio.h>\nint main(void){puts(\"built-and-ran\");return 0;}\n",
@@ -489,9 +544,10 @@ async fn b1_control_sandboxed_same_group_child_dies_on_cancel() {
     assert!(!alive, "control failed: a same-group child survived");
 }
 
-/// KNOWN GAP (design note C.11, built by T.8): the Landlock sandbox does not
-/// change it; a child that called `setsid` survives a cancel. Once a
-/// containment exists this assertion flips to `!alive`.
+/// RESIDUAL WITHOUT CONTAINMENT (PLAN.md T9): Landlock alone (no
+/// bubblewrap, `contain = "auto"`'s fallback) does not change it; a child
+/// that called `setsid` survives a cancel. With the containment it dies:
+/// `tests/contain.rs`, whose flipped form of this test failed on `main`.
 #[tokio::test]
 async fn a_setsid_child_survives_cancel_in_the_sandbox() {
     let Some(_) = landlock() else { return };
@@ -501,10 +557,13 @@ async fn a_setsid_child_survives_cancel_in_the_sandbox() {
         false,
     )
     .await;
-    assert!(!alive, "a setsid child survived cancel");
+    assert!(
+        alive,
+        "the setsid child died without the containment: update PLAN.md T9"
+    );
 }
 
-/// KNOWN GAP (C.11 / T.8): the same, ended by the timeout.
+/// RESIDUAL WITHOUT CONTAINMENT: the same, ended by the timeout.
 #[tokio::test]
 async fn a_setsid_child_survives_timeout_in_the_sandbox() {
     let Some(_) = landlock() else { return };
@@ -516,6 +575,6 @@ async fn a_setsid_child_survives_timeout_in_the_sandbox() {
     .await;
     assert!(
         alive,
-        "the setsid child died: the gap is closed, flip this test"
+        "the setsid child died without the containment: update PLAN.md T9"
     );
 }

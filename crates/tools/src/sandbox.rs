@@ -1589,7 +1589,11 @@ mod tests {
         let s = start(&settings(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
         assert!(s.refusal.is_none(), "{:?}", s.refusal);
         assert!(s.contain_degraded);
-        assert!(s.contain_summary.contains("NOT CONTAINED"), "{}", s.contain_summary);
+        assert!(
+            s.contain_summary.contains("NOT CONTAINED"),
+            "{}",
+            s.contain_summary
+        );
         let (_, contained) = shell(&s.confinement).unwrap();
         assert!(!contained);
 

@@ -383,7 +383,8 @@ async fn exit_codes_output_and_the_graceful_stop_are_unchanged() {
 
     let r = run(&ctx, json!({"command": "sleep 100", "timeout_secs": 1})).await;
     assert!(
-        r.output.contains("[timed out after 1s: process group killed]"),
+        r.output
+            .contains("[timed out after 1s: process group killed]"),
         "{}",
         r.output
     );
@@ -409,7 +410,11 @@ async fn exit_codes_output_and_the_graceful_stop_are_unchanged() {
         "the TERM trap did not run: {}",
         r.output
     );
-    assert!(t.elapsed() < Duration::from_millis(1900), "{:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_millis(1900),
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 /// Nothing in a call's input, nor a session's own confinement, switches
