@@ -168,12 +168,18 @@ async fn sessions_and_tools_stay_out_of_the_data_dir() {
         .tool_output(&sid, "run: cat ../data/api-token; echo; echo done")
         .await;
     assert!(out.contains("done"), "{out}");
-    assert!(out.contains("Permission denied"), "{out}");
+    assert!(refused(&out), "{out}");
     assert!(!out.contains("[REDACTED]"), "the file was read: {out}");
     assert!(
         !all.contains(&token),
         "the API token is in the events: {all}"
     );
+}
+
+/// Not opened: denied by Landlock where the shell is not contained, not
+/// there at all in the contained shell's file view (T.8c).
+fn refused(out: &str) -> bool {
+    out.contains("Permission denied") || out.contains("No such file or directory")
 }
 
 /// S-4 (R.1): a relative `--data-dir` is made absolute once, where the
@@ -203,7 +209,7 @@ async fn a_relative_data_dir_is_made_absolute_for_the_sandbox() {
         out.contains(&format!("tmp={}/", tmp.display())),
         "TMPDIR is not the data directory's: {out}"
     );
-    assert!(out.contains("Permission denied"), "{out}");
+    assert!(refused(&out), "{out}");
 }
 
 /// The shell's view of the home directory: a private key next to the
@@ -224,7 +230,7 @@ async fn bash_cannot_read_keys_beside_the_project() {
         )
         .await;
     assert!(!out.contains("PRIVATE-KEY-CANARY"), "{out}");
-    assert!(out.contains("Permission denied"), "{out}");
+    assert!(refused(&out), "{out}");
     assert!(out.contains("project-file-ok"), "{out}");
     assert!(out.contains("built"), "{out}");
 }
