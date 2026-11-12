@@ -690,8 +690,12 @@ fn refusing_while(f: &Fixture, flag: &Path) -> PathBuf {
 /// T8B-2: a fresh namespace that lists an interface besides `lo` (what a
 /// kernel with a tunnel module loaded makes: `tunl0`, `sit0`) is still a
 /// namespace of its own. The real bubblewrap with every option as given;
-/// only the list the node's probe script would read is one with `lo` and
-/// `tunl0`. Both `auto` and `required` end with the namespace.
+/// the stand-in swaps a probe script's read of `/proc/net/dev` for a list
+/// with `lo` and `tunl0`. It failed before the fix (the probe read that
+/// list). Since the fix the probe does not read it, so the stand-in changes
+/// nothing and this tests plain bubblewrap: both `auto` and `required` end
+/// with the namespace. It would fail again if the list came back into the
+/// probe (review R-5).
 #[tokio::test]
 async fn an_extra_interface_in_a_new_namespace_still_counts_as_one() {
     use harness_tools::contain::ContainMode;
@@ -877,4 +881,261 @@ async fn the_shared_proc_form_gets_the_namespace_too() {
         .await;
     assert!(own_ns(&out), "{out}");
     assert!(arrived(&[host])[0].is_empty(), "{out}");
+}
+
+// ---- re-check R-1, R-2: one way up for every step, never on the caller's path ----
+
+/// The stand-in that fails its first `n` runs, whatever the options (as a
+/// full process table or no memory would), then is the real bubblewrap.
+fn failing_first(f: &Fixture, n: u32) -> (PathBuf, PathBuf) {
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    let count = f.root.join("runs");
+    let fake = stand_in(
+        f,
+        "bwrap-fails-first-runs",
+        &format!(
+            "n=$(cat '{count}' 2>/dev/null || echo 0); echo $((n+1)) >'{count}'\n\
+             if [ \"$n\" -lt {n} ]; then\n\
+             echo 'bwrap: Creating new namespace failed: Resource temporarily unavailable' >&2\n\
+             exit 1; fi\nexec '{real}' \"$@\"\n",
+            count = count.display(),
+            real = real.display()
+        ),
+    );
+    (fake, count)
+}
+
+fn runs(count: &Path) -> u32 {
+    std::fs::read_to_string(count)
+        .map(|s| s.trim().parse().unwrap())
+        .unwrap_or(0)
+}
+
+/// What a command prints of its PID: 2 (or 3) in a namespace of its own.
+fn pid_of(out: &str) -> u32 {
+    out.lines()
+        .find_map(|l| l.strip_prefix("pid="))
+        .and_then(|p| p.split_whitespace().next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no pid: {out}"))
+}
+
+/// R-1: every probe at start failed (four runs: both forms, with and
+/// without the namespace), so the `auto` node started with Landlock alone.
+/// It keeps the bubblewrap it found and probes again, at most every
+/// interval, beside a shell command: the commands started after a probe
+/// passed are contained, with a network namespace of their own, and the
+/// host hears nothing from them.
+#[tokio::test]
+async fn an_auto_node_that_could_not_contain_at_start_contains_later() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let (fake, count) = failing_first(&f, 4);
+    let retry = Duration::from_millis(500);
+    let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, retry);
+    assert_eq!(runs(&count), 4);
+    assert!(
+        s.contain_summary.starts_with("NOT CONTAINED"),
+        "{}",
+        s.contain_summary
+    );
+    let host = udp_host();
+    let cmd = |tag: &str| format!("echo pid=$$; {}", send_cmd(&host, tag));
+
+    // At once: Landlock alone, as the start left it.
+    let out = run_in(&f, &s.confinement, &cmd("alone")).await;
+    assert!(pid_of(&out) > 3 && out.contains(&host_ns()), "{out}");
+    assert_eq!(arrived(std::slice::from_ref(&host))[0], ["alone"], "{out}");
+
+    // After the interval a command starts the probe beside it; the ones
+    // started once it passed are contained.
+    tokio::time::sleep(retry + Duration::from_millis(100)).await;
+    let _ = run_in(&f, &s.confinement, &cmd("trigger")).await;
+    let _ = arrived(std::slice::from_ref(&host));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for round in 0..2 {
+        let out = run_in(&f, &s.confinement, &cmd("contained")).await;
+        assert!(pid_of(&out) <= 3, "round {round}: not contained: {out}");
+        assert!(own_ns(&out), "round {round}: {out}");
+        assert!(
+            arrived(std::slice::from_ref(&host))[0].is_empty(),
+            "round {round}: {out}"
+        );
+    }
+}
+
+/// R-1: a node that found no bubblewrap at all never probes: one that
+/// appears at that path later is not run, and commands stay as they were.
+#[tokio::test]
+async fn a_node_without_bubblewrap_never_probes() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let missing = f.root.join("bwrap-appears-later");
+    let s = start_node(
+        &f,
+        Network::Off,
+        ContainMode::Auto,
+        &missing,
+        Duration::ZERO,
+    );
+    assert!(
+        s.contain_summary.starts_with("NOT CONTAINED"),
+        "{}",
+        s.contain_summary
+    );
+    let (fake, count) = failing_first(&f, 0);
+    std::fs::rename(&fake, &missing).unwrap();
+    for _ in 0..3 {
+        let out = run_in(&f, &s.confinement, "echo pid=$$").await;
+        assert!(pid_of(&out) > 3, "{out}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(runs(&count), 0, "a node without bubblewrap probed");
+}
+
+/// R-1, the twin of `a_node_with_the_namespace_never_loses_it`: a node that
+/// contains never goes back to Landlock alone, whatever bubblewrap does
+/// later: the command fails, it does not run uncontained.
+#[tokio::test]
+async fn a_node_that_contains_never_goes_back_to_landlock_alone() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    let flag = f.root.join("broken");
+    let fake = stand_in(
+        &f,
+        "bwrap-breaks-later",
+        &format!(
+            "if [ -e '{flag}' ]; then echo 'bwrap: Creating new namespace failed: Resource \
+             temporarily unavailable' >&2; exit 1; fi\nexec '{real}' \"$@\"\n",
+            flag = flag.display(),
+            real = real.display()
+        ),
+    );
+    let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, Duration::ZERO);
+    assert!(
+        s.contain_summary.starts_with("contained"),
+        "{}",
+        s.contain_summary
+    );
+    std::fs::write(&flag, "").unwrap();
+    let host = udp_host();
+    for _ in 0..2 {
+        let out = run_in(
+            &f,
+            &s.confinement,
+            &format!("echo pid=$$; {}", send_cmd(&host, "x")),
+        )
+        .await;
+        assert!(!out.contains("pid="), "ran without bubblewrap: {out}");
+        assert!(out.contains("Creating new namespace failed"), "{out}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(arrived(&[host])[0].is_empty());
+}
+
+/// Live processes whose command line is exactly `sleep <arg>`.
+fn sleeping(arg: &str) -> Vec<i32> {
+    let want = format!("sleep\0{arg}\0");
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|p| std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c == want.as_bytes()))
+        .collect()
+}
+
+/// R-2: a later probe that hangs (the stand-in sleeps 6 s before it runs a
+/// probe with `--unshare-net`) holds no command: the one that noticed the
+/// probe was due returns within its own 1 s timeout, in the mode the node
+/// was in. The probe is bounded: it is killed, counted as failed, and a
+/// later probe still runs and steps up.
+#[tokio::test]
+async fn a_hung_later_probe_holds_no_command() {
+    use harness_tools::contain::ContainMode;
+    const SLEEP: &str = "6.0731";
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    let refuse = f.root.join("refuse");
+    let slow = f.root.join("slow");
+    let fake = stand_in(
+        &f,
+        "bwrap-slow-probe",
+        &format!(
+            "for a; do if [ \"$a\" = --unshare-net ]; then\n\
+             if [ -e '{refuse}' ]; then echo 'bwrap: Creating new namespace failed: Resource \
+             temporarily unavailable' >&2; exit 1; fi\n\
+             if [ -e '{slow}' ]; then sleep {SLEEP}; fi; fi; done\nexec '{real}' \"$@\"\n",
+            refuse = refuse.display(),
+            slow = slow.display(),
+            real = real.display()
+        ),
+    );
+    std::fs::write(&refuse, "").unwrap();
+    let retry = Duration::from_millis(1000);
+    let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, retry);
+    assert!(
+        s.contain_summary.contains("network off WITH A GAP"),
+        "{}",
+        s.contain_summary
+    );
+    std::fs::remove_file(&refuse).unwrap();
+    std::fs::write(&slow, "").unwrap();
+    tokio::time::sleep(retry + Duration::from_millis(100)).await;
+
+    // A: the probe is due; A runs at once in the gap, within its timeout.
+    let mut ctx = ToolCtx::new(&f.ws);
+    ctx.protected = Arc::new(vec![f.data.clone()]);
+    ctx.sandbox = s.confinement.clone().for_session("s1");
+    let started = std::time::Instant::now();
+    let a = Bash
+        .run(
+            &ctx,
+            json!({"command": format!("{IDENTITY} echo hi"), "timeout_secs": 1}),
+        )
+        .await
+        .output;
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "A waited {:?} for the probe: {a}",
+        started.elapsed()
+    );
+    assert!(a.contains("hi") && a.contains(&host_ns()), "{a}");
+
+    // The hung probe is killed at its bound (well before its 6 s).
+    let by = std::time::Instant::now() + Duration::from_secs(4);
+    while sleeping(SLEEP).is_empty() && std::time::Instant::now() < by {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let by = std::time::Instant::now() + Duration::from_secs(4);
+    while !sleeping(SLEEP).is_empty() {
+        assert!(
+            std::time::Instant::now() < by,
+            "the hung probe was not killed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // bubblewrap answers again: a later probe runs and the node steps up.
+    std::fs::remove_file(&slow).unwrap();
+    tokio::time::sleep(retry + Duration::from_millis(100)).await;
+    let _ = run_in(&f, &s.confinement, "true").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let out = run_in(&f, &s.confinement, IDENTITY).await;
+    assert!(own_ns(&out), "no later probe after the hung one: {out}");
 }
