@@ -86,8 +86,10 @@ Terms used below:
 - **Scratch session**: an agentic session with no project; it gets a repository of its own
   (§4.11.5).
 - **Spool**: the node's durable store of events the master has not yet acknowledged (§4.12).
-- **Host session**: a session whose shell runs on the node's machine under Landlock, not in a
-  container.
+- **Host session**: a session whose shell runs on the node's machine, not in a container: each
+  command in bubblewrap with Landlock inside, or under Landlock alone where bubblewrap cannot
+  run (decision O12 of 2026-11-12, from B.11, `docs/container-experiment.md`; built as T.8a to
+  T.8c).
 - **Pair code**: a short, single-use code the node shows and a workspace owner or admin types
   into the master's UI to attach that node to that workspace.
 - **Grant**: what the master sends a node so one turn of one session can call its models.
@@ -116,7 +118,7 @@ Terms used below:
 
 | Decision | Cost |
 |---|---|
-| **Podman** for session containers and self-hosting; Docker only for self-hosting. | Rootless Podman needs setuid `newuidmap`, `/etc/subuid` and a user runtime directory; the README's systemd unit (`NoNewPrivileges=yes`, `nologin` user) must change. Docker hosts get no container sessions. |
+| **Podman** for session containers and self-hosting; Docker only for self-hosting. | Rootless Podman needs `newuidmap`/`newgidmap` with privileges (setuid, or file capabilities as on Arch: `cap_setuid=ep`), `/etc/subuid` and a user runtime directory. `no_new_privs` disables those privileges, so a node started by the README's systemd unit (`NoNewPrivileges=yes`) cannot create its first container: measured, `newuidmap` fails with "Could not set caps" (B.11, `docs/container-experiment.md` §7). The unit must drop that line or the node must run as a user service; a `nologin` user without linger has no runtime directory (not reproduced in B.11). Rootless Podman does not run nested in the published image, so a node there has no environments. Docker hosts get no container sessions. |
 | **Chat-model keys per workspace (BYOK)**, no global store, nothing copied. Onboarding writes its first provider into the first admin's Personal workspace. **R1 (reading, to confirm):** the `HARNESS_PROVIDER_*` settings seed that Personal workspace. | `providers`, `default_model`, `[agent_models]` and `HARNESS_DEFAULT_MODEL` go; Personal workspaces gain settings; notices and the model cache go per workspace. `.env` seeds apply at config load, before any account exists, so R1 needs a seed deferred to the claim (§4.4). |
 | **Embeddings and voice are harness (server-wide) settings** with their own endpoints. They never reuse a workspace provider. Onboarding offers Ollama (the default) or a custom API endpoint for embeddings, and no "reuse the provider you just added". | Voice already has its own URL and key. Embeddings lose `source = "provider"` and `provider_id` and the onboarding path that reuses the provider. |
 | **A1 (to confirm):** title generation, summarisation and the vision bridge use the workspace's models. | Summarisation already uses the turn's model on the node; I found no title generator or vision bridge (first version): slots to add. |
@@ -127,7 +129,7 @@ Terms used below:
 | **The path decides the workspace** (owner, 2026-11-11): `<base>/<workspace-id>/<session-id>/files/`, derived on the node; the master sends no folder (§4.11). | Today's "open my checkout in `~/code/foo`" becomes a one-time `node link` on the node (§4.11.3); projects stop carrying a folder path (`crates/master/src/projects.rs:131`). |
 | **No conversation at rest on the node** (owner, 2026-11-11): a spool of unacknowledged events; the master's log is the durable record (§4.12). | The master must store with `synchronous=FULL` and acknowledge each event; it sends histories to nodes; a master that loses its database loses every conversation, so the master must be backed up. `PLAN.md` §1 to §3 change (§4.12.5). |
 | **`local` is an ordinary, shareable node** (owner, 2026-11-11). | A sandbox escape on `local` reaches the master process, every workspace's keys and the database. T11 changes (§4.10.6). |
-| **Private per-user node** (own confirm code, model access by proxy) is experimental and comes last. **Landlock stays**; containers are a further `Confinement` kind. | Two execution paths to test and document. |
+| **Private per-user node** (own confirm code, model access by proxy) is experimental and comes last. **Landlock stays**; containers are a further `Confinement` kind. Since O12 (2026-11-12, B.11) a host session's commands also run in bubblewrap, with Landlock inside where the kernel has it. | Two execution paths to test and document. |
 | **Environments**: the volume is kept; the node builds the invocation; the image comes from an allow-list, plus a setup script; one worktree per session; files are shared within the workspace, chats stay private. | File tools run in the node process and the shell runs in the container, so paths and file ownership must agree (§4.6). Shared files change T10 (§5). |
 | **Deletion**: no migration. Sessions are classified (a)/(b)/(c); other users are named, with their counts; autosave is optional, the deleter's choice. Anything unsafe forces a schedule (7 days by default, at least 1). Sessions are then archived; to continue, fork. **A4 (to confirm):** nothing unsafe may be deleted immediately. **A5 (confirmed):** a repository with no forge remote is class `c`. | Needs Connections (P7), a git path with network access (§4.7), archive and fork (P8). The names and counts in the dialog and autosaving colleagues' files need T10 changed (§5). |
 | **Forge accounts through Connections, per user**, plus one workspace account added by admins. | OAuth needs a registered app per forge and a callback a loopback master often cannot receive. Users have no e-mail today, which the plain fallback needs (§4.7). |
@@ -406,7 +408,7 @@ max_workspaces = 4           # pairing beyond this is refused on the node
 allow = []                   # workspace ids; non-empty means only these may be attached
 
 [execution]
-host_shell = true            # sessions in a host folder, under [sandbox] (Landlock)
+host_shell = true            # sessions in a host folder, under [sandbox] (bubblewrap with Landlock inside; O12)
 host_shell_shared = "abi9"   # host sessions on a shared node: "never" | "abi9" | "always" (§4.10.3)
 containers = false           # sessions in environments
 
@@ -426,7 +428,7 @@ local_keys_file = ""         # 0600, operator-managed; only with model_keys = "l
 runtime = "podman"           # the only value; rootless is required, not a setting
 max_environments = 8         # node-wide; shared between workspaces by the strict rule
 max_running = 4              # running session containers, node-wide; strict share
-network = "on"               # "on" (pasta, no published ports) | "off" (--network=none)
+network = "on"               # "on" (pasta with the host mapping off, no published ports) | "off" (--network=none); §4.6
 allow_host_network = false   # only true makes network = "host" accepted
 memory = "4g"
 cpus = 2
@@ -468,7 +470,7 @@ podman run --detach --name rh-<env>-<session> --label rizzy.env=<env> --label ri
   --userns=keep-id --user <node uid>:<gid>     # same uid inside and out
   --cap-drop=all --security-opt=no-new-privileges
   --read-only --tmpfs /tmp:size=1g,mode=1777 --tmpfs /run
-  --network=pasta | none                       # host only if allow_host_network
+  --network=pasta:--map-guest-addr,none | none # host only if allow_host_network
   --memory=<m> --memory-swap=<m> --cpus=<n> --pids-limit=<p>
   --mount type=bind,src=<base>/<ws>/<session>,dst=<base>/<ws>/<session>,relabel=private
   --mount type=bind,src=<repo>,dst=<repo>,relabel=private      # the environment's repository
@@ -485,6 +487,23 @@ podman run --detach --name rh-<env>-<session> --label rizzy.env=<env> --label ri
 siblings' (an improvement on the first version, which mounted every session's worktree). Before
 `podman run` the node checks every mount source: real path inside `<base>/<ws>` of the
 session's own workspace, no symlink in the path, and inside no other workspace's directory.
+**That check is not enough on its own** (B.11, `docs/container-experiment.md` §4): Podman
+resolves a mount source that is a symlink at `podman run` time and mounts its target, so a
+folder swapped for a link between the check and the run is followed (the review's S-2 window).
+Podman cannot be handed the node's checked descriptor instead (`src=/proc/<node>/fd/<n>` is
+refused: "statfs … permission denied"). So after the container starts, and before its first
+command, the node runs `stat -c %d:%i <dst>` inside it for every mount and compares the result
+with the device and inode of the pin it checked (measured: the same numbers inside and on the
+host); on any mismatch it removes the container and refuses the session.
+
+**Network.** `network = "on"` is `--network=pasta:--map-guest-addr,none`, not plain `pasta`
+(B.11 §5). Rootless pasta keeps a container off the host's 127.0.0.1, but by default it maps the
+host at `169.254.1.2`, which the container's `/etc/hosts` names `host.containers.internal`, and
+every host service bound to `0.0.0.0` or to the LAN address answered there, the connection
+arriving from the host's own LAN address. With `--map-guest-addr,none` that address timed out
+and the internet stayed reachable. IPv6 was not tested. Each container with the network on has
+its own `pasta` process: 26.4 MB RSS (25.7 MB PSS) idle, against 2.7 MB PSS for the rest of an
+idle session container (conmon, init, `sleep`).
 
 Why: `keep-id` so the node's file tools and checkpoint git can use what the container wrote; no
 privilege or capabilities (the floor in `research/round1/synth/02-permissions-sandbox-security.md`
@@ -493,9 +512,32 @@ F15); `--read-only` so setup cannot persist outside the volume; no published por
 mount paths because worktrees store absolute paths.
 
 Each `bash` call runs as `podman exec --workdir … <ctr> bash -c <cmd>`, with the allow-listed
-environment (T3). Killing the `podman exec` client may not kill the process inside, so the
-command runs under a wrapper that prints its process group id first. On cancel or timeout the
-node runs `podman exec <ctr> kill -TERM -<pgid>`, then `-KILL`, then stops the container (T9).
+environment (T3). **Stopping a command (corrected by B.11, `docs/container-experiment.md` §2,
+§3).** A SIGTERM or SIGINT to the `podman exec` client is forwarded inside; a SIGKILL reaches
+nothing, and a node `kill -9` leaves the container and every process in it running. The command
+inside is already its own process group and session leader, so the wrapper prints its pid
+(`$$`) first, and that is the group to signal. `podman exec <ctr> kill -TERM -<pid>`, then
+`-KILL`, ends that group (106 ms for the extra exec), **but not a child that called `setsid`**:
+it survived both. Only stopping the container ended it, through the PID namespace's init
+(`--init`). So the node does, on cancel, on timeout and at the end of every turn:
+
+1. `kill -TERM -<pid>` inside, the grace `bash.rs` uses today, then `kill -KILL -<pid>`;
+2. one `podman exec <ctr> ps -eo pid,ppid,pgid` (about 70 ms): a process whose parent is pid 1
+   and that is neither the `sleep infinity` holder nor a command the node tracks (T.8d's
+   background commands) was left behind;
+3. if anything was left, `podman stop -t 2` and a fresh `podman run` before the next command
+   (measured: up to 2 s for the stop, 72 ms for the run), with the event saying why.
+
+Recommended: stop only when something is left, not always. Always stopping is simpler and
+certain, but every cancel would then cost a container restart, lose `/tmp` and kill the
+session's tracked background commands, which are legitimate; the check costs one exec and
+misses only a detached process whose parent is still a tracked command, which step 2 finds
+when that command ends. Files live in the mounts and survive a stop either way. A restarted
+node finds leftover containers by their labels (`podman ps -a --filter label=rizzy.env=…`) and
+removes them (74 ms each) before it serves the workspace. Not yet tested: running each command
+inside the container under `bwrap --unshare-pid`, which would end a command's tree with the
+command as on the host; B.11 found bwrap needs the container's `/proc` unmasked
+(`--security-opt unmask=ALL`) to mount its own, so N.4 should measure it before choosing.
 
 **Image and setup.** The creator picks an image from the allow-list the node announced. The
 setup script is stored on the master, shown to the creator, and run once with the
@@ -688,10 +730,10 @@ shared node `[sandbox] write` is refused (its entries become `<base>/<ws>/cache/
 
 | Residual for host sessions | Closed by |
 |---|---|
-| Before Landlock ABI 9 (Linux 7.1, `research/round2/synth/05-links-workers-protocols.md` §6.5), the session bus or any pathname socket starts a program outside the sandbox: A becomes the node user and reads B's files and every grant in the node's memory. | ABI 9; or a container. |
-| Before ABI 6, A can signal B's processes. | ABI 6, included in ABI 9. |
-| A sees B's command lines in `/proc`. | A container (own PID namespace); `hidepid` on `/proc`, the host's choice. |
-| A connects to anything B listens on at `127.0.0.1`; with network off, UDP still goes. | A container with its own network namespace (if test D14 confirms); seccomp (O4) for UDP. |
+| Before Landlock ABI 9 (Linux 7.1, `research/round2/synth/05-links-workers-protocols.md` §6.5), the session bus or any pathname socket starts a program outside the sandbox: A becomes the node user and reads B's files and every grant in the node's memory. | ABI 9; or a container; for pathname sockets also T.8c's mount view, in which a socket outside the grants does not exist (abstract sockets belong to the network namespace: ABI 6, or T.8b with the network off). |
+| Before ABI 6, A can signal B's processes. | ABI 6, included in ABI 9; or T.8a's PID namespace, in which B's processes have no pid A can name. |
+| A sees B's command lines in `/proc`. | T.8a: bubblewrap's PID namespace with a fresh `/proc` (B.11 §4: a bwrap command saw 5 processes, a `sandbox-exec` command 422 with every command line); a container; `hidepid` on `/proc`, the host's choice. |
+| A connects to anything B listens on at `127.0.0.1`; with network off, UDP still goes. | With the network off: T.8b's network namespace closes TCP, UDP and DNS (B.11 §5). With the network on: nothing for host sessions, which share the host's network. A container: its own network namespace; test D14 is answered (§4.6, "Network"). seccomp (O4) only on the Landlock-only path. |
 | A fills the disk, CPU or memory B needs. | The share (§4.10.4) for slots; nothing for disk. |
 | A bug in the file tools' path walk is a read of B. | Nothing: file tools run in the node process in every mode. Tests in §8. |
 
@@ -716,7 +758,30 @@ setting or Podman even on a new kernel.
 Containers are the separated path for all of it: own mount, PID and network namespaces. They
 still share the uid with the node (an escape from the container is the node user) and the file
 tools' path walk. A different Unix user per workspace, the real separation for host sessions,
-is not planned: it needs root and a privileged helper.
+is not planned: it needs root and a privileged helper. B.11 confirmed the namespaces for files,
+`/proc` and network (`docs/container-experiment.md` §4, §5; with pasta's host mapping off).
+
+**Open question for the owner (B.11, 2026-11-12; not decided, the rule above stands): can
+`host_shell_shared` relax once host sessions run in bubblewrap?** The rule refuses host sessions
+on a shared node below ABI 9 because of the pathname-socket escape. What the namespaces change,
+step by step:
+
+| Residual | After T.8a (PID namespace) | After T.8b (network namespace, network off only) | After T.8c (mount view from the grants) |
+|---|---|---|---|
+| Pathname socket escape (the session bus) | unchanged | unchanged | **closed**: a socket that is not granted is not in the view |
+| Abstract Unix socket escape | unchanged | closed (abstract sockets are per network namespace) | unchanged with the network on (ABI 6 closes it) |
+| Signals to B | **closed** | | |
+| B's command lines | **closed** | | |
+| Loopback services, UDP | unchanged | closed with the network off | unchanged with the network on |
+| Capacity, the file tools' path walk | unchanged | unchanged | unchanged |
+
+Recommendation: keep `"abi9"` until T.8c is built and its tests pass. Then add a value (for
+example `"namespaces"`, the new default) that allows host sessions on a shared node when the
+node runs them in bubblewrap with the mount view and either Landlock ABI 6 or the network off,
+because that closes both known escapes without ABI 9. What stays is the same as at ABI 9: B's
+loopback services with the network on, capacity and the path walk, a leak between people who
+each trust the other with a shell, not a way into B's files or keys. Not to be relaxed before
+T.8c: T.8a and T.8b alone leave the pathname socket open, which is the full escape.
 
 #### 4.10.4 A fair share of the node
 
@@ -1137,7 +1202,11 @@ T28 (spool wording).
   reserves space for classification, autosave and the spool.
 - **Podman missing, rootless not available, or the harness running in a container.** The node
   announces `containers` only after a self-test passes. When the harness itself runs in a
-  container (`HARNESS_CONTAINER`, `crates/cli/src/net.rs`), container execution is refused.
+  container (`HARNESS_CONTAINER`, `crates/cli/src/net.rs`), container execution is refused:
+  B.11 found rootless Podman does not run nested in a default rootless container at all (no
+  subordinate ids inside; with `ignore_chown_errors`, a read-only `/proc/sys`), so the published
+  image has no environments (`docs/container-experiment.md` §7). Under `NoNewPrivileges=yes`
+  the self-test fails at the first user namespace (`newuidmap`: "Could not set caps").
 - **Image supply chain.** Only digests from `node.toml` are used; a tag is refused at load.
 - **Clocks.** Only the master's clock sets deadlines. The node deletes on its own only its
   trash and acknowledged spool rows.
@@ -1145,8 +1214,9 @@ T28 (spool wording).
   node's list is rewritten by atomic rename; a folder is either in place or in the trash.
 - **Wrong classification.** Reachability, not branch existence; a stash, a dirty submodule or a
   detached HEAD gives `b`; classify again at the deadline.
-- **A cancel that does not reach the process inside the container** would break T9; the
-  wrapper in §4.6 handles it, with a test.
+- **A cancel that does not reach the process inside the container** would break T9. The
+  wrapper's group kill in §4.6 does not reach a `setsid` child (B.11); the check for anything
+  left and the container stop after it do, with a test that uses a `setsid` child.
 
 ## 7. What the others do
 
@@ -1177,7 +1247,7 @@ version is kept; phase 1 grew twice on 2026-11-11, and phase 1b is new.
 | 1b | **The spool**: per-workspace `spool.db`, `session.stored`, deletion and WAL truncation, `session.history`, histories in memory with `history_mb`, restart recovery from spool plus master, `master.db` at `FULL`, B.10's measurement of the master's fsyncs. | The spool tests below. | L (4 to 5 days) |
 | 2 | BYOK, aliases, slots (unchanged). | *Workspace B cannot use A's provider id. *No key appears in plain text in `config.toml` or `master.db`. | L |
 | 3 | Grants keyed by workspace. | *`model_keys = "none"` or `"local"` refuses a grant. *Key bytes absent from the spool, its WAL and the audit table. *A turn with agent X and delegate Y receives exactly those providers. *After a restart, a turn waits for its grant. | M (+half a day) |
-| 4 | Environments in the new layout, mount checks, container and environment shares. | *`podman inspect` shows no privilege, no capabilities, only the session folder, the repository and the environment mounted, `keep-id`. *An image off the list is refused. *A repository `compose.yaml` changes nothing. *Cancel kills `sleep` inside within 2 s. *Low disk refuses a new session. | L (+1 day) |
+| 4 | Environments in the new layout, mount checks, container and environment shares. | *`podman inspect` shows no privilege, no capabilities, only the session folder, the repository and the environment mounted, `keep-id`. *An image off the list is refused. *A repository `compose.yaml` changes nothing. *Cancel kills `sleep` inside within 2 s, and a `setsid` child too (it survives the group kill, B.11; the container stop ends it). *A mount swapped for a link before `podman run` is caught by the check after start and the container removed. *`host.containers.internal` reaches no host service with `network = "on"`. *Low disk refuses a new session. | L (+1 day) |
 | 5 | Archived state and fork. | *An archived chat refuses with 409 even while its node is online. *A fork by a non-owner gets 404. *A fork onto a node not attached to the session's workspace is refused. | M |
 | 6 | Connections, the forge git path, `forge.grant`, **the first clone of a project's repository**. | *Another user cannot use my connection. *A token never appears in `argv`. *A host not in `[forge] hosts` is refused. | L (+1 day) |
 | 7 | Classification, scheduled deletion, autosave; detach with environments and session folders, from the master and from the node's CLI; session deletion with its worktree and branch; node revocation. | The classification table, case by case; autosave rules; offline deadline. | L (+2 days) |
@@ -1261,15 +1331,28 @@ alias".
 - `local` is shareable (2026-11-11). I recommended keeping host sessions on it for server
   admins: on `local`, a sandbox escape is the whole server.
 
+**Answered by B.11** (2026-11-12, `docs/container-experiment.md`):
+
+- whether `podman exec` passes signals to the process inside: SIGTERM and SIGINT yes, SIGKILL
+  no (§3 there; §4.6 here);
+- whether rootless `pasta` keeps a container off the host's loopback (test D14): off
+  127.0.0.1 yes, off the host no, unless `--network=pasta:--map-guest-addr,none` (§5 there;
+  §4.6 here). IPv6 not tested;
+- that the `cmdline` of other processes is readable under Landlock: yes, every host process's
+  under `sandbox-exec` (§4 there), and the `environ` of a process outside the domain was
+  denied; tested against the test driver, not a sibling session.
+
+**Open, from B.11:** whether `host_shell_shared` may relax once host sessions run in
+bubblewrap with a mount view (§4.10.3, the question and the recommendation).
+
 **Not verified:**
 
-- whether `podman exec` passes signals to the process inside;
 - whether `systemd-creds` works for user services on the distributions in the README;
 - which forges offer device flow;
-- that Landlock denies `environ`, `fd` and `mem` of a sibling session's processes (tested only
-  against the harness, `crates/cli/tests/sandbox.rs:231-253`) and that their `cmdline` is
-  readable (kernel behaviour, not tested here);
-- whether rootless `pasta` keeps a container off the host's loopback (test D14);
+- that Landlock denies `fd` and `mem` of a sibling session's processes (tested only against
+  the harness, `crates/cli/tests/sandbox.rs:231-253`);
+- whether a `nologin` node user without linger can run rootless Podman at all (B.11 could not
+  reproduce the missing runtime directory: it needs root);
 - which kernels the README's distributions ship, so how many nodes reach Landlock ABI 9;
 - whether the session fold gives the same view without stored deltas (decides hydration size);
 - what the master's per-event fsync costs on a small home server (B.10).
