@@ -427,17 +427,14 @@ impl Sandbox {
         }
         let with = crate::contain::Contain::new(c.bwrap().to_path_buf(), c.form());
         let scratch = gap.scratch.join(format!("probe-net-{}", gap.now_ms()));
-        match self.probe_containment(&with, &scratch) {
-            Ok(()) => {
-                gap.taken.store(true, std::sync::atomic::Ordering::SeqCst);
-                network_log(&format!(
-                    "shell containment: bubblewrap makes a network namespace now; with [sandbox] \
-                     network = \"off\" every command from now on runs in one of its own (no \
-                     UDP or DNS out), the gap of the start is closed"
-                ));
-            }
-            // Stays in the gap; the next probe is an interval later.
-            Err(_) => {}
+        // On failure it stays in the gap; the next probe is an interval later.
+        if self.probe_containment(&with, &scratch).is_ok() {
+            gap.taken.store(true, std::sync::atomic::Ordering::SeqCst);
+            network_log(
+                "shell containment: bubblewrap makes a network namespace now; with [sandbox] \
+                 network = \"off\" every command from now on runs in one of its own (no UDP or \
+                 DNS out), the gap of the start is closed",
+            );
         }
     }
 
