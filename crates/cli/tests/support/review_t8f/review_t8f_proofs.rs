@@ -1,22 +1,24 @@
-//! T.8f review (2026-11): proofs and observations that need the node's own
-//! code. Not part of the test suite: `run_rust_proofs.sh` copies this file
-//! to `crates/cli/tests/` for the run and removes the copy again.
+//! T.8f review (2026-11), re-check after the redesign: `sandbox-exec` in a
+//! contained command is started through the guard's descriptor of the
+//! node's image (no link, no bind, no path). Not part of the test suite:
+//! `run_rust_proofs.sh` copies this file to `crates/cli/tests/` for the run
+//! and removes the copy again.
 //!
-//! Every test here PRINTS what it observed; the asserts are only the facts
-//! the report quotes. Each works on copies of the harness binary and on
-//! data directories of its own under `TMPDIR`.
+//! The proofs of the first design's link (C, E, E9, F's two fallbacks, G,
+//! I) are gone with the link; what they showed is in the report. Each test
+//! here PRINTS what it observed and says in its comment whether it shows a
+//! finding or an attack that is held. Each works on copies of the harness
+//! binary and on data directories of its own under `TMPDIR`.
 
 #[allow(dead_code)]
 #[path = "support/bwrap.rs"]
 mod bwrap;
 
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use harness_tools::contain::{Binds, Contain, Form};
-use harness_tools::image::ImageLink;
 use harness_tools::sandbox::{Confinement, Sandbox, Settings};
 use harness_tools::{Bash, Tool, ToolCtx};
 use serde_json::json;
@@ -51,21 +53,24 @@ impl Fixture {
         let exe = self.root.join(rel);
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::copy(EXE, &exe).unwrap();
+        // Written out: on a slow disk later renames otherwise wait seconds.
+        std::fs::File::open(&exe).unwrap().sync_all().unwrap();
         exe
     }
 
-    fn plain(&self, exe: &Path) -> Sandbox {
+    fn plain(&self, exe: &Path, settings: &Settings) -> Sandbox {
         Sandbox::new(
             exe.to_owned(),
-            &Settings::default(),
+            settings,
             Some(self.data.join("sandbox-tmp")),
             std::slice::from_ref(&self.data),
         )
         .unwrap()
     }
 
+    /// Probed as the node probes it, with the real bubblewrap.
     fn contained(&self, exe: &Path, form: Form, binds: Binds) -> Sandbox {
-        let sb = self.plain(exe);
+        let sb = self.plain(exe, &Settings::default());
         sb.probe(&self.data.join("sandbox-tmp/probe"), &self.data)
             .expect("Landlock");
         let bw = harness_tools::contain::find_bwrap().expect("bubblewrap");
@@ -80,14 +85,10 @@ impl Fixture {
         ctx.protected = Arc::new(vec![self.data.clone()]);
         ctx.sandbox = Confinement::Confined {
             sandbox: sb,
-            tmp: Some(self.data.join("sandbox-tmp").join(session)),
+            tmp: None,
         }
         .for_session(session);
         ctx
-    }
-
-    fn link(&self) -> PathBuf {
-        self.data.join(harness_tools::image::LINK)
     }
 }
 
@@ -125,90 +126,6 @@ fn names(d: &Path) -> Vec<String> {
     v
 }
 
-/// What a contained command does with any inherited descriptor of the image.
-const PROBE_PY: &str = r#"
-import os, sys, errno
-img = os.stat('/.rizzy-harness/rizzy-harness')
-print(f"view image: nlink={img.st_nlink} mode={oct(img.st_mode & 0o7777)}")
-found = None
-for fd in sorted(os.listdir('/proc/self/fd'), key=int):
-    p = '/proc/self/fd/' + fd
-    try:
-        st = os.stat(p)
-    except OSError:
-        continue
-    if (st.st_dev, st.st_ino) == (img.st_dev, img.st_ino):
-        found = p
-        print(f"inherited descriptor {fd} IS the image; it names: {os.path.basename(os.readlink(p))}")
-def t(name, f):
-    try:
-        f()
-        print(f"{name}: DONE")
-    except OSError as e:
-        print(f"{name}: refused ({errno.errorcode.get(e.errno)})")
-view = '/.rizzy-harness/rizzy-harness'
-t("view path: chmod 000", lambda: os.chmod(view, 0))
-t("view path: open for writing", lambda: os.close(os.open(view, os.O_WRONLY)))
-t("view path: link into the temp folder", lambda: os.link(view, os.environ['TMPDIR'] + '/keep-v'))
-if not found:
-    print("no inherited descriptor of the image")
-    sys.exit(0)
-t("fd: open for writing", lambda: os.close(os.open(found, os.O_WRONLY)))
-t("fd: truncate", lambda: os.truncate(found, 0))
-t("fd: link into the temp folder (same file system as the data directory)",
-  lambda: os.link(found, os.environ['TMPDIR'] + '/keep', follow_symlinks=True))
-t("fd: link into the session folder", lambda: os.link(found, 'keep', follow_symlinks=True))
-t("fd: setxattr user.review", lambda: os.setxattr(found, 'user.review', b'1'))
-t("fd: utime", lambda: os.utime(found, (0, 0)))
-t("fd: chmod 000", lambda: os.chmod(found, 0))
-"#;
-
-// ---- A. what a command can do to the image's inode (T8C-N2 with a link) ----
-
-/// The binary is OUTSIDE every grant (an installed, user-owned binary). In
-/// each bind mode, with the link (T.8f) and without (T.8c's fallback): what
-/// a contained command can do to the image, and what the next command gets.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_what_a_command_can_do_to_the_image() {
-    for (binds, linked) in [(Binds::Fd, true), (Binds::Path, true), (Binds::Path, false)] {
-        let f = fixture();
-        let exe = f.binary("bin/rizzy-harness");
-        std::fs::write(f.ws.join("probe.py"), PROBE_PY).unwrap();
-        let sb = f.contained(&exe, Form::Full, binds);
-        let l = if linked {
-            format!("{:?}", sb.link_image(&f.data))
-                .chars()
-                .take(6)
-                .collect()
-        } else {
-            "no link (T.8c's view)".to_string()
-        };
-        println!("==== {binds:?}, {l} ====");
-        let ctx = f.ctx(Arc::new(sb), "s1");
-        let before = (ino(&exe), mode(&exe));
-        let r = run(&ctx, "python3 probe.py").await;
-        println!("{}", r.replace(f.root.to_str().unwrap(), "<root>"));
-        let after = (ino(&exe), mode(&exe));
-        println!(
-            "on the host: the binary's mode before {:o}, after {:o}; size {}",
-            before.1,
-            after.1,
-            std::fs::symlink_metadata(&exe).unwrap().len()
-        );
-        let r2 = run(&ctx, "echo NEXT-COMMAND-RAN").await;
-        println!(
-            "the next command: {}",
-            r2.replace(f.root.to_str().unwrap(), "<root>")
-        );
-        let r3 = run(&f.ctx(ctx_sandbox(&ctx), "s2"), "echo ANOTHER-SESSION-RAN").await;
-        println!(
-            "another session's command: {}",
-            r3.replace(f.root.to_str().unwrap(), "<root>")
-        );
-        let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
-    }
-}
-
 fn ctx_sandbox(ctx: &ToolCtx) -> Arc<Sandbox> {
     match &ctx.sandbox {
         Confinement::Confined { sandbox, .. } => sandbox.clone(),
@@ -216,330 +133,424 @@ fn ctx_sandbox(ctx: &ToolCtx) -> Arc<Sandbox> {
     }
 }
 
-// ---- C. the link replaced after the guard's check ----
+// ---- A. what a command holds, and what of the image it can reach ----
 
-/// Something that can write the data directory (a second node's start, task
-/// A.20) replaces the link at a random moment while commands run. Counted:
-/// commands that ran from the node's image, commands refused, and commands
-/// for which the OTHER file ran as `sandbox-exec`.
+/// What a contained command does to find and change the image: `@ID@` is
+/// the image's device:inode, `@BIN@` its path on the host.
+const PROBE_PY: &str = r#"
+import os, sys, errno
+ID = "@ID@"; BIN = "@BIN@"
+def ident(p):
+    st = os.stat(p)
+    return f"{st.st_dev}:{st.st_ino}"
+own = []
+for n in sorted(int(x) for x in os.listdir('/proc/self/fd')):
+    try:
+        own.append(f"{n}:{'IMAGE' if ident(f'/proc/self/fd/{n}') == ID else os.readlink(f'/proc/self/fd/{n}').split('/')[-1][:12]}")
+    except OSError:
+        pass
+print("descriptors this command holds (python's own included):", " ".join(own))
+print("a path of the harness in the view:", [p for p in ('/.rizzy-harness', BIN) if os.path.lexists(p)] or "none")
+pids = sorted(int(p) for p in os.listdir('/proc') if p.isdigit())
+me = os.getpid()
+seen = {"exe readable": 0, "exe IS the image": 0, "a descriptor IS the image": 0, "root readable": 0}
+hits = []
+for pid in pids:
+    if pid == me:
+        continue
+    for what, p in (("exe", f"/proc/{pid}/exe"),):
+        try:
+            i = ident(p)
+            seen["exe readable"] += 1
+            if i == ID:
+                seen["exe IS the image"] += 1
+                hits.append(p)
+        except OSError:
+            pass
+    try:
+        for n in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                if ident(f"/proc/{pid}/fd/{n}") == ID:
+                    seen["a descriptor IS the image"] += 1
+                    hits.append(f"/proc/{pid}/fd/{n}")
+            except OSError:
+                pass
+    except OSError:
+        pass
+    try:
+        if ident(f"/proc/{pid}/root{BIN}") == ID:
+            seen["root readable"] += 1
+            hits.append(f"/proc/{pid}/root{BIN}")
+    except OSError:
+        pass
+print(f"other processes in /proc: {len(pids) - 1}; " + "; ".join(f"{k}: {v}" for k, v in seen.items()))
+done = 0
+for h in hits:
+    try:
+        os.chmod(h, 0)
+        done += 1
+        print(f"chmod 000 through {h.replace(BIN, '<bin>')}: DONE")
+        break
+    except OSError as e:
+        print(f"chmod 000 through {h.replace(BIN, '<bin>')}: refused ({errno.errorcode.get(e.errno)})")
+if not hits:
+    print("no way to the image found")
+"#;
+
+/// HELD (T8F-2 is closed). The binary is outside every grant. In both forms
+/// and both bind modes the command holds 0, 1, 2 only, no path of the
+/// harness is in the view, and no process it can see gives it the image
+/// (its own `/proc`: bubblewrap's init only; the machine's `/proc`:
+/// Landlock refuses every look at a process outside the sandbox). The
+/// binary's mode on the host is unchanged and the next commands run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_what_a_command_holds_and_can_reach() {
+    for (form, binds) in [
+        (Form::Full, Binds::Fd),
+        (Form::Full, Binds::Path),
+        (Form::SharedProc, Binds::Fd),
+        (Form::SharedProc, Binds::Path),
+    ] {
+        let f = fixture();
+        let exe = f.binary("bin/rizzy-harness");
+        let m = std::fs::metadata(&exe).unwrap();
+        std::fs::write(
+            f.ws.join("probe.py"),
+            PROBE_PY
+                .replace("@ID@", &format!("{}:{}", m.dev(), m.ino()))
+                .replace("@BIN@", exe.to_str().unwrap()),
+        )
+        .unwrap();
+        let sb = f.contained(&exe, form, binds);
+        println!("==== {form:?}, {binds:?} ====");
+        let ctx = f.ctx(Arc::new(sb), "s1");
+        let r = run(&ctx, "python3 probe.py").await;
+        println!("{}", r.replace(f.root.to_str().unwrap(), "<root>").trim());
+        println!(
+            "on the host: the binary's mode before 755, after {:o}",
+            mode(&exe)
+        );
+        assert_eq!(mode(&exe), 0o755, "{form:?} {binds:?}: the mode changed");
+        assert!(!r.contains("IMAGE"), "{form:?} {binds:?}: {r}");
+        let r2 = run(&ctx, "echo NEXT-COMMAND-RAN").await;
+        let r3 = run(&f.ctx(ctx_sandbox(&ctx), "s2"), "echo ANOTHER-SESSION-RAN").await;
+        println!(
+            "the next command: {:?}; another session's: {:?}",
+            r2.trim(),
+            r3.trim()
+        );
+        assert!(r2.contains("NEXT-COMMAND-RAN\n") && r3.contains("ANOTHER-SESSION-RAN\n"));
+    }
+}
+
+// ---- J. between the guard's open and bubblewrap's exec ----
+
+/// A stand-in for bubblewrap that records what the guard hands it and then
+/// runs the real one. `@MODE@` is a file naming what else it does:
+/// `inside`: run a lister as the program in place of `sandbox-exec`;
+/// `chmod`: set the image's mode to 000 through the program's descriptor
+/// first; `close`: close the program's descriptor first.
+const FAKE_BWRAP: &str = r#"#!/usr/bin/python3
+import os, sys, stat
+LOG = "@LOG@"; MODE = "@MODE@"; REAL = "@REAL@"
+a = sys.argv[1:]
+if "--" not in a:
+    os.execv(REAL, ["bwrap"] + a)
+mode = open(MODE).read().strip() if os.path.exists(MODE) else "log"
+i = a.index("--")
+prog = a[i + 1]
+def ident(p):
+    try:
+        st = os.stat(p)
+        return f"{st.st_dev}:{st.st_ino}"
+    except OSError as e:
+        return f"({e.strerror})"
+lines = [f"program word: {prog} = {ident(prog)}",
+         f"the guard (bubblewrap's parent) runs: {ident(f'/proc/{os.getppid()}/exe')}"]
+try:
+    node = int(open(f"/proc/{os.getppid()}/stat").read().rsplit(")", 1)[1].split()[1])
+    lines.append(f"the node (the guard's parent) runs: {ident(f'/proc/{node}/exe')}")
+except Exception as e:
+    lines.append(f"the node: {e}")
+inh = []
+for n in sorted(int(x) for x in os.listdir("/proc/self/fd")):
+    try:
+        if not os.get_inheritable(n):
+            continue
+        st = os.fstat(n)
+    except OSError:
+        continue
+    kind = ("socket" if stat.S_ISSOCK(st.st_mode) else "pipe" if stat.S_ISFIFO(st.st_mode)
+            else "dir" if stat.S_ISDIR(st.st_mode) else "chr" if stat.S_ISCHR(st.st_mode) else "file")
+    flags = int(open(f"/proc/self/fdinfo/{n}").read().split("flags:")[1].split()[0], 8)
+    inh.append(f"{n}={kind}{'(O_PATH)' if flags & 0o10000000 else ''}")
+lines.append("bubblewrap inherits: " + " ".join(inh))
+lines.append("@rizzy words left in the options: " + str([w for w in a[:i] if w.startswith("@rizzy")]))
+with open(LOG, "a") as f:
+    f.write("\n".join(lines) + "\n")
+INSIDE = '''
+import os, sys
+p = sys.argv[1]
+out = []
+for n in sorted(int(x) for x in os.listdir("/proc/self/fd")):
+    try:
+        st = os.stat(f"/proc/self/fd/{n}")
+        out.append(f"{n}={st.st_dev}:{st.st_ino}")
+    except OSError:
+        pass
+print("at the program's start the process holds:", " ".join(out))
+try:
+    st = os.stat(p)
+    print(f"the program word {p} names: {st.st_dev}:{st.st_ino}")
+except OSError as e:
+    print(f"the program word {p}: {e.strerror}")
+'''
+if mode == "inside":
+    a = a[: i + 1] + ["/usr/bin/python3", "-c", INSIDE, prog]
+elif mode == "chmod":
+    os.chmod(prog, 0)
+elif mode == "close":
+    os.close(int(prog.rsplit("/", 1)[1]))
+os.execv(REAL, ["bwrap"] + a)
+"#;
+
+fn fake_bwrap(f: &Fixture) -> (PathBuf, PathBuf, PathBuf) {
+    let real = harness_tools::contain::find_bwrap().expect("bubblewrap");
+    let (at, log, mode) = (
+        f.root.join("fake-bwrap"),
+        f.root.join("fake-bwrap.log"),
+        f.root.join("fake-bwrap.mode"),
+    );
+    std::fs::write(
+        &at,
+        FAKE_BWRAP
+            .replace("@LOG@", log.to_str().unwrap())
+            .replace("@MODE@", mode.to_str().unwrap())
+            .replace("@REAL@", real.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (at, log, mode)
+}
+
+/// HELD. With two extra grants (so the guard opens descriptors before the
+/// image's): in both forms and both bind modes the program word is
+/// `/proc/self/fd/<n>`, `<n>` is the guard's own image, bubblewrap inherits
+/// it and the grants' descriptors and NOT the node's channel (no socket),
+/// and at the program's start inside the namespace `<n>` is still the
+/// image and is the only descriptor above 2: bubblewrap closed the grants'.
+/// With the descriptor closed before bubblewrap starts, the command does
+/// not run and nothing is looked up by a path. With the image's mode set to
+/// 000 between the guard's open and the exec, the command does not run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j_between_the_guards_open_and_the_exec() {
+    for (form, binds) in [
+        (Form::Full, Binds::Fd),
+        (Form::Full, Binds::Path),
+        (Form::SharedProc, Binds::Fd),
+        (Form::SharedProc, Binds::Path),
+    ] {
+        let f = fixture();
+        let exe = f.binary("bin/rizzy-harness");
+        let (fake, log, mode_file) = fake_bwrap(&f);
+        let extras = [f.root.join("extra-a"), f.root.join("extra-b")];
+        for e in &extras {
+            std::fs::create_dir_all(e).unwrap();
+        }
+        let sb = f
+            .plain(
+                &exe,
+                &Settings {
+                    write: extras.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .with_containment(Contain::new(fake, form).with_binds(binds));
+        let ctx = f.ctx(Arc::new(sb), "s1");
+        let m = std::fs::metadata(&exe).unwrap();
+        let id = format!("{}:{}", m.dev(), m.ino());
+        println!("==== {form:?}, {binds:?}; the image is {id} ====");
+        let cut = |s: String| s.replace(f.root.to_str().unwrap(), "<root>");
+
+        let r = run(&ctx, "echo RAN-THROUGH-THE-STAND-IN").await;
+        let l = std::fs::read_to_string(&log).unwrap_or_default();
+        println!("{}", cut(l.clone()).trim());
+        println!("the command: {:?}", r.trim());
+        assert!(r.contains("RAN-THROUGH-THE-STAND-IN\n"), "{r}");
+        assert!(
+            l.contains(&format!("program word: /proc/self/fd/")) && l.contains(&format!("= {id}"))
+        );
+        assert!(l.contains(&format!("the guard (bubblewrap's parent) runs: {id}")));
+        assert!(!l.contains("socket"), "bubblewrap inherits a socket: {l}");
+
+        std::fs::write(&mode_file, "inside").unwrap();
+        let r = run(&ctx, "true").await;
+        println!("{}", cut(r.clone()).trim());
+        let held = r
+            .lines()
+            .find(|l| l.starts_with("at the program's start"))
+            .unwrap_or_default()
+            .to_string();
+        let above_2: Vec<&str> = held
+            .split_whitespace()
+            .filter(|w| {
+                w.split_once('=')
+                    .and_then(|(n, _)| n.parse::<u32>().ok())
+                    .is_some_and(|n| n > 2)
+            })
+            .collect();
+        // The lister's own listing descriptor may be among them (a folder
+        // of /proc); the image must be, and no grant's folder.
+        assert!(
+            above_2.iter().any(|w| w.ends_with(&format!("={id}"))),
+            "{held}"
+        );
+        for e in &extras {
+            let em = std::fs::metadata(e).unwrap();
+            assert!(
+                !held.contains(&format!("={}:{}", em.dev(), em.ino())),
+                "a grant's descriptor reached the program: {held}"
+            );
+        }
+        assert!(r.contains(&format!("names: {id}")), "{r}");
+
+        std::fs::write(&mode_file, "close").unwrap();
+        let r = run(&ctx, "echo RAN-WITHOUT-THE-DESCRIPTOR").await;
+        println!("the descriptor closed first: {:?}", cut(r.clone()).trim());
+        assert!(!r.contains("RAN-WITHOUT-THE-DESCRIPTOR\n"), "{r}");
+
+        std::fs::write(&mode_file, "chmod").unwrap();
+        let r = run(&ctx, "echo RAN-WITH-MODE-000").await;
+        println!(
+            "mode 000 between the guard's open and the exec: {:?}; the binary's mode now {:o}",
+            cut(r.clone()).trim(),
+            mode(&exe)
+        );
+        assert!(!r.contains("RAN-WITH-MODE-000\n"), "{r}");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&mode_file, "log").unwrap();
+        let r = run(&ctx, "echo RAN-AGAIN").await;
+        println!("the mode restored: {:?}", r.trim());
+        assert!(r.contains("RAN-AGAIN\n"), "{r}");
+    }
+}
+
+// ---- H. a session against the binary's path while a command starts ----
+
+/// HELD for a replacement and a deletion (T8F-3b is closed): by path and by
+/// descriptor, in a build tree, two contained commands of two sessions; the
+/// first waits, spins a random time and then replaces the binary with its
+/// own file, or deletes it; the second is `echo RAN`. The session's file
+/// never runs as `sandbox-exec` and the command always runs, also the next
+/// one. OPEN BY DECISION for the mode (T8F-5): `chmod 000` at that moment,
+/// or before, stops the command; the messages are printed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn c_a_link_replaced_after_the_guards_check() {
+async fn h_a_session_against_the_binary_while_a_command_starts() {
     let rounds: usize = std::env::var("REVIEW_T8F_ROUNDS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(200);
-    for binds in [Binds::Path, Binds::Fd] {
-        let f = fixture();
-        let exe = f.binary("bin/rizzy-harness");
-        let log = f.ws.join("ran-as");
-        let other = f.root.join("other-build");
-        impostor(&other, &log);
-        let sb = f.contained(&exe, Form::Full, binds);
-        assert_eq!(sb.link_image(&f.data), &ImageLink::Linked(f.link()));
-        let ctx = f.ctx(Arc::new(sb), "s1");
-        // The copy of the binary is written out first: on a slow disk the
-        // swapper's link and rename otherwise wait seconds for the journal.
-        std::fs::File::open(&exe).unwrap().sync_all().unwrap();
-        std::fs::File::open(&f.data).unwrap().sync_all().unwrap();
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let swaps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (data, link, exe2, other2, stop2, swaps2) = (
-            f.data.clone(),
-            f.link(),
-            exe.clone(),
-            other.clone(),
-            stop.clone(),
-            swaps.clone(),
-        );
-        let swapper = std::thread::spawn(move || {
-            let mut x: u64 = 0x9E3779B97F4A7C15;
-            let mut nap = || {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                std::thread::sleep(std::time::Duration::from_micros(x % 7000));
+        .unwrap_or(300);
+    let f = fixture();
+    let master = f.binary("master");
+    let bw = harness_tools::contain::find_bwrap().expect("bubblewrap");
+    let log = f.ws.join("ran-as");
+    let mut x: u64 = 0x2545F4914F6CDD1D;
+    for (binds, act, n) in [
+        (Binds::Path, "replace", rounds),
+        (Binds::Fd, "replace", rounds / 3),
+        (Binds::Path, "delete", rounds / 3),
+        (Binds::Path, "chmod", rounds / 3),
+        (Binds::Fd, "chmod", rounds / 6),
+    ] {
+        let (mut ran, mut next_ran, mut session_file_ran) = (0, 0, 0);
+        let mut failed = std::collections::BTreeMap::<String, usize>::new();
+        for i in 0..n {
+            let tag = format!("{binds:?}-{act}-{i}");
+            let dir = f.ws.join(&tag);
+            std::fs::create_dir_all(&dir).unwrap();
+            let exe = dir.join("rizzy-harness");
+            std::fs::hard_link(&master, &exe).unwrap();
+            impostor(&dir.join("imp"), &log);
+            let sb = f.plain(&exe, &Settings::default());
+            if i == 0 {
+                sb.probe(&f.data.join("sandbox-tmp/probe"), &f.data)
+                    .expect("Landlock");
+            }
+            let c = Contain::new(bw.clone(), Form::Full).with_binds(binds);
+            if i == 0 {
+                sb.probe_containment(&c, &f.data.join("sandbox-tmp/probe-contain"))
+                    .expect("containment");
+            }
+            let sb = Arc::new(sb.with_containment(c));
+            let (c1, c2) = (f.ctx(sb.clone(), "s1"), f.ctx(sb, "s2"));
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let spin = x % 40000;
+            let what = match act {
+                "replace" => format!("mv -f {tag}/imp {tag}/rizzy-harness"),
+                "delete" => format!("rm -f {tag}/rizzy-harness"),
+                _ => format!("chmod 000 {tag}/rizzy-harness"),
             };
-            while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
-                for src in [&other2, &exe2] {
-                    let t = data.join("swap");
-                    let _ = std::fs::remove_file(&t);
-                    std::fs::hard_link(src, &t).unwrap();
-                    std::fs::rename(&t, &link).unwrap();
-                    swaps2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    nap();
-                }
-            }
-        });
-        let (mut ok, mut refused_guard, mut refused_bwrap, mut other_ran, mut odd) =
-            (0, 0, 0, 0, Vec::new());
-        for i in 0..rounds {
-            let before = std::fs::read_to_string(&log).unwrap_or_default().len();
-            let r = run(&ctx, "echo RAN").await;
-            let after = std::fs::read_to_string(&log).unwrap_or_default().len();
-            if after > before {
-                other_ran += 1;
-                if other_ran == 1 {
-                    println!(
-                        "{binds:?}: round {i}: THE OTHER FILE RAN AS sandbox-exec; the command's \
-                         output: {r:?}; its record: {:?}",
-                        std::fs::read_to_string(&log).unwrap_or_default()
-                    );
-                }
-            } else if r.contains("RAN\n") {
-                ok += 1;
-            } else if r.contains("is not the image this node runs") {
-                refused_guard += 1;
-            } else if r.contains("bwrap:") {
-                refused_bwrap += 1;
-                if refused_bwrap <= 2 {
-                    println!(
-                        "{binds:?}: bubblewrap's refusal: {}",
-                        r.replace(f.root.to_str().unwrap(), "<root>").trim()
-                    );
-                }
-            } else {
-                odd.push(r);
-            }
-        }
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        swapper.join().unwrap();
-        println!(
-            "{binds:?}: {rounds} commands, {} swaps of the link: ran from the node's image {ok}; \
-             refused by the guard {refused_guard}; refused by bubblewrap {refused_bwrap}; THE \
-             OTHER FILE RAN AS sandbox-exec {other_ran}; other outcomes {}",
-            swaps.load(std::sync::atomic::Ordering::SeqCst),
-            odd.len()
-        );
-        for o in odd.iter().take(3) {
-            println!(
-                "  other outcome: {:?}",
-                o.replace(f.root.to_str().unwrap(), "<root>")
+            let script = format!(
+                "while [ ! -e {tag}/go ]; do :; done; for ((k=0;k<{spin};k++)); do :; done; \
+                 {what}; echo acted"
             );
+            let other = tokio::spawn(async move { run(&c2, &script).await });
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let before = std::fs::read_to_string(&log).unwrap_or_default().len();
+            std::fs::write(dir.join("go"), "").unwrap();
+            let r = run(&c1, "echo RAN").await;
+            let s = other.await.unwrap();
+            assert!(s.contains("acted"), "{s}");
+            // The command after it, when everything is over.
+            let r2 = run(&c1, "echo RAN-NEXT").await;
+            let after = std::fs::read_to_string(&log).unwrap_or_default().len();
+            if act == "chmod" {
+                // One inode for every pair: the owner restores the mode.
+                std::fs::set_permissions(&master, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            if after > before {
+                session_file_ran += 1;
+            }
+            if r.contains("RAN\n") {
+                ran += 1;
+            } else {
+                *failed
+                    .entry(format!(
+                        "the command: {}",
+                        r.replace(f.root.to_str().unwrap(), "<root>")
+                            .trim()
+                            .replace('\n', " | ")
+                    ))
+                    .or_default() += 1;
+            }
+            if r2.contains("RAN-NEXT\n") {
+                next_ran += 1;
+            } else {
+                *failed
+                    .entry(format!(
+                        "the next command: {}",
+                        r2.replace(f.root.to_str().unwrap(), "<root>")
+                            .trim()
+                            .replace('\n', " | ")
+                    ))
+                    .or_default() += 1;
+            }
         }
-        if binds == Binds::Fd {
-            assert_eq!(other_ran, 0, "fd mode ran another file");
-        }
-    }
-}
-
-// ---- E. what a start finds, and what it leaves ----
-
-fn held(p: &Path) -> std::fs::File {
-    std::fs::File::open(p).unwrap()
-}
-
-#[test]
-fn e_what_a_start_finds_and_leaves() {
-    use harness_tools::image::{LINK, make, trial};
-    let d = tempfile::tempdir().unwrap();
-    let root = d.path().canonicalize().unwrap();
-    let data = root.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let bin = root.join("bin");
-    std::fs::write(&bin, "image").unwrap();
-    let f = held(&bin);
-    let outside = root.join("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("kept"), "kept").unwrap();
-    let pid = std::process::id();
-
-    // E1: a FIFO, a dangling symlink, a socket-like special file at the name.
-    nix::unistd::mkfifo(
-        &data.join(LINK),
-        nix::sys::stat::Mode::from_bits_truncate(0o600),
-    )
-    .unwrap();
-    let r = make(f.as_raw_fd(), &data);
-    println!(
-        "E1 a FIFO at the name: {r:?}; now a regular file with the image's inode: {}",
-        ino(&data.join(LINK)) == ino(&bin)
-    );
-    std::fs::remove_file(data.join(LINK)).unwrap();
-    std::os::unix::fs::symlink("/nonexistent/x", data.join(LINK)).unwrap();
-    let r = make(f.as_raw_fd(), &data);
-    println!(
-        "E1 a dangling symlink at the name: {r:?}; the image's inode: {}",
-        ino(&data.join(LINK)) == ino(&bin)
-    );
-
-    // E2: a folder at the name holding links out.
-    std::fs::remove_file(data.join(LINK)).unwrap();
-    std::fs::create_dir_all(data.join(LINK).join("deep")).unwrap();
-    std::os::unix::fs::symlink(&outside, data.join(LINK).join("to-folder")).unwrap();
-    std::os::unix::fs::symlink(outside.join("kept"), data.join(LINK).join("deep/to-file")).unwrap();
-    std::fs::hard_link(outside.join("kept"), data.join(LINK).join("deep/hard")).unwrap();
-    let r = make(f.as_raw_fd(), &data);
-    println!(
-        "E2 a folder with links out at the name: {r:?}; outside still holds {:?} = {:?}",
-        names(&outside),
-        std::fs::read_to_string(outside.join("kept")).unwrap()
-    );
-    assert_eq!(
-        std::fs::read_to_string(outside.join("kept")).unwrap(),
-        "kept"
-    );
-
-    // E3: the temporary name occupied: a symlink out, then a folder.
-    let tmp = data.join(format!("{LINK}.new-{pid}"));
-    std::os::unix::fs::symlink(outside.join("kept"), &tmp).unwrap();
-    let r = make(f.as_raw_fd(), &data);
-    println!(
-        "E3 a symlink at the temporary name: {r:?}; its target: {:?}; the data directory: {:?}",
-        std::fs::read_to_string(outside.join("kept")).unwrap(),
-        names(&data)
-    );
-    // (What the line above shows left at the temporary name is finding
-    // T8F-1: see `g_a_restart_leaves_its_temporary_link`.)
-    let _ = std::fs::remove_file(&tmp);
-    std::fs::create_dir_all(tmp.join("x")).unwrap();
-    let r = make(f.as_raw_fd(), &data);
-    println!(
-        "E3 a folder at the temporary name: {r:?}; the data directory: {:?}",
-        names(&data)
-    );
-    let _ = std::fs::remove_file(&tmp);
-
-    // E4: what a start that crashed between the link and the rename left
-    // (another pid's temporary name): is it ever removed?
-    let stale = data.join(format!("{LINK}.new-{}", pid.wrapping_add(100_000)));
-    let old = root.join("old-build");
-    std::fs::write(&old, "an old build").unwrap();
-    std::fs::hard_link(&old, &stale).unwrap();
-    std::fs::remove_file(&old).unwrap();
-    let r = make(f.as_raw_fd(), &data);
-    let _ = std::fs::remove_file(&tmp);
-    let t = trial(f.as_raw_fd(), &data);
-    println!(
-        "E4 a crashed start's temporary link (another pid): after a start ({r:?}) and a doctor \
-         ({t:?}) the data directory holds {:?}",
-        names(&data)
-    );
-    std::fs::remove_file(&stale).unwrap();
-
-    // E5: a data directory that cannot be written, with an earlier start's
-    // link at the name: is anything left at the name?
-    if !nix::unistd::geteuid().is_root() {
-        std::fs::remove_file(data.join(LINK)).unwrap();
-        std::fs::write(data.join(LINK), "an earlier build").unwrap();
-        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let r = make(f.as_raw_fd(), &data);
-        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
         println!(
-            "E5 an unwritable data directory with an earlier link: {r:?}; the data directory \
-             holds {:?}; the name holds {:?}",
-            names(&data),
-            std::fs::read_to_string(data.join(LINK)).ok()
+            "{binds:?}, {act} at a random moment: {n} pairs: the command ran {ran}; the next \
+             command ran {next_ran}; THE SESSION'S FILE RAN AS sandbox-exec {session_file_ran}"
         );
+        for (k, v) in &failed {
+            // The descriptor's number differs between runs.
+            println!("  {v:4} x {k}");
+        }
+        assert_eq!(session_file_ran, 0);
+        if act != "chmod" {
+            assert_eq!((ran, next_ran), (n, n), "{binds:?} {act}");
+        }
     }
-
-    // E6: the data directory reached through a symlink.
-    let via = root.join("data-link");
-    std::os::unix::fs::symlink(&data, &via).unwrap();
-    let _ = std::fs::remove_file(data.join(LINK));
-    let r = make(f.as_raw_fd(), &via);
-    println!("E6 the data directory through a symlink: {r:?}");
-
-    // E7: a binary with a second name, its first name replaced (a cargo
-    // build tree: target/debug/x is a hard link of deps/x-<hash>).
-    let bin2 = root.join("bin2");
-    std::fs::write(&bin2, "image two").unwrap();
-    std::fs::hard_link(&bin2, root.join("bin2-deps")).unwrap();
-    let f2 = held(&bin2);
-    std::fs::write(root.join("next"), "next").unwrap();
-    std::fs::rename(root.join("next"), &bin2).unwrap();
-    let r = make(f2.as_raw_fd(), &data);
-    println!(
-        "E7 a binary replaced at its path that has another name: {r:?}; the link is the held \
-         image: {}; is the file now at the path: {}",
-        ino(&data.join(LINK)) == ino(&root.join("bin2-deps")),
-        ino(&data.join(LINK)) == ino(&bin2)
-    );
-    assert_eq!(ino(&data.join(LINK)), ino(&root.join("bin2-deps")));
-
-    // E8: doctor's trial with its own names occupied by someone else's things.
-    let dn = data.join(format!("{LINK}.doctor-{pid}"));
-    std::fs::create_dir_all(dn.join("someone-elses")).unwrap();
-    std::fs::write(dn.join("someone-elses/file"), "x").unwrap();
-    let _ = std::fs::remove_file(&tmp);
-    let before = ino(&data.join(LINK));
-    let t = trial(f.as_raw_fd(), &data);
-    println!(
-        "E8 doctor's trial with a folder at its own name: {t:?}; the node's link untouched: {}; \
-         the data directory holds {:?}",
-        ino(&data.join(LINK)) == before,
-        names(&data)
-    );
-}
-
-/// Two starts racing on one data directory with different images (A.20).
-/// For each outcome: what each start believes, and what the name holds.
-#[test]
-fn e9_two_starts_racing() {
-    use harness_tools::image::{LINK, make};
-    let d = tempfile::tempdir().unwrap();
-    let root = d.path().canonicalize().unwrap();
-    let data = root.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let (a, b) = (root.join("a"), root.join("b"));
-    std::fs::write(&a, "image a").unwrap();
-    std::fs::write(&b, "image b").unwrap();
-    let (fa, fb) = (held(&a), held(&b));
-    let mut tally = std::collections::BTreeMap::<String, usize>::new();
-    for _ in 0..3000 {
-        let _ = std::fs::remove_file(data.join(LINK));
-        let barrier = std::sync::Barrier::new(2);
-        let (ra, rb) = std::thread::scope(|s| {
-            let ta = s.spawn(|| {
-                barrier.wait();
-                // The same pid in both threads: give each its own temporary
-                // name by racing only the final steps is not possible from
-                // outside; two processes differ in pid. See the note printed.
-                make(fa.as_raw_fd(), &data)
-            });
-            barrier.wait();
-            let rb = make(fb.as_raw_fd(), &data);
-            (ta.join().unwrap(), rb)
-        });
-        let holds = match std::fs::symlink_metadata(data.join(LINK)) {
-            Ok(m) if m.ino() == ino(&a) => "a",
-            Ok(m) if m.ino() == ino(&b) => "b",
-            Ok(_) => "another file",
-            Err(_) => "nothing",
-        };
-        let short = |r: &ImageLink| match r {
-            ImageLink::Linked(_) => "Linked".to_string(),
-            ImageLink::NotMade(w) => format!(
-                "NotMade({})",
-                w.chars()
-                    .rev()
-                    .take(48)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            ),
-            o => format!("{o:?}"),
-        };
-        *tally
-            .entry(format!(
-                "A: {} | B: {} | the name holds {holds}",
-                short(&ra),
-                short(&rb)
-            ))
-            .or_default() += 1;
-        // The property that matters: a start that says Linked while the
-        // name holds the other image is caught by the guard (refused); a
-        // start must never be told Linked for a name it then finds gone
-        // AND later filled by the other. Recorded, not asserted.
-    }
-    println!(
-        "(both threads share one pid here, so they also share the temporary name: this is \
-              harsher than two processes)"
-    );
-    for (k, v) in tally {
-        println!("{v:5}  {k}");
-    }
-    println!("left in the data directory: {:?}", names(&data));
 }
 
 // ---- real nodes ----
@@ -558,34 +569,41 @@ impl Drop for Server {
     }
 }
 
+fn node_files(data: &Path, ws: &Path, extra: &str) {
+    std::fs::write(
+        data.join("node.toml"),
+        format!(
+            "workspace_roots = [{:?}]\nmax_approval_mode = \"auto\"\n{extra}",
+            ws.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("config.toml"),
+        "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\n\
+         mock_delay_ms = 1\n\n[[providers.models]]\nid = \"mock\"\n",
+    )
+    .unwrap();
+}
+
 impl Server {
     fn start(exe: &Path, data: &Path, ws: &Path, log: &Path, bind: &str) -> Result<Server, String> {
         use std::io::BufRead;
         if !data.join("node.toml").exists() {
-            std::fs::write(
-                data.join("node.toml"),
-                format!(
-                    "workspace_roots = [{:?}]\nmax_approval_mode = \"auto\"\n",
-                    ws.display().to_string()
-                ),
-            )
-            .unwrap();
-            std::fs::write(
-                data.join("config.toml"),
-                "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \
-                 \"mock\"\nmock_delay_ms = 1\n\n[[providers.models]]\nid = \"mock\"\n",
-            )
-            .unwrap();
+            node_files(data, ws, "");
         }
         let mut child = std::process::Command::new(exe)
             .args(["--data-dir", data.to_str().unwrap()])
             .args(["serve", "--bind", bind])
             .env("HARNESS_LOG", "info")
+            // The node's own working directory: the fixture, never the
+            // source tree (see `l_a_binary_the_node_cannot_read`).
+            .current_dir(data.parent().unwrap())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::fs::File::create(log).unwrap())
             .spawn()
-            .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+            .map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
         let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
         let addr = loop {
             let Some(Ok(line)) = lines.next() else {
@@ -613,16 +631,13 @@ impl Server {
         })
     }
 
-    fn view_line(&self) -> String {
+    fn log_lines(&self, word: &str) -> Vec<String> {
         std::fs::read_to_string(&self.log)
             .unwrap()
             .lines()
-            .find(|l| l.contains("file view: "))
-            .map(|l| {
-                let at = l.find("the harness binary at").unwrap_or(0);
-                l[at..].to_string()
-            })
-            .unwrap_or_default()
+            .filter(|l| l.contains(word))
+            .map(str::to_string)
+            .collect()
     }
 
     async fn run(&self, cwd: &Path, text: &str) -> String {
@@ -670,24 +685,15 @@ impl Server {
     }
 }
 
-fn doctor_view(exe: &Path, data: &Path) -> String {
-    let out = std::process::Command::new(exe)
-        .args(["--data-dir", data.to_str().unwrap(), "doctor"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    let out = String::from_utf8_lossy(&out.stdout).into_owned();
-    out.lines()
-        .find(|l| l.contains(" file view: "))
-        .map(|l| {
-            let at = l.find("the harness binary at").unwrap_or(0);
-            l[at..].to_string()
-        })
-        .unwrap_or_else(|| format!("NO file view LINE: {out}"))
-}
+// ---- B. a node run from its build tree ----
 
-// ---- B. a node run from its build tree: what a session can do to the image ----
-
+/// HELD for the content, a rebuild and a deletion; OPEN BY DECISION for the
+/// mode (T8F-5). A real `serve` from `ws/target/debug`: a session cannot
+/// change the image's content through any name while the node runs; after
+/// a rebuild and after the binary is deleted outright commands still run;
+/// `chmod 000` on a name the session kept stops every command, and the
+/// node cannot be started again until the mode is restored. The messages
+/// the agent and the owner get are printed.
 #[tokio::test(flavor = "multi_thread")]
 async fn b_a_build_tree_session_and_the_running_image() {
     let f = fixture();
@@ -701,72 +707,124 @@ async fn b_a_build_tree_session_and_the_running_image() {
     )
     .unwrap();
     let cut = |r: String| r.replace(f.root.to_str().unwrap(), "<root>");
-    println!("{}", cut(s.view_line()));
-    let old = ino(&exe);
-    assert_eq!(ino(&f.link()), old);
-    // 1: content. The image is the node's running program.
+    for l in s.log_lines("WARNING: a session can replace") {
+        let at = l.find("and a session that can write there").unwrap_or(0);
+        println!(
+            "start-up warning, its last part: …{}",
+            cut(l[at..].to_string())
+        );
+    }
     let r = s
         .run(
             &f.ws,
-            "run: ln target/debug/rizzy-harness .keep && echo third-link-made; \
-             stat -c 'nlink=%h mode=%a' .keep; \
+            "run: ln target/debug/rizzy-harness .keep && echo third-name-made; \
              echo x >> target/debug/rizzy-harness; echo append=$?; \
              : > .keep; echo truncate=$?; \
-             cp /usr/bin/true target/debug/rizzy-harness; echo cp-over=$?; \
-             python3 -c \"import os; os.truncate('.keep', 0)\"; echo truncate-syscall=$?",
+             cp /usr/bin/true target/debug/rizzy-harness; echo cp-over=$?",
         )
         .await;
     println!("1 (content, while the node runs): {}", cut(r));
-    println!(
-        "  on the host: the link's size {} (the binary copied was {})",
-        std::fs::metadata(f.link()).unwrap().len(),
-        std::fs::metadata(EXE).unwrap().len()
-    );
     assert_eq!(
-        std::fs::metadata(f.link()).unwrap().len(),
+        std::fs::metadata(f.ws.join(".keep")).unwrap().len(),
         std::fs::metadata(EXE).unwrap().len()
     );
-    // 2: a rebuild.
     let r = s
         .run(
             &f.ws,
             "run: rm target/debug/rizzy-harness && echo next-build > target/debug/rizzy-harness \
-             && echo rebuilt; stat -c 'kept: nlink=%h' .keep",
+             && echo rebuilt",
         )
         .await;
     println!("2 (a rebuild): {}", cut(r));
     let r = s.run(&f.ws, "run: echo AFTER-THE-REBUILD").await;
     println!("3 (after the rebuild): {}", cut(r.clone()));
     assert!(r.contains("AFTER-THE-REBUILD\n"));
-    // 4: the mode of the shared inode.
+    let r = s
+        .run(
+            &f.ws,
+            "run: rm -f target/debug/rizzy-harness .keep.none; echo deleted",
+        )
+        .await;
+    println!("4 (the binary deleted, nothing at its path): {}", cut(r));
+    let r = s.run(&f.ws, "run: echo AFTER-THE-DELETION").await;
+    println!("5 (after the deletion): {}", cut(r.clone()));
+    assert!(r.contains("AFTER-THE-DELETION\n"));
+    // The node's helpers start sandbox-exec by the path (unchanged, the
+    // documented residual): what the node's log says while commands run on.
+    let failed = s.log_lines("checkpoint failed");
+    println!(
+        "  while commands ran on, the node logged {} failed checkpoints, the first: {}; the last: {}",
+        failed.len(),
+        failed
+            .first()
+            .map(|l| l.rsplit("error=").next().unwrap_or(""))
+            .unwrap_or("none"),
+        failed
+            .last()
+            .map(|l| l.rsplit("error=").next().unwrap_or(""))
+            .unwrap_or("none"),
+    );
+    println!(
+        "  the data directory holds nothing named node-image*: {}",
+        !names(&f.data).iter().any(|n| n.starts_with("node-image"))
+    );
     let r = s.run(&f.ws, "run: chmod 000 .keep; echo chmod=$?").await;
     println!(
-        "4 (chmod 000 on the session's own link to the image): {}",
+        "6 (chmod 000 on the session's own name of the image): {}",
         cut(r)
     );
-    println!(
-        "  on the host: the node's link has mode {:o}",
-        mode(&f.link())
-    );
     let r = s.run(&f.ws, "run: echo AFTER-CHMOD").await;
-    println!("5 (the next command, any session): {}", cut(r));
-    let log = std::fs::read_to_string(&s.log).unwrap();
-    for l in log
-        .lines()
-        .filter(|l| l.contains("ermission denied"))
-        .take(2)
-    {
-        println!("  node log: {}", cut(l.to_string()));
+    println!("7 (the next command, any session): {}", cut(r.clone()));
+    assert!(!r.contains("AFTER-CHMOD\n"));
+    let tail: Vec<String> = s
+        .log_lines("ermission denied")
+        .into_iter()
+        .rev()
+        .take(3)
+        .collect();
+    for l in tail.iter().rev() {
+        println!("  node log: {}", cut(l.clone()));
     }
-    let _ = std::fs::set_permissions(f.link(), std::fs::Permissions::from_mode(0o755));
+    // The owner restarts the node: the image's file (now only .keep).
+    std::fs::rename(f.ws.join(".keep"), &exe).unwrap();
+    drop(s);
+    let again = Server::start(
+        &exe,
+        &f.data,
+        &f.ws,
+        &f.root.join("serve2.log"),
+        "127.0.0.1:0",
+    );
+    println!(
+        "8 (the node stopped and started again, the image still mode {:o}): {}",
+        mode(&exe),
+        match &again {
+            Ok(_) => "it runs".to_string(),
+            Err(e) => cut(e.clone()),
+        }
+    );
+    drop(again);
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let s = Server::start(
+        &exe,
+        &f.data,
+        &f.ws,
+        &f.root.join("serve3.log"),
+        "127.0.0.1:0",
+    )
+    .unwrap();
     let r = s
         .run(&f.ws, "run: echo AFTER-THE-OWNER-RESTORED-THE-MODE")
         .await;
-    println!("6 (mode restored on the host): {}", cut(r));
+    println!("9 (mode restored, node started): {}", cut(r));
 }
 
-// ---- D. a second node on the same data directory, and doctor ----
+// ---- D. a second start, doctor ----
 
+/// HELD (T8F-4 is closed; T8F-1, T8F-6 no longer apply). Two builds on one
+/// data directory: a second start that fails on the port, `doctor` of
+/// either build, and a second node that does start leave the first node's
+/// commands running; nothing named `node-image*` is made.
 #[tokio::test(flavor = "multi_thread")]
 async fn d_a_second_node_and_doctor() {
     let f = fixture();
@@ -774,462 +832,296 @@ async fn d_a_second_node_and_doctor() {
     let b = f.binary("bin-b/rizzy-harness");
     let cut = |r: String| r.replace(f.root.to_str().unwrap(), "<root>");
     let sa = Server::start(&a, &f.data, &f.ws, &f.root.join("a.log"), "127.0.0.1:0").unwrap();
-    println!("A: {}", cut(sa.view_line()));
+    for l in sa.log_lines("file view: ") {
+        let at = l.find("Its sandbox-exec").unwrap_or(0);
+        println!("A's file view line, its last part: {}", &l[at..]);
+    }
     println!(
-        "A, first command: {}",
-        cut(sa.run(&f.ws, "run: echo A-RAN").await)
+        "A, first command: {:?}",
+        sa.run(&f.ws, "run: echo A-RAN").await.trim()
     );
-    assert_eq!(ino(&f.link()), ino(&a));
-
-    // doctor, same build and another build, against the running node.
-    let before = names(&f.data);
-    println!("doctor (A's binary): {}", cut(doctor_view(&a, &f.data)));
-    println!("doctor (another build): {}", cut(doctor_view(&b, &f.data)));
-    println!(
-        "after both doctors: the link is still A's image: {}; new names in the data directory: {:?}",
-        ino(&f.link()) == ino(&a),
-        names(&f.data)
-            .into_iter()
-            .filter(|n| !before.contains(n))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(ino(&f.link()), ino(&a));
-    println!(
-        "A, after the doctors: {}",
-        cut(sa.run(&f.ws, "run: echo A-RAN-2").await)
-    );
-
-    // A second start of ANOTHER build that cannot take the port.
+    for exe in [&a, &b] {
+        let out = std::process::Command::new(exe)
+            .args(["--data-dir", f.data.to_str().unwrap(), "doctor"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout).into_owned();
+        println!(
+            "doctor ({}): {} lines, a file view line: {}",
+            if exe == &a {
+                "A's build"
+            } else {
+                "another build"
+            },
+            out.lines().count(),
+            out.lines().any(|l| l.contains(" file view: "))
+        );
+    }
     let r = Server::start(&b, &f.data, &f.ws, &f.root.join("b-fail.log"), &sa.addr);
     println!(
-        "B started on A's port: {}",
+        "B (another build) started on A's port: {}",
         match &r {
             Ok(_) => "it runs".to_string(),
             Err(e) => cut(e
                 .lines()
-                .filter(|l| l.contains("rror") || l.contains("ended"))
-                .take(3)
+                .filter(|l| l.contains("rror") || l.contains("in use"))
+                .take(2)
                 .collect::<Vec<_>>()
                 .join(" / ")),
         }
     );
     drop(r);
-    println!(
-        "after B's failed start the link is: {}",
-        if ino(&f.link()) == ino(&a) {
-            "A's image"
-        } else if ino(&f.link()) == ino(&b) {
-            "B's image"
-        } else {
-            "something else"
-        }
-    );
-    println!(
-        "A, after B's failed start: {}",
-        cut(sa.run(&f.ws, "run: echo A-RAN-3").await)
-    );
-
-    // A second node that does start.
+    let r = sa.run(&f.ws, "run: echo A-RAN-AFTER-B-FAILED").await;
+    println!("A, after B's failed start: {:?}", r.trim());
+    assert!(r.contains("A-RAN-AFTER-B-FAILED\n"));
     match Server::start(&b, &f.data, &f.ws, &f.root.join("b.log"), "127.0.0.1:0") {
         Ok(sb) => {
-            println!("B: {}", cut(sb.view_line()));
-            println!(
-                "with B running the link is: {}",
-                if ino(&f.link()) == ino(&b) {
-                    "B's image"
-                } else {
-                    "not B's image"
-                }
-            );
-            let ra = sa
-                .run(
-                    &f.ws,
-                    "run: echo A-RAN-4; stat -c inode=%i /.rizzy-harness/rizzy-harness",
-                )
-                .await;
-            println!(
-                "A, with B running (A's image is inode {}, B's {}): {}",
-                ino(&a),
-                ino(&b),
-                cut(ra.clone())
-            );
-            assert!(
-                !ra.contains(&format!("inode={}", ino(&b))),
-                "A bound B's build"
-            );
-            let rb = sb
-                .run(
-                    &f.ws,
-                    "run: echo B-RAN; stat -c inode=%i /.rizzy-harness/rizzy-harness",
-                )
-                .await;
-            println!("B: {}", cut(rb));
-            drop(sb);
-            let ra = sa.run(&f.ws, "run: echo A-RAN-5").await;
-            println!("A, after B stopped: {}", cut(ra));
+            let ra = sa.run(&f.ws, "run: echo A-RAN-WITH-B").await;
+            let rb = sb.run(&f.ws, "run: echo B-RAN").await;
+            println!("with B running: A: {:?}; B: {:?}", ra.trim(), rb.trim());
+            assert!(ra.contains("A-RAN-WITH-B\n") && rb.contains("B-RAN\n"));
         }
         Err(e) => println!("B did not start: {}", cut(e)),
     }
-}
-
-// ---- F. the real fallbacks (run by real_fallbacks.sh) ----
-
-/// `REVIEW_T8F_DATA_PARENT`: a folder on ANOTHER file system than `TMPDIR`
-/// (EXDEV); `REVIEW_T8F_FOREIGN_EXE`: a copy of the binary owned by another
-/// user, mode 755 (EPERM under protected_hardlinks). One of them.
-#[tokio::test(flavor = "multi_thread")]
-async fn f_a_real_fallback() {
-    let f = fixture();
-    let (exe, data, what) = if let Some(p) = std::env::var_os("REVIEW_T8F_DATA_PARENT") {
-        let data = PathBuf::from(p).join("data");
-        std::fs::create_dir_all(&data).unwrap();
-        (
-            f.binary("bin/rizzy-harness"),
-            data.canonicalize().unwrap(),
-            "EXDEV",
-        )
-    } else if let Some(p) = std::env::var_os("REVIEW_T8F_FOREIGN_EXE") {
-        (PathBuf::from(p), f.data.clone(), "EPERM")
-    } else {
-        println!("SKIPPED: run through real_fallbacks.sh");
-        return;
-    };
-    let m = std::fs::metadata(&exe).unwrap();
     println!(
-        "{what}: the binary: owner uid {} (this user is {}), mode {:o}, device {}; the data \
-         directory's device {}",
-        m.uid(),
-        nix::unistd::geteuid(),
-        m.mode() & 0o7777,
-        m.dev(),
-        std::fs::metadata(&data).unwrap().dev()
-    );
-    let cut = |r: String| {
-        r.replace(f.root.to_str().unwrap(), "<root>")
-            .replace(data.to_str().unwrap(), "<data>")
-            .replace(exe.parent().unwrap().to_str().unwrap(), "<bin>")
-    };
-    std::fs::write(
-        data.join("node.toml"),
-        format!(
-            "workspace_roots = [{:?}]\nmax_approval_mode = \"auto\"\n",
-            f.ws.display().to_string()
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        data.join("config.toml"),
-        "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\n\
-         mock_delay_ms = 1\n\n[[providers.models]]\nid = \"mock\"\n",
-    )
-    .unwrap();
-    if what == "EXDEV" {
-        // The link itself, with the node's own code: the build's binary
-        // (on the disk) and this data directory (on the other file system).
-        let sb = Sandbox::new(
-            PathBuf::from(EXE),
-            &Settings::default(),
-            Some(data.join("sandbox-tmp")),
-            std::slice::from_ref(&data),
-        )
-        .unwrap();
-        let l = sb.link_image(&data).clone();
-        println!("link_image: {}", cut(format!("{l:?}")));
-        assert!(matches!(&l, ImageLink::NotMade(w) if w.contains("another file system")));
-        println!(
-            "the view line: {}",
-            cut(sb
-                .view_line()
-                .split("the harness binary at")
-                .nth(1)
-                .unwrap_or("")
-                .to_string())
-        );
-        println!("the data directory holds: {:?}", names(&data));
-        if harness_tools::contain::find_bwrap().is_err() {
-            // In this private namespace bubblewrap is not root's file (root
-            // is not mapped): the node is told to use it anyway.
-            let mut t = std::fs::read_to_string(data.join("node.toml")).unwrap();
-            t.push_str("\n[sandbox]\nbwrap = \"/usr/bin/bwrap\"\n");
-            std::fs::write(data.join("node.toml"), t).unwrap();
-            println!("(node.toml names /usr/bin/bwrap: root is not mapped in this namespace)");
-        }
-    }
-    println!("doctor: {}", cut(doctor_view(&exe, &data)));
-    println!(
-        "after doctor, node-image* in the data directory: {:?}",
-        names(&data)
-            .into_iter()
-            .filter(|n| n.starts_with("node-image"))
-            .collect::<Vec<_>>()
-    );
-    let s = Server::start(&exe, &data, &f.ws, &f.root.join("serve.log"), "127.0.0.1:0").unwrap();
-    println!("node log: {}", cut(s.view_line()));
-    println!(
-        "after the start, node-image* in the data directory: {:?}",
-        names(&data)
-            .into_iter()
-            .filter(|n| n.starts_with("node-image"))
-            .collect::<Vec<_>>()
-    );
-    println!(
-        "first command: {}",
-        cut(s.run(&f.ws, "run: echo FIRST-RAN").await)
-    );
-    // Replaced by a rename, as an upgrade does.
-    let next = exe.with_extension("next");
-    std::fs::copy(EXE, &next).unwrap();
-    std::fs::rename(&next, &exe).unwrap();
-    let r = s.run(&f.ws, "run: echo RAN-AFTER-THE-UPGRADE").await;
-    println!("after the upgrade: {}", cut(r.clone()));
-    assert!(!r.contains("RAN-AFTER-THE-UPGRADE\n"));
-    assert!(r.contains("restart the node"));
-}
-
-// ---- G. a restart of the same binary ----
-
-/// T8F-1. The link is made under a temporary name and renamed over the
-/// fixed one. `rename(2)` does nothing when both names are already the same
-/// file, which is every restart of a binary that was not rebuilt: the
-/// temporary name stays. First with `image::make`, then with a real node
-/// restarted three times and then "upgraded".
-#[tokio::test(flavor = "multi_thread")]
-async fn g_a_restart_leaves_its_temporary_link() {
-    use harness_tools::image::make;
-    let d = tempfile::tempdir().unwrap();
-    let root = d.path().canonicalize().unwrap();
-    let data = root.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let bin = root.join("bin");
-    std::fs::write(&bin, "image").unwrap();
-    let fd = held(&bin);
-    let r1 = make(fd.as_raw_fd(), &data);
-    println!(
-        "make, first: {:?}; the data directory: {:?}",
-        matches!(r1, ImageLink::Linked(_)),
-        names(&data)
-    );
-    let r2 = make(fd.as_raw_fd(), &data);
-    println!(
-        "make, again (a restart): {:?}; the data directory: {:?}",
-        matches!(r2, ImageLink::Linked(_)),
-        names(&data)
-    );
-
-    let f = fixture();
-    let exe = f.binary("bin/rizzy-harness");
-    let cut = |r: String| r.replace(f.root.to_str().unwrap(), "<root>");
-    let images = |data: &Path| -> Vec<String> {
-        names(data)
-            .into_iter()
-            .filter(|n| n.starts_with("node-image"))
-            .map(|n| {
-                let m = std::fs::symlink_metadata(data.join(&n)).unwrap();
-                format!("{n} (inode {}, {} bytes)", m.ino(), m.len())
-            })
-            .collect()
-    };
-    for i in 1..=3 {
-        let s = Server::start(
-            &exe,
-            &f.data,
-            &f.ws,
-            &f.root.join("serve.log"),
-            "127.0.0.1:0",
-        )
-        .unwrap();
-        let r = s.run(&f.ws, "run: echo RAN").await;
-        println!(
-            "start {i} (pid {}): command: {:?}; node-image*: {:?}",
-            s.child.id(),
-            cut(r).trim(),
-            images(&f.data)
-        );
-        drop(s);
-    }
-    // An upgrade: another file at the path; the node started again.
-    let old = ino(&exe);
-    let next = f.root.join("bin/next");
-    std::fs::copy(EXE, &next).unwrap();
-    std::fs::rename(&next, &exe).unwrap();
-    let s = Server::start(
-        &exe,
-        &f.data,
-        &f.ws,
-        &f.root.join("serve.log"),
-        "127.0.0.1:0",
-    )
-    .unwrap();
-    println!(
-        "after an upgrade (the old build was inode {old}, the new one is {}) and a start: node-image*: {:?}",
-        ino(&exe),
-        images(&f.data)
-    );
-    let pinned: u64 = names(&f.data)
-        .iter()
-        .filter(|n| n.starts_with("node-image.new-"))
-        .map(|n| std::fs::symlink_metadata(f.data.join(n)).unwrap())
-        .filter(|m| m.ino() == old)
-        .map(|m| m.len())
-        .max()
-        .unwrap_or(0);
-    println!(
-        "the old build has no name but those left behind: {} bytes kept on disk by them",
-        pinned
-    );
-    drop(s);
-}
-
-// ---- H. the fallback, by path, in a build tree: one concurrent command ----
-
-/// Where no link is made the view is T.8c's: the image is bound through the
-/// binary's OWN path. With an older bubblewrap (binds by path) nothing looks
-/// at what was mounted, and in a build tree that path is in the session's
-/// folder. Two contained commands of two sessions of one node: the first
-/// waits, then renames its own file over the binary once, at a random
-/// moment; the second is started at that time. Counted: for how many pairs
-/// the session's file ran as `sandbox-exec` (before Landlock). Then the same
-/// with the link made (T.8f), and the fallback with binds by descriptor.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn h_the_fallback_by_path_in_a_build_tree() {
-    let rounds: usize = std::env::var("REVIEW_T8F_ROUNDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(120);
-    let f = fixture();
-    let master = f.binary("master");
-    std::fs::File::open(&master).unwrap().sync_all().unwrap();
-    let bw = harness_tools::contain::find_bwrap().expect("bubblewrap");
-    let log = f.ws.join("ran-as");
-    let mut x: u64 = 0x2545F4914F6CDD1D;
-    for (binds, linked) in [
-        (Binds::Path, false),
-        (Binds::Path, true),
-        (Binds::Fd, false),
-    ] {
-        let (mut ran_image, mut refused, mut session_file_ran, mut odd) = (0, 0, 0, Vec::new());
-        for i in 0..rounds {
-            let tag = format!("{binds:?}-{linked}-{i}");
-            let dir = f.ws.join(&tag);
-            std::fs::create_dir_all(&dir).unwrap();
-            let exe = dir.join("rizzy-harness");
-            std::fs::hard_link(&master, &exe).unwrap();
-            impostor(&dir.join("imp"), &log);
-            let sb = f.plain(&exe);
-            if i == 0 {
-                sb.probe(&f.data.join("sandbox-tmp/probe"), &f.data)
-                    .expect("Landlock");
-            }
-            let c = Contain::new(bw.clone(), Form::Full).with_binds(binds);
-            if i == 0 {
-                sb.probe_containment(&c, &f.data.join("sandbox-tmp/probe-contain"))
-                    .expect("containment");
-            }
-            let sb = sb.with_containment(c);
-            if linked {
-                assert!(matches!(sb.link_image(&f.data), ImageLink::Linked(_)));
-            }
-            let sb = Arc::new(sb);
-            let (c1, c2) = (f.ctx(sb.clone(), "s1"), f.ctx(sb, "s2"));
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            let spin = x % 40000;
-            // Session 2's command: wait for the mark, spin, replace the binary.
-            let script = format!(
-                "while [ ! -e {tag}/go ]; do :; done; for ((k=0;k<{spin};k++)); do :; done; \
-                 mv -f {tag}/imp {tag}/rizzy-harness; echo swapped"
-            );
-            let swapper = tokio::spawn(async move { run(&c2, &script).await });
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-            let before = std::fs::read_to_string(&log).unwrap_or_default().len();
-            std::fs::write(dir.join("go"), "").unwrap();
-            let r = run(&c1, "echo RAN").await;
-            let s = swapper.await.unwrap();
-            let after = std::fs::read_to_string(&log).unwrap_or_default().len();
-            if !s.contains("swapped") {
-                odd.push(format!("the swapping command: {s}"));
-            } else if after > before {
-                session_file_ran += 1;
-                if session_file_ran == 1 {
-                    println!(
-                        "{binds:?}, link {linked}: pair {i}: THE SESSION'S FILE RAN AS \
-                         sandbox-exec; the command's output {r:?}; its record {:?}",
-                        std::fs::read_to_string(&log)
-                            .unwrap_or_default()
-                            .lines()
-                            .last()
-                    );
-                }
-            } else if r.contains("RAN\n") {
-                ran_image += 1;
-            } else if r.contains("restart the node") || r.contains("bwrap:") {
-                refused += 1;
-            } else {
-                odd.push(r);
-            }
-        }
-        println!(
-            "{binds:?}, link made: {linked}: {rounds} pairs: the command ran from the node's image \
-             {ran_image}; refused {refused}; THE SESSION'S FILE RAN AS sandbox-exec \
-             {session_file_ran}; other {}",
-            odd.len()
-        );
-        for o in odd.iter().take(2) {
-            println!(
-                "  other: {:?}",
-                o.replace(f.root.to_str().unwrap(), "<root>")
-            );
-        }
-        if linked || binds == Binds::Fd {
-            assert_eq!(session_file_ran, 0);
-        }
-    }
-}
-
-// ---- I. a command that runs the harness itself, on a real node ----
-
-/// The session's temp folder is INSIDE the data directory, on the link's
-/// file system. A contained command runs the harness binary it sees
-/// (`doctor`, with a data directory in its temp folder), tries the node's
-/// own way of linking (`ln -L` on the descriptor of a running copy) and
-/// looks at what the view tells it about the link.
-#[tokio::test(flavor = "multi_thread")]
-async fn i_a_command_runs_the_harness_itself() {
-    let f = fixture();
-    let exe = f.binary("bin/rizzy-harness");
-    let s = Server::start(
-        &exe,
-        &f.data,
-        &f.ws,
-        &f.root.join("serve.log"),
-        "127.0.0.1:0",
-    )
-    .unwrap();
-    let cut = |r: String| r.replace(f.root.to_str().unwrap(), "<root>");
-    let r = s
-        .run(
-            &f.ws,
-            "run: H=/.rizzy-harness/rizzy-harness; mkdir -p \"$TMPDIR/d\"; \
-             $H --data-dir \"$TMPDIR/d\" doctor 2>&1 | grep -o -E 'no link node-image could be made[^:]*|kept by a link[^:]*' | head -2; \
-             echo \"in its own data directory: $(ls -A \"$TMPDIR/d\" | tr '\\n' ' ')\"; \
-             ln \"$H\" \"$TMPDIR/k1\" 2>&1 | sed 's/.*: //'; \
-             ( exec 9<\"$H\"; ln -L /proc/self/fd/9 \"$TMPDIR/k2\" 2>&1 | sed 's/.*: //' ); \
-             chmod 000 \"$H\" 2>&1 | sed 's/.*: //'; \
-             grep -c node-image /proc/self/mountinfo | sed 's/^/mountinfo lines naming node-image: /'; \
-             stat -c 'the image in the view: links=%h mode=%a' \"$H\"; \
-             echo \"temp folder: $(ls -A \"$TMPDIR\" | tr '\\n' ' ')\"",
-        )
-        .await;
-    println!("{}", cut(r));
-    println!(
-        "on the host: the link's mode {:o}; node-image* in the data directory: {:?}",
-        mode(&f.link()),
+        "node-image* in the data directory: {:?}",
         names(&f.data)
             .into_iter()
             .filter(|n| n.starts_with("node-image"))
             .collect::<Vec<_>>()
     );
-    assert_eq!(mode(&f.link()), 0o755);
-    assert_eq!(std::fs::symlink_metadata(f.link()).unwrap().nlink(), 2);
+}
+
+// ---- K. the node, its guard and sandbox-exec are one inode ----
+
+/// HELD. A real `serve` whose node.toml names the stand-in bubblewrap of
+/// `J` (it records and runs the real one): the node, the guard and the
+/// program bubblewrap is given are one device and inode, before and after
+/// the binary at the node's path is replaced by another build, and that
+/// inode is then not the file at the path.
+#[tokio::test(flavor = "multi_thread")]
+async fn k_the_node_its_guard_and_the_wrapper_are_one_inode() {
+    let f = fixture();
+    let exe = f.binary("bin/rizzy-harness");
+    let (fake, log, _) = fake_bwrap(&f);
+    node_files(
+        &f.data,
+        &f.ws,
+        &format!("\n[sandbox]\nbwrap = {:?}\n", fake.display().to_string()),
+    );
+    let s = Server::start(
+        &exe,
+        &f.data,
+        &f.ws,
+        &f.root.join("serve.log"),
+        "127.0.0.1:0",
+    )
+    .unwrap();
+    let m = std::fs::metadata(&exe).unwrap();
+    let id = format!("{}:{}", m.dev(), m.ino());
+    let last = |log: &Path| -> String {
+        let l = std::fs::read_to_string(log).unwrap_or_default();
+        let v: Vec<&str> = l.lines().collect();
+        v.iter()
+            .rev()
+            .take(5)
+            .rev()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let r = s.run(&f.ws, "run: echo FIRST").await;
+    println!(
+        "the image the node was started from: {id}\n{}\nthe command: {:?}",
+        last(&log),
+        r.trim()
+    );
+    let l = last(&log);
+    assert_eq!(l.matches(&id).count(), 3, "{l}");
+    // An upgrade: another build renamed over the path.
+    let next = f.root.join("bin/next");
+    std::fs::copy(EXE, &next).unwrap();
+    std::fs::rename(&next, &exe).unwrap();
+    let m2 = std::fs::metadata(&exe).unwrap();
+    let r = s.run(&f.ws, "run: echo AFTER-THE-UPGRADE").await;
+    println!(
+        "the file now at the node's path: {}:{}\n{}\nthe command: {:?}",
+        m2.dev(),
+        m2.ino(),
+        last(&log),
+        r.trim()
+    );
+    let l = last(&log);
+    assert_eq!(l.matches(&id).count(), 3, "{l}");
+    assert!(r.contains("AFTER-THE-UPGRADE\n"));
+}
+
+// ---- F. a binary this user does not own (run by foreign_owner.sh) ----
+
+/// HELD (the first design's `EPERM` fallback no longer exists).
+/// `REVIEW_T8F_FOREIGN_EXE`: a copy of the binary owned by another user,
+/// mode 755, as an installed root-owned binary is; inside bubblewrap's user
+/// namespace its owner is not mapped. A real `serve` from it: a command
+/// runs, the binary is replaced by a rename as an upgrade does, and the
+/// next command runs too.
+#[tokio::test(flavor = "multi_thread")]
+async fn f_a_binary_this_user_does_not_own() {
+    let Some(p) = std::env::var_os("REVIEW_T8F_FOREIGN_EXE") else {
+        println!("SKIPPED: run through foreign_owner.sh");
+        return;
+    };
+    let f = fixture();
+    let exe = PathBuf::from(p);
+    let m = std::fs::metadata(&exe).unwrap();
+    println!(
+        "the binary: owner uid {} (this user is {}), mode {:o}",
+        m.uid(),
+        nix::unistd::geteuid(),
+        m.mode() & 0o7777
+    );
+    let s = Server::start(
+        &exe,
+        &f.data,
+        &f.ws,
+        &f.root.join("serve.log"),
+        "127.0.0.1:0",
+    )
+    .unwrap();
+    let r = s.run(&f.ws, "run: echo FIRST-RAN; echo pid=$$").await;
+    println!("first command: {:?}", r.trim());
+    assert!(r.contains("FIRST-RAN\n") && r.contains("pid=2\n"), "{r}");
+    let next = exe.with_extension("next");
+    std::fs::copy(EXE, &next).unwrap();
+    std::fs::rename(&next, &exe).unwrap();
+    let r = s.run(&f.ws, "run: echo RAN-AFTER-THE-UPGRADE").await;
+    println!(
+        "after the upgrade (the old file has no name left): {:?}",
+        r.trim()
+    );
+    assert!(r.contains("RAN-AFTER-THE-UPGRADE\n"), "{r}");
+    println!(
+        "the image's inode was {}; the path now holds {}",
+        m.ino(),
+        ino(&exe)
+    );
+}
+
+// ---- L. a binary the node can execute but not read ----
+
+/// FINDING R-1. The node opens its own image for READING (`open_image`,
+/// `File::open("/proc/self/exe")`); where that fails (a binary with mode
+/// 711 or 311: executable, not readable) it holds no descriptor, says
+/// nothing, and starts every guard from the binary's PATH. The guard's own
+/// image, and so `sandbox-exec`, is then whatever file is at that path when
+/// the command starts. Shown with the stand-in bubblewrap of `J` on a real
+/// `serve`: before an upgrade all three are one inode; after it the node is
+/// the old build and its guard and `sandbox-exec` are the new file; and a
+/// script put at the path runs as the GUARD (outside bubblewrap and
+/// Landlock, with the node's channel on its stdin).
+#[tokio::test(flavor = "multi_thread")]
+async fn l_a_binary_the_node_cannot_read() {
+    let f = fixture();
+    let exe = f.binary("bin/rizzy-harness");
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o311)).unwrap();
+    if std::fs::File::open(&exe).is_ok() {
+        println!("SKIPPED: this user reads a mode 311 file (root)");
+        return;
+    }
+    let (fake, log, _) = fake_bwrap(&f);
+    node_files(
+        &f.data,
+        &f.ws,
+        &format!("\n[sandbox]\nbwrap = {:?}\n", fake.display().to_string()),
+    );
+    let s = Server::start(
+        &exe,
+        &f.data,
+        &f.ws,
+        &f.root.join("serve.log"),
+        "127.0.0.1:0",
+    )
+    .unwrap();
+    let cut = |r: String| r.replace(f.root.to_str().unwrap(), "<root>");
+    let m = std::fs::metadata(&exe).unwrap();
+    let last = |log: &Path| -> String {
+        let l = std::fs::read_to_string(log).unwrap_or_default();
+        let v: Vec<&str> = l.lines().collect();
+        v.iter()
+            .rev()
+            .take(5)
+            .rev()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let r = s.run(&f.ws, "run: echo FIRST").await;
+    println!(
+        "the node's image: {}:{}, mode {:o}\n{}\nthe command: {:?}",
+        m.dev(),
+        m.ino(),
+        m.mode() & 0o7777,
+        last(&log),
+        r.trim()
+    );
+    println!(
+        "lines of the node's log that name the image or a descriptor of it: {:?}",
+        s.log_lines("own image").len() + s.log_lines("descriptor of").len()
+    );
+    // An upgrade: another build renamed over the path.
+    let next = f.root.join("bin/next");
+    std::fs::copy(EXE, &next).unwrap();
+    std::fs::rename(&next, &exe).unwrap();
+    let m2 = std::fs::metadata(&exe).unwrap();
+    let r = s.run(&f.ws, "run: echo AFTER-THE-UPGRADE").await;
+    println!(
+        "the file now at the node's path: {}:{}\n{}\nthe command: {:?}",
+        m2.dev(),
+        m2.ino(),
+        last(&log),
+        r.trim()
+    );
+    // A script at the path.
+    let rec = f.root.join("ran-as");
+    let imp = f.root.join("bin/imp");
+    std::fs::write(
+        &imp,
+        format!(
+            "#!/bin/sh\necho \"ran as $1, pid $$, $(ls /proc | grep -c '^[0-9]') processes in \
+             /proc, stdin $(readlink /proc/$$/fd/0)\" >> '{}'\n",
+            rec.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&imp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&imp, &exe).unwrap();
+    let r = s.run(&f.ws, "run: echo AFTER-A-SCRIPT-AT-THE-PATH").await;
+    let record = std::fs::read_to_string(&rec).unwrap_or_default();
+    println!(
+        "a script at the node's path: the command: {:?}\nthe script's record as the GUARD: {:?}\n(and {} \
+         records as sandbox-exec: the node's helpers, which start it by path, the documented residual)",
+        cut(r).trim(),
+        record
+            .lines()
+            .find(|l| l.contains("ran as sandbox-guard"))
+            .unwrap_or("none"),
+        record
+            .lines()
+            .filter(|l| l.contains("ran as sandbox-exec"))
+            .count()
+    );
+    // An aside, part of that residual: the script prints nothing, so the
+    // node's `git rev-parse --git-common-dir` "answers" with an empty path
+    // and the checkpoint order file is written into the node's own working
+    // directory (`order_file` in crates/node/src/git.rs joins onto it).
+    println!(
+        "in the node's working directory afterwards: harness-checkpoints exists: {}",
+        f.data
+            .parent()
+            .unwrap()
+            .join("harness-checkpoints")
+            .exists()
+    );
 }

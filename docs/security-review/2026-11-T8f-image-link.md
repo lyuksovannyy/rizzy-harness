@@ -462,3 +462,371 @@ The whole file: `10 passed … finished in 154.48s`. `run_rust_proofs.sh`
 copies the proofs to `crates/cli/tests/` for the run and removes the copy.
 Every node the proofs start is their own child, killed by pid and reaped
 when its test ends.
+
+---
+
+# Re-check after the redesign (2026-11-12)
+
+Reviewed: the same branch at `f228f04`: `5a8bd63` (tests), `9208bad` (the
+change), `f228f04` (documents), on top of this review's `b975fa4` and a
+merge of `origin/main` (`9f4e075`, not the subject). The hard link is gone.
+The guard opens its own `/proc/self/exe` (`O_PATH`, not close-on-exec) and
+gives bubblewrap `/proc/self/fd/<n>` as the program; `sandbox-exec` closes
+every descriptor above 2 before it reads its arguments. Read in full, then
+attacked on the branch's build, same machine as above (bubblewrap 0.13.1;
+binds by path through `with_binds`). No product or test source changed.
+Sections 1 to 7 above describe the first design and are left as they were
+written; section 7's commands no longer exist (see "The proofs" below).
+
+## R.1 Verdict
+
+**The redesign closes what the first review found, and nothing a session
+can do was found against it.** The program bubblewrap runs is the guard's
+inode in both forms and both bind modes; a command holds 0, 1 and 2 and
+nothing else; 750 concurrent replacements and deletions of the binary by
+another session ran the session's file 0 times and stopped 0 commands; a
+second start, `doctor` and a binary the user does not own change nothing.
+What is left is what the documents say is left (T8F-5, T8F-9, the helpers
+by path), and five notes, none asked for before merge.
+
+| Id | Status | Why |
+|---|---|---|
+| T8F-1 (temporary link left) | **No longer applies** | Nothing is written to the data directory (`node-image* in the data directory: []` after starts, a failed second start, two `doctor`s). |
+| T8F-2 (the command held the image) | **Closed** | `a_what`: 0, 1, 2 only, in `(Full, SharedProc) x (Fd, Path)`; no path of the harness in the view; the binary's mode unchanged. |
+| T8F-3a (the link replaced after the check) | **No longer applies** | No path is bound for the image. |
+| T8F-3b (a session's file as `sandbox-exec`, by path) | **Closed** | `h_a_session`: 450 pairs by path, 150 by descriptor, 150 deletions: 0 runs of the session's file, every command and the one after it ran. |
+| T8F-4 (a failed second start stops the node) | **Closed** | `d_a_second_node`: A runs after B's failed start and beside a running B. |
+| T8F-5 (`chmod 000` in a build tree) | **Open by decision, documented** | README, PLAN T9 and the start-up warning say it. Still true (`b_a_build`, `h_a_session`); the messages name the wrong program (R-2). |
+| T8F-6 (leftovers at the name) | **No longer applies** | |
+| T8F-7 (test gaps) | **Mostly closed** | `own_image.rs`: 8 form/bind/network combinations, the descriptors, 200 races, the second start. Left: `nothing_of_the_image_reaches_the_command` runs `Form::Full` only (held in `SharedProc` here); nothing asserts that bubblewrap inherits no socket (held here). |
+| T8F-8 (`EPERM`'s one cause) | **No longer applies** | |
+| T8F-9 (the old build runs silently) | **Open by decision, documented** | README (in bold) and PLAN. It now holds on every file system and for every owner, so it is the normal case after any upgrade. |
+| "Not proven": `open_image`'s second comparison | **Stands**, and see R-1 | The same function. |
+
+New:
+
+| Id | Severity | What | Proof |
+|---|---|---|---|
+| R-1 | Note | The node opens its image for READING. A binary it can execute but not read (mode 711, 311) leaves it without a descriptor; it says nothing and starts every guard from the binary's PATH. The guard, and so `sandbox-exec`, is then the file at the path: after an upgrade the old node talks to the new build's guard, and a file a session puts there runs as the guard. "Never through the binary's path" is false there. | `l_a_binary_the_node_cannot_read` |
+| R-2 | Note | With the image's mode 000 the agent is told `failed to spawn bash: Permission denied (os error 13)`: it was not bash. During a start: `bwrap: execvp /proc/self/fd/5: Permission denied`. Neither names the harness binary or what to do. | `b_a_build` 7, `h_a_session`, `j_between` |
+| R-3 | Note | Without `/proc`, `close_inherited` closes the numbers below the SOFT descriptor limit; one numbered above it stays. No start of the node makes that case (both forms have a `/proc`; the guard's numbers are single digits). | `close_inherited.py` |
+| R-4 | Note | What used to be refused now runs, and the node's helpers still go by the path. After a rebuild leaves something that cannot run, or the binary is deleted, commands run on while every checkpoint fails, with a `WARN` in the node's log as the only sign. | `b_a_build` 5 |
+| R-5 | Note | `guard.rs`, `open_view`'s comment: "or another program, refuses the command". The code passes another program through unchanged; only an `@rizzy` word in the options refuses. The node always sends the token. | reading |
+
+## R.2 New findings
+
+### R-1. Note. A binary the node cannot read is run by its path, silently
+
+**The statement it breaks.** (a) "always"; README "never through the
+binary's path"; PLAN "No path of the binary is bound, resolved or executed
+for a contained command".
+
+**The mechanism.** `open_image` is `File::open("/proc/self/exe")`: a read
+open. Mode 711 or 311 fails it, `Sandbox::image` is `None`, and
+`Contain::command` then starts the guard with `Command::new(exe)`. Nothing
+is logged; `doctor` says nothing. The guard's own `/proc/self/exe` is then
+whatever was at the path when that command started.
+
+**Reproduction** (`run_rust_proofs.sh l_a_binary`; a real `serve` from a
+mode 311 copy, the stand-in bubblewrap of `j_between` recording what it is
+given):
+
+```
+the node's image: 2049:4065004, mode 311
+program word: /proc/self/fd/7 = 2049:4065004
+the command: "FIRST\n[exit code: 0]"
+lines of the node's log that name the image or a descriptor of it: 0
+the file now at the node's path: 2049:4065604
+program word: /proc/self/fd/7 = 2049:4065604
+the guard (bubblewrap's parent) runs: 2049:4065604
+the command: "AFTER-THE-UPGRADE\n[exit code: 0]"
+a script at the node's path: the command: "(no output)\n[exit code: 0]"
+the script's record as the GUARD: "ran as sandbox-guard, pid 2106557, 553 processes in /proc, stdin socket:[33342022]"
+```
+
+Why a note: where the path is a session's to write, the node's helpers
+already run its file unconfined (the documented residual; 23 such records in
+the same run), and where it is not (a root-owned 711 install) what is left
+is a node of one build with a guard of another. But it is silent, and it is
+one flag.
+
+**Smallest fix.** Open the image `O_PATH` (no read permission is needed, and
+`execve` through `/proc/self/fd/<n>` of such a descriptor is what the guard
+already does for `sandbox-exec`). Where no descriptor can be had, say so in
+the log and in `doctor`, and let `contain = "required"` refuse.
+
+**The test that should exist.** The proof with the three inodes asserted
+equal after the upgrade, for a mode 311 copy.
+
+### R-2. Note. The messages at mode 000 name bash
+
+`b_a_build_tree_session_and_the_running_image`:
+
+```
+6 (chmod 000 on the session's own name of the image): chmod=0
+7 (the next command, any session): failed to spawn bash: Permission denied (os error 13)
+8 (the node stopped and started again, the image still mode 0): cannot start <root>/ws/target/debug/rizzy-harness: Permission denied (os error 13)
+9 (mode restored, node started): AFTER-THE-OWNER-RESTORED-THE-MODE
+```
+
+and, when the mode changes while a command starts (`h_a_session`):
+
+```
+Path, chmod at a random moment: 150 pairs: the command ran 129; the next command ran 0; THE SESSION'S FILE RAN AS sandbox-exec 0
+    21 x the command: bwrap: execvp /proc/self/fd/5: Permission denied |  | [exit code: 1]
+   150 x the next command: failed to spawn bash: Permission denied (os error 13)
+```
+
+README and PLAN describe the state truthfully ("no contained command of any
+session starts and the node cannot be restarted until you restore the
+mode"). The message at the moment does not. **Fix:** when the guard cannot
+be started, say that the node's own image could not be executed, its path,
+and "restore its mode (chmod 755)". **Test:** step 7 asserts the harness
+binary's name in the output.
+
+### R-3. Note. The bound of `close_inherited` without `/proc`
+
+`close_inherited.py <binary>` (the real `sandbox-exec`, descriptors 3, 50,
+1000 and 5000 passed on purpose, the soft limit lowered to 1024 afterwards):
+
+```
+1. with /proc:    the command holds above 2: nothing
+2. without /proc: the command holds above 2: [5000]
+```
+
+Case 2 is made with an empty folder over `/proc`; the node never starts a
+command that way. **Fix, if wanted:** `close_range(3, u32::MAX)` (Linux
+5.9), which needs no listing and no `/proc`; or the loop to the hard limit.
+
+### R-4. Note. Commands run on while the helpers fail
+
+`b_a_build`, after the rebuild left a text file at the path and after the
+binary was deleted:
+
+```
+3 (after the rebuild): AFTER-THE-REBUILD
+5 (after the deletion): AFTER-THE-DELETION
+  while commands ran on, the node logged 4 failed checkpoints, the first: git: Permission denied (os error 13); the last: git: No such file or directory (os error 2)
+```
+
+Before, the refusal stopped the shell at this point. Now the agent keeps
+changing files and no checkpoint is taken. The documents say the helpers go
+by the path; they do not say this consequence. **Fix:** start the helpers
+and the uncontained shell from the node's descriptor too
+(`Command::new("/proc/self/fd/<n>")`, as the guard is started): the node
+holds it already. That ends this note, the "helpers by path" residual in a
+build tree, and the version boundary below.
+
+## R.3 What I attacked and what held
+
+**1. Is the program always the guard's inode?** Read `open_view`: the
+grants' descriptors are opened first, the image's last, all held until
+bubblewrap has started; the node's arguments use no `--args`, `--file`,
+`--info-fd`, `--seccomp` or other option that takes a number; every word of
+the options that begins with `@rizzy` and is not a grant refuses the
+command; a path in the options is absolute, so none can be read as an
+option. Then observed, with a stand-in for bubblewrap that records what it
+is given and runs the real one (`run_rust_proofs.sh j_between`; two extra
+grants, so four descriptors come before the image's):
+
+```
+==== Full, Fd; the image is 2049:4065001 ====
+program word: /proc/self/fd/9 = 2049:4065001
+the guard (bubblewrap's parent) runs: 2049:4065001
+bubblewrap inherits: 0=chr 1=pipe 2=pipe 5=dir(O_PATH) 6=dir(O_PATH) 7=dir(O_PATH) 8=dir(O_PATH) 9=file(O_PATH)
+@rizzy words left in the options: []
+at the program's start the process holds: 0=7:4 1=16:32747069 2=16:32747070 9=2049:4065001
+the program word /proc/self/fd/9 names: 2049:4065001
+the descriptor closed first: "bwrap: execvp /proc/self/fd/9: No such file or directory\n\n[exit code: 1]"
+mode 000 between the guard's open and the exec: "bwrap: execvp /proc/self/fd/9: Permission denied\n\n[exit code: 1]"; the binary's mode now 0
+the mode restored: "RAN-AGAIN\n\n[exit code: 0]"
+==== Full, Path; the image is 2049:4065418 ====
+program word: /proc/self/fd/5 = 2049:4065418
+bubblewrap inherits: 0=chr 1=pipe 2=pipe 5=file(O_PATH)
+at the program's start the process holds: 0=7:4 1=16:32745018 2=16:32745019 5=2049:4065418
+```
+
+`(SharedProc, Fd)` and `(SharedProc, Path)` gave the same lines (numbers 9
+and 5): with the machine's `/proc` bound, `/proc/self` still names the
+process itself. bubblewrap closed the four grants' descriptors and left the
+image's; it inherits no socket (the node's channel stays in the guard). When
+the `execve` fails nothing is looked up by a path: bubblewrap ends with the
+error. `/proc` is mounted first and the grants after it; a grant could
+shadow it only if node.toml granted a folder under `/proc`, which is the
+owner's file, not a session's.
+
+**The node, the guard and `sandbox-exec` are one inode**
+(`k_the_node_its_guard`, a real `serve`):
+
+```
+the image the node was started from: 2049:4065001
+program word: /proc/self/fd/7 = 2049:4065001
+the guard (bubblewrap's parent) runs: 2049:4065001
+the node (the guard's parent) runs: 2049:4065001
+the file now at the node's path: 2049:4065604
+program word: /proc/self/fd/7 = 2049:4065001
+the guard (bubblewrap's parent) runs: 2049:4065001
+the node (the guard's parent) runs: 2049:4065001
+the command: "AFTER-THE-UPGRADE\n[exit code: 0]"
+```
+
+**2. `close_inherited`.** It is the first statement of `main` when
+`argv[1]` is `sandbox-exec`, before `Cli::parse`; the probes and the
+step-up path are the same `sandbox-exec` started by the same
+`Contain::command`. It lists, then closes, so a number above the listing's
+own is not missed. Nothing is passed to `sandbox-exec` by number on purpose
+(read; and the whole `harness` suite passes: 116 tests, among them `contain`
+18, `guard` 23, `mount_view` 15, `network_off` 17, `sandbox` 13,
+`snapshot_sandbox` 4, `sub_agent_sandbox` 7, `own_image` 5). What a command
+holds and can reach (`run_rust_proofs.sh a_what`; a probe that also walks
+every process in `/proc` for a way to the image: its `exe`, its
+descriptors, its root):
+
+```
+==== Full, Fd ====
+descriptors this command holds (python's own included): 0:null 1:pipe:[327122 2:pipe:[327122
+a path of the harness in the view: none
+other processes in /proc: 1; exe readable: 0; exe IS the image: 0; a descriptor IS the image: 0; root readable: 0
+no way to the image found
+on the host: the binary's mode before 755, after 755
+==== SharedProc, Path ====
+descriptors this command holds (python's own included): 0:null 1:pipe:[327261 2:pipe:[327261
+other processes in /proc: 554; exe readable: 1; exe IS the image: 0; a descriptor IS the image: 0; root readable: 0
+no way to the image found
+on the host: the binary's mode before 755, after 755
+```
+
+`(Full, Path)` and `(SharedProc, Fd)` the same. With the machine's `/proc`
+the command sees 554 processes, the node and the guards among them, and
+Landlock refuses every look at one outside the sandbox (the one readable
+`exe` is its own shell).
+
+**3. The race, and the binary replaced, deleted or mode 000.** By two real
+contained commands of two sessions (`REVIEW_T8F_ROUNDS=450
+run_rust_proofs.sh h_a_session`):
+
+```
+Path, replace at a random moment: 450 pairs: the command ran 450; the next command ran 450; THE SESSION'S FILE RAN AS sandbox-exec 0
+Fd, replace at a random moment: 150 pairs: the command ran 150; the next command ran 150; THE SESSION'S FILE RAN AS sandbox-exec 0
+Path, delete at a random moment: 150 pairs: the command ran 150; the next command ran 150; THE SESSION'S FILE RAN AS sandbox-exec 0
+```
+
+(The first design: 4 of 200 by path without the link, and every later
+command refused.) Mode 000: R-2. The content of the image still cannot be
+changed (`b_a_build` 1: `Text file busy` for append, truncate and `cp`
+over).
+
+**4. An image no path names.** A binary deleted outright: commands run
+(`b_a_build` 5). A binary of another owner, not mapped in bubblewrap's user
+namespace (`foreign_owner.sh`):
+
+```
+the binary: owner uid 100000 (this user is 1000), mode 755
+first command: "FIRST-RAN\npid=2\n[exit code: 0]"
+after the upgrade (the old file has no name left): "RAN-AFTER-THE-UPGRADE\n[exit code: 0]"
+```
+
+A second node and `doctor` (`d_a_second_node`):
+
+```
+B (another build) started on A's port: Error: binding 127.0.0.1:42079 /     Address already in use (os error 98)
+A, after B's failed start: "A-RAN-AFTER-B-FAILED\n[exit code: 0]"
+with B running: A: "A-RAN-WITH-B\n[exit code: 0]"; B: "B-RAN\n[exit code: 0]"
+node-image* in the data directory: []
+```
+
+The version boundary: none between the node, its guard and `sandbox-exec`
+(one inode, above; R-1 is the exception). There is one between the node and
+its helpers, which start `sandbox-exec` by the path: after an upgrade a
+helper is the NEW build given the OLD node's arguments. By reading
+(`Cmd::SandboxExec`, `Grant::parse_pairs`): an argument the new build does
+not know, or an expectation it cannot parse, ends it with status 2 before
+anything runs, so the helper fails closed; an argument whose meaning changed
+while its spelling did not would be taken in the new meaning. Nothing in
+this branch changes one. R-4's fix removes the boundary.
+
+**5. The documents.** T8F-5 is stated in README ("can change its mode
+(`chmod 000`), after which no contained command of any session starts and
+the node cannot be restarted until you restore the mode"), in PLAN T9 and
+in the start-up warning (`b_a_build` prints it). T8F-9 is stated in README,
+in bold, and in PLAN. The helpers by path are stated. Sentences that claim
+more than is true: README "never through the binary's path" and PLAN "No
+path of the binary is bound, resolved or executed for a contained command"
+(R-1); `guard.rs` "or another program, refuses the command" (R-5). Missing:
+R-4's consequence.
+
+## R.4 The proofs
+
+`review_t8f_proofs.rs` is rewritten and compiles against the new code. Each
+test's comment says whether it shows a finding or an attack that is held.
+
+- Kept, rewritten: `a_what_a_command_holds_and_can_reach` (held),
+  `b_a_build_tree_session_and_the_running_image` (held; T8F-5 open by
+  decision; R-2, R-4), `d_a_second_node_and_doctor` (held),
+  `h_a_session_against_the_binary_while_a_command_starts` (held; T8F-5).
+- New: `j_between_the_guards_open_and_the_exec` (held),
+  `k_the_node_its_guard_and_the_wrapper_are_one_inode` (held),
+  `l_a_binary_the_node_cannot_read` (R-1),
+  `f_a_binary_this_user_does_not_own` with `foreign_owner.sh` (held),
+  `close_inherited.py` (R-3).
+- Removed with the link: `c_a_link_replaced_after_the_guards_check`,
+  `e_what_a_start_finds_and_leaves`, `e9_two_starts_racing`,
+  `g_a_restart_leaves_its_temporary_link`, `i_a_command_runs_the_harness_itself`
+  (no harness is in the view now), `f_a_real_fallback`; the scripts
+  `real_fallbacks.sh` (both fallbacks are gone) and `inode_reuse.py`
+  (nothing compares a device and inode for the image now).
+
+Every node the proofs start runs in its fixture folder. An aside from
+`l_a_binary_the_node_cannot_read`, part of the helpers-by-path residual and
+not of this change: with a file at the binary's path that exits 0 and prints
+nothing, the node's `git rev-parse --git-common-dir` "answers" with an empty
+path, and `order_file` (`crates/node/src/git.rs`) joins `harness-checkpoints`
+onto it, so the node writes that file into its own working directory
+(`in the node's working directory afterwards: harness-checkpoints exists:
+true`). An empty answer should be an error there.
+
+```
+export CARGO_TARGET_DIR=…/target
+export TMPDIR=$CARGO_TARGET_DIR/review-t8f/tmp     # not /tmp
+D=crates/cli/tests/support/review_t8f
+REVIEW_T8F_ROUNDS=450 sh $D/run_rust_proofs.sh     # all: 8 passed … finished in 226.99s
+sh $D/foreign_owner.sh
+python3 $D/close_inherited.py $CARGO_TARGET_DIR/debug/rizzy-harness
+```
+
+## R.5 What I could not test, and why
+
+- A real bubblewrap below 0.10.0 (0.9.0 on Ubuntu 24.04, CI's) and a setuid
+  one: that they pass an unnamed descriptor to the program is the design's
+  one assumption about bubblewrap, shown here on 0.13.1 only.
+- AppArmor or SELinux: the image is executed through a descriptor of a
+  mount that is detached inside the namespace. A profile that judges an
+  `execve` by its path may refuse it. This machine has neither. If it is
+  refused the start's probe fails and the node says the shell is not
+  contained (reading), so it would be seen, not silent.
+- The machine's `/proc` form WITHOUT Landlock: the command would then read
+  `/proc/<node>/exe` and `/proc/<node>/root`. That is that form's own
+  weakness since T.8a, not this change's.
+- `open_image`'s second `current_exe()` comparison (microseconds at start):
+  as before, not proven.
+- Mutations of the product source: none made.
+
+## R.6 Verdict on the four statements
+
+(a) **`sandbox-exec` in a contained command is always the node's own
+image:** true wherever the node can open its own binary for reading, which
+is every ordinary install and every build tree; silently false for a binary
+it can execute but not read (R-1).
+
+(b) **A contained command holds no descriptor it did not open:** true, in
+both forms and both bind modes.
+
+(c) **A rebuild, upgrade or second start no longer stops a running node's
+commands:** true, also for a deleted binary, a binary on another file
+system and a binary of another owner. A changed mode still stops them
+(T8F-5, by decision), and the helpers started by path are not covered
+(R-4).
+
+(d) **The documents say what is left:** yes for T8F-5, T8F-9 and the
+helpers by path. Not said: R-1 and R-4. One code comment says more than the
+code does (R-5).

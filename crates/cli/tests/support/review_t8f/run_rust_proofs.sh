@@ -6,8 +6,7 @@
 #   run_rust_proofs.sh [test-name-filter]
 #
 # Needs bubblewrap and python3. One cargo command. Temp folders go to
-# $TMPDIR (set it to a folder on the build's file system: the proofs need
-# the binary's copy and the data directory on one file system).
+# $TMPDIR (set it outside /tmp; any file system).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 tests=$(cd "$here/../.." && pwd)
