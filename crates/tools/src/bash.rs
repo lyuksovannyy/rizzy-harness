@@ -23,13 +23,19 @@ pub const MAX_TIMEOUT_MAX_S: u64 = 3600;
 /// Grace period between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
-/// SIGKILLs a process group when dropped while still armed.
-pub(crate) struct KillGroupOnDrop(pub(crate) Option<i32>);
+/// SIGKILLs a process group when dropped while still armed; for a
+/// contained command (the second field) its whole namespace, init first
+/// (`contain::kill_namespace`, review T8A-2).
+pub(crate) struct KillGroupOnDrop(pub(crate) Option<i32>, pub(crate) bool);
 
 impl Drop for KillGroupOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0.take() {
-            signal_group(pgid, Signal::SIGKILL);
+            if self.1 {
+                crate::contain::kill_namespace(pgid);
+            } else {
+                signal_group(pgid, Signal::SIGKILL);
+            }
         }
     }
 }
@@ -174,7 +180,28 @@ impl Tool for Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        let mut child = match crate::sandbox::Confinement::spawn(cmd, contained).await {
+        // The spawn of a contained command waits on the spawner thread: that
+        // wait is raced against the cancel and the timeout (review N-2). A
+        // child the spawner starts after this stopped waiting is killed there.
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let spawned = tokio::select! {
+            r = crate::sandbox::Confinement::spawn(cmd, contained) => r,
+            _ = ctx.cancel.cancelled() => {
+                return ToolOutcome {
+                    ok: false,
+                    output: "[cancelled before the command started]".into(),
+                    ..Default::default()
+                };
+            }
+            _ = &mut deadline => {
+                return ToolOutcome::err(format!(
+                    "the command did not start within {}s",
+                    timeout.as_secs()
+                ));
+            }
+        };
+        let mut child = match spawned {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
         };
@@ -182,8 +209,8 @@ impl Tool for Bash {
         // If this call is dropped before it reaped the group itself (the
         // agent loop abandons a tool that outlives a cancel), the whole
         // group dies, not only the shell `kill_on_drop` covers. Contained,
-        // the group is bubblewrap alone, and its death ends the namespace.
-        let mut group = KillGroupOnDrop(pgid);
+        // the namespace dies, its init killed first.
+        let mut group = KillGroupOnDrop(pgid, contained);
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
         let out_task = tokio::spawn(pump(
@@ -214,8 +241,6 @@ impl Tool for Bash {
             }
         };
 
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
         let end = loop {
             tokio::select! {
                 Some((stream, s)) = rx.recv() => {
@@ -250,17 +275,13 @@ impl Tool for Bash {
                 // the namespace at once); the namespace's init ignores it.
                 // Without the init's number (no `children` file), bwrap
                 // gets SIGTERM, which kills the namespace without a grace.
-                match crate::contain::sandbox_init(pgid) {
-                    Some(init) => signal_group(init, Signal::SIGTERM),
-                    None => signal_group(pgid, Signal::SIGTERM),
-                }
+                crate::contain::term_namespace_with(pgid, crate::contain::sandbox_init);
                 if tokio::time::timeout(TERM_GRACE, child.wait())
                     .await
                     .is_err()
                 {
-                    // bwrap dies, its init dies with it (`--die-with-
-                    // parent`), and with the init the whole namespace.
-                    signal_group(pgid, Signal::SIGKILL);
+                    // The init first, then bubblewrap (review T8A-2).
+                    crate::contain::kill_namespace(pgid);
                 }
                 let _ = child.wait().await;
             }

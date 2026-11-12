@@ -707,3 +707,99 @@ async fn below_abi_9_a_service_outside_still_outlives_the_kill() {
     );
     drop(reaper);
 }
+
+// ---- T8A-2 (docs/security-review/2026-11-T8a-containment.md) ----
+
+/// The namespace init's host pid: bubblewrap's only child.
+fn init_of(bwrap: i32) -> Option<i32> {
+    std::fs::read_to_string(format!("/proc/{bwrap}/task/{bwrap}/children"))
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Whether `pid` leads its own session (the init after `--new-session`).
+fn leads_a_session(pid: i32) -> bool {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    let mut fields = stat.rsplit(')').next().unwrap_or("").split_whitespace();
+    fields.nth(3).and_then(|s| s.parse::<i32>().ok()) == Some(pid)
+}
+
+/// The review's proof inverted. Killing bubblewrap's group in the moment
+/// after the init's `setsid` and before it set its own death signal left
+/// the namespace running (first or second try on the review machine; 19 of
+/// 20 at that instant). The node's kill (`contain::kill_namespace`, used by
+/// the dropped call, the end of the grace and the spawner) now stops
+/// bubblewrap and kills the init it names first: no try leaves a survivor.
+/// Half the tries are at fixed delays after the spawn (0 to 1 ms), the
+/// review's other measurement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_just_after_the_inits_setsid_ends_the_namespace() {
+    const SECS: u32 = 975_120;
+    let tries: u32 = std::env::var("T8A_TRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let conf = Confinement::Confined {
+        sandbox: sb,
+        tmp: None,
+    };
+    let reaper = Reaper(vec![SECS]);
+    let mut survivors = Vec::new();
+    for attempt in 0..tries {
+        let (mut cmd, _) = conf
+            .shell(
+                "sleep".as_ref(),
+                &[SECS.to_string().as_ref()],
+                &f.ws,
+                None,
+                &Default::default(),
+                std::slice::from_ref(&f.data),
+                Grants {
+                    workspace_write: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = harness_tools::contain::spawn_for_test(cmd).await.unwrap();
+        let bwrap_pid = child.id().unwrap() as i32;
+        if attempt % 2 == 0 {
+            let by = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < by && !init_of(bwrap_pid).is_some_and(leads_a_session) {
+                std::hint::spin_loop();
+            }
+        } else {
+            let until = Instant::now() + Duration::from_micros(u64::from(attempt % 11) * 100);
+            while Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        }
+        harness_tools::contain::kill_namespace(bwrap_pid);
+        let _ = child.wait().await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let left = sleeps(SECS);
+        if !left.is_empty() {
+            survivors.push(attempt);
+            for pid in left {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+    drop(reaper);
+    assert!(
+        survivors.is_empty(),
+        "namespaces survived the node's kill at tries {survivors:?} of {tries}"
+    );
+}
