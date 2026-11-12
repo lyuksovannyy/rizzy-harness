@@ -691,8 +691,10 @@ impl Sandbox {
             // The file view (T.8c) holds exactly what Landlock grants below.
             Some((b, cwd)) => b.command(
                 &self.exe,
-                self.image,
-                self.bound_image(),
+                crate::contain::Image {
+                    fd: self.image,
+                    link: self.bound_image(),
+                },
                 cwd,
                 mark.as_ref(),
                 self.network == Network::Off && self.network_namespace(b),

@@ -111,6 +111,14 @@ pub const FD_TOKEN: &str = "@rizzy-fd:";
 /// which bubblewrap resolves in its own descriptor table).
 pub const IMAGE_TOKEN: &str = "@rizzy-image";
 
+/// The node's own image, for [`Contain::command`]: the descriptor the guard
+/// is started from, and the node's link to it (T.8f), where it made one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Image<'a> {
+    pub fd: Option<std::os::fd::RawFd>,
+    pub link: Option<&'a Path>,
+}
+
 /// How the grants that carry an identity get into the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binds {
@@ -254,7 +262,7 @@ impl Contain {
     /// `<exe> sandbox-guard --node <pid> [--mark …] -- bwrap <args> --
     /// <exe>`: the guard, which starts bubblewrap in `cwd` (T.8e).
     ///
-    /// The guard is started from `image`, a descriptor of the binary this
+    /// The guard is started from `image.fd`, a descriptor of the binary this
     /// process holds for its life, opened when the first sandbox was made
     /// (for the node, `/proc/self/exe`: its own running image), as
     /// `/proc/self/fd/<n>`, resolved by `execve` in the forked child before
@@ -263,7 +271,7 @@ impl Contain {
     /// T8E-5). Without it (it could not be opened), `exe`. Its `argv[0]` is
     /// `exe`, for `ps`. `sandbox-exec` inside the namespace is started from
     /// [`VIEW_EXE`], where the guard binds its own running image (T.8c):
-    /// through `image_link` where the node made one (T.8f, passed as the
+    /// through `image.link` where the node made one (T.8f, passed as the
     /// guard's `--image`; the guard binds it only while it is that image),
     /// else through the path the image's descriptor names.
     ///
@@ -274,22 +282,21 @@ impl Contain {
     pub(crate) fn command(
         &self,
         exe: &Path,
-        image: Option<std::os::fd::RawFd>,
-        image_link: Option<&Path>,
+        image: Image<'_>,
         cwd: &Path,
         mark: Option<&Mark>,
         net_off: bool,
         view: &[Mount],
     ) -> std::process::Command {
         use std::os::unix::process::CommandExt;
-        let mut c = match image {
+        let mut c = match image.fd {
             Some(fd) => std::process::Command::new(format!("/proc/self/fd/{fd}")),
             None => std::process::Command::new(exe),
         };
         c.arg0(exe).arg(crate::guard::SUBCOMMAND);
         c.arg(crate::guard::NODE)
             .arg(std::process::id().to_string());
-        if let Some(l) = image_link {
+        if let Some(l) = image.link {
             c.arg(crate::guard::IMAGE).arg(l);
         }
         if let Some(m) = mark {
