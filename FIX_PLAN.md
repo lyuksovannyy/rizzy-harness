@@ -7,6 +7,7 @@ every audit finding to a task here, so nothing is dropped.
 
 1. **Feature freeze.** No new feature merges until the gate of Phase 3 is
    passed. Every hour spent on features now widens what has to be fixed.
+   **Ended on 2026-11-12: Gate 3 passed.**
 2. **Delete before you fix.** Phase 1 removes code. Hardening something that
    is about to be deleted is wasted work, and removed code has no bugs.
 3. **A fix lands with the test that proves it.** The test is written first
@@ -104,6 +105,14 @@ a test in CI. Only after this gate may a second account get the agentic grant.
 closed with a test, or recorded in the threat model as accepted with a
 reason. Ask for one outside review of `crates/link`, the approval path and
 the sandbox before this gate is called passed. **The feature freeze ends here.**
+
+**Passed on 2026-11-12, by the owner.** The review is
+`docs/security-review/2026-11-gate3.md` with its six follow-ups (`-fixes.md` to
+`-fixes-6.md`); its final verdict was "fit to pass". It was done by an
+independent model, not an outside person, and the owner accepted that. What
+the review left open, and what the owner decided for each point, is in
+`ADOPTION_PLAN.md` under "After Gate 3". Phases 4 and 5 of this plan continue
+beside the features.
 
 ### Phase 4 — Foundations (one to two weeks)
 
