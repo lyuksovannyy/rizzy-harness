@@ -29,6 +29,8 @@ web/dist/
 
 # python
 __pycache__/
+# Playwright for the browser scripts (README.md, Development)
+.venv/
 
 # Docker templates: local secrets and data
 docker/*/.env

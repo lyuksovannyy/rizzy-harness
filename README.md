@@ -1190,10 +1190,42 @@ Web bundle budget (also in CI):
 cd web && pnpm build && pnpm size
 ```
 
-End-to-end UI flows against the real binary (needs Playwright + Chromium):
+End-to-end UI flows against the real binary: the scripts in `web/e2e/` drive
+Chromium through Playwright. They are Node scripts; the Python package of
+Playwright carries the same Node driver, so `uv` sets everything up in
+`.venv` without a global Node package. Once, from the repository root:
 
 ```bash
-node web/e2e/phase3.cjs target/debug/rizzy-harness
+uv venv .venv
+uv pip install --python .venv/bin/python playwright
+PLAYWRIGHT_BROWSERS_PATH=$PWD/.venv/ms-playwright .venv/bin/playwright install chromium
+mkdir -p .venv/node_modules
+ln -s "$(echo $PWD/.venv/lib/python*/site-packages/playwright/driver/package)" .venv/node_modules/playwright
+```
+
+Then build the binary (`cargo build -p harness`) and run every script, or the
+ones named, one at a time (they use fixed ports):
+
+```bash
+web/e2e/run.sh
+web/e2e/run.sh phase3 login-key
+```
+
+`run.sh` takes the binary from `BIN` and the setup from `E2E_VENV` (defaults
+`target/debug/rizzy-harness` and `.venv`). To run one script by hand, set the
+two variables it sets:
+
+```bash
+NODE_PATH=$PWD/.venv/node_modules PLAYWRIGHT_BROWSERS_PATH=$PWD/.venv/ms-playwright node web/e2e/phase3.cjs target/debug/rizzy-harness
+```
+
+The commands below assume those two variables are exported.
+
+The login key in the browser (cookie without the key, another port of the
+host, the socket's first message, log out):
+
+```bash
+node web/e2e/login-key.cjs target/debug/rizzy-harness
 ```
 
 ```bash
