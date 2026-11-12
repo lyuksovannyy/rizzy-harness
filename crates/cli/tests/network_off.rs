@@ -738,7 +738,19 @@ async fn an_extra_interface_in_a_new_namespace_still_counts_as_one() {
     );
     for mode in [ContainMode::Auto, ContainMode::Required] {
         let s = start_node(&f, Network::Off, mode, &fake, Duration::from_secs(60));
-        assert!(s.refusal.is_none(), "{mode:?}: {:?}", s.refusal);
+        if let Some(why) = &s.refusal {
+            // Below Landlock ABI 9 (CI's kernel) `required` refuses for
+            // T.8a's reason, the Unix-socket gap. That is not this test's
+            // subject; a refusal about the network namespace is.
+            assert!(
+                mode == ContainMode::Required
+                    && why.contains("Landlock ABI")
+                    && !why.contains("network namespace")
+                    && !why.contains("--unshare-net"),
+                "{mode:?}: {why}"
+            );
+            continue;
+        }
         assert!(
             s.contain_summary.contains("a network namespace of its own")
                 && !s.contain_summary.contains("network off WITH A GAP"),
