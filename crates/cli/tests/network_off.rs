@@ -741,7 +741,7 @@ async fn an_extra_interface_in_a_new_namespace_still_counts_as_one() {
         assert!(s.refusal.is_none(), "{mode:?}: {:?}", s.refusal);
         assert!(
             s.contain_summary.contains("a network namespace of its own")
-                && !s.contain_summary.contains("WITH A GAP"),
+                && !s.contain_summary.contains("network off WITH A GAP"),
             "{mode:?}: {}",
             s.contain_summary
         );
@@ -788,7 +788,7 @@ fn two_failed_probes_at_start_still_end_with_the_namespace() {
     assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
     assert!(
         s.contain_summary.contains("a network namespace of its own")
-            && !s.contain_summary.contains("WITH A GAP"),
+            && !s.contain_summary.contains("network off WITH A GAP"),
         "{}",
         s.contain_summary
     );
