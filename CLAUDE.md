@@ -64,10 +64,12 @@ yourself first.
 Read [`AUDIT.md`](AUDIT.md) and [`FIX_PLAN.md`](FIX_PLAN.md) before proposing
 work.
 
-- **There is a feature freeze** until Gate 3 of the fix plan. If asked for a
-  feature before then, say what it costs against the plan and ask whether to
-  break the freeze.
-- Work the fix plan in order. Each task lists what "done" means.
+- **The feature freeze ended on 2026-11-12:** Gate 3 of the fix plan is passed.
+  Features follow the order in [`ADOPTION_PLAN.md`](ADOPTION_PLAN.md) ("After
+  Gate 3" first). If asked for a feature outside that order, say what it costs
+  against the plan before starting.
+- The rest of the fix plan (Phases 4 and 5) is worked in order. Each task lists
+  what "done" means.
 - When a finding is fixed, update the threat model in the same change.
 
 ## What this is

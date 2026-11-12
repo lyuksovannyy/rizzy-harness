@@ -4,7 +4,9 @@
 workspaces, see C.12). **Progress, 2026-11-11:** Phase A tasks A.1 to A.14 are written and merged
 (A.1 to A.5, A.8 to A.10, A.12, A.13 into `integration/gate3`; A.6, A.7, A.14 into pull request
 7; A.11 into pull request 6). A.15 and the new A.16 are open. Experiments B.1, B.2 and B.5 have
-run. Phases C, T, N, X and W have not started.
+run. Phases C, T, N, X and W have not started. **2026-11-12: fix plan Gate 3 is passed (the
+owner); the feature freeze is over.** Phases A and R are merged, with experiments B.1, B.2, B.3
+and B.5 and notes C.12, C.13 and C.14. What comes first is under "After Gate 3" in §4.
 
 Brings what the two-round harness study found into our own code. Inputs, by authority:
 `research/round2/final-review-ours.md` (what is true about our code; it wins every
@@ -166,6 +168,7 @@ is merged `#[ignore]` with the observed result and the decision it feeds.
 | B.8 | Test D19: compact a session whose results hold a known key and an unknown secret-like string | Known key in the summary: a bug in A.7's path. The unknown one: a residual in the threat model. | **S** |
 | B.9 | Not settled: where instruction files enter the prompt and whether they survive compaction | Lost after compaction: re-injection joins X.2. | **S** |
 | B.10 | Missed 8: fsyncs and bytes per turn on node and mirror for a long streamed answer | Numbers for fix plan 4.8's ADR. This plan changes nothing about deltas. | **S** |
+| B.11 | Containers in place of the Landlock sandbox for agent shells (the owner, 2026-11-12: a separate branch with quick Podman tests first). Rootless Podman against bubblewrap against today's `sandbox-exec`, same tests: time to start and per `exec`; whether a `setsid` child dies with the container or namespace, on cancel and on `kill -9` of the node; no network with `--network=none` (UDP and DNS included); what a session can see of another's folder; memory per idle session; what it needs from the machine (`subuid`, a user runtime directory, user namespaces); what happens inside the published image, where rootless Podman cannot nest. | Decides: Podman alone, bubblewrap alone, or Podman for environments with bubblewrap for plain sessions; and what a node without either does (refuse the shell, never run unconfined). The node's own helpers (shadow git, the PDF parser) keep Landlock either way: a container per checkpoint costs too much. Feeds T.8 and N.4. | **M** |
 
 Dropped as experiments (reasons in §9): D5, D8, D9 (they are A.3's, A.1's and A.6's failing
 tests), D10, D11, D18 (covered on PR 4), D12 (rerun in X.3), D16 (settled by reading), D6,
@@ -216,10 +219,10 @@ should do T.1 to T.4 before N.1: they are small and fix gaps users meet today.
 | T.2 **sec** | `edit` staleness guard (C.9) | `edit` without a read refused; stale with a changed span refused with a diff; identical span applied; `write` over an unread file refused; restart rebuilds; batch against the original; tier reported. | One writer; light process | No / No | A.8, C.9, PR 7 | **M** |
 | T.3 **sec** | Web and memory tools on agentic nodes | Off unless `node.toml` enables them. Memory approval in the write path, failing closed; staged writes carry a base version; shared memory outside the shell's writable set; threads with external content not auto-extracted; URL provenance and the public-address resolver kept. Tests: a URL only in an error is refused on the node; a private address refused; an unapproved memory write refused; a node with web off refuses by name. Undoes A.11. `07` §6.2. | Master runs no tools: the stress test settles where a node's memory write is stored | No / No | A.11 | **L** |
 | T.4 **sec** | Unattended authorisation (C.7) | C.7's tests. | Node decides | No / Yes | C.7, A.1, A.5 | **L** |
-| T.5 **sec** | Per-user API tokens (O5) | Hashed, scoped, revocable; the single token removed. A's token cannot read B's chat; a revoked token is 401 at once; no token in a log line. | Private chats, restored | No / Yes | fix plan 4.1 | **M** |
+| T.5 **sec** | API keys per user and per workspace (O5; the owner, 2026-11-12) | The single static token is removed. A user's key acts as that user. A workspace key is its own identity inside one workspace: it owns the chats and routines it creates and reads nobody's private chats; creating one needs a permission of its own, which the workspace role "admin" does not imply by default. Keys are shown once, stored as a hash, scoped, revocable, with an expiry and a last-used time. Tests first: A's key cannot read B's chat; a workspace key cannot read any user's chat and reaches no other workspace; a member without the permission cannot create one; a revoked or expired key is 401 at once; no key in a log line, an event or a URL. | Private chats, restored | No / Yes | fix plan 4.1 | **M to L** |
 | T.6 **sec** | seccomp (C.10, if O4) | With network off, UDP `sendto` and a DNS lookup fail `EPERM`; `io_uring_setup` fails; a cargo build in the cwd works; unknown architecture refused under `required`. | No `unsafe` in our crates | No / No | C.10, outside review | **M** |
 | T.7 **sec** | Read-only shell for read-only agents (C.10) | A Landlock profile with only a per-call temp directory writable, chosen by the node for agents without a write tool; gives Scout and Reviewer `bash` for `grep` and `git log`. `touch x` fails; `git log` works; a spec asking a writable shell for Scout is refused by the node. | Node decides | No / No | C.10 | **M** |
-| T.8 **sec** | Process containment (C.11, if B.1 leaked) | C.11's tests in CI. | Light process | No / No | B.1, C.11 | **M** |
+| T.8 **sec** | Background commands, and nothing left running (C.11; B.1 leaked; the owner, 2026-11-12) | `bash` may start a command in the background: the node tracks it, records its end as an event and starts a turn that tells the agent ("call the agent back when done"). Every command states a timeout, 60 s when none is given, never above the node's `bash_timeout_max_s`. Bounds from `node.toml`: how many run at once per session, how many callbacks a session may take without a person's message, output kept per command. **The callback does not close the residual alone:** a command can detach itself (`setsid`), so the kill needs containment, chosen by B.11 (a container or a PID namespace). Tests first: a `setsid` child is gone 2 s after cancel, after the timeout and after the session ends; none survives `kill -9` of the node; a callback arrives once, in the owning session, and counts against the step limit; an agent cannot raise its own bounds; a callback into a deleted chat starts nothing. | Light process; one writer (the session actor appends the end event); node decides | B.11's choice / No | B.1, B.11, C.11 | **L** |
 | T.9 | Soft limit of 100 changed files per turn: warn at the end of the turn and on its undo; never block | One named constant (100); the count is `changed(before, after)` (nested repositories and ignored files not counted; a sub-agent's changes count toward the turn that applied them); the warning is the existing chat note and the undo plan's count, no new event. Tests: 100 files warn nobody; 101 warn at the end of the turn and on its undo, and both complete normally; nested repositories are not counted. `docs/undo-and-stash.md` §2.6. | One writer | No / No | C.13 | **S** |
 
 **Gate T:** each task's abuse tests in CI and the threat model updated with it.
@@ -276,10 +279,13 @@ the threat model. W.1 and W.2 are on the critical path.
 | ID | Covers | Change | Done when, and size |
 |---|---|---|---|
 | W.1 | Web checks not runnable here | Node 22 (CI's version) and pnpm 12.17.0 through `corepack`, plus Playwright's browsers; steps in the README's development section. Owner action. Fallback: a manually triggered CI job running one named e2e script against the built binary. | The four `pnpm` checks pass locally on `integration/gate3`, and `node web/e2e/onboard.cjs target/debug/rizzy-harness` runs. **S** |
+| W.1 (done) | Browser tests runnable here (the owner, 2026-11-12: through `uv`, in the project) | Node 22 and pnpm were installed on 2026-11-12. Playwright: `uv venv .venv`, `uv pip install --python .venv/bin/python playwright`, `PLAYWRIGHT_BROWSERS_PATH=$PWD/.venv/ms-playwright .venv/bin/playwright install chromium`. The scripts are Node, and the Python package carries the same Node driver, so `.venv/node_modules/playwright` is a link to `.venv/lib/python*/site-packages/playwright/driver/package`; run a script with `NODE_PATH=$PWD/.venv/node_modules PLAYWRIGHT_BROWSERS_PATH=$PWD/.venv/ms-playwright node web/e2e/<name>.cjs target/debug/rizzy-harness`. Nothing is added to `web/package.json`. | Chromium 158 starts and the scripts run. Still to do: these steps in the README's development section (with W.7). |
 | W.2 **sec** | Fix plan 3.10 (L14) | Drafts cleared on logout and chat delete, never stored for incognito; `#` links only to footnote ids; temporary passwords generated by the server and shown once (Rust endpoint and test first). | 3.10's tests; `pnpm size` passes. **S** |
 | W.3 | PR 4 follow-ups | The "for this turn" button, labelled as A.2 makes it ("this exact command, for this turn"), offered after the first approval; no reconnect after close code 4401; request id on errors; messages for the new 403, 422, 429 and 503. | Component tests each; the approval e2e flow passes. **M** |
 | W.4 | PR 6 follow-ups | Picker grouped by category; aliases in mentions; the "User facts" label; a default picker per mode; the new error texts. | Component tests each. **M** |
 | W.5 | PR 7 follow-up (only if O2 is yes) | "Retrying in N s" from the new event. | A fixture-event test. **S** |
+| W.6 **sec** | The approval takes the composer's place (the owner, 2026-11-12) | While a call waits for approval in the open chat, the composer's text field is replaced by the choice (the three buttons of R.6, with the card above them); the field comes back when the call is answered. A browser notification is sent when the tab is hidden, after permission asked on a click, with fixed words and the chat's place in the list, never the command, a path or a title. No button has focus when the choice appears, and keys are ignored for a short moment after it does, so a line being typed cannot answer it. A draft being typed is kept. | Component tests, written first: Enter and Space typed as the choice appears approve nothing; the draft survives; the notification carries no call text; a second pending call is shown after the first is answered; a hidden character in the call is still marked (R.6's tests stay). A browser script for the whole flow. `pnpm size` passes; the choice loads with the conversation chunk. **M** |
+| W.7 | The browser scripts pass again | The first run in a real browser (2026-11-12, `main` at `4961065`, Chromium 158): 4 of 15 pass (`attention`, `backdrop`, `phase7`, `savings`); `artifacts`, `container`, `media`, `phase3` to `phase6`, `phase8`, `phase9`, `rich` and `routines` fail, most on a selector that never appears, `phase4` on "focus is in the search input", `rich` on "the footnote keeps its id". Each failure is either a script that fell behind the UI (fixed in the script) or a fault in the product (fixed with a test, or listed for the owner). The login key and the cookie's reach to other ports (R.2) get a script of their own: they have never run in a browser. | Every script passes three times in a row, or its failure is a named, filed fault. The README says how to run them. **M** |
 
 The design note's UI (Nodes page and pair dialog, per-workspace providers and aliases,
 onboarding, key list on removal, environments, archived view and fork, Connections, the
@@ -303,7 +309,28 @@ tests, and the fixes are read again by an independent reviewer before the gate i
 | R.4 | P-4, P-5, P-6, L-7, S-5, the Notes | The remaining Low and Note findings: fixed where small, otherwise recorded in the threat table with the reason. | Each has a test or a threat-table row. **Done (branch `fix/R.4-remaining-findings`):** fixed, each with a test that failed first: R1d-1, R2-1, R2-2, R2-3, L-7, S-5, P-6, N-3, N-4, N-5 (and R3-1, closed by the P-6 claim path), plus the routines retry race behind a flaky CI run; recorded in `PLAN.md` with the reason: P-4 (T11), P-5 (T20), N-1 tree-sitter (T23), N-2 (T4, README), N-6 (T22, a condition on T.3), R3-2 (T10), W-4 and the card notes (T4), the notes of fix reviews 2 to 5 (T2, T4, T5, T32), the residuals of pull requests 35, 36, 38 and 40 (T2, T4, T7, T32); S-6's gap was already in T33. |
 | R.5 | The whole of Phase R | **The fixes are read again** by an independent reviewer, as the review asks, together with the part it did not check: how the web UI renders node-controlled and model-controlled strings. | A second report with no finding above Low. The reviewer's closing verdict on all three areas is in `docs/security-review/2026-11-gate3-fixes-5.md` (section 6). |
 
-**Gate R:** R.1 to R.5 done. Only then can fix plan Gate 3 be called.
+**Gate R:** R.1 to R.5 done. Only then can fix plan Gate 3 be called. **Done; Gate 3 was called
+passed by the owner on 2026-11-12.**
+
+### After Gate 3: what the review left open, and the owner's directions (2026-11-12)
+
+The owner passed the gate and, for five of the points the review left open, said how each is to
+be closed. These come first, in the order below the table.
+
+| Left open | The owner's direction | Task |
+|---|---|---|
+| Nothing was run in a real browser | Playwright through `uv`, inside the project | **W.1, done 2026-11-12** (see its row). The first full run of `web/e2e/*.cjs` on `main` failed in 11 of 15 scripts: **W.7** |
+| The approval card shows what runs but cannot make anyone read it | As Claude Desktop does: the composer's text field is replaced by the choice to allow or deny, and the browser sends a notification | **W.6** |
+| The static API token acts as every user | No static token. API keys per user and per workspace; creating a workspace key needs its own permission | **T.5**, extended |
+| The sandbox exists only where the kernel has Landlock | Replace it with Podman: first a separate branch with quick Podman tests, then the implementation | **B.11**, then a decision, then N.4 (pulled forward) |
+| Processes an agent leaves running outlive their command | Background commands that call the agent back when they end; every command states a timeout (60 s when none is given) | **T.8**, rewritten |
+
+Not reopened, so they stay as recorded: the workspace `agentic` role is not a boundary until
+the nodes design is built (N.1 to N.4); the tree-sitter parsers run in the process that holds
+the keys; the review was done by an independent model.
+
+**Order:** W.7 (a browser run that passes is the test bed for W.6), W.6, T.5 after fix plan 4.1,
+B.11, then T.8 on what B.11 decides. T.1 and A.19 fit in between; they touch other files.
 
 ## 5. Order and dependencies
 
