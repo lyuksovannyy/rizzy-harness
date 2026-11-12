@@ -136,4 +136,4 @@ async function skipOnboarding(page) {
     process.kill(-srv.pid, 'SIGKILL');
     searx.close();
   }
-})().catch((e) => { console.error('FAILED:', e.message.split('\n')[0]); process.exit(1); });
+})().catch((e) => { console.error('FAILED:', e.message.split('\n').slice(0, 3).join(' | ')); process.exit(1); });

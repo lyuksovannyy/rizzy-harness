@@ -178,7 +178,7 @@ let srv = null;
   await b.close();
   process.kill(-srv.pid, 'SIGKILL');
 })().catch(e => {
-  console.error('FAILED:', e.message.split('\n')[0]);
-  if (srv) process.kill(-srv.pid, 'SIGKILL');
+  console.error('FAILED:', e.message.split('\n').slice(0, 3).join(' | '));
+  try { if (srv) process.kill(-srv.pid, 'SIGKILL'); } catch { /* already gone */ }
   process.exit(1);
 });
