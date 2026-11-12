@@ -38,6 +38,12 @@ describe("Progress", () => {
     expect(text(h)).toContain("Stopped · turn cancelled");
   });
 
+  test("a turn the node's stop ended says so (A.19)", () => {
+    const h = html(job, { mode: "full", ended: true, reason: "stopped" });
+    expect(h).toContain('class="ui-progress ui-progress-stopped"');
+    expect(text(h)).toContain("Stopped · node stopped");
+  });
+
   test("a block marked done or failed leaves a forgotten active step still, even while the turn runs", () => {
     for (const status of ["done", "failed"] as const) {
       const h = html({ ...job, status });

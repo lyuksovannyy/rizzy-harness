@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 mod lock;
 mod net;
+mod stop;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
@@ -456,8 +457,39 @@ async fn serve(
             dir.join("claim-code").display()
         );
     }
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+    // A stop (A.19): while HTTP still serves, so the UI shows the turns
+    // closing, routines start nothing, both local runtimes refuse new work
+    // and close their turns; then HTTP gets its grace and ends. Remote
+    // nodes keep their turns and reconnect when the server is back.
+    let mut signals = stop::Signals::install().context("catching stop signals")?;
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+    {
+        let (master, chat) = (master.clone(), chat.clone());
+        let local = node.as_ref().map(|(n, _)| n.clone());
+        tokio::spawn(async move {
+            let name = signals.first().await;
+            stop::announce(name, "the server");
+            signals.force_on_second();
+            master.begin_stop();
+            let (mut left, more) = tokio::join!(chat.stop(stop::STOP_WAIT), async {
+                match &local {
+                    Some(n) => n.stop(stop::STOP_WAIT).await,
+                    None => Vec::new(),
+                }
+            });
+            left.extend(more);
+            tokio::join!(chat.flush(stop::FLUSH_WAIT), async {
+                if let Some(n) = &local {
+                    n.flush(stop::FLUSH_WAIT).await;
+                }
+            });
+            let _ = stopped_tx.send(left.into_iter().map(|s| s.to_string()).collect());
+        });
+    }
+    let (left_tx, left_rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+    let shutdown = async move {
+        let left = stopped_rx.await.unwrap_or_default();
+        let _ = left_tx.send(left);
     };
     let limits = harness_master::serve::ServeConfig::default();
     if tls {
@@ -493,7 +525,23 @@ async fn serve(
         harness_master::serve::serve(listener, harness_master::router(master), limits, shutdown)
             .await?;
     }
-    Ok(())
+    stopped(left_rx.await.unwrap_or_default())
+}
+
+/// The end of a stop: 0 when every turn closed, else 1 naming the sessions
+/// the next start closes as `interrupted`.
+fn stopped(left: Vec<String>) -> anyhow::Result<()> {
+    if left.is_empty() {
+        tracing::info!("stopped: every turn is closed");
+        return Ok(());
+    }
+    bail!(
+        "stopped after {} s with {} turn(s) still running (sessions {}): the next start \
+         closes them as interrupted",
+        stop::STOP_WAIT.as_secs(),
+        left.len(),
+        left.join(", ")
+    )
 }
 
 /// The model a node uses when the master sends none (the master resolves
@@ -754,31 +802,49 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
         true,
     )
     .await?;
+    let mut signals = stop::Signals::install().context("catching stop signals")?;
     let stop = tokio_util::sync::CancellationToken::new();
-    let s2 = stop.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        s2.cancel();
-    });
     println!("node `{}` connecting to {}", remote.node_id, remote.url);
-    harness_link::client::run(
+    let attach = node.clone();
+    let mut link = tokio::spawn(harness_link::client::run(
         harness_link::client::Remote {
             url: remote.url,
             fingerprint: remote.fingerprint,
             node_id: remote.node_id,
         },
         key,
-        stop,
-        || {
-            let node = node.clone();
+        stop.clone(),
+        move || {
+            let node = attach.clone();
             async move {
                 let l = node.attach().await;
                 (l.to_node, l.from_node)
             }
         },
-    )
-    .await?;
-    Ok(())
+    ));
+    tokio::select! {
+        name = signals.first() => {
+            // The link stays up while the turns close, so the master sees
+            // them end (and the refusals of new work); a master that is
+            // away gets them replayed at the next hello.
+            stop::announce(name, "the node");
+            signals.force_on_second();
+            let left = node.stop(stop::STOP_WAIT).await;
+            node.flush(stop::FLUSH_WAIT).await;
+            // The last message taken from the queue may still be on its way
+            // out: a moment before the link closes (a lost one replays).
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            stop.cancel();
+            let _ = link.await;
+            stopped(left.into_iter().map(|s| s.to_string()).collect())
+        }
+        // The link ends by itself only on a refusal (a revoked or unknown
+        // key, another protocol version): exit with the master's reason.
+        r = &mut link => {
+            r.context("the link to the master")??;
+            Ok(())
+        }
+    }
 }
 
 /// `<data>/api-token`: the scripts' bearer token.

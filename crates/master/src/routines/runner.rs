@@ -134,7 +134,9 @@ pub(super) async fn tick(h: &RoutinesHandle, m: &Master) {
     let mut ready = h.ready.clone();
     let _ = ready.wait_for(|r| *r).await;
     let cfg = config(m);
-    if !cfg.enabled {
+    // A server that is stopping starts no run: what is due stays due and
+    // fires at the next start (on time or by its catch-up rule).
+    if !cfg.enabled || m.is_stopping() {
         return;
     }
     let now = h.clock.now();
@@ -726,7 +728,7 @@ async fn launch_failed(m: &Master, a: &Admitted, run: &RunRow, e: CommandError) 
     let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
     let r = &a.routine;
     match e {
-        CommandError::NodeOffline(_) | CommandError::Timeout => {
+        CommandError::NodeOffline(_) | CommandError::NodeStopping | CommandError::Timeout => {
             retry_later(m, run, r, e.to_string(), a.event.clone()).await
         }
         CommandError::UnknownAgent(_)
@@ -1188,6 +1190,10 @@ async fn finalize(m: &Master, b: &Bound, end: &Value) {
         Some("completed") => ("completed", None),
         Some("cancelled") => ("cancelled", Some("the turn was cancelled".to_string())),
         Some("interrupted") => ("interrupted", Some("the turn was interrupted".to_string())),
+        Some("stopped") => (
+            "interrupted",
+            Some("the node was stopped while the turn ran".to_string()),
+        ),
         _ => ("error", Some("the turn ended with an error".to_string())),
     };
     end_run(m, &b.run_id, &b.routine_id, &b.owner, status, reason).await;

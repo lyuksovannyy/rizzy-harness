@@ -34,7 +34,9 @@ ENV HARNESS_DATA_DIR=/data \
     HARNESS_NO_LOCAL_NODE=1
 VOLUME /data
 EXPOSE 7777
-# serve shuts down cleanly on SIGINT; PID 1 would ignore SIGTERM.
+# serve stops cleanly on SIGTERM and SIGINT alike (A.19): chat turns are
+# closed, then HTTP ends; give it time (`docker stop -t 90`, compose
+# `stop_grace_period: 90s`): Docker's default 10 s can cut a turn's close.
 STOPSIGNAL SIGINT
 ENTRYPOINT ["rizzy-harness"]
 CMD ["serve", "--bind", "0.0.0.0:7777"]

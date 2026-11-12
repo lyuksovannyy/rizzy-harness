@@ -486,6 +486,12 @@ impl Session {
             savings: extra.savings.clone(),
             publishes: Arc::default(),
         })?;
+        // Claimed after a stop began: refused here, since the stop's
+        // cancel may have passed this session already (A.19).
+        if self.node.is_stopping() {
+            self.release(&turn_id);
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
         if self.unclosed.load(Ordering::SeqCst) {
             let message = "The session log could not be written, so this turn was stopped.";
             if let Err(e) = self.close_open_turn(message, TurnEndReason::Error).await {
@@ -692,8 +698,13 @@ impl Session {
             self.checkpoint_after(&turn_id, &root, &before).await;
             collect = Some(root);
         }
+        // A cancel during a stop of the node is the stop's (A.19).
         let reason = if cancel.is_cancelled() && reason != TurnEndReason::Error {
-            TurnEndReason::Cancelled
+            if self.node.is_stopping() {
+                TurnEndReason::Stopped
+            } else {
+                TurnEndReason::Cancelled
+            }
         } else {
             reason
         };
@@ -1658,6 +1669,10 @@ impl Session {
                 .retain(|a| *a != approval_id);
         }
         written
+    }
+
+    pub(crate) fn id(&self) -> SessionId {
+        self.id
     }
 
     pub(crate) fn is_running(&self) -> bool {

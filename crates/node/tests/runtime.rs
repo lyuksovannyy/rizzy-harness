@@ -3309,3 +3309,74 @@ async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
     assert_eq!(tree(&h.ws), before, "the nested writer changed the folder");
     assert!(!h.ws.join("nested.txt").exists());
 }
+
+fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
+    MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: req_id.into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    }
+}
+
+/// A.19: a stop denies a pending approval, ends the turn `stopped` (not
+/// `cancelled`, not left for the next start), and from then on refuses a
+/// prompt and a new session with `NODE_STOPPING`, while a cancel is still
+/// answered.
+#[tokio::test]
+async fn a_stop_closes_the_running_turn_and_refuses_new_work() {
+    let mut h = Harness::new(default_policy).await;
+    let sid = h.create().await;
+    let idle = h.create().await;
+    h.send(prompt_msg("p", sid, "run: sleep 100"));
+    h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
+        .await;
+    let left = h.node.stop(Duration::from_secs(20)).await;
+    assert!(left.is_empty(), "turns left running: {left:?}");
+    let EventKind::TurnEnded(end) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
+        unreachable!()
+    };
+    assert_eq!(end.reason, TurnEndReason::Stopped);
+    let v = SessionView::fold(&h.node.store().events_after(sid, 0, 1000).unwrap()).unwrap();
+    assert!(v.running_turn.is_none() && v.pending_approvals.is_empty());
+
+    h.send(prompt_msg("p2", idle, "hello"));
+    h.send(MasterToNode::Create {
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: "c2".into(),
+        session_id: SessionId::new(),
+        title: "t".into(),
+        cwd: h.ws.display().to_string(),
+        model: None,
+        approval_mode: None,
+    });
+    h.send(MasterToNode::Cancel {
+        req_id: "x".into(),
+        session_id: idle,
+    });
+    let mut acks = std::collections::HashMap::new();
+    while acks.len() < 3 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .expect("no ack")
+            .unwrap();
+        if let NodeToMaster::Ack { req_id, ok, error } = msg {
+            acks.insert(req_id, (ok, error));
+        }
+    }
+    let stopping = (false, Some(harness_protocol::NODE_STOPPING.to_string()));
+    assert_eq!(acks["p2"], stopping);
+    assert_eq!(acks["c2"], stopping);
+    assert_eq!(acks["x"], (true, None));
+    // Nothing was started on the idle session.
+    let idle_log = h.node.store().events_after(idle, 0, 1000).unwrap();
+    assert_eq!(idle_log.len(), 1, "{idle_log:?}");
+}

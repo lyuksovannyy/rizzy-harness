@@ -19,6 +19,15 @@ pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 /// frame limit.
 pub const MAX_CHUNK: u32 = 256 * 1024;
 
+/// The `ack.error` of a node that is stopping (SIGTERM or SIGINT, A.19) for
+/// a command that would start new work: a session, a turn, a restore, a
+/// staged file. Exactly this text, so the master can tell it from a refusal
+/// of the command itself: it is answered as a node that is away (503, a
+/// routine retries), not as a bad request. A node that sends it falsely
+/// gains nothing it could not get by not answering.
+pub const NODE_STOPPING: &str = "this node is stopping (its owner or its service manager stopped \
+                                 it): send this again once it is back";
+
 /// The node capability that announces the `artifact.*` messages. The master
 /// sends them only to nodes whose hello listed it (an unknown message drops
 /// the link).

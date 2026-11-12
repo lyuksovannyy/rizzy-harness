@@ -513,7 +513,11 @@ pub enum TurnEndReason {
     Completed,
     Cancelled,
     Error,
+    /// The process died while the turn ran; closed at the next start.
     Interrupted,
+    /// The node was stopped (SIGTERM or SIGINT, A.19): the turn was
+    /// cancelled through the normal cancel path and closed before exit.
+    Stopped,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

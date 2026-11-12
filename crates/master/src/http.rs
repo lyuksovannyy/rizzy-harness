@@ -244,7 +244,9 @@ impl From<CommandError> for ApiError {
     fn from(e: CommandError) -> Self {
         let code = match &e {
             CommandError::UnknownSession => StatusCode::NOT_FOUND,
-            CommandError::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
+            CommandError::NodeOffline(_) | CommandError::NodeStopping => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             CommandError::Rejected(_)
             | CommandError::AgentGone(_)
