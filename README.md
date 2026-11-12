@@ -1227,8 +1227,8 @@ or the WireGuard address). Notes:
   port needs `HARNESS_ALLOWED_HOSTS=127.0.0.1:8080` (the Host header check).
 - For remote nodes add `--node-listen <host VPN address>:7443` to the command.
 - `docker stop` waits 10 s by default; a server closing its chat turns
-  may need up to 60 s and then HTTP's 30 s grace, so give it
-  `docker stop -t 100` or compose `stop_grace_period: 100s`
+  may need up to 80 s and then HTTP's 30 s grace, so give it
+  `docker stop -t 150` or compose `stop_grace_period: 150s`
   ([Stopping a node or the server](#stopping-a-node-or-the-server)).
 - The image's binary is built on Debian 13: copied to a node, it runs on Debian 13
   and Ubuntu 26.04, not on older glibc.
@@ -1266,12 +1266,16 @@ naming the chat and the node, and refuses new messages to it ("diverged").
 Delete the chat to clear it; the node's copy goes with it.
 
 A node and its server must speak the same link protocol. A node that does
-not is refused when it connects, with both versions and which side to
-upgrade in its log ("the master is older: upgrade the master first"), and
-`node run` exits with that message instead of trying again. A node refused
-for its key (revoked, or never joined) exits the same way; a server that is
-down or restarting is retried every few seconds up to 30 s apart. Upgrade
-the server first, then its nodes.
+not is refused when it connects (or joins: the join token is then not
+spent), with both versions and which side to upgrade in its log ("the
+master refused this node: … the master is older: upgrade the master
+first"), and `node run` exits with that message instead of trying again.
+A node refused for its key (revoked, or never joined) exits the same way.
+Both end with exit status **77**, so a service manager can leave the node
+down (the unit below does); a server that is down or restarting is retried
+every few seconds up to 30 s apart. What the master sends in a refusal is
+shown as one line of at most 300 characters, without control characters.
+Upgrade the server first, then its nodes.
 
 ### Stopping a node or the server
 
@@ -1279,26 +1283,41 @@ the server first, then its nodes.
 `kill`, `docker stop`) and on SIGINT (Ctrl-C):
 
 - New work is refused at once with "this node is stopping": a new message
-  or a new chat on it gets that answer (HTTP 503), and a routine that
-  falls due waits for the server's next start or retries the node later
-  (it is not blocked). Answers to approvals and cancels are still taken.
+  or a new chat on it gets that answer (HTTP 503) and keeps its attached
+  files, so it can be sent again once the node is back. On a stopping
+  server, **Run now** and webhook calls get 503 too and record no run, and
+  no scheduled run starts; what falls due runs at the next start (by its
+  catch-up rule). Answers to approvals and cancels are still taken.
 - Every running turn is cancelled as with the chat's Stop button: its
-  command gets SIGTERM, and 2 s later it and everything it started are killed,
-  a question waiting for your approval is denied, and the turn ends in the
-  log as **stopped** ("turn stopped" in the chat). The server keeps serving
-  the page meanwhile, so open chats show it; a node keeps its link to the
-  server, so the server sees it too.
+  command gets SIGTERM, and 2 s later its guard kills it and everything it
+  started; a question waiting for your approval is denied; the turn takes
+  its after-turn checkpoint (its undo point) and ends in the log as
+  **stopped** ("turn stopped" in the chat). A turn you had cancelled just
+  before stays "cancelled", and one that had already finished stays
+  finished. The server keeps serving the page meanwhile, so open chats
+  show it; a node keeps its link to the server, so the server sees it too.
+- A routine's run whose turn a stop ended is no failure: it is put back
+  and runs again, in a new chat, once the node or the server is back.
 - When the last turn has closed the process exits with status 0. It waits
-  at most 60 s; a turn still open then is closed as "interrupted" at the
-  next start, and the process exits with status 1.
-- A **second** signal while it waits exits at once with status 1. Nothing
-  is left running: each command's guard ends its command when the node
-  process is gone, and the next start closes the open turns.
+  at most 80 s (the cancelled command's grace, the checkpoint's own 60 s
+  limit, and a margin); a turn still open then, or one whose end could not
+  be written (a full disk), is named, closed as "interrupted" at the next
+  start, and the process exits with status 1.
+- A **second** signal while it waits exits at once with status 1. Each
+  command's guard ends its command when the node process is gone, and the
+  next start closes the open turns.
 
-While a stop waits, the data directory stays locked, so a second start on
-it is refused with the usual "is in use by" message. Stopping the server
-does not stop its remote nodes: their turns keep running and they connect
-again when it is back.
+What can outlive a stop: a command stuck in a read the kernel cannot
+interrupt (a network folder whose server went away) keeps its guard until
+the read returns, and with `[sandbox] contain = "off"` a command that
+detached from its shell is not ended at all. A tool of the node's own
+stuck that way is left behind: the process exits 2 s after its work is
+done whatever threads remain.
+
+The data directory stays locked until the process is gone, so a second
+start on it during a stop is refused with the usual "is in use by"
+message. Stopping the server does not stop its remote nodes: their turns
+keep running and they connect again when it is back.
 
 ### Set up a node by hand
 
@@ -1349,8 +1368,11 @@ RestartSec=5
 # its commands' guards end them. With the default (control-group) every
 # guard would get it too and kill its command before the turn could close.
 KillMode=mixed
-# The node closes its turns within 60 s, then exits; SIGKILL after this.
-TimeoutStopSec=90
+# The node closes its turns within 80 s, then exits; SIGKILL after this.
+TimeoutStopSec=120
+# 77: the master refused this node (revoked, unknown, another protocol):
+# starting it again changes nothing until you act.
+RestartPreventExitStatus=77
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/rizzy-harness /home/rizzy-harness

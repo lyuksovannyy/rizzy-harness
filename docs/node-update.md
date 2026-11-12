@@ -105,7 +105,10 @@ and shown by `doctor` as "update verification is off: this node runs whatever it
 serves". Durations: `ask_minutes` 1 to 30,
 `force_after_minutes` from `ask_minutes` to 1440, `hard_stop_seconds` 10 to 300. **The master
 can change none of these.** The hard bound is 60 s because the after-turn checkpoint took up to
-15.5 s on B.3's slow disk (`docs/checkpoint-cost.md`).
+15.5 s on B.3's slow disk (`docs/checkpoint-cost.md`). **Wrong, found by A.19's review
+(A19-3):** the checkpoint may take its whole 60 s limit (one sparse file does it), so a 60 s
+bound ends such a stop with the turn open. A.19 derives its wait (80 s, §7.0); N.9 must keep
+`hard_stop_seconds` above the same sum, not below it.
 
 **Defaults.** By hand with the README unit: `notify` (its binary is root-owned). In a container:
 not a supported kind (`Dockerfile:1-3`). `local`: no setting; it is the master's own process and
@@ -302,30 +305,39 @@ binary and `node.toml` are root-owned is safer, and cannot use `auto`.
 
 ### 7.0 What A.19 built, and what is left for N.9
 
-**Built (A.19):**
+**Built (A.19, then fixed after its review `docs/security-review/2026-11-A19-stop-and-refusal.md`):**
 
-- **Refusal with a reason.** `Hello::Auth` carries `protocol_version` (absent from older
-  builds: protocol 1); the master compares it after the key is proved and before `Accepted`,
-  and answers `Rejected` naming both versions and the older side. A peer without a registered
-  key gets the same refusal as before and learns nothing of the version. Every `Rejected`
-  already ended the node's reconnect loop, and that is kept: each needs a person (a revoked
-  or unknown key, a spent token, another protocol). A master that is down, a network or TLS
-  error, a timeout or a link dropped after `Accepted` is retried. `Hello::Auth` gains no
-  `version` or `build_id` yet (step 2).
+- **Refusal with a reason.** `Hello::Auth` and `Hello::Join` carry `protocol_version`, a
+  required field; the master compares it after the key is proved (for a join, and the token
+  found valid, before it is spent) and before `Accepted`, and answers `Rejected` naming both
+  versions and the older side. A peer without a registered key or a valid token gets the same
+  refusal as before and learns nothing of the version. Every `Rejected` ends the node's
+  reconnect loop (each needs a person: a revoked or unknown key, a spent token, another
+  protocol) and the process exits **77** (`EX_NOPERM`; 75 and 76 stay the update's); the unit
+  sets `RestartPreventExitStatus=77`. The node prints the reason as one line without control
+  characters, at most 300 characters. A master that is down, a network or TLS error, a timeout
+  or a link dropped after `Accepted` is retried. `Hello::Auth` gains no `version` or
+  `build_id` yet (step 2).
 - **Stop signals.** SIGTERM is handled like SIGINT by `serve` and `node run`: new turns,
-  sessions, restores and stages are acked with the fixed text `harness_protocol::NODE_STOPPING`
-  (the master maps it to 503 and routines retry, §7.4's rule for `draining`); approval
-  answers and cancels are taken; every running turn is cancelled **at once** through the
-  normal path and ends `turn_ended{reason: "stopped"}`; the process waits at most 60 s
-  (`hard_stop_seconds`' default, a constant in `crates/cli/src/stop.rs`; no `[drain]` table)
-  and exits 0, or 1 when a turn was still open; a second signal exits 1 at once. `serve`
-  closes its local and chat turns while HTTP still serves, starts no routine run meanwhile,
-  then gives HTTP its 30 s grace (§8.2). The README unit sets `KillMode=mixed` and
-  `TimeoutStopSec=90` and no `KillSignal`.
+  sessions, restores, stages and sub-agents are acked with the fixed text
+  `harness_protocol::NODE_STOPPING` (the master maps it to 503 and gives a refused message's
+  uploads back); approval answers and cancels are taken, the cancel winning over an answer
+  that comes with it; every running turn is cancelled **at once** through the normal path and
+  ends `turn_ended{reason: "stopped"}` (one cancelled before keeps `cancelled`, one completed
+  keeps `completed`); the process waits at most 80 s (the agent loop's tool grace, the after-turn
+  checkpoint's 60 s limit and 15 s, a constant in `crates/cli/src/stop.rs`; no `[drain]` table)
+  and exits 0, or 1 when a turn is still open or its end could not be written; a second signal
+  exits 1 at once; the data directory's lock is held until the process is gone, and the runtime
+  gets 2 s before the process exits whatever threads are left. `serve` closes its local and
+  chat turns while HTTP still serves, starts no routine run meanwhile (Run now and webhooks get
+  503 and record nothing), then gives HTTP its 30 s grace (§8.2). A routine's run cut by a stop
+  is no failure: it is put back and runs once more, at once if a remote node stopped or at the
+  server's next start (§7.4's rule for `draining`). The README unit sets `KillMode=mixed`,
+  `TimeoutStopSec=120` and no `KillSignal`.
 
 **Differs from the full design, on purpose until N.9:** A.19 has no grace before the cancel
 (no note, no `ask_minutes`, no `force_after_minutes`): the stop is today's cancel, named. So
-`TimeoutStopSec` is 90 s, not 35 min. A stop's turn ends `reason: "stopped"`, a value of
+`TimeoutStopSec` is 120 s, not 35 min. A stop's turn ends `reason: "stopped"`, a value of
 `TurnEndReason`, where §8.1 plans `TurnEnded.drain` beside `reason`; N.9 can keep `stopped`
 for a supervisor's stop and add `drain` for its outcomes. The refusal is a fixed `ack.error`
 text, not `ack.retry_after_ms` (§8.1): a stop has no time to give.

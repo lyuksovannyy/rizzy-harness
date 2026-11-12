@@ -141,10 +141,14 @@ the per-owner listing), `crates/master/tests/link_hardening.rs` and
 
 The protocol version was compared in `add_link`, after `accepted`: a node
 of another protocol was accepted, dropped and reconnected for ever without
-a reason. The `auth` hello now carries `protocol_version` (absent: 1), and
-`node_connection` compares it **after** the signature check and before
-`accepted`, answering `rejected` with both versions and the side to
-upgrade. Order matters: a peer without a registered key gets "unknown or
+a reason. The `auth` and `join` hellos now carry `protocol_version`, a
+required field (a hello without it is malformed and closed), and
+`node_connection` compares it **after** the signature check (for a join,
+once the token is found valid, before it is spent) and before `accepted`,
+answering `rejected` with both versions and the side to upgrade. The node
+prints a refusal as one line without control characters, at most 300
+characters, and exits 77 (review A19-6, A19-7: a master could otherwise
+write escape sequences and forged log lines on the node's terminal). Order matters: a peer without a registered key gets "unknown or
 revoked node" whatever it claims (`an_unauthenticated_peer_does_not_learn_the_version`),
 so only the master's own nodes learn its protocol and crate version. Every
 `rejected` ends the node's reconnect loop (each needs a person); a master

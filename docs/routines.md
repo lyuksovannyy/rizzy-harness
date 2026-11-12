@@ -115,8 +115,17 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
   (24), or running longer than its `max_runtime_min` (counted from when it last started or
   resumed running), is cancelled and recorded as `timed_out`.
 - **Restart.** `pending` runs become `interrupted` and are never retried (turns are not resumed,
-  PLAN §2). `running` and `waiting` runs are followed again, or finished from their chat's first
-  `turn_ended`.
+  PLAN §2), except those a stop put back (below). `running` and `waiting` runs are followed
+  again, or finished from their chat's first `turn_ended`.
+- **A stop (A.19).** A run whose turn ended `stopped` (its node or the server got SIGTERM or
+  SIGINT) is no failure and is not counted: it goes back to `pending` with the reason "the node
+  was stopped while the run's turn ran; it runs again when the server is back", forgets its chat
+  (which keeps the cut turn), and runs once more in a new chat: at once when the server itself
+  is not stopping (a remote node was; the launch then waits for it as for any offline node), or
+  at the server's next start. A launch the stopping server's own node refused waits for the next
+  start the same way. While the server stops, the scheduler starts nothing and **Run now** and
+  webhook calls are answered 503 ("the server is stopping: try again once it is back") with no
+  run recorded.
 - **Losing access mid-run.** Agentic turns are cancelled by the existing revocation sweep and the
   run records `cancelled`; a chat-profile run finishes its current turn. Either way the next fire
   is blocked and pauses the routine.
