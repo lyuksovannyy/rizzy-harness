@@ -6,7 +6,11 @@
 //!
 //! The file-policy tests run twice where bubblewrap works: with Landlock
 //! alone (the fallback) and inside the shell's containment (T.8a), which
-//! must not change what a command may open.
+//! must not change what a command may open. Not twice: the start-up
+//! self-test (it is `sandbox::start`'s, run through the test binary; the
+//! contained start is `contain.rs` `a_started_node_contains_its_shell`) and
+//! the B.1 tests at the end, which record what a node without bubblewrap
+//! leaves running (contained, `contain.rs` shows them gone).
 
 #[path = "support/bwrap.rs"]
 mod bwrap;
@@ -284,8 +288,14 @@ async fn a_build_in_the_project_works_in(f: Fixture) {
 /// domain. (The fd *numbers* can be listed; their targets cannot be read.)
 #[tokio::test]
 async fn the_harness_environment_is_not_readable_through_proc() {
-    let Some(_) = landlock() else { return };
-    let f = fixture();
+    let Some(status) = landlock() else { return };
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        the_harness_environment_is_not_readable_through_proc_in(f, &status).await;
+    }
+}
+
+async fn the_harness_environment_is_not_readable_through_proc_in(f: Fixture, _status: &str) {
     let out = f
         .bash(
             Settings::default(),
@@ -310,7 +320,13 @@ async fn the_harness_environment_is_not_readable_through_proc() {
 #[tokio::test]
 async fn network_off_denies_tcp_connect() {
     let Some(status) = landlock() else { return };
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        network_off_denies_tcp_connect_in(f, &status).await;
+    }
+}
+
+async fn network_off_denies_tcp_connect_in(f: Fixture, status: &str) {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let cmd = format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo connected");
@@ -320,7 +336,7 @@ async fn network_off_denies_tcp_connect() {
         network: Network::Off,
         ..Default::default()
     };
-    if abi(&status) < 4 {
+    if abi(status) < 4 {
         // Required + off on an old kernel: the command does not run at all.
         let out = f.bash(off, &f.ws, &cmd).await;
         assert!(out.contains("cannot enforce the sandbox"), "{out}");
@@ -335,8 +351,14 @@ async fn network_off_denies_tcp_connect() {
 /// `--rw /` gains nothing.
 #[tokio::test]
 async fn a_nested_sandbox_exec_gains_nothing() {
-    let Some(_) = landlock() else { return };
-    let f = fixture();
+    let Some(status) = landlock() else { return };
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        a_nested_sandbox_exec_gains_nothing_in(f, &status).await;
+    }
+}
+
+async fn a_nested_sandbox_exec_gains_nothing_in(f: Fixture, _status: &str) {
     // Let the shell see the harness binary so it can try.
     let bin_dir = PathBuf::from(EXE).canonicalize().unwrap();
     let settings = Settings {
@@ -364,7 +386,13 @@ async fn a_nested_sandbox_exec_gains_nothing() {
 #[tokio::test]
 async fn pathname_unix_sockets_need_abi_9() {
     let Some(status) = landlock() else { return };
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        pathname_unix_sockets_need_abi_9_in(f, &status).await;
+    }
+}
+
+async fn pathname_unix_sockets_need_abi_9_in(f: Fixture, status: &str) {
     let sock = f.root.join("agent.sock");
     let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     let have_py = std::process::Command::new("python3")
@@ -381,11 +409,11 @@ async fn pathname_unix_sockets_need_abi_9() {
         sock.display()
     );
     let out = f.bash(Settings::default(), &f.ws, &cmd).await;
-    if abi(&status) >= 9 {
+    if abi(status) >= 9 {
         assert!(!out.contains("unix-connected"), "{out}");
         assert!(out.contains("PermissionError"), "{out}");
     } else {
-        eprintln!("OPEN RESIDUAL (Landlock ABI {} < 9): {out}", abi(&status));
+        eprintln!("OPEN RESIDUAL (Landlock ABI {} < 9): {out}", abi(status));
         assert!(out.contains("unix-connected"), "{out}");
     }
 }
@@ -399,7 +427,14 @@ async fn signals_to_the_harness_are_denied() {
         eprintln!("Landlock ABI < 6: no signal scoping here");
         return;
     }
-    let f = fixture();
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        signals_to_the_harness_are_denied_in(f).await;
+    }
+}
+
+/// Contained, `$PPID` is the namespace's init, outside the domain too.
+async fn signals_to_the_harness_are_denied_in(f: Fixture) {
     let out = f
         .bash(Settings::default(), &f.ws, "kill -0 $PPID; echo rc=$?")
         .await;

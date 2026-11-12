@@ -857,3 +857,116 @@ fn a_planted_bwrap_on_path_is_skipped() {
         "the planted bwrap ran: {out}"
     );
 }
+
+// ---- N-4: the node's own start path and `doctor`'s line ----
+
+/// `sandbox::start`'s successful branch, as a node runs it (with the
+/// harness binary as the wrapper): it probes, keeps the containment, and a
+/// command through the confinement it returns is contained. A start that
+/// probed and then forgot the containment would fail here.
+#[tokio::test]
+async fn a_started_node_contains_its_shell() {
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let s = harness_tools::sandbox::start_with_exe(
+        PathBuf::from(EXE),
+        &Settings::default(),
+        &f.data,
+        std::slice::from_ref(&f.data),
+        &f.data.join("node.toml"),
+    )
+    .unwrap();
+    assert!(s.refusal.is_none(), "{:?}", s.refusal);
+    let abi = harness_tools::sandbox::effective_abi(&s.summary);
+    let want = if abi >= 9 {
+        harness_tools::sandbox::ContainLevel::Ok
+    } else {
+        harness_tools::sandbox::ContainLevel::Warn
+    };
+    assert_eq!(s.contain_level, want, "ABI {abi}: {}", s.contain_summary);
+    assert!(
+        s.contain_summary.starts_with("contained"),
+        "{}",
+        s.contain_summary
+    );
+    let mut ctx = ToolCtx::new(&f.ws);
+    ctx.protected = Arc::new(vec![f.data.clone()]);
+    ctx.sandbox = s.confinement.for_session("s1");
+    let r = run(&ctx, json!({"command": "echo self=$$"})).await;
+    assert!(r.output.contains("self=2"), "{}", r.output);
+}
+
+/// `doctor` in `dir` with `node_toml` (if any): its stdout and status.
+fn doctor(dir: &Path, node_toml: Option<&str>) -> (String, bool) {
+    if let Some(t) = node_toml {
+        std::fs::write(dir.join("node.toml"), t).unwrap();
+    }
+    let out = std::process::Command::new(EXE)
+        .args(["--data-dir", dir.to_str().unwrap(), "doctor"])
+        .output()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
+}
+
+fn line<'a>(out: &'a str, name: &str) -> &'a str {
+    out.lines()
+        .find(|l| l.contains(&format!(" {name}: ")))
+        .unwrap_or_else(|| panic!("no {name} line: {out}"))
+}
+
+/// `doctor`'s containment line in each state it can be put in from here:
+/// contained (ok from Landlock ABI 9, warn with the gap below), not
+/// contained (warn, never ok: N-5), off (warn), required and refused
+/// (FAIL, with the Landlock line still ok). The shared-`/proc` form and an
+/// ABI below 9 on a newer kernel cannot be forced through the binary; their
+/// lines are `sandbox.rs` `the_containment_line_depends_on_the_landlock_abi`.
+#[test]
+fn doctor_marks_each_containment_state() {
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let (out, _) = doctor(&f.data, None);
+    let abi = harness_tools::sandbox::effective_abi(line(&out, "shell sandbox"));
+    let c = line(&out, "shell containment");
+    if abi >= 9 {
+        assert!(c.starts_with("ok    shell containment: contained ("), "{c}");
+        assert!(c.contains("nothing a command starts outlives it"), "{c}");
+    } else {
+        assert!(c.starts_with("warn  shell containment: contained ("), "{c}");
+        assert!(c.contains("WITH A GAP") && c.contains("session bus"), "{c}");
+    }
+
+    let (out, _) = doctor(&f.data, Some("[sandbox]\nbwrap = \"/nonexistent/bwrap\"\n"));
+    let c = line(&out, "shell containment");
+    assert!(
+        c.starts_with("warn  shell containment: NOT CONTAINED"),
+        "{c}"
+    );
+
+    let (out, _) = doctor(&f.data, Some("[sandbox]\ncontain = \"off\"\n"));
+    assert!(line(&out, "shell containment").starts_with("warn  shell containment: OFF"));
+
+    let (out, ok) = doctor(
+        &f.data,
+        Some("[sandbox]\ncontain = \"required\"\nbwrap = \"/nonexistent/bwrap\"\n"),
+    );
+    let c = line(&out, "shell containment");
+    assert!(c.starts_with("FAIL  shell containment: REFUSING"), "{c}");
+    assert!(line(&out, "shell sandbox").starts_with("ok "), "{out}");
+    assert!(!ok, "doctor passed with a refusal: {out}");
+
+    // `required` on this kernel: refused below ABI 9 (T8A-1), else ok.
+    let (out, _) = doctor(&f.data, Some("[sandbox]\ncontain = \"required\"\n"));
+    let c = line(&out, "shell containment");
+    if abi >= 9 {
+        assert!(c.starts_with("ok "), "{c}");
+    } else {
+        assert!(c.starts_with("FAIL ") && c.contains("does not hold"), "{c}");
+    }
+}
