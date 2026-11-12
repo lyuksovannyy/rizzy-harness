@@ -262,7 +262,10 @@ async fn network_off_tcp_fails_and_only_loopback_is_there() {
         assert!(out.contains(&format!("refused {i}")), "{out}");
         assert!(l.accept().is_err(), "listener {i} got a connection: {out}");
     }
-    assert!(out.contains("ifs=[lo ]"), "not only its own loopback: {out}");
+    assert!(
+        out.contains("ifs=[lo ]"),
+        "not only its own loopback: {out}"
+    );
 }
 
 /// Loopback inside the command, before and after T.8b: bubblewrap brings
@@ -293,9 +296,7 @@ try:
 except OSError as e:
     print("tcp-bind", type(e).__name__)
 "#;
-    let out = f
-        .bash(sb, &format!("{INTERFACES} python3 -c '{py}'"))
-        .await;
+    let out = f.bash(sb, &format!("{INTERFACES} python3 -c '{py}'")).await;
     assert!(out.contains("ifs=[lo ]"), "{out}");
     assert!(out.contains("udp-self self"), "loopback is not up: {out}");
     assert!(out.contains("tcp-bind PermissionError"), "{out}");
@@ -322,7 +323,10 @@ async fn network_off_dns_lookups_fail() {
     );
     let started = std::time::Instant::now();
     let out = f.bash(sb, &cmd).await;
-    assert!(!out.contains("lookup-skipped"), "not in its own namespace: {out}");
+    assert!(
+        !out.contains("lookup-skipped"),
+        "not in its own namespace: {out}"
+    );
     assert!(
         out.contains("lookup-exit=") && !out.contains("lookup-exit=0"),
         "{out}"
@@ -378,7 +382,10 @@ async fn network_off_hides_the_hosts_abstract_sockets() {
     let (l, name) = abstract_listener();
     let out = f.bash(sb, &abstract_probe(&name)).await;
     assert!(out.contains("abstract-ECONNREFUSED"), "{out}");
-    assert!(l.accept().is_err(), "the host's socket got a connection: {out}");
+    assert!(
+        l.accept().is_err(),
+        "the host's socket got a connection: {out}"
+    );
 }
 
 // ---- network on: nothing changes ----
@@ -421,7 +428,10 @@ async fn network_on_is_unchanged() {
     let got_before = arrived(&listeners);
     let after = f.bash(contained, &probe("contained")).await;
     let got_after = arrived(&listeners);
-    assert_eq!(before, after, "network on: contained differs from Landlock alone");
+    assert_eq!(
+        before, after,
+        "network on: contained differs from Landlock alone"
+    );
     for (i, (b, a)) in got_before.iter().zip(&got_after).enumerate() {
         assert_eq!(b, &[format!("landlock-{i}")], "{before}");
         assert_eq!(a, &[format!("contained-{i}")], "{after}");
@@ -519,7 +529,11 @@ fn a_bwrap_without_network_namespaces_is_not_used_with_the_network_off() {
     use harness_tools::sandbox::ContainLevel;
 
     let on = start(Network::On, ContainMode::Auto);
-    assert!(on.contain_summary.starts_with("contained"), "{}", on.contain_summary);
+    assert!(
+        on.contain_summary.starts_with("contained"),
+        "{}",
+        on.contain_summary
+    );
 
     let auto = start(Network::Off, ContainMode::Auto);
     assert!(auto.refusal.is_none(), "{:?}", auto.refusal);

@@ -103,12 +103,17 @@ impl Contain {
     /// `exe`, for `ps`. `sandbox-exec` inside the namespace is still started
     /// from `exe` (there neither descriptor nor `/proc/self/exe` is the
     /// node's); `sandbox::start` warns where a session can write it.
+    ///
+    /// With `net_off` (`[sandbox] network = "off"`, decided by the node's
+    /// [`crate::sandbox::Sandbox`], never per call) the command also gets a
+    /// network namespace of its own (T.8b).
     pub(crate) fn command(
         &self,
         exe: &Path,
         image: Option<std::os::fd::RawFd>,
         cwd: &Path,
         mark: Option<&Mark>,
+        net_off: bool,
     ) -> std::process::Command {
         use std::os::unix::process::CommandExt;
         let mut c = match image {
@@ -121,7 +126,10 @@ impl Contain {
         if let Some(m) = mark {
             m.push_args(&mut c);
         }
-        c.arg("--").arg(&self.bwrap).args(self.args(cwd)).arg(exe);
+        c.arg("--")
+            .arg(&self.bwrap)
+            .args(self.args(cwd, net_off))
+            .arg(exe);
         c
     }
 
@@ -130,12 +138,12 @@ impl Contain {
     #[doc(hidden)]
     pub fn bwrap_command(&self, program: &Path, cwd: &Path) -> std::process::Command {
         let mut c = std::process::Command::new(&self.bwrap);
-        c.args(self.args(cwd)).arg(program);
+        c.args(self.args(cwd, false)).arg(program);
         c
     }
 
     /// The arguments up to and including `--`.
-    fn args(&self, cwd: &Path) -> Vec<OsString> {
+    fn args(&self, cwd: &Path, net_off: bool) -> Vec<OsString> {
         let mut a: Vec<OsString> = [
             // Through PR_SET_PDEATHSIG: bwrap dies with its guard (a
             // single-threaded process), and bwrap's init dies with bwrap.
@@ -155,6 +163,13 @@ impl Contain {
         .collect();
         if self.form == Form::Full {
             a.extend(["--proc", "/proc"].map(OsString::from));
+        }
+        if net_off {
+            // T.8b: a network namespace with only its own loopback (which
+            // bwrap brings up), so no UDP or DNS leaves either, which
+            // Landlock's TCP rule inside does not cover. Abstract Unix
+            // sockets belong to it too: the host's are not there.
+            a.push("--unshare-net".into());
         }
         a.push("--chdir".into());
         a.push(cwd.as_os_str().to_owned());
@@ -236,11 +251,21 @@ pub(crate) fn trusted(file: &Path) -> Result<(), String> {
 
 /// The script the probe runs inside the namespace: `$$` is 2 only in a new
 /// PID namespace (bwrap's init is 1, the shell 2); with `own_proc`,
-/// `/proc/self` must be that same 2, so `/proc` is the namespace's own.
-pub(crate) fn probe_script(own_proc: bool) -> String {
+/// `/proc/self` must be that same 2, so `/proc` is the namespace's own;
+/// with `own_net`, `/proc/net/dev` (the reader's network namespace, in
+/// either form of `/proc`) must list `lo` and nothing else.
+pub(crate) fn probe_script(own_proc: bool, own_net: bool) -> String {
     let mut s = String::from("cat \"$1\" >/dev/null || exit 2; [ \"$$\" = 2 ] || exit 4;");
     if own_proc {
         s.push_str(" read -r p _ </proc/self/stat; [ \"$p\" = 2 ] || exit 5;");
+    }
+    if own_net {
+        // Past the two header lines, one line per interface.
+        s.push_str(
+            " n=0; { read -r _; read -r _; while IFS=': ' read -r i _; do \
+             [ \"$i\" = lo ] || exit 6; n=$((n+1)); done; } </proc/net/dev; \
+             [ \"$n\" = 1 ] || exit 6;",
+        );
     }
     s
 }
@@ -882,12 +907,36 @@ mod tests {
     #[test]
     fn the_shared_proc_form_mounts_no_proc() {
         let full = Contain::new("/usr/bin/bwrap".into(), Form::Full);
-        let a = full.args(Path::new("/w"));
+        let a = full.args(Path::new("/w"), false);
         assert!(a.windows(2).any(|w| w[0] == "--proc" && w[1] == "/proc"));
         assert!(a.iter().any(|x| x == "--die-with-parent"));
         assert!(a.iter().any(|x| x == "--new-session"));
         assert_eq!(a.last().unwrap(), "--");
         let shared = Contain::new("/usr/bin/bwrap".into(), Form::SharedProc);
-        assert!(!shared.args(Path::new("/w")).iter().any(|x| x == "--proc"));
+        assert!(
+            !shared
+                .args(Path::new("/w"), false)
+                .iter()
+                .any(|x| x == "--proc")
+        );
+    }
+
+    /// T.8b: the network namespace exactly when the node's network is off,
+    /// in both forms, before the `--` that ends bubblewrap's options.
+    #[test]
+    fn the_network_off_adds_a_network_namespace() {
+        for form in [Form::Full, Form::SharedProc] {
+            let c = Contain::new("/usr/bin/bwrap".into(), form);
+            assert!(
+                !c.args(Path::new("/w"), false)
+                    .iter()
+                    .any(|x| x == "--unshare-net")
+            );
+            let off = c.args(Path::new("/w"), true);
+            let at = off.iter().position(|x| x == "--unshare-net").unwrap();
+            assert!(at < off.len() - 1 && off.last().unwrap() == "--");
+        }
+        assert!(probe_script(true, true).contains("/proc/net/dev"));
+        assert!(!probe_script(true, false).contains("/proc/net/dev"));
     }
 }

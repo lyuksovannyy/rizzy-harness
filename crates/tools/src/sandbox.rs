@@ -79,8 +79,11 @@ pub enum Mode {
 pub enum Network {
     #[default]
     On,
-    /// Deny TCP connect and bind (Landlock ABI 4). UDP, and so DNS, is not
-    /// covered by Landlock.
+    /// Deny TCP connect and bind (Landlock ABI 4), and run the agent's
+    /// contained shell in a network namespace of its own (bubblewrap, T.8b),
+    /// which closes UDP and DNS too. Where the shell is not contained (the
+    /// Landlock-only fallback, `contain = "off"`) and for the node's own
+    /// helpers, only TCP: Landlock does not cover UDP, and so DNS.
     Off,
 }
 
@@ -419,7 +422,13 @@ impl Sandbox {
             session: session.to_owned(),
         });
         let mut c = match contain {
-            Some((b, cwd)) => b.command(&self.exe, self.image, cwd, mark.as_ref()),
+            Some((b, cwd)) => b.command(
+                &self.exe,
+                self.image,
+                cwd,
+                mark.as_ref(),
+                self.network == Network::Off,
+            ),
             None => std::process::Command::new(&self.exe),
         };
         c.arg(SUBCOMMAND);
@@ -553,7 +562,9 @@ impl Sandbox {
 
     /// Run a fixed check through bubblewrap and the wrapper, as a shell
     /// command runs: the command must be in a PID namespace of its own
-    /// and, for [`crate::contain::Form::Full`], see its own `/proc`.
+    /// and, for [`crate::contain::Form::Full`], see its own `/proc`; with
+    /// the network off, in a network namespace with only its own `lo`
+    /// (T.8b), so a bubblewrap that cannot make one is not used.
     pub fn probe_containment(
         &self,
         contain: &crate::contain::Contain,
@@ -574,7 +585,8 @@ impl Sandbox {
         // kill order) until the probe has ended.
         let (keep, theirs) = std::os::unix::net::UnixStream::pair()
             .map_err(|e| format!("the guard's channel: {e}"))?;
-        c.args(["sh", "-c", &crate::contain::probe_script(full), "sh"])
+        let net = self.network == Network::Off;
+        c.args(["sh", "-c", &crate::contain::probe_script(full, net), "sh"])
             .arg(&ok)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -591,6 +603,7 @@ impl Sandbox {
             Some(0) => Ok(()),
             Some(4) => Err("the command was not in a PID namespace of its own".into()),
             Some(5) => Err("/proc is not the namespace's own".into()),
+            Some(6) => Err("the command was not in a network namespace of its own".into()),
             code => Err(format!(
                 "{} failed (exit {code:?}): {}",
                 contain.bwrap().display(),
@@ -1131,6 +1144,12 @@ pub fn start_with_exe(
         Contained::Yes(s, level) => {
             started.contain_summary = s;
             started.contain_level = level;
+            if settings.network == Network::Off {
+                started.contain_summary.push_str(
+                    "; network off: a network namespace of its own per command (only its own \
+                     loopback: no TCP, UDP or DNS out)",
+                );
+            }
             // Review R-3: a read-write grant carries Landlock's socket right,
             // so a `write` entry that holds the usual socket folders hands
             // the command other programs' sockets on every kernel.
@@ -1149,6 +1168,11 @@ pub fn start_with_exe(
         Contained::No(s) => {
             started.contain_summary = s;
             started.contain_level = ContainLevel::Warn;
+            if settings.network == Network::Off {
+                started
+                    .contain_summary
+                    .push_str(&format!("; {NETWORK_OFF_UNCONTAINED}"));
+            }
         }
         Contained::Refuse(msg) => {
             started.contain_level = ContainLevel::Refused;
@@ -1204,6 +1228,12 @@ fn socket_write_entries(settings: &Settings) -> Vec<PathBuf> {
         .cloned()
         .collect()
 }
+
+/// What the containment line adds where the shell is not contained and the
+/// network is off (T.8b): Landlock alone covers only TCP.
+const NETWORK_OFF_UNCONTAINED: &str = "WARNING: [sandbox] network = \"off\" without the \
+     containment stops TCP only: UDP and DNS still go out (Landlock does not cover them; the \
+     network namespace needs bubblewrap)";
 
 enum Contained {
     Yes(String, ContainLevel),
@@ -1264,6 +1294,10 @@ fn containment(
                         Err(msg) => (sandbox, Contained::Refuse(msg)),
                     };
                 }
+                Err(e) if settings.network == Network::Off => format!(
+                    "{e} (with [sandbox] network = \"off\" the probe needs a network namespace \
+                     of its own as well)"
+                ),
                 Err(e) => e,
             }
         }
