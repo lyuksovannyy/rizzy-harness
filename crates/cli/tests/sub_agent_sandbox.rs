@@ -10,6 +10,9 @@
 //! name the user's object store, and the grants are those the node passes
 //! (`harness_core::folder::OwnedFolder`).
 
+#[path = "support/bwrap.rs"]
+mod bwrap;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -124,15 +127,21 @@ fn fixture() -> Fixture {
 }
 
 impl Fixture {
+    /// The sandbox as a node sets it up: inside the shell's containment
+    /// where bubblewrap works (T.8a), so every test here also checks that
+    /// the identity grants of a sub-agent hold inside bubblewrap.
     fn sandbox(&self) -> Arc<Sandbox> {
+        let sb = Sandbox::new(
+            PathBuf::from(EXE),
+            &Settings::default(),
+            Some(self.data.join("sandbox-tmp")),
+            std::slice::from_ref(&self.data),
+        )
+        .unwrap();
         Arc::new(
-            Sandbox::new(
-                PathBuf::from(EXE),
-                &Settings::default(),
-                Some(self.data.join("sandbox-tmp")),
-                std::slice::from_ref(&self.data),
-            )
-            .unwrap(),
+            match bwrap::contained(sb, &self.data.join("sandbox-tmp/probe-contain")) {
+                Ok(sb) | Err(sb) => sb,
+            },
         )
     }
 
@@ -179,6 +188,21 @@ impl Fixture {
             }
         }
     }
+}
+
+/// A sub-agent's shell goes through the same path as its parent's: it is
+/// contained too (its own PID namespace, `$$` is 2), started by the node
+/// like every other command, never nested in the parent's namespace.
+#[tokio::test]
+async fn a_sub_agents_shell_is_contained() {
+    let f = fixture();
+    if !f.landlock() || f.sandbox().containment().is_none() {
+        return;
+    }
+    let out = f
+        .child("echo self=$$; echo pids=$(ls -d /proc/[0-9]* | wc -l)")
+        .await;
+    assert!(out.contains("self=2"), "{out}");
 }
 
 /// The child's ordinary git works in its own folder: `status`, `add`,

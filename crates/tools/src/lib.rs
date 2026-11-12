@@ -5,6 +5,7 @@
 
 pub mod approval;
 mod bash;
+pub mod contain;
 pub use bash::{DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S};
 pub mod env;
 pub mod filter;
@@ -28,7 +29,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub use approval::{CallKey, call_key};
-pub use bash::Bash;
+pub use bash::{Bash, ShellChild};
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;

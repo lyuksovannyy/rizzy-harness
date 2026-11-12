@@ -613,6 +613,17 @@ fn start_sandbox(
         }
         (None, _) => tracing::warn!("shell sandbox: {}", s.summary),
     }
+    match s.contain_level {
+        harness_tools::sandbox::ContainLevel::Ok => {
+            tracing::info!("shell containment: {}", s.contain_summary)
+        }
+        harness_tools::sandbox::ContainLevel::Warn => {
+            tracing::warn!("shell containment: {}", s.contain_summary)
+        }
+        harness_tools::sandbox::ContainLevel::Refused => {
+            tracing::error!("shell containment: {}", s.contain_summary)
+        }
+    }
     if let Some(root) = &s.tmp_root {
         harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
     }
@@ -697,6 +708,7 @@ fn api_token_path(dir: &Path) -> PathBuf {
 }
 
 fn doctor(dir: &Path) -> anyhow::Result<()> {
+    use harness_tools::sandbox::ContainLevel;
     let mut ok = true;
     let mut check = |name: &str, res: Result<String, String>| match res {
         Ok(m) => println!("ok    {name}: {m}"),
@@ -772,10 +784,35 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                 )
             })
             .and_then(|s| match s.refusal {
-                Some(_) => Err(s.summary),
-                None => Ok(s.summary),
+                // A refusal for the containment is reported on its own line.
+                Some(_) if s.contain_level != ContainLevel::Refused => Err(s.summary),
+                _ => Ok(s.summary),
             }),
     );
+    // Three marks: a containment with a named gap, or none, is a warning,
+    // never "ok" (review N-5); one that makes the node refuse is a failure.
+    let containment = NodePolicy::load(&dir.join("node.toml"))
+        .map_err(|e| e.to_string())
+        .and_then(|mut p| {
+            p.protect(dir);
+            harness_tools::sandbox::start(
+                &p.sandbox.settings()?,
+                dir,
+                &p.protected_dirs,
+                &p.workspace_roots,
+                &dir.join("node.toml"),
+            )
+        });
+    match containment {
+        Ok(s) if s.contain_level == ContainLevel::Warn => {
+            println!("warn  shell containment: {}", s.contain_summary)
+        }
+        Ok(s) if s.contain_level == ContainLevel::Refused => {
+            check("shell containment", Err(s.contain_summary))
+        }
+        Ok(s) => check("shell containment", Ok(s.contain_summary)),
+        Err(e) => check("shell containment", Err(e)),
+    }
     check(
         "checkpoint git",
         NodePolicy::load(&dir.join("node.toml"))

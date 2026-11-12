@@ -1,0 +1,366 @@
+diff --git a/crates/cli/tests/review_t8a_fixes.rs b/crates/cli/tests/review_t8a_fixes.rs
+new file mode 100644
+index 0000000..c0078d1
+--- /dev/null
++++ b/crates/cli/tests/review_t8a_fixes.rs
+@@ -0,0 +1,360 @@
++//! T.8a REVIEW, RE-CHECK OF THE FIXES
++//! (docs/security-review/2026-11-T8a-containment.md, "Re-check of the
++//! fixes"), against `feat/T.8a-shell-containment` at `a13e67f`.
++//!
++//! `review_r1_…` **passes on that branch, and passing is the gap**; the
++//! other test checks a claim of the fix and passes because the claim holds.
++
++#[path = "support/bwrap.rs"]
++mod bwrap;
++
++use std::path::PathBuf;
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use harness_tools::sandbox::{Confinement, Grants, Sandbox, Settings};
++use nix::sys::signal::{Signal, kill};
++use nix::unistd::Pid;
++
++const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
++
++struct Fixture {
++    _dir: tempfile::TempDir,
++    data: PathBuf,
++    ws: PathBuf,
++}
++
++/// A contained confinement, or `None` where it cannot run here.
++fn fixture() -> Option<(Fixture, Confinement)> {
++    let dir = tempfile::tempdir().unwrap();
++    let root = dir.path().canonicalize().unwrap();
++    let (data, ws) = (root.join("data"), root.join("home/proj"));
++    std::fs::create_dir_all(&data).unwrap();
++    std::fs::create_dir_all(&ws).unwrap();
++    let sb = Sandbox::new(
++        PathBuf::from(EXE),
++        &Settings::default(),
++        Some(data.join("sandbox-tmp")),
++        std::slice::from_ref(&data),
++    )
++    .unwrap();
++    if let Err(e) = sb.probe(&data.join("sandbox-tmp/probe"), &data) {
++        eprintln!("SKIPPED: Landlock does not work here: {e}");
++        return None;
++    }
++    let sb = bwrap::contained(sb, &data.join("sandbox-tmp/probe-contain")).ok()?;
++    let conf = Confinement::Confined {
++        sandbox: Arc::new(sb),
++        tmp: None,
++    };
++    Some((
++        Fixture {
++            _dir: dir,
++            data,
++            ws,
++        },
++        conf,
++    ))
++}
++
++/// `sleep <secs>` as the bash tool starts a command: contained, its own
++/// process group, `kill_on_drop`.
++fn command(f: &Fixture, conf: &Confinement, secs: u32) -> tokio::process::Command {
++    let (mut cmd, contained) = conf
++        .shell(
++            "sleep".as_ref(),
++            &[secs.to_string().as_ref()],
++            &f.ws,
++            None,
++            &Default::default(),
++            std::slice::from_ref(&f.data),
++            Grants {
++                workspace_write: true,
++                ..Default::default()
++            },
++        )
++        .unwrap();
++    assert!(contained);
++    cmd.stdin(std::process::Stdio::null())
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .process_group(0)
++        .kill_on_drop(true);
++    cmd
++}
++
++fn read(path: String) -> String {
++    std::fs::read_to_string(path).unwrap_or_default()
++}
++
++fn state(pid: i32) -> Option<char> {
++    read(format!("/proc/{pid}/stat"))
++        .rsplit(')')
++        .next()?
++        .trim_start()
++        .chars()
++        .next()
++}
++
++fn alive(pid: i32) -> bool {
++    state(pid).is_some_and(|s| !"ZXx".contains(s))
++}
++
++fn pids() -> Vec<i32> {
++    std::fs::read_dir("/proc")
++        .unwrap()
++        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
++        .collect()
++}
++
++/// Every live process whose command line is exactly `sleep <secs>`.
++fn sleeps(secs: u32) -> Vec<i32> {
++    let want = format!("sleep\0{secs}\0");
++    pids()
++        .into_iter()
++        .filter(|pid| {
++            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want.as_bytes())
++                && alive(*pid)
++        })
++        .collect()
++}
++
++/// This process's bubblewrap child whose command ends in `sleep <secs>`.
++fn our_bwrap(secs: u32) -> Option<i32> {
++    let me = std::process::id();
++    let tail = format!("\0sleep\0{secs}\0");
++    std::fs::read_dir(format!("/proc/{me}/task"))
++        .ok()?
++        .filter_map(|t| t.ok())
++        .flat_map(|t| {
++            read(format!(
++                "/proc/{me}/task/{}/children",
++                t.file_name().to_string_lossy()
++            ))
++            .split_whitespace()
++            .filter_map(|p| p.parse::<i32>().ok())
++            .collect::<Vec<_>>()
++        })
++        .find(|pid| {
++            std::fs::read(format!("/proc/{pid}/cmdline"))
++                .is_ok_and(|c| c.starts_with(b"bwrap\0") && c.ends_with(tail.as_bytes()))
++                || std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
++                    c.ends_with(tail.as_bytes())
++                        && c.split(|b| *b == 0)
++                            .next()
++                            .is_some_and(|a| a.ends_with(b"bwrap"))
++                })
++        })
++}
++
++fn init_of(bwrap: i32) -> Option<i32> {
++    read(format!("/proc/{bwrap}/task/{bwrap}/children"))
++        .split_whitespace()
++        .next()?
++        .parse()
++        .ok()
++}
++
++fn leads_a_session(pid: i32) -> bool {
++    let stat = read(format!("/proc/{pid}/stat"));
++    let mut fields = stat.rsplit(')').next().unwrap_or("").split_whitespace();
++    fields.nth(3).and_then(|s| s.parse::<i32>().ok()) == Some(pid)
++}
++
++struct Reaper(u32);
++
++impl Drop for Reaper {
++    fn drop(&mut self) {
++        for pid in sleeps(self.0) {
++            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
++        }
++    }
++}
++
++/// The fix's claim (N-2), which has no test of its own: a caller that
++/// stops waiting before the spawner answered (the cancel won the race) has
++/// its late child killed by the spawner, namespace and all. Holds: no
++/// command is left in 30 tries.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn a_spawn_abandoned_before_the_answer_is_killed_by_the_spawner() {
++    const SECS: u32 = 975_301;
++    let Some((f, conf)) = fixture() else { return };
++    let _reaper = Reaper(SECS);
++    for _ in 0..30 {
++        let mut fut = Box::pin(harness_tools::contain::spawn_for_test(command(
++            &f, &conf, SECS,
++        )));
++        assert!(futures::poll!(&mut fut).is_pending());
++        drop(fut);
++    }
++    tokio::time::sleep(Duration::from_secs(1)).await;
++    assert!(sleeps(SECS).is_empty(), "left: {:?}", sleeps(SECS));
++    // Reaped too? (tokio reaps a dropped child when a later SIGCHLD comes.)
++    let me = std::process::id().to_string();
++    let zombies = pids()
++        .into_iter()
++        .filter(|pid| {
++            let stat = read(format!("/proc/{pid}/stat"));
++            let mut after = stat.rsplit(')').next().unwrap_or("").split_whitespace();
++            after.next() == Some("Z") && after.next() == Some(me.as_str())
++        })
++        .count();
++    eprintln!("unreaped bubblewrap processes of the 30 after 1 s: {zombies}");
++}
++
++/// R-1. One kill path does not go through `contain::kill_namespace`: the
++/// answer the caller never reads. The spawner has already put the child
++/// into the reply when the caller stops waiting (in `bash.rs` the `select!`
++/// takes the cancel or the timeout, or the call is dropped); the reply is
++/// dropped with the child inside, and all that kills it is tokio's
++/// `kill_on_drop`: SIGKILL to bubblewrap alone, T8A-2's kill. In the moment
++/// after the init's `setsid` the namespace is left running, as before the
++/// fix, while the node lives and has reported the call as cancelled.
++///
++/// The test stops waiting (drops the spawn future, as `select!` does) the
++/// instant `/proc` shows the init leading its session. A race: it tries
++/// until the first survivor (first to third try on the review machine).
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn review_r1_an_answer_nobody_reads_is_killed_without_its_namespace() {
++    const SECS: u32 = 975_302;
++    const TRIES: u32 = 300;
++    let Some((f, conf)) = fixture() else { return };
++    let _reaper = Reaper(SECS);
++    let mut survived = None;
++    for attempt in 1..=TRIES {
++        let mut fut = Box::pin(harness_tools::contain::spawn_for_test(command(
++            &f, &conf, SECS,
++        )));
++        // The caller waits once, as `select!` does, and is not woken again
++        // before its cancel.
++        assert!(futures::poll!(&mut fut).is_pending());
++        let by = Instant::now() + Duration::from_millis(500);
++        let mut bwrap_pid = None;
++        let mut init = None;
++        while Instant::now() < by {
++            bwrap_pid = bwrap_pid.or_else(|| our_bwrap(SECS));
++            init = init.or_else(|| bwrap_pid.and_then(init_of));
++            if init.is_some_and(leads_a_session) {
++                break;
++            }
++            std::hint::spin_loop();
++        }
++        // The cancel wins: the spawn is no longer waited for.
++        drop(fut);
++        tokio::time::sleep(Duration::from_millis(400)).await;
++        let left = sleeps(SECS);
++        if let (Some(pid), Some(init)) = (left.first(), init) {
++            eprintln!(
++                "try {attempt}: the answer was dropped unread; bubblewrap {} is {}; its init \
++                 {init} and `sleep {SECS}` (pid {pid}) are still running",
++                bwrap_pid.unwrap(),
++                if bwrap_pid.is_some_and(alive) {
++                    "ALIVE"
++                } else {
++                    "dead"
++                },
++            );
++            survived = Some(attempt);
++            // Clean up: killing the init from outside ends its namespace.
++            if alive(init) && init_of(init) == Some(*pid) {
++                let _ = kill(Pid::from_raw(init), Signal::SIGKILL);
++            }
++            break;
++        }
++    }
++    // The gap: `Some`. Closed (the reply carries a guard whose drop calls
++    // `kill_namespace`), no try leaves a survivor.
++    assert!(
++        survived.is_some(),
++        "no namespace survived in {TRIES} tries: closed, or the race was not hit"
++    );
++}
++
++/// R-2. The two lines most nodes will print carry a run of spaces where a
++/// line continuation was lost: the warning below ABI 9 ("a command can
++/// <14 spaces> still start …") and the shared-`/proc` line.
++#[test]
++fn review_r2_the_warning_line_has_runs_of_spaces() {
++    use harness_tools::contain::Form;
++    use harness_tools::sandbox::contained_line;
++    let b = std::path::Path::new("/usr/bin/bwrap");
++    // The gap: `true`. Closed, no line has two spaces in a row.
++    assert!(
++        contained_line(Form::Full, 4, b)
++            .0
++            .contains("can              still")
++    );
++    assert!(
++        contained_line(Form::SharedProc, 9, b)
++            .0
++            .contains("but a              fresh")
++    );
++    assert!(!contained_line(Form::Full, 9, b).0.contains("  "));
++}
++
++/// R-3 (a note). From ABI 9 the line reads "nothing a command starts
++/// outlives it", and Landlock's pathname-socket right is part of every
++/// read-write grant: a service's socket inside a `[sandbox] write` entry
++/// (an operator who lists `/tmp`, as the README's "missing by default" list
++/// invites: X11, tmux, an ssh-agent) is reachable on every kernel, and
++/// `doctor` still says ok. One inside a read-only entry is refused.
++#[tokio::test]
++async fn review_r3_a_socket_inside_a_write_entry_is_reachable_on_every_kernel() {
++    use harness_tools::{Bash, Tool, ToolCtx};
++    let Some((f, _)) = fixture() else { return };
++    if !std::process::Command::new("python3")
++        .arg("-V")
++        .output()
++        .is_ok_and(|o| o.status.success())
++    {
++        eprintln!("SKIPPED: no python3");
++        return;
++    }
++    let root = f.ws.parent().unwrap().parent().unwrap();
++    let (rw, ro) = (root.join("w"), root.join("r"));
++    std::fs::create_dir_all(&rw).unwrap();
++    std::fs::create_dir_all(&ro).unwrap();
++    let _a = std::os::unix::net::UnixListener::bind(rw.join("s")).unwrap();
++    let _b = std::os::unix::net::UnixListener::bind(ro.join("s")).unwrap();
++    let settings = Settings {
++        write: vec![rw.clone()],
++        read: vec![ro.clone()],
++        ..Default::default()
++    };
++    let sb = Sandbox::new(
++        PathBuf::from(EXE),
++        &settings,
++        Some(f.data.join("sandbox-tmp")),
++        std::slice::from_ref(&f.data),
++    )
++    .unwrap();
++    let status = sb
++        .probe(&f.data.join("sandbox-tmp/probe2"), &f.data)
++        .unwrap();
++    let abi = harness_tools::sandbox::effective_abi(&status);
++    let Ok(sb) = bwrap::contained(sb, &f.data.join("sandbox-tmp/probe-contain2")) else {
++        return;
++    };
++    let mut ctx = ToolCtx::new(&f.ws);
++    ctx.protected = Arc::new(vec![f.data.clone()]);
++    ctx.sandbox = Confinement::Confined {
++        sandbox: Arc::new(sb),
++        tmp: None,
++    }
++    .for_session("s1");
++    let cmd = format!(
++        "cd {}; for d in w r; do python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX)\n\
++         try:\n    s.connect(sys.argv[1]+\"/s\"); print(sys.argv[1], \"unix-\"+\"connected\")\n\
++         except OSError as e: print(sys.argv[1], \"refused\", e)' $d; done",
++        root.display()
++    );
++    let out = Bash
++        .run(&ctx, serde_json::json!({ "command": cmd }))
++        .await
++        .output;
++    eprintln!("Landlock ABI {abi}: {out}");
++    assert!(out.contains("w unix-connected"), "{out}");
++    if abi >= 9 {
++        assert!(out.contains("r refused"), "{out}");
++    }
++}

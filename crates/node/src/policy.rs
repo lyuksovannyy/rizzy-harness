@@ -64,6 +64,13 @@ pub struct SandboxPolicy {
     pub read: Vec<PathBuf>,
     /// More read-write folders (caches: `~/.cache`, `~/.npm`, ...).
     pub write: Vec<PathBuf>,
+    /// `"auto"` (default: contain the agent's shell in bubblewrap where it
+    /// works, else run it with Landlock alone and say so), `"required"`
+    /// (refuse agentic sessions without it) or `"off"`.
+    pub contain: harness_tools::contain::ContainMode,
+    /// Where bubblewrap is, absolute; taken as given. Without it, the first
+    /// `bwrap` on `PATH` that this user cannot replace (owned by root).
+    pub bwrap: Option<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -99,6 +106,16 @@ impl SandboxPolicy {
             network: self.network,
             read: expand("read", &self.read)?,
             write: expand("write", &self.write)?,
+            contain: self.contain,
+            bwrap: match &self.bwrap {
+                Some(p) if !p.is_absolute() => {
+                    return Err(format!(
+                        "[sandbox] bwrap: {} must be an absolute path",
+                        p.display()
+                    ));
+                }
+                p => p.clone(),
+            },
         })
     }
 }

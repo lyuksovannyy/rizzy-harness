@@ -23,13 +23,42 @@ pub const MAX_TIMEOUT_MAX_S: u64 = 3600;
 /// Grace period between SIGTERM and SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
-/// SIGKILLs a process group when dropped while still armed.
+/// SIGKILLs a process group when dropped while still armed. A contained
+/// command needs none: its [`ShellChild::Contained`] guard kills the whole
+/// namespace when dropped.
 pub(crate) struct KillGroupOnDrop(pub(crate) Option<i32>);
 
 impl Drop for KillGroupOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0.take() {
             signal_group(pgid, Signal::SIGKILL);
+        }
+    }
+}
+
+/// A started shell command. A contained one is only ever held as
+/// [`crate::contain::ContainedChild`], whose drop kills its namespace through
+/// `kill_namespace` (review R-1).
+pub enum ShellChild {
+    Plain(tokio::process::Child),
+    Contained(crate::contain::ContainedChild),
+}
+
+impl std::ops::Deref for ShellChild {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Plain(c) => c,
+            Self::Contained(c) => c,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ShellChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Plain(c) => c,
+            Self::Contained(c) => c,
         }
     }
 }
@@ -151,8 +180,9 @@ impl Tool for Bash {
 
         // The allow-listed environment (node.toml `env_pass`), nothing else,
         // in the Landlock sandbox where the node has one (node.toml
-        // `[sandbox]`): read-write the session folder and its temp folder.
-        let mut cmd: Command = match ctx.sandbox.command(
+        // `[sandbox]`): read-write the session folder and its temp folder;
+        // inside the node's process containment where it has one (T.8a).
+        let (mut cmd, contained): (Command, bool) = match ctx.sandbox.shell(
             "bash".as_ref(),
             &["-c".as_ref(), command.as_ref()],
             &ctx.workspace,
@@ -173,15 +203,37 @@ impl Tool for Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        let mut child = match cmd.spawn() {
+        // The spawn of a contained command waits on the spawner thread: that
+        // wait is raced against the cancel and the timeout (review N-2). A
+        // child the spawner starts after this stopped waiting is killed there.
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let spawned = tokio::select! {
+            r = crate::sandbox::Confinement::spawn(cmd, contained) => r,
+            _ = ctx.cancel.cancelled() => {
+                return ToolOutcome {
+                    ok: false,
+                    output: "[cancelled before the command started]".into(),
+                    ..Default::default()
+                };
+            }
+            _ = &mut deadline => {
+                return ToolOutcome::err(format!(
+                    "the command did not start within {}s",
+                    timeout.as_secs()
+                ));
+            }
+        };
+        let mut child = match spawned {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
         };
         let pgid = child.id().map(|p| p as i32);
         // If this call is dropped before it reaped the group itself (the
         // agent loop abandons a tool that outlives a cancel), the whole
-        // group dies, not only the shell `kill_on_drop` covers.
-        let mut group = KillGroupOnDrop(pgid);
+        // group dies, not only the shell `kill_on_drop` covers. Contained,
+        // the child's own guard kills the namespace, its init first.
+        let mut group = KillGroupOnDrop(pgid.filter(|_| !contained));
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
         let out_task = tokio::spawn(pump(
@@ -212,8 +264,6 @@ impl Tool for Bash {
             }
         };
 
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
         let end = loop {
             tokio::select! {
                 Some((stream, s)) = rx.recv() => {
@@ -237,7 +287,28 @@ impl Tool for Bash {
             }
         };
 
-        if let Some(pgid) = pgid {
+        if let (Some(pgid), true) = (pgid, contained) {
+            // bubblewrap is the group leader and alone in its group; the
+            // command is in the session of the namespace's init. When bwrap
+            // has exited, its init is gone and the kernel has killed every
+            // process in the namespace: nothing is left to signal.
+            if matches!(end, End::Cancelled | End::TimedOut) {
+                // The graceful stop goes to the command's group (bwrap does
+                // not forward SIGTERM, and SIGTERM to bwrap itself would end
+                // the namespace at once); the namespace's init ignores it.
+                // Without the init's number (no `children` file), bwrap
+                // gets SIGTERM, which kills the namespace without a grace.
+                crate::contain::term_namespace_with(pgid, crate::contain::sandbox_init);
+                if tokio::time::timeout(TERM_GRACE, child.wait())
+                    .await
+                    .is_err()
+                {
+                    // The init first, then bubblewrap (review T8A-2).
+                    crate::contain::kill_namespace(pgid);
+                }
+                let _ = child.wait().await;
+            }
+        } else if let Some(pgid) = pgid {
             match end {
                 End::Exited(_) => {
                     // The leader exited; reap anything it left in the group so
@@ -803,36 +874,30 @@ mod tests {
         let _ = c.wait();
     }
 
-    /// KNOWN GAP (design note C.11, built by T.8): a child that called
+    /// RESIDUAL WITHOUT CONTAINMENT (PLAN.md T9): a child that called
     /// `setsid` is not in the process group the tool signals, so it
-    /// survives a cancel. Once a containment (cgroup, PID namespace or
-    /// `/proc` walk) exists, this assertion flips to `!alive`.
+    /// survives a cancel. These tests run the shell unconfined, as a node
+    /// without bubblewrap does; contained, it dies (`cli/tests/contain.rs`).
     #[tokio::test]
     async fn a_setsid_child_survives_cancel() {
         let pf = tempfile::tempdir().unwrap();
         let pidfile = pf.path().join("pid");
         let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_603));
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_603, Stop::Cancel).await;
-        assert!(
-            alive,
-            "the setsid child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): same as above, ended by the timeout.
+    /// RESIDUAL WITHOUT CONTAINMENT: same as above, ended by the timeout.
     #[tokio::test]
     async fn a_setsid_child_survives_timeout() {
         let pf = tempfile::tempdir().unwrap();
         let pidfile = pf.path().join("pid");
         let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_604));
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_604, Stop::Timeout).await;
-        assert!(
-            alive,
-            "the setsid child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): same as above, ended by dropping the call
+    /// RESIDUAL WITHOUT CONTAINMENT: same as above, ended by dropping the call
     /// future (`KillGroupOnDrop` path).
     #[tokio::test]
     async fn a_setsid_child_survives_a_dropped_call() {
@@ -840,13 +905,10 @@ mod tests {
         let pidfile = pf.path().join("pid");
         let cmd = format!("setsid {} & wait", recording_sleep(&pidfile, 987_605));
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_605, Stop::Drop).await;
-        assert!(
-            alive,
-            "the setsid child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): `setsid -f` (forks, parent exits at once).
+    /// RESIDUAL WITHOUT CONTAINMENT: `setsid -f` (forks, parent exits at once).
     #[tokio::test]
     async fn a_setsid_f_child_survives_cancel() {
         let pf = tempfile::tempdir().unwrap();
@@ -856,13 +918,10 @@ mod tests {
             recording_sleep(&pidfile, 987_606)
         );
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_606, Stop::Cancel).await;
-        assert!(
-            alive,
-            "the setsid -f child died: the gap is closed, flip this test"
-        );
+        assert!(alive, "the setsid -f child died: update PLAN.md T9");
     }
 
-    /// KNOWN GAP (C.11 / T.8): a classic double fork (subshell in the
+    /// RESIDUAL WITHOUT CONTAINMENT: a classic double fork (subshell in the
     /// background, then `setsid`), the shape of a daemon.
     #[tokio::test]
     async fn a_double_forked_setsid_daemon_survives_cancel() {
@@ -873,7 +932,7 @@ mod tests {
             recording_sleep(&pidfile, 987_607)
         );
         let (_r, alive) = stop_and_look(cmd, &pidfile, 987_607, Stop::Cancel).await;
-        assert!(alive, "the daemon died: the gap is closed, flip this test");
+        assert!(alive, "the daemon died: update PLAN.md T9");
     }
 
     /// Control: a double fork with `nohup` but without `setsid` is still in
@@ -903,9 +962,9 @@ mod tests {
     /// session actor or a restart: only that nothing in `bash.rs` can clean
     /// up after a SIGKILL of its process.
     ///
-    /// KNOWN GAP (C.11 / T.8): the ordinary child survives. A containment
-    /// that dies with the node (a cgroup, or a PID namespace whose init is
-    /// the node's helper) would flip this to `!alive`.
+    /// RESIDUAL WITHOUT CONTAINMENT (PLAN.md T9): the ordinary child
+    /// survives. Contained, it dies with the node
+    /// (`cli/tests/contain.rs`, `detached_children_end_when_the_node_is_killed`).
     #[tokio::test]
     async fn a_command_survives_sigkill_of_its_node() {
         const SECS: u32 = 987_609;
@@ -927,10 +986,7 @@ mod tests {
         let _ = helper.wait();
         tokio::time::sleep(Duration::from_secs(2)).await;
         let alive = is_our_sleep(reaper.pid, SECS);
-        assert!(
-            alive,
-            "the command died with its node: the gap is closed, flip this test"
-        );
+        assert!(alive, "the command died with its node: update PLAN.md T9");
     }
 
     /// Not a test on its own: the body of the helper process above. Without

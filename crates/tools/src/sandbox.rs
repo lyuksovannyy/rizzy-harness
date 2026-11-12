@@ -91,6 +91,12 @@ pub struct Settings {
     pub network: Network,
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    /// `[sandbox] contain`: the agent shell's process containment (T.8a).
+    pub contain: crate::contain::ContainMode,
+    /// Where bubblewrap is (`[sandbox] bwrap`, absolute, taken as given);
+    /// `None`: the first `bwrap` on `PATH` the node's user cannot replace,
+    /// looked up at start.
+    pub bwrap: Option<PathBuf>,
 }
 
 /// A working sandbox: the wrapper binary and the node-wide rules.
@@ -107,6 +113,10 @@ pub struct Sandbox {
     /// Per-session temp directories live under it (inside the data dir).
     tmp_root: Option<PathBuf>,
     protected: Vec<PathBuf>,
+    /// The agent shell's containment, when the node has one (set once at
+    /// start, from node.toml and the probe; nothing per session or per
+    /// call can change it).
+    contain: Option<crate::contain::Contain>,
 }
 
 /// Lexically normalized absolute path (`.` and `..` folded).
@@ -338,16 +348,38 @@ impl Sandbox {
             best_effort: settings.mode == Mode::BestEffort,
             tmp_root,
             protected: protected.to_vec(),
+            contain: None,
         })
+    }
+
+    /// This sandbox with the agent's shell contained by `c` (bubblewrap).
+    pub fn with_containment(mut self, c: crate::contain::Contain) -> Self {
+        self.contain = Some(c);
+        self
+    }
+
+    /// The agent shell's containment, if any.
+    pub fn containment(&self) -> Option<&crate::contain::Contain> {
+        self.contain.as_ref()
     }
 
     pub fn network(&self) -> Network {
         self.network
     }
 
-    /// The wrapper's command line up to and including `--`.
-    fn wrapper(&self, rw: &[Grant], ro: &[Grant], status: bool) -> std::process::Command {
-        let mut c = std::process::Command::new(&self.exe);
+    /// The wrapper's command line up to and including `--`; with
+    /// `contain`, inside bubblewrap started in the given folder.
+    fn wrapper(
+        &self,
+        rw: &[Grant],
+        ro: &[Grant],
+        status: bool,
+        contain: Option<(&crate::contain::Contain, &Path)>,
+    ) -> std::process::Command {
+        let mut c = match contain {
+            Some((b, cwd)) => b.command(&self.exe, cwd),
+            None => std::process::Command::new(&self.exe),
+        };
         c.arg(SUBCOMMAND);
         if self.best_effort {
             c.arg("--best-effort");
@@ -426,7 +458,12 @@ impl Sandbox {
         let canary = canary_dir.join("sandbox-canary");
         std::fs::write(&canary, "the sandbox must not read this\n")
             .map_err(|e| format!("{}: {e}", canary.display()))?;
-        let mut c = self.wrapper(&[Grant::made(scratch, "the self-test folder")?], &[], true);
+        let mut c = self.wrapper(
+            &[Grant::made(scratch, "the self-test folder")?],
+            &[],
+            true,
+            None,
+        );
         c.args([
             "sh",
             "-c",
@@ -461,6 +498,46 @@ impl Sandbox {
             )),
             (code, _) => Err(format!(
                 "the sandbox self-test failed (exit {code:?}): {}",
+                stderr.trim()
+            )),
+        }
+    }
+
+    /// Run a fixed check through bubblewrap and the wrapper, as a shell
+    /// command runs: the command must be in a PID namespace of its own
+    /// and, for [`crate::contain::Form::Full`], see its own `/proc`.
+    pub fn probe_containment(
+        &self,
+        contain: &crate::contain::Contain,
+        scratch: &Path,
+    ) -> Result<(), String> {
+        std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let ok = scratch.join("granted");
+        std::fs::write(&ok, "ok").map_err(|e| format!("{}: {e}", ok.display()))?;
+        let full = contain.form() == crate::contain::Form::Full;
+        let mut c = self.wrapper(
+            &[Grant::made(scratch, "the self-test folder")?],
+            &[],
+            false,
+            Some((contain, scratch)),
+        );
+        c.args(["sh", "-c", &crate::contain::probe_script(full), "sh"])
+            .arg(&ok)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .current_dir(scratch)
+            .stdin(std::process::Stdio::null());
+        let out = c.output();
+        let _ = std::fs::remove_dir_all(scratch);
+        let out = out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match out.status.code() {
+            Some(0) => Ok(()),
+            Some(4) => Err("the command was not in a PID namespace of its own".into()),
+            Some(5) => Err("/proc is not the namespace's own".into()),
+            code => Err(format!(
+                "{} failed (exit {code:?}): {}",
+                contain.bwrap().display(),
                 stderr.trim()
             )),
         }
@@ -526,6 +603,56 @@ impl Confinement {
         protected: &[PathBuf],
         grants: Grants,
     ) -> Result<tokio::process::Command, String> {
+        self.build(program, args, workspace, pin, env, protected, grants, false)
+            .map(|(c, _)| c)
+    }
+
+    /// The agent's shell: as [`Self::command`], inside the node's process
+    /// containment when it has one (T.8a). Returns whether it is contained;
+    /// a contained command must be started with [`Self::spawn`]. Whether
+    /// there is a containment is the node's alone: nothing a call or a
+    /// session passes reaches this decision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shell(
+        &self,
+        program: &OsStr,
+        args: &[&OsStr],
+        workspace: &Path,
+        pin: Option<&harness_core::folder::FolderPin>,
+        env: &crate::ToolEnv,
+        protected: &[PathBuf],
+        grants: Grants,
+    ) -> Result<(tokio::process::Command, bool), String> {
+        self.build(program, args, workspace, pin, env, protected, grants, true)
+    }
+
+    /// Start a command from [`Self::shell`]: a contained one from the
+    /// process's spawner thread (`crate::contain::spawn`).
+    pub async fn spawn(
+        mut cmd: tokio::process::Command,
+        contained: bool,
+    ) -> std::io::Result<crate::bash::ShellChild> {
+        if contained {
+            crate::contain::spawn(cmd)
+                .await
+                .map(crate::bash::ShellChild::Contained)
+        } else {
+            cmd.spawn().map(crate::bash::ShellChild::Plain)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        &self,
+        program: &OsStr,
+        args: &[&OsStr],
+        workspace: &Path,
+        pin: Option<&harness_core::folder::FolderPin>,
+        env: &crate::ToolEnv,
+        protected: &[PathBuf],
+        grants: Grants,
+        shell: bool,
+    ) -> Result<(tokio::process::Command, bool), String> {
         if let Self::Refused(why) = self {
             return Err(why.to_string());
         }
@@ -535,6 +662,7 @@ impl Confinement {
                 .canonicalize()
                 .map_err(|e| format!("workspace {}: {e}", workspace.display()))?,
         };
+        let mut contained = false;
         let std_cmd = match self {
             Self::Refused(why) => return Err(why.to_string()),
             Self::Unconfined => {
@@ -627,7 +755,9 @@ impl Confinement {
                     make_private_dir(t)?;
                     rw.push(Grant::made(t, "the session's temp folder")?);
                 }
-                let mut c = sandbox.wrapper(&rw, &ro, false);
+                let contain = sandbox.contain.as_ref().filter(|_| shell);
+                contained = contain.is_some();
+                let mut c = sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())));
                 c.arg(program);
                 env.apply_std(&mut c);
                 if let Some(t) = tmp {
@@ -638,7 +768,7 @@ impl Confinement {
         };
         let mut c = tokio::process::Command::from(std_cmd);
         c.args(args).current_dir(&ws);
-        Ok(c)
+        Ok((c, contained))
     }
 }
 
@@ -654,15 +784,96 @@ fn make_private_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
+/// How the containment line is marked in `doctor` and the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainLevel {
+    /// Contained, and the claim holds in full.
+    Ok,
+    /// Contained with a named gap, or not contained (`auto`, `off`).
+    Warn,
+    /// Agentic sessions are refused for it (`contain = "required"`).
+    Refused,
+}
+
+/// The effective Landlock ABI in the wrapper's status line
+/// (`effective_abi: V9` gives 9), 0 when there is none.
+pub fn effective_abi(status: &str) -> u32 {
+    status
+        .split("effective_abi: V")
+        .nth(1)
+        .unwrap_or("0")
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// The Landlock ABI from which a command can no longer reach a service of
+/// the node user over a pathname Unix socket (the session bus), and the one
+/// from which abstract sockets are closed (review T8A-1).
+pub const ABI_PATHNAME_SOCKETS: u32 = 9;
+pub const ABI_ABSTRACT_SOCKETS: u32 = 6;
+
+/// What the containment line says for a working containment of `form` on
+/// a kernel with Landlock ABI `abi` (review T8A-1). Below ABI 9 it is a
+/// warning that names the hole: bubblewrap ends every process in its
+/// namespace, but a command can ask a service outside it to start one.
+pub fn contained_line(
+    form: crate::contain::Form,
+    abi: u32,
+    bwrap: &Path,
+) -> (String, ContainLevel) {
+    let what = match form {
+        crate::contain::Form::Full => format!(
+            "contained ({}: a PID namespace and /proc of its own per command",
+            bwrap.display()
+        ),
+        crate::contain::Form::SharedProc => format!(
+            "contained without a /proc of its own ({}: a PID namespace per command, but a \
+             fresh /proc could not be mounted, so /proc lists this machine's processes",
+            bwrap.display()
+        ),
+    };
+    if abi >= ABI_PATHNAME_SOCKETS {
+        return (
+            format!("{what}; nothing a command starts outlives it)"),
+            ContainLevel::Ok,
+        );
+    }
+    let abstract_too = if abi < ABI_ABSTRACT_SOCKETS {
+        ", or over an abstract socket (X11 and others)"
+    } else {
+        ""
+    };
+    (
+        format!(
+            "{what}) WITH A GAP: on this kernel (Landlock ABI {abi}, below 9) a command can \
+             still start a process outside the containment, which then outlives it and runs \
+             without the sandbox, by asking a service of this user over a Unix socket (the \
+             session bus at /run/user/<uid>/bus, a container runtime's socket){abstract_too}. \
+             Closed by Linux 7.1 or newer (Landlock ABI 9), or by the planned file view (T.8c); \
+             README, \"The shell sandbox\""
+        ),
+        ContainLevel::Warn,
+    )
+}
+
 /// The outcome of [`start`].
 #[derive(Debug)]
 pub struct Started {
     pub confinement: Confinement,
     /// Set when agentic sessions must be refused (mode `required`, sandbox
-    /// not enforced); the text names the node.toml setting.
+    /// not enforced; or `contain = "required"` and no containment); the
+    /// text names the node.toml setting.
     pub refusal: Option<String>,
     /// One line for the log and `doctor`.
     pub summary: String,
+    /// One line on the shell's process containment (bubblewrap), for the
+    /// log and `doctor`.
+    pub contain_summary: String,
+    /// How `doctor` and the log mark that line.
+    pub contain_level: ContainLevel,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
 }
@@ -670,9 +881,11 @@ pub struct Started {
 /// Set up the node's sandbox once at start: resolve the wrapper binary
 /// (`current_exe`, canonical; a binary replaced by an upgrade is picked up
 /// at the same path, a deleted one makes every command fail closed), build
-/// the rules and run the self-test. `Err` is a configuration error (a
+/// the rules and run the self-test; then find bubblewrap and probe the
+/// shell's containment (T.8a). `Err` is a configuration error (a
 /// `[sandbox]` entry that would expose the data directory or a protected
-/// folder, or that holds a workspace root).
+/// folder, or that holds a workspace root; `contain = "required"` with
+/// `mode = "off"`).
 pub fn start(
     settings: &Settings,
     data_dir: &Path,
@@ -680,14 +893,21 @@ pub fn start(
     workspace_roots: &[PathBuf],
     node_toml: &Path,
 ) -> Result<Started, String> {
+    use crate::contain::ContainMode;
     if !data_dir.is_absolute() {
         return Err(format!(
             "the data directory {} is a relative path; the sandbox needs it absolute",
             data_dir.display()
         ));
     }
-    let tmp_root = data_dir.join("sandbox-tmp");
     if settings.mode == Mode::Off {
+        if settings.contain == ContainMode::Required {
+            return Err(format!(
+                "{}: [sandbox] contain = \"required\" needs the sandbox; it is \
+                 mode = \"off\" (the containment wraps the sandbox's wrapper)",
+                node_toml.display()
+            ));
+        }
         return Ok(Started {
             confinement: Confinement::Unconfined,
             refusal: None,
@@ -696,6 +916,10 @@ pub fn start(
                  of this OS user",
                 node_toml.display()
             ),
+            contain_summary: "OFF ([sandbox] mode = \"off\"): processes a command leaves \
+                              behind can outlive it"
+                .into(),
+            contain_level: ContainLevel::Warn,
             tmp_root: None,
         });
     }
@@ -703,27 +927,228 @@ pub fn start(
     let exe = std::env::current_exe()
         .and_then(|e| e.canonicalize())
         .map_err(|e| format!("cannot find the harness binary for {SUBCOMMAND}: {e}"));
-    let sandbox = match exe {
-        Ok(exe) => Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?,
-        Err(e) => return Ok(not_enforced(settings, e, node_toml, None)),
-    };
+    match exe {
+        Ok(exe) => start_with_exe(exe, settings, data_dir, protected, node_toml),
+        Err(e) => Ok(not_enforced(settings, e, node_toml, None)),
+    }
+}
+
+/// [`start`] with the wrapper binary given (`start` passes its own; a test
+/// passes the harness binary, since its own executable is the test).
+/// The caller has checked the `[sandbox]` entries against the roots.
+pub fn start_with_exe(
+    exe: PathBuf,
+    settings: &Settings,
+    data_dir: &Path,
+    protected: &[PathBuf],
+    node_toml: &Path,
+) -> Result<Started, String> {
+    let tmp_root = data_dir.join("sandbox-tmp");
+    let sandbox = Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?;
     let scratch = tmp_root.join(format!("probe-{}", std::process::id()));
     let canary_dir = protected.first().map_or(data_dir, |p| p.as_path());
+    let landlock = sandbox.probe(&scratch, canary_dir);
+    if let (Err(e), Mode::Required) = (&landlock, settings.mode) {
+        return Ok(not_enforced(
+            settings,
+            e.clone(),
+            node_toml,
+            Some(Arc::new(sandbox)),
+        ));
+    }
+    let abi = landlock.as_deref().map_or(0, effective_abi);
+    let (sandbox, contain) = containment(
+        sandbox,
+        settings,
+        abi,
+        &tmp_root.join(format!("probe-contain-{}", std::process::id())),
+        node_toml,
+    );
     let sandbox = Arc::new(sandbox);
-    match sandbox.probe(&scratch, canary_dir) {
-        Ok(status) if settings.mode == Mode::Required => Ok(Started {
-            confinement: Confinement::Confined { sandbox, tmp: None },
+    let mut started = match landlock {
+        Ok(status) if settings.mode == Mode::Required => Started {
+            confinement: Confinement::Confined {
+                sandbox: sandbox.clone(),
+                tmp: None,
+            },
             refusal: None,
             summary: format!("enforced ({status})"),
+            contain_summary: String::new(),
+            contain_level: ContainLevel::Ok,
             tmp_root: Some(tmp_root),
-        }),
-        Ok(status) => Ok(Started {
-            confinement: Confinement::Confined { sandbox, tmp: None },
+        },
+        Ok(status) => Started {
+            confinement: Confinement::Confined {
+                sandbox: sandbox.clone(),
+                tmp: None,
+            },
             refusal: None,
             summary: format!("best-effort ({status}): only what the kernel enforces"),
+            contain_summary: String::new(),
+            contain_level: ContainLevel::Ok,
             tmp_root: Some(tmp_root),
-        }),
-        Err(e) => Ok(not_enforced(settings, e, node_toml, Some(sandbox))),
+        },
+        Err(e) => not_enforced(settings, e, node_toml, Some(sandbox.clone())),
+    };
+    match contain {
+        Contained::Yes(s, level) => {
+            started.contain_summary = s;
+            started.contain_level = level;
+            // Review R-3: a read-write grant carries Landlock's socket right,
+            // so a `write` entry that holds the usual socket folders hands
+            // the command other programs' sockets on every kernel.
+            let risky = socket_write_entries(settings);
+            if !risky.is_empty() {
+                let list: Vec<String> = risky.iter().map(|p| p.display().to_string()).collect();
+                started.contain_summary.push_str(&format!(
+                    "; WARNING: the [sandbox] write entry {} holds sockets of other programs \
+                     (/tmp: tmux, X11; /run/user/<uid>: the session bus), through which a \
+                     command can start a process outside the containment",
+                    list.join(", ")
+                ));
+                started.contain_level = ContainLevel::Warn;
+            }
+        }
+        Contained::No(s) => {
+            started.contain_summary = s;
+            started.contain_level = ContainLevel::Warn;
+        }
+        Contained::Refuse(msg) => {
+            started.contain_level = ContainLevel::Refused;
+            started.contain_summary = format!("REFUSING agentic sessions: {msg}");
+            started.confinement = Confinement::Refused(msg.clone().into());
+            started.refusal = Some(msg);
+        }
+    }
+    Ok(started)
+}
+
+/// A working containment of `form` under `mode` on a kernel with
+/// Landlock ABI `abi`: its line, or the refusal. `required` means the
+/// guarantee holds; below ABI 9 it does not (T8A-1), so `required` refuses
+/// there, and `auto` contains anyway and warns.
+fn decide(
+    form: crate::contain::Form,
+    abi: u32,
+    bwrap: &Path,
+    mode: crate::contain::ContainMode,
+    node_toml: &Path,
+) -> Result<(String, ContainLevel), String> {
+    let (line, level) = contained_line(form, abi, bwrap);
+    if level != ContainLevel::Ok && mode == crate::contain::ContainMode::Required {
+        return Err(format!(
+            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {} \
+             promises that nothing a command starts outlives it, and here it does not hold: \
+             {line}. Set contain = \"auto\" to run contained with that gap",
+            node_toml.display()
+        ));
+    }
+    Ok((line, level))
+}
+
+/// `[sandbox] write` entries that are, or hold, `/tmp` or this user's
+/// `/run/user/<uid>`, where other programs keep their sockets (review R-3).
+/// Only those two: a socket elsewhere in a write entry is not looked for.
+fn socket_write_entries(settings: &Settings) -> Vec<PathBuf> {
+    let uid = nix::unistd::getuid();
+    let risky = [
+        PathBuf::from("/tmp"),
+        PathBuf::from(format!("/run/user/{uid}")),
+    ];
+    settings
+        .write
+        .iter()
+        .filter(|w| {
+            let w = real(w);
+            risky
+                .iter()
+                .any(|r| r.starts_with(&w) || real(r).starts_with(&w))
+        })
+        .cloned()
+        .collect()
+}
+
+enum Contained {
+    Yes(String, ContainLevel),
+    No(String),
+    Refuse(String),
+}
+
+/// Find bubblewrap and probe its two forms, the full one first (T.8a).
+fn containment(
+    sandbox: Sandbox,
+    settings: &Settings,
+    abi: u32,
+    scratch: &Path,
+    node_toml: &Path,
+) -> (Sandbox, Contained) {
+    use crate::contain::{Contain, ContainMode, Form};
+    if settings.contain == ContainMode::Off {
+        return (
+            sandbox,
+            Contained::No(format!(
+                "OFF ([sandbox] contain = \"off\" in {}): processes a command leaves behind \
+                 can outlive it, and it sees every process of this machine in /proc",
+                node_toml.display()
+            )),
+        );
+    }
+    // node.toml's `[sandbox] bwrap` is the owner's choice and taken as it
+    // is; otherwise the first `bwrap` on PATH this user cannot replace.
+    let found = match &settings.bwrap {
+        Some(p) if p.is_absolute() && p.is_file() => p
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", p.display())),
+        Some(p) => Err(format!("bubblewrap not found at {}", p.display())),
+        None => crate::contain::find_bwrap(),
+    };
+    let why = match found {
+        Err(e) => e,
+        Ok(bwrap) => {
+            let full = Contain::new(bwrap.clone(), Form::Full);
+            let shared = Contain::new(bwrap.clone(), Form::SharedProc);
+            let found = match sandbox.probe_containment(&full, scratch) {
+                Ok(()) => Ok((full, None)),
+                Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
+                    Ok(()) => Ok((shared, Some(full_err))),
+                    Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
+                },
+            };
+            match found {
+                Ok((c, proc_err)) => {
+                    return match decide(c.form(), abi, &bwrap, settings.contain, node_toml) {
+                        Ok((mut line, level)) => {
+                            // Why the fresh /proc failed (the shared form).
+                            if let Some(e) = proc_err {
+                                line.push_str(&format!("; a fresh /proc failed: {e}"));
+                            }
+                            (sandbox.with_containment(c), Contained::Yes(line, level))
+                        }
+                        Err(msg) => (sandbox, Contained::Refuse(msg)),
+                    };
+                }
+                Err(e) => e,
+            }
+        }
+    };
+    let advice = "install bubblewrap and allow unprivileged user namespaces (README, \
+                  \"The shell sandbox\")";
+    match settings.contain {
+        ContainMode::Required => (
+            sandbox,
+            Contained::Refuse(format!(
+                "this node refuses agentic sessions: [sandbox] contain = \"required\" in {} and \
+                 the shell cannot be contained here ({why}); {advice}, or set contain = \"auto\"",
+                node_toml.display()
+            )),
+        ),
+        _ => (
+            sandbox,
+            Contained::No(format!(
+                "NOT CONTAINED, running with Landlock alone ([sandbox] contain = \"auto\"): \
+                 {why}. Processes a command leaves behind can outlive it; {advice}"
+            )),
+        ),
     }
 }
 
@@ -741,6 +1166,8 @@ fn not_enforced(
             summary: format!(
                 "NOT ENFORCED, running anyway ([sandbox] mode = \"best-effort\"): {why}"
             ),
+            contain_summary: String::new(),
+            contain_level: ContainLevel::Ok,
             tmp_root,
         },
         _ => {
@@ -760,6 +1187,8 @@ fn not_enforced(
                 confinement: Confinement::Refused(msg.clone().into()),
                 refusal: Some(msg.clone()),
                 summary: format!("REFUSING agentic sessions: {msg}"),
+                contain_summary: "not probed: the sandbox does not work".into(),
+                contain_level: ContainLevel::Warn,
                 tmp_root,
             }
         }
@@ -1124,7 +1553,7 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false)
+        sb.wrapper(&[], &[], false, None)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -1268,6 +1697,151 @@ mod tests {
                 .unwrap_err();
             assert!(e.contains("relative"), "{e}");
         }
+    }
+
+    /// `contain = "required"` where bubblewrap is missing: agentic sessions
+    /// are refused, naming the setting, and no shell command is built.
+    /// `auto` runs as before (Landlock alone) and says so. Simulated with a
+    /// bubblewrap path that does not exist (tests cannot change `PATH`).
+    #[test]
+    fn contain_required_without_bubblewrap_refuses_and_auto_falls_back() {
+        use crate::contain::ContainMode;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let data = root.join("data");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let missing = data.join("no-such/bwrap");
+        let settings = |contain| Settings {
+            // `best-effort`: the test binary is no sandbox wrapper, so the
+            // Landlock probe fails; that path still probes the containment.
+            mode: Mode::BestEffort,
+            contain,
+            bwrap: Some(missing.clone()),
+            ..Default::default()
+        };
+        let toml = data.join("node.toml");
+        let prot = std::slice::from_ref(&data);
+        let s = start(&settings(ContainMode::Required), &data, prot, &[], &toml).unwrap();
+        let why = s.refusal.expect("required without bubblewrap must refuse");
+        assert!(why.contains("contain = \"required\""), "{why}");
+        assert!(why.contains("bubblewrap not found"), "{why}");
+        let shell = |c: &Confinement| {
+            c.shell(
+                OsStr::new("bash"),
+                &[],
+                &ws,
+                None,
+                &Default::default(),
+                &[],
+                Grants::default(),
+            )
+        };
+        assert_eq!(shell(&s.confinement).unwrap_err(), why);
+
+        let s = start(&settings(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
+        assert!(s.refusal.is_none(), "{:?}", s.refusal);
+        assert_eq!(s.contain_level, ContainLevel::Warn);
+        assert!(
+            s.contain_summary.contains("NOT CONTAINED"),
+            "{}",
+            s.contain_summary
+        );
+        let (_, contained) = shell(&s.confinement).unwrap();
+        assert!(!contained);
+
+        // `off` with the sandbox off is fine; `required` with it is a
+        // configuration error.
+        let off = |contain| Settings {
+            mode: Mode::Off,
+            contain,
+            ..Default::default()
+        };
+        assert!(start(&off(ContainMode::Auto), &data, prot, &[], &toml).is_ok());
+        let e = start(&off(ContainMode::Required), &data, prot, &[], &toml).unwrap_err();
+        assert!(e.contains("contain = \"required\""), "{e}");
+    }
+
+    /// T8A-1: the line depends on the effective Landlock ABI. From ABI 9
+    /// the claim is made in full; below, it is a warning that names the
+    /// session bus (and below ABI 6 abstract sockets), and `required`
+    /// refuses. The shared-`/proc` form says so in every case.
+    #[test]
+    fn the_containment_line_depends_on_the_landlock_abi() {
+        use crate::contain::{ContainMode, Form};
+        let b = Path::new("/usr/bin/bwrap");
+        let toml = Path::new("/n/node.toml");
+        let (line, level) = contained_line(Form::Full, 9, b);
+        assert_eq!(level, ContainLevel::Ok);
+        assert!(
+            line.contains("nothing a command starts outlives it"),
+            "{line}"
+        );
+        assert!(!line.contains("GAP"), "{line}");
+        for abi in [0, 4, 6, 8] {
+            let (line, level) = contained_line(Form::Full, abi, b);
+            assert_eq!(level, ContainLevel::Warn, "{abi}");
+            assert!(
+                line.contains("WITH A GAP") && line.contains("session bus"),
+                "{line}"
+            );
+            assert!(
+                !line.contains("nothing a command starts outlives it"),
+                "{line}"
+            );
+            assert_eq!(line.contains("abstract socket"), abi < 6, "{abi}: {line}");
+            let e = decide(Form::Full, abi, b, ContainMode::Required, toml).unwrap_err();
+            assert!(
+                e.contains("contain = \"required\"") && e.contains("auto"),
+                "{e}"
+            );
+            assert!(decide(Form::Full, abi, b, ContainMode::Auto, toml).is_ok());
+        }
+        let (line, level) = contained_line(Form::SharedProc, 9, b);
+        assert_eq!(level, ContainLevel::Ok);
+        assert!(line.contains("without a /proc of its own"), "{line}");
+        let (_, level) = contained_line(Form::SharedProc, 4, b);
+        assert_eq!(level, ContainLevel::Warn);
+        assert!(decide(Form::Full, 9, b, ContainMode::Required, toml).is_ok());
+        assert_eq!(
+            effective_abi("landlock Available { effective_abi: V9, kernel_abi: Some(10) }"),
+            9
+        );
+        assert_eq!(effective_abi("landlock unavailable"), 0);
+        // Review R-2: a lost line continuation left runs of spaces; every
+        // line, in every form and range, is single-spaced.
+        for form in [Form::Full, Form::SharedProc] {
+            for abi in [0, 4, 6, 8, 9, 10] {
+                let (line, _) = contained_line(form, abi, b);
+                assert!(!line.contains("  "), "{form:?} {abi}: {line}");
+                if let Err(e) = decide(form, abi, b, ContainMode::Required, toml) {
+                    assert!(!e.contains("  "), "{form:?} {abi}: {e}");
+                }
+            }
+        }
+    }
+
+    /// Review R-3: a `write` entry that is or holds `/tmp` or this user's
+    /// runtime folder makes `doctor` warn; other entries do not.
+    #[test]
+    fn a_write_entry_with_other_programs_sockets_is_named() {
+        let uid = nix::unistd::getuid();
+        let run = PathBuf::from(format!("/run/user/{uid}"));
+        let s = Settings {
+            write: vec![
+                "/tmp".into(),
+                "/run/user".into(),
+                run.join("gcr"),
+                "/home/someone/.cache".into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            socket_write_entries(&s),
+            vec![PathBuf::from("/tmp"), PathBuf::from("/run/user")]
+        );
+        assert!(socket_write_entries(&Settings::default()).is_empty());
     }
 
     #[test]
