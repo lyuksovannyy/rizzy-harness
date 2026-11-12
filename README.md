@@ -661,6 +661,7 @@ network = "on"                       # on | off (off: no TCP connect or bind)
 read = []                            # more read-only folders, e.g. "~/.cargo"
 write = []                           # more read-write folders, e.g. "~/.cache"
 contain = "auto"                     # auto | required | off: run the shell in bubblewrap (see below)
+# bwrap = "/usr/bin/bwrap"           # which bubblewrap; default: the first root-owned one on PATH
 ```
 
 **The shell sandbox.** `bash` (and graphify) run through `rizzy-harness
@@ -741,8 +742,14 @@ user without a login session (no session bus, no `docker` group, as
 - The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
   without it.
 
-It needs the `bubblewrap` package (`bwrap` on the node's `PATH`) and
-unprivileged user namespaces. **Ubuntu 24.04 and later** deny those to
+It needs the `bubblewrap` package and unprivileged user namespaces. The
+node takes the first `bwrap` on its `PATH` that its own user cannot replace
+(the file and every folder above it owned by root and not writable by
+group or others; a sticky folder such as `/nix/store` is fine), resolved
+once at start and named in the log and in `doctor`; one an agent could
+have planted (a project's `bin` ahead of `/usr/bin`) is skipped and named.
+To use another, give its absolute path: `[sandbox] bwrap =
+"/opt/bubblewrap/bin/bwrap"`, taken as given. **Ubuntu 24.04 and later** deny those to
 programs without an AppArmor profile: allow them with `sudo sysctl -w
 kernel.apparmor_restrict_unprivileged_userns=0` (and a file in
 `/etc/sysctl.d/` to keep it), or give `bwrap` an AppArmor profile that

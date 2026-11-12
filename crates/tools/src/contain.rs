@@ -114,20 +114,73 @@ impl Contain {
 
 /// Where bubblewrap is: `bwrap` on the node's `PATH`, canonical. Resolved
 /// once at start, like the harness binary itself.
+///
+/// bubblewrap is the one program on the command path that runs outside
+/// the sandbox, at every start and for every call, so only one the node's
+/// own user cannot replace is taken (review N-1): the file and every folder
+/// above it owned by root, none writable by group or others (a folder with
+/// the sticky bit, as `/nix/store`, is accepted: nobody but root can replace
+/// root's entries there), and the file executable. A `bwrap` that fails
+/// that (one an agent planted in a project's `bin` ahead of `/usr/bin`) is
+/// skipped and named. Elsewhere, name it in node.toml: `[sandbox] bwrap`.
 pub fn find_bwrap() -> Result<PathBuf, String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path) {
+    find_bwrap_in(&std::env::var_os("PATH").unwrap_or_default())
+}
+
+pub(crate) fn find_bwrap_in(path: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    let mut skipped = Vec::new();
+    for dir in std::env::split_paths(path) {
         if !dir.is_absolute() {
             continue;
         }
         let p = dir.join("bwrap");
-        if p.is_file() {
-            return p
-                .canonicalize()
-                .map_err(|e| format!("{}: {e}", p.display()));
+        if !p.is_file() {
+            continue;
+        }
+        let real = match p.canonicalize() {
+            Ok(r) => r,
+            Err(e) => {
+                skipped.push(format!("{}: {e}", p.display()));
+                continue;
+            }
+        };
+        match trusted(&real) {
+            Ok(()) => return Ok(real),
+            Err(why) => skipped.push(format!("{} ({why})", p.display())),
         }
     }
-    Err("bubblewrap (`bwrap`) is not installed (not found on PATH)".into())
+    if skipped.is_empty() {
+        Err("bubblewrap (`bwrap`) is not installed (not found on PATH)".into())
+    } else {
+        Err(format!(
+            "no bubblewrap on PATH that this user cannot replace; skipped: {}. Name one in \
+             node.toml ([sandbox] bwrap = \"/absolute/path\") to use it anyway",
+            skipped.join("; ")
+        ))
+    }
+}
+
+/// Whether `file` (a canonical path) and every folder above it are out of
+/// reach of anyone but root (see [`find_bwrap`]). ACLs are not read.
+pub(crate) fn trusted(file: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(file).map_err(|e| e.to_string())?;
+    if md.mode() & 0o111 == 0 {
+        return Err("not executable".into());
+    }
+    let mut at = Some(file);
+    while let Some(p) = at {
+        let md = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        if md.uid() != 0 {
+            return Err(format!("{} is not owned by root", p.display()));
+        }
+        let sticky_dir = md.is_dir() && md.mode() & 0o1000 != 0;
+        if md.mode() & 0o022 != 0 && !sticky_dir {
+            return Err(format!("{} is writable by group or others", p.display()));
+        }
+        at = p.parent();
+    }
+    Ok(())
 }
 
 /// The script the probe runs inside the namespace: `$$` is 2 only in a new
@@ -332,6 +385,31 @@ mod tests {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
+        }
+    }
+
+    /// N-1: a `bwrap` the node's user could replace is skipped, and the
+    /// next one on `PATH` is taken; one owned by root is.
+    #[test]
+    fn a_bwrap_this_user_can_replace_is_not_taken() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().canonicalize().unwrap().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let planted = bin.join("bwrap");
+        std::fs::write(&planted, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted(&planted).is_err());
+        let only = find_bwrap_in(bin.as_os_str()).unwrap_err();
+        assert!(
+            only.contains("skipped") && only.contains("[sandbox] bwrap"),
+            "{only}"
+        );
+        if Path::new("/usr/bin/bwrap").is_file() {
+            let mut path = std::ffi::OsString::from(&bin);
+            path.push(":/usr/bin");
+            let found = find_bwrap_in(&path).unwrap();
+            assert_eq!(found, Path::new("/usr/bin/bwrap").canonicalize().unwrap());
         }
     }
 

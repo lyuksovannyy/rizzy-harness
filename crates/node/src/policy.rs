@@ -68,6 +68,9 @@ pub struct SandboxPolicy {
     /// works, else run it with Landlock alone and say so), `"required"`
     /// (refuse agentic sessions without it) or `"off"`.
     pub contain: harness_tools::contain::ContainMode,
+    /// Where bubblewrap is, absolute; taken as given. Without it, the first
+    /// `bwrap` on `PATH` that this user cannot replace (owned by root).
+    pub bwrap: Option<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -104,7 +107,15 @@ impl SandboxPolicy {
             read: expand("read", &self.read)?,
             write: expand("write", &self.write)?,
             contain: self.contain,
-            bwrap: None,
+            bwrap: match &self.bwrap {
+                Some(p) if !p.is_absolute() => {
+                    return Err(format!(
+                        "[sandbox] bwrap: {} must be an absolute path",
+                        p.display()
+                    ));
+                }
+                p => p.clone(),
+            },
         })
     }
 }

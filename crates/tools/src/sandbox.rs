@@ -93,8 +93,9 @@ pub struct Settings {
     pub write: Vec<PathBuf>,
     /// `[sandbox] contain`: the agent shell's process containment (T.8a).
     pub contain: crate::contain::ContainMode,
-    /// Where bubblewrap is; `None`: `bwrap` on `PATH`, looked up at start.
-    /// Never read from node.toml (tests point it at a missing file).
+    /// Where bubblewrap is (`[sandbox] bwrap`, absolute, taken as given);
+    /// `None`: the first `bwrap` on `PATH` the node's user cannot replace,
+    /// looked up at start.
     pub bwrap: Option<PathBuf>,
 }
 
@@ -1048,8 +1049,12 @@ fn containment(
             )),
         );
     }
+    // node.toml's `[sandbox] bwrap` is the owner's choice and taken as it
+    // is; otherwise the first `bwrap` on PATH this user cannot replace.
     let found = match &settings.bwrap {
-        Some(p) if p.is_file() => Ok(p.clone()),
+        Some(p) if p.is_absolute() && p.is_file() => p
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", p.display())),
         Some(p) => Err(format!("bubblewrap not found at {}", p.display())),
         None => crate::contain::find_bwrap(),
     };
