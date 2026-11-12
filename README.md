@@ -724,7 +724,12 @@ abstract sockets too. `doctor` then marks the line `warn` and names the
 hole, and `contain = "required"` refuses. Running the node as its own OS
 user without a login session (no session bus, no `docker` group, as
 "Limits" below advises) removes the usual services. The planned file view
-(ADOPTION_PLAN T.8c) closes it on every kernel. What a command notices:
+(ADOPTION_PLAN T.8c) closes it on every kernel. On every kernel, a
+`[sandbox] write` entry that holds another program's socket (`/tmp`, where
+tmux and X11 keep theirs; `/run/user/<uid>`) is the same way out: a
+read-write grant includes connecting to sockets in it. `doctor` warns for
+`/tmp` and `/run/user/<uid>`; it does not look for sockets elsewhere. What
+a command notices:
 
 - `/proc` lists only its own processes; `ps` shows a handful, `$$` is 2.
   The node's and the rest of the machine's processes are not visible.

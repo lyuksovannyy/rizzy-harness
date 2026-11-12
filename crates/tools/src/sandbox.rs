@@ -994,6 +994,20 @@ pub fn start_with_exe(
         Contained::Yes(s, level) => {
             started.contain_summary = s;
             started.contain_level = level;
+            // Review R-3: a read-write grant carries Landlock's socket right,
+            // so a `write` entry that holds the usual socket folders hands
+            // the command other programs' sockets on every kernel.
+            let risky = socket_write_entries(settings);
+            if !risky.is_empty() {
+                let list: Vec<String> = risky.iter().map(|p| p.display().to_string()).collect();
+                started.contain_summary.push_str(&format!(
+                    "; WARNING: the [sandbox] write entry {} holds sockets of other programs \
+                     (/tmp: tmux, X11; /run/user/<uid>: the session bus), through which a \
+                     command can start a process outside the containment",
+                    list.join(", ")
+                ));
+                started.contain_level = ContainLevel::Warn;
+            }
         }
         Contained::No(s) => {
             started.contain_summary = s;
@@ -1030,6 +1044,28 @@ fn decide(
         ));
     }
     Ok((line, level))
+}
+
+/// `[sandbox] write` entries that are, or hold, `/tmp` or this user's
+/// `/run/user/<uid>`, where other programs keep their sockets (review R-3).
+/// Only those two: a socket elsewhere in a write entry is not looked for.
+fn socket_write_entries(settings: &Settings) -> Vec<PathBuf> {
+    let uid = nix::unistd::getuid();
+    let risky = [
+        PathBuf::from("/tmp"),
+        PathBuf::from(format!("/run/user/{uid}")),
+    ];
+    settings
+        .write
+        .iter()
+        .filter(|w| {
+            let w = real(w);
+            risky
+                .iter()
+                .any(|r| r.starts_with(&w) || real(r).starts_with(&w))
+        })
+        .cloned()
+        .collect()
 }
 
 enum Contained {
@@ -1784,6 +1820,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Review R-3: a `write` entry that is or holds `/tmp` or this user's
+    /// runtime folder makes `doctor` warn; other entries do not.
+    #[test]
+    fn a_write_entry_with_other_programs_sockets_is_named() {
+        let uid = nix::unistd::getuid();
+        let run = PathBuf::from(format!("/run/user/{uid}"));
+        let s = Settings {
+            write: vec![
+                "/tmp".into(),
+                "/run/user".into(),
+                run.join("gcr"),
+                "/home/someone/.cache".into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            socket_write_entries(&s),
+            vec![PathBuf::from("/tmp"), PathBuf::from("/run/user")]
+        );
+        assert!(socket_write_entries(&Settings::default()).is_empty());
     }
 
     #[test]
