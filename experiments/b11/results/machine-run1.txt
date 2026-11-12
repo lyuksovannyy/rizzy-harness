@@ -1,7 +1,7 @@
 == what this machine provides
    kernel 7.2.15-arch1-1; LSMs: capability,landlock,lockdown,yama,bpf
    user.max_user_namespaces=124236
-   newuidmap: /usr/bin/newuidmap cap_setuid=ep ; subuid: lebron:100000:65536
+   newuidmap: /usr/bin/newuidmap cap_setuid=ep ; subuid: <user>:100000:65536
    bwrap: -rwxr-xr-x root (not setuid)
    XDG_RUNTIME_DIR=/run/user/1000; linger: no
    cgroup controllers delegated to the user manager: cpu memory pids
@@ -41,9 +41,9 @@
    rizzy-harness sandbox status: landlock Available { effective_abi: V9, kernel_abi: Some(10) }, ruleset FullyEnforced, no_new_privs true, network on
    inside-landlock
    bash: line 1: /dev/null: Permission denied
-   ls: cannot open directory '/home/lebron/.cache/rh-b11/run/base/ws1/sessA/files':
+   ls: cannot open directory '~/.cache/rh-b11/run/base/ws1/sessA/files':
    write-granted-ok
 == test 8: sandbox-exec's Landlock inside bwrap
    rizzy-harness sandbox status: landlock Available { effective_abi: V9, kernel_abi: Some(10) }, ruleset FullyEnforced, no_new_privs true, network on
    /usr/bin/bash: line 1: /dev/null: Permission denied
-   ls: cannot open directory '/home/lebron/.cache/rh-b11/run/base/ws1/sessA/files':
+   ls: cannot open directory '~/.cache/rh-b11/run/base/ws1/sessA/files':

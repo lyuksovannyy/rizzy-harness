@@ -1,62 +1,62 @@
 == sbx  (pm1 = keep-id, pm2 = root in container without keep-id, pm3 = uid 1000 without keep-id)
    passwd=host
-   secret=cat: /home/lebron/.cache/rh-b11/run/secret/id_test: Permissi
-   sibling=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessB/files/sib
+   secret=cat: ~/.cache/rh-b11/run/secret/id_test: Permissi
+   sibling=cat: ~/.cache/rh-b11/run/base/ws1/sessB/files/sib
    home-ls=ls: cannot open directory '/home': Permission denied 
    proc-pids=422
    host-pid1-cmdline=/sbin/init 
    node-environ=head: cannot open '/proc/69268/environ' for reading: Permission denied
-   link-dir=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessA/files/lin
+   link-dir=cat: ~/.cache/rh-b11/run/base/ws1/sessA/files/lin
    link-passwd=72db280e020b
    wrote=ok
    on the host: own-sbx owner=1000:1000 mode=644 own-sbx.d owner=1000:1000 mode=755 
 == bw  (pm1 = keep-id, pm2 = root in container without keep-id, pm3 = uid 1000 without keep-id)
    passwd=host
-   secret=cat: /home/lebron/.cache/rh-b11/run/secret/id_test: No such 
-   sibling=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessB/files/sib
-   home-ls=lebron 
+   secret=cat: ~/.cache/rh-b11/run/secret/id_test: No such 
+   sibling=cat: ~/.cache/rh-b11/run/base/ws1/sessB/files/sib
+   home-ls=<user> 
    proc-pids=5
    host-pid1-cmdline=bwrap --unshare-all --die-with-parent --new-sessio
    node-environ=head: cannot open '/proc/69268/environ' for reading: No such file or directory
-   link-dir=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessA/files/lin
+   link-dir=cat: ~/.cache/rh-b11/run/base/ws1/sessA/files/lin
    link-passwd=72db280e020b
    wrote=ok
    on the host: own-bw owner=1000:1000 mode=644 own-bw.d owner=1000:1000 mode=755 
 == pm1  (pm1 = keep-id, pm2 = root in container without keep-id, pm3 = uid 1000 without keep-id)
    passwd=not-host(b712a8710b54)
-   secret=cat: /home/lebron/.cache/rh-b11/run/secret/id_test: No such 
-   sibling=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessB/files/sib
-   home-ls=lebron 
+   secret=cat: ~/.cache/rh-b11/run/secret/id_test: No such 
+   sibling=cat: ~/.cache/rh-b11/run/base/ws1/sessB/files/sib
+   home-ls=<user> 
    proc-pids=6
    host-pid1-cmdline=/run/podman-init -- sleep infinity 
    node-environ=head: cannot open '/proc/69268/environ' for reading: No such file or directory
-   link-dir=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessA/files/lin
+   link-dir=cat: ~/.cache/rh-b11/run/base/ws1/sessA/files/lin
    link-passwd=b712a8710b54
    wrote=ok
    on the host: own-pm1 owner=1000:1000 mode=644 own-pm1.d owner=1000:1000 mode=755 
 == pm2  (pm1 = keep-id, pm2 = root in container without keep-id, pm3 = uid 1000 without keep-id)
    passwd=not-host(21352194cc53)
-   secret=cat: /home/lebron/.cache/rh-b11/run/secret/id_test: No such 
-   sibling=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessB/files/sib
-   home-ls=lebron 
+   secret=cat: ~/.cache/rh-b11/run/secret/id_test: No such 
+   sibling=cat: ~/.cache/rh-b11/run/base/ws1/sessB/files/sib
+   home-ls=<user> 
    proc-pids=6
    host-pid1-cmdline=/run/podman-init -- sleep infinity 
    node-environ=head: cannot open '/proc/69268/environ' for reading: No such file or directory
-   link-dir=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessA/files/lin
+   link-dir=cat: ~/.cache/rh-b11/run/base/ws1/sessA/files/lin
    link-passwd=21352194cc53
    wrote=ok
    on the host: own-pm2 owner=1000:1000 mode=644 own-pm2.d owner=1000:1000 mode=755 
 == pm3  (pm1 = keep-id, pm2 = root in container without keep-id, pm3 = uid 1000 without keep-id)
    passwd=not-host(b712a8710b54)
-   secret=cat: /home/lebron/.cache/rh-b11/run/secret/id_test: No such 
-   sibling=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessB/files/sib
-   home-ls=lebron 
+   secret=cat: ~/.cache/rh-b11/run/secret/id_test: No such 
+   sibling=cat: ~/.cache/rh-b11/run/base/ws1/sessB/files/sib
+   home-ls=<user> 
    proc-pids=6
    host-pid1-cmdline=/run/podman-init -- sleep infinity 
    node-environ=head: cannot open '/proc/69268/environ' for reading: No such file or directory
-   link-dir=cat: /home/lebron/.cache/rh-b11/run/base/ws1/sessA/files/lin
+   link-dir=cat: ~/.cache/rh-b11/run/base/ws1/sessA/files/lin
    link-passwd=b712a8710b54
-   touch: cannot touch '/home/lebron/.cache/rh-b11/run/base/ws1/sessA/files/own-pm3': Permission denied
+   touch: cannot touch '~/.cache/rh-b11/run/base/ws1/sessA/files/own-pm3': Permission denied
    on the host: stat: cannot statx 'own-pm3': No such file or directory stat: cannot statx 'own-pm3.d': No such file or directory 
 == a mount source that is a symlink (S-2): src=link -> secret folder
 podman: /mnt holds: id_test

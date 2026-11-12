@@ -1,6 +1,6 @@
 == sandbox-exec
    CapEff: 0000000000000000 CapBnd: 000001ffffffffff NoNewPrivs: 1 Seccomp: 0 
-   uid=1000 user=lebron
+   uid=1000 user=<user>
    mount-tmpfs=mount: /tmp/m: must be superuser to use mount.
           dmesg(1) may hav
    insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
@@ -18,7 +18,7 @@
    git-commit=ok
 == bwrap (per command)
    CapEff: 0000000000000000 CapBnd: 0000000000000000 NoNewPrivs: 1 Seccomp: 0 
-   uid=1000 user=lebron
+   uid=1000 user=<user>
    mount-tmpfs=mount: /tmp/m: must be superuser to use mount.
           dmesg(1) may hav
    insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
@@ -33,7 +33,7 @@
    git-commit=ok
 == podman exec (--cap-drop=all, no-new-privileges, --read-only, keep-id)
    CapEff: 0000000000000000 CapBnd: 0000000000000000 NoNewPrivs: 1 Seccomp: 2 
-   uid=1000 user=lebron
+   uid=1000 user=<user>
    mount-tmpfs=mount: /tmp/m: must be superuser to use mount.
           dmesg(1) may hav
    insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
