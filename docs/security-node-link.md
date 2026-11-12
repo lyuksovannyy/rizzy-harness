@@ -137,6 +137,22 @@ Tests: `crates/store/tests/event_log.rs` (the inverted proof tests:
 the per-owner listing), `crates/master/tests/link_hardening.rs` and
 `hostile_node.rs` (a fake node sends the hostile frames to a real master).
 
+## A refused node is told why (2026-11-12, ADOPTION_PLAN A.19)
+
+The protocol version was compared in `add_link`, after `accepted`: a node
+of another protocol was accepted, dropped and reconnected for ever without
+a reason. The `auth` hello now carries `protocol_version` (absent: 1), and
+`node_connection` compares it **after** the signature check and before
+`accepted`, answering `rejected` with both versions and the side to
+upgrade. Order matters: a peer without a registered key gets "unknown or
+revoked node" whatever it claims (`an_unauthenticated_peer_does_not_learn_the_version`),
+so only the master's own nodes learn its protocol and crate version. Every
+`rejected` ends the node's reconnect loop (each needs a person); a master
+that is down, TLS and network errors are retried. `add_link` keeps its
+check for a `node.hello` that contradicts the `auth`. Tests:
+`crates/master/tests/version_refusal.rs`; the node's exit in
+`crates/cli/tests/stop_signal.rs`.
+
 ## Left open
 
 - **Channel binding** uses the certificate fingerprint, not a TLS exporter

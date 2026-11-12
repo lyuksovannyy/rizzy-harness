@@ -1,8 +1,8 @@
 # Node update and drain: design note
 
-Status: **decided by the owner on 2026-11-12 (§2); no open question.** Nothing built. Task C.14 of `ADOPTION_PLAN.md`. Two pieces fix built behaviour and may go
-first (task A.19): the master tells a node why it was refused, and a stop signal stops a node
-cleanly. The rest is a feature, after Gate 3 of `FIX_PLAN.md`.
+Status: **decided by the owner on 2026-11-12 (§2); no open question.** Task C.14 of `ADOPTION_PLAN.md`. **Step 1 is built (A.19, 2026-11-12):** the master
+tells a node why it was refused, and a stop signal stops a node cleanly (§7.0). The rest is a
+feature, after Gate 3 of `FIX_PLAN.md` (N.9).
 
 **Summary.** The master states which build it requires of a node. A node whose own `node.toml`
 allows it **asks its master for that build** over the authenticated node link, verifies it,
@@ -33,9 +33,9 @@ Claims about code were read on `main` at `e988625`.
 | One binary | `serve`, `node run`, `sandbox-exec`, `pdf-text` and the rest are subcommands of one executable. | `crates/cli/src/main.rs` |
 | Versions in the handshake | `node.hello` carries `protocol_version` (the constant `1`) and `version`; `master.welcome` carries `protocol_version` only. | `crates/protocol/src/lib.rs:10`, `:79-88`, `:130`; `crates/node/src/lib.rs:402` |
 | Build identity | None beyond the crate version, `0.1.0` in every build. No build script in `crates/cli`; the image build excludes `.git`. CI checks that a release tag equals the crate version. | `Cargo.toml:6`; `crates/master/build.rs` (web assets only); `.dockerignore`; `.github/workflows/ci.yml:82-86` |
-| Mismatch at the master | `add_link` refuses `protocol_version != 1`, but **after** `Accepted` was sent, so the node never learns why: it reconnects with backoff up to 30 s, forever. | `crates/master/src/lib.rs:894-897`; `crates/master/src/nodes.rs:234-268`; `crates/link/src/client.rs:52-63` |
+| Mismatch at the master | `add_link` refuses `protocol_version != 1`, but **after** `Accepted` was sent, so the node never learns why: it reconnects with backoff up to 30 s, forever. **Fixed by A.19** (§7.0). | `crates/master/src/lib.rs:894-897`; `crates/master/src/nodes.rs:234-268`; `crates/link/src/client.rs:52-63` |
 | A refusal that reaches the node | `ServerMsg::Rejected { reason }` before `Accepted`: the client stops and `node run` exits with the reason. | `crates/master/src/nodes.rs:161-163`; `crates/link/src/client.rs:56` |
-| Stop signal | `serve` and `node run` stop on SIGINT only; SIGTERM kills. The README unit sets `KillSignal=SIGINT`; the image `STOPSIGNAL SIGINT`. No stop closes running turns; the next start does. | `crates/cli/src/main.rs:432`, `:670`; `README.md:1054-1058`; `Dockerfile:38` |
+| Stop signal | `serve` and `node run` stop on SIGINT only; SIGTERM kills. The README unit sets `KillSignal=SIGINT`; the image `STOPSIGNAL SIGINT`. No stop closes running turns; the next start does. **Fixed by A.19** (§7.0). | `crates/cli/src/main.rs:432`, `:670`; `README.md:1054-1058`; `Dockerfile:38` |
 | The sandbox helper | Each shell command runs through `sandbox-exec` of the binary **at the node's own path**, resolved once at start: "a binary replaced by an upgrade is picked up at the same path". | `crates/tools/src/sandbox.rs:670-705` |
 | After a crash | `recover_interrupted` denies pending approvals (`interrupted`), writes an error, ends the turn `interrupted`. Tool processes survive a SIGKILL of the node (a known gap, C.11). | `crates/node/src/session.rs:222-232`, `:236-260`; `crates/tools/src/bash.rs:905-910` |
 | Cancel | Bash gets SIGTERM to its group, SIGKILL 2 s later; a tool running 5 s after cancel is abandoned. Sub-agents run under the parent's token. | `crates/tools/src/bash.rs:24`, `:248`; `crates/agent-native/src/lib.rs:44`; `crates/node/src/session.rs:1670`, `:1702-1712` |
@@ -300,6 +300,39 @@ binary and `node.toml` are root-owned is safer, and cannot use `auto`.
 
 ## 7. The drain
 
+### 7.0 What A.19 built, and what is left for N.9
+
+**Built (A.19):**
+
+- **Refusal with a reason.** `Hello::Auth` carries `protocol_version` (absent from older
+  builds: protocol 1); the master compares it after the key is proved and before `Accepted`,
+  and answers `Rejected` naming both versions and the older side. A peer without a registered
+  key gets the same refusal as before and learns nothing of the version. Every `Rejected`
+  already ended the node's reconnect loop, and that is kept: each needs a person (a revoked
+  or unknown key, a spent token, another protocol). A master that is down, a network or TLS
+  error, a timeout or a link dropped after `Accepted` is retried. `Hello::Auth` gains no
+  `version` or `build_id` yet (step 2).
+- **Stop signals.** SIGTERM is handled like SIGINT by `serve` and `node run`: new turns,
+  sessions, restores and stages are acked with the fixed text `harness_protocol::NODE_STOPPING`
+  (the master maps it to 503 and routines retry, §7.4's rule for `draining`); approval
+  answers and cancels are taken; every running turn is cancelled **at once** through the
+  normal path and ends `turn_ended{reason: "stopped"}`; the process waits at most 60 s
+  (`hard_stop_seconds`' default, a constant in `crates/cli/src/stop.rs`; no `[drain]` table)
+  and exits 0, or 1 when a turn was still open; a second signal exits 1 at once. `serve`
+  closes its local and chat turns while HTTP still serves, starts no routine run meanwhile,
+  then gives HTTP its 30 s grace (§8.2). The README unit sets `KillMode=mixed` and
+  `TimeoutStopSec=90` and no `KillSignal`.
+
+**Differs from the full design, on purpose until N.9:** A.19 has no grace before the cancel
+(no note, no `ask_minutes`, no `force_after_minutes`): the stop is today's cancel, named. So
+`TimeoutStopSec` is 90 s, not 35 min. A stop's turn ends `reason: "stopped"`, a value of
+`TurnEndReason`, where §8.1 plans `TurnEnded.drain` beside `reason`; N.9 can keep `stopped`
+for a supervisor's stop and add `drain` for its outcomes. The refusal is a fixed `ack.error`
+text, not `ack.retry_after_ms` (§8.1): a stop has no time to give.
+
+**Left for N.9:** `node_draining`, the note, `drain_answer`, the phases of §7.3, `drain.json`
+and "Continue" (§8.2), the requirement and update modes, exit 75 and 76.
+
 ### 7.1 What starts one
 
 | Trigger | Exit |
@@ -315,8 +348,8 @@ The unit also needs `KillMode=mixed` for the drain to have anything to drain: wi
 default (`control-group`) the stop signal goes to every process of the unit at once, every
 command's guard (T.8e) among them, and a guard takes SIGTERM, SIGINT and SIGHUP as its kill
 order, so every running command is killed the moment the stop begins (review T8E-2's N-2; on
-`main` before T.8e bubblewrap died of the same signal, no better). The README's unit does not
-set it yet (A.19).
+`main` before T.8e bubblewrap died of the same signal, no better). The README's unit sets it
+since A.19.
 
 ### 7.2 The note and the answer
 
@@ -481,7 +514,7 @@ master holds one open file, not a copy.
 
 | Step | What | Size | When |
 |---|---|---|---|
-| 1 | **A.19:** version check before `Accepted` with the reason; SIGTERM handled like SIGINT; a stop refuses new work, cancels running turns through the normal path with a reason, closes them, exits; README unit (tests 15, 16, 20) | **M** | A fix: now |
+| 1 | **A.19 (built, §7.0):** version check before `Accepted` with the reason; SIGTERM handled like SIGINT; a stop refuses new work, cancels running turns through the normal path with a reason, closes them, exits; README unit (tests 15, 16, 20: `crates/cli/tests/stop_signal.rs`, `crates/master/tests/version_refusal.rs`) | **M** | Done |
 | 2 | Build identity: build script, CI arguments, the marked string | **S** | After Gate 3 |
 | 3 | The full drain: phases, the note, `drain_answer`, events, marker, Continue, routines (tests 17 to 26) | **L** | After Gate 3, on step 1 |
 | 4 | Requirement: storage, admin setting, `welcome`, notices; `off`, `notify`, `restart` (tests 1, 23) | **M** | After 3 |
