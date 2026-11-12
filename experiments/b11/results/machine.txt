@@ -1,0 +1,47 @@
+== what this machine provides
+   kernel 7.2.15-arch1-1; LSMs: capability,landlock,lockdown,yama,bpf
+   user.max_user_namespaces=124236
+   newuidmap: /usr/bin/newuidmap cap_setuid=ep ; subuid: <user>:100000:65536
+   bwrap: -rwxr-xr-x root (not setuid)
+   XDG_RUNTIME_DIR=/run/user/1000; linger: no
+   cgroup controllers delegated to the user manager: cpu memory pids
+== Podman without XDG_RUNTIME_DIR and without a user bus (a systemd system unit, nologin user, no linger)
+   rc=0
+   rc=0
+   rc=0
+   where the run state went: 
+== bwrap without XDG_RUNTIME_DIR
+   works
+== newuidmap under no_new_privs: file capabilities are not granted, so a new rootless user namespace cannot be mapped
+   with no_new_privs: newuidmap: Could not set caps
+   rc=1
+   without: rc=0
+== podman under no_new_privs via setpriv: succeeds only because it joins the user's existing
+   pause process (made earlier without no_new_privs); a fresh node user has none
+   podman:          0       1000          1
+   podman:          1     100000      65536
+   rc=0
+   bwrap works
+   sandbox-exec works
+== the README unit's hardening as a transient user service (systemd-run --user; not the system manager)
+   bwrap ran
+   sandbox-exec ran
+== nested: inside a rootless Podman container like the published image (no flags beyond the default)
+   bwrap --unshare-all: bwrap: Can't mount proc on /proc: Operation not permitted
+   bwrap without a new /proc: works
+   podman load (vfs):  * docker-archive: writing blob: adding layer with blob "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90"/""/"sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90": ApplyLayer stdout:  stderr: potentially insufficient UIDs or GIDs available in user namespac
+   podman (vfs, ignore_chown_errors): Error: OCI runtime error: crun: open `/proc/sys/net/ipv4/ping_group_range`: Read-only file system 
+   sandbox-exec (Landlock): rizzy-harness sandbox status: landlock Available { effective_abi: V9, kernel_abi: Some(10) }, ruleset FullyEnforced, no_new_privs true, network on bash: line 1: /dev/null: Permission denied cat: /root/x: Permission denied ls: cannot open directory '/home': Permission denied 
+== nested, with the flags that are known to let bwrap run in a container (unmask /proc, no seccomp)
+   bwrap --unshare-all: works
+   unmask only: bwrap --unshare-all: works
+== test 8: sandbox-exec's Landlock inside the design's session container
+   rizzy-harness sandbox status: landlock Available { effective_abi: V9, kernel_abi: Some(10) }, ruleset FullyEnforced, no_new_privs true, network on
+   inside-landlock
+   bash: line 1: /dev/null: Permission denied
+   ls: cannot open directory '~/.cache/rh-b11/run/base/ws1/sessA/files':
+   write-granted-ok
+== test 8: sandbox-exec's Landlock inside bwrap
+   rizzy-harness sandbox status: landlock Available { effective_abi: V9, kernel_abi: Some(10) }, ruleset FullyEnforced, no_new_privs true, network on
+   /usr/bin/bash: line 1: /dev/null: Permission denied
+   ls: cannot open directory '~/.cache/rh-b11/run/base/ws1/sessA/files':

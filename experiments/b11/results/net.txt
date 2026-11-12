@@ -1,0 +1,77 @@
+== LAN address 192.168.1.100; listeners on 127.0.0.1 and 192.168.1.100
+== sandbox-exec --no-network (Landlock ABI 4 TCP rules)
+   tcp-127.0.0.1                              PermissionError:13
+   tcp-lan                                    PermissionError:13
+   tcp-host.containers.internal               no-such-name
+   tcp-169.254.1.2(pasta-host-map)-lo-port    PermissionError:13
+   tcp-metadata-169.254.169.254:80            PermissionError:13
+   udp-127.0.0.1                              sent
+   udp-lan                                    sent
+   dns-example.com                            resolved:104.20.23.154
+== bwrap --unshare-net
+   tcp-127.0.0.1                              ConnectionRefusedError:111
+   tcp-lan                                    OSError:101
+   tcp-host.containers.internal               no-such-name
+   tcp-169.254.1.2(pasta-host-map)-lo-port    OSError:101
+   tcp-metadata-169.254.169.254:80            OSError:101
+   udp-127.0.0.1                              sent
+   udp-lan                                    OSError:101
+   dns-example.com                            gaierror
+== podman --network=none
+   tcp-127.0.0.1                              ConnectionRefusedError:111
+   tcp-lan                                    OSError:101
+   tcp-host.containers.internal               OSError:101
+   tcp-169.254.1.2(pasta-host-map)-lo-port    OSError:101
+   tcp-metadata-169.254.169.254:80            OSError:101
+   udp-127.0.0.1                              sent
+   udp-lan                                    OSError:101
+   dns-example.com                            gaierror
+== podman default rootless network (pasta), the design's network = "on"
+   tcp-127.0.0.1                              ConnectionRefusedError:111
+   tcp-lan                                    ConnectionRefusedError:111
+   tcp-host.containers.internal               CONNECTED:hello-from-host-
+   tcp-169.254.1.2(pasta-host-map)-lo-port    ConnectionRefusedError:111
+   tcp-metadata-169.254.169.254:80            TimeoutError
+   udp-127.0.0.1                              sent
+   udp-lan                                    sent
+   dns-example.com                            resolved:104.20.23.154
+   https-head-example.com                     HTTP 200
+   pasta's command line: --config-net --dns-forward 169.254.1.1 -t none -u none -T none -U none --no-map-gw --quiet --map-guest-addr 169.254.1.2 --netns /run/user/1000/netns/netns-7247a230-495d-919b-4c04-a3de433835bc
+== podman pasta with --network=pasta:--no-map-gw (host mapping off)
+   tcp-127.0.0.1                              ConnectionRefusedError:111
+   tcp-lan                                    ConnectionRefusedError:111
+   tcp-host.containers.internal               CONNECTED:hello-from-host-
+   tcp-169.254.1.2(pasta-host-map)-lo-port    ConnectionRefusedError:111
+   tcp-metadata-169.254.169.254:80            TimeoutError
+   udp-127.0.0.1                              sent
+   udp-lan                                    sent
+   dns-example.com                            resolved:104.20.23.154
+== sandbox-exec with network on, for comparison
+   tcp-127.0.0.1                              CONNECTED:hello-from-host-
+   tcp-lan                                    CONNECTED:hello-from-host-
+   tcp-host.containers.internal               no-such-name
+   tcp-169.254.1.2(pasta-host-map)-lo-port    TimeoutError
+   tcp-metadata-169.254.169.254:80            TimeoutError
+   udp-127.0.0.1                              sent
+   udp-lan                                    sent
+   dns-example.com                            resolved:172.66.147.243
+   https-head-example.com                     HTTP 200
+== UDP datagrams the host received (tag -> destination, source address)
+   udp 127.0.0.1:18733 got sbx-off->127.0.0.1 from 127.0.0.1
+   udp 192.168.1.100:18734 got sbx-off->192.168.1.100 from 192.168.1.100
+   udp 127.0.0.1:18733 got sbx-on->127.0.0.1 from 127.0.0.1
+   udp 192.168.1.100:18734 got sbx-on->192.168.1.100 from 192.168.1.100
+   host.containers.internal = 169.254.1.2
+   container addresses: has 192.168.1.100
+   169.254.1.2 18735 CONNECTED got-0.0.0.0-from-192.168.1.100
+   169.254.1.2 18732 CONNECTED got-192.168.1.100-from-192.168.1.100
+   169.254.1.2 18731 ConnectionRefusedError
+   192.168.1.100 18735 ConnectionRefusedError
+== --network=pasta:--map-guest-addr,none
+   169.254.1.2 TimeoutError
+   192.168.1.100 ConnectionRefusedError
+   example.com:443 CONNECTED
+== --network=pasta:--map-host-loopback,none,--map-guest-addr,none
+   169.254.1.2 TimeoutError
+   192.168.1.100 ConnectionRefusedError
+   example.com:443 CONNECTED

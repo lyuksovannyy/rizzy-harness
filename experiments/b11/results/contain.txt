@@ -1,0 +1,69 @@
+sbx/a before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+sbx/a +2s     setsid=alive nohup=gone dfork=gone noterm=gone plain=gone
+sbx/a +10s    setsid=alive nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+sbx/b before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+   sbx/b: no confinement to stop (n/a)
+sbx/b +2s     setsid=alive nohup=gone dfork=gone noterm=gone plain=gone
+sbx/b +10s    setsid=alive nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+sbx/c before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+./lib.sh: line 164: 55197 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+sbx/c +2s     setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+sbx/c +10s    setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+   left: containers=[] podman-clients=0 bwrap=0
+bw/a before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+bw/a +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bw/a +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+bw/b before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+./contain.sh: line 39: kill: `': not a pid or valid job spec
+bw/b +2s     setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+bw/b +10s    setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+   left: containers=[] podman-clients=0 bwrap=0
+./contain.sh: line 27: 55689 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+bw/c before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+./lib.sh: line 164: 55962 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+bw/c +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bw/c +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+bws/a before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+bws/a +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bws/a +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=2
+./contain.sh: line 27: 56276 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+bws/b before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+bws/b +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bws/b +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+bws/c before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+./lib.sh: line 164: 57098 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+bws/c +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+bws/c +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+pmexec/a before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+pmexec/a +2s     setsid=alive nohup=gone dfork=gone noterm=alive plain=gone
+pmexec/a +10s    setsid=alive nohup=gone dfork=gone noterm=alive plain=gone
+   left: containers=[rh-b11-c-172421:Up 13 seconds ] podman-clients=0 bwrap=0
+pmexec/b before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+pmexec/b +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+pmexec/b +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[rh-b11-c-314233:Exited (143) 10 seconds ago ] podman-clients=0 bwrap=0
+pmexec/c before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+./lib.sh: line 164: 58404 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+pmexec/c +2s     setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+pmexec/c +10s    setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+   left: containers=[rh-b11-c-641625:Up 12 seconds ] podman-clients=1 bwrap=0
+pmrun/a before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+pmrun/a +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+pmrun/a +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+pmrun/b before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+pmrun/b +2s     setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+pmrun/b +10s    setsid=gone nohup=gone dfork=gone noterm=gone plain=gone
+   left: containers=[] podman-clients=0 bwrap=0
+pmrun/c before  setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+./lib.sh: line 164: 59413 Killed                     setsid bash "$HERE/node.sh" "$opt" "$pf" < /dev/null > /dev/null 2>&1
+pmrun/c +2s     setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+pmrun/c +10s    setsid=alive nohup=alive dfork=alive noterm=alive plain=alive
+   left: containers=[rh-b11-r-608686:Up 12 seconds ] podman-clients=1 bwrap=0
