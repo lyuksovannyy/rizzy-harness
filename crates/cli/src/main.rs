@@ -981,6 +981,12 @@ fn load_dotenv() -> anyhow::Result<Vec<String>> {
 fn main() -> anyhow::Result<()> {
     // The sandbox wrapper runs first: no `.env`, no data directory, no
     // threads (Landlock confines the calling thread, then `exec`).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref()) {
+        // Before anything else: nothing the guard, bubblewrap or the node
+        // left open (the image this runs from, review T8F-2) reaches the
+        // command.
+        harness_tools::sandbox::close_inherited();
+    }
     if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref())
         && let Cmd::SandboxExec {
             rw,

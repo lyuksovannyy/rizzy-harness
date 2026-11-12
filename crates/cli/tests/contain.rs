@@ -476,7 +476,17 @@ fn only_the_shell_is_contained() {
             Grants::default(),
         )
         .unwrap();
-    assert_eq!(args(&plain), Path::new(EXE).as_os_str());
+    // Not contained: `sandbox-exec` itself, started from the node's image
+    // too (T.8f re-check R-4), no guard.
+    assert!(
+        args(&plain).to_string_lossy().starts_with("/proc/self/fd/"),
+        "{:?}",
+        args(&plain)
+    );
+    assert_eq!(
+        plain.as_std().get_args().next(),
+        Some(std::ffi::OsStr::new("sandbox-exec"))
+    );
     let (shell, contained) = conf
         .shell(
             "true".as_ref(),
@@ -688,7 +698,7 @@ async fn below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside() {
     let all: Vec<OsString> = node.get_args().map(OsString::from).collect();
     let guard_end = all.iter().position(|a| a == "--").unwrap();
     let bwrap_end = guard_end + 1 + all[guard_end + 1..].iter().position(|a| a == "--").unwrap();
-    assert_eq!(all[bwrap_end + 1], harness_tools::contain::VIEW_EXE);
+    assert_eq!(all[bwrap_end + 1], harness_tools::contain::IMAGE_TOKEN);
     assert_eq!(all[bwrap_end + 2], "sandbox-exec");
     let mut old = tokio::process::Command::new(node.get_program());
     old.args(&all[..=bwrap_end])

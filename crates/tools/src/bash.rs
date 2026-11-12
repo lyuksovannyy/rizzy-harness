@@ -224,9 +224,17 @@ impl Tool for Bash {
         // folder (the folder was resolved above, in this task).
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
+        // What runs first: the node's own image (the guard, or the wrapper)
+        // where the shell is confined, else bash.
+        let program = cmd.as_std().get_program().to_owned();
         let mut child = match crate::sandbox::Confinement::spawn(cmd, contained).await {
             Ok(c) => c,
-            Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
+            Err(e) => {
+                return ToolOutcome::err(
+                    crate::sandbox::image_spawn_error(&program, &e)
+                        .unwrap_or_else(|| format!("failed to spawn bash: {e}")),
+                );
+            }
         };
         let pgid = child.id().map(|p| p as i32);
         // If this call is dropped before it reaped the group itself (the
