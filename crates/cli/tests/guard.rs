@@ -988,55 +988,141 @@ fn a_node_killed_while_a_child_waits_before_exec_leaves_nothing() {
     );
 }
 
-/// The second line for T8E-1: a guard of this node's data directory whose
-/// parent is not this node (here one started without `--node`, the
-/// stand-in for a guard that has not noticed its node died) is told to
-/// kill (SIGTERM, its kill order) by the sweep at start, and its command
-/// ends. The sweep names it.
+/// A guard's command line for `script`, started from the binary's path
+/// (this process's descriptor means nothing to a shell), with its
+/// `--node` value replaced by `node` (`None`: without `--node`).
+fn guard_argv(
+    f: &Fixture,
+    sb: Arc<Sandbox>,
+    script: &str,
+    node: Option<&str>,
+) -> Vec<std::ffi::OsString> {
+    let cmd = f.shell(sb, script);
+    let mut argv: Vec<std::ffi::OsString> = vec![EXE.into()];
+    let mut it = cmd.as_std().get_args();
+    while let Some(a) = it.next() {
+        if a == "--node" {
+            it.next();
+            if let Some(n) = node {
+                argv.push("--node".into());
+                argv.push(n.into());
+            }
+        } else {
+            argv.push(a.into());
+        }
+    }
+    argv
+}
+
+/// Start `argv` under a shell that stays its parent (`wait`), its stdin a
+/// pipe the returned handle holds open (`<&9` overrides the `/dev/null` a
+/// shell gives `&`); `@NODE@` in it becomes the shell's pid. The command
+/// line is in a script file, so the shell's own command line carries no
+/// mark (a process that does is killed by the sweep, by design).
+fn under_shell(
+    dir: &Path,
+    argv: &[std::ffi::OsString],
+) -> (std::process::Child, Option<std::process::ChildStdin>) {
+    let quote = |a: &std::ffi::OsStr| {
+        let a = a.to_str().unwrap();
+        if a == "@NODE@" {
+            "\"$$\"".to_string()
+        } else {
+            format!("'{}'", a.replace('\'', "'\\''"))
+        }
+    };
+    let line: Vec<String> = argv.iter().map(|a| quote(a)).collect();
+    let script = dir.join(format!("under-shell-{}.sh", std::process::id()));
+    std::fs::write(
+        &script,
+        format!(
+            "exec 9<&0\n{} <&9 >/dev/null 2>&1 &\nwait\n",
+            line.join(" ")
+        ),
+    )
+    .unwrap();
+    let mut sh = std::process::Command::new("sh")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let held = sh.stdin.take();
+    (sh, held)
+}
+
+/// The second line for T8E-1: a guard whose node died (its parent is no
+/// longer the pid of its own `--node`) and that is still ending a command
+/// the kernel cannot end yet is told to stop (SIGTERM, its kill order) by
+/// the sweep at start, and named as still busy; once the read is released
+/// everything is gone. A guard with no `--node` the sweep can read is left
+/// alone and named (re-check R-1: never judged by who is starting).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_node_ends_a_guard_whose_node_died() {
     const SECS: u32 = 974_862;
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
+    let mnt = f.ws.join("mnt");
+    let Some(mut stall) = Stall::mount(&mnt) else {
+        return;
+    };
     let _clean = Cleanup(f.ws.clone(), vec![SECS]);
-    let cmd = f.shell(sb, &format!("sleep {SECS}"));
-    let std = cmd.as_std();
-    // From the path: the program is this process's own descriptor.
-    let mut argv: Vec<std::ffi::OsString> = vec![EXE.into()];
-    let mut it = std.get_args();
-    while let Some(a) = it.next() {
-        if a == "--node" {
-            it.next();
-        } else {
-            argv.push(a.into());
-        }
-    }
-    // Orphaned, its stdin a pipe this test holds open (so the channel does
-    // not close): `<&9` overrides the `/dev/null` a shell gives `&`.
-    let mut sh = std::process::Command::new("sh")
-        .args(["-c", "exec 9<&0; \"$@\" <&9 >/dev/null 2>&1 &", "sh"])
-        .args(&argv)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let held = sh.stdin.take();
-    sh.wait().unwrap();
-    wait_for("the command", || !sleeps(SECS).is_empty()).await;
-    let guard = guard_of(&f.ws).expect("the guard");
     let root = f.data.join("sandbox-tmp");
-    let swept = tokio::task::spawn_blocking(move || harness_tools::contain::sweep(&root))
-        .await
-        .unwrap();
-    drop(held);
-    eprintln!("the sweep: {swept:?}");
+    let sweep = |root: PathBuf| async move {
+        tokio::task::spawn_blocking(move || harness_tools::contain::sweep(&root))
+            .await
+            .unwrap()
+    };
+
+    // A guard with no `--node`: left alone, named.
+    let (mut sh, held) = under_shell(
+        f.data.parent().unwrap(),
+        &guard_argv(&f, sb.clone(), &format!("sleep {SECS}"), None),
+    );
+    wait_for("the command", || !sleeps(SECS).is_empty()).await;
+    let unknown = guard_of(&f.ws).expect("the guard");
+    let swept = sweep(root.clone()).await;
+    eprintln!("a guard without --node: {swept:?}");
     assert!(
         swept
             .iter()
-            .any(|s| s.pid == guard && s.ended && s.session == "s1"),
+            .any(|s| s.pid == unknown && s.what == harness_tools::contain::Left::GuardUnknown),
         "{swept:?}"
     );
-    let l = left(&f.ws, &[SECS]);
-    assert!(l.is_empty(), "left:\n{}", describe(&l));
+    assert!(!sleeps(SECS).is_empty(), "the sweep ended it");
+    drop(held);
+    let _ = sh.wait();
+    let by = Instant::now() + Duration::from_secs(3);
+    while (alive(unknown) || !sleeps(SECS).is_empty()) && Instant::now() < by {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !alive(unknown) && sleeps(SECS).is_empty(),
+        "the channel's close did not end it"
+    );
+
+    // A guard whose node died, busy with a stuck read.
+    let file = mnt.join("stall");
+    let (mut sh, held) = under_shell(
+        f.data.parent().unwrap(),
+        &guard_argv(&f, sb, &format!("cat {}", file.display()), Some("@NODE@")),
+    );
+    tokio::task::block_in_place(|| stall.held());
+    let guard = guard_of(&f.ws).expect("the guard");
+    sh.kill().unwrap(); // its node dies
+    let _ = sh.wait();
+    let swept = sweep(root).await;
+    eprintln!("a guard of a dead node: {swept:?}");
+    assert!(
+        swept.iter().any(|s| s.pid == guard
+            && s.what == harness_tools::contain::Left::Guard
+            && !s.ended
+            && s.session == "s1"),
+        "{swept:?}"
+    );
+    tokio::task::block_in_place(|| stall.release());
+    drop(held);
+    let l = gone_within(&f.ws, &[], Duration::from_secs(3));
+    assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
 }
 
 // ---- review T8E-2: a guard that dies in its first millisecond ----
@@ -1265,8 +1351,9 @@ async fn a_guard_that_does_not_answer_is_reported_within_the_loops_grace() {
 
 /// A namespace a dead node and a dead guard left, whose command is in a
 /// FUSE read the kernel will not interrupt: the sweep kills it but must not
-/// call it ended while the reader lives, and the next start must still
-/// name it. Once the read is released, a sweep finds it gone.
+/// call it ended while the reader lives (the start logs it STILL ALIVE).
+/// The next start finds nothing marked and kills nothing; once the read is
+/// released, it is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_sweep_does_not_call_a_stuck_leftover_ended() {
     let f = fixture();
@@ -1289,18 +1376,16 @@ async fn the_sweep_does_not_call_a_stuck_leftover_ended() {
     eprintln!("first start: {first:?}");
     assert!(!first.is_empty(), "the sweep found nothing");
     assert!(first.iter().all(|s| !s.ended), "called ended: {first:?}");
+    // The next start: the stuck init carries no mark any more; nothing is
+    // named and nothing killed (re-check R-2: no file of pids is kept).
     let second = sweep(root.clone()).await;
     eprintln!("second start: {second:?}");
-    assert!(
-        !second.is_empty() && second.iter().all(|s| !s.ended),
-        "the second start does not name it: {second:?}"
-    );
+    assert!(second.is_empty(), "{second:?}");
     tokio::task::block_in_place(|| stall.release());
     let l = gone_within(&f.ws, &[], Duration::from_secs(2));
     assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
     let third = sweep(root).await;
-    eprintln!("after the release: {third:?}");
-    assert!(third.iter().all(|s| s.ended), "{third:?}");
+    assert!(third.is_empty(), "{third:?}");
 }
 
 // ---- review T8E-5: the binary a command may replace ----
@@ -1404,10 +1489,27 @@ fn the_node_start_sweeps_what_a_dead_node_left() {
         assert!(Instant::now() < by, "the leftover never started");
         std::thread::sleep(Duration::from_millis(10));
     }
+    let (listening, log) = serve_once(&f.data);
+    let gone = sleeps(SECS).is_empty();
+    let log = log.join("\n");
+    assert!(listening, "the node never served: {log}");
+    assert!(gone, "the leftover still runs after the start: {log}");
+    assert!(
+        log.contains("ended a command a previous run of this node left running")
+            && log.contains("session \"s1\""),
+        "{log}"
+    );
+}
+
+/// One real node start (`serve` on `data`, loopback, any port), stopped as
+/// soon as it serves: whether it served, and its log.
+fn serve_once(data: &Path) -> (bool, Vec<String>) {
     let mut serve = std::process::Command::new(EXE)
-        .args(["--data-dir", f.data.to_str().unwrap()])
+        .args(["--data-dir", data.to_str().unwrap()])
         .args(["serve", "--bind", "127.0.0.1:0"])
         .env("HARNESS_LOG", "warn")
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1424,15 +1526,164 @@ fn the_node_start_sweeps_what_a_dead_node_left() {
         .by_ref()
         .map_while(Result::ok)
         .any(|l| l.contains("listening on"));
-    let gone = sleeps(SECS).is_empty();
     let _ = serve.kill();
     let _ = serve.wait();
-    let log = log.join().unwrap().join("\n");
-    assert!(listening, "the node never served: {log}");
-    assert!(gone, "the leftover still runs after the start: {log}");
+    (listening, log.join().unwrap())
+}
+
+/// An ordinary `sleep <secs>` of this test, no mark: the victim the sweep
+/// must never touch. Its pid and start time (ticks since boot).
+fn victim(secs: u32) -> (std::process::Child, i32, u64) {
+    let c = std::process::Command::new("sleep")
+        .arg(secs.to_string())
+        .spawn()
+        .unwrap();
+    let pid = c.id() as i32;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start = stat
+        .rsplit(')')
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    (c, pid, start)
+}
+
+// ---- re-check R-1: a second start on a live node's data directory ----
+
+/// The reviewer's proof inverted (re-check R-1): a node is alive with one
+/// command; the real binary is started on the same data directory. Its
+/// sweep must not tell the live node's guard to stop (its parent is still
+/// the pid in its own `--node`): the command runs to its own end, and the
+/// second start logs nothing about it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_start_leaves_the_live_nodes_commands_alone() {
+    const SECS: u32 = 974_901;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let ctx = f.ctx(sb);
+    let h = tokio::spawn(async move {
+        Bash.run(
+            &ctx,
+            json!({"command": format!("sleep {SECS} & s=$!; sleep 4; kill $s; echo finished")}),
+        )
+        .await
+    });
+    wait_for("the command", || !sleeps(SECS).is_empty()).await;
+    let data = f.data.clone();
+    let (listening, log) = tokio::task::spawn_blocking(move || serve_once(&data))
+        .await
+        .unwrap();
+    let log = log.join("\n");
+    assert!(listening, "the second start never served: {log}");
+    let r = tokio::time::timeout(Duration::from_secs(20), h)
+        .await
+        .expect("the command never ended")
+        .unwrap();
     assert!(
-        log.contains("ended a command a previous run of this node left running")
-            && log.contains("session s1"),
-        "{log}"
+        r.ok && r.output.contains("finished"),
+        "the live node's command was stopped: {} | log: {log}",
+        r.output
     );
+    assert!(!log.contains("previous run"), "{log}");
+}
+
+// ---- re-check R-2: nothing outside the marks is killed ----
+
+/// The reviewer's `leftovers_file.py` inverted (re-check R-2): a file at
+/// `<data>/sandbox-leftovers` naming an unmarked process (directly, then
+/// as a link to a file elsewhere) makes no start kill anything: the victim
+/// survives two starts.
+#[test]
+fn a_planted_leftovers_file_kills_nothing() {
+    const SECS: u32 = 974_911;
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let (mut v, pid, start) = victim(SECS);
+    let file = f.data.join("sandbox-leftovers");
+    let elsewhere = f.ws.join("elsewhere");
+    for link in [false, true] {
+        let _ = std::fs::remove_file(&file);
+        let text = format!("{pid} {start} some-session\n");
+        if link {
+            std::fs::write(&elsewhere, &text).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+        } else {
+            std::fs::write(&file, &text).unwrap();
+        }
+        for n in 1..=2 {
+            let (listening, log) = serve_once(&f.data);
+            assert!(listening, "{log:?}");
+            assert!(
+                v.try_wait().unwrap().is_none(),
+                "start {n} (file as a link: {link}) killed the victim: {log:?}"
+            );
+        }
+    }
+    let _ = v.kill();
+    let _ = v.wait();
+}
+
+/// The reviewer's `leftovers_inject.py` inverted (re-check R-2): a marked
+/// process stuck in a read the kernel will not interrupt, whose session
+/// text holds a line break and a victim's pid and start time. Two starts:
+/// the victim survives, and the line naming the marked process is one
+/// line, its session escaped.
+#[test]
+fn a_session_with_a_line_break_injects_nothing() {
+    const SECS: u32 = 974_912;
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let mnt = f.ws.join("mnt");
+    let Some(mut stall) = Stall::mount(&mnt) else {
+        return;
+    };
+    let _clean = Cleanup(f.ws.clone(), vec![SECS]);
+    let (mut v, pid, start) = victim(SECS);
+    let session = format!("s1\n{pid} {start} injected");
+    let root = f.data.join("sandbox-tmp");
+    let mut reader = std::process::Command::new("python3")
+        .args(["-I", "-c", "import sys; open(sys.argv[1], 'rb').read()"])
+        .arg(mnt.join("stall"))
+        .arg("--mark")
+        .arg(&root)
+        .arg("--mark-session")
+        .arg(&session)
+        .spawn()
+        .unwrap();
+    stall.held();
+    for n in 1..=2 {
+        let (listening, log) = serve_once(&f.data);
+        assert!(listening, "{log:?}");
+        assert!(
+            v.try_wait().unwrap().is_none(),
+            "start {n} killed the victim: {log:?}"
+        );
+        for l in &log {
+            assert!(
+                !l.contains("injected") || l.contains("shell containment"),
+                "start {n}: a line of its own from the session text: {log:?}"
+            );
+        }
+        if n == 1 {
+            assert!(
+                log.iter()
+                    .any(|l| l.contains("STILL ALIVE") && l.contains("\\n")),
+                "start 1: {log:?}"
+            );
+        }
+    }
+    stall.release();
+    let _ = reader.wait();
+    let _ = v.kill();
+    let _ = v.wait();
 }
