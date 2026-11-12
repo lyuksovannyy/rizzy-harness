@@ -75,15 +75,35 @@ pub enum Form {
 pub struct Contain {
     bwrap: PathBuf,
     form: Form,
+    /// Whether it may make a network namespace for a node whose network is
+    /// off (T.8b). `false` only where the node's own probe at start found
+    /// that `--unshare-net` fails here and `contain = "auto"` chose to
+    /// contain without it.
+    net_ns: bool,
 }
 
 impl Contain {
     pub fn new(bwrap: PathBuf, form: Form) -> Self {
-        Self { bwrap, form }
+        Self {
+            bwrap,
+            form,
+            net_ns: true,
+        }
+    }
+
+    /// The same, never making a network namespace (the network-off gap).
+    pub fn without_network_namespace(mut self) -> Self {
+        self.net_ns = false;
+        self
     }
 
     pub fn form(&self) -> Form {
         self.form
+    }
+
+    /// Whether a command with the network off gets a network namespace.
+    pub fn network_namespace(&self) -> bool {
+        self.net_ns
     }
 
     pub fn bwrap(&self) -> &Path {
@@ -164,7 +184,7 @@ impl Contain {
         if self.form == Form::Full {
             a.extend(["--proc", "/proc"].map(OsString::from));
         }
-        if net_off {
+        if net_off && self.net_ns {
             // T.8b: a network namespace with only its own loopback (which
             // bwrap brings up), so no UDP or DNS leaves either, which
             // Landlock's TCP rule inside does not cover. Abstract Unix
@@ -936,6 +956,13 @@ mod tests {
             let at = off.iter().position(|x| x == "--unshare-net").unwrap();
             assert!(at < off.len() - 1 && off.last().unwrap() == "--");
         }
+        // The gap `auto` chose at start: never the flag.
+        let gap = Contain::new("/usr/bin/bwrap".into(), Form::Full).without_network_namespace();
+        assert!(
+            !gap.args(Path::new("/w"), true)
+                .iter()
+                .any(|x| x == "--unshare-net")
+        );
         assert!(probe_script(true, true).contains("/proc/net/dev"));
         assert!(!probe_script(true, false).contains("/proc/net/dev"));
     }

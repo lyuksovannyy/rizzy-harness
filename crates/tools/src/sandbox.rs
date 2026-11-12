@@ -427,7 +427,7 @@ impl Sandbox {
                 self.image,
                 cwd,
                 mark.as_ref(),
-                self.network == Network::Off,
+                self.network == Network::Off && b.network_namespace(),
             ),
             None => std::process::Command::new(&self.exe),
         };
@@ -585,7 +585,7 @@ impl Sandbox {
         // kill order) until the probe has ended.
         let (keep, theirs) = std::os::unix::net::UnixStream::pair()
             .map_err(|e| format!("the guard's channel: {e}"))?;
-        let net = self.network == Network::Off;
+        let net = self.network == Network::Off && contain.network_namespace();
         c.args(["sh", "-c", &crate::contain::probe_script(full, net), "sh"])
             .arg(&ok)
             .env_clear()
@@ -1144,7 +1144,8 @@ pub fn start_with_exe(
         Contained::Yes(s, level) => {
             started.contain_summary = s;
             started.contain_level = level;
-            if settings.network == Network::Off {
+            let net_ns = sandbox.containment().is_some_and(|c| c.network_namespace());
+            if settings.network == Network::Off && net_ns {
                 started.contain_summary.push_str(
                     "; network off: a network namespace of its own per command (only its own \
                      loopback: no TCP, UDP or DNS out)",
@@ -1229,6 +1230,22 @@ fn socket_write_entries(settings: &Settings) -> Vec<PathBuf> {
         .collect()
 }
 
+/// What the containment line adds where the shell is contained but
+/// bubblewrap could not make a network namespace (`why`) and the network
+/// is off (T.8b, `contain = "auto"`): a gap, as below Landlock ABI 9.
+fn network_gap_line(why: &str, abi: u32) -> String {
+    let abstract_sockets = if abi >= ABI_ABSTRACT_SOCKETS {
+        "abstract Unix sockets outside are closed by Landlock (ABI 6 or newer)"
+    } else {
+        "abstract Unix sockets outside (X11 and others) can be reached (Landlock below ABI 6)"
+    };
+    format!(
+        "; network off WITH A GAP: bubblewrap cannot make a network namespace here ({why}), so \
+         commands run contained without one: TCP is stopped by Landlock, but UDP and DNS still go \
+         out, and {abstract_sockets}. contain = \"required\" refuses this"
+    )
+}
+
 /// What the containment line adds where the shell is not contained and the
 /// network is off (T.8b): Landlock alone covers only TCP.
 const NETWORK_OFF_UNCONTAINED: &str = "WARNING: [sandbox] network = \"off\" without the \
@@ -1272,33 +1289,66 @@ fn containment(
     let why = match found {
         Err(e) => e,
         Ok(bwrap) => {
-            let full = Contain::new(bwrap.clone(), Form::Full);
-            let shared = Contain::new(bwrap.clone(), Form::SharedProc);
-            let found = match sandbox.probe_containment(&full, scratch) {
-                Ok(()) => Ok((full, None)),
-                Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
-                    Ok(()) => Ok((shared, Some(full_err))),
-                    Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
-                },
+            let probe = |net_ns: bool| {
+                let mk = |form| {
+                    let c = Contain::new(bwrap.clone(), form);
+                    if net_ns {
+                        c
+                    } else {
+                        c.without_network_namespace()
+                    }
+                };
+                let (full, shared) = (mk(Form::Full), mk(Form::SharedProc));
+                match sandbox.probe_containment(&full, scratch) {
+                    Ok(()) => Ok((full, None)),
+                    Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
+                        Ok(()) => Ok((shared, Some(full_err))),
+                        Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
+                    },
+                }
             };
-            match found {
-                Ok((c, proc_err)) => {
+            let mut found = probe(true);
+            // T.8b: bubblewrap works but cannot make a network namespace.
+            // `required` refuses; `auto` still contains (more than Landlock
+            // alone), with the gap named. Decided here, once, at start.
+            let mut net_err = None;
+            if settings.network == Network::Off
+                && let Err(e) = &found
+                && let Ok(without) = probe(false)
+            {
+                net_err = Some(e.clone());
+                found = Ok(without);
+            }
+            match (found, net_err) {
+                (Ok(_), Some(e)) if settings.contain == ContainMode::Required => {
+                    return (
+                        sandbox,
+                        Contained::Refuse(format!(
+                            "this node refuses agentic sessions: [sandbox] network = \"off\" and \
+                             contain = \"required\" in {}, and bubblewrap cannot make a network \
+                             namespace here ({e}), so UDP and DNS would go out. Set contain = \
+                             \"auto\" to run contained with that gap",
+                            node_toml.display()
+                        )),
+                    );
+                }
+                (Ok((c, proc_err)), net_err) => {
                     return match decide(c.form(), abi, &bwrap, settings.contain, node_toml) {
-                        Ok((mut line, level)) => {
+                        Ok((mut line, mut level)) => {
                             // Why the fresh /proc failed (the shared form).
                             if let Some(e) = proc_err {
                                 line.push_str(&format!("; a fresh /proc failed: {e}"));
+                            }
+                            if let Some(e) = net_err {
+                                line.push_str(&network_gap_line(&e, abi));
+                                level = ContainLevel::Warn;
                             }
                             (sandbox.with_containment(c), Contained::Yes(line, level))
                         }
                         Err(msg) => (sandbox, Contained::Refuse(msg)),
                     };
                 }
-                Err(e) if settings.network == Network::Off => format!(
-                    "{e} (with [sandbox] network = \"off\" the probe needs a network namespace \
-                     of its own as well)"
-                ),
-                Err(e) => e,
+                (Err(e), _) => e,
             }
         }
     };

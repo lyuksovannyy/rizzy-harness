@@ -781,9 +781,13 @@ network namespace. Landlock still refuses every TCP connect and bind inside
 it, its own loopback included, as before: a test server on `127.0.0.1`
 cannot be started with the network off; UDP to itself on `127.0.0.1` works.
 DNS lookups fail (`/etc/hosts` still answers). Where bubblewrap runs but
-cannot make a network namespace, it is not used with the network off: the
-probe at start fails, `contain = "required"` refuses with the reason, and
-`"auto"` falls back to Landlock alone (below). **Without the containment**
+cannot make a network namespace (the node's probe at start finds out),
+`contain = "required"` refuses with bubblewrap's error, and `"auto"` still
+contains every command (its own processes, the guard, Landlock inside)
+without the namespace: TCP is stopped by Landlock, but UDP and DNS go out,
+and abstract sockets are closed only from Linux 6.12 (Landlock ABI 6);
+`doctor` and the log mark the line `warn` ("network off WITH A GAP") and
+name bubblewrap's error. **Without the containment**
 (`"auto"`'s fallback, `contain = "off"`) and for graphify and the node's own
 git, `network = "off"` stops TCP only: **UDP and DNS still go out**, and
 `doctor` and the log say so on the containment line.

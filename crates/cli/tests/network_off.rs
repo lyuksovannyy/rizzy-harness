@@ -566,7 +566,10 @@ async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
     let out = Bash.run(&ctx, json!({ "command": cmd })).await.output;
     assert!(out.contains("self=2"), "not in a PID namespace: {out}");
     assert!(!out.contains("ifs=[lo ]"), "{out}");
-    assert!(out.contains("refused") && !out.contains("connected"), "{out}");
+    assert!(
+        out.contains("refused") && !out.contains("connected"),
+        "{out}"
+    );
 
     let required = start(Network::Off, ContainMode::Required);
     assert_eq!(required.contain_level, ContainLevel::Refused);
