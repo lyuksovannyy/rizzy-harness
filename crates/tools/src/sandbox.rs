@@ -21,9 +21,12 @@
 //! is an error (`sandbox-exec` exits [`EXIT_UNCONFINED`] without running the
 //! command). Newer rights are added best-effort on top: device ioctls (ABI 5),
 //! abstract Unix socket and signal scoping (ABI 6), connecting to pathname
-//! Unix sockets (ABI 9). Below ABI 9 a pathname socket (`/run/user/<uid>/bus`,
-//! `/var/run/docker.sock`, an ssh-agent) can still be connected to: an open
-//! residual, see PLAN.md R2.
+//! Unix sockets (ABI 9). Below ABI 9 Landlock lets a pathname socket
+//! (`/run/user/<uid>/bus`, `/var/run/docker.sock`, an ssh-agent) be
+//! connected to. Where the shell is contained, its file view (T.8c,
+//! [`crate::contain`]) holds only the grants, so a socket outside them is
+//! not there; a socket inside a granted folder, and every socket with
+//! Landlock alone, is an open residual, see PLAN.md R2.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};

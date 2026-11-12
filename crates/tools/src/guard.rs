@@ -269,8 +269,8 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
 /// of the destination's path (the view binds every grant at its own path),
 /// opened `O_PATH` without following a link at its last component, whose
 /// device and inode must be the ones the node checked: a folder swapped
-/// since refuses the command, and one swapped after this open is not what
-/// is mounted (the descriptor holds the checked one). The
+/// since refuses the command; one swapped after this open is caught by
+/// bubblewrap, which compares what it mounted with the descriptor. The
 /// [`crate::contain::IMAGE_TOKEN`] becomes a descriptor of this process's
 /// own running image (the node's: it started this guard from it). Not
 /// close-on-exec, so bubblewrap inherits them; bubblewrap closes those it
@@ -290,12 +290,26 @@ fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::Owned
         let opt = i.checked_sub(1).and_then(|j| args[j].to_str());
         let by_fd = matches!(opt, Some("--bind-fd" | "--ro-bind-fd"));
         let fd = if word == IMAGE_TOKEN && (by_fd || opt == Some("--ro-bind")) {
-            nix::fcntl::open(
+            let fd = nix::fcntl::open(
                 "/proc/self/exe",
                 OFlag::O_PATH,
                 nix::sys::stat::Mode::empty(),
             )
-            .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?
+            .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?;
+            // bubblewrap binds a descriptor through the path it names, which
+            // a deleted file no longer has (an upgrade that replaced the
+            // binary under a running node). Never the file now at the path:
+            // that is what a session could have put there (T8E-5).
+            let at = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                .map_err(|e| format!("its own image: {e}"))?;
+            if at.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
+                return Err(format!(
+                    "the harness binary this node runs was deleted or replaced since the node \
+                     started ({}); restart the node. The command was not started",
+                    at.display()
+                ));
+            }
+            fd
         } else if let (Some(id), true) = (word.strip_prefix(FD_TOKEN), by_fd) {
             let bad = || format!("a bad view argument {word:?}");
             let (dev, ino) = id.split_once(':').ok_or_else(bad)?;

@@ -39,9 +39,10 @@
 //! (the session's folder, its temp folder, a node.toml entry as it resolves
 //! now) is bound from a descriptor the guard opens without following a
 //! link and checks against that identity ([`Binds::Fd`], bubblewrap 0.10.0
-//! or newer, which checks the mount against the descriptor again); a
+//! or newer, which mounts the descriptor through the path it names, then
+//! compares the mount with the descriptor and refuses on a difference): a
 //! folder swapped since the check refuses the command, and one swapped
-//! after the guard's open is not what is mounted. With an older bubblewrap
+//! after the guard's open does too. With an older bubblewrap
 //! ([`Binds::Path`]) the grant is bound by its path and `sandbox-exec`,
 //! which runs before every contained command, Landlock or not, opens the
 //! mounted folder without following a link and refuses the command if it

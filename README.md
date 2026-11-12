@@ -502,7 +502,9 @@ local_node_users = "admins"          # admins (default) | granted
 The embedded node runs as the server's own OS user, next to its data
 directory. Its shell is sandboxed (see "The shell sandbox"), but on kernels
 before Linux 7.1 it can still reach Unix sockets such as the session bus,
-which can start programs outside the sandbox. So by default only
+which can start programs outside the sandbox (contained in bubblewrap, only
+those inside the folders it is granted, and abstract ones below Linux 6.12
+with the network on). So by default only
 server admins (and the API token) may use it; other accounts with the
 agentic grant run their agentic sessions on a remote node (`node join`), and
 get "use a remote node, or ask the server admin" on the built-in one, also
@@ -686,7 +688,33 @@ cannot gain privileges (`no_new_privs`): `sudo` and other setuid programs
 fail inside the sandbox. From Linux 6.12 the shell also cannot signal
 processes outside it, and from Linux 7.1 it cannot connect to Unix sockets
 outside its folders (the session bus, the Docker socket, an ssh-agent); on
-older kernels it **can**, see "Limits" below.
+older kernels it **can** where the shell is not contained (below), see
+"Limits" below.
+
+**What a contained command sees.** Where the shell is contained in
+bubblewrap (below), its file system is built from exactly that list and
+nothing else: the system folders above (read-only; `/bin`, `/lib` and the
+like are the same links as on your machine), the `[sandbox] read` and
+`write` entries, its session folder and temp folder, a `/dev` of its own
+(null, zero, full, random, urandom, a terminal device and `/dev/shm` of its
+own; none of your machine's devices), `/proc`, an empty read-only `/tmp`,
+and the harness binary at `/.rizzy-harness/rizzy-harness`. Everything else
+**does not exist** for it: `ls ~/.ssh` says "No such file or directory",
+not "Permission denied"; another chat's folder, the data directory and the
+target of a link that points out of the session folder are not there
+either, and neither is any Unix socket outside those folders (the session
+bus, the Docker socket). The folders above the session folder exist only
+as the way down to it. This holds without Landlock too (an old kernel, or
+`mode = "best-effort"` where Landlock is missing); Landlock stays inside as
+a second layer with the same rules. A folder is mounted only if it is
+still the one the node checked: one replaced by a link or another folder
+since refuses the command. With bubblewrap 0.10 or newer the node's guard
+opens each folder itself and bubblewrap mounts that very folder; with an
+older one (Ubuntu 24.04 has 0.9) it mounts by path and the wrapper checks
+the mounted folder before the command runs. `rizzy-harness doctor` lists
+what is mounted on its "file view" line, and says which of the two ways.
+Where the shell is not contained, the command sees your whole file system
+and Landlock alone decides what it can open, as the list above says.
 
 The node's own git, which takes the checkpoints and fills a sub-agent's
 folder, runs in the same sandbox: it may read the chat's folder (and your
@@ -710,36 +738,40 @@ process namespace of its own, with the Landlock sandbox inside it
 unchanged. When the command ends, is cancelled, times out, or the node
 process dies (even by `kill -9`), every process it started ends too,
 including ones that detached themselves (`setsid`, `nohup … &`, a daemon's
-double fork). bubblewrap changes nothing about which files a command may
-open; it only adds the process boundary. Each command has a small guard
+double fork). It also builds the command's file view ("What a contained
+command sees" above). Each command has a small guard
 process of its own between the node and bubblewrap that lives exactly as
 long as the command: it ends everything and confirms it before a cancel
 returns, and it ends the command when the node dies, even in the first
 millisecond after a start.
 
-**The condition.** On a kernel older than Linux 7.1 (Landlock ABI below 9:
-Ubuntu 24.04, Debian 13 and most kernels in use today) a command can still
-reach services of the node's user over Unix sockets, and such a service can
-start a process **outside** the containment, which then outlives the
-command and runs without the sandbox: one call to the session bus
-(`/run/user/<uid>/bus`, what `systemd-run --user` sends) is enough, as is a
-container runtime's or a `tmux` server's socket; below Linux 6.12 (ABI 6)
-abstract sockets too. `doctor` then marks the line `warn` and names the
-hole, and `contain = "required"` refuses. Running the node as its own OS
-user without a login session (no session bus, no `docker` group, as
-"Limits" below advises) removes the usual services. The planned file view
-(ADOPTION_PLAN T.8c) closes it on every kernel. On every kernel, a
-`[sandbox] write` entry that holds another program's socket (`/tmp`, where
-tmux and X11 keep theirs; `/run/user/<uid>`) is the same way out: a
-read-write grant includes connecting to sockets in it. `doctor` warns for
+**The condition.** A service of the node's user that a command can reach
+over a Unix socket can start a process **outside** the containment, which
+then outlives the command and runs without the sandbox: one call to the
+session bus (`/run/user/<uid>/bus`, what `systemd-run --user` sends) is
+enough, as is a container runtime's or a `tmux` server's socket. A
+contained command cannot reach a socket outside its folders on any kernel:
+it is not in its file view. On a kernel older than Linux 7.1 (Landlock ABI
+below 9: Ubuntu 24.04, Debian 13 and most kernels in use today) it can
+still reach a socket **inside** a folder it is granted (its session
+folder, a `[sandbox] read` or `write` entry), and below Linux 6.12 (ABI 6)
+with the network on, a service on an abstract socket (an X11 display,
+some D-Bus and IDE sockets: not files, so no file view hides them;
+`network = "off"` does). `doctor` then marks the line `warn` and names
+what is left, and `contain = "required"` still refuses there. Running the
+node as its own OS user without a login session (no session bus, no
+`docker` group, as "Limits" below advises) removes the usual services. On
+every kernel, a `[sandbox] write` entry that holds another program's
+socket (`/tmp`, where tmux and X11 keep theirs; `/run/user/<uid>`) is the
+same way out: a read-write grant includes connecting to sockets in it. `doctor` warns for
 `/tmp` and `/run/user/<uid>`; it does not look for sockets elsewhere. What
 a command notices:
 
 - `/proc` lists only its own processes; `ps` shows a handful, `$$` is 2.
   The node's and the rest of the machine's processes are not visible.
   Process 1 is bubblewrap's, and its command line (`/proc/1/cmdline`)
-  lists the command's own grants: its folder, its temp folder, the
-  `[sandbox] read`/`write` entries, the harness binary's path.
+  lists the command's own grants and file view: its folder, its temp
+  folder, the `[sandbox] read`/`write` entries, the system folders.
 - A program that daemonizes to keep running after the call (a dev server
   started with `setsid`, a `--daemon` flag) stops when the call ends. Run
   it in the foreground within one call, with a timeout.
@@ -769,8 +801,13 @@ a command notices:
   A second node started on the same data directory leaves the running
   node's commands alone; other parts of such a start still disturb it (its
   temp folders are emptied), so never start two on one data directory.
-- The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
-  without it.
+- `/dev` is its own and `/tmp` is empty and read-only; use `TMPDIR` (the
+  chat's temp folder, which compilers, `mktemp` and most tools already
+  use). Your home folder is there only as far as a `[sandbox] read` or
+  `write` entry or the session folder lies inside it, so a program that
+  looks for `~/.gitconfig` or `~/.config` finds nothing (`git` then works
+  with its defaults; give it `-c user.name=…` or a `read` entry for the
+  file). The host name, `TMPDIR` and the environment are as without it.
 
 **Network off.** `network = "off"` is about the node's shell (and
 graphify and the node's own git); the agent's web tools (`web_search`,
@@ -786,9 +823,8 @@ before: a test server on `127.0.0.1` cannot be started with the network
 off; UDP to itself on `127.0.0.1` works. DNS lookups over the network fail
 (`/etc/hosts` still answers). Not tested: a resolver that answers over a
 named Unix socket (systemd-resolved's, nscd's) is outside the namespace,
-and below Linux 7.1 (Landlock ABI 9) a command can still connect to such a
-socket and have names looked up for it, until the file view (T.8c) leaves
-it out; the containment line is a warning there already.
+which the file view leaves out (`/run` is not in it), so a contained
+command cannot use one, on any kernel.
 
 The node checks at start that a command really gets a namespace of its
 own (its `/proc/self/ns/net` is not the node's). Where the probe with
@@ -849,13 +885,17 @@ it does not work:
 - `"off"`: never use it (logged on every start); as with `"auto"`'s
   fallback, there is no guard and no confirmed end.
 
-**Keep the harness binary out of every session's reach.** A command's
-guard is the node's own running image, but the wrapper inside the
-namespace is started from the binary's path. If a workspace root or a
-`[sandbox] write` entry holds the binary (a node run from its own build
-tree, with a session on that tree), one command can replace it and the
-next command runs the agent's program in place of the wrapper, without the
-file sandbox. `doctor` and the log warn ("a session can replace the
+**Keep the harness binary out of every session's reach.** A contained
+command's guard and its wrapper are the node's own running image, which
+the guard mounts into the file view: replacing the file at the binary's
+path changes nothing for them (if the binary is deleted or replaced by an
+upgrade while the node runs, contained commands are refused with "restart
+the node" until it is restarted). But the node's own helpers (its checkpoint
+git, graphify), and the shell wherever it is not contained, start the
+wrapper from the binary's path. If a workspace root or a `[sandbox] write`
+entry holds the binary (a node run from its own build tree, with a session
+on that tree), one command can replace it and the next of those runs the
+agent's program in place of the wrapper, without the file sandbox. `doctor` and the log warn ("a session can replace the
 harness binary"), and `contain = "required"` refuses to start. Install the
 binary in a folder outside every workspace root and write entry (for
 example `/usr/local/bin`; `~/.cargo/bin` is inside a workspace root of
@@ -874,8 +914,12 @@ turn the containment off. Only the agent's shell is contained; graphify
 and the node's own git and PDF reader keep the Landlock sandbox alone.
 
 What breaks by default, and the fix: toolchains and caches under your home
-folder. A command that fails with `Permission denied` on a path under `~`
-needs that folder listed. The usual entries:
+folder. A command that fails with `Permission denied` (or, contained, `No
+such file or directory`) on a path under `~` needs that folder listed. Do
+not list a folder on the node's own `PATH` under `write` (`~/.cargo` when
+`~/.cargo/bin` is on it): a command could leave a program there that the
+node or a later command runs by name; `doctor` warns about it. List
+`~/.cargo/bin` under `read` and the caches under `write` instead. The usual entries:
 
 ```toml
 [sandbox]
@@ -907,14 +951,16 @@ its venv and the Python it was made from).
 Limits: Landlock does not cover UDP, so where the shell is not contained
 (and for graphify and the node's git) `network = "off"` still allows DNS
 and any UDP traffic ("Network off" above); Landlock does not hide that a
-file exists (`stat` and `test -e` still work on paths outside, only opening is denied); `/etc` is
+file exists where the shell is not contained (`stat` and `test -e` still work on paths outside, only opening is denied; contained, they are not there); `/etc` is
 readable; the session folder's own `.git` is writable, so a command can
 change that repository's hooks and config (the file tools refuse to).
-Before Linux 7.1 a command can connect to Unix sockets such as
-`/run/user/<uid>/bus` or `/var/run/docker.sock`, and through them start
-programs outside the sandbox (`systemd-run --user`, `docker run -v
-/:/host`): on such kernels run the node as its own OS user, without
-membership in the `docker` group and without a login session.
+Before Linux 7.1 a command that is not contained can connect to Unix
+sockets such as `/run/user/<uid>/bus` or `/var/run/docker.sock`, and
+through them start programs outside the sandbox (`systemd-run --user`,
+`docker run -v /:/host`); a contained one only to those inside its granted
+folders (and, below Linux 6.12 with the network on, to abstract ones): on
+such kernels run the node as its own OS user, without membership in the
+`docker` group and without a login session.
 
 **The agent's environment.** The shell and every other program a tool
 starts get an empty environment plus `PATH HOME USER LOGNAME SHELL LANG

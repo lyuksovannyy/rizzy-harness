@@ -674,6 +674,43 @@ async fn a_replaced_binary_does_not_run_as_sandbox_exec() {
     assert!(r2.output.contains("second"), "{}", r2.output);
 }
 
+/// The binary deleted under the running node (an upgrade that replaced
+/// it): its image has no path that bubblewrap could bind, and the file now
+/// at the path is not the node's. Every contained command is refused, with
+/// the reason, and nothing runs; the node runs again after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_binary_refuses_the_command_with_the_reason() {
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let bin = f.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("rizzy-harness");
+    std::fs::copy(EXE, &exe).unwrap();
+    let sb = Sandbox::new(
+        exe.clone(),
+        &Settings::default(),
+        Some(f.data.join("sandbox-tmp")),
+        std::slice::from_ref(&f.data),
+    )
+    .unwrap();
+    let Ok(sb) = bwrap::contained(sb, &f.data.join("sandbox-tmp/probe-contain")) else {
+        panic!("bubblewrap worked a moment ago")
+    };
+    let ctx = f.ctx(Arc::new(sb));
+    let r = Bash.run(&ctx, json!({ "command": "echo before" })).await;
+    assert!(r.output.contains("before"), "{}", r.output);
+    std::fs::remove_file(&exe).unwrap();
+    std::fs::copy(EXE, &exe).unwrap();
+    let r = Bash
+        .run(&ctx, json!({ "command": "echo RAN-AFTER-DELETE" }))
+        .await;
+    eprintln!("{}", r.output);
+    assert!(!r.output.contains("RAN-AFTER-DELETE\n"), "{}", r.output);
+    assert!(r.output.contains("restart the node"), "{}", r.output);
+}
+
 /// Helper for the next test (does nothing unless its variable is set): a
 /// node whose network is off and whose `[sandbox] write` entry holds a
 /// folder on its `PATH` probes its containment; it prints the result.
