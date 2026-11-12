@@ -124,18 +124,19 @@ impl Drop for Reaper {
 
 /// The four ways a process leaves the group the tool signals (B.1, B.11):
 /// `setsid`, `nohup … &`, a double fork with `setsid`, and a child that
-/// ignores SIGTERM. Each runs `sleep <base + i>`.
+/// ignores SIGTERM; and, as a control, a plain background child. Each runs
+/// `sleep <base + i>`.
 fn detached(base: u32) -> (String, Reaper) {
-    let s: Vec<u32> = (0..4).map(|i| base + i).collect();
+    let s: Vec<u32> = (0..5).map(|i| base + i).collect();
     let cmd = format!(
         "setsid sleep {} & nohup sleep {} >/dev/null 2>&1 & ( setsid sleep {} & ) ; \
-         sh -c 'trap \"\" TERM; exec sleep {}' & ",
-        s[0], s[1], s[2], s[3]
+         sh -c 'trap \"\" TERM; exec sleep {}' & sleep {} & ",
+        s[0], s[1], s[2], s[3], s[4]
     );
     (cmd, Reaper(s))
 }
 
-/// Wait until all four are running (so a pass is never vacuous).
+/// Wait until all five are running (so a pass is never vacuous).
 async fn all_started(r: &Reaper) {
     let by = Instant::now() + Duration::from_secs(20);
     while r.0.iter().any(|s| sleeps(*s).is_empty()) {
@@ -178,7 +179,7 @@ async fn detached_children_end_with(how: Stop, base: u32) {
     let cancel = ctx.cancel.clone();
     let (cmd, reaper) = detached(base);
     let input = match how {
-        // Long enough for the test to see all four from outside.
+        // Long enough for the test to see all five from outside.
         Stop::Exit => json!({"command": format!("{cmd} sleep 3; echo done")}),
         Stop::Timeout => json!({"command": format!("{cmd} sleep 1000"), "timeout_secs": 2}),
         Stop::Cancel | Stop::Drop => json!({"command": format!("{cmd} sleep 1000")}),

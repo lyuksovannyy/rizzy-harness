@@ -777,8 +777,9 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                 )
             })
             .and_then(|s| match s.refusal {
-                Some(_) => Err(s.summary),
-                None => Ok(s.summary),
+                // A refusal for the containment is reported on its own line.
+                Some(_) if !s.contain_summary.starts_with("REFUSING") => Err(s.summary),
+                _ => Ok(s.summary),
             }),
     );
     check(
