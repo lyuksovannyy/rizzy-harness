@@ -245,7 +245,11 @@ async fn exec(
     .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        // Through the sandbox the program is the node's own image.
+        harness_tools::sandbox::image_spawn_error(cmd.as_std().get_program(), &e)
+            .unwrap_or_else(|| format!("git: {e}"))
+    })?;
     let mut group = Group(child.id());
     let stdin = child.stdin.take();
     let work = async move {
@@ -2173,7 +2177,11 @@ fn stream_writes(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        // Through the sandbox the program is the node's own image.
+        harness_tools::sandbox::image_spawn_error(cmd.get_program(), &e)
+            .unwrap_or_else(|| format!("git: {e}"))
+    })?;
     let _group = Group(Some(child.id()));
     let ids: Vec<u8> = writes
         .iter()

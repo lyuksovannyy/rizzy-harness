@@ -37,19 +37,17 @@ use serde::{Deserialize, Serialize};
 /// The subcommand name of the wrapper.
 pub const SUBCOMMAND: &str = "sandbox-exec";
 
-/// What to tell when `program` could not be started (stub, re-check R-2).
-pub fn explain_spawn(program: &OsStr, e: &std::io::Error) -> String {
-    format!("{}: {e}", program.to_string_lossy())
-}
-
 /// `sandbox-exec`, first: close every descriptor above 2 this process was
 /// given (T.8f, review T8F-2). A contained `sandbox-exec` is started from a
 /// descriptor of the node's image that its guard left open (and, with
 /// binds by path, nothing else closes descriptors on the way), and the
 /// command must hold nothing of the image, the view or the guard. The list
 /// is `/proc/self/fd` (taken whole, then closed); without `/proc`, every
-/// number below the descriptor limit. Nothing opened before this is needed
-/// after it.
+/// number below the soft descriptor limit (capped at 65536), so one above
+/// it would stay (re-check R-3). `close_range(2)` would end that, but nix
+/// 0.31.3 has no safe wrapper of it, and no start of the node reaches this
+/// case (both forms of the view have a `/proc`). Nothing opened before this
+/// is needed after it.
 pub fn close_inherited() {
     let fds: Vec<i32> = match std::fs::read_dir("/proc/self/fd") {
         Ok(d) => d
@@ -159,41 +157,99 @@ pub struct Sandbox {
     /// in the network-off gap. The way up, which is the only way the node
     /// ever moves.
     step_up: Option<StepUp>,
-    /// The harness binary as it was when first opened, held open for the
-    /// process's life: the guard is started from it (`/proc/self/fd/<n>`),
-    /// so a command
-    /// that later replaces the file at `exe` cannot replace its guard
-    /// (review T8E-5). For the node itself it is `/proc/self/exe`, its own
-    /// running image.
+    /// The harness binary as it was when first opened, held open (`O_PATH`)
+    /// for the process's life: the guard, the helpers' and the uncontained
+    /// shell's `sandbox-exec` are started from it (`/proc/self/fd/<n>`), so
+    /// a file that later replaces the one at `exe` never runs in their place
+    /// (reviews T8E-5, T8F re-check R-1 and R-4). For the node itself it is
+    /// `/proc/self/exe`, its own running image ([`hold_own_image`]).
     image: Option<std::os::fd::RawFd>,
+    /// Why there is no `image`, where there is none.
+    image_err: Option<String>,
 }
 
-/// The harness binary to start guards from, as a descriptor this process
-/// holds until it exits (so its number can never name another file): the
-/// running image when `exe` is this process's own binary (the node), else
-/// `exe` as it is when first asked for (a test, whose own image is the
-/// test binary). Opened once per path.
-fn open_image(exe: &Path) -> Option<std::os::fd::RawFd> {
-    use std::os::fd::AsRawFd;
-    type Images = std::sync::Mutex<Vec<(PathBuf, std::fs::File)>>;
+type Images = std::sync::Mutex<Vec<(PathBuf, std::os::fd::OwnedFd)>>;
+
+/// The images this process holds, by the path they are known as: each
+/// descriptor is held until the process exits, so its number never names
+/// another file.
+fn images() -> &'static Images {
     static IMAGES: std::sync::OnceLock<Images> = std::sync::OnceLock::new();
-    let mut images = IMAGES.get_or_init(Default::default).lock().ok()?;
-    if let Some((_, f)) = images.iter().find(|(p, _)| p == exe) {
-        return Some(f.as_raw_fd());
+    IMAGES.get_or_init(Default::default)
+}
+
+/// The node, once at start: hold its own running image (`/proc/self/exe`,
+/// whatever is at `exe` now) as the image of `exe`, so every [`Sandbox`]
+/// of `exe` starts its guards, helpers and wrappers from it. `O_PATH`:
+/// execute permission is enough, for this and for `execve` through
+/// `/proc/self/fd/<n>` (a binary of mode 711 or 311: re-check R-1). This
+/// replaces a second `current_exe()` comparison in [`open_image`], which a
+/// binary replaced between the two calls could have answered with the new
+/// file (the first review's "not proven").
+pub fn hold_own_image(exe: &Path) -> Result<(), String> {
+    let mut v = images().lock().map_err(|_| "a poisoned lock".to_string())?;
+    if v.iter().any(|(p, _)| p == exe) {
+        return Ok(());
     }
-    let own = std::env::current_exe()
-        .and_then(|e| e.canonicalize())
-        .ok()
-        .is_some_and(|me| exe.canonicalize().is_ok_and(|e| e == me));
-    let path = if own {
-        Path::new("/proc/self/exe")
-    } else {
-        exe
-    };
-    let f = std::fs::File::open(path).ok()?;
-    let fd = f.as_raw_fd();
-    images.push((exe.to_owned(), f));
-    Some(fd)
+    let fd = nix::fcntl::open(
+        "/proc/self/exe",
+        nix::fcntl::OFlag::O_PATH | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|e| format!("/proc/self/exe: {e}"))?;
+    v.push((exe.to_owned(), fd));
+    Ok(())
+}
+
+/// The harness binary to start guards, helpers and wrappers from: the one
+/// held for `exe` ([`hold_own_image`], the node), else `exe` as it is when
+/// first asked for (a test, whose own image is the test binary), opened
+/// `O_PATH`, once per path.
+fn open_image(exe: &Path) -> Result<std::os::fd::RawFd, String> {
+    use std::os::fd::AsRawFd;
+    let mut v = images().lock().map_err(|_| "a poisoned lock".to_string())?;
+    if let Some((_, f)) = v.iter().find(|(p, _)| p == exe) {
+        return Ok(f.as_raw_fd());
+    }
+    let fd = nix::fcntl::open(
+        exe,
+        nix::fcntl::OFlag::O_PATH | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|e| format!("{}: {e}", exe.display()))?;
+    let raw = fd.as_raw_fd();
+    v.push((exe.to_owned(), fd));
+    Ok(raw)
+}
+
+/// What to tell when `program` could not be started: where it is the
+/// node's own image (a held descriptor, or the path it is known as), that
+/// the node's own binary could not be executed, which, why, and what to do
+/// (re-check R-2: before, the agent was told "failed to spawn bash").
+pub fn image_spawn_error(program: &OsStr, e: &std::io::Error) -> Option<String> {
+    use std::os::fd::AsRawFd;
+    let v = images().lock().ok()?;
+    let fd: Option<i32> = program
+        .to_str()
+        .and_then(|p| p.strip_prefix("/proc/self/fd/"))
+        .and_then(|n| n.parse().ok());
+    let (path, _) = v
+        .iter()
+        .find(|(p, f)| Some(f.as_raw_fd()) == fd || p.as_os_str() == program)?;
+    let p = path.display();
+    Some(match e.raw_os_error() {
+        Some(nix::libc::EACCES | nix::libc::EPERM) => format!(
+            "the node's own binary {p} could not be executed ({e}): restore its mode (chmod \
+             755 {p}); if the file at that path is no longer the one the node runs (it was \
+             rebuilt or replaced), restart the node instead. Nothing was started"
+        ),
+        _ => format!("the node's own binary {p} could not be started ({e}). Nothing was started"),
+    })
+}
+
+/// [`image_spawn_error`], or `<program>: <error>`.
+pub fn explain_spawn(program: &OsStr, e: &std::io::Error) -> String {
+    image_spawn_error(program, e).unwrap_or_else(|| format!("{}: {e}", program.to_string_lossy()))
 }
 
 /// Lexically normalized absolute path (`.` and `..` folded).
@@ -408,8 +464,10 @@ impl Sandbox {
                 ));
             }
         }
+        let image = open_image(&exe);
         Ok(Self {
-            image: open_image(&exe),
+            image: image.as_ref().ok().copied(),
+            image_err: image.err(),
             exe,
             read,
             extra_read: settings
@@ -670,7 +728,7 @@ impl Sandbox {
                 self.network == Network::Off && self.network_namespace(b),
                 &view(&all_rw, &all_ro),
             ),
-            None => std::process::Command::new(&self.exe),
+            None => self.own_program(),
         };
         c.arg(SUBCOMMAND);
         // In bubblewrap's command line (and its init's) too, where a
@@ -700,6 +758,24 @@ impl Sandbox {
         c
     }
 
+    /// The harness binary to run `sandbox-exec` from outside a containment
+    /// (the helpers, an uncontained shell): the held image
+    /// (`/proc/self/fd/<n>`, resolved by `execve` in the forked child before
+    /// the close-on-exec descriptor closes), as the guard is started
+    /// (re-check R-4); `argv[0]` is the path, for `ps`. Without a held
+    /// image (said at start), the path.
+    fn own_program(&self) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        match self.image {
+            Some(fd) => {
+                let mut c = std::process::Command::new(format!("/proc/self/fd/{fd}"));
+                c.arg0(&self.exe);
+                c
+            }
+            None => std::process::Command::new(&self.exe),
+        }
+    }
+
     /// The wrapper for one of the node's own helpers (its git for
     /// checkpoints, R.1 R1b-2), up to and including `--`: exactly `rw` and
     /// `ro` on top of the system folders ([`SYSTEM_READ`]) and the device
@@ -708,7 +784,7 @@ impl Sandbox {
     /// the protected folders: the caller passes only its own folders, each
     /// with the identity it expects (R1c-1).
     pub fn helper(&self, rw: &[Grant], ro: &[Grant]) -> std::process::Command {
-        let mut c = std::process::Command::new(&self.exe);
+        let mut c = self.own_program();
         c.arg(SUBCOMMAND);
         if self.best_effort {
             c.arg("--best-effort");
@@ -769,8 +845,12 @@ impl Sandbox {
         let out = c.output();
         let _ = std::fs::remove_file(&canary);
         let _ = std::fs::remove_dir_all(scratch);
-        let out =
-            out.map_err(|e| format!("cannot start {} {SUBCOMMAND}: {e}", self.exe.display()))?;
+        let out = out.map_err(|e| {
+            format!(
+                "cannot start {SUBCOMMAND}: {}",
+                explain_spawn(c.get_program(), &e)
+            )
+        })?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         let status = stderr
             .lines()
@@ -1325,11 +1405,53 @@ pub fn start(
         .map_err(|e| format!("cannot find the harness binary for {SUBCOMMAND}: {e}"));
     match exe {
         Ok(exe) => {
+            // Its own running image, once, before anything is started from
+            // it (re-check R-1).
+            let held = hold_own_image(&exe);
             let mut s = start_with_exe(exe.clone(), settings, data_dir, protected, node_toml)?;
+            check_image(&mut s, held.err(), settings, node_toml);
             check_binary_reach(&mut s, &exe, settings, workspace_roots, node_toml);
             Ok(s)
         }
         Err(e) => Ok(not_enforced(settings, e, node_toml, None)),
+    }
+}
+
+/// Re-check R-1: a node that holds no descriptor of its own image (or
+/// could not hold `/proc/self/exe`, `held`) starts its guards, helpers and
+/// wrappers from the binary's path, so a file put there runs in their
+/// place. Said in the log and `doctor` (the containment line); `contain =
+/// "required"` refuses.
+fn check_image(s: &mut Started, held: Option<String>, settings: &Settings, node_toml: &Path) {
+    let Confinement::Confined { sandbox, .. } = &s.confinement else {
+        return;
+    };
+    let why = match (&held, &sandbox.image_err) {
+        (_, Some(e)) => format!(
+            "the node holds no descriptor of its own binary ({e}): its guards, sandbox-exec and \
+             helpers are started from the path {}, so a file put at that path runs in their \
+             place",
+            sandbox.exe.display()
+        ),
+        (Some(e), None) => format!(
+            "the node could not hold its own running image ({e}): it holds the file that was at \
+             {} when it started, which may not be the build it runs",
+            sandbox.exe.display()
+        ),
+        (None, None) => return,
+    };
+    if settings.contain == crate::contain::ContainMode::Required {
+        let msg = format!(
+            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {}, and {why}",
+            node_toml.display()
+        );
+        s.contain_level = ContainLevel::Refused;
+        s.contain_summary = format!("REFUSING agentic sessions: {msg}");
+        s.confinement = Confinement::Refused(msg.clone().into());
+        s.refusal = Some(msg);
+    } else {
+        s.contain_summary.push_str(&format!("; WARNING: {why}"));
+        s.contain_level = ContainLevel::Warn;
     }
 }
 
@@ -1344,14 +1466,13 @@ pub fn binary_reach(exe: &Path, settings: &Settings, roots: &[PathBuf]) -> Optio
         .cloned()
 }
 
-/// Review T8E-5: where a session can write the binary's path, one command
-/// can replace it, and the node's helpers and a shell left to Landlock
-/// alone, which start `sandbox-exec` from that path, run the agent's
-/// program in its place, without Landlock. A contained command's guard and
-/// `sandbox-exec` are the node's own image, through descriptors (T.8e,
-/// T.8f), so they run no file at that path; but a session that owns a name
-/// of the image can change its mode and stop them all (review T8F-5).
-/// Warned in the log and `doctor`; `contain = "required"` refuses.
+/// Review T8E-5: where a session can write the binary's path, it can put a
+/// file there. Nothing the node starts runs it: the guard, `sandbox-exec`
+/// and the helpers are the node's own image, through descriptors (T.8e,
+/// T.8f, re-check R-4). What is left is the mode: a session that keeps a
+/// name of the image can change it and stop them all, and the node's
+/// restart (review T8F-5). Warned in the log and `doctor`; `contain =
+/// "required"` refuses.
 fn check_binary_reach(
     s: &mut Started,
     exe: &Path,
@@ -1365,21 +1486,17 @@ fn check_binary_reach(
     let Some(dir) = binary_reach(exe, settings, roots).filter(|_| contained) else {
         return;
     };
-    // A contained command runs no file at this path (its guard and its
-    // sandbox-exec are the node's running image, through descriptors, T.8e
-    // and T.8f), but the image's mode is the file's; the node's own helpers
-    // (its checkpoint git, graphify) and a shell left to Landlock alone
-    // still start sandbox-exec from this path.
+    // Nothing the node starts runs a file at this path (its guards,
+    // sandbox-exec and helpers are the node's running image, through
+    // descriptors), but the image's mode is the file's.
     let why = format!(
         "a session can replace the harness binary {} (it is inside {}, a workspace root or \
-         [sandbox] write entry): the node's own helpers (its checkpoint git, graphify), and \
-         shell commands whenever the shell is not contained, start sandbox-exec from that path, \
-         so the agent's program would run in its place without the file sandbox (a contained \
-         command's guard and sandbox-exec are the node's own running image, started through \
-         descriptors, so no file put at that path runs in their place); and a session that can \
-         write there can stop every contained command of every session, and the node's restart, \
-         by changing the mode of the file the node runs (chmod 000 on any name of it). Install \
-         the binary where no session can write",
+         [sandbox] write entry): no file put at that path runs in the node's place (its guards, \
+         sandbox-exec and helpers are started from the node's own running image, through \
+         descriptors), but a command can keep a name of the file the node runs there, and a \
+         session that can write there can then stop every contained command and \
+         every helper of every session, and the node's restart, by changing that file's mode \
+         (chmod 000). Install the binary where no session can write",
         exe.display(),
         dir.display()
     );
@@ -2468,6 +2585,59 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Re-check R-1: a node with no descriptor of its own binary says so,
+    /// with the reason, on its containment line (`auto`), and `required`
+    /// refuses; with one it says nothing.
+    #[test]
+    fn a_node_without_a_descriptor_of_its_image_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let missing = d.path().join("no-such-binary");
+        for (contain, refused) in [
+            (crate::contain::ContainMode::Auto, false),
+            (crate::contain::ContainMode::Required, true),
+        ] {
+            let settings = Settings {
+                contain,
+                ..Default::default()
+            };
+            let sb = Sandbox::new(missing.clone(), &settings, None, &[]).unwrap();
+            assert!(sb.image.is_none());
+            let mut s = not_enforced(
+                &Settings {
+                    mode: Mode::BestEffort,
+                    ..settings.clone()
+                },
+                "test".into(),
+                Path::new("node.toml"),
+                Some(Arc::new(sb)),
+            );
+            check_image(&mut s, None, &settings, Path::new("node.toml"));
+            assert!(
+                s.contain_summary
+                    .contains("no descriptor of its own binary")
+                    && s.contain_summary.contains("No such file"),
+                "{}",
+                s.contain_summary
+            );
+            assert_eq!(s.refusal.is_some(), refused, "{contain:?}");
+        }
+        let exe = PathBuf::from("/bin/true");
+        let sb = Sandbox::new(exe, &Settings::default(), None, &[]).unwrap();
+        assert!(sb.image.is_some());
+        let mut s = not_enforced(
+            &Settings {
+                mode: Mode::BestEffort,
+                ..Default::default()
+            },
+            "test".into(),
+            Path::new("node.toml"),
+            Some(Arc::new(sb)),
+        );
+        let before = s.contain_summary.clone();
+        check_image(&mut s, None, &Settings::default(), Path::new("node.toml"));
+        assert_eq!(s.contain_summary, before);
+    }
 
     #[test]
     fn grants_that_expose_the_data_dir_are_refused() {

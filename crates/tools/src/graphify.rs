@@ -185,7 +185,11 @@ async fn run(
         .stderr(std::process::Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = cmd.spawn().map_err(|e| format!("graphify: {e}"))?;
+    let child = cmd.spawn().map_err(|e| {
+        // Through the sandbox the program is the node's own image.
+        crate::sandbox::image_spawn_error(cmd.as_std().get_program(), &e)
+            .unwrap_or_else(|| format!("graphify: {e}"))
+    })?;
     let mut group = crate::bash::KillGroupOnDrop(child.id().map(|p| p as i32));
     let o = tokio::select! {
         r = tokio::time::timeout(timeout, child.wait_with_output()) => match r {

@@ -285,7 +285,12 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
 /// rebuild, an upgrade, a session's file: reviews T8E-5, T8F-3), and there
 /// is no path of it to bind. `sandbox-exec` closes it, and every other
 /// descriptor above 2, before anything else (review T8F-2). Any other
-/// `@rizzy` word in the options, or another program, refuses the command.
+/// `@rizzy` word in the options refuses the command. Another program after
+/// the options is passed through unchanged: the node always sends the
+/// token, and tests of the view without Landlock run the guard with another
+/// program there (`mount_view.rs` `without_the_wrapper`, `contain.rs`'s
+/// Landlock ABI 4 stand-in), so a guard that runs only its image would
+/// remove those tests, not a way in (only the node starts a guard).
 fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>), String> {
     use crate::contain::{FD_TOKEN, IMAGE_TOKEN};
     use nix::fcntl::OFlag;

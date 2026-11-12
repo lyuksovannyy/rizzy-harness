@@ -710,7 +710,7 @@ async fn at_mode_000_the_messages_name_the_nodes_binary() {
     };
     let sb = Arc::new(sb);
     let ctx = f.ctx(sb.clone(), "s1");
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o000)).unwrap();
     let r = run(&ctx, "echo RAN").await;
     let e = sb
         .helper(&[], &[])
