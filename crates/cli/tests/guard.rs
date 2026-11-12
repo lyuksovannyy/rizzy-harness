@@ -763,15 +763,18 @@ fn bwrap_argv(f: &Fixture, sb: Arc<Sandbox>, script: &str) -> Vec<std::ffi::OsSt
 /// Start `argv` orphaned (through a shell that exits at once), as a
 /// namespace whose guard and node are gone; `--die-with-parent` is dropped
 /// so it outlives that shell: the stand-in for a guard killed in the
-/// moment before bubblewrap or its init set the death signal.
-fn orphan(argv: &[std::ffi::OsString]) {
+/// moment before bubblewrap or its init set the death signal. Returns the
+/// pid of the program started (bubblewrap), as the shell reports it.
+fn orphan(argv: &[std::ffi::OsString]) -> i32 {
     let argv: Vec<_> = argv.iter().filter(|a| *a != "--die-with-parent").collect();
-    let st = std::process::Command::new("sh")
-        .args(["-c", "\"$@\" </dev/null >/dev/null 2>&1 &", "sh"])
+    let out = std::process::Command::new("sh")
+        .args(["-c", "\"$@\" </dev/null >/dev/null 2>&1 & echo $!", "sh"])
         .args(argv)
-        .status()
+        .stderr(std::process::Stdio::null())
+        .output()
         .unwrap();
-    assert!(st.success());
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
 }
 
 fn replace_mark(argv: &[std::ffi::OsString], to: Option<&Path>) -> Vec<std::ffi::OsString> {
@@ -806,29 +809,24 @@ async fn a_restarted_node_sweeps_what_a_dead_guard_left() {
     let root = f.data.join("sandbox-tmp");
     for (secs, kill_bwrap) in [(974_841, false), (974_842, true)] {
         let _clean = Cleanup(f.ws.clone(), vec![secs]);
-        orphan(&bwrap_argv(&f, sb.clone(), &format!("sleep {secs}")));
+        let bwrap = orphan(&bwrap_argv(&f, sb.clone(), &format!("sleep {secs}")));
         wait_for("the orphan", || !sleeps(secs).is_empty()).await;
         if kill_bwrap {
-            // bubblewrap gone, its init (with no death signal) left.
-            let init = pids()
-                .into_iter()
-                .find(|p| {
-                    children(*p)
-                        .iter()
-                        .any(|c| cmdline(*c) == format!("sleep\0{secs}\0").as_bytes())
-                })
-                .expect("the namespace's init");
-            let bwrap = std::fs::read_to_string(format!("/proc/{init}/stat"))
-                .unwrap()
-                .rsplit(')')
-                .next()
-                .unwrap()
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-                .parse::<i32>()
-                .unwrap();
-            assert!(cmdline(bwrap).starts_with(b"/"), "{}", describe(&[bwrap]));
+            // bubblewrap gone, its init (with no death signal) left. The
+            // init is taken as bubblewrap's own child, not guessed from the
+            // command's parent: how many processes sit between the two
+            // differs between bubblewrap versions and shells (the guess
+            // killed the init itself on CI's Ubuntu).
+            let inits = children(bwrap);
+            assert_eq!(
+                inits.len(),
+                1,
+                "bubblewrap {bwrap} should have one child, its init:\n{}",
+                describe(&[&[bwrap][..], &inits[..]].concat())
+            );
+            let init = inits[0];
+            let tree =
+                describe(&[&[bwrap, init][..], &children(init)[..], &sleeps(secs)[..]].concat());
             nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(bwrap),
                 nix::sys::signal::Signal::SIGKILL,
@@ -836,8 +834,9 @@ async fn a_restarted_node_sweeps_what_a_dead_guard_left() {
             .unwrap();
             wait_for("bubblewrap's end", || !alive(bwrap)).await;
             assert!(
-                !sleeps(secs).is_empty(),
-                "the init did not survive bubblewrap"
+                alive(init) && !sleeps(secs).is_empty(),
+                "the init did not survive bubblewrap; before the kill:\n{tree}\nafter:\n{}",
+                describe(&[&[init][..], &sleeps(secs)[..]].concat())
             );
         }
         let swept = tokio::task::spawn_blocking({
