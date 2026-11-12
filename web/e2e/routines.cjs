@@ -60,6 +60,9 @@ let PAGE = null;
     await p.waitForSelector('h1:has-text("Routines")');
     await p.click('button:has-text("New routine")');
     await p.fill('form input[placeholder="Morning briefing"]', 'Echo check');
+    // The default Assistant has no bash since the roster (9c32186).
+    await p.click('form button.select-button[aria-label^="Agent:"]');
+    await p.click('[role=listbox][aria-label=Agent] [role=option]:has-text("Software Developer")');
     await p.click('[role=radiogroup][aria-label="Runs as"] [role=radio]:has-text("Agentic")');
     await p.selectOption('select:has(option:has-text("Pick a node"))', { label: 'local' });
     await p.fill('input[placeholder="/home/me/project"]', `${S}/ws`);
