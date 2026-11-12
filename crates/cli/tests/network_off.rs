@@ -486,13 +486,14 @@ fn doctor_says_where_udp_and_dns_still_go_out() {
 }
 
 /// A bubblewrap that works but cannot make a network namespace (a stand-in
-/// that refuses `--unshare-net`, as a sandboxed outer container might):
-/// with the network off, `required` refuses with the reason and `auto`
-/// falls back to Landlock alone, saying UDP and DNS go out; neither runs a
-/// command contained with the network silently on. With the network on the
-/// same bubblewrap contains.
-#[test]
-fn a_bwrap_without_network_namespaces_is_not_used_with_the_network_off() {
+/// that refuses `--unshare-net`, as a sandboxed outer container might),
+/// with the network off: `auto` still contains (a PID namespace, the guard,
+/// Landlock inside), without the network namespace, and its line says so as
+/// a gap naming bubblewrap's error; `required` refuses with the reason.
+/// Neither runs a command with the network silently on. With the network
+/// on the same bubblewrap contains as usual.
+#[tokio::test]
+async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
     let f = fixture();
     if f.contained(Network::Off).is_none() {
         return;
@@ -538,17 +539,34 @@ fn a_bwrap_without_network_namespaces_is_not_used_with_the_network_off() {
     let auto = start(Network::Off, ContainMode::Auto);
     assert!(auto.refusal.is_none(), "{:?}", auto.refusal);
     assert_eq!(auto.contain_level, ContainLevel::Warn);
+    let line = &auto.contain_summary;
+    assert!(line.starts_with("contained ("), "{line}");
     assert!(
-        auto.contain_summary.starts_with("NOT CONTAINED")
-            && auto.contain_summary.contains("network namespace")
-            && auto.contain_summary.contains("UDP and DNS still go out"),
-        "{}",
-        auto.contain_summary
+        line.contains("network off WITH A GAP")
+            && line.contains("Operation not permitted")
+            && line.contains("UDP and DNS still go out"),
+        "{line}"
     );
+    assert!(!line.contains("only its own loopback"), "{line}");
     match &auto.confinement {
-        Confinement::Confined { sandbox, .. } => assert!(sandbox.containment().is_none()),
+        Confinement::Confined { sandbox, .. } => assert!(sandbox.containment().is_some()),
         other => panic!("{other:?}"),
     }
+    // Contained: its own PID namespace; the host's interfaces (the gap);
+    // TCP still refused by Landlock.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let mut ctx = ToolCtx::new(&f.ws);
+    ctx.protected = Arc::new(vec![f.data.clone()]);
+    ctx.sandbox = auto.confinement.for_session("s1");
+    let cmd = format!(
+        "echo self=$$; {INTERFACES} (exec 3<>/dev/tcp/127.0.0.1/{port}) && echo connected || \
+         echo refused"
+    );
+    let out = Bash.run(&ctx, json!({ "command": cmd })).await.output;
+    assert!(out.contains("self=2"), "not in a PID namespace: {out}");
+    assert!(!out.contains("ifs=[lo ]"), "{out}");
+    assert!(out.contains("refused") && !out.contains("connected"), "{out}");
 
     let required = start(Network::Off, ContainMode::Required);
     assert_eq!(required.contain_level, ContainLevel::Refused);
