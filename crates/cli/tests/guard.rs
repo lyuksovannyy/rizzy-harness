@@ -54,9 +54,13 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn plain(&self) -> Sandbox {
+        self.plain_with(&Settings::default())
+    }
+
+    fn plain_with(&self, settings: &Settings) -> Sandbox {
         Sandbox::new(
             PathBuf::from(EXE),
-            &Settings::default(),
+            settings,
             Some(self.data.join("sandbox-tmp")),
             std::slice::from_ref(&self.data),
         )
@@ -66,7 +70,12 @@ impl Fixture {
     /// The contained sandbox, or `None` (and a printed reason) where it
     /// cannot run here.
     fn sandbox(&self) -> Option<Arc<Sandbox>> {
-        let sb = self.plain();
+        self.sandbox_with(&Settings::default())
+    }
+
+    /// The same with these settings (T.8b: the network off).
+    fn sandbox_with(&self, settings: &Settings) -> Option<Arc<Sandbox>> {
+        let sb = self.plain_with(settings);
         if let Err(e) = sb.probe(&self.data.join("sandbox-tmp/probe"), &self.data) {
             assert!(!bwrap::required(), "Landlock does not work here: {e}");
             eprintln!("SKIPPED: Landlock does not work here: {e}");
@@ -357,9 +366,33 @@ async fn helper_node_spawns_one_command() {
 /// confirmed end, is proved by the FUSE test below, which fails on `main`.
 #[tokio::test]
 async fn cancel_returns_only_after_everything_ended() {
+    cancel_returns_only_after_everything_ended_with(
+        Settings::default(),
+        [974_811, 974_812, 974_813],
+    )
+    .await;
+}
+
+/// The same with the network off (T.8b): the command in a network
+/// namespace of its own changes nothing about the guard, its kill and its
+/// confirmation.
+#[tokio::test]
+async fn cancel_returns_only_after_everything_ended_with_the_network_off() {
+    cancel_returns_only_after_everything_ended_with(
+        Settings {
+            network: harness_tools::sandbox::Network::Off,
+            ..Default::default()
+        },
+        [974_821, 974_822, 974_823],
+    )
+    .await;
+}
+
+async fn cancel_returns_only_after_everything_ended_with(settings: Settings, secs: [u32; 3]) {
     let f = fixture();
-    let Some(sb) = f.sandbox() else { return };
-    let secs = [974_811, 974_812, 974_813];
+    let Some(sb) = f.sandbox_with(&settings) else {
+        return;
+    };
     let _clean = Cleanup(f.ws.clone(), secs.to_vec());
     for round in 0..5 {
         let ctx = f.ctx(sb.clone());
