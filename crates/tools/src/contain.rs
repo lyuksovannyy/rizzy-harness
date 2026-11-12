@@ -503,20 +503,26 @@ pub async fn spawn_for_test(cmd: tokio::process::Command) -> std::io::Result<Con
 /// What [`sweep`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Left {
-    /// A namespace nothing alive holds (bubblewrap whose guard died, an
-    /// init whose bubblewrap died, or one a previous start killed and
-    /// recorded as not yet ended): killed.
+    /// A namespace nothing alive holds (bubblewrap whose guard died, or an
+    /// init whose bubblewrap died): killed.
     Namespace,
-    /// A live guard of this node's data directory whose parent is not this
-    /// process (its node died while a child of it held the channel, review
-    /// T8E-1): told to kill (SIGTERM, its kill order).
+    /// A live guard of this node's data directory whose parent is no longer
+    /// the node named in its own `--node` (that node died while a child of
+    /// it held the channel, review T8E-1): told to kill (SIGTERM, its kill
+    /// order). A guard of a node that is alive (another process on the same
+    /// data directory) is never signalled (re-check R-1).
     Guard,
+    /// A guard of this data directory without a `--node` this can read:
+    /// left alone, named.
+    GuardUnknown,
 }
 
 /// One thing [`sweep`] found and acted on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swept {
     pub pid: i32,
+    /// As it came from the process's own arguments, which a command can
+    /// choose: print it escaped (`{:?}`), never as it is (re-check R-2).
     pub session: String,
     pub what: Left,
     /// Gone within 2 s: the process and every child it was killed with have
@@ -686,53 +692,24 @@ fn settle(acted: Vec<Acted>, within: std::time::Duration) -> Vec<(Acted, bool)> 
         .collect()
 }
 
-/// Where a start records what it killed and could not see end: beside the
-/// temp root, in the data directory (the temp root is emptied at start).
-fn leftovers_file(root: &Path) -> Option<PathBuf> {
-    Some(root.parent()?.join("sandbox-leftovers"))
-}
-
 /// At the node's start, before it serves (T.8e's second line): end every
 /// namespace a dead node left behind, found by the marker naming this
 /// node's temp root `root` (inside its data directory) among this user's
 /// own processes in `/proc`, and tell every guard of this data directory
-/// whose parent is not this process to kill (SIGTERM). A process without
-/// the marker, with another node's, or held by a guard of this process is
-/// never touched; a process that carries this node's marker of its own
-/// accord is killed with them (only this user's processes can, and the
-/// marker names this node). Each orphan is stopped and checked again (same
-/// start time) before the kill, its init (bubblewrap's child) is killed
-/// first, then it. What is not gone 2 s later is recorded beside the temp
-/// root, killed again and named again at the next start, until it is.
+/// whose node is dead (its parent is not the pid of its own `--node`) to
+/// kill (SIGTERM). A process without the marker, with another node's, or
+/// held by a live guard is never touched; a process that carries this
+/// node's marker of its own accord is killed with them (only this user's
+/// processes can, and the marker names this node). Each orphan is stopped
+/// and checked again (same start time) before the kill, its init
+/// (bubblewrap's child) is killed first, then it. What is not gone 2 s
+/// later is reported not ended; it was sent SIGKILL and ends when the
+/// kernel releases it. Nothing is kept for a later start (re-check R-2).
 pub fn sweep(root: &Path) -> Vec<Swept> {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     let rb = root.as_os_str().as_encoded_bytes().to_vec();
-    let me = std::process::id() as i32;
     let mut acted: Vec<Acted> = Vec::new();
-    // What an earlier start killed and did not see end.
-    let file = leftovers_file(root);
-    if let Some(text) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
-        for l in text.lines() {
-            let mut w = l.split_whitespace();
-            let (Some(pid), Some(start)) = (
-                w.next().and_then(|p| p.parse::<i32>().ok()),
-                w.next().and_then(|s| s.parse::<u64>().ok()),
-            ) else {
-                continue;
-            };
-            let session = w.next().unwrap_or_default().to_string();
-            if !gone(pid, start) {
-                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-            }
-            acted.push(Acted {
-                pid,
-                session,
-                what: Left::Namespace,
-                watch: vec![(pid, start)],
-            });
-        }
-    }
     let procs = marked(&rb, None);
     for p in orphans(&procs, &rb) {
         if acted.iter().any(|a| a.pid == p.pid) {
@@ -742,7 +719,23 @@ pub fn sweep(root: &Path) -> Vec<Swept> {
             acted.push(a);
         }
     }
-    for g in procs.iter().filter(|p| p.is_guard() && p.ppid != me) {
+    for g in procs.iter().filter(|p| p.is_guard()) {
+        let node = g
+            .value(crate::guard::NODE)
+            .and_then(|v| std::str::from_utf8(v).ok()?.parse::<i32>().ok());
+        let Some(node) = node else {
+            acted.push(Acted {
+                pid: g.pid,
+                session: g.session(),
+                what: Left::GuardUnknown,
+                watch: Vec::new(),
+            });
+            continue;
+        };
+        // Its node is alive (the parent is still that pid): not ours.
+        if g.ppid == node {
+            continue;
+        }
         if kill(Pid::from_raw(g.pid), Signal::SIGTERM).is_ok() {
             acted.push(Acted {
                 pid: g.pid,
@@ -753,24 +746,6 @@ pub fn sweep(root: &Path) -> Vec<Swept> {
         }
     }
     let settled = settle(acted, std::time::Duration::from_secs(2));
-    if let Some(f) = &file {
-        let keep: String = settled
-            .iter()
-            .filter(|(a, done)| !done && a.what == Left::Namespace)
-            .flat_map(|(a, _)| {
-                a.watch
-                    .iter()
-                    .filter(|(p, s)| !gone(*p, *s))
-                    .map(|(p, s)| format!("{p} {s} {}\n", a.session))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        if keep.is_empty() {
-            let _ = std::fs::remove_file(f);
-        } else {
-            let _ = std::fs::write(f, keep);
-        }
-    }
     settled
         .into_iter()
         .map(|(a, ended)| Swept {
