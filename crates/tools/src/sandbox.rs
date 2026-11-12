@@ -781,6 +781,75 @@ fn make_private_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
+/// How the containment line is marked in `doctor` and the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainLevel {
+    /// Contained, and the claim holds in full.
+    Ok,
+    /// Contained with a named gap, or not contained (`auto`, `off`).
+    Warn,
+    /// Agentic sessions are refused for it (`contain = "required"`).
+    Refused,
+}
+
+/// The effective Landlock ABI in the wrapper's status line
+/// (`effective_abi: V9` gives 9), 0 when there is none.
+pub fn effective_abi(status: &str) -> u32 {
+    status
+        .split("effective_abi: V")
+        .nth(1)
+        .unwrap_or("0")
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// The Landlock ABI from which a command can no longer reach a service of
+/// the node user over a pathname Unix socket (the session bus), and the one
+/// from which abstract sockets are closed (review T8A-1).
+pub const ABI_PATHNAME_SOCKETS: u32 = 9;
+pub const ABI_ABSTRACT_SOCKETS: u32 = 6;
+
+/// What the containment line says for a working containment of `form` on
+/// a kernel with Landlock ABI `abi` (review T8A-1). Below ABI 9 it is a
+/// warning that names the hole: bubblewrap ends every process in its
+/// namespace, but a command can ask a service outside it to start one.
+pub fn contained_line(
+    form: crate::contain::Form,
+    abi: u32,
+    bwrap: &Path,
+) -> (String, ContainLevel) {
+    let what = match form {
+        crate::contain::Form::Full => format!(
+            "contained ({}: a PID namespace and /proc of its own per command",
+            bwrap.display()
+        ),
+        crate::contain::Form::SharedProc => format!(
+            "contained without a /proc of its own ({}: a PID namespace per command, but a              fresh /proc could not be mounted, so /proc lists this machine's processes",
+            bwrap.display()
+        ),
+    };
+    if abi >= ABI_PATHNAME_SOCKETS {
+        return (
+            format!("{what}; nothing a command starts outlives it)"),
+            ContainLevel::Ok,
+        );
+    }
+    let abstract_too = if abi < ABI_ABSTRACT_SOCKETS {
+        ", or over an abstract socket (X11 and others)"
+    } else {
+        ""
+    };
+    (
+        format!(
+            "{what}) WITH A GAP: on this kernel (Landlock ABI {abi}, below 9) a command can              still start a process outside the containment, which then outlives it and runs              without the sandbox, by asking a service of this user over a Unix socket (the              session bus at /run/user/<uid>/bus, a container runtime's socket){abstract_too}.              Closed by Linux 7.1 or newer (Landlock ABI 9), or by the planned file view (T.8c);              README, \"The shell sandbox\""
+        ),
+        ContainLevel::Warn,
+    )
+}
+
 /// The outcome of [`start`].
 #[derive(Debug)]
 pub struct Started {
@@ -794,8 +863,8 @@ pub struct Started {
     /// One line on the shell's process containment (bubblewrap), for the
     /// log and `doctor`.
     pub contain_summary: String,
-    /// Whether that line is a warning (`auto` without a containment).
-    pub contain_degraded: bool,
+    /// How `doctor` and the log mark that line.
+    pub contain_level: ContainLevel,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
 }
@@ -822,7 +891,6 @@ pub fn start(
             data_dir.display()
         ));
     }
-    let tmp_root = data_dir.join("sandbox-tmp");
     if settings.mode == Mode::Off {
         if settings.contain == ContainMode::Required {
             return Err(format!(
@@ -842,7 +910,7 @@ pub fn start(
             contain_summary: "OFF ([sandbox] mode = \"off\"): processes a command leaves \
                               behind can outlive it"
                 .into(),
-            contain_degraded: true,
+            contain_level: ContainLevel::Warn,
             tmp_root: None,
         });
     }
@@ -850,10 +918,24 @@ pub fn start(
     let exe = std::env::current_exe()
         .and_then(|e| e.canonicalize())
         .map_err(|e| format!("cannot find the harness binary for {SUBCOMMAND}: {e}"));
-    let sandbox = match exe {
-        Ok(exe) => Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?,
-        Err(e) => return Ok(not_enforced(settings, e, node_toml, None)),
-    };
+    match exe {
+        Ok(exe) => start_with_exe(exe, settings, data_dir, protected, node_toml),
+        Err(e) => Ok(not_enforced(settings, e, node_toml, None)),
+    }
+}
+
+/// [`start`] with the wrapper binary given (`start` passes its own; a test
+/// passes the harness binary, since its own executable is the test).
+/// The caller has checked the `[sandbox]` entries against the roots.
+pub fn start_with_exe(
+    exe: PathBuf,
+    settings: &Settings,
+    data_dir: &Path,
+    protected: &[PathBuf],
+    node_toml: &Path,
+) -> Result<Started, String> {
+    let tmp_root = data_dir.join("sandbox-tmp");
+    let sandbox = Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?;
     let scratch = tmp_root.join(format!("probe-{}", std::process::id()));
     let canary_dir = protected.first().map_or(data_dir, |p| p.as_path());
     let landlock = sandbox.probe(&scratch, canary_dir);
@@ -865,9 +947,11 @@ pub fn start(
             Some(Arc::new(sandbox)),
         ));
     }
+    let abi = landlock.as_deref().map_or(0, effective_abi);
     let (sandbox, contain) = containment(
         sandbox,
         settings,
+        abi,
         &tmp_root.join(format!("probe-contain-{}", std::process::id())),
         node_toml,
     );
@@ -881,7 +965,7 @@ pub fn start(
             refusal: None,
             summary: format!("enforced ({status})"),
             contain_summary: String::new(),
-            contain_degraded: false,
+            contain_level: ContainLevel::Ok,
             tmp_root: Some(tmp_root),
         },
         Ok(status) => Started {
@@ -892,18 +976,22 @@ pub fn start(
             refusal: None,
             summary: format!("best-effort ({status}): only what the kernel enforces"),
             contain_summary: String::new(),
-            contain_degraded: false,
+            contain_level: ContainLevel::Ok,
             tmp_root: Some(tmp_root),
         },
         Err(e) => not_enforced(settings, e, node_toml, Some(sandbox.clone())),
     };
     match contain {
-        Contained::Yes(s) => started.contain_summary = s,
+        Contained::Yes(s, level) => {
+            started.contain_summary = s;
+            started.contain_level = level;
+        }
         Contained::No(s) => {
             started.contain_summary = s;
-            started.contain_degraded = true;
+            started.contain_level = ContainLevel::Warn;
         }
         Contained::Refuse(msg) => {
+            started.contain_level = ContainLevel::Refused;
             started.contain_summary = format!("REFUSING agentic sessions: {msg}");
             started.confinement = Confinement::Refused(msg.clone().into());
             started.refusal = Some(msg);
@@ -912,8 +1000,31 @@ pub fn start(
     Ok(started)
 }
 
+/// A working containment of `form` under `mode` on a kernel with
+/// Landlock ABI `abi`: its line, or the refusal. `required` means the
+/// guarantee holds; below ABI 9 it does not (T8A-1), so `required` refuses
+/// there, and `auto` contains anyway and warns.
+fn decide(
+    form: crate::contain::Form,
+    abi: u32,
+    bwrap: &Path,
+    mode: crate::contain::ContainMode,
+    node_toml: &Path,
+) -> Result<(String, ContainLevel), String> {
+    let (line, level) = contained_line(form, abi, bwrap);
+    if level != ContainLevel::Ok && mode == crate::contain::ContainMode::Required {
+        return Err(format!(
+            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {} \
+             promises that nothing a command starts outlives it, and here it does not hold: \
+             {line}. Set contain = \"auto\" to run contained with that gap",
+            node_toml.display()
+        ));
+    }
+    Ok((line, level))
+}
+
 enum Contained {
-    Yes(String),
+    Yes(String, ContainLevel),
     No(String),
     Refuse(String),
 }
@@ -922,6 +1033,7 @@ enum Contained {
 fn containment(
     sandbox: Sandbox,
     settings: &Settings,
+    abi: u32,
     scratch: &Path,
     node_toml: &Path,
 ) -> (Sandbox, Contained) {
@@ -945,35 +1057,24 @@ fn containment(
         Err(e) => e,
         Ok(bwrap) => {
             let full = Contain::new(bwrap.clone(), Form::Full);
-            match sandbox.probe_containment(&full, scratch) {
-                Ok(()) => {
-                    return (
-                        sandbox.with_containment(full),
-                        Contained::Yes(format!(
-                            "contained ({}: a PID namespace and /proc of its own per command; \
-                             nothing a command starts outlives it)",
-                            bwrap.display()
-                        )),
-                    );
-                }
-                Err(full_err) => {
-                    let shared = Contain::new(bwrap.clone(), Form::SharedProc);
-                    match sandbox.probe_containment(&shared, scratch) {
-                        Ok(()) => {
-                            return (
-                                sandbox.with_containment(shared),
-                                Contained::Yes(format!(
-                                    "contained without a /proc of its own ({}: a PID namespace \
-                                     per command, so nothing a command starts outlives it, but \
-                                     a fresh /proc could not be mounted ({full_err}), so /proc \
-                                     lists this machine's processes)",
-                                    bwrap.display()
-                                )),
-                            );
+            let shared = Contain::new(bwrap.clone(), Form::SharedProc);
+            let found = match sandbox.probe_containment(&full, scratch) {
+                Ok(()) => Ok(full),
+                Err(full_err) => match sandbox.probe_containment(&shared, scratch) {
+                    Ok(()) => Ok(shared),
+                    Err(e) => Err(format!("{full_err}; without a new /proc: {e}")),
+                },
+            };
+            match found {
+                Ok(c) => {
+                    return match decide(c.form(), abi, &bwrap, settings.contain, node_toml) {
+                        Ok((line, level)) => {
+                            (sandbox.with_containment(c), Contained::Yes(line, level))
                         }
-                        Err(e) => format!("{full_err}; without a new /proc: {e}"),
-                    }
+                        Err(msg) => (sandbox, Contained::Refuse(msg)),
+                    };
                 }
+                Err(e) => e,
             }
         }
     };
@@ -1013,7 +1114,7 @@ fn not_enforced(
                 "NOT ENFORCED, running anyway ([sandbox] mode = \"best-effort\"): {why}"
             ),
             contain_summary: String::new(),
-            contain_degraded: false,
+            contain_level: ContainLevel::Ok,
             tmp_root,
         },
         _ => {
@@ -1034,7 +1135,7 @@ fn not_enforced(
                 refusal: Some(msg.clone()),
                 summary: format!("REFUSING agentic sessions: {msg}"),
                 contain_summary: "not probed: the sandbox does not work".into(),
-                contain_degraded: true,
+                contain_level: ContainLevel::Warn,
                 tmp_root,
             }
         }
@@ -1588,7 +1689,7 @@ mod tests {
 
         let s = start(&settings(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
         assert!(s.refusal.is_none(), "{:?}", s.refusal);
-        assert!(s.contain_degraded);
+        assert_eq!(s.contain_level, ContainLevel::Warn);
         assert!(
             s.contain_summary.contains("NOT CONTAINED"),
             "{}",
@@ -1607,6 +1708,54 @@ mod tests {
         assert!(start(&off(ContainMode::Auto), &data, prot, &[], &toml).is_ok());
         let e = start(&off(ContainMode::Required), &data, prot, &[], &toml).unwrap_err();
         assert!(e.contains("contain = \"required\""), "{e}");
+    }
+
+    /// T8A-1: the line depends on the effective Landlock ABI. From ABI 9
+    /// the claim is made in full; below, it is a warning that names the
+    /// session bus (and below ABI 6 abstract sockets), and `required`
+    /// refuses. The shared-`/proc` form says so in every case.
+    #[test]
+    fn the_containment_line_depends_on_the_landlock_abi() {
+        use crate::contain::{ContainMode, Form};
+        let b = Path::new("/usr/bin/bwrap");
+        let toml = Path::new("/n/node.toml");
+        let (line, level) = contained_line(Form::Full, 9, b);
+        assert_eq!(level, ContainLevel::Ok);
+        assert!(
+            line.contains("nothing a command starts outlives it"),
+            "{line}"
+        );
+        assert!(!line.contains("GAP"), "{line}");
+        for abi in [0, 4, 6, 8] {
+            let (line, level) = contained_line(Form::Full, abi, b);
+            assert_eq!(level, ContainLevel::Warn, "{abi}");
+            assert!(
+                line.contains("WITH A GAP") && line.contains("session bus"),
+                "{line}"
+            );
+            assert!(
+                !line.contains("nothing a command starts outlives it"),
+                "{line}"
+            );
+            assert_eq!(line.contains("abstract socket"), abi < 6, "{abi}: {line}");
+            let e = decide(Form::Full, abi, b, ContainMode::Required, toml).unwrap_err();
+            assert!(
+                e.contains("contain = \"required\"") && e.contains("auto"),
+                "{e}"
+            );
+            assert!(decide(Form::Full, abi, b, ContainMode::Auto, toml).is_ok());
+        }
+        let (line, level) = contained_line(Form::SharedProc, 9, b);
+        assert_eq!(level, ContainLevel::Ok);
+        assert!(line.contains("without a /proc of its own"), "{line}");
+        let (_, level) = contained_line(Form::SharedProc, 4, b);
+        assert_eq!(level, ContainLevel::Warn);
+        assert!(decide(Form::Full, 9, b, ContainMode::Required, toml).is_ok());
+        assert_eq!(
+            effective_abi("landlock Available { effective_abi: V9, kernel_abi: Some(10) }"),
+            9
+        );
+        assert_eq!(effective_abi("landlock unavailable"), 0);
     }
 
     #[test]

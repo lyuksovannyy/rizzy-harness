@@ -27,6 +27,7 @@ const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    root: PathBuf,
     data: PathBuf,
     ws: PathBuf,
 }
@@ -40,6 +41,7 @@ fn fixture() -> Fixture {
     std::fs::create_dir_all(&ws).unwrap();
     Fixture {
         _dir: dir,
+        root,
         data,
         ws,
     }
@@ -58,15 +60,22 @@ impl Fixture {
 
     /// The contained sandbox, or `None` where it cannot run here.
     fn sandbox(&self) -> Option<Arc<Sandbox>> {
+        self.sandbox_and_status().map(|(sb, _)| sb)
+    }
+
+    /// The contained sandbox and the wrapper's Landlock status line.
+    fn sandbox_and_status(&self) -> Option<(Arc<Sandbox>, String)> {
         let sb = self.plain();
-        if let Err(e) = sb.probe(&self.data.join("sandbox-tmp/probe"), &self.data) {
-            assert!(!bwrap::required(), "Landlock does not work here: {e}");
-            eprintln!("SKIPPED: Landlock does not work here: {e}");
-            return None;
-        }
-        bwrap::contained(sb, &self.data.join("sandbox-tmp/probe-contain"))
-            .ok()
-            .map(Arc::new)
+        let status = match sb.probe(&self.data.join("sandbox-tmp/probe"), &self.data) {
+            Ok(s) => s,
+            Err(e) => {
+                assert!(!bwrap::required(), "Landlock does not work here: {e}");
+                eprintln!("SKIPPED: Landlock does not work here: {e}");
+                return None;
+            }
+        };
+        let sb = bwrap::contained(sb, &self.data.join("sandbox-tmp/probe-contain")).ok()?;
+        Some((Arc::new(sb), status))
     }
 
     fn ctx(&self, sb: Arc<Sandbox>) -> ToolCtx {
@@ -508,4 +517,193 @@ async fn the_shared_proc_form_still_contains() {
     cancel.cancel();
     let _ = h.await.unwrap();
     none_left(&reaper, "cancel, shared /proc").await;
+}
+
+// ---- T8A-1 (docs/security-review/2026-11-T8a-containment.md) ----
+//
+// bubblewrap ends every process in its namespace, but a command can ask a
+// service of the node user outside it to start one. Whether it can reach
+// such a service is Landlock's (pathname Unix sockets from ABI 9, abstract
+// ones from ABI 6), so the containment's claim holds in full only from ABI
+// 9, and `doctor` says so (`sandbox::contained_line`).
+
+fn have_python() -> bool {
+    let ok = std::process::Command::new("python3")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        assert!(!bwrap::required(), "the T8A-1 tests need python3");
+        eprintln!("SKIPPED: no python3");
+    }
+    ok
+}
+
+/// A service of the test outside the sandbox that starts `sleep <secs>`
+/// for each connection: one listener on a pathname socket outside every
+/// grant, one on an abstract socket (the stand-in for the session bus).
+fn service(path: &Path, abstract_name: &str, secs_path: u32, secs_abstract: u32) {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+    let by_path = UnixListener::bind(path).unwrap();
+    let by_name =
+        UnixListener::bind_addr(&SocketAddr::from_abstract_name(abstract_name).unwrap()).unwrap();
+    for (listener, secs) in [(by_path, secs_path), (by_name, secs_abstract)] {
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                if conn.is_ok() {
+                    let _ = std::process::Command::new("sleep")
+                        .arg(secs.to_string())
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            }
+        });
+    }
+}
+
+/// One connect to each socket.
+fn connect_script(path: &Path, abstract_name: &str) -> String {
+    format!(
+        "python3 -c 'import socket\n\
+         for a in (\"{}\", \"\\0{abstract_name}\"):\n\
+         \x20   s = socket.socket(socket.AF_UNIX)\n\
+         \x20   try:\n\
+         \x20       s.connect(a); print(\"unix-\" + \"connected\")\n\
+         \x20   except OSError as e: print(\"refused:\", e)\n\
+         '",
+        path.display()
+    )
+}
+
+/// The review's proof through the real wrapper and the real `bash` tool,
+/// kept to record which side of the line this kernel is on (CI's kernel is
+/// expected below ABI 9): from ABI 9 nothing reaches the pathname socket,
+/// from ABI 6 nothing the abstract one; below, what the service starts
+/// outlives the command, and `doctor` warns instead of claiming it
+/// (`the_containment_line_depends_on_the_landlock_abi`).
+#[tokio::test]
+async fn a_service_outside_is_out_of_reach_only_from_landlock_abi_9() {
+    let f = fixture();
+    let Some((sb, status)) = f.sandbox_and_status() else {
+        return;
+    };
+    if !have_python() {
+        return;
+    }
+    let abi = harness_tools::sandbox::effective_abi(&status);
+    let (bus, name) = (f.root.join("bus"), format!("t8a-{}", std::process::id()));
+    let reaper = Reaper(vec![975_101, 975_102]);
+    service(&bus, &name, 975_101, 975_102);
+    let r = run(
+        &f.ctx(sb),
+        json!({"command": format!("echo self=$$; {}", connect_script(&bus, &name))}),
+    )
+    .await;
+    assert!(r.output.contains("self=2"), "not contained: {}", r.output);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (by_path, by_name) = (!sleeps(975_101).is_empty(), !sleeps(975_102).is_empty());
+    eprintln!(
+        "Landlock ABI {abi}: after the contained command ended, the process started through \
+         the pathname socket is {}, through the abstract socket {}",
+        if by_path { "RUNNING" } else { "not there" },
+        if by_name { "RUNNING" } else { "not there" },
+    );
+    assert_eq!(by_path, abi < 9, "{}", r.output);
+    assert_eq!(by_name, abi < 6, "{}", r.output);
+    drop(reaper);
+}
+
+/// RESIDUAL BELOW LANDLOCK ABI 9 (PLAN.md T9), shown on any kernel: the
+/// node's exact bubblewrap command line with the wrapper replaced by what
+/// an ABI 4 kernel enforces (`support/review_t8a/landlock_abi4.py`). The
+/// command is in its namespace and the file policy holds; one connect to
+/// each socket makes the service start a process, and the node's kill
+/// leaves those two. Closed by T.8c's file view (and a network namespace
+/// for abstract sockets); until then `doctor` names it and `contain =
+/// "required"` refuses on such a kernel. This test flips when it closes.
+#[tokio::test]
+async fn below_abi_9_a_service_outside_still_outlives_the_kill() {
+    use std::ffi::OsString;
+    const ABI4: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/review_t8a/landlock_abi4.py"
+    );
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    if !have_python() {
+        return;
+    }
+    let (bus, name) = (
+        f.root.join("bus"),
+        format!("t8a-old-{}", std::process::id()),
+    );
+    let secret = f.root.join("home/secret");
+    std::fs::write(&secret, "outside the session folder").unwrap();
+    let reaper = Reaper(vec![975_111, 975_112, 975_113, 975_114]);
+    service(&bus, &name, 975_111, 975_112);
+    let script = format!(
+        "cat {} && echo FILE-POLICY-BROKEN; {}; setsid sleep 975113 & sleep 975114",
+        secret.display(),
+        connect_script(&bus, &name)
+    );
+    let conf = Confinement::Confined {
+        sandbox: sb,
+        tmp: None,
+    };
+    let (node, contained) = conf
+        .shell(
+            "bash".as_ref(),
+            &["-c".as_ref(), script.as_ref()],
+            &f.ws,
+            None,
+            &Default::default(),
+            std::slice::from_ref(&f.data),
+            Grants {
+                workspace_write: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(contained);
+    let node = node.as_std();
+    let argv: Vec<OsString> = node.get_args().map(OsString::from).collect();
+    let at = argv.iter().position(|a| a == EXE).unwrap();
+    assert_eq!(argv[at + 1], "sandbox-exec");
+    let mut old = std::process::Command::new(node.get_program());
+    old.args(&argv[..at])
+        .args(["python3", "-I", ABI4])
+        .args(&argv[at + 2..])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .current_dir(&f.ws)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    std::os::unix::process::CommandExt::process_group(&mut old, 0);
+    let child = old.spawn().unwrap();
+    let bwrap_pid = child.id() as i32;
+    let by = Instant::now() + Duration::from_secs(20);
+    while reaper.0.iter().any(|s| sleeps(*s).is_empty()) {
+        assert!(Instant::now() < by, "the four processes never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The node's kill at the end of a cancel or a timeout.
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(bwrap_pid),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let out = child.wait_with_output().unwrap();
+    let out =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert!(!out.contains("FILE-POLICY-BROKEN"), "{out}");
+    none_left(&Reaper(vec![975_113, 975_114]), "inside the namespace").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !sleeps(975_111).is_empty() && !sleeps(975_112).is_empty(),
+        "closed: nothing reached the sockets; flip this test and PLAN.md T9: {out}"
+    );
+    drop(reaper);
 }

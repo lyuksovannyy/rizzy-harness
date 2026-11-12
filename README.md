@@ -702,14 +702,28 @@ start, `serve` starts for chats only. `"best-effort"` uses whatever the
 kernel enforces and logs a warning; `"off"` runs the shell with every right
 of the node's OS user and logs that on every start.
 
-**Nothing a command starts outlives it.** Each `bash` call runs inside
+**Nothing a command starts outlives it, on Linux 7.1 or newer.** Each
+`bash` call runs inside
 [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) in a
 process namespace of its own, with the Landlock sandbox inside it
 unchanged. When the command ends, is cancelled, times out, or the node
 process dies (even by `kill -9`), every process it started ends too,
 including ones that detached themselves (`setsid`, `nohup … &`, a daemon's
 double fork). bubblewrap changes nothing about which files a command may
-open; it only adds the process boundary. What a command notices:
+open; it only adds the process boundary.
+
+**The condition.** On a kernel older than Linux 7.1 (Landlock ABI below 9:
+Ubuntu 24.04, Debian 13 and most kernels in use today) a command can still
+reach services of the node's user over Unix sockets, and such a service can
+start a process **outside** the containment, which then outlives the
+command and runs without the sandbox: one call to the session bus
+(`/run/user/<uid>/bus`, what `systemd-run --user` sends) is enough, as is a
+container runtime's or a `tmux` server's socket; below Linux 6.12 (ABI 6)
+abstract sockets too. `doctor` then marks the line `warn` and names the
+hole, and `contain = "required"` refuses. Running the node as its own OS
+user without a login session (no session bus, no `docker` group, as
+"Limits" below advises) removes the usual services. The planned file view
+(ADOPTION_PLAN T.8c) closes it on every kernel. What a command notices:
 
 - `/proc` lists only its own processes; `ps` shows a handful, `$$` is 2.
   The node's and the rest of the machine's processes are not visible.
@@ -740,8 +754,11 @@ it does not work:
   alone, and say so once in the log and in `doctor`. Processes a command
   detaches then **can** outlive it and the node, and `/proc` shows every
   process of the machine.
-- `"required"`: refuse agentic sessions, as `mode = "required"` does
-  without Landlock (`node run` refuses to start).
+- `"required"`: refuse agentic sessions unless the guarantee above holds
+  in full, as `mode = "required"` does without Landlock (`node run`
+  refuses to start). It therefore refuses where bubblewrap does not run
+  **and** on kernels below Linux 7.1 (the condition above). On such a
+  kernel set `"auto"`: the shell is contained, with that gap named.
 - `"off"`: never use it (logged on every start).
 
 `mode = "required"` promises the Landlock file sandbox only; it does not
