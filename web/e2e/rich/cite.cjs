@@ -6,6 +6,7 @@
 // focus back on the pill after Escape in the card and a readable unknown
 // label.
 const { check, log, contrast, focused } = require('./lib.cjs');
+const { pickAgent } = require('../onboard.cjs');
 
 module.exports = async function cite(t) {
   const { p, ctx, S } = t;
@@ -94,12 +95,12 @@ module.exports = async function cite(t) {
   // new page is S3, a known one keeps S2), and the labels it hands back
   // resolve to its pages here, not to this session's S1.
   await t.newChat('Ask');
-  // The composer's agent picker is a listbox button, not a native select.
-  await p.click('.composer button.select-button[aria-label^="agent:"]');
-  await p.click('[role=listbox][aria-label=agent] [role=option]:has-text("Ultracode")');
+  // Ultracode became the Senior Teamlead in the roster (9c32186), and Scout
+  // lost web search there, so the sub-task goes to the Researcher.
+  await pickAgent(p, 'Senior Teamlead');
   await t.send('cite: rust');
   await p.waitForSelector('.tool-web .web-status:has-text("Searched “rust” · 2 results")');
-  await t.send('delegate: scout=cite: other rust');
+  await t.send('delegate: researcher=cite: other rust');
   const relayed = p.locator('.msg.assistant:has-text("Sub-agent said:")');
   const subPills = await relayed.locator('.cite').allInnerTexts();
   check(JSON.stringify(subPills) === JSON.stringify(['c.example', 'b.example', 'c.example +1']), 'sub-task pills: ' + JSON.stringify(subPills));

@@ -27,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { check, log, sleep, chat } = require('./rich/lib.cjs');
-const { claimCode, createOwner, keywordsOnly } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
 
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-rich-'));
@@ -79,6 +79,8 @@ async function signUp(p, code) {
     const code = await claimCode(`${S}/data/claim-code`, URL_);
     b = await chromium.launch();
     const ctx = await b.newContext({ viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
+    // The sections' own fetch('/api/…') calls send the login key (Gate 3 P-1).
+    await keyed(ctx);
     const p = await ctx.newPage();
     const errors = [];
     // Every request of every page, also those the CSP blocks (Chromium

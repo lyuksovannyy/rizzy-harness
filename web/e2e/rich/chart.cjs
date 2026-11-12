@@ -13,7 +13,7 @@ module.exports = async function chart(t) {
   const svg = msg.locator('.ui-card-chart svg.ui-chart');
   await svg.waitFor();
   check(chunks('Chart').length === 1, 'chart chunk loaded once');
-  check((await msg.locator('.ui-from').innerText()) === 'from General', 'framed as the agent\'s');
+  check((await msg.locator('.ui-from').innerText()) === 'from Assistant', 'framed as the agent\'s');
   const marks = svg.locator('.ui-chart-mark');
   check((await marks.count()) === 5, `5 bars, none for the missing value (got ${await marks.count()})`);
   const fills = await marks.evaluateAll((els) => [...new Set(els.map((el) => getComputedStyle(el).fill))]);

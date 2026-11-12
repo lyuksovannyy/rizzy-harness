@@ -35,7 +35,7 @@ module.exports = async function blocks(t) {
   const choices = await t.lastMsg();
   await choices.locator('.ui-card .ui-choices').waitFor();
   check((await choices.locator('.ui-skeleton').count()) === 0, 'the skeleton gives way to the card');
-  check((await choices.locator('.ui-from').innerText()) === 'Question from General', 'harness frame names the agent');
+  check((await choices.locator('.ui-from').innerText()) === 'Question from Assistant', 'harness frame names the agent');
   check((await choices.locator('.ui-footer').innerText()) === 'Sends your answers as a message. Never type passwords or keys here.', 'fixed footer');
   check((await choices.locator('.ui-title').innerText()) === 'Which colour do you like best?', 'the question');
   const labels = await choices.locator('.ui-option-label').allInnerTexts();
@@ -155,7 +155,7 @@ module.exports = async function blocks(t) {
   // an inline error, and the answer reaches the model as ids and values.
   const trip = await t.send('ui: form');
   await trip.locator('.ui-card .ui-form').waitFor();
-  check((await trip.locator('.ui-from').innerText()) === 'Form from General', 'form header');
+  check((await trip.locator('.ui-from').innerText()) === 'Form from Assistant', 'form header');
   check(await trip.locator('.ui-send').isDisabled(), 'Send off until Travellers is filled');
   const people = trip.getByLabel('Travellers', { exact: true });
   check((await people.getAttribute('aria-required')) === 'true', 'Travellers is read as required');

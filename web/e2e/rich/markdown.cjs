@@ -45,7 +45,15 @@ module.exports = async function markdown(t) {
   // Temml's output is cleaned: \label's id (which would take over the
   // footnote's) and \char"202E are gone.
   check((await demo.locator('.md .math-out [id]').count()) === 0, 'no ids inside math');
-  check((await demo.locator('[id="user-content-fn-1"]').count()) === 1, 'the footnote keeps its id');
+  // Footnote ids carry a prefix of their own per message since 5d51e06, so
+  // the demo's \label{user-content-fn-1} no longer names this footnote. The
+  // check follows the reference to its target: exactly one element on the
+  // page has that id, and it is this message's footnote.
+  const ref = await demo.locator('.md sup a[id$="-fnref-1"]').getAttribute('href');
+  const fnId = decodeURIComponent((ref || '').replace(/^#/, ''));
+  check(/^m\d+-fn-1$/.test(fnId), `the footnote reference has a per-message id (${ref})`);
+  check((await p.locator(`[id="${fnId}"]`).count()) === 1, 'the footnote keeps its id');
+  check((await demo.locator(`.md section[data-footnotes] li[id="${fnId}"]`).count()) === 1, 'the id is on the footnote itself');
   check(!HIDDEN.test((await demo.locator('.md .math-out').allInnerTexts()).join('')), 'no hidden characters from \\char');
   check((await demo.locator('.callout-warning .callout-title').innerText()) === 'Check before you run', 'warning callout with its title');
   check((await demo.locator('.md img').count()) === 0, 'no <img> in messages');
