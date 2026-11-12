@@ -280,10 +280,13 @@ async fn helper_runs_detached_children() {
 }
 
 /// `PR_SET_PDEATHSIG` fires when the *thread* that started bwrap exits.
-/// A contained command started from a thread that then ends must run to
-/// its end: the spawn goes through the process's spawner thread. The
-/// control shows the hazard is real: the same command spawned directly
-/// from that thread is killed when it ends.
+/// T.8a spawned every command from one long-lived thread for that reason;
+/// a command spawned directly from a thread that then ended was killed
+/// (this test's control on `main` before T.8e). Now the guard, a
+/// single-threaded process, starts bubblewrap, and the node's side is a
+/// channel the kernel closes only when the process dies: a command
+/// spawned from a thread that ends at once runs to its end, through the
+/// tool's path and directly from the ending thread alike.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_command_outlives_the_thread_that_started_it() {
     let f = fixture();
@@ -312,7 +315,7 @@ async fn a_command_outlives_the_thread_that_started_it() {
         c
     };
     let rt = tokio::runtime::Handle::current();
-    // The real path, from a thread that ends at once.
+    // The tool's path, from a thread that ends at once.
     let cmd = build();
     let rt2 = rt.clone();
     let child = std::thread::spawn(move || {
@@ -325,26 +328,23 @@ async fn a_command_outlives_the_thread_that_started_it() {
     assert!(out.status.success(), "{:?}", out.status);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "survived");
 
-    // Control: spawned by the ending thread itself. It lives a moment
-    // longer, past bwrap's own `prctl` (a thread that ends before bwrap
-    // set its death signal is not noticed: PLAN.md T9's residual).
-    let mut cmd = build();
+    // From an ending thread itself, which lives on a moment past
+    // bubblewrap's own `prctl`: before T.8e this was killed.
+    let cmd = build();
     let rt2 = rt.clone();
     let child = std::thread::spawn(move || {
         let _g = rt2.enter();
-        let c = cmd.spawn().unwrap();
+        let c = rt2
+            .block_on(harness_tools::contain::spawn_for_test(cmd))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(300));
         c
     })
     .join()
     .unwrap();
     let out = child.wait_with_output().await.unwrap();
-    assert!(
-        !out.status.success() && out.stdout.is_empty(),
-        "control: a command spawned from an ended thread survived ({:?}); the hazard \
-         this test guards against is not reproduced",
-        out.status
-    );
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "survived");
 }
 
 async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
@@ -486,11 +486,12 @@ fn only_the_shell_is_contained() {
         )
         .unwrap();
     assert!(contained);
-    assert!(
-        Path::new(&args(&shell)).ends_with("bwrap"),
-        "{:?}",
-        args(&shell)
-    );
+    // Its guard (T.8e), which starts bubblewrap.
+    assert_eq!(args(&shell), Path::new(EXE).as_os_str());
+    let argv: Vec<_> = shell.as_std().get_args().collect();
+    assert_eq!(argv[0], harness_tools::guard::SUBCOMMAND);
+    let at = argv.iter().position(|a| *a == "--").unwrap();
+    assert!(Path::new(argv[at + 1]).ends_with("bwrap"), "{argv:?}");
 }
 
 /// Where only the shared-`/proc` form works (nested in a container), the
@@ -669,10 +670,14 @@ async fn below_abi_9_a_service_outside_still_outlives_the_kill() {
         .unwrap();
     assert!(contained);
     let node = node.as_std();
-    let argv: Vec<OsString> = node.get_args().map(OsString::from).collect();
+    // bubblewrap's part of it, without the guard (T.8e): this test kills
+    // bubblewrap's group itself, as the node did before.
+    let all: Vec<OsString> = node.get_args().map(OsString::from).collect();
+    let bwrap_at = all.iter().position(|a| a == "--").unwrap() + 1;
+    let argv = &all[bwrap_at + 1..];
     let at = argv.iter().position(|a| a == EXE).unwrap();
     assert_eq!(argv[at + 1], "sandbox-exec");
-    let mut old = std::process::Command::new(node.get_program());
+    let mut old = std::process::Command::new(&all[bwrap_at]);
     old.args(&argv[..at])
         .args(["python3", "-I", ABI4])
         .args(&argv[at + 2..])
@@ -730,11 +735,13 @@ fn leads_a_session(pid: i32) -> bool {
 /// The review's proof inverted. Killing bubblewrap's group in the moment
 /// after the init's `setsid` and before it set its own death signal left
 /// the namespace running (first or second try on the review machine; 19 of
-/// 20 at that instant). The node's kill (`contain::kill_namespace`, used by
-/// the dropped call, the end of the grace and the spawner) now stops
-/// bubblewrap and kills the init it names first: no try leaves a survivor.
-/// Half the tries are at fixed delays after the spawn (0 to 1 ms), the
-/// review's other measurement.
+/// 20 at that instant). T.8a's fix (`contain::kill_namespace`: stop
+/// bubblewrap, kill the init it names, then the group) is now the guard's
+/// kill, and the node's kill is dropping the command (its guard's channel
+/// closes). No try leaves a survivor. Half the tries drop it the instant
+/// the init leads its session, half at fixed delays after the spawn (0 to
+/// 1 ms), the review's other measurement. `T8A_TRIES` sets the count
+/// (default 60).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_just_after_the_inits_setsid_ends_the_namespace() {
     const SECS: u32 = 975_120;
@@ -770,11 +777,15 @@ async fn a_kill_just_after_the_inits_setsid_ends_the_namespace() {
             .stderr(std::process::Stdio::null())
             .process_group(0)
             .kill_on_drop(true);
-        let mut child = harness_tools::contain::spawn_for_test(cmd).await.unwrap();
-        let bwrap_pid = child.id().unwrap() as i32;
+        let child = harness_tools::contain::spawn_for_test(cmd).await.unwrap();
+        let guard = child.id().unwrap() as i32;
         if attempt % 2 == 0 {
             let by = Instant::now() + Duration::from_millis(200);
-            while Instant::now() < by && !init_of(bwrap_pid).is_some_and(leads_a_session) {
+            while Instant::now() < by
+                && !init_of(guard)
+                    .and_then(init_of)
+                    .is_some_and(leads_a_session)
+            {
                 std::hint::spin_loop();
             }
         } else {
@@ -783,8 +794,7 @@ async fn a_kill_just_after_the_inits_setsid_ends_the_namespace() {
                 std::hint::spin_loop();
             }
         }
-        harness_tools::contain::kill_namespace(bwrap_pid);
-        let _ = child.wait().await;
+        drop(child);
         tokio::time::sleep(Duration::from_millis(250)).await;
         let left = sleeps(SECS);
         if !left.is_empty() {
@@ -972,143 +982,11 @@ fn doctor_marks_each_containment_state() {
 }
 
 // ---- R-1 (re-check of the fixes): the answer nobody reads ----
-
-/// This process's bubblewrap child whose command ends in `sleep <secs>`.
-fn our_bwrap(secs: u32) -> Option<i32> {
-    let me = std::process::id();
-    let tail = format!("\0sleep\0{secs}\0");
-    std::fs::read_dir(format!("/proc/{me}/task"))
-        .ok()?
-        .filter_map(|t| t.ok())
-        .flat_map(|t| {
-            std::fs::read_to_string(format!(
-                "/proc/{me}/task/{}/children",
-                t.file_name().to_string_lossy()
-            ))
-            .unwrap_or_default()
-            .split_whitespace()
-            .filter_map(|p| p.parse::<i32>().ok())
-            .collect::<Vec<_>>()
-        })
-        .find(|pid| {
-            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
-                c.ends_with(tail.as_bytes())
-                    && c.split(|b| *b == 0)
-                        .next()
-                        .is_some_and(|a| a.ends_with(b"bwrap"))
-            })
-        })
-}
-
-/// The re-check's proof inverted. The spawner had already put the child
-/// into the reply when the caller stopped waiting (the `select!` in
-/// `bash.rs` takes the cancel or the timeout, or the call is dropped): the
-/// reply was dropped with the bare child inside and only tokio's
-/// `kill_on_drop` killed bubblewrap, leaving the namespace running at the
-/// first to third try. The reply now carries `ContainedChild`, whose drop
-/// kills the namespace: no try leaves a survivor. `T8A_TRIES` sets the
-/// count (default 100).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_answer_nobody_reads_is_killed_with_its_namespace() {
-    const SECS: u32 = 975_302;
-    let tries: u32 = std::env::var("T8A_TRIES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100);
-    let f = fixture();
-    let Some(sb) = f.sandbox() else { return };
-    let conf = Confinement::Confined {
-        sandbox: sb,
-        tmp: None,
-    };
-    let reaper = Reaper(vec![SECS]);
-    let mut survivors = Vec::new();
-    for attempt in 1..=tries {
-        let (mut cmd, _) = conf
-            .shell(
-                "sleep".as_ref(),
-                &[SECS.to_string().as_ref()],
-                &f.ws,
-                None,
-                &Default::default(),
-                std::slice::from_ref(&f.data),
-                Grants {
-                    workspace_write: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0)
-            .kill_on_drop(true);
-        let mut fut = Box::pin(harness_tools::contain::spawn_for_test(cmd));
-        // The caller waits once, as `select!` does, then is not woken again
-        // before its cancel.
-        assert!(futures::poll!(&mut fut).is_pending());
-        let by = Instant::now() + Duration::from_millis(500);
-        let mut bwrap_pid = None;
-        while Instant::now() < by {
-            bwrap_pid = bwrap_pid.or_else(|| our_bwrap(SECS));
-            if bwrap_pid.and_then(init_of).is_some_and(leads_a_session) {
-                break;
-            }
-            std::hint::spin_loop();
-        }
-        drop(fut);
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let left = sleeps(SECS);
-        if !left.is_empty() {
-            survivors.push(attempt);
-            for pid in left {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
-        }
-    }
-    eprintln!(
-        "an unread answer: {} of {tries} namespaces survived",
-        survivors.len()
-    );
-    drop(reaper);
-    assert!(
-        survivors.is_empty(),
-        "namespaces survived an unread answer at tries {survivors:?} of {tries}"
-    );
-}
-
-/// N-2's claim, from the re-check: a caller that stops waiting before the
-/// spawner answered has its late child killed, namespace and all.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_spawn_abandoned_before_the_answer_is_killed() {
-    const SECS: u32 = 975_301;
-    let f = fixture();
-    let Some(sb) = f.sandbox() else { return };
-    let conf = Confinement::Confined {
-        sandbox: sb,
-        tmp: None,
-    };
-    let _reaper = Reaper(vec![SECS]);
-    for _ in 0..30 {
-        let (mut cmd, _) = conf
-            .shell(
-                "sleep".as_ref(),
-                &[SECS.to_string().as_ref()],
-                &f.ws,
-                None,
-                &Default::default(),
-                std::slice::from_ref(&f.data),
-                Grants::default(),
-            )
-            .unwrap();
-        cmd.process_group(0).kill_on_drop(true);
-        let mut fut = Box::pin(harness_tools::contain::spawn_for_test(cmd));
-        assert!(futures::poll!(&mut fut).is_pending());
-        drop(fut);
-    }
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(sleeps(SECS).is_empty(), "left: {:?}", sleeps(SECS));
-}
+//
+// Before T.8e the spawn waited on the spawner thread, and an answer the
+// caller had stopped waiting for was dropped with the child inside. The
+// spawn no longer waits on anything (no spawner thread), and a dropped
+// `ContainedChild` closes its guard's channel, which is the kill order:
+// `a_kill_just_after_the_inits_setsid_ends_the_namespace` above drops it at
+// the review's worst instant, and `cli/tests/guard.rs` kills the whole
+// node 0 to 1 ms after the spawn.

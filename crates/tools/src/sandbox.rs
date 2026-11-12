@@ -368,19 +368,30 @@ impl Sandbox {
     }
 
     /// The wrapper's command line up to and including `--`; with
-    /// `contain`, inside bubblewrap started in the given folder.
+    /// `contain`, inside bubblewrap started in the given folder by its
+    /// guard (T.8e), both marked with this node's temp root and `session`.
     fn wrapper(
         &self,
         rw: &[Grant],
         ro: &[Grant],
         status: bool,
         contain: Option<(&crate::contain::Contain, &Path)>,
+        session: &OsStr,
     ) -> std::process::Command {
+        let mark = self.tmp_root.as_ref().map(|root| crate::contain::Mark {
+            root: root.clone(),
+            session: session.to_owned(),
+        });
         let mut c = match contain {
-            Some((b, cwd)) => b.command(&self.exe, cwd),
+            Some((b, cwd)) => b.command(&self.exe, cwd, mark.as_ref()),
             None => std::process::Command::new(&self.exe),
         };
         c.arg(SUBCOMMAND);
+        // In bubblewrap's command line (and its init's) too, where a
+        // restarted node's sweep looks for it.
+        if let (Some(_), Some(m)) = (contain, &mark) {
+            m.push_args(&mut c);
+        }
         if self.best_effort {
             c.arg("--best-effort");
         }
@@ -463,6 +474,7 @@ impl Sandbox {
             &[],
             true,
             None,
+            OsStr::new("probe"),
         );
         c.args([
             "sh",
@@ -520,14 +532,22 @@ impl Sandbox {
             &[],
             false,
             Some((contain, scratch)),
+            OsStr::new("probe"),
         );
+        // Through the guard, as every command: its channel stays open (no
+        // kill order) until the probe has ended.
+        let (keep, theirs) = std::os::unix::net::UnixStream::pair()
+            .map_err(|e| format!("the guard's channel: {e}"))?;
         c.args(["sh", "-c", &crate::contain::probe_script(full), "sh"])
             .arg(&ok)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(scratch)
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+                theirs,
+            )));
         let out = c.output();
+        drop(keep);
         let _ = std::fs::remove_dir_all(scratch);
         let out = out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -626,16 +646,14 @@ impl Confinement {
         self.build(program, args, workspace, pin, env, protected, grants, true)
     }
 
-    /// Start a command from [`Self::shell`]: a contained one from the
-    /// process's spawner thread (`crate::contain::spawn`).
+    /// Start a command from [`Self::shell`]: a contained one with its
+    /// guard's control channel (`crate::contain::spawn`, T.8e).
     pub async fn spawn(
         mut cmd: tokio::process::Command,
         contained: bool,
     ) -> std::io::Result<crate::bash::ShellChild> {
         if contained {
-            crate::contain::spawn(cmd)
-                .await
-                .map(crate::bash::ShellChild::Contained)
+            crate::contain::spawn(cmd).map(crate::bash::ShellChild::Contained)
         } else {
             cmd.spawn().map(crate::bash::ShellChild::Plain)
         }
@@ -757,7 +775,12 @@ impl Confinement {
                 }
                 let contain = sandbox.contain.as_ref().filter(|_| shell);
                 contained = contain.is_some();
-                let mut c = sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())));
+                let session = tmp
+                    .as_ref()
+                    .and_then(|t| t.file_name())
+                    .unwrap_or(OsStr::new("-"));
+                let mut c =
+                    sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())), session);
                 c.arg(program);
                 env.apply_std(&mut c);
                 if let Some(t) = tmp {
@@ -767,7 +790,11 @@ impl Confinement {
             }
         };
         let mut c = tokio::process::Command::from(std_cmd);
-        c.args(args).current_dir(&ws);
+        // A contained command's guard starts in `/`: bubblewrap enters the
+        // folder (`--chdir`), so a folder that hangs (a stalled network
+        // mount) stalls the guard, never the node's spawn (review N-2).
+        c.args(args)
+            .current_dir(if contained { Path::new("/") } else { &ws });
         Ok((c, contained))
     }
 }
@@ -1553,7 +1580,7 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false, None)
+        sb.wrapper(&[], &[], false, None, OsStr::new("-"))
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()

@@ -1,30 +1,41 @@
-//! Process containment of the agent's shell (ADOPTION_PLAN T.8a, PLAN.md T9).
+//! Process containment of the agent's shell (ADOPTION_PLAN T.8a, T.8e;
+//! PLAN.md T9).
 //!
 //! Landlock decides what a command may open; it does nothing about
 //! processes. A child that calls `setsid` leaves the process group the tool
 //! signals, and every child outlives a `kill -9` of the node (experiment
 //! B.1). Here each agent `bash` call runs inside its own PID namespace made
-//! by bubblewrap: `bwrap --die-with-parent --new-session --unshare-pid
-//! --dev-bind / / --proc /proc --chdir <folder> -- <harness> sandbox-exec …
-//! -- bash -c <cmd>`. When the namespace's first process (bwrap's init) dies,
-//! the kernel kills every process in it, whatever its session or signal
-//! mask. It dies when the command ends, when the node kills bwrap, and,
-//! through `--die-with-parent` (`PR_SET_PDEATHSIG`), when the node dies.
+//! by bubblewrap, under a guard of its own: `<harness> sandbox-guard --mark
+//! … -- bwrap --die-with-parent --new-session --unshare-pid --dev-bind / /
+//! --proc /proc --chdir <folder> -- <harness> sandbox-exec … -- bash -c
+//! <cmd>`. When the namespace's first process (bwrap's init) dies, the
+//! kernel kills every process in it, whatever its session or signal mask.
+//!
+//! **The guard** ([`crate::guard`], T.8e) is bubblewrap's parent and holds
+//! the command until it is dead: its stdin is one end of a socket pair
+//! whose other end only the node holds ([`ContainedChild`]). The channel
+//! closing, by the node to cancel or by the kernel when the node dies, is
+//! the kill order; the guard kills and repeats until it has reaped
+//! everything, and tells the node when it has, or that something is still
+//! alive. bubblewrap's `--die-with-parent` names the guard, so a guard that
+//! is itself killed takes the namespace with it, and [`sweep`] ends at the
+//! next start what a doubly unlucky kill left.
 //!
 //! The file system is the one the command sees without bwrap (`/` bound as
 //! it is, devices included): Landlock inside still decides what is readable
 //! and writable (`docs/container-experiment.md` §8: `sandbox-exec` reaches
 //! full enforcement inside bwrap). Only `/proc` is the namespace's own.
 //!
-//! **Which thread spawns.** `PR_SET_PDEATHSIG` fires when the *thread* that
-//! forked bwrap exits, not the process. A command spawned from a tokio
-//! blocking-pool thread, or any thread that later ends, would be killed for
-//! no reason. Every contained command is therefore spawned by one thread
-//! that lives as long as the process ([`spawn`]).
+//! **Which thread spawns** no longer matters. `PR_SET_PDEATHSIG` fires when
+//! the *thread* that forked bwrap exits; T.8a therefore spawned every
+//! command from one long-lived thread. The guard is single-threaded and
+//! forks bubblewrap itself, and the node's guard does not depend on a death
+//! signal at all (the channel closes when the process dies, whichever
+//! thread spawned it), so a command is spawned where it is asked for
+//! (`cli/tests/contain.rs` `a_command_outlives_the_thread_that_started_it`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, mpsc};
 
 use serde::{Deserialize, Serialize};
 
@@ -76,8 +87,28 @@ impl Contain {
         &self.bwrap
     }
 
-    /// `bwrap <args> -- <program>`, started in `cwd`.
-    pub(crate) fn command(&self, program: &Path, cwd: &Path) -> std::process::Command {
+    /// `<exe> sandbox-guard [--mark …] -- bwrap <args> -- <exe>`: the
+    /// guard, which starts bubblewrap in `cwd` (T.8e). `exe` is the harness
+    /// binary, resolved once at start, as for `sandbox-exec`.
+    pub(crate) fn command(
+        &self,
+        exe: &Path,
+        cwd: &Path,
+        mark: Option<&Mark>,
+    ) -> std::process::Command {
+        let mut c = std::process::Command::new(exe);
+        c.arg(crate::guard::SUBCOMMAND);
+        if let Some(m) = mark {
+            m.push_args(&mut c);
+        }
+        c.arg("--").arg(&self.bwrap).args(self.args(cwd)).arg(exe);
+        c
+    }
+
+    /// `bwrap <args> -- <program>`, without the guard (tests, and the
+    /// measurement of what the guard costs).
+    #[doc(hidden)]
+    pub fn bwrap_command(&self, program: &Path, cwd: &Path) -> std::process::Command {
         let mut c = std::process::Command::new(&self.bwrap);
         c.args(self.args(cwd)).arg(program);
         c
@@ -86,8 +117,8 @@ impl Contain {
     /// The arguments up to and including `--`.
     fn args(&self, cwd: &Path) -> Vec<OsString> {
         let mut a: Vec<OsString> = [
-            // Through PR_SET_PDEATHSIG: bwrap dies with the thread that
-            // started it, and bwrap's init dies with bwrap.
+            // Through PR_SET_PDEATHSIG: bwrap dies with its guard (a
+            // single-threaded process), and bwrap's init dies with bwrap.
             "--die-with-parent",
             // bwrap's init calls setsid: the command has no controlling
             // terminal (no TIOCSTI into the node's), and its session is the
@@ -246,19 +277,108 @@ pub(crate) fn term_namespace_with(bwrap_pid: i32, init_of: impl Fn(i32) -> Optio
     let _ = killpg(Pid::from_raw(target), Signal::SIGTERM);
 }
 
-/// A spawned contained command (review R-1). There is no other way to hold
-/// one: the spawner hands this out, never the bare child, so wherever it is
-/// dropped while bubblewrap still runs (an answer nobody reads, a call
-/// dropped mid-run, an early return, a panic) the whole namespace is killed
-/// through [`kill_namespace`], never by tokio's `kill_on_drop` alone, which
-/// kills bubblewrap only. Once the child has been reaped nothing is sent:
-/// its number may belong to another process by then.
+/// The marker a contained command carries in its guard's and in
+/// bubblewrap's command lines (T.8e): the node's temp root (inside its data
+/// directory) and the session. [`sweep`] looks for it.
+#[derive(Debug, Clone)]
+pub struct Mark {
+    pub root: PathBuf,
+    pub session: OsString,
+}
+
+impl Mark {
+    pub(crate) fn push_args(&self, c: &mut std::process::Command) {
+        c.arg(crate::guard::MARK)
+            .arg(&self.root)
+            .arg(crate::guard::MARK_SESSION)
+            .arg(&self.session);
+    }
+}
+
+/// How a stop of a contained command ended, as its guard reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// Everything the command started was reaped, this long after the
+    /// order.
+    Ended(std::time::Duration),
+    /// Something was still not dead this long after the order (stuck in
+    /// I/O the kernel will not interrupt); the guard keeps killing it.
+    StillAlive(std::time::Duration),
+    /// The guard gave no report (it was killed, or did not answer in
+    /// time): the kill was ordered, its end is not known.
+    Unconfirmed(String),
+}
+
+/// A spawned contained command: its guard (the child), and the node's end
+/// of the guard's control channel (T.8e). There is no other way to hold
+/// one. Wherever it is dropped (an answer nobody reads, a call dropped
+/// mid-run, an early return, a panic) the channel closes, which is the
+/// guard's kill order; a `kill -9` of the node closes it the same way. The
+/// guard is never signalled from here: a SIGKILL to it would leave the
+/// namespace to bubblewrap's death signals, the slower second line.
 #[derive(Debug)]
-pub struct ContainedChild(tokio::process::Child);
+pub struct ContainedChild {
+    child: tokio::process::Child,
+    ctl: Option<tokio::net::UnixStream>,
+}
 
 impl ContainedChild {
+    /// Stop the command and wait for its guard's answer: with `graceful`,
+    /// SIGTERM to the command first and the guard's 2 s grace. Returns when
+    /// the guard reported the end (and has exited), or that something is
+    /// still alive [`crate::guard::CONFIRM_BOUND`] after the kill, or after
+    /// a bound of its own when the guard does not answer at all.
+    pub async fn stop(&mut self, graceful: bool) -> Stopped {
+        use crate::guard::{CONFIRM_BOUND, Report, TERM, TERM_GRACE};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let Some(mut ctl) = self.ctl.take() else {
+            return Stopped::Unconfirmed("the stop was already ordered".into());
+        };
+        if graceful {
+            let _ = ctl.write_all(&[TERM]).await;
+        }
+        // The half-close is the order; the read half stays for the answer.
+        let _ = ctl.shutdown().await;
+        let bound = TERM_GRACE + CONFIRM_BOUND + std::time::Duration::from_secs(1);
+        let answer = tokio::time::timeout(bound, async move {
+            let mut lines = tokio::io::BufReader::new(ctl).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                if let Some(r) = Report::parse(&l) {
+                    return Some(r);
+                }
+            }
+            None
+        })
+        .await;
+        match answer {
+            Ok(Some(Report::Ended(d))) => {
+                // It exits right after the report; reap it.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), self.child.wait())
+                    .await;
+                Stopped::Ended(d)
+            }
+            Ok(Some(Report::StillAlive(d))) => Stopped::StillAlive(d),
+            Ok(None) => {
+                let status =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), self.child.wait())
+                        .await;
+                Stopped::Unconfirmed(format!(
+                    "its guard ended without a report ({})",
+                    match status {
+                        Ok(Ok(s)) => s.to_string(),
+                        _ => "status unknown".into(),
+                    }
+                ))
+            }
+            Err(_) => Stopped::Unconfirmed(format!(
+                "its guard did not answer within {} s",
+                bound.as_secs()
+            )),
+        }
+    }
+
     /// Wait for it and collect its output, like `Child::wait_with_output`,
-    /// without giving the child up while it may still run.
+    /// keeping the channel open (so not ordering a kill) meanwhile.
     pub async fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
         async fn read(p: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
             use tokio::io::AsyncReadExt;
@@ -268,8 +388,8 @@ impl ContainedChild {
             }
             buf
         }
-        let (out, err) = (self.0.stdout.take(), self.0.stderr.take());
-        let (status, stdout, stderr) = tokio::join!(self.0.wait(), read(out), read(err));
+        let (out, err) = (self.child.stdout.take(), self.child.stderr.take());
+        let (status, stdout, stderr) = tokio::join!(self.child.wait(), read(out), read(err));
         Ok(std::process::Output {
             status: status?,
             stdout,
@@ -281,93 +401,186 @@ impl ContainedChild {
 impl std::ops::Deref for ContainedChild {
     type Target = tokio::process::Child;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.child
     }
 }
 
 impl std::ops::DerefMut for ContainedChild {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.child
     }
 }
 
-impl Drop for ContainedChild {
-    fn drop(&mut self) {
-        // `Ok(None)`: still running and not reaped, so the number is still
-        // bubblewrap's. A reaped child (`Ok(Some)`) is left alone.
-        if let (Ok(None), Some(pid)) = (self.0.try_wait(), self.0.id()) {
-            kill_namespace(pid as i32);
-        }
-    }
+/// Spawn `cmd` (a guard's command line, [`Contain::command`]) with the
+/// guard's control channel as its stdin. The node keeps the only other
+/// end: both ends are close-on-exec, so no other child inherits it, and the
+/// copy in `cmd` is closed when `cmd` is dropped here. Never killed on
+/// drop: the closing channel is the kill.
+pub(crate) fn spawn(mut cmd: tokio::process::Command) -> std::io::Result<ContainedChild> {
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+    ours.set_nonblocking(true)?;
+    let ours = tokio::net::UnixStream::from_std(ours)?;
+    cmd.stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+        theirs,
+    )))
+    .kill_on_drop(false);
+    let child = cmd.spawn();
+    drop(cmd);
+    Ok(ContainedChild {
+        child: child?,
+        ctl: Some(ours),
+    })
 }
 
-type Reply = tokio::sync::oneshot::Sender<std::io::Result<ContainedChild>>;
-
-struct Job {
-    cmd: tokio::process::Command,
-    handle: tokio::runtime::Handle,
-    reply: Reply,
-}
-
-static SPAWNER: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
-
-/// Spawn `cmd` from the process's one spawner thread, which never exits
-/// before the process does, so `--die-with-parent` fires only when the node
-/// dies (see the module docs). The child is registered with the caller's
-/// tokio runtime.
-pub(crate) async fn spawn(cmd: tokio::process::Command) -> std::io::Result<ContainedChild> {
-    let tx = SPAWNER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Job>();
-        std::thread::Builder::new()
-            .name("rizzy-contain-spawner".into())
-            .spawn(move || {
-                // Ends only when every sender is gone, which the static
-                // never is: this thread lives as long as the process.
-                while let Ok(mut job) = rx.recv() {
-                    // A caller that stopped waiting gets nothing; the guard
-                    // dropped here (inside the caller's runtime, so tokio
-                    // can still reap it), or with the unread answer, kills
-                    // the namespace.
-                    let _rt = job.handle.enter();
-                    let r = job.cmd.spawn().map(ContainedChild);
-                    let _ = job.reply.send(r);
-                }
-            })
-            .expect("start the containment spawner thread");
-        Mutex::new(tx)
-    });
-    spawn_via(tx, cmd).await
-}
-
-/// Hand `cmd` to the spawner behind `tx`. Fails closed, never hangs and
-/// never runs the command another way when that thread is gone: before the
-/// job (the channel is closed) or with it (the reply is dropped).
-async fn spawn_via(
-    tx: &Mutex<mpsc::Sender<Job>>,
-    cmd: tokio::process::Command,
-) -> std::io::Result<ContainedChild> {
-    let (reply, rx) = tokio::sync::oneshot::channel();
-    let job = Job {
-        cmd,
-        handle: tokio::runtime::Handle::current(),
-        reply,
-    };
-    let sent = tx
-        .lock()
-        .map_err(|_| std::io::Error::other("the containment spawner is gone"))?
-        .send(job);
-    if sent.is_err() {
-        return Err(std::io::Error::other("the containment spawner is gone"));
-    }
-    rx.await
-        .map_err(|_| std::io::Error::other("the containment spawner is gone"))?
-}
-
-/// For tests of the spawner: spawn `cmd` the way a contained `bash` call
-/// does.
+/// For tests: spawn `cmd` the way a contained `bash` call does.
 #[doc(hidden)]
 pub async fn spawn_for_test(cmd: tokio::process::Command) -> std::io::Result<ContainedChild> {
-    spawn(cmd).await
+    spawn(cmd)
+}
+
+// ---- the sweep: what a dead node and a dead guard left ----
+
+/// A namespace [`sweep`] found and killed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Swept {
+    pub pid: i32,
+    pub session: String,
+    /// Gone within 2 s of the kill.
+    pub ended: bool,
+}
+
+/// One `/proc` entry, as much as the sweep needs.
+struct Proc {
+    pid: i32,
+    ppid: i32,
+    uid: u32,
+    argv: Vec<Vec<u8>>,
+}
+
+fn read_proc(pid: i32) -> Option<Proc> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut f = stat.rsplit(')').next()?.split_whitespace();
+    let state = f.next()?;
+    if matches!(state, "Z" | "X" | "x") {
+        return None;
+    }
+    let ppid = f.next()?.parse().ok()?;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let argv = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()?
+        .split(|b| *b == 0)
+        .map(<[u8]>::to_vec)
+        .collect();
+    Some(Proc {
+        pid,
+        ppid,
+        uid,
+        argv,
+    })
+}
+
+impl Proc {
+    /// The value after `key` in its arguments.
+    fn value(&self, key: &str) -> Option<&[u8]> {
+        self.argv
+            .windows(2)
+            .find(|w| w[0] == key.as_bytes())
+            .map(|w| w[1].as_slice())
+    }
+
+    fn marked(&self, root: &[u8]) -> bool {
+        self.value(crate::guard::MARK) == Some(root)
+    }
+
+    fn is_guard(&self) -> bool {
+        self.argv.get(1).map(Vec::as_slice) == Some(crate::guard::SUBCOMMAND.as_bytes())
+    }
+}
+
+/// The marked processes of this user that nothing alive holds: carrying
+/// `root`'s marker, not a guard, and whose parent does not carry it (a
+/// live guard, bubblewrap above its init, the init above `sandbox-exec`).
+/// What is left is bubblewrap whose guard died, or an init whose
+/// bubblewrap died, both orphans.
+fn orphans(root: &Path) -> Vec<Proc> {
+    let root = root.as_os_str().as_encoded_bytes();
+    let uid = nix::unistd::getuid().as_raw();
+    let me = std::process::id() as i32;
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|p| *p != me)
+        .filter_map(read_proc)
+        .filter(|p| p.uid == uid && p.marked(root) && !p.is_guard())
+        .filter(|p| !read_proc(p.ppid).is_some_and(|parent| parent.marked(root)))
+        .collect()
+}
+
+/// At the node's start, before it serves (T.8e's second line): end every
+/// namespace a dead node left behind, found by the marker naming this
+/// node's temp root `root` (inside its data directory) among this user's
+/// own processes in `/proc`. A process without the marker, with another
+/// node's, or held by a live guard (one is its parent) is never touched; a
+/// process that carries this node's marker of its own accord is killed
+/// with them (only this user's processes can, and the marker names this
+/// node). Each is stopped and checked again before the kill, so a number
+/// reused in between is left alone; its init (bubblewrap's child) is
+/// killed first, then it.
+pub fn sweep(root: &Path) -> Vec<Swept> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let rb = root.as_os_str().as_encoded_bytes().to_vec();
+    let mut killed = Vec::new();
+    for p in orphans(root) {
+        let pid = Pid::from_raw(p.pid);
+        if kill(pid, Signal::SIGSTOP).is_err() {
+            continue;
+        }
+        // Stopped, it cannot exit or exec; check it is still the one found.
+        match read_proc(p.pid) {
+            Some(now) if now.uid == p.uid && now.argv == p.argv && now.marked(&rb) => {}
+            _ => {
+                let _ = kill(pid, Signal::SIGCONT);
+                continue;
+            }
+        }
+        let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", p.pid))
+            .unwrap_or_default();
+        for c in children
+            .split_whitespace()
+            .filter_map(|c| c.parse::<i32>().ok())
+        {
+            let _ = kill(Pid::from_raw(c), Signal::SIGKILL);
+        }
+        let _ = kill(pid, Signal::SIGKILL);
+        let session = p
+            .value(crate::guard::MARK_SESSION)
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .unwrap_or_default();
+        killed.push((p, session));
+    }
+    // Not this process's children: their reaper reaps them. Wait for that.
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let gone = |p: &Proc| read_proc(p.pid).is_none_or(|now| now.argv != p.argv);
+    while std::time::Instant::now() < by && !killed.iter().all(|(p, _)| gone(p)) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    killed
+        .into_iter()
+        .map(|(p, session)| Swept {
+            ended: gone(&p),
+            pid: p.pid,
+            session,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -410,7 +623,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (base, term) in [(974_301, true), (974_303, false)] {
             let c = Contain::new(bwrap.clone(), Form::Full);
-            let mut cmd = c.command(Path::new("sh"), dir.path());
+            let mut cmd = c.bwrap_command(Path::new("sh"), dir.path());
             cmd.args(["-c", &format!("setsid sleep {base} & sleep {}", base + 1)]);
             std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
             let mut child = cmd.spawn().unwrap();
@@ -460,36 +673,6 @@ mod tests {
             let found = find_bwrap_in(&path).unwrap();
             assert_eq!(found, Path::new("/usr/bin/bwrap").canonicalize().unwrap());
         }
-    }
-
-    /// N-2: with the spawner thread gone, a shell command fails with a
-    /// clear error, never hangs and never runs.
-    #[tokio::test]
-    async fn a_dead_spawner_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let mark = dir.path().join("ran");
-        let cmd = || {
-            let mut c = tokio::process::Command::new("touch");
-            c.arg(&mark);
-            c
-        };
-        // Gone before the job: the channel is closed.
-        let (tx, rx) = mpsc::channel::<Job>();
-        drop(rx);
-        let e = spawn_via(&Mutex::new(tx), cmd()).await.unwrap_err();
-        assert!(e.to_string().contains("spawner is gone"), "{e}");
-        // Gone with the job: it takes it and ends without an answer.
-        let (tx, rx) = mpsc::channel::<Job>();
-        let t = std::thread::spawn(move || drop(rx.recv()));
-        let r = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            spawn_via(&Mutex::new(tx), cmd()),
-        )
-        .await
-        .expect("the spawn hung");
-        assert!(r.unwrap_err().to_string().contains("spawner is gone"));
-        t.join().unwrap();
-        assert!(!mark.exists(), "the command ran");
     }
 
     #[test]

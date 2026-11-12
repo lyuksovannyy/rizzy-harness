@@ -110,6 +110,13 @@ enum Cmd {
         /// Print what is enforced on stderr first.
         #[arg(long)]
         status: bool,
+        /// The node's marker (T.8e): its temp root, so its init's command
+        /// line names the node that started it. Not used here.
+        #[arg(long, hide = true)]
+        mark: Option<std::ffi::OsString>,
+        /// The session of the marker. Not used here.
+        #[arg(long, hide = true)]
+        mark_session: Option<std::ffi::OsString>,
         /// The command and its arguments.
         #[arg(last = true, required = true, value_name = "CMD")]
         command: Vec<std::ffi::OsString>,
@@ -625,6 +632,22 @@ fn start_sandbox(
         }
     }
     if let Some(root) = &s.tmp_root {
+        // Before it serves: what a dead node left that its guard could not
+        // end (a guard killed in the moment before bubblewrap's init set
+        // its death signal; T.8e).
+        for w in harness_tools::contain::sweep(root) {
+            tracing::warn!(
+                "shell containment: ended a command a previous run of this node left running \
+                 (pid {}, session {}){}",
+                w.pid,
+                w.session,
+                if w.ended {
+                    ""
+                } else {
+                    "; it is still alive 2 s after the kill"
+                }
+            );
+        }
         harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
     }
     policy.sandbox_refusal = s.refusal;
@@ -902,6 +925,7 @@ fn main() -> anyhow::Result<()> {
             best_effort,
             status,
             command,
+            ..
         } = Cli::parse().cmd
     {
         let grants = |pairs: &[std::ffi::OsString]| {
@@ -920,6 +944,11 @@ fn main() -> anyhow::Result<()> {
                 command,
             },
         ));
+    }
+    // The guard of a contained command (T.8e): one thread, no `.env`, no
+    // runtime; bubblewrap's death signal names its only thread.
+    if std::env::args_os().nth(1).as_deref() == Some(harness_tools::guard::SUBCOMMAND.as_ref()) {
+        std::process::exit(harness_tools::guard::main());
     }
     // The PDF helper too: one thread, no `.env`, no runtime (its memory
     // limit covers every mapping, thread stacks included).

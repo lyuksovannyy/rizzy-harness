@@ -77,10 +77,13 @@ impl Fixture {
     /// The contained sandbox without the probes (the helper processes; the
     /// parent test probed).
     fn sandbox_unprobed(&self) -> Arc<Sandbox> {
-        Arc::new(self.plain().with_containment(harness_tools::contain::Contain::new(
-            harness_tools::contain::find_bwrap().unwrap(),
-            harness_tools::contain::Form::Full,
-        )))
+        Arc::new(
+            self.plain()
+                .with_containment(harness_tools::contain::Contain::new(
+                    harness_tools::contain::find_bwrap().unwrap(),
+                    harness_tools::contain::Form::Full,
+                )),
+        )
     }
 
     fn ctx(&self, sb: Arc<Sandbox>) -> ToolCtx {
@@ -159,9 +162,7 @@ fn left(needle: &Path, secs: &[u32]) -> Vec<i32> {
         .filter(|p| {
             let c = cmdline(*p);
             c.windows(n.len()).any(|w| w == n)
-                || secs
-                    .iter()
-                    .any(|s| c == format!("sleep\0{s}\0").as_bytes())
+                || secs.iter().any(|s| c == format!("sleep\0{s}\0").as_bytes())
         })
         .filter(|p| alive(*p))
         .collect()
@@ -463,7 +464,12 @@ async fn a_process_the_kernel_cannot_kill_yet_is_reported_still_alive() {
     let cmd = format!("cat {}", file.display());
     let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": cmd})).await });
     tokio::task::block_in_place(|| stall.held());
-    let want = [b"cat\0".as_slice(), file.as_os_str().as_encoded_bytes(), b"\0"].concat();
+    let want = [
+        b"cat\0".as_slice(),
+        file.as_os_str().as_encoded_bytes(),
+        b"\0",
+    ]
+    .concat();
     let cat = pids()
         .into_iter()
         .find(|p| cmdline(*p) == want)
@@ -478,7 +484,10 @@ async fn a_process_the_kernel_cannot_kill_yet_is_reported_still_alive() {
         state(cat),
         r.output.lines().last().unwrap_or_default()
     );
-    assert!(stuck, "the kernel ended the reader: the case is not exercised");
+    assert!(
+        stuck,
+        "the kernel ended the reader: the case is not exercised"
+    );
     assert!(
         !r.output.contains("[cancelled"),
         "reported as cancelled while {cat} still runs: {}",
@@ -493,4 +502,375 @@ async fn a_process_the_kernel_cannot_kill_yet_is_reported_still_alive() {
     let l = gone_within(&f.ws, &[], Duration::from_secs(2));
     assert!(!alive(cat), "the reader outlived its release");
     assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
+}
+
+// ---- 4. the guard itself ----
+
+/// The test's guard: a process whose command line starts `<exe>
+/// sandbox-guard` and holds `needle`.
+fn guard_of(needle: &Path) -> Option<i32> {
+    let n = needle.as_os_str().as_encoded_bytes();
+    let head = [
+        EXE.as_bytes(),
+        b"\0",
+        harness_tools::guard::SUBCOMMAND.as_bytes(),
+        b"\0",
+    ]
+    .concat();
+    pids().into_iter().find(|p| {
+        let c = cmdline(*p);
+        c.starts_with(&head) && c.windows(n.len()).any(|w| w == n) && alive(*p)
+    })
+}
+
+/// The children of `pid` (its main thread's).
+fn children(pid: i32) -> Vec<i32> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect()
+}
+
+async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    let by = Instant::now() + Duration::from_secs(20);
+    while !ok() {
+        assert!(Instant::now() < by, "{what} never happened");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The detached children of `cli/tests/contain.rs`: `setsid`, `nohup`, a
+/// double fork with `setsid`, one that ignores SIGTERM, a plain one.
+fn detached(base: u32) -> (String, Vec<u32>) {
+    let s: Vec<u32> = (0..5).map(|i| base + i).collect();
+    let cmd = format!(
+        "setsid sleep {} & nohup sleep {} >/dev/null 2>&1 & ( setsid sleep {} & ) ; \
+         sh -c 'trap \"\" TERM; exec sleep {}' & sleep {} & sleep 1000",
+        s[0], s[1], s[2], s[3], s[4]
+    );
+    (cmd, s)
+}
+
+/// The second line: a `kill -9` of the guard alone (not the node) still
+/// ends the namespace, through bubblewrap's `--die-with-parent`, which
+/// names the guard's only thread, and its init's own death signal.
+#[tokio::test]
+async fn a_kill_of_the_guard_alone_ends_the_namespace() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let (cmd, secs) = detached(974_821);
+    let _clean = Cleanup(f.ws.clone(), secs.clone());
+    let ctx = f.ctx(sb);
+    let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": cmd})).await });
+    wait_for("the detached children", || {
+        secs.iter().all(|s| !sleeps(*s).is_empty())
+    })
+    .await;
+    let guard = guard_of(&f.ws).expect("the guard");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(guard),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    let l = tokio::task::spawn_blocking({
+        let ws = f.ws.clone();
+        let secs = secs.clone();
+        move || gone_within(&ws, &secs, Duration::from_secs(2))
+    })
+    .await
+    .unwrap();
+    assert!(
+        l.is_empty(),
+        "left 2 s after the guard's kill:\n{}",
+        describe(&l)
+    );
+    let r = tokio::time::timeout(Duration::from_secs(5), h)
+        .await
+        .expect("the call never returned")
+        .unwrap();
+    assert!(r.output.contains("[exit code: signal]"), "{}", r.output);
+}
+
+/// A command cannot reach, signal or outlive its guard, and does not hold
+/// its control channel: the guard is outside the PID namespace (its host
+/// number names nothing inside, and `kill -KILL -1` inside reaches only
+/// the namespace), the channel is not among the command's descriptors (it
+/// has no socket at all), and no signal is blocked in it (the guard blocks
+/// SIGCHLD for its `signalfd`; the mask must not leak). When the call
+/// returns, the guard is gone too: no idle process.
+#[tokio::test]
+async fn a_command_cannot_reach_signal_or_outlive_its_guard() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let _clean = Cleanup(f.ws.clone(), vec![974_831]);
+    let gpid = f.ws.join("gpid");
+    let ctx = f.ctx(sb);
+    let cmd = format!(
+        "sleep 974831 & ls -l /proc/$$/fd; grep -E '^Sig(Blk|Ign)' /proc/self/status; \
+         while [ ! -s {g} ]; do sleep 0.01; done; g=$(cat {g}); \
+         test -e /proc/$g && echo GUARD-VISIBLE; \
+         kill -KILL $g; echo kill-guard=$?; kill -STOP $g; echo stop-guard=$?; \
+         kill -KILL -1; echo kill-all=$?; echo done",
+        g = gpid.display()
+    );
+    let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": cmd})).await });
+    let mut guard = None;
+    wait_for("the guard", || {
+        guard = guard_of(&f.ws);
+        guard.is_some()
+    })
+    .await;
+    let guard = guard.unwrap();
+    let channel = std::fs::read_dir(format!("/proc/{guard}/fd"))
+        .unwrap()
+        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+        .map(|l| l.to_string_lossy().into_owned())
+        .find(|l| l.starts_with("socket:"))
+        .expect("the guard's channel");
+    std::fs::write(&gpid, guard.to_string()).unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(20), h)
+        .await
+        .expect("the call never returned")
+        .unwrap();
+    let out = &r.output;
+    assert!(r.ok, "{out}");
+    assert!(out.contains("done"), "{out}");
+    assert!(
+        !out.contains(&channel),
+        "the command holds {channel}: {out}"
+    );
+    assert!(
+        !out.contains("socket:"),
+        "the command holds a socket: {out}"
+    );
+    assert!(out.contains("SigBlk:\t0000000000000000"), "{out}");
+    assert!(!out.contains("GUARD-VISIBLE"), "{out}");
+    assert!(
+        out.contains("kill-guard=1") && out.contains("stop-guard=1"),
+        "{out}"
+    );
+    assert!(out.contains("kill-all=0"), "{out}");
+    let l = left(&f.ws, &[974_831]);
+    assert!(
+        l.is_empty(),
+        "left when the call returned:\n{}",
+        describe(&l)
+    );
+    assert!(!alive(guard), "the guard outlived its command");
+}
+
+// ---- 5. the sweep at the node's start ----
+
+/// The node's contained command line for `script`, split: bubblewrap and
+/// its arguments, without the guard in front (what a dead guard leaves).
+fn bwrap_argv(f: &Fixture, sb: Arc<Sandbox>, script: &str) -> Vec<std::ffi::OsString> {
+    let cmd = f.shell(sb, script);
+    let all: Vec<std::ffi::OsString> = cmd.as_std().get_args().map(Into::into).collect();
+    let at = all.iter().position(|a| a == "--").unwrap();
+    all[at + 1..].to_vec()
+}
+
+/// Start `argv` orphaned (through a shell that exits at once), as a
+/// namespace whose guard and node are gone; `--die-with-parent` is dropped
+/// so it outlives that shell: the stand-in for a guard killed in the
+/// moment before bubblewrap or its init set the death signal.
+fn orphan(argv: &[std::ffi::OsString]) {
+    let argv: Vec<_> = argv.iter().filter(|a| *a != "--die-with-parent").collect();
+    let st = std::process::Command::new("sh")
+        .args(["-c", "\"$@\" </dev/null >/dev/null 2>&1 &", "sh"])
+        .args(argv)
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+fn replace_mark(argv: &[std::ffi::OsString], to: Option<&Path>) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::new();
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        if a == harness_tools::guard::MARK || a == harness_tools::guard::MARK_SESSION {
+            let v = it.next().unwrap();
+            if let Some(to) = to {
+                out.push(a.clone());
+                out.push(if a == harness_tools::guard::MARK {
+                    to.as_os_str().to_owned()
+                } else {
+                    v.clone()
+                });
+            }
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
+/// A restarted node ends what a doubly unlucky kill left: a bubblewrap
+/// whose guard is gone, and an init whose bubblewrap is gone too, each
+/// found by the marker naming this node's data directory, named with its
+/// session, and gone when the sweep returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_node_sweeps_what_a_dead_guard_left() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let root = f.data.join("sandbox-tmp");
+    for (secs, kill_bwrap) in [(974_841, false), (974_842, true)] {
+        let _clean = Cleanup(f.ws.clone(), vec![secs]);
+        orphan(&bwrap_argv(&f, sb.clone(), &format!("sleep {secs}")));
+        wait_for("the orphan", || !sleeps(secs).is_empty()).await;
+        if kill_bwrap {
+            // bubblewrap gone, its init (with no death signal) left.
+            let init = pids()
+                .into_iter()
+                .find(|p| {
+                    children(*p)
+                        .iter()
+                        .any(|c| cmdline(*c) == format!("sleep\0{secs}\0").as_bytes())
+                })
+                .expect("the namespace's init");
+            let bwrap = std::fs::read_to_string(format!("/proc/{init}/stat"))
+                .unwrap()
+                .rsplit(')')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<i32>()
+                .unwrap();
+            assert!(cmdline(bwrap).starts_with(b"/"), "{}", describe(&[bwrap]));
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(bwrap),
+                nix::sys::signal::Signal::SIGKILL,
+            )
+            .unwrap();
+            wait_for("bubblewrap's end", || !alive(bwrap)).await;
+            assert!(
+                !sleeps(secs).is_empty(),
+                "the init did not survive bubblewrap"
+            );
+        }
+        let swept = tokio::task::spawn_blocking({
+            let root = root.clone();
+            move || harness_tools::contain::sweep(&root)
+        })
+        .await
+        .unwrap();
+        assert_eq!(swept.len(), 1, "{swept:?}");
+        assert_eq!(swept[0].session, "s1");
+        assert!(swept[0].ended, "{swept:?}");
+        let l = left(&f.ws, &[secs]);
+        assert!(l.is_empty(), "left after the sweep:\n{}", describe(&l));
+    }
+}
+
+/// The sweep never touches a process without the marker, one marked for
+/// another data directory, or a namespace whose guard is alive (here a
+/// running call): all three still run after it, and it reports nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_touches_nothing_else() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let root = f.data.join("sandbox-tmp");
+    let (unmarked, other, live) = (974_851, 974_852, 974_853);
+    let _clean = Cleanup(f.ws.clone(), vec![unmarked, other, live]);
+    orphan(&replace_mark(
+        &bwrap_argv(&f, sb.clone(), &format!("sleep {unmarked}")),
+        None,
+    ));
+    orphan(&replace_mark(
+        &bwrap_argv(&f, sb.clone(), &format!("sleep {other}")),
+        Some(&f.ws.join("another-node/sandbox-tmp")),
+    ));
+    let ctx = f.ctx(sb);
+    let cancel = ctx.cancel.clone();
+    let h = tokio::spawn(async move {
+        Bash.run(&ctx, json!({"command": format!("sleep {live}")}))
+            .await
+    });
+    wait_for("all three", || {
+        [unmarked, other, live]
+            .iter()
+            .all(|s| !sleeps(*s).is_empty())
+    })
+    .await;
+    let swept = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || harness_tools::contain::sweep(&root)
+    })
+    .await
+    .unwrap();
+    assert!(swept.is_empty(), "{swept:?}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for s in [unmarked, other, live] {
+        assert!(!sleeps(s).is_empty(), "the sweep ended sleep {s}");
+    }
+    cancel.cancel();
+    let r = h.await.unwrap();
+    assert!(r.output.contains("[cancelled"), "{}", r.output);
+}
+
+// ---- 6. what the guard costs ----
+
+/// Per command, the guard adds one `exec` of the harness binary and a few
+/// system calls. Measured here against T.8a's command line (bubblewrap
+/// started directly, the guard's part stripped), both running `true` to
+/// the end and collecting the output, alternately, `T8E_RUNS` times each
+/// (default 40). The bound is loose (a debug build on a loaded machine);
+/// the numbers are printed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_guard_costs_little_per_command() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let runs: usize = std::env::var("T8E_RUNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let (mut with, mut without) = (Vec::new(), Vec::new());
+    for _ in 0..runs {
+        let mut cmd = f.shell(sb.clone(), "true");
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let t = Instant::now();
+        let child = Confinement::spawn(cmd, true).await.unwrap();
+        let harness_tools::ShellChild::Contained(c) = child else {
+            panic!("not contained")
+        };
+        let out = c.wait_with_output().await.unwrap();
+        with.push(t.elapsed());
+        assert!(out.status.success(), "{out:?}");
+
+        let argv = bwrap_argv(&f, sb.clone(), "true");
+        let mut direct = tokio::process::Command::new(&argv[0]);
+        direct
+            .args(&argv[1..])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0);
+        let t = Instant::now();
+        let out = direct.output().await.unwrap();
+        without.push(t.elapsed());
+        assert!(out.status.success(), "{out:?}");
+    }
+    let median = |v: &mut Vec<Duration>| {
+        v.sort();
+        v[v.len() / 2]
+    };
+    let mean = |v: &[Duration]| v.iter().sum::<Duration>() / v.len() as u32;
+    let (mw, mo) = (mean(&with), mean(&without));
+    let (dw, d_o) = (median(&mut with), median(&mut without));
+    eprintln!(
+        "per command, {runs} runs: with the guard median {dw:?} mean {mw:?}; bubblewrap \
+         directly (T.8a) median {d_o:?} mean {mo:?}; the guard adds {:?} (median)",
+        dw.saturating_sub(d_o)
+    );
+    assert!(
+        dw < d_o + Duration::from_millis(15),
+        "the guard adds {:?}",
+        dw.saturating_sub(d_o)
+    );
 }
