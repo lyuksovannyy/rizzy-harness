@@ -1,0 +1,35 @@
+== a signal to the client
+sbx     SIGTERM to the client: client rc=143; log: pid=67044 pgid=67044 sid=67004 got-TERM ; plain child alive; setsid child alive
+sbx     SIGINT  to the client: client rc=130; log: pid=67098 pgid=67098 sid=67004 got-INT ; plain child alive; setsid child alive
+./signals.sh: line 40: 67152 Killed                     ( cd "$SA" && HOME=$SA TMPDIR=$TMPA exec "${a[@]}" bash -c "$(probe)" )
+sbx     SIGKILL to the client: client rc=137; log: pid=67152 pgid=67152 sid=67004 ; plain child alive; setsid child alive
+bw      SIGTERM to the client: client rc=143; log: pid=2 pgid=1 sid=1 ; plain child gone; setsid child gone
+bw      SIGINT  to the client: client rc=130; log: pid=2 pgid=1 sid=1 ; plain child gone; setsid child gone
+./signals.sh: line 40: 67313 Killed                     ( exec "${a[@]}" bash -c "$(probe)" )
+bw      SIGKILL to the client: client rc=137; log: pid=2 pgid=1 sid=1 ; plain child gone; setsid child gone
+pmexec  SIGTERM to the client: client rc=143; log: pid=3 pgid=3 sid=3 got-TERM ; plain child gone; setsid child alive
+pmexec  SIGINT  to the client: client rc=130; log: pid=12 pgid=12 sid=12 got-INT ; plain child alive; setsid child alive
+./signals.sh: line 40: 67543 Killed                     ( exec podman exec --workdir "$SA" $C bash -c "$(probe)" )
+pmexec  SIGKILL to the client: client rc=137; log: pid=21 pgid=21 sid=21 ; plain child alive; setsid child alive
+== the nodes design's stop: podman exec <ctr> kill -TERM -<pgid>, then -KILL
+pid=30 pgid=30 sid=30
+kill -TERM -30 rc=0
+client rc=143 after the in-container TERM (106 ms for the kill exec)
+log: pid=30 pgid=30 sid=30 got-TERM 
+plain child gone; setsid child alive; container running
+kill -KILL: kill: (-30): No such process
+after -KILL of the group: setsid child alive
+the setsid child by session id instead (pkill -s):
+pkill -s 37: setsid child gone
+what remains in the container after the command:
+       PID    PGID     SID COMMAND
+         1       1       1 /run/podman-init -- sleep infinity
+         2       2       1 sleep infinity
+        45      45      45 ps -eo pid,pgid,sid,args
+== exit codes and streams
+sbx     exit 3 -> rc=3 stdout=[to-stdout] stderr=[to-stderr]; self-SIGKILL -> rc=137; self-SIGTERM -> rc=143
+bw      exit 3 -> rc=3 stdout=[to-stdout] stderr=[to-stderr]; self-SIGKILL -> rc=137; self-SIGTERM -> rc=143
+pmexec  exit 3 -> rc=3 stdout=[to-stdout] stderr=[to-stderr]; self-SIGKILL -> rc=137; self-SIGTERM -> rc=143
+pmrun   exit 3 -> rc=3 stdout=[to-stdout] stderr=[to-stderr]; self-SIGKILL -> rc=137; self-SIGTERM -> rc=143
+(podman exec of a command killed by a TERM/KILL sent from inside the container, as the design's timeout does:)
+podman exec client rc=137 (killed by SIGKILL inside)

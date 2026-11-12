@@ -1,0 +1,65 @@
+== sandbox-exec
+   CapEff: 0000000000000000 CapBnd: 000001ffffffffff NoNewPrivs: 1 Seccomp: 0 
+   uid=1000 user=<user>
+   mount-tmpfs=mount: /tmp/m: must be superuser to use mount.
+          dmesg(1) may hav
+   insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
+   unshare-user=allowed
+   unshare-user-mount=unshare: cannot open /proc/self/uid_map: Permission denied
+   ptrace-own-child=allowed ptrace-sibling=denied:Operation not permitted 
+   bash: line 9: kill: (72528) - No such process
+   ls: cannot open directory '/dev': Permission denied
+   ls: cannot open directory '/dev': Permission denied
+   dev-entries=0 block-devices=0
+   write-/usr=touch: cannot touch '/usr/b11': Permission denied
+   write-/etc=touch: cannot touch '/etc/b11': Permission denied
+   write-/tmp=touch: cannot touch '/tmp/b11': Permission denied
+   gcc=compiled-and-ran
+   git-commit=ok
+== bwrap (per command)
+   CapEff: 0000000000000000 CapBnd: 0000000000000000 NoNewPrivs: 1 Seccomp: 0 
+   uid=1000 user=<user>
+   mount-tmpfs=mount: /tmp/m: must be superuser to use mount.
+          dmesg(1) may hav
+   insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
+   unshare-user=allowed
+   unshare-user-mount=allowed
+   ptrace-own-child=allowed ptrace-sibling=denied:Operation not permitted 
+   dev-entries=14 block-devices=0
+   write-/usr=touch: cannot touch '/usr/b11': Read-only file system
+   write-/etc=touch: cannot touch '/etc/b11': Read-only file system
+   write-/tmp=ok
+   gcc=compiled-and-ran
+   git-commit=ok
+== podman exec (--cap-drop=all, no-new-privileges, --read-only, keep-id)
+   CapEff: 0000000000000000 CapBnd: 0000000000000000 NoNewPrivs: 1 Seccomp: 2 
+   uid=1000 user=<user>
+   mount-tmpfs=mount: /tmp/m: must be superuser to use mount.
+          dmesg(1) may hav
+   insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
+   unshare-user=allowed
+   unshare-user-mount=allowed
+   ptrace-own-child=allowed ptrace-sibling=denied:Operation not permitted 
+   bash: line 9: kill: (27) - No such process
+   dev-entries=15 block-devices=0
+   write-/usr=touch: cannot touch '/usr/b11': Read-only file system
+   write-/etc=touch: cannot touch '/etc/b11': Read-only file system
+   write-/tmp=ok
+   gcc=compiled-and-ran
+   git-commit=ok
+== podman run as root, no keep-id, same caps and flags
+   CapEff: 0000000000000000 CapBnd: 0000000000000000 NoNewPrivs: 1 Seccomp: 2 
+   uid=0 user=root
+   mount-tmpfs=mount: /tmp/m: permission denied.
+          dmesg(1) may have more inform
+   insmod=insmod: ERROR: could not insert module /dev/null: Invalid pa
+   unshare-user=allowed
+   unshare-user-mount=unshare: write failed /proc/self/uid_map: Operation not permitted
+   ptrace-own-child=allowed ptrace-sibling=denied:Operation not permitted 
+   bash: line 9: kill: (24) - No such process
+   dev-entries=15 block-devices=0
+   write-/usr=touch: cannot touch '/usr/b11': Read-only file system
+   write-/etc=touch: cannot touch '/etc/b11': Read-only file system
+   write-/tmp=ok
+   gcc=compiled-and-ran
+   git-commit=ok
