@@ -228,7 +228,15 @@ judge sees them; every verdict is an event (`approval_resolved{by: judge, score}
 * **The agent loop runs on the node that owns the session.** The master never
   executes tools. It mirrors the node's log and forwards commands.
 * **Single writer.** A session's events are appended only by its owning node's
-  session actor. `seq` is assigned by that actor, contiguous from 1.
+  session actor. `seq` is assigned by that actor, contiguous from 1. One
+  process per data directory keeps it so across processes (A.20): `serve`,
+  `node run` and `node join` hold an exclusive `flock` on `<data>/lock` from
+  right after the directory is resolved, before the start-up sweep, the temp
+  root's reset, the sub-agents' folder's removal and `recover_interrupted`
+  (which appends to every session with an open turn); a second start is
+  refused before it touches anything (`cli/tests/data_dir_lock.rs`). Where the
+  file system has no locks the start warns and is unprotected. The lock is
+  per directory, not per role: a server and a node do not share one.
 * **Event sourcing.** Everything the UI shows is a fold over the event log.
   There is no other session state that matters for display.
 * **One code path for local and remote nodes.** A `NodeLink` is a pair of
