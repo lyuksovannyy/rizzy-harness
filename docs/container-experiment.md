@@ -1,5 +1,8 @@
 # Containers as the confinement for agent shells (experiment B.11)
 
+**Status: decided.** The owner chose the recommendation on 2026-11-12, "Bubblewrap + Podman"
+(`ADOPTION_PLAN.md` O12). It supersedes the earlier direction "replace Landlock with Podman".
+
 The owner's direction of 2026-11-12 is to replace the Landlock sandbox of the
 agent's `bash` with Podman, after quick Podman tests on a separate branch.
 This note is those tests. Two things are open after the security review:
@@ -327,6 +330,27 @@ a second layer.
 ## What this means
 
 ### Recommendation: bubblewrap for plain sessions, Podman only for image-based environments
+
+**Decided by the owner on 2026-11-12 as recommended** (O12), with Landlock kept for the node's
+own helpers, as a second layer inside bubblewrap, and as the shell's confinement where
+bubblewrap cannot run. A node with neither refuses the shell under `mode = "required"`.
+
+**What gets built.** Four small pull requests, because each changes the sandbox (T.8a to T.8d
+in `ADOPTION_PLAN.md`). **T.8a, containment:** today's `sandbox-exec` invocation runs inside
+`bwrap --unshare-pid --die-with-parent` with a fresh `/proc`, the file policy unchanged; its
+tests are `contain.sh`'s five escapers and four endings, and the fallback to today's path is
+visible in `doctor` and the log. **T.8b, network off means off:** `--unshare-net` with
+`network = "off"`, tested with `net.sh` (UDP and DNS included); it shrinks seccomp (T.6) to
+what a network namespace does not cover. **T.8c, the file view without Landlock:** the mount
+namespace built with `--bind-fd` from the descriptors the node already checked, tested with
+`files.sh` and its swap race. **T.8d, background commands:** each its own bubblewrap sandbox
+the node holds, a timeout on every command, a callback turn at the end. Environments stay
+N.4, with the corrections of §2 to §7 written into the nodes design (§2, §4.5, §4.6, §6, §8,
+§9 there). One measured detail matters for T.8a's fallback: inside a default rootless
+container, `bwrap --unshare-user --unshare-pid --unshare-net` did run when it was not asked
+for a fresh `/proc` (§7), so the published image may get the PID and network namespaces with
+the container's own `/proc` bound in, rather than falling back to Landlock alone. That is
+worth one test at the start of T.8a; it was not tested under Docker.
 
 Of the four outcomes, the numbers support **Podman for image-based
 environments with bubblewrap for plain sessions**, with bubblewrap as the
