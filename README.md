@@ -888,9 +888,18 @@ it does not work:
 **Keep the harness binary out of every session's reach.** A contained
 command's guard and its wrapper are the node's own running image, which
 the guard mounts into the file view: replacing the file at the binary's
-path changes nothing for them (if the binary is deleted or replaced by an
-upgrade while the node runs, contained commands are refused with "restart
-the node" until it is restarted). But the node's own helpers (its checkpoint
+path changes nothing for them. A rebuild or an upgrade under a running
+node does not stop contained commands either: at start the node gives its
+image a second name in its data directory (`<data dir>/node-image`, a hard
+link no session can reach), and the view binds that, so commands keep
+running the image the node started with until it is restarted. Where that
+link cannot be made (the data directory on another file system than the
+binary; a binary the node's user does not own, such as one in
+`/usr/local/bin`, with `fs.protected_hardlinks` on, the usual default; a
+data directory that cannot be written), the `file view` line of the log
+and of `doctor` says so and why, and once the binary is deleted or replaced
+contained commands are refused with "restart the node" until it is
+restarted. The binary is never copied. But the node's own helpers (its checkpoint
 git, graphify), and the shell wherever it is not contained, start the
 wrapper from the binary's path. If a workspace root or a `[sandbox] write`
 entry holds the binary (a node run from its own build tree, with a session
