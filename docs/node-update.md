@@ -1,6 +1,6 @@
 # Node update and drain: design note
 
-Status: **decided by the owner on 2026-11-12 (§2), except one naming question in §12.** Nothing built. Task C.14 of `ADOPTION_PLAN.md`. Two pieces fix built behaviour and may go
+Status: **decided by the owner on 2026-11-12 (§2); no open question.** Nothing built. Task C.14 of `ADOPTION_PLAN.md`. Two pieces fix built behaviour and may go
 first (task A.19): the master tells a node why it was refused, and a stop signal stops a node
 cleanly. The rest is a feature, after Gate 3 of `FIX_PLAN.md`.
 
@@ -9,8 +9,8 @@ allows it **asks its master for that build** over the authenticated node link, v
 stages it beside its binary, drains, and restarts into it. The master never sends a binary, a URL
 or a command unasked. When a node restarts, for an update or because its supervisor stops it, it
 drains (§7) and its supervisor starts it again. **What a node trusts is its owner's choice
-(§6.4):** with `update_trust = "signature"`, the default, it checks the master's bytes against the hash in
-the project's GitHub release, so the master alone cannot run its code there; with `"disabled"`,
+(§6.4):** with `update_verify = "release_hash"`, the default, it checks the master's bytes against the hash in
+the project's GitHub release, so the master alone cannot run its code there; with `"none"`,
 the only choice for untagged and self-built servers, nothing is checked against the release and
 the node runs whatever its master serves.
 
@@ -64,7 +64,7 @@ What is given up is stated in §6.4.
 | D5 | An unanswered turn's running command at five minutes | Stopped (the command, not the turn). |
 | D6 | May the master cut off a draining node | No. A deadline applies at admission only. |
 | D7 | Guarding against a compromised master | In the owner's words: "instead of downloading releases from github, instead parse node binary hash and compare with downloaded one from master before replacing". **Reading:** the bytes still come from the master; the expected hash comes from a second, independent source, the project's GitHub release for that version, fetched by the node itself; the node installs only on a match (§6.4). |
-| D8 | Names, default and what comes later | `update_trust` has two values: `"signature"` (the release check of D7, **the default**) and `"disabled"` (no check: the node trusts its master). There is no third value and no empty one: `auto` no longer has to be given an `update_trust`. During development, nodes set `"disabled"` (a server built from source matches no release). An offline signing key is **planned** (§6.5). |
+| D8 | Names, default and what comes later | The setting is `update_verify` with two values: `"release_hash"` (the release check of D7, **the default**) and `"none"` (no check: the node runs what its master serves). `auto` does not have to be given an `update_verify`; a missing one is `"release_hash"`. During development, nodes set `"none"` (a server built from source matches no release). An offline signing key is **planned** (§6.5). The owner first named the values `"signature"` and `"disabled"` under `update_trust`, then left the final names to this note: `update_trust = "disabled"` read as "trusts nothing", and `"signature"` named a check that is a published hash. |
 
 ## 3. Settings in `node.toml`
 
@@ -72,7 +72,7 @@ Top-level keys, beside `max_approval_mode` (`README.md:1027`), and one table:
 
 ```toml
 update_mode = "notify"     # "off" | "notify" | "restart" | "auto"
-update_trust = "signature"  # "signature" (default) | "disabled"
+update_verify = "release_hash"  # "release_hash" (default) | "none"
 update_release_repo = "lyuksovannyy/rizzy-harness"   # the compiled-in default; a fork sets its own
 
 [drain]
@@ -92,16 +92,16 @@ min_minutes_between = 60   # no new update drain within this long after one
 `restart` is `auto` with nothing to fetch and shares its code; it stays a separate value because
 it grants something different (the owner's packaging, not the master or a release).
 
-**`update_trust` says what a pulled build is checked against** (§6.4). `"signature"`, the
-default, is the project's published release: today the binary's hash in the GitHub release
-(§6.5), and the planned offline signing key will strengthen the same value with no change to
-`node.toml`. `"disabled"` checks nothing beyond what the master itself states.
+**`update_verify` says what a pulled build is checked against** (§6.4). `"release_hash"`, the
+default, is the binary's hash in the project's GitHub release (§6.5). `"none"` checks nothing
+beyond what the master itself states. The planned offline signing key adds a third value,
+`"release_signature"`, which then becomes the default (§6.5).
 
-**Checked at start.** A value other than `"signature"` or `"disabled"`: `node run` refuses to
-start, naming the setting. A missing `update_trust` is `"signature"`. `update_release_repo` must be
+**Checked at start.** A value other than `"release_hash"` or `"none"`: `node run` refuses to
+start, naming the setting. A missing `update_verify` is `"release_hash"`. `update_release_repo` must be
 `owner/name` of letters, digits, `-`, `_` and `.`. `auto` when the node's user cannot replace its binary
-(§6.2) degrades to `notify` with the reason. `update_trust = "disabled"` is logged at every start
-and shown by `doctor` as "update verification is disabled: this node runs whatever its master
+(§6.2) degrades to `notify` with the reason. `update_verify = "none"` is logged at every start
+and shown by `doctor` as "update verification is off: this node runs whatever its master
 serves". Durations: `ask_minutes` 1 to 30,
 `force_after_minutes` from `ask_minutes` to 1440, `hard_stop_seconds` 10 to 300. **The master
 can change none of these.** The hard bound is 60 s because the after-turn checkpoint took up to
@@ -143,7 +143,7 @@ running executable cannot be rewritten in place; a rename leaves the open file i
 |---|---|
 | Where | `<data>/node-builds/<target>/rizzy-harness` and `meta.json` (identity, origin, time added), 0600, owned by the server's user. |
 | How a build is added | (a) **By the server's admin** on the server's machine: `rizzy-harness node-build add <file>`, which refuses a file whose identity is not the master's own version and build id. No HTTP route adds one (`FIX_PLAN.md` Q3). (b) **Fetched by the master** from the release for its own version, at the first request from that target, if `config.toml` has `[nodes] fetch_builds = "github"` (default `"off"`). The URL comes from a fixed repository name, the version and the target, never from a node; it passes the outbound rules (`crates/master/src/outbound.rs`), with the release and download hosts allowed by name (the download redirects off origin). |
-| Verified on arrival | The tarball's SHA-256 against the release's `.sha256`; the extracted file's identity against the master's own version and build id. That is integrity, not authenticity (both come from the same place). **For nodes with `update_trust = "signature"` the cache needs no trust at all:** each node checks the bytes against the release hash itself, so a corrupted or tampered cache is refused at the node. |
+| Verified on arrival | The tarball's SHA-256 against the release's `.sha256`; the extracted file's identity against the master's own version and build id. That is integrity, not authenticity (both come from the same place). **For nodes with `update_verify = "release_hash"` the cache needs no trust at all:** each node checks the bytes against the release hash itself, so a corrupted or tampered cache is refused at the node. |
 | Bounds | At most 4 targets, 200 MiB per file, one build per target (the master's own); a build for an older master version is deleted at start. One fetch at a time, at most 3 attempts per target per day. |
 | No build | The endpoint answers `none` with the reason; the node behaves as `notify`. |
 
@@ -179,10 +179,10 @@ Base64 adds a third; it happens once per update.
 
 1. `build.info`: its own target; newer than its own build (§4.1); at most 200 MiB; not listed in
    `<data>/update-failed` (§6.3).
-2. With `update_trust = "signature"`: the release hash (§6.5), compared with `build.info.sha256`
+2. With `update_verify = "release_hash"`: the release hash (§6.5), compared with `build.info.sha256`
    **before any byte is downloaded**, so a mismatch costs no transfer.
 3. Fetch into `<bin dir>/.rizzy-harness.next`, mode 0600; the SHA-256 of the bytes checked
-   against `build.info` and, with `"signature"`, against the release hash again.
+   against `build.info` and, with `"release_hash"`, against the release hash again.
 4. File identity read and compared with `build.info`.
 5. Mode 0755, flushed. **Preflight:** `.rizzy-harness.next version --json`, 10 s, empty
    environment, must report the same identity. No new trust (it is about to run anyway), and a
@@ -225,28 +225,27 @@ is caught by the preflight, not here.
 
 Today a compromised master can drive agent turns only inside each node's policy and sandbox
 (`PLAN.md` T5, T6). `auto` changes that by the node owner's choice, to a degree set by
-`update_trust`:
+`update_verify`:
 
-| `update_trust` | Who must be compromised to run code on the node | Works with |
+| `update_verify` | Who must be compromised to run code on the node | Works with |
 |---|---|---|
-| `"disabled"` | **The master alone.** Whoever controls it runs code of their choice as the node's user, outside the sandbox, on every node in `auto` with this setting. | Any master build, tagged or not, self-built included. |
-| `"signature"` | **The master and the project's GitHub releases** (the account, a workflow, or the release assets), or TLS to GitHub. | A master running a tagged release binary or the published image of that tag. |
+| `"none"` | **The master alone.** Whoever controls it runs code of their choice as the node's user, outside the sandbox, on every node in `auto` with this setting. | Any master build, tagged or not, self-built included. |
+| `"release_hash"` | **The master and the project's GitHub releases** (the account, a workflow, or the release assets), or TLS to GitHub. | A master running a tagged release binary or the published image of that tag. |
 
-`auto` is opt-in per node and never the default; `"disabled"` is a second explicit choice on top
+`auto` is opt-in per node and never the default; `"none"` is a second explicit choice on top
 of it, logged at every start and shown by `doctor`. Integrity holds whatever the trust: hash,
-target, identity, size, never older. With the planned offline signing key (§6.5) the first
-column of the `"signature"` row becomes "the master and the offline key".
+target, identity, size, never older. The planned `"release_signature"` (§6.5) will read "the master and the offline
+signing key" in the first column.
 
-**`"signature"` is the default.** It trusts what anyone who downloads the release directly
-trusts, the install path of every other harness's installer. The name says more than today's
-check does: until the offline key exists it is a published hash, not a cryptographic signature,
-and the README must say so.
-**`"disabled"` is for untagged and self-built servers,** by the node owner's explicit choice: a
+**`"release_hash"` is the default.** It trusts what anyone who downloads the release directly
+trusts, the install path of every other harness's installer. It is a published hash, not a
+cryptographic signature, and the name says so.
+**`"none"` is for untagged and self-built servers,** by the node owner's explicit choice: a
 fair trade when one person runs the master and its nodes, not for a node attached to someone
 else's master or a shared node serving people who do not run it.
 
 **During development** (owner, 2026-11-12): a server built from source matches no release, so a
-development node that exercises `auto` sets `update_trust = "disabled"`. That belongs in the
+development node that exercises `auto` sets `update_verify = "none"`. That belongs in the
 development section of the README and in test fixtures, never in a shipped example or unit.
 
 ### 6.5 The release hash
@@ -257,15 +256,15 @@ development section of the README and in test fixtures, never in a shipped examp
 | Transport | The node's existing `reqwest` client, HTTPS through the operating system's trust store (§1). GitHub answers a release download with a redirect to its asset host: redirects are allowed only to `github.com` and hosts under `githubusercontent.com`, at most 3. Timeout 15 s; answer capped at 1 KiB; no token. |
 | Parse | Exactly one line, 64 lowercase hex characters, two spaces, `rizzy-harness`; anything else is refused. |
 | Failure | GitHub unreachable, rate-limited or answering 404: retried with backoff (1, 5, 15, 60 minutes, then once a day), and meanwhile the node behaves as `notify` with the reason. **It never falls back to trusting the master: no automatic downgrade of trust, ever.** No drain until verified. |
-| A private fork | Not supported in `"signature"` mode (it would need a GitHub token on every node); such a node uses `"disabled"`. |
+| A private fork | Not supported in `"release_hash"` mode (it would need a GitHub token on every node); such a node uses `"none"`. |
 | The workflow change | The release step publishes one more asset per target, the binary's own hash: `sha256sum rizzy-harness > "$name.bin.sha256"` beside the tarball's (`.github/workflows/ci.yml:124-127`), added to `gh release create`. **S.** |
 
 **Consequences, plainly.**
-- **A master built from source cannot serve `"signature"` nodes.** Its binary is not the release
+- **A master built from source cannot serve `"release_hash"` nodes.** Its binary is not the release
   artifact, so the hashes never match: that is the property working. Those nodes behave as
   `notify` and say why. A master running the release binary, or the image of that tag, matches.
 - **Nothing works before the first tag, nor between tags** (the `:edge` image is not a release):
-  only `"disabled"` covers an untagged build.
+  only `"none"` covers an untagged build.
 - **A node with no route to GitHub** cannot verify and stays at `notify`, with the reason.
 - An older release named by the master is refused as before (never older).
 - Defends against a compromised master and a corrupted cache; not against a compromised GitHub
@@ -281,12 +280,14 @@ asset above.
 
 **The offline signing key: planned.** A release signing key kept offline, whose public half is
 compiled into the binary (and can be pinned in `node.toml` by a fork), signs each release's
-binary hash; a node with `update_trust = "signature"` then verifies that signature as well as
+binary hash; a node with `update_verify = "release_signature"` verifies that signature as well as
 the hash. The master and GitHub both become mere carriers: it survives a compromised GitHub
 account or workflow, which the hash alone does not. It needs tagged releases, a signing step,
 key custody and rotation, none of which exist. Planned for after the first tagged release, as
 its own task; not part of N.9. Its test: `a_build_without_a_valid_offline_signature_is_refused`.
-No setting changes when it lands.
+When it lands, `"release_signature"` becomes the default: a node that never wrote `update_verify`
+gets the stronger check with no change to its `node.toml`, and a node that wrote `"release_hash"`
+keeps the hash check, with `doctor` saying that a stronger one exists.
 
 ### 6.6 An escaped agent
 
@@ -433,7 +434,7 @@ master holds one open file, not a copy.
 
 | # | Threat | Mitigation |
 |---|---|---|
-| T35 | A compromised master serves a malicious build to nodes that update from it, or uses requirements to keep nodes from working; a prompt-injected agent starts, cancels or stretches a restart | **The node pulls; the master never pushes.** A node asks for a build only with `update_mode = "auto"` in its own `node.toml`, and skips the release check only with `update_trust = "disabled"` written there; nothing on the master enables it. **With `update_trust = "disabled"` a compromised master runs code of its choice as the node's user, outside the sandbox, on every such node: accepted, by each node owner's choice, logged at every start and shown by `doctor`.** With `"signature"` the node fetches the binary's hash itself from a release URL it builds from its own `node.toml` and a plain version number, compares it before downloading and after, and refuses any mismatch, so the master alone cannot run code there; GitHub unreachable leaves the node at `notify`, never at `"disabled"` trust. Always: hash, target, identity and size checked, never older, preflighted, renamed in after the drain, rolled back on a failed handshake, never retried. The endpoint is on the authenticated link, own target only, rate-limited, refused to revoked nodes. The drain's durations are the node's; the agent chooses only finish or pause for its own turn. Tests: `docs/node-update.md` §9. **Residual:** `"disabled"` trust as above; with `"signature"`, a compromised GitHub repository or release together with the master; an escaped agent can replace a node-owned binary, as it can already rewrite `node.toml`. |
+| T35 | A compromised master serves a malicious build to nodes that update from it, or uses requirements to keep nodes from working; a prompt-injected agent starts, cancels or stretches a restart | **The node pulls; the master never pushes.** A node asks for a build only with `update_mode = "auto"` in its own `node.toml`, and skips the release check only with `update_verify = "none"` written there; nothing on the master enables it. **With `update_verify = "none"` a compromised master runs code of its choice as the node's user, outside the sandbox, on every such node: accepted, by each node owner's choice, logged at every start and shown by `doctor`.** With `"release_hash"` the node fetches the binary's hash itself from a release URL it builds from its own `node.toml` and a plain version number, compares it before downloading and after, and refuses any mismatch, so the master alone cannot run code there; GitHub unreachable leaves the node at `notify`, and it never skips the check. Always: hash, target, identity and size checked, never older, preflighted, renamed in after the drain, rolled back on a failed handshake, never retried. The endpoint is on the authenticated link, own target only, rate-limited, refused to revoked nodes. The drain's durations are the node's; the agent chooses only finish or pause for its own turn. Tests: `docs/node-update.md` §9. **Residual:** `update_verify = "none"` as above; with `"release_hash"`, a compromised GitHub repository or release together with the master; an escaped agent can replace a node-owned binary, as it can already rewrite `node.toml`. |
 
 ## 9. Tests the build commits to
 
@@ -445,7 +446,7 @@ master holds one open file, not a copy.
 6. `a_build_with_a_wrong_hash_target_or_identity_is_refused_and_nothing_is_installed`.
 7. `a_build_older_than_the_running_one_is_refused`.
 8. `a_build_whose_hash_differs_from_the_release_is_refused`: nothing downloaded, nothing installed, no drain.
-9. `auto_without_update_trust_checks_the_release` (the default is `"signature"`), `an_unknown_update_trust_refuses_to_start`, and with a root-owned binary `auto` degrades to `notify`.
+9. `auto_without_update_verify_checks_the_release_hash` (the default is `"release_hash"`), `an_unknown_update_verify_refuses_to_start`, and with a root-owned binary `auto` degrades to `notify`.
 10. `a_failed_download_or_verification_causes_no_drain`.
 11. `a_build_that_fails_preflight_causes_no_drain`.
 12. `the_binary_is_replaced_only_after_the_drain`: a command run during the drain uses the old helper.
@@ -466,7 +467,7 @@ master holds one open file, not a copy.
 27. `the_node_never_takes_a_url_or_hash_source_from_the_master`: a `build.info` with extra `url`, `host` or `hash_url` fields fetches only the node-built URL.
 28. `a_master_supplied_version_with_path_characters_is_refused`: `1.2.3/../x`, `1.2.3?a` and `v1.2` are refused before any request.
 29. `github_unreachable_leaves_the_node_at_notify_and_never_skips_the_check`.
-30. `a_self_built_masters_build_is_refused_under_signature_trust`.
+30. `a_self_built_masters_build_is_refused_under_release_hash`.
 
 ## 10. Build order and size
 
@@ -477,8 +478,8 @@ master holds one open file, not a copy.
 | 3 | The full drain: phases, the note, `drain_answer`, events, marker, Continue, routines (tests 17 to 26) | **L** | After Gate 3, on step 1 |
 | 4 | Requirement: storage, admin setting, `welcome`, notices; `off`, `notify`, `restart` (tests 1, 23) | **M** | After 3 |
 | 5 | The endpoint on the link and the master's own build (tests 2 to 5, 14) | **M** | After 2 |
-| 6 | Node side of `auto`: fetch, verify, preflight, install after drain, rollback, `"disabled"` trust (tests 6, 7, 9 to 13) | **L** | After 3 and 5 |
-| 7 | `"signature"` trust: the hash fetch, URL building, version check, no fallback (tests 8, 27 to 30); the workflow's `.bin.sha256` asset; immutable releases turned on | **M** (fetch) + **S** (workflow) | After 6; usable from the first tag |
+| 6 | Node side of `auto`: fetch, verify, preflight, install after drain, rollback, `update_verify = "none"` (tests 6, 7, 9 to 13) | **L** | After 3 and 5 |
+| 7 | `update_verify = "release_hash"`: the hash fetch, URL building, version check, no fallback (tests 8, 27 to 30); the workflow's `.bin.sha256` asset; immutable releases turned on | **M** (fetch) + **S** (workflow) | After 6; usable from the first tag |
 | 8 | The cache: `node-build add`, the GitHub fetch | **M** | After 6; the fetch after the first tag |
 
 The offline signing key is planned and not part of these steps (§6.5). About five weeks in all. Nothing from the nodes design is needed first: N.1 adds the spool
@@ -492,9 +493,5 @@ flush and per-workspace notices, N.4 container stop and reconcile.
 
 ## 12. Questions for the owner
 
-| # | Decision | Recommended | If you choose the other |
-|---|---|---|---|
-| Q1 | The key's name. `update_trust = "disabled"` can be read as "trusts nothing", the opposite of what it does (it turns the check off and trusts the master). | **Rename the key to `update_verify`:** `update_verify = "signature"` and `update_verify = "disabled"` read as what they do. The values stay as you named them. | `update_trust` stays; the start-up log line and `doctor` carry the meaning, and the README warns about it. |
-
-Decided since the last revision (D8): the reading of D7, the two value names, the default, and
-the offline signing key as planned work.
+None open. D1 to D8 in §2 record the answers; the names in D8 were left to this note by the owner
+on 2026-11-12.
