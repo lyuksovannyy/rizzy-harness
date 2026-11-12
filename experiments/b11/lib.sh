@@ -60,7 +60,7 @@ sbx_args() {
 }
 sbx() { # sbx <cmd string>
   local -a a; mapfile -d '' a < <(sbx_args)
-  (cd "$SA" && TMPDIR=$TMPA "${a[@]}" bash -c "$1")
+  (cd "$SA" && HOME=$SA TMPDIR=$TMPA "${a[@]}" bash -c "$1")
 }
 
 # bubblewrap, one namespace set per command. BW_NET=on shares the network.
@@ -75,6 +75,48 @@ bw_args() {
   printf '%s\0' "${a[@]}"
 }
 bw() { local -a a; mapfile -d '' a < <(bw_args); "${a[@]}" bash -c "$1"; }
+
+# bubblewrap, one long-lived namespace per session: a holder (`sleep
+# infinity` under bwrap's own init, pid 1 of the session's PID namespace).
+# Per command, nsenter joins the holder's user and PID namespaces and a
+# fresh bwrap builds the mounts in a nested user and PID namespace. Nested,
+# because bwrap cannot mount a new /proc for a PID namespace its user
+# namespace does not own and then silently bind-mounts the host's /proc
+# (measured: 413 host processes visible). bwrap's own --userns/--pidns
+# failed here ("Setting pidns failed: Operation not permitted"). nsenter
+# must join the holder's mount namespace too (-m): without it, bwrap reads
+# /proc/<pid> of its child from the host's /proc, where that pid number is
+# some other process (measured: 1 run in 6 failed with "open
+# /proc/10/ns/ns failed"). Killing the holder's init kills every process of
+# the session, nested namespaces included.
+bws_start() { # bws_start <infofile>; prints the holder init's pid
+  local -a a; mapfile -d '' a < <(bw_args)
+  local -a b=(); local x
+  for x in "${a[@]}"; do
+    # no --die-with-parent: the session outlives one command
+    if [ "$x" = --die-with-parent ]; then b+=(--info-fd 3); else b+=("$x"); fi
+  done
+  : >"$1"
+  "${b[@]}" sleep infinity 3>"$1" </dev/null >/dev/null 2>&1 &
+  local i; for i in $(seq 1 200); do
+    grep -q child-pid "$1" 2>/dev/null && break; sleep 0.01; done
+  sed -n 's/.*"child-pid": \([0-9]*\).*/\1/p' "$1"
+}
+bws_args() { # bws_args <holder pid>: the per-command argv
+  local a=(nsenter -t "$1" -U -p -m --preserve-credentials --
+    bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts
+    --die-with-parent --new-session
+    --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/bin /sbin
+    --symlink usr/lib /lib --symlink usr/lib /lib64
+    --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp
+    --bind "$SA" "$SA" --ro-bind "$REPO" "$REPO" --chdir "$SA"
+    --setenv HOME "$SA" --setenv TMPDIR /tmp)
+  printf '%s\0' "${a[@]}"
+}
+bws() { # bws <holder pid> <cmd>
+  local -a a; mapfile -d '' a < <(bws_args "$1")
+  "${a[@]}" bash -c "$2"
+}
 
 # Podman: the nodes design's argv (docs/nodes-credentials-environments.md
 # §4.6) minus what this machine cannot or need not show (memory/cpu caps
@@ -104,8 +146,8 @@ pm_once() { # podman run --rm per command
 # A run tag: our sleeps are `sleep 1000.<tag><n>`, so the scripts find and
 # kill only their own processes.
 TAG=${TAG:-$(date +%s%N | tail -c 7)}
-alive() { pgrep -f "sleep 1000\\.$TAG$1" >/dev/null && echo alive || echo gone; }
-kill_ours() { pkill -9 -f "sleep 1000\\.$TAG" 2>/dev/null || true; }
+alive() { pgrep -f "^sleep 1000\\.$TAG$1" >/dev/null && echo alive || echo gone; }
+kill_ours() { pkill -9 -f "^sleep 1000\\.$TAG" 2>/dev/null || true; }
 
 # The four ways a command escapes its process group, as one shell string.
 # 1 setsid, 2 nohup &, 3 double fork, 4 ignores SIGTERM, 5 plain child.

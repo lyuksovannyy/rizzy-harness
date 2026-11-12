@@ -1,0 +1,45 @@
+== start-up (create the confinement), 10 runs
+podman run -d (network none) n=10 min=69 median=72 max=80 ms; podman rm -f -t 0: median=74 max=78 ms
+podman run -d (pasta)        n=10 min=66 median=79 max=92 ms; podman rm -f -t 0: median=75 max=85 ms
+bwrap session holder        n=10 times(us): 2512 2273 2390 2290 12976 2267 2137 2317 2123 2043
+== per command (50 runs each)
+host-unconfined true         n=50 min=0.5 median=0.5 p90=0.6 max=0.8 ms
+sandbox-exec true            n=50 min=1.9 median=2.2 p90=2.4 max=3.0 ms
+bwrap-per-cmd true           n=50 min=1.4 median=1.5 p90=1.7 max=2.3 ms
+host-unconfined git-status-rw-200 n=50 min=1.1 median=1.1 p90=1.2 max=1.5 ms
+sandbox-exec git-status-rw-200 n=50 min=2.5 median=2.8 p90=3.1 max=3.4 ms
+bwrap-per-cmd git-status-rw-200 n=50 min=2.0 median=2.1 p90=2.3 max=2.6 ms
+host-unconfined git-status-ro-3000 n=50 min=1.7 median=1.8 p90=2.0 max=2.1 ms
+sandbox-exec git-status-ro-3000 n=50 min=3.3 median=3.6 p90=3.9 max=4.3 ms
+bwrap-per-cmd git-status-ro-3000 n=50 min=2.6 median=2.7 p90=2.9 max=3.4 ms
+host-unconfined ls-R-3000    n=50 min=1.3 median=1.3 p90=1.4 max=1.6 ms
+sandbox-exec ls-R-3000       n=50 min=2.7 median=2.9 p90=3.1 max=3.3 ms
+bwrap-per-cmd ls-R-3000      n=50 min=2.1 median=2.4 p90=2.6 max=2.6 ms
+bwrap-session true           n=50 min=1.6 median=1.7 p90=1.8 max=2.4 ms
+bwrap-session git-status-rw-200 n=50 min=2.1 median=2.3 p90=2.4 max=3.5 ms
+bwrap-session git-status-ro-3000 n=50 min=2.8 median=3.0 p90=3.2 max=3.4 ms
+bwrap-session ls-R-3000      n=50 min=2.4 median=2.6 p90=2.8 max=3.2 ms
+podman-exec true             n=50 min=65.7 median=70.8 p90=75.3 max=77.7 ms
+podman-exec git-status-rw-200 n=50 min=65.7 median=68.7 p90=73.3 max=75.4 ms
+podman-exec git-status-ro-3000 n=50 min=31.5 median=68.5 p90=73.2 max=79.4 ms
+podman-exec ls-R-3000        n=50 min=65.5 median=69.4 p90=72.8 max=81.2 ms
+podman-run-rm true           n=20 min=62.1 median=67.6 p90=77.2 max=78.1 ms
+podman-run-rm git-status-rw-200 n=20 min=62.7 median=68.4 p90=76.0 max=79.4 ms
+== idle memory per session (kB; PSS from smaps_rollup, RSS from ps)
+podman session (none): conmon+ctr  pids=41463 41466 41469 RSS=4872 kB PSS=2663 kB
+  conmon alone                     pids=41463 RSS=2280 kB PSS=409 kB
+  container cgroup memory.current: 520 kB
+podman session (pasta): conmon+ctr pids=51432 51435 51450 RSS=4752 kB PSS=1551 kB
+  + its pasta process              pids=51447 RSS=26380 kB PSS=25691 kB
+bwrap session: bwrap x2 + sleep    pids=51551 51555 51557 RSS=7692 kB PSS=460 kB
+sandbox-exec: nothing stays between commands (no process per session)
+== 8 idle session containers (network none)
+8 sessions: conmon+ctr             RSS=38564 kB PSS=5650 kB
+== disk per session container
+SizeRw=14001 bytes SizeRootFs=1123458243 bytes
+overlay-containers/<id>: 44 kB
+XDG_RUNTIME_DIR/containers (all): 28 kB
+image size: 1123444242 bytes
+podman exec client peak RSS kB: 51832
+bwrap peak RSS kB: 13864
+sandbox-exec (debug) peak RSS kB: 19284
