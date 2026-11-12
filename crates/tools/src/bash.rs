@@ -151,8 +151,9 @@ impl Tool for Bash {
 
         // The allow-listed environment (node.toml `env_pass`), nothing else,
         // in the Landlock sandbox where the node has one (node.toml
-        // `[sandbox]`): read-write the session folder and its temp folder.
-        let mut cmd: Command = match ctx.sandbox.command(
+        // `[sandbox]`): read-write the session folder and its temp folder;
+        // inside the node's process containment where it has one (T.8a).
+        let (mut cmd, contained): (Command, bool) = match ctx.sandbox.shell(
             "bash".as_ref(),
             &["-c".as_ref(), command.as_ref()],
             &ctx.workspace,
@@ -173,14 +174,15 @@ impl Tool for Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        let mut child = match cmd.spawn() {
+        let mut child = match crate::sandbox::Confinement::spawn(cmd, contained).await {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(format!("failed to spawn bash: {e}")),
         };
         let pgid = child.id().map(|p| p as i32);
         // If this call is dropped before it reaped the group itself (the
         // agent loop abandons a tool that outlives a cancel), the whole
-        // group dies, not only the shell `kill_on_drop` covers.
+        // group dies, not only the shell `kill_on_drop` covers. Contained,
+        // the group is bubblewrap alone, and its death ends the namespace.
         let mut group = KillGroupOnDrop(pgid);
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
@@ -237,7 +239,32 @@ impl Tool for Bash {
             }
         };
 
-        if let Some(pgid) = pgid {
+        if let (Some(pgid), true) = (pgid, contained) {
+            // bubblewrap is the group leader and alone in its group; the
+            // command is in the session of the namespace's init. When bwrap
+            // has exited, its init is gone and the kernel has killed every
+            // process in the namespace: nothing is left to signal.
+            if matches!(end, End::Cancelled | End::TimedOut) {
+                // The graceful stop goes to the command's group (bwrap does
+                // not forward SIGTERM, and SIGTERM to bwrap itself would end
+                // the namespace at once); the namespace's init ignores it.
+                // Without the init's number (no `children` file), bwrap
+                // gets SIGTERM, which kills the namespace without a grace.
+                match crate::contain::sandbox_init(pgid) {
+                    Some(init) => signal_group(init, Signal::SIGTERM),
+                    None => signal_group(pgid, Signal::SIGTERM),
+                }
+                if tokio::time::timeout(TERM_GRACE, child.wait())
+                    .await
+                    .is_err()
+                {
+                    // bwrap dies, its init dies with it (`--die-with-
+                    // parent`), and with the init the whole namespace.
+                    signal_group(pgid, Signal::SIGKILL);
+                }
+                let _ = child.wait().await;
+            }
+        } else if let Some(pgid) = pgid {
             match end {
                 End::Exited(_) => {
                     // The leader exited; reap anything it left in the group so

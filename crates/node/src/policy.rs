@@ -64,6 +64,10 @@ pub struct SandboxPolicy {
     pub read: Vec<PathBuf>,
     /// More read-write folders (caches: `~/.cache`, `~/.npm`, ...).
     pub write: Vec<PathBuf>,
+    /// `"auto"` (default: contain the agent's shell in bubblewrap where it
+    /// works, else run it with Landlock alone and say so), `"required"`
+    /// (refuse agentic sessions without it) or `"off"`.
+    pub contain: harness_tools::contain::ContainMode,
 }
 
 impl SandboxPolicy {
@@ -99,6 +103,8 @@ impl SandboxPolicy {
             network: self.network,
             read: expand("read", &self.read)?,
             write: expand("write", &self.write)?,
+            contain: self.contain,
+            bwrap: None,
         })
     }
 }

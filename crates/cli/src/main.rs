@@ -613,6 +613,11 @@ fn start_sandbox(
         }
         (None, _) => tracing::warn!("shell sandbox: {}", s.summary),
     }
+    if s.contain_degraded {
+        tracing::warn!("shell containment: {}", s.contain_summary);
+    } else {
+        tracing::info!("shell containment: {}", s.contain_summary);
+    }
     if let Some(root) = &s.tmp_root {
         harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
     }
@@ -774,6 +779,25 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
             .and_then(|s| match s.refusal {
                 Some(_) => Err(s.summary),
                 None => Ok(s.summary),
+            }),
+    );
+    check(
+        "shell containment",
+        NodePolicy::load(&dir.join("node.toml"))
+            .map_err(|e| e.to_string())
+            .and_then(|mut p| {
+                p.protect(dir);
+                harness_tools::sandbox::start(
+                    &p.sandbox.settings()?,
+                    dir,
+                    &p.protected_dirs,
+                    &p.workspace_roots,
+                    &dir.join("node.toml"),
+                )
+            })
+            .and_then(|s| match s.refusal {
+                Some(_) if s.contain_summary.starts_with("REFUSING") => Err(s.contain_summary),
+                _ => Ok(s.contain_summary),
             }),
     );
     check(

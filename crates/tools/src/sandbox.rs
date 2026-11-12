@@ -91,6 +91,11 @@ pub struct Settings {
     pub network: Network,
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    /// `[sandbox] contain`: the agent shell's process containment (T.8a).
+    pub contain: crate::contain::ContainMode,
+    /// Where bubblewrap is; `None`: `bwrap` on `PATH`, looked up at start.
+    /// Never read from node.toml (tests point it at a missing file).
+    pub bwrap: Option<PathBuf>,
 }
 
 /// A working sandbox: the wrapper binary and the node-wide rules.
@@ -107,6 +112,10 @@ pub struct Sandbox {
     /// Per-session temp directories live under it (inside the data dir).
     tmp_root: Option<PathBuf>,
     protected: Vec<PathBuf>,
+    /// The agent shell's containment, when the node has one (set once at
+    /// start, from node.toml and the probe; nothing per session or per
+    /// call can change it).
+    contain: Option<crate::contain::Contain>,
 }
 
 /// Lexically normalized absolute path (`.` and `..` folded).
@@ -338,16 +347,38 @@ impl Sandbox {
             best_effort: settings.mode == Mode::BestEffort,
             tmp_root,
             protected: protected.to_vec(),
+            contain: None,
         })
+    }
+
+    /// This sandbox with the agent's shell contained by `c` (bubblewrap).
+    pub fn with_containment(mut self, c: crate::contain::Contain) -> Self {
+        self.contain = Some(c);
+        self
+    }
+
+    /// The agent shell's containment, if any.
+    pub fn containment(&self) -> Option<&crate::contain::Contain> {
+        self.contain.as_ref()
     }
 
     pub fn network(&self) -> Network {
         self.network
     }
 
-    /// The wrapper's command line up to and including `--`.
-    fn wrapper(&self, rw: &[Grant], ro: &[Grant], status: bool) -> std::process::Command {
-        let mut c = std::process::Command::new(&self.exe);
+    /// The wrapper's command line up to and including `--`; with
+    /// `contain`, inside bubblewrap started in the given folder.
+    fn wrapper(
+        &self,
+        rw: &[Grant],
+        ro: &[Grant],
+        status: bool,
+        contain: Option<(&crate::contain::Contain, &Path)>,
+    ) -> std::process::Command {
+        let mut c = match contain {
+            Some((b, cwd)) => b.command(&self.exe, cwd),
+            None => std::process::Command::new(&self.exe),
+        };
         c.arg(SUBCOMMAND);
         if self.best_effort {
             c.arg("--best-effort");
@@ -426,7 +457,12 @@ impl Sandbox {
         let canary = canary_dir.join("sandbox-canary");
         std::fs::write(&canary, "the sandbox must not read this\n")
             .map_err(|e| format!("{}: {e}", canary.display()))?;
-        let mut c = self.wrapper(&[Grant::made(scratch, "the self-test folder")?], &[], true);
+        let mut c = self.wrapper(
+            &[Grant::made(scratch, "the self-test folder")?],
+            &[],
+            true,
+            None,
+        );
         c.args([
             "sh",
             "-c",
@@ -461,6 +497,46 @@ impl Sandbox {
             )),
             (code, _) => Err(format!(
                 "the sandbox self-test failed (exit {code:?}): {}",
+                stderr.trim()
+            )),
+        }
+    }
+
+    /// Run a fixed check through bubblewrap and the wrapper, as a shell
+    /// command runs: the command must be in a PID namespace of its own
+    /// and, for [`crate::contain::Form::Full`], see its own `/proc`.
+    pub fn probe_containment(
+        &self,
+        contain: &crate::contain::Contain,
+        scratch: &Path,
+    ) -> Result<(), String> {
+        std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let ok = scratch.join("granted");
+        std::fs::write(&ok, "ok").map_err(|e| format!("{}: {e}", ok.display()))?;
+        let full = contain.form() == crate::contain::Form::Full;
+        let mut c = self.wrapper(
+            &[Grant::made(scratch, "the self-test folder")?],
+            &[],
+            false,
+            Some((contain, scratch)),
+        );
+        c.args(["sh", "-c", &crate::contain::probe_script(full), "sh"])
+            .arg(&ok)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .current_dir(scratch)
+            .stdin(std::process::Stdio::null());
+        let out = c.output();
+        let _ = std::fs::remove_dir_all(scratch);
+        let out = out.map_err(|e| format!("cannot start {}: {e}", contain.bwrap().display()))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match out.status.code() {
+            Some(0) => Ok(()),
+            Some(4) => Err("the command was not in a PID namespace of its own".into()),
+            Some(5) => Err("/proc is not the namespace's own".into()),
+            code => Err(format!(
+                "{} failed (exit {code:?}): {}",
+                contain.bwrap().display(),
                 stderr.trim()
             )),
         }
@@ -526,6 +602,54 @@ impl Confinement {
         protected: &[PathBuf],
         grants: Grants,
     ) -> Result<tokio::process::Command, String> {
+        self.build(program, args, workspace, pin, env, protected, grants, false)
+            .map(|(c, _)| c)
+    }
+
+    /// The agent's shell: as [`Self::command`], inside the node's process
+    /// containment when it has one (T.8a). Returns whether it is contained;
+    /// a contained command must be started with [`Self::spawn`]. Whether
+    /// there is a containment is the node's alone: nothing a call or a
+    /// session passes reaches this decision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shell(
+        &self,
+        program: &OsStr,
+        args: &[&OsStr],
+        workspace: &Path,
+        pin: Option<&harness_core::folder::FolderPin>,
+        env: &crate::ToolEnv,
+        protected: &[PathBuf],
+        grants: Grants,
+    ) -> Result<(tokio::process::Command, bool), String> {
+        self.build(program, args, workspace, pin, env, protected, grants, true)
+    }
+
+    /// Start a command from [`Self::shell`]: a contained one from the
+    /// process's spawner thread (`crate::contain::spawn`).
+    pub async fn spawn(
+        mut cmd: tokio::process::Command,
+        contained: bool,
+    ) -> std::io::Result<tokio::process::Child> {
+        if contained {
+            crate::contain::spawn(cmd).await
+        } else {
+            cmd.spawn()
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        &self,
+        program: &OsStr,
+        args: &[&OsStr],
+        workspace: &Path,
+        pin: Option<&harness_core::folder::FolderPin>,
+        env: &crate::ToolEnv,
+        protected: &[PathBuf],
+        grants: Grants,
+        shell: bool,
+    ) -> Result<(tokio::process::Command, bool), String> {
         if let Self::Refused(why) = self {
             return Err(why.to_string());
         }
@@ -535,6 +659,7 @@ impl Confinement {
                 .canonicalize()
                 .map_err(|e| format!("workspace {}: {e}", workspace.display()))?,
         };
+        let mut contained = false;
         let std_cmd = match self {
             Self::Refused(why) => return Err(why.to_string()),
             Self::Unconfined => {
@@ -627,7 +752,9 @@ impl Confinement {
                     make_private_dir(t)?;
                     rw.push(Grant::made(t, "the session's temp folder")?);
                 }
-                let mut c = sandbox.wrapper(&rw, &ro, false);
+                let contain = sandbox.contain.as_ref().filter(|_| shell);
+                contained = contain.is_some();
+                let mut c = sandbox.wrapper(&rw, &ro, false, contain.map(|b| (b, ws.as_path())));
                 c.arg(program);
                 env.apply_std(&mut c);
                 if let Some(t) = tmp {
@@ -638,7 +765,7 @@ impl Confinement {
         };
         let mut c = tokio::process::Command::from(std_cmd);
         c.args(args).current_dir(&ws);
-        Ok(c)
+        Ok((c, contained))
     }
 }
 
@@ -659,10 +786,16 @@ fn make_private_dir(dir: &Path) -> Result<(), String> {
 pub struct Started {
     pub confinement: Confinement,
     /// Set when agentic sessions must be refused (mode `required`, sandbox
-    /// not enforced); the text names the node.toml setting.
+    /// not enforced; or `contain = "required"` and no containment); the
+    /// text names the node.toml setting.
     pub refusal: Option<String>,
     /// One line for the log and `doctor`.
     pub summary: String,
+    /// One line on the shell's process containment (bubblewrap), for the
+    /// log and `doctor`.
+    pub contain_summary: String,
+    /// Whether that line is a warning (`auto` without a containment).
+    pub contain_degraded: bool,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
 }
@@ -670,9 +803,11 @@ pub struct Started {
 /// Set up the node's sandbox once at start: resolve the wrapper binary
 /// (`current_exe`, canonical; a binary replaced by an upgrade is picked up
 /// at the same path, a deleted one makes every command fail closed), build
-/// the rules and run the self-test. `Err` is a configuration error (a
+/// the rules and run the self-test; then find bubblewrap and probe the
+/// shell's containment (T.8a). `Err` is a configuration error (a
 /// `[sandbox]` entry that would expose the data directory or a protected
-/// folder, or that holds a workspace root).
+/// folder, or that holds a workspace root; `contain = "required"` with
+/// `mode = "off"`).
 pub fn start(
     settings: &Settings,
     data_dir: &Path,
@@ -680,6 +815,7 @@ pub fn start(
     workspace_roots: &[PathBuf],
     node_toml: &Path,
 ) -> Result<Started, String> {
+    use crate::contain::ContainMode;
     if !data_dir.is_absolute() {
         return Err(format!(
             "the data directory {} is a relative path; the sandbox needs it absolute",
@@ -688,6 +824,13 @@ pub fn start(
     }
     let tmp_root = data_dir.join("sandbox-tmp");
     if settings.mode == Mode::Off {
+        if settings.contain == ContainMode::Required {
+            return Err(format!(
+                "{}: [sandbox] contain = \"required\" needs the sandbox; it is \
+                 mode = \"off\" (the containment wraps the sandbox's wrapper)",
+                node_toml.display()
+            ));
+        }
         return Ok(Started {
             confinement: Confinement::Unconfined,
             refusal: None,
@@ -696,6 +839,10 @@ pub fn start(
                  of this OS user",
                 node_toml.display()
             ),
+            contain_summary: "OFF ([sandbox] mode = \"off\"): processes a command leaves \
+                              behind can outlive it"
+                .into(),
+            contain_degraded: true,
             tmp_root: None,
         });
     }
@@ -709,21 +856,145 @@ pub fn start(
     };
     let scratch = tmp_root.join(format!("probe-{}", std::process::id()));
     let canary_dir = protected.first().map_or(data_dir, |p| p.as_path());
+    let landlock = sandbox.probe(&scratch, canary_dir);
+    if let (Err(e), Mode::Required) = (&landlock, settings.mode) {
+        return Ok(not_enforced(
+            settings,
+            e.clone(),
+            node_toml,
+            Some(Arc::new(sandbox)),
+        ));
+    }
+    let (sandbox, contain) = containment(
+        sandbox,
+        settings,
+        &tmp_root.join(format!("probe-contain-{}", std::process::id())),
+        node_toml,
+    );
     let sandbox = Arc::new(sandbox);
-    match sandbox.probe(&scratch, canary_dir) {
-        Ok(status) if settings.mode == Mode::Required => Ok(Started {
-            confinement: Confinement::Confined { sandbox, tmp: None },
+    let mut started = match landlock {
+        Ok(status) if settings.mode == Mode::Required => Started {
+            confinement: Confinement::Confined {
+                sandbox: sandbox.clone(),
+                tmp: None,
+            },
             refusal: None,
             summary: format!("enforced ({status})"),
+            contain_summary: String::new(),
+            contain_degraded: false,
             tmp_root: Some(tmp_root),
-        }),
-        Ok(status) => Ok(Started {
-            confinement: Confinement::Confined { sandbox, tmp: None },
+        },
+        Ok(status) => Started {
+            confinement: Confinement::Confined {
+                sandbox: sandbox.clone(),
+                tmp: None,
+            },
             refusal: None,
             summary: format!("best-effort ({status}): only what the kernel enforces"),
+            contain_summary: String::new(),
+            contain_degraded: false,
             tmp_root: Some(tmp_root),
-        }),
-        Err(e) => Ok(not_enforced(settings, e, node_toml, Some(sandbox))),
+        },
+        Err(e) => not_enforced(settings, e, node_toml, Some(sandbox.clone())),
+    };
+    match contain {
+        Contained::Yes(s) => started.contain_summary = s,
+        Contained::No(s) => {
+            started.contain_summary = s;
+            started.contain_degraded = true;
+        }
+        Contained::Refuse(msg) => {
+            started.contain_summary = format!("REFUSING agentic sessions: {msg}");
+            started.confinement = Confinement::Refused(msg.clone().into());
+            started.refusal = Some(msg);
+        }
+    }
+    Ok(started)
+}
+
+enum Contained {
+    Yes(String),
+    No(String),
+    Refuse(String),
+}
+
+/// Find bubblewrap and probe its two forms, the full one first (T.8a).
+fn containment(
+    sandbox: Sandbox,
+    settings: &Settings,
+    scratch: &Path,
+    node_toml: &Path,
+) -> (Sandbox, Contained) {
+    use crate::contain::{Contain, ContainMode, Form};
+    if settings.contain == ContainMode::Off {
+        return (
+            sandbox,
+            Contained::No(format!(
+                "OFF ([sandbox] contain = \"off\" in {}): processes a command leaves behind \
+                 can outlive it, and it sees every process of this machine in /proc",
+                node_toml.display()
+            )),
+        );
+    }
+    let found = match &settings.bwrap {
+        Some(p) if p.is_file() => Ok(p.clone()),
+        Some(p) => Err(format!("bubblewrap not found at {}", p.display())),
+        None => crate::contain::find_bwrap(),
+    };
+    let why = match found {
+        Err(e) => e,
+        Ok(bwrap) => {
+            let full = Contain::new(bwrap.clone(), Form::Full);
+            match sandbox.probe_containment(&full, scratch) {
+                Ok(()) => {
+                    return (
+                        sandbox.with_containment(full),
+                        Contained::Yes(format!(
+                            "contained ({}: a PID namespace and /proc of its own per command; \
+                             nothing a command starts outlives it)",
+                            bwrap.display()
+                        )),
+                    );
+                }
+                Err(full_err) => {
+                    let shared = Contain::new(bwrap.clone(), Form::SharedProc);
+                    match sandbox.probe_containment(&shared, scratch) {
+                        Ok(()) => {
+                            return (
+                                sandbox.with_containment(shared),
+                                Contained::Yes(format!(
+                                    "contained without a /proc of its own ({}: a PID namespace \
+                                     per command, so nothing a command starts outlives it, but \
+                                     a fresh /proc could not be mounted ({full_err}), so /proc \
+                                     lists this machine's processes)",
+                                    bwrap.display()
+                                )),
+                            );
+                        }
+                        Err(e) => format!("{full_err}; without a new /proc: {e}"),
+                    }
+                }
+            }
+        }
+    };
+    let advice = "install bubblewrap and allow unprivileged user namespaces (README, \
+                  \"The shell sandbox\")";
+    match settings.contain {
+        ContainMode::Required => (
+            sandbox,
+            Contained::Refuse(format!(
+                "this node refuses agentic sessions: [sandbox] contain = \"required\" in {} and \
+                 the shell cannot be contained here ({why}); {advice}, or set contain = \"auto\"",
+                node_toml.display()
+            )),
+        ),
+        _ => (
+            sandbox,
+            Contained::No(format!(
+                "NOT CONTAINED, running with Landlock alone ([sandbox] contain = \"auto\"): \
+                 {why}. Processes a command leaves behind can outlive it; {advice}"
+            )),
+        ),
     }
 }
 
@@ -741,6 +1012,8 @@ fn not_enforced(
             summary: format!(
                 "NOT ENFORCED, running anyway ([sandbox] mode = \"best-effort\"): {why}"
             ),
+            contain_summary: String::new(),
+            contain_degraded: false,
             tmp_root,
         },
         _ => {
@@ -760,6 +1033,8 @@ fn not_enforced(
                 confinement: Confinement::Refused(msg.clone().into()),
                 refusal: Some(msg.clone()),
                 summary: format!("REFUSING agentic sessions: {msg}"),
+                contain_summary: "not probed: the sandbox does not work".into(),
+                contain_degraded: true,
                 tmp_root,
             }
         }
@@ -1124,7 +1399,7 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false)
+        sb.wrapper(&[], &[], false, None)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -1268,6 +1543,66 @@ mod tests {
                 .unwrap_err();
             assert!(e.contains("relative"), "{e}");
         }
+    }
+
+    /// `contain = "required"` where bubblewrap is missing: agentic sessions
+    /// are refused, naming the setting, and no shell command is built.
+    /// `auto` runs as before (Landlock alone) and says so. Simulated with a
+    /// bubblewrap path that does not exist (tests cannot change `PATH`).
+    #[test]
+    fn contain_required_without_bubblewrap_refuses_and_auto_falls_back() {
+        use crate::contain::ContainMode;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let data = root.join("data");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let missing = data.join("no-such/bwrap");
+        let settings = |contain| Settings {
+            // `best-effort`: the test binary is no sandbox wrapper, so the
+            // Landlock probe fails; that path still probes the containment.
+            mode: Mode::BestEffort,
+            contain,
+            bwrap: Some(missing.clone()),
+            ..Default::default()
+        };
+        let toml = data.join("node.toml");
+        let prot = std::slice::from_ref(&data);
+        let s = start(&settings(ContainMode::Required), &data, prot, &[], &toml).unwrap();
+        let why = s.refusal.expect("required without bubblewrap must refuse");
+        assert!(why.contains("contain = \"required\""), "{why}");
+        assert!(why.contains("bubblewrap not found"), "{why}");
+        let shell = |c: &Confinement| {
+            c.shell(
+                OsStr::new("bash"),
+                &[],
+                &ws,
+                None,
+                &Default::default(),
+                &[],
+                Grants::default(),
+            )
+        };
+        assert_eq!(shell(&s.confinement).unwrap_err(), why);
+
+        let s = start(&settings(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
+        assert!(s.refusal.is_none(), "{:?}", s.refusal);
+        assert!(s.contain_degraded);
+        assert!(s.contain_summary.contains("NOT CONTAINED"), "{}", s.contain_summary);
+        let (_, contained) = shell(&s.confinement).unwrap();
+        assert!(!contained);
+
+        // `off` with the sandbox off is fine; `required` with it is a
+        // configuration error.
+        let off = |contain| Settings {
+            mode: Mode::Off,
+            contain,
+            ..Default::default()
+        };
+        assert!(start(&off(ContainMode::Auto), &data, prot, &[], &toml).is_ok());
+        let e = start(&off(ContainMode::Required), &data, prot, &[], &toml).unwrap_err();
+        assert!(e.contains("contain = \"required\""), "{e}");
     }
 
     #[test]

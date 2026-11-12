@@ -501,10 +501,7 @@ async fn a_setsid_child_survives_cancel_in_the_sandbox() {
         false,
     )
     .await;
-    assert!(
-        alive,
-        "the setsid child died: the gap is closed, flip this test"
-    );
+    assert!(!alive, "a setsid child survived cancel");
 }
 
 /// KNOWN GAP (C.11 / T.8): the same, ended by the timeout.

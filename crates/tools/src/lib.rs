@@ -5,6 +5,7 @@
 
 pub mod approval;
 mod bash;
+pub mod contain;
 pub use bash::{DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S};
 pub mod env;
 pub mod filter;
