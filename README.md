@@ -660,6 +660,7 @@ mode = "required"                    # required | best-effort | off
 network = "on"                       # on | off (off: no TCP connect or bind)
 read = []                            # more read-only folders, e.g. "~/.cargo"
 write = []                           # more read-write folders, e.g. "~/.cache"
+contain = "auto"                     # auto | required | off: run the shell in bubblewrap (see below)
 ```
 
 **The shell sandbox.** `bash` (and graphify) run through `rizzy-harness
@@ -700,6 +701,60 @@ agentic sessions with a message naming this setting; `node run` refuses to
 start, `serve` starts for chats only. `"best-effort"` uses whatever the
 kernel enforces and logs a warning; `"off"` runs the shell with every right
 of the node's OS user and logs that on every start.
+
+**Nothing a command starts outlives it.** Each `bash` call runs inside
+[bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) in a
+process namespace of its own, with the Landlock sandbox inside it
+unchanged. When the command ends, is cancelled, times out, or the node
+process dies (even by `kill -9`), every process it started ends too,
+including ones that detached themselves (`setsid`, `nohup … &`, a daemon's
+double fork). bubblewrap changes nothing about which files a command may
+open; it only adds the process boundary. What a command notices:
+
+- `/proc` lists only its own processes; `ps` shows a handful, `$$` is 2.
+  The node's and the rest of the machine's processes are not visible.
+- A program that daemonizes to keep running after the call (a dev server
+  started with `setsid`, a `--daemon` flag) stops when the call ends. Run
+  it in the foreground within one call, with a timeout.
+- Files owned by other users (`root` among them) show as owned by
+  `nobody` in `ls -l`, and `id` lists the group `nobody`: the command runs
+  in a user namespace. Your own files show as yours.
+- The command has no controlling terminal (a new session).
+- A command killed by a signal reports exit code 128 + the signal (137
+  for SIGKILL) instead of "signal".
+- On cancel or timeout the command still gets SIGTERM first and 2 s to
+  exit, then everything left is killed.
+- The host name, `/dev`, `/tmp`, `TMPDIR` and the environment are as
+  without it.
+
+It needs the `bubblewrap` package (`bwrap` on the node's `PATH`) and
+unprivileged user namespaces. **Ubuntu 24.04 and later** deny those to
+programs without an AppArmor profile: allow them with `sudo sysctl -w
+kernel.apparmor_restrict_unprivileged_userns=0` (and a file in
+`/etc/sysctl.d/` to keep it), or give `bwrap` an AppArmor profile that
+permits `userns`. `rizzy-harness doctor` shows the result next to the
+Landlock line ("shell containment"). `contain` decides what happens where
+it does not work:
+
+- `"auto"` (default): run the shell as before, in the Landlock sandbox
+  alone, and say so once in the log and in `doctor`. Processes a command
+  detaches then **can** outlive it and the node, and `/proc` shows every
+  process of the machine.
+- `"required"`: refuse agentic sessions, as `mode = "required"` does
+  without Landlock (`node run` refuses to start).
+- `"off"`: never use it (logged on every start).
+
+`mode = "required"` promises the Landlock file sandbox only; it does not
+require bubblewrap, so a node where bubblewrap cannot run keeps its shell.
+Where bubblewrap runs but cannot mount a fresh `/proc` (inside some
+containers), it is used without one: every process still ends with the
+command, but `/proc` then lists the outer processes, under numbers that
+are not the command's own (`/proc/$$` is another process); the log and
+`doctor` say "contained without a /proc of its own". With `mode = "off"`
+there is no sandbox and no containment, and `contain = "required"` is
+refused at start. Nothing in a request, a chat or an agent definition can
+turn the containment off. Only the agent's shell is contained; graphify
+and the node's own git and PDF reader keep the Landlock sandbox alone.
 
 What breaks by default, and the fix: toolchains and caches under your home
 folder. A command that fails with `Permission denied` on a path under `~`
@@ -987,6 +1042,13 @@ or the WireGuard address). Notes:
 - Building yourself and hitting Docker Hub rate limits:
   `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
 - Published images are linux/amd64 only.
+- The image has no bubblewrap, and bubblewrap does not run inside a
+  default rootless container ("Can't mount proc"), so the embedded node's
+  shell there runs in the Landlock sandbox alone (`contain = "auto"`'s
+  fallback; `doctor` says so). Which outer-container flags would let it
+  run is in [docs/container-experiment.md](docs/container-experiment.md)
+  §7; they loosen the outer container and were not tested with the
+  harness's image.
 
 ## Remote worker nodes
 

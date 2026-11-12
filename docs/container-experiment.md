@@ -464,7 +464,10 @@ alternative the owner should decide on explicitly.
 - **A tokio node holding `--die-with-parent`**: `PR_SET_PDEATHSIG` fires
   when the parent *thread* exits, so a command started from a short-lived
   thread would be killed early. Read, not measured; the implementation
-  must spawn from a thread that lives as long as the node.
+  must spawn from a thread that lives as long as the node. (Since
+  measured by T.8a, `cli/tests/contain.rs`: a command spawned from a
+  thread that then ends is killed, once bwrap has set its death signal;
+  the node now spawns every contained command from one long-lived thread.)
 - **Podman-in-Podman with the published approaches** (a privileged outer
   container, `--userns=auto`, `/dev/fuse`): stopped after the default
   and `ignore_chown_errors` attempts failed.
