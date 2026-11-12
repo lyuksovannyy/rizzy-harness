@@ -851,3 +851,30 @@ async fn a_node_with_the_namespace_never_loses_it() {
     assert!(!out.contains(&host_ns()), "{out}");
     assert!(arrived(&[host])[0].is_empty(), "{out}");
 }
+
+/// T8B-2, both forms: the probe's identity check passes in the shared-`/proc`
+/// form too (its `/proc/self` is still the reader's), and a command there
+/// has its own namespace.
+#[tokio::test]
+async fn the_shared_proc_form_gets_the_namespace_too() {
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let shared = harness_tools::contain::Contain::new(
+        harness_tools::contain::find_bwrap().unwrap(),
+        harness_tools::contain::Form::SharedProc,
+    );
+    let sb = f.plain(Network::Off);
+    sb.probe_containment(&shared, &f.data.join("probe-shared"))
+        .unwrap();
+    let host = udp_host();
+    let out = f
+        .bash(
+            Arc::new(sb.with_containment(shared)),
+            &send_cmd(&host, "shared"),
+        )
+        .await;
+    assert!(own_ns(&out), "{out}");
+    assert!(arrived(&[host])[0].is_empty(), "{out}");
+}
