@@ -383,7 +383,7 @@ async fn cancel_returns_only_after_everything_ended_with_the_network_off() {
             network: harness_tools::sandbox::Network::Off,
             ..Default::default()
         },
-        [974_821, 974_822, 974_823],
+        [974_951, 974_952, 974_953],
     )
     .await;
 }
