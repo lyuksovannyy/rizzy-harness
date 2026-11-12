@@ -791,17 +791,25 @@ socket and have names looked up for it, until the file view (T.8c) leaves
 it out; the containment line is a warning there already.
 
 The node checks at start that a command really gets a namespace of its
-own (its `/proc/self/ns/net` is not the node's). Where bubblewrap works but
-fails with `--unshare-net`, the node tries once more; if it fails again,
-`contain = "required"` refuses with bubblewrap's own error (restart the
-node to probe again), and `"auto"` still contains every command (its own
-processes, the guard, Landlock inside) without the namespace: TCP is
-stopped by Landlock, but UDP and DNS go out, and abstract sockets are
-closed only from Linux 6.12 (Landlock ABI 6). `doctor` and the start-up log
-mark the line `warn` ("network off WITH A GAP") with bubblewrap's error.
-Such a node probes again before a command, at most once a minute, and from
-the first probe that passes runs every command in a namespace of its own
-and logs one line saying so; it never goes back. After the start-up line
+own (its `/proc/self/ns/net` is not the node's). Where the probe with
+`--unshare-net` fails and the one without it passes, the node tries once
+more; if it fails again, `contain = "required"` refuses, and `"auto"` still
+contains every command (its own processes, the guard, Landlock inside)
+without the namespace: TCP is stopped by Landlock, but UDP and DNS go out,
+and abstract sockets are closed only from Linux 6.12 (Landlock ABI 6).
+`doctor` and the start-up log mark the line `warn` ("network off WITH A
+GAP") and say what failed: bubblewrap itself (its message), or the
+probe's own check (the command's namespace was the node's or could not be
+read). An `"auto"` node below where it could be, in that gap or on
+Landlock alone because bubblewrap failed every probe at start, probes
+again beside a shell command, at most once a minute and at most 2 s each
+(the command that noticed does not wait for it); from the first probe that
+passes, commands started from then on run contained, or in a namespace of
+their own, and the node logs one line saying so. It only ever steps up: a
+command already running stays as it started, and a node that contains, or
+has the namespace, never goes back (if bubblewrap fails later, the command
+fails). A node with no bubblewrap found, or with `contain = "off"`, does
+not probe; `"required"` refused at start (restart it to probe again). After the start-up line
 nothing in the chat says a node is in that gap (planned: the chat shows
 the node's gaps). **Without the containment** (`"auto"`'s fallback,
 `contain = "off"`) and for graphify and the node's own git, `network =
@@ -815,7 +823,10 @@ group or others; a sticky folder such as `/nix/store` is fine), resolved
 once at start and named in the log and in `doctor`; one an agent could
 have planted (a project's `bin` ahead of `/usr/bin`) is skipped and named.
 To use another, give its absolute path: `[sandbox] bwrap =
-"/opt/bubblewrap/bin/bwrap"`, taken as given. **Ubuntu 24.04 and later** deny those to
+"/opt/bubblewrap/bin/bwrap"`, taken as given: it is your own choice, and a
+wrapper there that gives the new network namespace a way out (user-mode
+networking, say) defeats `network = "off"`, because the probe checks that
+the namespace is new, not that it is empty. **Ubuntu 24.04 and later** deny those to
 programs without an AppArmor profile: allow them with `sudo sysctl -w
 kernel.apparmor_restrict_unprivileged_userns=0` (and a file in
 `/etc/sysctl.d/` to keep it), or give `bwrap` an AppArmor profile that
@@ -828,7 +839,8 @@ it does not work:
   ended), and say so once in the log and in `doctor`. Processes a command
   detaches then **can** outlive it and the node, `/proc` shows every
   process of the machine, and with `network = "off"` UDP and DNS still go
-  out.
+  out. Where a bubblewrap was found but failed every probe at start, the
+  node probes again later and steps up ("Network off" above).
 - `"required"`: refuse agentic sessions unless the guarantee above holds
   in full, as `mode = "required"` does without Landlock (`node run`
   refuses to start). It therefore refuses where bubblewrap does not run
