@@ -135,6 +135,10 @@ pub struct Sandbox {
     /// (review T8E-5). For the node itself it is `/proc/self/exe`, its own
     /// running image.
     image: Option<std::os::fd::RawFd>,
+    /// The node's link to that image in its data directory, once made
+    /// (T.8f, [`crate::image`]): what the file view binds, so a binary
+    /// replaced under the running node does not stop contained commands.
+    image_link: std::sync::OnceLock<crate::image::ImageLink>,
 }
 
 /// The harness binary to start guards from, as a descriptor this process
@@ -379,6 +383,7 @@ impl Sandbox {
         }
         Ok(Self {
             image: open_image(&exe),
+            image_link: std::sync::OnceLock::new(),
             exe,
             read,
             extra_read: settings
@@ -398,6 +403,38 @@ impl Sandbox {
             contain: std::sync::OnceLock::new(),
             step_up: None,
         })
+    }
+
+    /// Make the node's link to its own running image, `<data_dir>/node-image`
+    /// (T.8f, [`crate::image::make`]), which the file view then binds. Once:
+    /// a later call returns the first result. Where it cannot be made, the
+    /// view binds the image through its own path as before.
+    pub fn link_image(&self, data_dir: &Path) -> &crate::image::ImageLink {
+        self.image_link.get_or_init(|| match self.image {
+            Some(fd) => crate::image::make(fd, data_dir),
+            None => crate::image::ImageLink::NotMade(
+                "the node holds no descriptor of its own image".into(),
+            ),
+        })
+    }
+
+    /// `doctor`'s trial of [`Self::link_image`]: whether the link could be
+    /// made, without touching the one a running node made.
+    pub fn try_link_image(&self, data_dir: &Path) -> &crate::image::ImageLink {
+        self.image_link.get_or_init(|| match self.image {
+            Some(fd) => crate::image::trial(fd, data_dir),
+            None => crate::image::ImageLink::NotMade(
+                "the node holds no descriptor of its own image".into(),
+            ),
+        })
+    }
+
+    /// The link to bind, where one was made.
+    fn bound_image(&self) -> Option<&Path> {
+        match self.image_link.get() {
+            Some(crate::image::ImageLink::Linked(p)) => Some(p),
+            _ => None,
+        }
     }
 
     /// This sandbox with the agent's shell contained by `c` (bubblewrap).
@@ -632,6 +669,7 @@ impl Sandbox {
             Some((b, cwd)) => b.command(
                 &self.exe,
                 self.image,
+                self.bound_image(),
                 cwd,
                 mark.as_ref(),
                 self.network == Network::Off && self.network_namespace(b),
@@ -1236,6 +1274,27 @@ pub struct Started {
     pub view_summary: String,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
+}
+
+impl Started {
+    /// The node, once at start: make its link to its own running image in
+    /// `data_dir` (T.8f, [`Sandbox::link_image`]) and name the outcome in
+    /// [`Self::view_summary`]. Only the node: `doctor` uses
+    /// [`Self::try_link_image`], which leaves a running node's link alone.
+    pub fn link_image(&mut self, data_dir: &Path) {
+        if let Confinement::Confined { sandbox, .. } = &self.confinement {
+            sandbox.link_image(data_dir);
+            self.view_summary = sandbox.view_line();
+        }
+    }
+
+    /// `doctor`: whether the node could make its link here.
+    pub fn try_link_image(&mut self, data_dir: &Path) {
+        if let Confinement::Confined { sandbox, .. } = &self.confinement {
+            sandbox.try_link_image(data_dir);
+            self.view_summary = sandbox.view_line();
+        }
+    }
 }
 
 /// Set up the node's sandbox once at start: resolve the wrapper binary

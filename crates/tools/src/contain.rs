@@ -257,7 +257,10 @@ impl Contain {
     /// command that can write there cannot replace its guard (review
     /// T8E-5). Without it (it could not be opened), `exe`. Its `argv[0]` is
     /// `exe`, for `ps`. `sandbox-exec` inside the namespace is started from
-    /// [`VIEW_EXE`], where the guard binds its own running image (T.8c).
+    /// [`VIEW_EXE`], where the guard binds its own running image (T.8c):
+    /// through `image_link` where the node made one (T.8f, passed as the
+    /// guard's `--image`; the guard binds it only while it is that image),
+    /// else through the path the image's descriptor names.
     ///
     /// The file view holds `view` and the fixed parts ([`Self::args`]).
     /// With `net_off` (`[sandbox] network = "off"`, decided by the node's
@@ -267,6 +270,7 @@ impl Contain {
         &self,
         exe: &Path,
         image: Option<std::os::fd::RawFd>,
+        image_link: Option<&Path>,
         cwd: &Path,
         mark: Option<&Mark>,
         net_off: bool,
@@ -280,6 +284,9 @@ impl Contain {
         c.arg0(exe).arg(crate::guard::SUBCOMMAND);
         c.arg(crate::guard::NODE)
             .arg(std::process::id().to_string());
+        if let Some(l) = image_link {
+            c.arg(crate::guard::IMAGE).arg(l);
+        }
         if let Some(m) = mark {
             m.push_args(&mut c);
         }

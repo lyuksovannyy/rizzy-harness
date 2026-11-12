@@ -95,6 +95,11 @@ pub const PARENT_LOOK: Duration = Duration::from_millis(500);
 /// is the kill order (review T8E-1).
 pub const NODE: &str = "--node";
 
+/// The node's link to its own running image (T.8f, [`crate::image`]), in
+/// the guard's arguments where the node made one: the view binds it, and
+/// only while it is this guard's own image.
+pub const IMAGE: &str = "--image";
+
 /// Who gave the kill order, when it was not the node through the channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum By {
@@ -176,7 +181,11 @@ pub fn main() -> i32 {
         .windows(2)
         .find(|w| w[0] == NODE)
         .and_then(|w| w[1].to_str()?.parse::<i32>().ok());
-    match run(program, &args[at + 2..], node) {
+    let image = args[..at]
+        .windows(2)
+        .find(|w| w[0] == IMAGE)
+        .map(|w| std::path::PathBuf::from(&w[1]));
+    match run(program, &args[at + 2..], node, image.as_deref()) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{SUBCOMMAND}: {e}");
@@ -194,7 +203,12 @@ enum Phase {
     Killing(Instant, bool),
 }
 
-fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, String> {
+fn run(
+    program: &OsStr,
+    args: &[OsString],
+    node: Option<i32>,
+    image: Option<&std::path::Path>,
+) -> Result<i32, String> {
     // A node that died before this ran: start nothing.
     if let Some(n) = node
         && nix::unistd::getppid().as_raw() != n
@@ -230,7 +244,7 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
     // The file view's descriptors (T.8c): opened here, inherited by
     // bubblewrap alone (this process has one thread and starts nothing
     // else), closed here once it has started.
-    let (args, view_fds) = open_view(args)?;
+    let (args, view_fds) = open_view(args, image)?;
     let child = std::process::Command::new(program)
         .args(&args)
         .stdin(Stdio::null())
@@ -276,7 +290,10 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
 /// close-on-exec, so bubblewrap inherits them; bubblewrap closes those it
 /// binds with `--bind-fd` before the command starts. Any other `@rizzy`
 /// word, or one in another place, refuses the command.
-fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>), String> {
+fn open_view(
+    args: &[OsString],
+    _image: Option<&std::path::Path>,
+) -> Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>), String> {
     use crate::contain::{FD_TOKEN, IMAGE_TOKEN};
     use nix::fcntl::OFlag;
     use std::os::fd::AsRawFd;
