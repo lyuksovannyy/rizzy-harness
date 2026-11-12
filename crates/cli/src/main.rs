@@ -117,8 +117,28 @@ enum Cmd {
         /// The session of the marker. Not used here.
         #[arg(long, hide = true)]
         mark_session: Option<std::ffi::OsString>,
-        /// The command and its arguments.
-        #[arg(last = true, required = true, value_name = "CMD")]
+        /// The start's self-test (T.8c, review R-3): checks this process
+        /// runs after it confined itself, in place of a command. A file that
+        /// must be readable.
+        #[arg(long, hide = true, action = clap::ArgAction::Append)]
+        probe_read: Vec<std::ffi::OsString>,
+        /// A file that must not be readable.
+        #[arg(long, hide = true, action = clap::ArgAction::Append)]
+        probe_unreadable: Vec<std::ffi::OsString>,
+        /// A path that must not exist at all (the file view).
+        #[arg(long, hide = true, action = clap::ArgAction::Append)]
+        probe_absent: Vec<std::ffi::OsString>,
+        /// This process must be pid 2 of a PID namespace of its own.
+        #[arg(long, hide = true)]
+        probe_pid_ns: bool,
+        /// `/proc` must be that namespace's own.
+        #[arg(long, hide = true)]
+        probe_own_proc: bool,
+        /// The network namespace must be another than this one (the node's).
+        #[arg(long, hide = true)]
+        probe_net_not: Option<std::ffi::OsString>,
+        /// The command and its arguments (none for a probe).
+        #[arg(last = true, value_name = "CMD")]
         command: Vec<std::ffi::OsString>,
     },
     /// Read a PDF on stdin, write its text on stdout, confined (no files, no
@@ -633,6 +653,14 @@ fn start_sandbox(
             tracing::error!("shell containment: {}", s.contain_summary)
         }
     }
+    if s.view_summary.is_empty() {
+        tracing::warn!(
+            "file view: none, the shell is not contained: a command sees this machine's whole \
+             file system and only Landlock decides what it can open"
+        );
+    } else {
+        tracing::info!("file view: {}", s.view_summary);
+    }
     if let Some(root) = &s.tmp_root {
         // Before it serves: what a dead node left that its guard could not
         // end (a guard killed in the moment before bubblewrap's init set
@@ -853,15 +881,24 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                 &dir.join("node.toml"),
             )
         });
-    match containment {
+    match &containment {
         Ok(s) if s.contain_level == ContainLevel::Warn => {
             println!("warn  shell containment: {}", s.contain_summary)
         }
         Ok(s) if s.contain_level == ContainLevel::Refused => {
-            check("shell containment", Err(s.contain_summary))
+            check("shell containment", Err(s.contain_summary.clone()))
         }
-        Ok(s) => check("shell containment", Ok(s.contain_summary)),
-        Err(e) => check("shell containment", Err(e)),
+        Ok(s) => check("shell containment", Ok(s.contain_summary.clone())),
+        Err(e) => check("shell containment", Err(e.clone())),
+    }
+    // What a contained command can see (T.8c), or that there is no view.
+    match &containment {
+        Ok(s) if !s.view_summary.is_empty() => check("file view", Ok(s.view_summary.clone())),
+        Ok(s) if s.contain_level != ContainLevel::Refused => println!(
+            "warn  file view: none, the shell is not contained: a command sees this machine's \
+             whole file system and only Landlock decides what it can open"
+        ),
+        _ => {}
     }
     check(
         "checkpoint git",
@@ -951,6 +988,12 @@ fn main() -> anyhow::Result<()> {
             no_network,
             best_effort,
             status,
+            probe_read,
+            probe_unreadable,
+            probe_absent,
+            probe_pid_ns,
+            probe_own_proc,
+            probe_net_not,
             command,
             ..
         } = Cli::parse().cmd
@@ -968,6 +1011,14 @@ fn main() -> anyhow::Result<()> {
                 no_network,
                 best_effort,
                 status,
+                probe: harness_tools::sandbox::Probe {
+                    read: probe_read.into_iter().map(Into::into).collect(),
+                    unreadable: probe_unreadable.into_iter().map(Into::into).collect(),
+                    pid_ns: probe_pid_ns,
+                    own_proc: probe_own_proc,
+                    net_not: probe_net_not,
+                    absent: probe_absent.into_iter().map(Into::into).collect(),
+                },
                 command,
             },
         ));

@@ -35,3 +35,35 @@ pub fn contained(sb: Sandbox, scratch: &Path) -> Result<Sandbox, Sandbox> {
     eprintln!("SKIPPED (containment): bubblewrap does not work here: {why}");
     Err(sb)
 }
+
+/// bubblewrap's part of a guard's command line (`argv`, from the program
+/// on), made runnable without the guard: the file view's descriptor words,
+/// which only the guard can resolve (T.8c), become binds by path, and the
+/// image the harness binary `exe` by its path. For the tests that start
+/// bubblewrap themselves (a namespace left behind, the guard's own cost);
+/// the view itself is tested through the guard (`mount_view.rs`).
+#[allow(dead_code)]
+pub fn by_path(argv: &[std::ffi::OsString], exe: &str) -> Vec<std::ffi::OsString> {
+    use harness_tools::contain::{FD_TOKEN, IMAGE_TOKEN};
+    let mut out = argv.to_vec();
+    let end = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    for i in 1..end {
+        let Some(word) = argv[i].to_str() else {
+            continue;
+        };
+        let opt = argv[i - 1].to_str().unwrap_or("");
+        if word == IMAGE_TOKEN {
+            out[i - 1] = "--ro-bind".into();
+            out[i] = exe.into();
+        } else if word.starts_with(FD_TOKEN) {
+            out[i - 1] = if opt == "--bind-fd" {
+                "--bind"
+            } else {
+                "--ro-bind"
+            }
+            .into();
+            out[i] = argv[i + 1].clone();
+        }
+    }
+    out
+}

@@ -155,7 +155,15 @@ async fn ssh_key_and_api_token_are_permission_denied_in(f: Fixture) {
         !out.lines().any(|l| l.trim() == "api-token"),
         "listing the data dir: {out}"
     );
-    assert_eq!(out.matches("Permission denied").count(), 3, "{out}");
+    if f.contained {
+        // The file view (T.8c): what is not granted is not there at all.
+        // The data directory exists only as the empty folder above the
+        // session's temp folder, and Landlock still refuses to list it.
+        assert_eq!(out.matches("No such file or directory").count(), 2, "{out}");
+        assert_eq!(out.matches("Permission denied").count(), 1, "{out}");
+    } else {
+        assert_eq!(out.matches("Permission denied").count(), 3, "{out}");
+    }
     assert!(out.contains("end"), "{out}");
 }
 
@@ -206,7 +214,16 @@ async fn node_key_is_unreadable_from_the_shell_in(f: Fixture) {
             "{tag} did not fail: {out}"
         );
     }
-    assert_eq!(out.matches("Permission denied").count(), 4, "{out}");
+    let (denied, absent) = (
+        out.matches("Permission denied").count(),
+        out.matches("No such file or directory").count(),
+    );
+    if f.contained {
+        // The file view (T.8c): absent, not denied.
+        assert_eq!((denied, absent), (0, 4), "{out}");
+    } else {
+        assert_eq!(denied, 4, "{out}");
+    }
     assert!(out.contains("end"), "{out}");
 }
 
@@ -381,8 +398,10 @@ async fn a_nested_sandbox_exec_gains_nothing_in(f: Fixture, _status: &str) {
 }
 
 /// A pathname Unix socket outside the grants (a session bus, the Docker
-/// socket, an ssh-agent): denied from Landlock ABI 9 on. Below it this is
-/// an OPEN residual (PLAN.md R2); the test then records that it connects.
+/// socket, an ssh-agent): contained, not there at all (the file view,
+/// T.8c) on every ABI; with Landlock alone, denied from ABI 9 on, and below
+/// it an OPEN residual of that fallback (PLAN.md R2): the test then records
+/// that it connects.
 #[tokio::test]
 async fn pathname_unix_sockets_need_abi_9() {
     let Some(status) = landlock() else { return };
@@ -409,7 +428,11 @@ async fn pathname_unix_sockets_need_abi_9_in(f: Fixture, status: &str) {
         sock.display()
     );
     let out = f.bash(Settings::default(), &f.ws, &cmd).await;
-    if abi(status) >= 9 {
+    if f.contained {
+        // The file view (T.8c): the socket is not there, on every ABI.
+        assert!(!out.contains("unix-connected"), "{out}");
+        assert!(out.contains("FileNotFoundError"), "{out}");
+    } else if abi(status) >= 9 {
         assert!(!out.contains("unix-connected"), "{out}");
         assert!(out.contains("PermissionError"), "{out}");
     } else {

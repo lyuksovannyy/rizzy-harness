@@ -227,12 +227,17 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
     }
     let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(|e| format!("signalfd: {e}"))?;
+    // The file view's descriptors (T.8c): opened here, inherited by
+    // bubblewrap alone (this process has one thread and starts nothing
+    // else), closed here once it has started.
+    let (args, view_fds) = open_view(args)?;
     let child = std::process::Command::new(program)
-        .args(args)
+        .args(&args)
         .stdin(Stdio::null())
         .process_group(0)
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", program.to_string_lossy()))?;
+    drop(view_fds);
     let bwrap = child.id() as i32;
     // Reaped below by `waitpid`, never through `Child`.
     drop(child);
@@ -256,6 +261,85 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
         let _ = nix::unistd::dup2_stderr(&null);
     }
     Ok(watch(bwrap, ctl, &sfd, node, !blocked))
+}
+
+/// The file view's descriptors (T.8c, [`crate::contain`]): in bubblewrap's
+/// options (up to its first `--`), each [`crate::contain::FD_TOKEN`]
+/// `<dev>:<ino>` after `--bind-fd` or `--ro-bind-fd` becomes a descriptor
+/// of the destination's path (the view binds every grant at its own path),
+/// opened `O_PATH` without following a link at its last component, whose
+/// device and inode must be the ones the node checked: a folder swapped
+/// since refuses the command, and one swapped after this open is not what
+/// is mounted (the descriptor holds the checked one). The
+/// [`crate::contain::IMAGE_TOKEN`] becomes a descriptor of this process's
+/// own running image (the node's: it started this guard from it). Not
+/// close-on-exec, so bubblewrap inherits them; bubblewrap closes those it
+/// binds with `--bind-fd` before the command starts. Any other `@rizzy`
+/// word, or one in another place, refuses the command.
+fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>), String> {
+    use crate::contain::{FD_TOKEN, IMAGE_TOKEN};
+    use nix::fcntl::OFlag;
+    use std::os::fd::AsRawFd;
+    let mut out = args.to_vec();
+    let mut fds = Vec::new();
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    for i in 0..end {
+        let Some(word) = args[i].to_str().filter(|w| w.starts_with("@rizzy")) else {
+            continue;
+        };
+        let opt = i.checked_sub(1).and_then(|j| args[j].to_str());
+        let by_fd = matches!(opt, Some("--bind-fd" | "--ro-bind-fd"));
+        let fd = if word == IMAGE_TOKEN && (by_fd || opt == Some("--ro-bind")) {
+            nix::fcntl::open(
+                "/proc/self/exe",
+                OFlag::O_PATH,
+                nix::sys::stat::Mode::empty(),
+            )
+            .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?
+        } else if let (Some(id), true) = (word.strip_prefix(FD_TOKEN), by_fd) {
+            let bad = || format!("a bad view argument {word:?}");
+            let (dev, ino) = id.split_once(':').ok_or_else(bad)?;
+            let (dev, ino): (u64, u64) = (
+                dev.parse().map_err(|_| bad())?,
+                ino.parse().map_err(|_| bad())?,
+            );
+            let dest = args
+                .get(i + 1)
+                .map(std::path::Path::new)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(bad)?;
+            let fd = nix::fcntl::open(
+                dest,
+                OFlag::O_PATH | OFlag::O_NOFOLLOW,
+                nix::sys::stat::Mode::empty(),
+            )
+            .map_err(|e| {
+                format!(
+                    "the folder granted at {} was replaced or removed ({e}); the command was \
+                     not started",
+                    dest.display()
+                )
+            })?;
+            let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("{}: {e}", dest.display()))?;
+            if st.st_dev as u64 != dev || st.st_ino as u64 != ino {
+                return Err(format!(
+                    "the folder granted at {} was replaced (it is not the one the node checked); \
+                     the command was not started",
+                    dest.display()
+                ));
+            }
+            fd
+        } else {
+            return Err(format!("a bad view argument {word:?}"));
+        };
+        out[i] = if by_fd {
+            fd.as_raw_fd().to_string().into()
+        } else {
+            format!("/proc/self/fd/{}", fd.as_raw_fd()).into()
+        };
+        fds.push(fd);
+    }
+    Ok((out, fds))
 }
 
 /// SIGKILL what is left: the namespace through bubblewrap while it is

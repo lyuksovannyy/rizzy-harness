@@ -757,7 +757,7 @@ fn bwrap_argv(f: &Fixture, sb: Arc<Sandbox>, script: &str) -> Vec<std::ffi::OsSt
     let cmd = f.shell(sb, script);
     let all: Vec<std::ffi::OsString> = cmd.as_std().get_args().map(Into::into).collect();
     let at = all.iter().position(|a| a == "--").unwrap();
-    all[at + 1..].to_vec()
+    bwrap::by_path(&all[at + 1..], EXE)
 }
 
 /// Start `argv` orphaned (through a shell that exits at once), as a

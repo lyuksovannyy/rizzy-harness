@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use harness_tools::contain::{Binds, Contain, Form};
 use harness_tools::sandbox::{Confinement, Grants, Network, Sandbox, Settings};
 use harness_tools::{Bash, Tool, ToolCtx};
 use serde_json::json;
@@ -105,6 +106,25 @@ impl Fixture {
 
     fn sandbox(&self) -> Option<Arc<Sandbox>> {
         self.sandbox_with(&Settings::default()).map(|(sb, _)| sb)
+    }
+
+    /// The contained sandbox in another form or with other binds than this
+    /// bubblewrap would choose (the older bubblewrap's binds by path on a
+    /// newer one), probed as the node probes it.
+    fn sandbox_as(&self, form: Form, binds: Binds) -> Option<Arc<Sandbox>> {
+        self.sandbox()?;
+        let sb = self.plain(&Settings::default());
+        let bwrap = harness_tools::contain::find_bwrap().unwrap();
+        let c = Contain::new(bwrap, form).with_binds(binds);
+        if let Err(e) = sb.probe_containment(&c, &self.data.join("sandbox-tmp/probe-as")) {
+            assert!(
+                !(bwrap::required() && form == Form::Full),
+                "{form:?} {binds:?}: {e}"
+            );
+            eprintln!("SKIPPED ({form:?}, {binds:?}): {e}");
+            return None;
+        }
+        Some(Arc::new(sb.with_containment(c)))
     }
 
     fn ctx(&self, sb: Arc<Sandbox>) -> ToolCtx {
@@ -213,7 +233,7 @@ fn look(paths: &[(&str, PathBuf)]) -> String {
     for (tag, p) in paths {
         let p = p.display();
         s.push_str(&format!(
-            "if [ -e '{p}' ] || [ -L '{p}' ]; then echo \"{tag}=there:$(head -n1 '{p}' 2>&1 \
+            "if [ -e '{p}' ]; then echo \"{tag}=there:$(head -n1 '{p}' 2>&1 \
              || ls '{p}' 2>&1 | head -n1)\"; else echo '{tag}=absent'; fi; "
         ));
     }
@@ -295,6 +315,67 @@ async fn outside_the_grants_is_absent_without_landlock() {
     assert_all_absent(&out, "without Landlock");
 }
 
+/// The same in every way the node can contain a command here: the older
+/// bubblewrap's binds by path (bubblewrap 0.9, CI's), and the form with the
+/// outer `/proc` (a default rootless container), each through the bash
+/// tool and with only the view.
+#[tokio::test]
+async fn outside_the_grants_is_absent_in_every_form_and_bind() {
+    for (form, binds) in [
+        (Form::Full, Binds::Path),
+        (Form::SharedProc, Binds::Fd),
+        (Form::SharedProc, Binds::Path),
+    ] {
+        let f = fixture();
+        let Some(sb) = f.sandbox_as(form, binds) else {
+            continue;
+        };
+        let how = format!("{form:?}, {binds:?}");
+        let script = format!("{} echo in-folder=$(cat marker)", look(&outside(&f)));
+        let r = Bash
+            .run(&f.ctx(sb.clone()), json!({ "command": script }))
+            .await;
+        assert!(
+            r.output.contains("in-folder=checked"),
+            "{how}: {}",
+            r.output
+        );
+        assert_all_absent(&r.output, &format!("{how}, with Landlock"));
+        let (out, ok) = run_guarded(without_the_wrapper(&f.shell(sb, &script), None)).await;
+        assert!(ok && out.contains("in-folder=checked"), "{how}: {out}");
+        assert_all_absent(&out, &format!("{how}, without Landlock"));
+        eprintln!("{how}: all absent");
+    }
+}
+
+/// No descriptor of the view's reaches the command: bubblewrap closes those
+/// it bound with `--bind-fd`, and nothing else of the guard's is inherited.
+/// A descriptor of a host folder would lead out of the view (`openat(fd,
+/// "..")`). With the older binds the image's `O_PATH` descriptor stays
+/// open (bubblewrap does not close a source given by path); it names the
+/// harness binary, which the view shows anyway, and is never a folder.
+#[tokio::test]
+async fn no_descriptor_of_a_folder_reaches_the_command() {
+    for binds in [Binds::Fd, Binds::Path] {
+        let f = fixture();
+        let Some(sb) = f.sandbox_as(Form::Full, binds) else {
+            continue;
+        };
+        let script = "for n in $(ls /proc/self/fd); do [ \"$n\" -gt 2 ] || continue; \
+                      t=$(readlink /proc/self/fd/$n 2>&1); [ -d /proc/self/fd/$n ] && \
+                      echo \"DIR-FD $n $t\"; echo \"fd $n $t\"; done; echo end";
+        for cmd in [
+            f.shell(sb.clone(), script),
+            without_the_wrapper(&f.shell(sb.clone(), script), None),
+        ] {
+            let (out, ok) = run_guarded(cmd).await;
+            eprintln!("{binds:?}: {out}");
+            assert!(ok && out.contains("end"), "{out}");
+            assert!(!out.contains("DIR-FD"), "{binds:?}: {out}");
+        }
+    }
+}
+
 // ---- 2. the swap between the node's check and the mount (S-2) ----
 
 /// The session folder is swapped for a link to the `~/.ssh` stand-in after
@@ -327,6 +408,27 @@ async fn a_folder_swapped_for_a_link_after_the_check_is_not_mounted() {
             "neither the checked folder nor a refusal: {out}"
         );
     }
+}
+
+/// The same swap with the older bubblewrap's binds by path: bubblewrap
+/// binds what the path leads to (the link's target), and `sandbox-exec`,
+/// which opens the mounted folder without following a link, refuses the
+/// command before it runs (B.11's fallback). Only with the wrapper: that
+/// check is the wrapper's, and it runs before every contained command,
+/// with or without Landlock.
+#[tokio::test]
+async fn with_binds_by_path_a_swapped_folder_refuses_the_command() {
+    let f = fixture();
+    let Some(sb) = f.sandbox_as(Form::Full, Binds::Path) else {
+        return;
+    };
+    let cmd = f.shell(sb, "echo got=$(cat marker 2>&1); cat id_test 2>&1");
+    std::fs::rename(&f.ws, f.ws.with_file_name("chat-a.old")).unwrap();
+    std::os::unix::fs::symlink(&f.ssh, &f.ws).unwrap();
+    let (out, ok) = run_guarded(cmd).await;
+    eprintln!("ok {ok}: {out}");
+    assert!(!ok && out.contains("replaced"), "{out}");
+    assert!(!out.contains(SSH_CANARY), "{out}");
 }
 
 // ---- 3. a pathname Unix socket outside the grants (T8A-1) ----
@@ -594,7 +696,7 @@ fn helper_probe_with_a_planted_path() {
     )
     .unwrap();
     let bwrap = harness_tools::contain::find_bwrap().unwrap();
-    let c = harness_tools::contain::Contain::new(bwrap, harness_tools::contain::Form::Full);
+    let c = Contain::new(bwrap, Form::Full);
     match sb.probe_containment(&c, &data.join("sandbox-tmp/probe-contain")) {
         Ok(()) => println!("PROBE-RESULT ok"),
         Err(e) => println!("PROBE-RESULT failed: {e}"),

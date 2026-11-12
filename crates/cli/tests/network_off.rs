@@ -622,7 +622,17 @@ async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
 fn stand_in(f: &Fixture, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let p = f.root.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
+    // The node asks bubblewrap's version once (T.8c, which binds it may
+    // use): answered by the real one, not counted as a run.
+    let real = harness_tools::contain::find_bwrap().unwrap();
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exec '{}' --version; fi\n{body}",
+            real.display()
+        ),
+    )
+    .unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
     p
 }
