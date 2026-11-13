@@ -2077,7 +2077,8 @@ async fn a_secret_cut_by_the_first_wait_reaches_neither_the_result_nor_the_strea
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let mut n = node_with(f, sb, vec![SECRET.into()]).await;
-    let cmd = "printf 'by-time:sk-test-0123456789abcde'; sleep 3.8; printf 'f\\n'; \
+    // The command builds it: no part of it is in the call's own input.
+    let cmd = "printf 'by-time:sk-test-%s' 0123456789abcde; sleep 3.8; printf 'f\\n'; \
                while [ ! -e go ]; do sleep 0.05; done";
     n.turn(json!([bg(cmd, 60)])).await;
     let part = "sk-test-0123456789abcde";

@@ -325,19 +325,22 @@ impl Tool for Bash {
         // Keep the model's copy (capped) and pass the chunk on to the UI
         // stream, which has its own budget: past it `send` returns at once,
         // so the pipes are still read (and discarded) at full speed.
-        let keep = |s: &str, combined: &mut String| {
+        // A background start's output goes through its ring's scrubber
+        // first: the live stream gets what the ring stored, never the
+        // held-back start of a secret the first wait may cut (R-4).
+        // `None`: send the chunk as it came.
+        let keep = |s: &str, combined: &mut String| -> Option<String> {
             if combined.len() < keep_chars {
                 combined.push_str(s);
             }
-            if let Some(r) = &ring {
-                r.lock().unwrap_or_else(|p| p.into_inner()).push(s);
-            }
+            ring.as_ref()
+                .and_then(|r| r.lock().unwrap_or_else(|p| p.into_inner()).push_clean(s))
         };
 
         let end = loop {
             tokio::select! {
                 Some((stream, s)) = rx.recv() => {
-                    keep(&s, &mut combined);
+                    let s = keep(&s, &mut combined).unwrap_or(s);
                     if let Some(ui) = &ctx.output {
                         // The consumer may be behind (the channel is
                         // bounded): waiting for it must not delay a cancel
@@ -368,6 +371,12 @@ impl Tool for Bash {
             let net_off = matches!(&ctx.sandbox,
                 crate::sandbox::Confinement::Confined { sandbox, .. }
                     if sandbox.network() == crate::sandbox::Network::Off);
+            // From the ring: scrubbed, without a possible secret's start
+            // that the first wait cut (R-4).
+            let (so_far, truncated) = {
+                let r = ring.lock().unwrap_or_else(|p| p.into_inner());
+                cap(r.text_within(crate::MAX_OUTPUT_CHARS - 2000))
+            };
             let st = bg.adopt(
                 res,
                 crate::background::Handover {
@@ -383,7 +392,6 @@ impl Tool for Bash {
                     mark: ctx.sandbox.mark(),
                 },
             );
-            let (so_far, truncated) = cap(combined);
             let mut note = format!(
                 "[running in the background as {id}: it keeps running after this step and is \
                  stopped at its timeout in {left} at the latest ({t} s; timeout_secs, up to {max} \
@@ -532,9 +540,17 @@ impl Tool for Bash {
         };
         let _ = tokio::time::timeout(drain, async {
             while let Some((stream, s)) = rx.recv().await {
-                keep(&s, &mut combined);
+                let s = keep(&s, &mut combined).unwrap_or(s);
                 if let Some(ui) = &ctx.output {
                     ui.send(stream, s).await;
+                }
+            }
+            // A background call that ended in its first wait: what its
+            // ring's scrubber still held, now the output is whole.
+            if let Some(r) = &ring {
+                let rest = r.lock().unwrap_or_else(|p| p.into_inner()).finish_clean();
+                if let (false, Some(ui)) = (rest.is_empty(), &ctx.output) {
+                    ui.send(OutputStream::Stdout, rest).await;
                 }
             }
         })

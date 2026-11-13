@@ -217,20 +217,34 @@ impl Ring {
     /// Text from the pipes: scrubbed (a secret split across pieces too),
     /// then stored.
     pub fn push(&mut self, s: &str) {
+        let _ = self.push_clean(s);
+    }
+
+    /// [`Self::push`], returning the scrubbed text it stored when that is
+    /// not `s` itself (`None`: `s` was stored as it came). What is held
+    /// back as the possible start of a secret is in neither (R-4).
+    pub fn push_clean(&mut self, s: &str) -> Option<String> {
         // No secret to look for (yet): stored as it came, no copy.
         if self.secrets.is_empty() && self.scrub_held == 0 {
             self.store(s);
-            return;
+            return None;
         }
         let clean = self.scrub.push(s);
         self.scrub_held = 1;
         self.store(&clean);
+        Some(clean)
     }
 
     /// The pipes are done: what the scrubber held back.
     pub fn finish(&mut self) {
+        let _ = self.finish_clean();
+    }
+
+    /// [`Self::finish`], returning what it released.
+    pub fn finish_clean(&mut self) -> String {
         let rest = self.scrub.finish();
         self.store(&rest);
+        rest
     }
 
     fn store(&mut self, s: &str) {
