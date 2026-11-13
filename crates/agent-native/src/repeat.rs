@@ -15,9 +15,10 @@
 //!   refused.
 //! - **A change** starts every call's count again ([`RepeatGuard::restart`];
 //!   each keeps its last result, so a call that only repeats itself after
-//!   it is no change): a new result of a call made before in this turn (a
-//!   poll whose answer moved, so the wait before the next poll is not
-//!   counted on), the first successful run of a tool that changes things
+//!   it is no change): a new successful result of a call made before in
+//!   this turn (a poll whose answer moved, so the wait before the next poll
+//!   is not counted on; a failure in new words restarts only its own
+//!   count), the first successful run of a tool that changes things
 //!   (an edit, then the test run again), a sub-agent that completed, and a
 //!   background command's end told at the step boundary. Calls in between
 //!   that change nothing do not break a count: it is not "in a row".
@@ -143,8 +144,12 @@ impl RepeatGuard {
         let outcome = h.finish();
         let (runs, change) = match self.calls.get(&key) {
             Some(s) if s.outcome == outcome => (s.runs + 1, false),
-            // A new result of a call made before: something moved.
-            Some(_) => (1, true),
+            // A new result of a call made before: something moved, if it
+            // succeeded (a poll that answers). A failure in new words (a
+            // test runner's run time) is no change: it restarts its own
+            // count only, never another call's, so a denied call between
+            // two runs of it is still counted (review T1-D1).
+            Some(_) => (1, ok),
             None => (1, changes && ok),
         };
         if change {
