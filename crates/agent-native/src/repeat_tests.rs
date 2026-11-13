@@ -712,11 +712,17 @@ async fn two_unchanging_commands_do_not_hide_the_loop_between_them() {
 
 /// Review T1-R3 (a): wait, then look. A poll whose answer changes every
 /// time shows the world moving, so the wait between polls is never
-/// refused, and the turn is not ended.
+/// refused, and the turn is not ended. Only the second wait is warned:
+/// the first poll is that call's first result, no change yet; every later
+/// poll's new answer starts the wait's count again.
 #[tokio::test]
 async fn a_wait_between_changing_polls_is_never_refused() {
     let host = Host::new(Decision::Allow);
-    let (wait, poll) = (bash("sleep 0.05"), probe(json!({"vary": true})));
+    let dir = tempfile::tempdir().unwrap();
+    let (wait, poll) = (
+        bash("sleep 0.05; echo w >> waits"),
+        probe(json!({"vary": true})),
+    );
     let mut calls = vec![];
     for _ in 0..8 {
         calls.extend([wait.clone(), poll.clone()]);
@@ -725,11 +731,14 @@ async fn a_wait_between_changing_polls_is_never_refused() {
         builtin: true,
         ..Default::default()
     };
-    let r = run_opts(&host, calls, o).await;
+    let r = run_in(&host, calls, o, dir.path()).await;
     let fin = host.noted();
     assert!(!fin.iter().any(|f| f.1.contains("Not run")), "{fin:?}");
     assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
     assert_eq!(r.probes, 8);
+    assert_eq!(lines_of(dir.path(), "waits"), 8, "{fin:?}");
+    let warned: Vec<usize> = (0..fin.len()).filter(|i| fin[*i].2.is_some()).collect();
+    assert_eq!(warned, [2], "{fin:?}");
 }
 
 /// Review T1-R3 (b): a sub-agent that did its work starts the counts
@@ -777,6 +786,55 @@ async fn a_test_run_after_each_delegation_runs() {
     let fin = host.noted();
     assert_eq!(r.probes, 5, "{fin:?}");
     assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+}
+
+/// The other side of T1-R3 (b): a sub-agent that ended in an error did
+/// nothing the guard can count on, so the same test run after each one is
+/// refused the fifth time.
+#[tokio::test]
+async fn a_failed_delegation_is_no_change() {
+    let mut host = Host::new(Decision::Allow);
+    host.delegate_fails = true;
+    let worker = harness_core::agent::AgentSpec {
+        agent_id: "worker".into(),
+        name: "Worker".into(),
+        system_prompt: "edits".into(),
+        tools: harness_core::agent::ToolSelection::List(vec![]),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        budget: Default::default(),
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates: vec![],
+        caps: None,
+    };
+    let lead = harness_core::agent::AgentSpec {
+        agent_id: "lead".into(),
+        tools: harness_core::agent::ToolSelection::List(vec!["probe".into()]),
+        delegates: vec![worker.clone()],
+        ..worker
+    };
+    let test = probe(json!({"cmd": "cargo test", "out": "1 failed"}));
+    let delegate = (DELEGATE, json!({"agent": "worker", "task": "fix it"}));
+    let mut calls = vec![];
+    for _ in 0..4 {
+        calls.extend([test.clone(), delegate.clone()]);
+    }
+    calls.push(test.clone());
+    let o = Opts {
+        agent: Some(lead),
+        ..Default::default()
+    };
+    let r = run_opts(&host, calls, o).await;
+    let fin = host.noted();
+    assert!(!fin[1].0, "the sub-agent failed: {fin:?}");
+    assert_eq!(r.probes, 4, "{fin:?}");
+    assert!(fin[8].1.contains("Not run"), "{fin:?}");
 }
 
 /// Review T1-R3 (c): a background command's end, told at the step
@@ -893,10 +951,20 @@ async fn several_calls_a_step_rebuild_from_the_log() {
     let r = run_opts(&host, vec![], o).await;
     let live = sent_results(&r);
     assert_eq!(live.len(), 7);
-    assert!(
-        live.iter().any(|s| !harness_lines(s).is_empty()),
-        "{live:?}"
-    );
+    // Which result carries which note: the change starts the count again.
+    let times: Vec<Option<String>> = live
+        .iter()
+        .map(|s| {
+            let l = harness_lines(s);
+            assert!(l.len() <= 1, "{s:?}");
+            l.first().map(|l| {
+                let n = l.split(" times").next().unwrap();
+                n.rsplit(' ').next().unwrap().to_string()
+            })
+        })
+        .collect();
+    let want = [None, Some("2"), Some("3"), None, None, Some("2"), Some("3")];
+    assert_eq!(times, want.map(|w| w.map(String::from)), "{live:?}");
     let rebuilt: Vec<String> = place_notes(history_to_messages(&log_of(
         SessionId::new(),
         &host,
