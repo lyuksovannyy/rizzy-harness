@@ -939,6 +939,7 @@ async fn list_sessions(
         })
         .collect();
     crate::routines::annotate(&m, &mut list, q.routine_runs).await?;
+    m.annotate_background(&mut list);
     Ok(Json(json!({ "sessions": list })))
 }
 
@@ -958,6 +959,7 @@ async fn get_session(
         &row
     ));
     crate::routines::annotate_one(&m, &mut v).await?;
+    m.annotate_background(std::slice::from_mut(&mut v));
     Ok(Json(v))
 }
 
@@ -1102,6 +1104,7 @@ async fn create_session(
             owner_id: who.user_id.clone(),
             workspace_id: scope.map(|a| a.workspace.workspace_id),
             project_id: project,
+            no_callbacks: false,
         })
         .await?;
     Ok(Json(json!({ "session_id": sid })))
@@ -1246,6 +1249,7 @@ async fn prompt(
                 reply: b.reply,
                 untrusted: flags.untrusted,
                 images,
+                callback: vec![],
             },
         )
         .await;
@@ -1860,11 +1864,18 @@ async fn attention(
     let who = require(&m, &headers).await?;
     let owner = who.user_id.clone();
     let viewer = owner.clone().unwrap_or_default();
+    let (o, v) = (owner.clone(), viewer.clone());
     let items = m
         .inner
         .mirror
-        .call(move |s| s.attention(owner.as_deref(), &viewer))
+        .call(move |s| s.attention(o.as_deref(), &v))
         .await?;
+    // Callback turns not seen yet, and why the agent was not resumed (T.8d
+    // step 3): rows of the same shape, after the chats that wait.
+    let mut items = serde_json::to_value(items).unwrap_or_default();
+    if let Some(list) = items.as_array_mut() {
+        list.extend(m.callback_attention(owner, viewer).await?);
+    }
     let routines = crate::routines::attention(&m, &who).await?;
     Ok(Json(json!({ "items": items, "routines": routines })))
 }

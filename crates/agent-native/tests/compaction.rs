@@ -213,6 +213,7 @@ fn history(turns: usize, tokens: usize) -> Vec<RawEvent> {
     for n in 1..=turns {
         let t = format!("t{n}");
         push(EventKind::TurnStarted(TurnStarted {
+            cause: None,
             agent: None,
             turn_id: t.clone(),
         }));

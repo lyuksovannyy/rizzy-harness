@@ -9,6 +9,7 @@ pub mod attachments;
 pub mod auth;
 pub mod avatars;
 pub mod blobs;
+mod callbacks;
 pub mod config;
 pub mod env;
 mod favicon;
@@ -205,6 +206,8 @@ pub struct MasterInner {
     sockets: ws::Sockets,
     /// Hosts an admin's provider test may reach besides public addresses.
     outbound: Mutex<outbound::Outbound>,
+    /// Callback turns: the watcher's per-chat state (T.8d step 3).
+    callbacks: callbacks::Callbacks,
 }
 
 /// What the UI asks for when starting a session.
@@ -227,6 +230,9 @@ pub struct CreateSpec {
     /// The project to put it in (checked by the caller); linked only when
     /// the chat lands in the project's workspace.
     pub project_id: Option<String>,
+    /// Never resumed by a callback turn (a routine's run chat, T.8d step
+    /// 3); the node records it and keeps to it.
+    pub no_callbacks: bool,
 }
 
 /// Per-message choices on a prompt.
@@ -251,6 +257,11 @@ pub struct PromptOpts {
     /// Images for this message (owner- and model-checked by
     /// `media::prompt_images`).
     pub images: Vec<media::ChatImage>,
+    /// A callback turn (T.8d step 3, `callbacks.rs`): resume the chat for
+    /// these ended background commands. Nobody wrote anything: the text and
+    /// every other field must be empty, and the turn gets no context and no
+    /// memory (no recall, no project facts, no `remember`).
+    pub callback: Vec<String>,
 }
 
 /// The model a turn runs on: the agent's (resolved), else the one chosen
@@ -415,6 +426,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
         MasterToNode::Prompt { session_id, .. }
+        | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::Restore { session_id, .. }
@@ -513,6 +525,7 @@ impl Master {
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
+                callbacks: Default::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -751,6 +764,29 @@ impl Master {
 
     pub fn start_routines(&self) {
         routines::start(self);
+    }
+
+    /// Resume chats whose background commands ended while the master was
+    /// away (T.8d step 3): one check of every chat updated in the last
+    /// hour. The watcher itself needs no start: the mirror tells it of
+    /// every event it takes.
+    pub fn start_callbacks(&self) {
+        callbacks::start(self);
+    }
+
+    /// The attention rows of callback turns and refusals (`GET
+    /// /api/attention` puts them with `items`).
+    pub(crate) async fn callback_attention(
+        &self,
+        owner: Option<String>,
+        viewer: String,
+    ) -> harness_store::Result<Vec<serde_json::Value>> {
+        callbacks::attention(self, owner, viewer).await
+    }
+
+    /// Mark each chat row with its running background commands.
+    pub(crate) fn annotate_background(&self, rows: &mut [serde_json::Value]) {
+        callbacks::annotate(self, rows);
     }
 
     /// The one hourly maintenance loop: the blob store's sweeps, then
@@ -1228,6 +1264,12 @@ impl Master {
                 if matches!(e.kind.as_str(), "artifact_staged" | "artifact_stage_failed") {
                     artifacts::on_applied(self, node_id, &e).await;
                 }
+                if matches!(
+                    e.kind.as_str(),
+                    "background_started" | "background_ended" | "turn_started" | "callback_refused"
+                ) {
+                    callbacks::on_applied(self, &e);
+                }
                 let _ = self.inner.live.send(Live::Event(e));
                 if structural {
                     let _ = self.inner.live.send(Live::SessionsChanged);
@@ -1482,6 +1524,7 @@ impl Master {
             .await?;
         let sent = self
             .send_command(&node_id, |req_id| MasterToNode::Create {
+                no_callbacks: spec.no_callbacks,
                 req_id,
                 session_id: sid,
                 title: spec.title,
@@ -1569,7 +1612,22 @@ impl Master {
             reply,
             untrusted,
             images,
+            callback,
         } = opts;
+        let resume = !callback.is_empty();
+        if resume
+            && (!text.is_empty()
+                || context.is_some()
+                || !attachments.is_empty()
+                || !compare.is_empty()
+                || reply.is_some()
+                || untrusted
+                || !images.is_empty())
+        {
+            return Err(CommandError::Rejected(
+                "a callback turn carries no message, attachment, image or context".into(),
+            ));
+        }
         let row = self
             .inner
             .mirror
@@ -1659,9 +1717,14 @@ impl Master {
         };
         // An untrusted turn reads and writes no memory: no recall, no
         // project facts (the brief and board stay), no `remember`.
+        // Nor does a callback turn: nobody wrote anything to recall by, and
+        // program output must not steer what is remembered.
         let allowed = projects::TurnMemory {
-            personal: personal && !untrusted,
-            project: project.is_some() && features.is_none_or(|f| f.project_memory) && !untrusted,
+            personal: personal && !untrusted && !resume,
+            project: project.is_some()
+                && features.is_none_or(|f| f.project_memory)
+                && !untrusted
+                && !resume,
         };
         lock(&self.inner.turn_memory).insert(sid, allowed);
         projects::offer_remember(r.agents(), &mut agent, allowed);
@@ -1679,7 +1742,9 @@ impl Master {
                 Err(err) => tracing::warn!(error = %err, "memory recall failed"),
             }
         }
-        if let Some(p) = &project {
+        // A callback turn's opening is rebuilt from the log alone on every
+        // later request: no per-turn context joins it.
+        if let Some(p) = project.as_ref().filter(|_| !resume) {
             let remember = allowed.project && agent.allows_tool("remember");
             turn_context.push(projects::turn_context(self, p, &text, allowed, remember).await);
         }
@@ -1701,6 +1766,23 @@ impl Master {
         }
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));
+        if resume {
+            let mut msg = MasterToNode::Callback {
+                req_id: String::new(),
+                session_id: sid,
+                bg_ids: callback,
+                agent: Some(agent),
+                savings,
+            };
+            return self
+                .send_command(&row.node_id, move |req_id| {
+                    if let MasterToNode::Callback { req_id: r, .. } = &mut msg {
+                        *r = req_id;
+                    }
+                    msg
+                })
+                .await;
+        }
         let sent_images: Vec<String> = images.iter().map(|i| i.media_id.clone()).collect();
         let mut msg = MasterToNode::Prompt {
             req_id: String::new(),
@@ -1889,6 +1971,7 @@ impl Master {
         if let Err(e) = res {
             tracing::warn!(session = %sid, error = %e, "deleting mirror copy failed");
         }
+        callbacks::forget(self, sid).await;
         let _ = self.inner.live.send(Live::SessionsChanged);
     }
 

@@ -23,6 +23,7 @@ fn created(sid: SessionId) -> RawEvent {
         sid,
         1,
         EventKind::SessionCreated(SessionCreated {
+            no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
@@ -44,6 +45,7 @@ fn script(sid: SessionId, n: u64) -> Vec<RawEvent> {
         sid,
         2,
         EventKind::TurnStarted(TurnStarted {
+            cause: None,
             agent: None,
             turn_id: "t1".into(),
         }),
@@ -318,6 +320,7 @@ fn expired_incognito_only_selects_idle_incognito() {
             inc,
             2,
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: "t".into(),
             }),
@@ -338,6 +341,7 @@ fn a_shown_input_block_needs_attention() {
         let blocks = harness_core::ui::extract(text, harness_core::agent::UiLevel::Rich);
         let kinds = [
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: "t1".into(),
             }),

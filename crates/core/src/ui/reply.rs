@@ -98,6 +98,7 @@ mod tests {
 
     fn created() -> EventKind {
         EventKind::SessionCreated(SessionCreated {
+            no_callbacks: false,
             title: "t".into(),
             cwd: "/w".into(),
             model: "m".into(),

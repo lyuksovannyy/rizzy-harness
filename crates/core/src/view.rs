@@ -82,6 +82,19 @@ pub enum Item {
         ran_ms: u64,
         tail: String,
     },
+    /// A turn the harness started because background commands ended while
+    /// the chat was idle (`turn_started.cause`): where a person's message
+    /// would be. No text: the chat names the ends from their own items.
+    Callback {
+        turn_id: String,
+        bg_ids: Vec<String>,
+    },
+    /// The node did not resume the agent for these ends
+    /// (`callback_refused`); they wait for the person's next message.
+    CallbackRefused {
+        bg_ids: Vec<String>,
+        reason: String,
+    },
     /// `model` answered this turn instead of `from` (`model_fallback`).
     Fallback {
         turn_id: String,
@@ -227,6 +240,12 @@ impl SessionView {
                 self.meta = Some(m);
             }
             EventKind::TurnStarted(t) => {
+                if let Some(c) = &t.cause {
+                    self.items.push(Item::Callback {
+                        turn_id: t.turn_id.clone(),
+                        bg_ids: c.callback_ids().to_vec(),
+                    });
+                }
                 self.running_turn = Some(t.turn_id);
                 self.running_agent = t.agent;
             }
@@ -411,6 +430,10 @@ impl SessionView {
                     },
                 );
             }
+            EventKind::CallbackRefused(r) => self.items.push(Item::CallbackRefused {
+                bg_ids: r.bg_ids,
+                reason: r.reason,
+            }),
             EventKind::BackgroundEnded(b) => {
                 if let Some(st) = self.background.get_mut(&b.bg_id) {
                     st.ended = true;
@@ -473,6 +496,7 @@ mod tests {
                 sid,
                 1,
                 EventKind::TurnStarted(TurnStarted {
+                    cause: None,
                     agent: None,
                     turn_id: "t".into(),
                 }),
@@ -666,6 +690,7 @@ mod tests {
             sid,
             1,
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: "t".into(),
             }),

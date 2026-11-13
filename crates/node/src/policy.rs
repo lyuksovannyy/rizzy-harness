@@ -178,7 +178,22 @@ pub struct LimitsPolicy {
     /// KiB of output kept in memory per background command (its first and
     /// last part); never written to disk.
     pub background_output_kb: usize,
+    /// Callback turns a chat may run in a row without a person's message
+    /// (T.8d step 3): turns the harness starts because background commands
+    /// ended while the chat was idle. Only a person's message refills it;
+    /// 0 turns callback turns off on this node (ends are still recorded
+    /// and reach the agent at the person's next message).
+    pub callback_turns: usize,
+    /// Model calls one callback turn may make; the cap is the lower of this
+    /// and `max_steps`.
+    pub callback_max_steps: usize,
 }
+
+/// `[limits] callback_turns` by default, and the most it may say.
+pub const DEFAULT_CALLBACK_TURNS: usize = 3;
+pub const MAX_CALLBACK_TURNS: usize = 20;
+/// `[limits] callback_max_steps` by default.
+pub const DEFAULT_CALLBACK_MAX_STEPS: usize = 20;
 
 /// The most `[limits] max_subagents` and `max_delegation_depth` may say.
 pub const MAX_SUBAGENTS: u32 = 32;
@@ -197,6 +212,8 @@ impl Default for LimitsPolicy {
             background_per_session: harness_tools::background::DEFAULT_PER_SESSION,
             background_per_node: harness_tools::background::DEFAULT_PER_NODE,
             background_output_kb: harness_tools::background::DEFAULT_OUTPUT_KB,
+            callback_turns: DEFAULT_CALLBACK_TURNS,
+            callback_max_steps: DEFAULT_CALLBACK_MAX_STEPS,
         }
     }
 }
@@ -209,6 +226,12 @@ impl LimitsPolicy {
             per_node: self.background_per_node,
             output_kb: self.background_output_kb,
         }
+    }
+
+    /// A callback turn's step cap: `callback_max_steps`, never above
+    /// `max_steps`.
+    pub fn callback_steps(&self) -> usize {
+        self.callback_max_steps.min(self.max_steps)
     }
 
     /// The master's agent spec within this node's delegation bounds: its
@@ -342,6 +365,18 @@ impl NodePolicy {
                 self.limits.background_output_kb,
                 bg::MIN_OUTPUT_KB,
                 bg::MAX_OUTPUT_KB,
+            ),
+            (
+                "callback_turns",
+                self.limits.callback_turns,
+                0,
+                MAX_CALLBACK_TURNS,
+            ),
+            (
+                "callback_max_steps",
+                self.limits.callback_max_steps,
+                harness_core::policy::MIN_MAX_STEPS,
+                harness_core::policy::MAX_MAX_STEPS,
             ),
         ] {
             if !(min..=max).contains(&n) {

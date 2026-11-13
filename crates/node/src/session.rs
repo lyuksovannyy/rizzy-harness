@@ -45,6 +45,8 @@ pub(crate) struct Session {
     incognito: bool,
     /// Set on a delegated sub-task's session; limits what its turns may do.
     parent_session: Option<SessionId>,
+    /// A chat that never gets a callback turn (`session_created`).
+    no_callbacks: bool,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
     /// An append of the running turn failed: the rest of its appends fail
@@ -102,6 +104,47 @@ fn background_table(
     (Some(node.background.session(next, tx)), Some(rx))
 }
 
+/// Whether `bg_ids` may resume a chat whose log is `history` (T.8d step
+/// 3, §4.4 step 5): each must name an end that may call back
+/// ([`BackgroundEnded::calls_back`]) recorded after the chat's last turn
+/// and its last refused callback. `Ok` holds the callback turns since the
+/// person's last message (the budget spent); `Err` says what is not there,
+/// behind [`harness_protocol::CALLBACK_NOTHING`].
+fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<usize, String> {
+    use harness_protocol::CALLBACK_NOTHING;
+    let mut floor = 0u64;
+    let mut in_a_row = 0usize;
+    let mut waiting: Vec<String> = Vec::new();
+    for e in history {
+        match e.typed() {
+            Ok(EventKind::TurnStarted(t)) => {
+                floor = e.seq;
+                waiting.clear();
+                if t.cause.is_some() {
+                    in_a_row += 1;
+                }
+            }
+            Ok(EventKind::UserMessage(_)) => in_a_row = 0,
+            Ok(EventKind::CallbackRefused(_)) => {
+                floor = e.seq;
+                waiting.clear();
+            }
+            Ok(EventKind::BackgroundEnded(b)) if e.seq > floor && b.calls_back() => {
+                waiting.push(b.bg_id)
+            }
+            _ => {}
+        }
+    }
+    for id in bg_ids {
+        if !waiting.contains(id) {
+            return Err(format!(
+                "{CALLBACK_NOTHING}: {id} has no end in this chat that waits for a turn"
+            ));
+        }
+    }
+    Ok(in_a_row)
+}
+
 /// Pin an agentic session's folder (see [`Session::pin`]).
 fn pin_of(profile: Profile, cwd: &std::path::Path) -> Option<harness_core::folder::FolderPin> {
     if profile != Profile::Agentic {
@@ -147,6 +190,8 @@ pub(crate) struct NewSession {
     pub parent_session: Option<SessionId>,
     /// A sub-agent's node-owned folder, when it has one.
     pub owned: Option<harness_core::folder::OwnedFolder>,
+    /// Never resumed by a callback turn (a routine's chat).
+    pub no_callbacks: bool,
 }
 
 impl Session {
@@ -165,6 +210,7 @@ impl Session {
             incognito,
             parent_session,
             owned,
+            no_callbacks,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, 1);
         let s = Arc::new(Self {
@@ -181,6 +227,7 @@ impl Session {
             profile,
             incognito,
             parent_session,
+            no_callbacks,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
             log_failed: AtomicBool::new(false),
@@ -192,6 +239,7 @@ impl Session {
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
+            no_callbacks,
             profile,
             agent_id,
             incognito,
@@ -259,6 +307,7 @@ impl Session {
             profile: meta.profile,
             incognito: meta.incognito,
             parent_session: meta.parent_session,
+            no_callbacks: meta.no_callbacks,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
             log_failed: AtomicBool::new(false),
@@ -779,9 +828,173 @@ impl Session {
             }
         };
         let this = self.clone();
+        let (turn_id, user_text) = (msg.turn_id.clone(), msg.model_text());
         tokio::spawn(async move {
-            this.run_turn(msg, history, agent, compare, extra, cancel, by_stop)
+            this.run_turn(
+                turn_id, user_text, history, agent, compare, extra, cancel, by_stop,
+            )
+            .await;
+        });
+        Ok(())
+    }
+
+    /// Resume this idle chat because background commands ended (a callback
+    /// turn, T.8d step 3), as the master asks. The node decides: it starts
+    /// the turn only if every id names an end in its own log that may call
+    /// back (it exited or timed out, and no step was told of it) with no
+    /// turn and no refusal after it, the chat may take callback turns at
+    /// all, and its budget of turns without the person's message lasts.
+    /// A refusal on the node's own rules is recorded (`callback_refused`)
+    /// and the ends wait for the person; one that finds nothing to resume
+    /// says so ([`harness_protocol::CALLBACK_NOTHING`]) and records
+    /// nothing. Nothing in the command widens a bound: the step cap is
+    /// `[limits]`, the approval mode is the session's (clamped at load),
+    /// delegation is off, and a table a revocation closed stays closed.
+    pub(crate) async fn callback(
+        self: &Arc<Self>,
+        bg_ids: Vec<String>,
+        agent: Option<AgentSpec>,
+        savings: harness_core::savings::Savings,
+    ) -> Result<(), String> {
+        use harness_protocol::{CALLBACK_NOTHING, MAX_CALLBACK_IDS};
+        let mut wanted = bg_ids.clone();
+        wanted.sort();
+        wanted.dedup();
+        if bg_ids.is_empty() || bg_ids.len() > MAX_CALLBACK_IDS || wanted.len() != bg_ids.len() {
+            return Err(format!(
+                "a callback names 1 to {MAX_CALLBACK_IDS} different background commands"
+            ));
+        }
+        if self.parent_session.is_some() || self.bg.is_none() {
+            return Err(format!(
+                "{CALLBACK_NOTHING}: this chat runs no background commands"
+            ));
+        }
+        self.check_cwd_still_allowed()?;
+        let limits = &self.node.cfg.policy.limits;
+        let turn_id = new_id();
+        let cancel = CancellationToken::new();
+        let by_stop = Arc::new(AtomicBool::new(false));
+        self.claim_turn(RunningTurn {
+            turn_id: turn_id.clone(),
+            cancel: cancel.clone(),
+            savings: savings.clone(),
+            publishes: Arc::default(),
+            by_stop: by_stop.clone(),
+        })
+        .map_err(|e| {
+            if e == "a turn is already running" {
+                format!("{CALLBACK_NOTHING}: {e}")
+            } else {
+                e
+            }
+        })?;
+        // Under the slot: no other turn starts and every end that comes
+        // meanwhile is queued, so the log read here is the log the turn
+        // joins.
+        if self.node.is_stopping() {
+            self.release(&turn_id);
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
+        if self.unclosed.load(Ordering::SeqCst) {
+            let message = "The session log could not be written, so this turn was stopped.";
+            if let Err(e) = self.close_open_turn(message, TurnEndReason::Error).await {
+                self.release(&turn_id);
+                return Err(e);
+            }
+            self.unclosed.store(false, Ordering::SeqCst);
+        }
+        let id = self.id;
+        let history = match self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                self.release(&turn_id);
+                return Err(e.to_string());
+            }
+        };
+        let refusal = match callback_check(&history, &bg_ids) {
+            Err(e) => {
+                self.release(&turn_id);
+                return Err(e);
+            }
+            Ok(in_a_row) => {
+                if self.no_callbacks {
+                    Some("this chat takes no callback turns (a routine's chat)".to_string())
+                } else if self.bg.as_ref().is_some_and(|b| b.is_closed()) {
+                    // A revocation closed the table; only the owner's own
+                    // prompt opens it again.
+                    Some("its owner lost access; nothing resumes it until they write".to_string())
+                } else if limits.callback_turns == 0 {
+                    Some("callback turns are off on this node (callback_turns = 0)".to_string())
+                } else if in_a_row >= limits.callback_turns {
+                    Some(format!(
+                        "{in_a_row} turns in a row without you (node limit)"
+                    ))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(reason) = refusal {
+            let recorded = self
+                .append(EventKind::CallbackRefused(CallbackRefused {
+                    bg_ids,
+                    reason: reason.clone(),
+                }))
                 .await;
+            self.release(&turn_id);
+            recorded.map_err(|e| e.to_string())?;
+            return Err(format!("{}: {reason}", harness_protocol::CALLBACK_REFUSED));
+        }
+        // No sub-agents in a turn nobody watches: the unattended spend is
+        // `callback_turns × callback_max_steps` model calls, nothing more.
+        let agent = agent.map(|a| {
+            let mut a = limits.bound_delegation(a);
+            a.delegates.clear();
+            a
+        });
+        let cause = TurnCause::Callback(bg_ids);
+        self.log_failed.store(false, Ordering::SeqCst);
+        self.unresolved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        if let Err(e) = self
+            .emit(EventKind::TurnStarted(TurnStarted {
+                turn_id: turn_id.clone(),
+                agent: agent.as_ref().map(AgentSpec::agent_ref),
+                cause: Some(cause.clone()),
+            }))
+            .await
+        {
+            self.release(&turn_id);
+            return Err(e.to_string());
+        }
+        let extra = TurnExtra {
+            savings,
+            cause: Some(cause),
+            max_steps: Some(limits.callback_steps()),
+            ..Default::default()
+        };
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.run_turn(
+                turn_id,
+                String::new(),
+                history,
+                agent,
+                vec![],
+                extra,
+                cancel,
+                by_stop,
+            )
+            .await;
         });
         Ok(())
     }
@@ -809,6 +1022,7 @@ impl Session {
             .clear();
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: msg.turn_id.clone(),
             }))
@@ -899,7 +1113,8 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         self: Arc<Self>,
-        msg: UserMessage,
+        turn_id: String,
+        user_text: String,
         history: Vec<RawEvent>,
         agent: Option<AgentSpec>,
         compare: Vec<String>,
@@ -907,8 +1122,6 @@ impl Session {
         cancel: CancellationToken,
         by_stop: Arc<AtomicBool>,
     ) -> (TurnEndReason, Option<Usage>) {
-        let turn_id = msg.turn_id.clone();
-        let user_text = msg.model_text();
         let checkpoint = self.checkpoint(&turn_id, CheckpointPhase::Before).await;
         if self.log_failed.load(Ordering::SeqCst) {
             // The checkpoint's event was not written: nothing else runs.
@@ -1674,6 +1887,8 @@ impl Session {
                 agent_id: Some(agent.agent_id.clone()),
                 incognito: self.incognito,
                 parent_session: Some(self.id),
+                // A sub-agent's chat has no background table at all.
+                no_callbacks: true,
                 // A read-only grandchild works in its parent's node-owned folder.
                 owned: iso
                     .as_ref()
@@ -1753,7 +1968,16 @@ impl Session {
         };
         let (reason, usage) = child
             .clone()
-            .run_turn(msg, history, Some(agent), vec![], extra, cancel, by_stop)
+            .run_turn(
+                msg.turn_id.clone(),
+                msg.model_text(),
+                history,
+                Some(agent),
+                vec![],
+                extra,
+                cancel,
+                by_stop,
+            )
             .await;
         // Each session's log gates its own effects: the parent's turn goes
         // on, but nothing of a child whose log failed (or whose parent's

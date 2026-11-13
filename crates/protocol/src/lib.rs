@@ -42,6 +42,26 @@ pub const CAP_IMAGES: &str = "images";
 /// hello listed it.
 pub const CAP_BACKGROUND: &str = "background";
 
+/// The node capability that announces `session.callback` (T.8d step 3).
+/// The master resumes chats only on nodes whose hello listed it.
+pub const CAP_CALLBACK: &str = "callback";
+
+/// How a node's refusal of a `session.callback` begins when there is
+/// nothing to resume: every named end was already delivered, covered by a
+/// later turn or refused before, or the chat is busy. The master drops
+/// those quietly (a second send of the same callback, a race with the
+/// person's message); every other refusal is the owner's to see.
+pub const CALLBACK_NOTHING: &str = "nothing to resume";
+
+/// How a node's refusal of a `session.callback` on its own rules begins
+/// (its budget, `callback_turns = 0`, a chat that takes none). The node
+/// recorded `callback_refused` in the chat's log, which is where the owner
+/// sees it; the master adds nothing of its own.
+pub const CALLBACK_REFUSED: &str = "the agent was not resumed";
+
+/// The most background ids one `session.callback` may name.
+pub const MAX_CALLBACK_IDS: usize = 64;
+
 /// Who asks a node to stop a session's background commands. The node
 /// records the end with this reason; nothing here can start or widen
 /// anything.
@@ -173,6 +193,11 @@ pub enum MasterToNode {
         /// Temporary chat: excluded from search and memory, purged after a TTL.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         incognito: bool,
+        /// This chat never gets a callback turn (a routine's run chat). The
+        /// node records it in `session_created` and holds to it for good;
+        /// no later command can clear it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_callbacks: bool,
     },
     #[serde(rename = "session.prompt")]
     Prompt {
@@ -204,6 +229,24 @@ pub enum MasterToNode {
         /// Images for this message; only to nodes with `CAP_IMAGES`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ChatImage>,
+    },
+    /// Resume an idle chat because background commands ended (a callback
+    /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
+    /// person's text, attachment, image, reply or context: the node opens
+    /// the turn with the harness's own frame and the ended commands' notes
+    /// from its log. A request only: the node starts it only if every id is
+    /// an undelivered end in its log with no turn after it, and its own
+    /// `[limits]` allow it (`callback_turns`, `callback_max_steps`).
+    #[serde(rename = "session.callback")]
+    Callback {
+        req_id: String,
+        session_id: SessionId,
+        bg_ids: Vec<String>,
+        /// The chat's agent, resolved by the master as for a prompt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        savings: Option<harness_core::savings::Savings>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
@@ -304,6 +347,7 @@ impl MasterToNode {
         match self {
             MasterToNode::Create { req_id, .. }
             | MasterToNode::Prompt { req_id, .. }
+            | MasterToNode::Callback { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::StopBackground { req_id, .. }

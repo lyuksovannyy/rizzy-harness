@@ -25,6 +25,9 @@
 //! * `script: [{"tool": .., "input": ..}, ..]` -> one call per step, in order
 //!   (step k = the k-th tool result since the message), then a summary of
 //!   the last result
+//! * a callback turn's opening -> the first quoted line of program output in
+//!   it, as if it were the message (an obedient model), else `Noted: the
+//!   command ended.`
 //! * a message with images -> `I see N image(s).` (the images it was shown)
 //! * anything else   -> echoes the message back, streamed word by word; an
 //!   answer to a question or form echoes its canonical text
@@ -225,6 +228,36 @@ impl Provider for Mock {
                 stop: Default::default(),
             });
         }
+        // A callback turn's opening (the harness's frame, then the ended
+        // commands' quoted output): the mock obeys the first quoted line as
+        // if it were the person's message, as a model steered by program
+        // output would. With none, it says it saw the end and stops.
+        let raw_user = match raw_user.strip_prefix(harness_core::event::CALLBACK_LEAD) {
+            Some(rest) => {
+                let quoted = rest.lines().find_map(|l| {
+                    l.strip_prefix(harness_core::event::OUTPUT_QUOTE)
+                        .filter(|c| !c.trim().is_empty())
+                });
+                match quoted {
+                    Some(c) => c.trim().to_string(),
+                    None => {
+                        let text = self
+                            .stream_words(
+                                vec!["Noted: ".into(), "the command ended.".into()],
+                                &deltas,
+                            )
+                            .await;
+                        return Ok(Completion {
+                            text,
+                            tool_calls: vec![],
+                            usage,
+                            stop: Default::default(),
+                        });
+                    }
+                }
+            }
+            None => raw_user,
+        };
         // Per-turn context comes first in the user message; commands follow it.
         let (context, user) = match raw_user
             .strip_prefix("<context>\n")

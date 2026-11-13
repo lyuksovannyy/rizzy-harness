@@ -615,6 +615,9 @@ async fn launch(m: Master, a: Admitted) {
                 owner_id: Some(a.owner.user_id.clone()),
                 workspace_id: Some(a.routine.workspace_id.clone()),
                 project_id: a.spec.project_id.clone(),
+                // A run's chat is never resumed by a background command's
+                // end (T.8d step 3); the node holds it to that for good.
+                no_callbacks: true,
                 ..Default::default()
             };
             match m.create_session(spec).await {

@@ -26,6 +26,13 @@ pub enum ChatMsg {
     /// command's end): sent as a user-role message, kept out of the URL
     /// provenance (`user_text` is `None` for it).
     Note(String),
+    /// A callback turn's opening (T.8d step 3): the harness's fixed first
+    /// line ([`harness_core::event::callback_opening`]) and the ended
+    /// commands' notes, quoted. The one user-role message the harness
+    /// writes itself; never the person's words, so `user_text` is `None`
+    /// (not URL provenance, not what a mock or a summary reads as the
+    /// person's). Sent as a user message by [`place_notes`].
+    Opening(String),
 }
 
 /// One image of a user message.
@@ -97,6 +104,8 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
                 call_id,
                 content: escape_leads(content),
             }),
+            // It took the notes before it when it was made (`open_callback`).
+            ChatMsg::Opening(t) => out.push(ChatMsg::User(t)),
             other => out.push(other),
         }
     }
@@ -136,6 +145,30 @@ pub fn escape_leads(content: String) -> String {
         out.push_str(line);
     }
     if escaped { out } else { content }
+}
+
+/// Close a callback turn's history: the notes at the end of `msgs` (the
+/// ended commands, recorded while the chat was idle) are taken into one
+/// [`ChatMsg::Opening`] under the harness's first line. The loop calls it
+/// for the turn it runs and `history_to_messages` at the turn's
+/// `turn_started` on every later request, from the log alone, so both
+/// build the same bytes (the provider's cache prefix does not move, also
+/// after a restart). Every line after the first is a note's: the
+/// harness's, or program output behind `| `.
+pub fn open_callback(msgs: &mut Vec<ChatMsg>, bg_ids: &[String]) {
+    let mut notes = Vec::new();
+    while let Some(ChatMsg::Note(_)) = msgs.last() {
+        if let Some(ChatMsg::Note(t)) = msgs.pop() {
+            notes.push(t);
+        }
+    }
+    notes.reverse();
+    let mut text = harness_core::event::callback_opening(bg_ids);
+    for n in notes {
+        text.push_str("\n\n");
+        text.push_str(&n);
+    }
+    msgs.push(ChatMsg::Opening(text));
 }
 
 /// The person's own text of a user message [`place_notes`] put notes in
@@ -421,7 +454,9 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
     let chars: usize = messages
         .iter()
         .map(|m| match m {
-            ChatMsg::System(t) | ChatMsg::User(t) | ChatMsg::Note(t) => t.len(),
+            ChatMsg::System(t) | ChatMsg::User(t) | ChatMsg::Note(t) | ChatMsg::Opening(t) => {
+                t.len()
+            }
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()

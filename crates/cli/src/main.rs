@@ -428,6 +428,7 @@ async fn serve(
         .map_err(anyhow::Error::msg)?;
     // After both links, so the chats routines start have somewhere to run.
     master.start_routines();
+    master.start_callbacks();
 
     if let Some(addr) = node_listen {
         let cert = Arc::new(harness_link::MasterCert::load_or_create(dir)?);
