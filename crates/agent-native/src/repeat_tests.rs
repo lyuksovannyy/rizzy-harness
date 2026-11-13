@@ -27,6 +27,12 @@ struct Host {
     /// the first).
     end_at: Option<usize>,
     boundaries: AtomicUsize,
+    /// Only this tool gets `mutating`; other changing tools are allowed.
+    only: Option<&'static str>,
+    /// The tools the person was asked about, in order.
+    asked_for: Mutex<Vec<String>>,
+    /// The sub-agent ends in an error instead of completing.
+    delegate_fails: bool,
 }
 
 impl Host {
@@ -37,7 +43,20 @@ impl Host {
             asked: AtomicUsize::new(0),
             end_at: None,
             boundaries: AtomicUsize::new(0),
+            only: None,
+            asked_for: Mutex::new(vec![]),
+            delegate_fails: false,
         }
+    }
+
+    /// How often the person was asked about `tool`.
+    fn asked_about(&self, tool: &str) -> usize {
+        self.asked_for
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| *t == tool)
+            .count()
     }
 
     /// Every finished call, in order: (ok, output, the harness's note).
@@ -73,14 +92,19 @@ impl TurnHost for Host {
         self.events.lock().unwrap().push(kind);
         Ok(())
     }
-    async fn approve(&self, _c: &str, _t: &str, _i: &Value, r: ToolRisk) -> Decision {
+    async fn approve(&self, _c: &str, tool: &str, _i: &Value, r: ToolRisk) -> Decision {
         if r == ToolRisk::ReadOnly {
             return Decision::Allow;
         }
         self.asked.fetch_add(1, Ordering::SeqCst);
-        self.mutating
+        self.asked_for.lock().unwrap().push(tool.into());
+        match self.only {
+            Some(t) if t != tool => Decision::Allow,
+            _ => self.mutating,
+        }
     }
-    /// A sub-agent that did its work (as one that edited the folder).
+    /// A sub-agent that did its work (as one that edited the folder), or
+    /// with `delegate_fails` one that ended in an error.
     async fn delegate(
         &self,
         _agent: harness_core::agent::AgentSpec,
@@ -95,7 +119,11 @@ impl TurnHost for Host {
         Ok(harness_core::backend::DelegateOutcome {
             child,
             text: "edited src/lib.rs".into(),
-            reason: TurnEndReason::Completed,
+            reason: if self.delegate_fails {
+                TurnEndReason::Error
+            } else {
+                TurnEndReason::Completed
+            },
             usage: None,
             sources: vec![],
         })
@@ -881,4 +909,69 @@ async fn several_calls_a_step_rebuild_from_the_log() {
     })
     .collect();
     assert_eq!(rebuilt, live);
+}
+
+/// Review T1-D1: a failing command whose text differs every run (a test
+/// runner that prints its run time) is no change. It does not start the
+/// other calls' counts again: the look between its runs is refused the
+/// fifth time, and the person is not asked a fifth time for the change
+/// they denied four times.
+#[tokio::test]
+async fn a_failing_run_whose_text_changes_restarts_nothing() {
+    let mut host = Host::new(Decision::Deny);
+    host.only = Some("change");
+    let dir = tempfile::tempdir().unwrap();
+    let test = bash(
+        "echo run >> runs; echo \"test result: FAILED. finished in 0.$(wc -l < runs)s\"; exit 101",
+    );
+    let look = probe(json!({"path": "src/lib.rs"}));
+    let fix = ("change", json!({"n": 1}));
+    let mut calls = vec![];
+    for _ in 0..8 {
+        calls.extend([test.clone(), look.clone(), fix.clone()]);
+    }
+    let o = Opts {
+        builtin: true,
+        ..Default::default()
+    };
+    let r = run_in(&host, calls, o, dir.path()).await;
+    let fin = host.noted();
+    assert_ne!(fin[0].1, fin[3].1, "the runner's text changes: {fin:?}");
+    assert_eq!(host.asked_about("change"), 4, "{fin:?}");
+    assert_eq!(r.probes, 4, "{fin:?}");
+    assert_eq!(r.changes, 0);
+    assert!(fin[13].1.contains("Not run"), "the fifth look: {fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
+}
+
+/// The other side of T1-D1: a build that fails at a later place after each
+/// edit runs every time, and so does the look between: each edit is a
+/// change that ran, so the counts start again.
+#[tokio::test]
+async fn a_failing_build_that_moves_after_each_edit_runs() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let build = bash(
+        "echo run >> runs; echo \"error[E0308]: mismatched types in src/f$(wc -l < runs).rs\"; \
+         exit 101",
+    );
+    let look = probe(json!({"path": "src/lib.rs"}));
+    let mut calls = vec![];
+    for n in 0..6 {
+        calls.extend([build.clone(), look.clone(), ("change", json!({"n": n}))]);
+    }
+    calls.push(build.clone());
+    let o = Opts {
+        builtin: true,
+        ..Default::default()
+    };
+    let r = run_in(&host, calls, o, dir.path()).await;
+    let fin = host.noted();
+    assert_eq!(lines_of(dir.path(), "runs"), 7, "{fin:?}");
+    assert_eq!((r.probes, r.changes), (6, 6), "{fin:?}");
+    assert!(
+        fin.iter().all(|f| f.2.is_none()),
+        "nothing is warned: {fin:?}"
+    );
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
 }
