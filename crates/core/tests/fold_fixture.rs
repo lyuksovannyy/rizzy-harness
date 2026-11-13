@@ -5,7 +5,7 @@
 use harness_core::agent::UiLevel;
 use harness_core::artifacts::{ArtifactMeta, GitInfo, StagedBy};
 use harness_core::event::*;
-use harness_core::policy::{ApprovalMode, Decision};
+use harness_core::policy::{ApprovalMode, Decision, ExecMode};
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId};
 use serde_json::json;
@@ -48,6 +48,8 @@ fn events() -> Vec<RawEvent> {
     let t = || "t1".to_string();
     let kinds = vec![
         EventKind::SessionCreated(SessionCreated {
+            // The fold keeps the session's mode (N.10a).
+            exec_mode: Some(ExecMode::Sandbox),
             no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,

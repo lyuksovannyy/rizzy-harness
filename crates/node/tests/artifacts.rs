@@ -148,6 +148,7 @@ impl Node {
     async fn create(&mut self) -> SessionId {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
+            exec_mode: None,
             no_callbacks: false,
             req_id: format!("create-{sid}"),
             session_id: sid,
