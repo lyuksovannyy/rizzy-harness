@@ -60,7 +60,7 @@ async fn start(app: Router, cfg: ServeConfig) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let done = tokio::spawn(serve(listener, app, cfg, async {
+    let done = tokio::spawn(serve(vec![listener], app, cfg, async {
         let _ = rx.await;
     }));
     Server {
@@ -203,7 +203,7 @@ async fn a_handshake_that_never_completes_is_dropped_and_frees_its_slot() {
         }
     };
     let (stop, rx) = oneshot::channel::<()>();
-    tokio::spawn(serve_with(listener, handshake, hello(), c, async {
+    tokio::spawn(serve_with(vec![listener], handshake, hello(), c, async {
         let _ = rx.await;
     }));
     let mut a = TcpStream::connect(addr).await.unwrap();
@@ -217,6 +217,46 @@ async fn a_handshake_that_never_completes_is_dropped_and_frees_its_slot() {
             .starts_with("HTTP/1.1 200")
     );
     let _ = stop.send(());
+}
+
+/// One loop over two listeners (the UI's `127.0.0.1` and `[::1]`, security
+/// review S2-1): both serve the app, they share one connection cap, and the
+/// shutdown closes both.
+#[tokio::test]
+async fn two_listeners_share_the_app_the_cap_and_the_shutdown() {
+    let mut c = cfg();
+    c.max_connections = 1;
+    let (a, b) = (
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    );
+    let (addr_a, addr_b) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+    let (stop, rx) = oneshot::channel::<()>();
+    let done = tokio::spawn(serve(vec![a, b], hello(), c, async {
+        let _ = rx.await;
+    }));
+    for addr in [addr_a, addr_b, addr_a] {
+        assert!(get_hello(addr).await.ends_with("hello"), "{addr}");
+    }
+    // A silent connection on one holds the only slot: the other waits.
+    let mut silent = TcpStream::connect(addr_a).await.unwrap();
+    tokio::time::sleep(HEADER / 4).await;
+    assert!(
+        tokio::time::timeout(HEADER / 3, get_hello(addr_b))
+            .await
+            .is_err(),
+        "the cap is per loop, not per listener"
+    );
+    assert!(closed_within(&mut silent, HEADER * 4).await);
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(5), done)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for addr in [addr_a, addr_b] {
+        assert!(TcpStream::connect(addr).await.is_err(), "{addr} still open");
+    }
 }
 
 #[tokio::test]
@@ -436,7 +476,7 @@ async fn master_server() -> (Server, String) {
     let (stop, rx) = oneshot::channel::<()>();
     let done = tokio::spawn(async move {
         let _keep = dir;
-        serve(listener, app, cfg(), async {
+        serve(vec![listener], app, cfg(), async {
             let _ = rx.await;
         })
         .await

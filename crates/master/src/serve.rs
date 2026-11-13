@@ -20,6 +20,10 @@
 //!   hyper connection at the upgrade, which releases the permit: sockets do
 //!   not count against the HTTP cap (their number is bounded per user in
 //!   `ws.rs`), and they do not hold shutdown up.
+//! - **Listeners.** One loop accepts from every listener it is given (the UI
+//!   holds `127.0.0.1` and `[::1]` of its port, security review S2-1), in
+//!   turn, so a flood on one does not starve the other; the cap and the
+//!   shutdown are shared.
 //! - **Shutdown.** When `shutdown` resolves the loop stops accepting, tells
 //!   every connection to finish its in-flight request and close, and waits
 //!   for them up to `shutdown_grace`.
@@ -27,6 +31,7 @@
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
@@ -66,13 +71,13 @@ impl Default for ServeConfig {
 
 /// Serve plain HTTP.
 pub async fn serve(
-    listener: TcpListener,
+    listeners: Vec<TcpListener>,
     app: Router,
     cfg: ServeConfig,
     shutdown: impl Future<Output = ()>,
 ) -> io::Result<()> {
     serve_with(
-        listener,
+        listeners,
         |s: TcpStream| async move { Ok(s) },
         app,
         cfg,
@@ -83,9 +88,9 @@ pub async fn serve(
 
 /// Serve over whatever `handshake` turns an accepted socket into (a TLS
 /// stream). The handshake runs inside the connection's permit and under
-/// `cfg.handshake_timeout`.
+/// `cfg.handshake_timeout`. Every listener serves the same app.
 pub async fn serve_with<Io, H, Fut>(
-    listener: TcpListener,
+    listeners: Vec<TcpListener>,
     handshake: H,
     app: Router,
     cfg: ServeConfig,
@@ -96,10 +101,17 @@ where
     H: Fn(TcpStream) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = io::Result<Io>> + Send + 'static,
 {
+    if listeners.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nothing to listen on",
+        ));
+    }
     let max = cfg.max_connections.max(1);
     let permits = Arc::new(Semaphore::new(max));
     let handshake = Arc::new(handshake);
     let (stop_tx, stop_rx) = watch::channel(false);
+    let mut next = 0usize;
     tokio::pin!(shutdown);
     loop {
         let permit = tokio::select! {
@@ -110,7 +122,7 @@ where
         let (tcp, peer) = tokio::select! {
             biased;
             _ = &mut shutdown => break,
-            r = listener.accept() => match r {
+            r = accept(&listeners, &mut next) => match r {
                 Ok(v) => v,
                 Err(e) => {
                     // Usually out of file descriptors; back off, do not spin.
@@ -147,7 +159,7 @@ where
             }
         });
     }
-    drop(listener);
+    drop(listeners);
     let _ = stop_tx.send(true);
     // Every connection holds one permit; all of them back means all closed.
     let all = permits.acquire_many(max as u32);
@@ -158,4 +170,24 @@ where
         );
     }
     Ok(())
+}
+
+/// The next connection on any of `listeners`, polled from `next` on so that
+/// each gets its turn.
+async fn accept(
+    listeners: &[TcpListener],
+    next: &mut usize,
+) -> io::Result<(TcpStream, std::net::SocketAddr)> {
+    std::future::poll_fn(|cx| {
+        let n = listeners.len();
+        for i in 0..n {
+            let at = (*next + i) % n;
+            if let Poll::Ready(r) = listeners[at].poll_accept(cx) {
+                *next = (at + 1) % n;
+                return Poll::Ready(r);
+            }
+        }
+        Poll::Pending
+    })
+    .await
 }

@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod listen;
 mod lock;
 mod net;
 mod stop;
@@ -223,20 +224,6 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn allowed_hosts(bind: SocketAddr, extra: &[String]) -> Vec<String> {
-    let port = bind.port();
-    let mut v = vec![bind.to_string()];
-    if bind.ip().is_loopback() || bind.ip().is_unspecified() {
-        v.push(format!("127.0.0.1:{port}"));
-        v.push(format!("localhost:{port}"));
-        v.push(format!("[::1]:{port}"));
-    }
-    v.extend(extra.iter().cloned());
-    v.sort();
-    v.dedup();
-    v
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn serve(
     dir: &Path,
@@ -271,6 +258,11 @@ async fn serve(
             if tls { "" } else { " and WITHOUT TLS: passwords and cookies travel in clear text" }
         ),
     }
+    // First, before anything starts that runs commands (security review
+    // S2-1): every loopback address accepted as this server's own is held
+    // by it, and a start where another program holds one ends here, having
+    // opened nothing in the data directory.
+    let ui = listen::bind(bind).await?;
     let env = harness_master::env::EnvSettings::from_env();
     if !env.locked().is_empty() {
         tracing::info!(
@@ -369,12 +361,13 @@ async fn serve(
     })
     .await?;
 
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("binding {bind}"))?;
-    // Use the bound address (port 0 resolves here) for the Host allowlist.
-    let addr = listener.local_addr()?;
-    let mut auth = auth::Auth::new(token, allowed_hosts(addr, &extra_hosts), tls);
+    // The bound address (port 0 resolved) and the loopback addresses held.
+    let addr = ui.addr;
+    let mut auth = auth::Auth::new(
+        token,
+        listen::allowed_hosts(addr, &ui.own, &extra_hosts),
+        tls,
+    );
     let unclaimed = mirror.call(|s| s.user_count()).await? == 0;
     if unclaimed {
         let path = dir.join("claim-code");
@@ -516,7 +509,7 @@ async fn serve(
             dir.join("keys/ui-cert.pem").display()
         );
         harness_master::serve::serve_with(
-            listener,
+            ui.listeners,
             net::tls_handshake(cert.server_config()?),
             harness_master::router(master),
             limits,
@@ -524,8 +517,13 @@ async fn serve(
         )
         .await?;
     } else {
-        harness_master::serve::serve(listener, harness_master::router(master), limits, shutdown)
-            .await?;
+        harness_master::serve::serve(
+            ui.listeners,
+            harness_master::router(master),
+            limits,
+            shutdown,
+        )
+        .await?;
     }
     match left_rx.await {
         Ok(Some(left)) => stopped(left),
