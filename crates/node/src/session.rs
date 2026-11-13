@@ -72,6 +72,10 @@ pub(crate) struct Session {
     /// folder. Not kept across a restart (the folder is removed when the
     /// sub-agent ends).
     owned: Option<harness_core::folder::OwnedFolder>,
+    /// How its commands run (N.10a): from its `session_created`, never
+    /// changed; `None` for a chat session. Checked against what the node
+    /// offers before every turn, callback, restore and delegation.
+    exec_mode: Option<harness_core::policy::ExecMode>,
     /// This session's background commands (T.8d): an agentic session that
     /// is not a sub-agent's. Dropping it stops every one.
     bg: Option<Arc<harness_tools::background::SessionBg>>,
@@ -196,6 +200,8 @@ pub(crate) struct NewSession {
     pub owned: Option<harness_core::folder::OwnedFolder>,
     /// Never resumed by a callback turn (a routine's chat).
     pub no_callbacks: bool,
+    /// Chosen by the runtime (or the parent's, for a sub-agent).
+    pub exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
 impl Session {
@@ -215,6 +221,7 @@ impl Session {
             parent_session,
             owned,
             no_callbacks,
+            exec_mode,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, 1);
         let s = Arc::new(Self {
@@ -241,6 +248,7 @@ impl Session {
             last_state: Mutex::new(None),
             pin: pin_of(profile, &cwd),
             owned,
+            exec_mode,
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
@@ -255,6 +263,7 @@ impl Session {
             backend: node.cfg.backend.name().to_string(),
             node_id: node.cfg.node_id.clone(),
             approval_mode: mode,
+            exec_mode,
         }))
         .await?;
         Ok(s)
@@ -322,6 +331,9 @@ impl Session {
             last_state: Mutex::new(last_state),
             pin,
             owned: None,
+            // As recorded, never re-chosen: one the node no longer offers
+            // runs nothing (`checked_folder`).
+            exec_mode: meta.exec_mode,
         });
         Self::record_ends(&s, ends);
         Ok(s)
@@ -701,6 +713,8 @@ impl Session {
         if self.profile != Profile::Agentic {
             return Ok(self.cwd.clone());
         }
+        // Its mode is still one this node offers (N.10a).
+        self.node.cfg.policy.check_exec(self.exec_mode)?;
         let dir = match &self.pin {
             Some(pin) => pin.check()?,
             None => {
@@ -714,9 +728,6 @@ impl Session {
         // A sub-agent's node-owned folder: inside it, and the sandbox still
         // works; it is in the protected sessions folder by design.
         if let Some(o) = &self.owned {
-            if let Some(why) = &self.node.cfg.policy.sandbox_refusal {
-                return Err(why.clone());
-            }
             if !dir.starts_with(&o.top) {
                 return Err(format!(
                     "{}: {} is outside the sub-agent's folder",
@@ -1911,6 +1922,8 @@ impl Session {
                 parent_session: Some(self.id),
                 // A sub-agent's chat has no background table at all.
                 no_callbacks: true,
+                // Its parent's, always (N.10a).
+                exec_mode: self.exec_mode,
                 // A read-only grandchild works in its parent's node-owned folder.
                 owned: iso
                     .as_ref()
@@ -2380,6 +2393,10 @@ impl TurnHost for Session {
         self.owned.clone()
     }
 
+    fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
+        self.exec_mode
+    }
+
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
         let policy = &self.node.cfg.policy;
         if policy.denied_tools.iter().any(|t| t == tool) {
@@ -2591,11 +2608,7 @@ fn approval_reason(
              with nobody watching, for up to {} (its timeout), unless it ends or is stopped first",
             harness_core::text::duration_words(t.as_millis() as u64)
         );
-        if policy
-            .sandbox
-            .settings()
-            .is_ok_and(|s| s.network == harness_tools::sandbox::Network::On)
-        {
+        if policy.sandbox.network == harness_tools::sandbox::Network::On {
             s.push_str("; the network is on, so it can accept connections");
         }
         return s;

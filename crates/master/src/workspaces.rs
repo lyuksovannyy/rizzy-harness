@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use harness_store::{SessionRow, StoreError, WorkspaceRow};
 use serde::{Deserialize, Serialize};
 
+use harness_core::policy::ExecMode;
+
 use crate::Master;
 use crate::auth::Principal;
 use crate::config::{AgentChain, check_chain};
@@ -465,6 +467,45 @@ pub fn may_use_local_node(m: &Master, who: &Principal) -> bool {
 pub fn node_refusal(m: &Master, who: &Principal, node_id: &str) -> Option<String> {
     (m.is_local_node(node_id) && !may_use_local_node(m, who))
         .then(|| LOCAL_NODE_ADMINS_ONLY.to_string())
+}
+
+/// The refusal of `host` to a caller who may not ask for it (N.10a part 1,
+/// until the levels of part 2 replace it).
+pub const HOST_OWNERS_ONLY: &str = "only the workspace's owner or a server admin may start a \
+     chat in the host mode (commands as the node's own user, without the sandbox)";
+
+/// The refusal of `host` on the embedded node to anyone but a server admin.
+pub const HOST_LOCAL_ADMINS_ONLY: &str = "the host mode on this server's own node is for server \
+     admins: its commands would run as the server's user, next to its keys and every account's \
+     chats";
+
+/// The execution mode to ask node `node_id` for, for `who` creating an
+/// agentic chat in `ws` (N.10a part 1, the interim rule): `host` only for
+/// the workspace's owner or a server admin, and on the embedded node only
+/// for a server admin; everyone else is refused it with the reason. Without
+/// a request the node's default applies, except for a caller who may not
+/// have `host`: they are sent `sandbox` explicitly, so a node whose only
+/// mode is `host` refuses them instead of handing it over by default. The
+/// node decides in the end: it refuses any mode it does not offer.
+pub fn exec_mode_for(
+    m: &Master,
+    who: &Principal,
+    ws: Option<&Access>,
+    node_id: Option<&str>,
+    requested: Option<ExecMode>,
+) -> Result<Option<ExecMode>, String> {
+    let local = node_id.is_none_or(|n| m.is_local_node(n));
+    let may_host = if local {
+        who.is_admin()
+    } else {
+        who.is_admin() || ws.is_some_and(Access::is_owner)
+    };
+    match requested {
+        Some(ExecMode::Host) if !may_host && local => Err(HOST_LOCAL_ADMINS_ONLY.into()),
+        Some(ExecMode::Host) if !may_host => Err(HOST_OWNERS_ONLY.into()),
+        None if !may_host => Ok(Some(ExecMode::Sandbox)),
+        r => Ok(r),
+    }
 }
 
 /// Why `who` may not make the agentic session `row` do work, or `None`

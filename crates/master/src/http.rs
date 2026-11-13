@@ -1037,6 +1037,10 @@ struct CreateBody {
     /// Start the chat in this project (docs/projects.md).
     #[serde(default)]
     project_id: Option<String>,
+    /// How its commands run (N.10a): a request, checked by
+    /// `ws::exec_mode_for` and then by the node.
+    #[serde(default)]
+    exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
 async fn create_session(
@@ -1084,6 +1088,19 @@ async fn create_session(
         {
             return Err(ApiError(StatusCode::FORBIDDEN, why));
         }
+        // The node the chat goes to, as `create_session` would pick it:
+        // the rule for `host` depends on whether it is the embedded one.
+        b.node_id = b
+            .node_id
+            .or_else(|| m.default_node(harness_core::event::Profile::Agentic));
+        b.exec_mode =
+            ws::exec_mode_for(&m, &who, scope.as_ref(), b.node_id.as_deref(), b.exec_mode)
+                .map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?;
+    } else if b.exec_mode.is_some() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "a chat runs no commands and has no execution mode".into(),
+        ));
     }
     let title = b
         .title
@@ -1105,6 +1122,7 @@ async fn create_session(
             workspace_id: scope.map(|a| a.workspace.workspace_id),
             project_id: project,
             no_callbacks: false,
+            exec_mode: b.exec_mode,
         })
         .await?;
     Ok(Json(json!({ "session_id": sid })))

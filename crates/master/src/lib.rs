@@ -123,6 +123,38 @@ pub struct NodeInfo {
     pub embedded: bool,
     /// Which sessions the node hosts (from its `profile:*` capability).
     pub profile: Profile,
+    /// The execution modes it announced it offers (N.10a; its `exec:*`
+    /// capabilities), most confined first. What the UI offers and names;
+    /// the node refuses a mode it does not offer whatever this says.
+    pub exec_modes: Vec<harness_core::policy::ExecMode>,
+    /// The gaps of those modes it announced (`gap:*`, review T8B-3), for
+    /// the chat to say. Only the known ones.
+    pub exec_gaps: Vec<String>,
+}
+
+/// The execution modes and gaps in a hello's capabilities (N.10a), the
+/// known ones only.
+fn exec_of(caps: &[String]) -> (Vec<harness_core::policy::ExecMode>, Vec<String>) {
+    let mut modes: Vec<_> = caps
+        .iter()
+        .filter_map(|c| c.strip_prefix(harness_protocol::CAP_EXEC_PREFIX))
+        .filter_map(harness_core::policy::ExecMode::parse)
+        .collect();
+    modes.sort();
+    modes.dedup();
+    let mut gaps: Vec<String> = caps
+        .iter()
+        .filter(|c| {
+            [
+                harness_protocol::GAP_SANDBOX_NETNS,
+                harness_protocol::GAP_HOST_NETNS,
+            ]
+            .contains(&c.as_str())
+        })
+        .cloned()
+        .collect();
+    gaps.dedup();
+    (modes, gaps)
 }
 
 struct NodeConn {
@@ -233,6 +265,11 @@ pub struct CreateSpec {
     /// Never resumed by a callback turn (a routine's run chat, T.8d step
     /// 3); the node records it and keeps to it.
     pub no_callbacks: bool,
+    /// The execution mode asked of the node (N.10a): a request it refuses
+    /// when it does not offer that mode; `None`, the node's most confined.
+    /// Who may ask for which is checked by the caller
+    /// (`workspaces::exec_mode_for`).
+    pub exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
 /// Per-message choices on a prompt.
@@ -1006,6 +1043,8 @@ impl Master {
                     connected: false,
                     embedded,
                     profile,
+                    exec_modes: Vec::new(),
+                    exec_gaps: Vec::new(),
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1016,6 +1055,7 @@ impl Master {
             entry.info.version = version;
             entry.info.connected = true;
             entry.info.profile = profile;
+            (entry.info.exec_modes, entry.info.exec_gaps) = exec_of(&capabilities);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -1553,6 +1593,7 @@ impl Master {
                 profile: Some(profile),
                 agent: Some(agent),
                 incognito: spec.incognito,
+                exec_mode: spec.exec_mode,
             })
             .await;
         match &sent {

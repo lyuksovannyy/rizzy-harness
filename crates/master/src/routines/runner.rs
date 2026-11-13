@@ -618,6 +618,11 @@ async fn launch(m: Master, a: Admitted) {
                 // A run's chat is never resumed by a background command's
                 // end (T.8d step 3); the node holds it to that for good.
                 no_callbacks: true,
+                // Unattended, often on input from outside: never the host
+                // shell, whoever owns the routine (N.10a, until the levels
+                // of part 2). A node that offers no sandbox refuses the run.
+                exec_mode: (a.spec.profile == harness_core::event::Profile::Agentic)
+                    .then_some(harness_core::policy::ExecMode::Sandbox),
                 ..Default::default()
             };
             match m.create_session(spec).await {

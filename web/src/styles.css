@@ -4524,3 +4524,20 @@ button.danger-text { color: var(--bad); }
 }
 .delete-chat::backdrop { background: var(--scrim); }
 .delete-chat .media-confirm { margin: 0; }
+/* Execution modes (N.10a): the chat's mode, and the host shell's warning. */
+.badge-warn {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+.host-warning {
+  width: min(480px, calc(100vw - 32px));
+  padding: 16px;
+  border: none;
+  border-radius: var(--r-lg);
+  background: var(--surface-pop);
+  color: var(--fg);
+  box-shadow: var(--shadow-2);
+}
+.host-warning::backdrop { background: var(--scrim); }
+.host-warning h2 { font-size: var(--text-lg); margin: 0; }
+.host-warning ul { margin: 0; padding-left: 20px; }

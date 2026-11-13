@@ -30,6 +30,39 @@ impl ApprovalMode {
     }
 }
 
+/// How an agentic session's commands run (O13, N.10a; docs/execution-modes.md).
+/// Chosen when the session is created, recorded in its `session_created`
+/// and never changed. Ordered from the most confined, so `min` picks the
+/// more confined mode. `container` (rootless Podman, N.4) joins below
+/// `Sandbox` once a node can offer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecMode {
+    /// Each command in bubblewrap: its own PID namespace and file view,
+    /// under its guard, Landlock inside (T.8a to T.8e).
+    Sandbox,
+    /// Each command as the node's own user, without bubblewrap: at most
+    /// the Landlock rules of `[sandbox] mode`, no process containment.
+    /// Offered only where the node's admin set `[execution] host = true`.
+    Host,
+}
+
+impl ExecMode {
+    /// Every mode, most confined first.
+    pub const ALL: [ExecMode; 2] = [ExecMode::Sandbox, ExecMode::Host];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ExecMode::Sandbox => "sandbox",
+            ExecMode::Host => "host",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ExecMode> {
+        Self::ALL.into_iter().find(|m| m.id() == s)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRisk {

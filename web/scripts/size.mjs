@@ -84,8 +84,15 @@ const SPLIT_KB = 1.7;
 // refusal took it from 370.4 to 370.5 (+0.1).
 const T8D_KB = 2.3;
 
+// N.10a part 1, measured 372.7 (initial 100.0, from 99.6): the chat
+// header's mode and gaps (in the lazy conversation chunk), the new chat's
+// mode choice and the host shell's warning, each its own lazy chunk (only
+// those who may pick the host shell load them), and in the first load the
+// composer's mode state and the rule for who may pick it (+2.1).
+const N10A_KB = 2.1;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + N10A_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

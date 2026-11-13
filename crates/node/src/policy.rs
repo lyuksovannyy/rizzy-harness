@@ -32,17 +32,23 @@ pub struct NodePolicy {
     pub limits: LimitsPolicy,
     /// The shell sandbox (`[sandbox]`, FIX_PLAN 2.7).
     pub sandbox: SandboxPolicy,
+    /// The execution modes this node may offer (`[execution]`, N.10a): its
+    /// ceiling. What it offers is decided at start, from this and its own
+    /// self-test ([`Self::exec`]).
+    pub execution: ExecutionPolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
     /// read from node.toml. Canonical paths.
     #[serde(skip)]
     pub protected_dirs: Vec<PathBuf>,
-    /// Set by the runtime when `[sandbox] mode = "required"` and the sandbox
-    /// does not work here: every agentic session is refused with this text
-    /// (at create, before every turn and restore). Never read from node.toml.
+    /// The execution modes this node offers, set by the runtime at start
+    /// from its self-test and [`Self::execution`] (N.10a): every agentic
+    /// create chooses inside it, and every turn, callback, restore and
+    /// delegation checks the session's recorded mode against it. Never
+    /// read from node.toml.
     #[serde(skip)]
-    pub sandbox_refusal: Option<String>,
+    pub exec: crate::exec::ExecOffers,
     /// Where the runtime keeps per-session temp folders (removed with the
     /// session). Never read from node.toml.
     #[serde(skip)]
@@ -64,18 +70,33 @@ pub struct SandboxPolicy {
     pub read: Vec<PathBuf>,
     /// More read-write folders (caches: `~/.cache`, `~/.npm`, ...).
     pub write: Vec<PathBuf>,
-    /// `"auto"` (default: contain the agent's shell in bubblewrap where it
-    /// works, else run it with Landlock alone and say so), `"required"`
-    /// (refuse agentic sessions without it) or `"off"`.
-    pub contain: harness_tools::contain::ContainMode,
     /// Where bubblewrap is, absolute; taken as given. Without it, the first
     /// `bwrap` on `PATH` that this user cannot replace (owned by root).
     pub bwrap: Option<PathBuf>,
 }
 
+/// `[execution]` in node.toml (N.10a; README "Execution modes"): which
+/// execution modes this node may offer, its ceiling. Nothing the master
+/// sends can widen it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionPolicy {
+    /// The `sandbox` mode (each command in bubblewrap): `"auto"` (default:
+    /// offered where the containment probe passes at start, its gaps
+    /// named), `"strict"` (offered only where it holds in full) or `"off"`.
+    pub sandbox: harness_tools::contain::ContainMode,
+    /// The `host` mode: commands as this node's user without bubblewrap.
+    /// Off by default; the node's admin turns it on.
+    pub host: bool,
+}
+
 impl SandboxPolicy {
     /// The settings with `~/` expanded; relative entries are an error.
-    pub fn settings(&self) -> Result<harness_tools::sandbox::Settings, String> {
+    /// `contain` is `[execution] sandbox`.
+    pub fn settings(
+        &self,
+        contain: harness_tools::contain::ContainMode,
+    ) -> Result<harness_tools::sandbox::Settings, String> {
         let home = dirs::home_dir();
         let expand = |key: &str, list: &[PathBuf]| -> Result<Vec<PathBuf>, String> {
             list.iter()
@@ -106,7 +127,7 @@ impl SandboxPolicy {
             network: self.network,
             read: expand("read", &self.read)?,
             write: expand("write", &self.write)?,
-            contain: self.contain,
+            contain,
             bwrap: match &self.bwrap {
                 Some(p) if !p.is_absolute() => {
                     return Err(format!(
@@ -271,8 +292,9 @@ impl Default for NodePolicy {
             env_pass: Vec::new(),
             limits: LimitsPolicy::default(),
             sandbox: SandboxPolicy::default(),
+            execution: ExecutionPolicy::default(),
             protected_dirs: Vec::new(),
-            sandbox_refusal: None,
+            exec: Default::default(),
             sandbox_tmp: None,
         }
     }
@@ -385,8 +407,18 @@ impl NodePolicy {
                 ));
             }
         }
-        self.sandbox.settings()?;
+        self.sandbox_settings()?;
         Ok(())
+    }
+
+    /// `[sandbox]` with `[execution] sandbox`, for the sandbox's start.
+    pub fn sandbox_settings(&self) -> Result<harness_tools::sandbox::Settings, String> {
+        self.sandbox.settings(self.execution.sandbox)
+    }
+
+    /// Whether `mode` may run here now (see [`Self::exec`]).
+    pub fn check_exec(&self, mode: Option<harness_core::policy::ExecMode>) -> Result<(), String> {
+        self.exec.check_session(mode)
     }
 
     /// The environment tool child processes get here: the core list, plus
@@ -400,9 +432,6 @@ impl NodePolicy {
 
     /// Validate and canonicalize a requested session cwd.
     pub fn check_cwd(&self, cwd: &str) -> Result<PathBuf, String> {
-        if let Some(why) = &self.sandbox_refusal {
-            return Err(why.clone());
-        }
         let p = Path::new(cwd)
             .canonicalize()
             .map_err(|e| format!("cwd {cwd}: {e}"))?;
@@ -438,14 +467,11 @@ impl NodePolicy {
 
     /// What is checked again before every turn, restore, delegation and
     /// publish of an agentic session (`cwd` is its folder as the pin
-    /// checked it): the sandbox still works here (see
-    /// [`Self::sandbox_refusal`]), the folder does not include a protected
-    /// one, and it is still inside `workspace_roots` (node.toml may have
-    /// been narrowed since the session was made).
+    /// checked it): the folder does not include a protected one, and it is
+    /// still inside `workspace_roots` (node.toml may have been narrowed
+    /// since the session was made). The session's mode is checked beside it
+    /// ([`Self::check_exec`]).
     pub fn check_session(&self, cwd: &Path) -> Result<(), String> {
-        if let Some(why) = &self.sandbox_refusal {
-            return Err(why.clone());
-        }
         self.check_protected(cwd)?;
         let real = cwd
             .canonicalize()
@@ -725,7 +751,7 @@ mod tests {
         .unwrap();
         assert_eq!(p.sandbox.mode, Mode::BestEffort);
         assert_eq!(p.sandbox.network, Network::Off);
-        let s = p.sandbox.settings().unwrap();
+        let s = p.sandbox_settings().unwrap();
         let home = dirs::home_dir().unwrap();
         assert_eq!(s.read, [home.join(".cargo"), PathBuf::from("/opt/x")]);
         assert_eq!(s.write, [home.join(".cache")]);
@@ -734,31 +760,53 @@ mod tests {
             "[sandbox]\nnetwork = \"udp\"\n",
             "[sandbox]\nreads = []\n",
             "sandbox = \"off\"\n",
+            // Moved to `[execution] sandbox` (N.10a); no old spelling.
+            "[sandbox]\ncontain = \"auto\"\n",
+            "[execution]\nsandbox = \"required\"\n",
+            "[execution]\nhost = \"yes\"\n",
+            "[execution]\ncontainers = true\n",
         ] {
             assert!(toml::from_str::<NodePolicy>(bad).is_err(), "{bad}");
         }
         let p: NodePolicy = toml::from_str("[sandbox]\nread = [\"relative/dir\"]\n").unwrap();
         assert!(p.validate().unwrap_err().contains("absolute"));
         // The runtime-only fields cannot come from node.toml.
-        assert!(toml::from_str::<NodePolicy>("sandbox_refusal = \"x\"\n").is_err());
+        assert!(toml::from_str::<NodePolicy>("exec = \"x\"\n").is_err());
         assert!(toml::from_str::<NodePolicy>("sandbox_tmp = \"/x\"\n").is_err());
     }
 
-    /// Without a working sandbox (mode `required`), no agentic session is
-    /// created, continued or restored.
+    /// `[execution]` (N.10a): `host` off and `sandbox = "auto"` by default;
+    /// both can be set; `[execution] sandbox` reaches the sandbox's start.
     #[test]
-    fn a_sandbox_refusal_refuses_every_session() {
-        let root = tempfile::tempdir().unwrap();
-        let mut p = NodePolicy {
-            workspace_roots: vec![root.path().into()],
-            ..Default::default()
-        };
-        assert!(p.check_cwd(root.path().to_str().unwrap()).is_ok());
-        assert!(p.check_session(root.path()).is_ok());
-        p.sandbox_refusal = Some("set [sandbox] mode in node.toml".into());
-        let e = p.check_cwd(root.path().to_str().unwrap()).unwrap_err();
+    fn the_execution_table_is_the_ceiling_and_host_is_off_by_default() {
+        use harness_tools::contain::ContainMode;
+        let d = NodePolicy::default();
+        assert!(!d.execution.host, "the host mode is off unless turned on");
+        assert_eq!(d.execution.sandbox, ContainMode::Auto);
+        assert!(!d.exec.offers(harness_core::policy::ExecMode::Host));
+        let p: NodePolicy =
+            toml::from_str("[execution]\nsandbox = \"strict\"\nhost = true\n").unwrap();
+        assert!(p.execution.host);
+        assert_eq!(p.sandbox_settings().unwrap().contain, ContainMode::Strict);
+        let p: NodePolicy = toml::from_str("[execution]\nsandbox = \"off\"\n").unwrap();
+        assert_eq!(p.sandbox_settings().unwrap().contain, ContainMode::Off);
+    }
+
+    /// A node that offers no mode refuses every agentic session's work
+    /// (N.10a): what `ExecOffers` says, through the policy.
+    #[test]
+    fn a_node_offering_nothing_refuses_every_session() {
+        use harness_core::policy::ExecMode;
+        let mut p = NodePolicy::default();
+        assert!(p.check_exec(Some(ExecMode::Sandbox)).is_ok());
+        p.exec = crate::exec::ExecOffers::new(
+            Err("set [sandbox] mode in node.toml".into()),
+            Err("set [sandbox] mode in node.toml".into()),
+            vec![],
+        );
+        let e = p.check_exec(Some(ExecMode::Sandbox)).unwrap_err();
         assert!(e.contains("[sandbox] mode"), "{e}");
-        assert!(p.check_session(root.path()).is_err());
+        assert!(p.exec.choose(None).unwrap_err().contains("[sandbox] mode"));
     }
 
     #[test]

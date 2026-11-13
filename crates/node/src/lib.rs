@@ -2,6 +2,7 @@
 //! session's event log, and talks to the master over a `NodeLink`.
 
 pub mod artifacts;
+pub mod exec;
 mod git;
 mod images;
 pub mod policy;
@@ -45,6 +46,8 @@ struct CreateArgs {
     agent: Option<harness_core::agent::AgentSpec>,
     incognito: bool,
     no_callbacks: bool,
+    /// A request only: [`exec::ExecOffers::choose`] decides.
+    exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
 /// The longest a delete waits for its session's background commands: the
@@ -507,6 +510,9 @@ impl NodeRuntime {
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
+                // The modes it offers and their gaps (N.10a), as decided at
+                // start.
+                capabilities.extend(self.inner.cfg.policy.exec.capabilities());
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
@@ -817,6 +823,7 @@ impl NodeRuntime {
                 profile,
                 agent,
                 incognito,
+                exec_mode,
                 ..
             } => {
                 self.audit("session.create", session_id).await;
@@ -831,6 +838,7 @@ impl NodeRuntime {
                         agent,
                         incognito,
                         no_callbacks,
+                        exec_mode,
                     },
                 )
                 .await
@@ -993,6 +1001,7 @@ impl NodeRuntime {
             agent,
             incognito,
             no_callbacks,
+            exec_mode,
         } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
@@ -1008,6 +1017,16 @@ impl NodeRuntime {
             ));
         }
         let policy = &self.inner.cfg.policy;
+        // The mode first (N.10a): chosen inside what this node offers,
+        // whatever the master asked; a chat session runs no commands and has
+        // none.
+        let exec_mode = match profile {
+            Profile::Agentic => Some(policy.exec.choose(exec_mode)?),
+            Profile::Chat if exec_mode.is_some() => {
+                return Err("a chat session runs no commands and has no execution mode".into());
+            }
+            Profile::Chat => None,
+        };
         // Chat sessions have no workspace; their runtime offers no file tools.
         let cwd = match profile {
             Profile::Agentic => policy.check_cwd(&cwd)?,
@@ -1033,6 +1052,7 @@ impl NodeRuntime {
                 parent_session: None,
                 owned: None,
                 no_callbacks,
+                exec_mode,
             },
         )
         .await

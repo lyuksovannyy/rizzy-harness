@@ -46,6 +46,26 @@ pub const CAP_BACKGROUND: &str = "background";
 /// The master resumes chats only on nodes whose hello listed it.
 pub const CAP_CALLBACK: &str = "callback";
 
+/// The node capability that says it runs sessions of an execution mode
+/// (N.10a): `exec:sandbox`, `exec:host`. Announced from the node's own
+/// self-test and `[execution]` at start; what the UI offers and names. The
+/// node refuses a mode it does not offer whatever the master believes.
+pub const CAP_EXEC_PREFIX: &str = "exec:";
+
+/// The capability for `mode`.
+pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
+    format!("{CAP_EXEC_PREFIX}{}", mode.id())
+}
+
+/// A gap of a mode the node offers, for the UI to say in the chat (review
+/// T8B-3): with `[sandbox] network = "off"`, that mode's commands have no
+/// network namespace of their own, so UDP and DNS still go out (Landlock
+/// stops TCP only). `gap:host:netns` whenever the network is off and `host`
+/// is offered (it never has one); `gap:sandbox:netns` where bubblewrap
+/// could not make one at start.
+pub const GAP_SANDBOX_NETNS: &str = "gap:sandbox:netns";
+pub const GAP_HOST_NETNS: &str = "gap:host:netns";
+
 /// How a node's refusal of a `session.callback` begins when there is
 /// nothing to resume: every named end was already delivered, covered by a
 /// later turn or refused before, or the chat is busy. The master drops
@@ -198,6 +218,12 @@ pub enum MasterToNode {
         /// no later command can clear it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_callbacks: bool,
+        /// How the session's commands run (N.10a). A request only: the node
+        /// refuses a mode it does not offer, whatever the master sends, and
+        /// without one takes the most confined mode it offers. Recorded in
+        /// `session_created`; no later command carries or changes it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exec_mode: Option<harness_core::policy::ExecMode>,
     },
     #[serde(rename = "session.prompt")]
     Prompt {
@@ -556,6 +582,7 @@ mod tests {
         .unwrap();
         assert!(matches!(extra, MasterToNode::Callback { .. }));
         let create = |no_callbacks| MasterToNode::Create {
+            exec_mode: None,
             req_id: "r".into(),
             session_id: sid,
             title: "t".into(),

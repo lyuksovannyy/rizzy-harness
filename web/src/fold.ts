@@ -116,6 +116,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (p.incognito) meta!.incognito = true;
       if (p.parent_session != null) meta!.parent_session = p.parent_session;
       if (p.no_callbacks) meta!.no_callbacks = true;
+      if (p.exec_mode != null) meta!.exec_mode = p.exec_mode;
       v.meta = meta;
       v.active_agent = p.agent_id ?? null;
       break;

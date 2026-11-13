@@ -10,6 +10,7 @@ import type {
   NodeInfo,
   Prefs,
   Profile,
+  ExecMode,
   RawEvent,
   FormReply,
   SearchKind,
@@ -139,6 +140,7 @@ export const api = {
     incognito?: boolean;
     workspace_id?: string;
     project_id?: string;
+    exec_mode?: ExecMode;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<AttentionResponse>("GET", "/api/attention"),
   markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),

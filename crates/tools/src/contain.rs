@@ -65,17 +65,23 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// `[sandbox] contain` in node.toml.
+/// `[execution] sandbox` in node.toml: whether this node offers the
+/// `sandbox` execution mode (N.10a), the shell contained in bubblewrap.
+/// Nothing in it runs a command uncontained: that is the `host` mode,
+/// offered only with `[execution] host = true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ContainMode {
-    /// Contain the shell where bubblewrap works; elsewhere run it as
-    /// before (Landlock alone) and say so in the log and in `doctor`.
+    /// Offer `sandbox` where the containment probe passes, its gaps named
+    /// in the log, `doctor` and the chat; not where it fails.
     #[default]
     Auto,
-    /// Refuse agentic sessions unless the shell can be contained.
-    Required,
-    /// Never contain (an explicit, logged choice).
+    /// Offer `sandbox` only where the containment holds in full: no gap
+    /// (Landlock ABI 9 or newer, the network namespace when the network is
+    /// off, the node's own image held, the binary out of every session's
+    /// reach).
+    Strict,
+    /// Never offer `sandbox` (bubblewrap is not probed).
     Off,
 }
 
@@ -198,8 +204,8 @@ pub struct Contain {
     form: Form,
     /// Whether it may make a network namespace for a node whose network is
     /// off (T.8b). `false` only where the node's own probe at start found
-    /// that `--unshare-net` fails here and `contain = "auto"` chose to
-    /// contain without it.
+    /// that `--unshare-net` fails here and `[execution] sandbox = "auto"`
+    /// chose to contain without it.
     net_ns: bool,
     /// How checked grants are bound (T.8c), from bubblewrap's version.
     binds: Binds,
@@ -1084,8 +1090,9 @@ mod tests {
 
     #[test]
     fn settings_parse_kebab_case() {
-        let m: ContainMode = serde_json::from_str("\"required\"").unwrap();
-        assert_eq!(m, ContainMode::Required);
+        let m: ContainMode = serde_json::from_str("\"strict\"").unwrap();
+        assert_eq!(m, ContainMode::Strict);
+        assert!(serde_json::from_str::<ContainMode>("\"required\"").is_err());
         assert_eq!(ContainMode::default(), ContainMode::Auto);
     }
 
