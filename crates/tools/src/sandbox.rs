@@ -1361,6 +1361,9 @@ pub struct Started {
     pub view_summary: String,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
+    /// The Landlock ABI the start's probe found enforced; 0 where it is not
+    /// (`[sandbox] mode = "off"`, or best-effort on a kernel without it).
+    pub landlock_abi: u32,
 }
 
 /// Set up the node's sandbox once at start: resolve the wrapper binary
@@ -1413,6 +1416,7 @@ pub fn start(
             contain_level: ContainLevel::Refused,
             view_summary: String::new(),
             tmp_root: None,
+            landlock_abi: 0,
         });
     }
     check_extras_against_roots(settings, workspace_roots)?;
@@ -1455,6 +1459,20 @@ impl Started {
     /// runs its commands without a network namespace of their own (the
     /// gap of T.8b; review T8B-3: the chat says so). As at start: a later
     /// probe may close it ([`StepUp`]).
+    /// The form the sandbox mode contains in, where it is offered.
+    pub fn sandbox_form(&self) -> Option<crate::contain::Form> {
+        match &self.confinement {
+            Confinement::Confined { sandbox, .. } => sandbox.containment().map(|c| c.form()),
+            _ => None,
+        }
+    }
+
+    /// Whether `[sandbox] network = "off"` stops a `host` chat's TCP: its
+    /// confinement is Landlock and Landlock enforces the TCP rule (ABI 4).
+    pub fn host_tcp_stopped(&self) -> bool {
+        matches!(self.uncontained, Confinement::Confined { .. }) && self.landlock_abi >= 4
+    }
+
     pub fn sandbox_netns_gap(&self) -> bool {
         match &self.confinement {
             Confinement::Confined { sandbox, .. } => {
@@ -1628,6 +1646,12 @@ impl StepUp {
     }
 }
 
+/// How often the start probes bubblewrap before it decides the sandbox
+/// mode is not offered, and the pause between two tries (review L-b): at
+/// most two pauses, so a start that fails for good costs about 2 s more.
+pub const START_PROBE_TRIES: u32 = 3;
+pub const START_PROBE_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// How long a later probe ([`StepUp`]) may take before it is killed and
 /// counted as failed (re-check R-2). The start's own probes have no bound:
 /// a cold start of the binary on a slow disk can take longer.
@@ -1782,6 +1806,7 @@ fn start_inner(
             contain_level: ContainLevel::Ok,
             view_summary: String::new(),
             tmp_root: Some(tmp_root),
+            landlock_abi: 0,
         },
         Ok(status) => Started {
             confinement: Confinement::Confined {
@@ -1798,6 +1823,7 @@ fn start_inner(
             contain_level: ContainLevel::Ok,
             view_summary: String::new(),
             tmp_root: Some(tmp_root),
+            landlock_abi: 0,
         },
         Err(e) => not_enforced(
             settings,
@@ -1840,6 +1866,40 @@ fn start_inner(
                 ));
                 started.contain_level = ContainLevel::Warn;
             }
+            // Review L-c: `strict` promises no named gap; these two are
+            // gaps the line names, so `strict` does not offer the mode.
+            if settings.contain == crate::contain::ContainMode::Strict {
+                let path =
+                    path_write_entries(settings, &std::env::var_os("PATH").unwrap_or_default());
+                let why = match (risky.is_empty(), path.is_empty()) {
+                    (false, _) => Some(format!(
+                        "a [sandbox] write entry ({}) holds other programs' sockets (/tmp or \
+                         /run/user/<uid>)",
+                        risky
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    (true, false) => Some(format!(
+                        "a [sandbox] write entry holds a folder on this node's PATH ({})",
+                        path.iter()
+                            .map(|(_, d)| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    (true, true) => None,
+                };
+                if let Some(why) = why {
+                    let msg = format!(
+                        "the sandbox mode is not offered: [execution] sandbox = \"strict\" in {}, \
+                         and {why}: a command could reach past the containment there. Set \
+                         sandbox = \"auto\" to offer it with that gap named",
+                        node_toml.display()
+                    );
+                    refuse_sandbox(&mut started, msg);
+                }
+            }
         }
         Contained::No(msg) => {
             // Not offered (N.10a): never a quiet fall back to Landlock
@@ -1855,6 +1915,7 @@ fn start_inner(
         Contained::Refuse(msg) => refuse_sandbox(&mut started, msg),
     }
     started.view_summary = sandbox.view_line();
+    started.landlock_abi = abi;
     Ok(started)
 }
 
@@ -1911,7 +1972,10 @@ fn decide(
     node_toml: &Path,
 ) -> Result<(String, ContainLevel), String> {
     let (line, level) = contained_line(form, abi, bwrap);
-    if level != ContainLevel::Ok && mode == crate::contain::ContainMode::Strict {
+    // Review L-c: the shared-/proc form is a named gap at every ABI (its
+    // `/proc` lists this machine's processes), so `strict` refuses it too.
+    let gap = level != ContainLevel::Ok || form == crate::contain::Form::SharedProc;
+    if gap && mode == crate::contain::ContainMode::Strict {
         return Err(format!(
             "the sandbox mode is not offered: [execution] sandbox = \"strict\" in {} promises \
              that nothing a command starts outlives it, and here it does not hold: {line}. Set \
@@ -2029,26 +2093,53 @@ fn containment(
                     },
                 }
             };
-            let mut found = probe(true);
-            // T.8b: bubblewrap works but not with `--unshare-net`. Tried once
-            // more first (review T8B-1: a failure of the moment is not a
-            // failure of the namespace). Then `required` refuses; `auto`
-            // still contains (more than Landlock alone), with the gap named,
-            // and probes again later ([`StepUp`]). Decided by the node's own
-            // probes, never per call.
-            let mut net_err = None;
-            if settings.network == Network::Off
-                && let Err(e) = &found
-                && let Ok(without) = probe(false)
-            {
-                match probe(true) {
-                    Ok(again) => found = Ok(again),
-                    Err(again) => {
-                        net_err = Some(format!("{e}; once more: {again}"));
-                        found = Ok(without);
+            // The start is the only moment a node decides whether it offers
+            // the sandbox mode (N.10a): a probe that fails for a moment (a
+            // full process table, no memory) is tried again, a few times,
+            // a pause apart (review L-b), each failure logged.
+            let mut tries = 0;
+            let (found, net_err) = loop {
+                tries += 1;
+                let mut found = probe(true);
+                // T.8b: bubblewrap works but not with `--unshare-net`. Tried
+                // once more first (review T8B-1: a failure of the moment is
+                // not a failure of the namespace). Then `strict` does not
+                // offer the mode; `auto` still contains (more than Landlock
+                // alone), with the gap named, and probes the namespace again
+                // later ([`StepUp`]). Decided by the node's own probes,
+                // never per call.
+                let mut net_err = None;
+                if settings.network == Network::Off
+                    && let Err(e) = &found
+                    && let Ok(without) = probe(false)
+                {
+                    match probe(true) {
+                        Ok(again) => found = Ok(again),
+                        Err(again) => {
+                            net_err = Some(format!("{e}; once more: {again}"));
+                            found = Ok(without);
+                        }
                     }
                 }
-            }
+                match &found {
+                    Err(e) if tries < START_PROBE_TRIES => {
+                        network_log(&format!(
+                            "shell containment: the start's probe {tries} of \
+                             {START_PROBE_TRIES} failed ({e}); trying again in {} s",
+                            START_PROBE_PAUSE.as_secs()
+                        ));
+                        std::thread::sleep(START_PROBE_PAUSE);
+                    }
+                    _ => break (found, net_err),
+                }
+            };
+            let found = found.map_err(|e| {
+                if tries > 1 {
+                    format!("{tries} tries at start, the last: {e}")
+                } else {
+                    e
+                }
+            });
             match (found, net_err) {
                 (Ok(_), Some(e)) if settings.contain == ContainMode::Strict => {
                     return (
@@ -2125,6 +2216,7 @@ fn not_enforced(
             contain_level: ContainLevel::Ok,
             view_summary: String::new(),
             tmp_root,
+            landlock_abi: 0,
         },
         _ => {
             let network = if settings.network == Network::Off {
@@ -2148,6 +2240,7 @@ fn not_enforced(
                 contain_level: ContainLevel::Refused,
                 view_summary: String::new(),
                 tmp_root,
+                landlock_abi: 0,
             }
         }
     }
@@ -3053,6 +3146,11 @@ mod tests {
         let (_, level) = contained_line(Form::SharedProc, 4, b);
         assert_eq!(level, ContainLevel::Warn);
         assert!(decide(Form::Full, 9, b, ContainMode::Strict, toml).is_ok());
+        // Review L-c: the shared-/proc form is a gap `strict` names, at
+        // every ABI.
+        let e = decide(Form::SharedProc, 9, b, ContainMode::Strict, toml).unwrap_err();
+        assert!(e.contains("without a /proc of its own"), "{e}");
+        assert!(decide(Form::SharedProc, 9, b, ContainMode::Auto, toml).is_ok());
         assert_eq!(
             effective_abi("landlock Available { effective_abi: V9, kernel_abi: Some(10) }"),
             9
