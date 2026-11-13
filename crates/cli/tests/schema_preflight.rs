@@ -69,6 +69,8 @@ fn a_newer_database_anywhere_in_the_data_directory_stops_serve_before_anything_i
             .collect();
         left.sort();
         // The lock file is taken first, by design (A.20); nothing else.
-        assert_eq!(left, vec!["lock".to_string(), newer.to_string()], "{newer}");
+        let mut expected = vec!["lock".to_string(), newer.to_string()];
+        expected.sort();
+        assert_eq!(left, expected, "{newer}");
     }
 }

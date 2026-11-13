@@ -30,7 +30,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 /// One schema step: SQL batches run in order, inside the migration's
 /// transaction.
@@ -46,7 +46,8 @@ pub enum MigrateError {
     #[error("{db} has schema version {found}, which no rizzy-harness writes. It was not changed")]
     Unknown { db: String, found: i64 },
     #[error(
-        "{db}: migrating the schema from version {from} to {to} failed in migration {step}; nothing was changed: {source}"
+        "{db}: migrating the schema from version {from} to {to} failed in migration {step}; nothing was changed \
+         in this file (a database migrated before it in this start stays migrated, and older builds refuse it): {source}"
     )]
     Failed {
         db: String,
@@ -152,6 +153,33 @@ pub fn migrate_checked(
     schema: &Schema,
 ) -> Result<Migrated, MigrateError> {
     apply(conn, db, schema.steps, Some(schema.recorded))
+}
+
+/// Start-up preflight (review R43-3): `path` is absent, or at a version
+/// this build can open with that version's schema. Read through a
+/// read-only connection, so nothing is written, not even a checkpoint of a
+/// crashed newer build's WAL on close. Run for every database of the data
+/// directory before any is opened, so a newer file found last does not
+/// leave the ones before it migrated.
+pub fn check_file(path: &Path, schema: &Schema) -> Result<(), MigrateError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let db = path.display().to_string();
+    let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
+        db: db.clone(),
+        source,
+    };
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(sqlite)?;
+    let known = schema.steps.len() as i64;
+    if refuse(&db, user_version(&conn).map_err(sqlite)?, known)? == known {
+        same_schema(&conn, &db, known, schema.recorded)?;
+    }
+    Ok(())
 }
 
 /// `migrate_checked` without the schema comparison: for building the
