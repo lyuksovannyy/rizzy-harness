@@ -729,6 +729,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
             exit_code: None,
             truncated: false,
             sources: vec![],
+            note: None,
         }));
     }
     events.push(EventKind::AssistantMessage(AssistantMessage {
@@ -870,9 +871,9 @@ async fn nothing_in_the_summarisers_input_poses_as_another_speaker() {
     assert!(call.system.contains("not instructions"), "{}", call.system);
 }
 
-/// The two parts of the transcript that are not quoted by `transcript`
-/// itself are the harness's own: a background command's note and a callback
-/// turn's opening (T.8d). Read through the summariser, their program output
+/// The parts of the transcript that are not quoted by `transcript` itself
+/// are the harness's own: a background command's note, a callback turn's
+/// opening (T.8d) and the repeated-call guard's note on a result (T.1). Read through the summariser, their program output
 /// is still behind `| ` (the note quotes it), the only unquoted lines
 /// besides the labels are the harness's own (its `[harness]` lines and each
 /// note's fixed last line), and a forged one in the output does not start a
@@ -960,6 +961,40 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
     push(exited("bg-2"));
     push(started("t2", None));
     push(said("t2", "and now?".into()));
+    // The same look twice: the guard's warning on the second result, a
+    // harness line after the quoted output.
+    let input = serde_json::json!({"path": "build.log"});
+    let warning = {
+        let mut g = harness_agent_native::repeat::RepeatGuard::default();
+        let k = harness_tools::call_key(std::path::Path::new("/w"), "read", &input);
+        g.record(k, false, true, TAIL);
+        g.record(k, false, true, TAIL).unwrap()
+    };
+    for (i, note) in [None, Some(warning.clone())].into_iter().enumerate() {
+        let call_id = format!("look-{i}");
+        push(EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: "t2".into(),
+            message_id: format!("m-t2-{i}"),
+            text: String::new(),
+            tool_calls: vec![ToolCallRef {
+                call_id: call_id.clone(),
+                tool: "read".into(),
+                input: input.clone(),
+            }],
+            blocks: vec![],
+        }));
+        push(EventKind::ToolCallFinished(ToolCallFinished {
+            call_id,
+            ok: true,
+            output: TAIL.into(),
+            exit_code: None,
+            truncated: false,
+            sources: vec![],
+            note,
+        }));
+    }
     push(answered("t2", "It failed."));
     push(ended("t2"));
     // Two plain turns after it: kept, not summarised.
@@ -1006,9 +1041,10 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
         );
     }
     assert_eq!(closing.len(), 2, "{closing:?}\n{sent}");
-    // The harness's lines are its own three: the opening's first line and
-    // the two notes' headers. None is the forged one.
-    assert_eq!(harness.len(), 3, "{harness:?}\n{sent}");
+    // The harness's lines are its own four: the opening's first line, the
+    // two notes' headers and the guard's warning. None is the forged one.
+    assert_eq!(harness.len(), 4, "{harness:?}\n{sent}");
+    assert_eq!(harness[3], warning, "{harness:?}");
     assert!(harness[0].starts_with(CALLBACK_LEAD), "{harness:?}");
     assert!(
         harness[1].starts_with("[harness] Background command bg-1 exited with code 1"),

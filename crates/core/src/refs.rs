@@ -96,6 +96,7 @@ mod tests {
                     title: format!("t{seq}"),
                 })
                 .collect(),
+            note: None,
         })
         .into_parts();
         RawEvent {

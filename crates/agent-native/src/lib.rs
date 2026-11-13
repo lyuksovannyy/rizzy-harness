@@ -12,6 +12,9 @@ pub mod mask;
 pub mod mock;
 pub mod models;
 pub mod provider;
+pub mod repeat;
+#[cfg(test)]
+mod repeat_tests;
 pub mod retry;
 pub mod style;
 
@@ -402,7 +405,9 @@ fn transcript(prev: Option<&str>, events: &[RawEvent]) -> String {
                 quoted_part(&mut out, PART_RESULT, &short);
             }
             // The harness's own words, not the user's: as they are.
-            ChatMsg::Note(t) | ChatMsg::Opening(t) => out.push_str(&format!("{t}\n\n")),
+            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) => {
+                out.push_str(&format!("{t}\n\n"))
+            }
             ChatMsg::System(_) => {}
         }
     }
@@ -735,6 +740,7 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
                         call_id: f.call_id,
                         content: f.output,
                     });
+                    out.extend(f.note.map(ChatMsg::CallNote));
                 }
             }
             // Where the log has it: after a step's results, or between
@@ -1172,6 +1178,9 @@ impl NativeBackend {
         let mut overflowed = false;
         // Messages in a row whose tool calls were cut by the output limit.
         let mut cut_steps = 0;
+        // Same call, same result (T.1): this turn's only, never the model's.
+        let mut guard = repeat::RepeatGuard::default();
+        let mut repeat_stop = false;
         for _ in 0..max_steps {
             let message_id = new_id();
             let mut sent = messages.clone();
@@ -1425,6 +1434,7 @@ impl NativeBackend {
                                 exit_code: None,
                                 truncated: false,
                                 sources: vec![],
+                                note: None,
                             }))
                             .await
                             .is_err()
@@ -1451,6 +1461,8 @@ impl NativeBackend {
                 continue;
             }
             cut_steps = 0;
+            // This message's calls: a refusal before it was sent (T.1).
+            guard.next_step();
 
             // Delegations of this step run in parallel, within the caps.
             let (delegations, calls): (Vec<_>, Vec<_>) = completion
@@ -1531,6 +1543,7 @@ impl NativeBackend {
                                     exit_code: None,
                                     truncated: false,
                                     sources: vec![],
+                                    note: None,
                                 }))
                                 .await
                                 .is_err()
@@ -1564,6 +1577,10 @@ impl NativeBackend {
                 for (call, (outcome, u)) in admitted.into_iter().zip(results) {
                     sub_tokens += u.input_tokens + u.output_tokens;
                     usage.add(&u);
+                    // A sub-agent's work is a change, as an edit is (T.1).
+                    if outcome.ok {
+                        guard.restart();
+                    }
                     let output = self.config.secrets.scrub(&outcome.output);
                     if host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
@@ -1573,6 +1590,7 @@ impl NativeBackend {
                             exit_code: None,
                             truncated: outcome.truncated,
                             sources: self.scrub_sources(outcome.sources),
+                            note: None,
                         }))
                         .await
                         .is_err()
@@ -1606,15 +1624,35 @@ impl NativeBackend {
                 {
                     return stopped(usage);
                 }
-                let mut observed = observed_text(&messages, &trusted, Some((user_idx, &own_words)));
-                if let Some(inh) = &ctx.extra.observed {
-                    observed.splice(0..0, inh.iter().cloned());
-                }
-                let outcome = self
-                    .run_tool(&ctx, host, &call, &mut allowed_this_turn, &observed, &refs)
-                    .await;
+                // Before approval and dispatch: a refused call never starts.
+                let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
+                let (outcome, refused) = match guard.admit(key) {
+                    repeat::Admission::Refuse { note, stop } => {
+                        repeat_stop |= stop;
+                        (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
+                    }
+                    repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
+                    repeat::Admission::Run => {
+                        let mut observed =
+                            observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                        if let Some(inh) = &ctx.extra.observed {
+                            observed.splice(0..0, inh.iter().cloned());
+                        }
+                        let o = self
+                            .run_tool(&ctx, host, &call, &mut allowed_this_turn, &observed, &refs)
+                            .await;
+                        (o, None)
+                    }
+                };
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
+                let note = refused.or_else(|| {
+                    let changes = self.tools.iter().any(|t| {
+                        t.name() == call.tool
+                            && t.risk() == harness_core::policy::ToolRisk::Mutating
+                    });
+                    guard.record(key, changes, outcome.ok, &output)
+                });
                 if let Some(b) = &outcome.background
                     && host
                         .emit(EventKind::BackgroundStarted(BackgroundStarted {
@@ -1643,6 +1681,7 @@ impl NativeBackend {
                         exit_code: outcome.exit_code,
                         truncated: outcome.truncated,
                         sources: self.scrub_sources(outcome.sources),
+                        note: note.clone(),
                     }))
                     .await
                     .is_err()
@@ -1656,6 +1695,8 @@ impl NativeBackend {
                     call_id: call.call_id,
                     content: output,
                 });
+                // After the result's escaped text, as the log rebuilds it.
+                messages.extend(note.map(ChatMsg::CallNote));
                 if cancelled {
                     return TurnOutcome {
                         reason: TurnEndReason::Cancelled,
@@ -1669,12 +1710,25 @@ impl NativeBackend {
             match host.background_notes().await {
                 // Scrubbed here as every tool result is, whatever the host
                 // did (T8D-2).
-                Ok(ends) => messages.extend(
-                    ends.iter()
-                        .filter_map(|b| b.model_note())
-                        .map(|n| ChatMsg::Note(self.config.secrets.scrub(&n))),
-                ),
+                Ok(ends) => {
+                    // An end is a change: what waited on it may run (T.1).
+                    if !ends.is_empty() {
+                        guard.restart();
+                    }
+                    messages.extend(
+                        ends.iter()
+                            .filter_map(|b| b.model_note())
+                            .map(|n| ChatMsg::Note(self.config.secrets.scrub(&n))),
+                    )
+                }
                 Err(_) => return stopped(usage),
+            }
+            if repeat_stop {
+                return TurnOutcome {
+                    reason: TurnEndReason::Error,
+                    usage: Some(usage),
+                    error: Some(repeat::STOP_ERROR.into()),
+                };
             }
         }
         TurnOutcome {
@@ -2792,6 +2846,7 @@ mod tests {
                     url: url.into(),
                     title: "old".into(),
                 }],
+                note: None,
             })
             .into_parts();
             RawEvent {
@@ -3101,6 +3156,7 @@ mod tests {
                     title: "old".into(),
                 },
             ],
+            note: None,
         })
         .into_parts();
         let mut c = ctx(
@@ -4129,6 +4185,7 @@ mod tests {
                     exit_code: None,
                     truncated: false,
                     sources: vec![],
+                    note: None,
                 }),
             ] {
                 seq += 1;
