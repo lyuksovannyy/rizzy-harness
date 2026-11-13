@@ -359,3 +359,25 @@ exact path with `fusermount3 -u -z`). The owner's server
 data directory and port never opened; nothing outside this machine was
 contacted. `step2_scan.py` builds and removes its own SQLite file and touches
 no product database.
+
+## 6. After the review
+
+Written by the coordinator.
+
+- **S2-1** is fixed on its own branch (`fix/loopback-both-families`, pull request 72; record and
+  re-check in `2026-11-S2-1-loopback-origin.md`: fixed, with the remainder R-A, a second node on
+  the server's machine while the server is down). This branch carries that fix by merge, so the
+  default does not turn on without it.
+- **S2-2** is closed by removal (`773c644`): the master reads no log for a stop. Every stop is
+  relayed to the node; `Store::background_events` and the "already ended" answer are gone, and
+  Stop all is always sent (`678f4c9`, found before the review: a log read through a bounded
+  window let a chat that starts thousands of short commands hide one from Stop all). The
+  answer's body is now `{ok: true}`; the proofs `step2_stop.py` and `step2_restart.py` print
+  "already ended" from the old body's `ended` field and now show such a stop as taken by the
+  node. `step2_scan.py` measures a function that no longer exists. Not re-checked by the
+  reviewer.
+- Run on this head by the coordinator: `cargo fmt --all --check`, clippy for the workspace,
+  `cargo test --workspace --no-fail-fast` with the sandbox and FUSE required (1324 passed, 0
+  failed, 10 ignored), the web checks (893 tests; first load 99.5 of 104 KB), and the browser
+  flow `web/e2e/background.cjs`.
+
