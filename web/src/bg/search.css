@@ -39,7 +39,7 @@
   opacity: calc(1 - var(--i) * 0.04);
 }
 .mag-warm {
-  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  fill: color-mix(in srgb, var(--accent-2) 10%, transparent);
   opacity: 0;
   transition: opacity var(--dur-3) var(--ease-standard);
 }

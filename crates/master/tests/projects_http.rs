@@ -244,7 +244,7 @@ async fn crud_and_privacy() {
 
     for (body, why) in [
         (json!({"icon": "skull"}), "unknown icon"),
-        (json!({"accent": "red"}), "unknown accent"),
+        (json!({"accent": "teal"}), "unknown accent"),
         (json!({"name": " "}), "empty name"),
         (
             json!({"settings": {"workspace_memory": true, "extra": 1}}),

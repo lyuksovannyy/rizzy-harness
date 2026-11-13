@@ -381,7 +381,7 @@ export function AgentPage(props: {
             )
           ) : (
             <span className="agent-face" title="Pick a look after saving">
-              <AgentAvatar avatar={{ shape: "circle", eyes: "round", accent: "gray" }} size={48} />
+              <AgentAvatar avatar={{ shape: "circle", eyes: "round", accent: "graphite" }} size={48} />
             </span>
           )}
           <div className="agent-title">

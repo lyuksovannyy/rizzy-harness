@@ -5,12 +5,14 @@
 // the theme.
 import { Folder, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { normalizeAccent } from "./appearance";
 
 let loaded: Record<string, LucideIcon> | null = null;
 
 /** The CSS colour of an accent name (unknown names fall back to the app accent). */
 export function accentColor(accent: string): string {
-  return /^[a-z]+$/.test(accent) ? `var(--accent-${accent}, var(--accent))` : "var(--accent)";
+  const preset = normalizeAccent(accent);
+  return preset ? `var(--ac-${preset}-2)` : "var(--accent-2)";
 }
 
 export function ProjectIcon({ icon, accent, size = 16 }: { icon: string; accent: string; size?: number }) {
