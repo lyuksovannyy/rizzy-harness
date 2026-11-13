@@ -78,6 +78,8 @@ pub(crate) struct Session {
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
     /// Wakes the end recorder when the turn slot is freed.
     bg_flush: Arc<tokio::sync::Notify>,
+    /// The last try to record a queued end failed (T8D-6).
+    bg_failed: AtomicBool,
 }
 
 type BgEnds = tokio::sync::mpsc::UnboundedReceiver<harness_tools::background::Ended>;
@@ -169,6 +171,7 @@ impl Session {
             bg,
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
+            bg_failed: AtomicBool::new(false),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -246,6 +249,7 @@ impl Session {
             bg,
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
+            bg_failed: AtomicBool::new(false),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -334,8 +338,12 @@ impl Session {
                 .append(EventKind::BackgroundEnded(e.event(false)))
                 .await
             {
-                Ok(_) => bg.recorded(),
+                Ok(_) => {
+                    bg.recorded();
+                    self.bg_failed.store(false, Ordering::SeqCst);
+                }
                 Err(err) => {
+                    self.bg_failed.store(true, Ordering::SeqCst);
                     tracing::error!(session = %self.id, error = %err, bg = %e.bg_id, "could not record a background command's end; kept for the next try");
                     self.bg_queue
                         .lock()
@@ -402,9 +410,16 @@ impl Session {
             harness_protocol::StopBackgroundBy::User => BackgroundReason::StoppedByUser,
             harness_protocol::StopBackgroundBy::AccessRevoked => BackgroundReason::AccessRevoked,
         };
-        match bg_id {
-            Some(id) => bg.stop(id, reason).map(|_| ()),
-            None => {
+        match (bg_id, by) {
+            (Some(id), _) => bg.stop(id, reason).map(|_| ()),
+            // A revoked owner's chat starts nothing more until they prompt
+            // it again (a start in its first wait is stopped when handed
+            // over).
+            (None, harness_protocol::StopBackgroundBy::AccessRevoked) => {
+                bg.close(reason);
+                Ok(())
+            }
+            (None, harness_protocol::StopBackgroundBy::User) => {
                 bg.stop_all(reason);
                 Ok(())
             }
@@ -433,6 +448,14 @@ impl Session {
     /// Ends sent and not recorded yet (a stop waits for them).
     pub(crate) fn background_unrecorded(&self) -> bool {
         self.bg.as_ref().is_some_and(|b| b.unrecorded() > 0)
+    }
+
+    /// Try the queued ends again, when no turn runs (a stop's pass,
+    /// T8D-6). True when an end is still not recorded and the last try
+    /// failed: the log does not take it, and waiting longer buys nothing.
+    pub(crate) async fn retry_background(&self) -> bool {
+        self.flush_background().await;
+        self.background_unrecorded() && self.bg_failed.load(Ordering::SeqCst)
     }
 
     /// Close out a turn that was running when the process died (PLAN.md §2).
@@ -690,6 +713,12 @@ impl Session {
             return Err("images can't go into an incognito chat".into());
         }
         self.check_cwd_still_allowed()?;
+        // The owner prompts the chat: it may start background commands
+        // again after a revocation closed its table (the master admits the
+        // prompt only for an owner with access).
+        if let Some(bg) = &self.bg {
+            bg.reopen();
+        }
         // The node decides how far delegation goes (Gate 3 review P-2): the
         // master's spec may ask for less than `[limits]`, never more. Its
         // sub-agents' specs come from this one, so they are bounded too.
@@ -2070,7 +2099,10 @@ impl TurnHost for Session {
         let mut out = Vec::new();
         let mut rest = queued.into_iter();
         while let Some(e) = rest.next() {
-            let ev = e.event(true);
+            // What is appended is scrubbed; so is what goes to the model
+            // (T8D-2).
+            let mut ev = e.event(true);
+            ev.tail = self.node.cfg.secrets.scrub(&ev.tail);
             if let Err(err) = Session::emit(self, EventKind::BackgroundEnded(ev.clone())).await {
                 // The turn ends; these are recorded after it.
                 let mut q = self.bg_queue.lock().unwrap_or_else(|p| p.into_inner());
@@ -2125,6 +2157,7 @@ impl TurnHost for Session {
         // with `harness_tools::call_key`, PLAN.md T4). The answer reaches
         // only this call: the approval id is bound to this one waiting
         // request, and the loop records the key of the call it is running.
+        let background_start = is_background_start(tool, input);
         let approval_id = new_id();
         let (tx, rx) = oneshot::channel();
         self.approvals
@@ -2138,7 +2171,9 @@ impl TurnHost for Session {
                 tool: tool.into(),
                 input: input.clone(),
                 reason: approval_reason(tool, risk, input, &self.node.cfg.policy),
-                turn_allow: true,
+                // "For this turn" would cover every identical start of the
+                // turn (N-2): a background start is asked for each time.
+                turn_allow: !background_start,
             }))
             .await;
         if requested.is_ok() {
@@ -2174,8 +2209,18 @@ impl TurnHost for Session {
         if !self.resolve(approval_id, decision, by).await {
             return Decision::Deny;
         }
+        // Not offered for a background start, and not taken either: one
+        // click is one command.
+        if background_start && decision == Decision::AllowSession {
+            return Decision::Allow;
+        }
         decision
     }
+}
+
+/// A `bash` call that asks to keep running.
+fn is_background_start(tool: &str, input: &Value) -> bool {
+    tool == "bash" && input.get("background").and_then(Value::as_bool) == Some(true)
 }
 
 /// Refusal while a restore of an overlapping folder runs.
@@ -2278,7 +2323,7 @@ fn approval_reason(
 ) -> String {
     // A background start says what it is, in words (§4.1): the field alone
     // is easy to miss.
-    if tool == "bash" && input.get("background").and_then(Value::as_bool) == Some(true) {
+    if is_background_start(tool, input) {
         let ceiling = std::time::Duration::from_secs(policy.limits.bash_timeout_max_s);
         let t = harness_tools::background::timeout_for(
             input.get("timeout_secs").and_then(Value::as_u64),
