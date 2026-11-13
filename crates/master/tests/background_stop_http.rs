@@ -114,6 +114,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                 keep.lock().unwrap().push(msg.clone());
                                 if let MasterToNode::Create { session_id, .. } = &msg {
                                     let created = EventKind::SessionCreated(SessionCreated {
+            exec_mode: None,
             no_callbacks: false,
                                         title: "t".into(),
                                         cwd: "/w".into(),

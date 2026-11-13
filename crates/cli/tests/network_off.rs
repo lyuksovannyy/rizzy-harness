@@ -476,8 +476,10 @@ async fn network_on_is_unchanged() {
 // ---- what the node says, and what it does when it cannot ----
 
 /// `doctor`'s containment line with the network off: contained, it names
-/// the namespace; on the fallback and with `contain = "off"` it says that
-/// UDP and DNS still go out.
+/// the namespace; where the sandbox mode is not offered (no bubblewrap, or
+/// `[execution] sandbox = "off"`) it says that UDP and DNS still go out for
+/// what runs uncontained (a `host` session): a warning where the node
+/// offers `host`, a failure where it then offers nothing (N.10a).
 #[test]
 fn doctor_says_where_udp_and_dns_still_go_out() {
     let f = fixture();
@@ -503,9 +505,15 @@ fn doctor_says_where_udp_and_dns_still_go_out() {
 
     for toml in [
         "[sandbox]\nnetwork = \"off\"\nbwrap = \"/nonexistent/bwrap\"\n",
-        "[sandbox]\nnetwork = \"off\"\ncontain = \"off\"\n",
+        "[sandbox]\nnetwork = \"off\"\n[execution]\nsandbox = \"off\"\n",
     ] {
         let c = doctor(toml);
+        assert!(c.starts_with("FAIL "), "{toml}: {c}");
+        assert!(c.contains("UDP and DNS still go out"), "{toml}: {c}");
+        let c = doctor(&format!("{toml}[execution]\nhost = true\n").replace(
+            "[execution]\nsandbox = \"off\"\n[execution]\n",
+            "[execution]\nsandbox = \"off\"\n",
+        ));
         assert!(c.starts_with("warn "), "{toml}: {c}");
         assert!(c.contains("UDP and DNS still go out"), "{toml}: {c}");
     }
@@ -518,7 +526,8 @@ fn doctor_says_where_udp_and_dns_still_go_out() {
 /// that refuses `--unshare-net`, as a sandboxed outer container might),
 /// with the network off: `auto` still contains (a PID namespace, the guard,
 /// Landlock inside), without the network namespace, and its line says so as
-/// a gap naming bubblewrap's error; `required` refuses with the reason.
+/// a gap naming bubblewrap's error; `strict` does not offer the sandbox
+/// mode, with the reason.
 /// Neither runs a command with the network silently on. With the network
 /// on the same bubblewrap contains as usual.
 #[tokio::test]
@@ -603,9 +612,10 @@ async fn a_bwrap_without_network_namespaces_still_contains_under_auto() {
         "{out}"
     );
 
-    let required = start(Network::Off, ContainMode::Required);
+    let required = start(Network::Off, ContainMode::Strict);
     assert_eq!(required.contain_level, ContainLevel::Refused);
-    let why = required.refusal.unwrap();
+    assert!(required.refusal.is_none(), "the node itself is not refused");
+    let why = required.sandbox_refusal().unwrap().to_string();
     assert!(
         why.contains("the probe with --unshare-net failed")
             && why.contains("Operation not permitted"),
@@ -703,7 +713,7 @@ fn refusing_while(f: &Fixture, flag: &Path) -> PathBuf {
 /// the stand-in swaps a probe script's read of `/proc/net/dev` for a list
 /// with `lo` and `tunl0`. It failed before the fix (the probe read that
 /// list). Since the fix the probe does not read it, so the stand-in changes
-/// nothing and this tests plain bubblewrap: both `auto` and `required` end
+/// nothing and this tests plain bubblewrap: both `auto` and `strict` end
 /// with the namespace. It would fail again if the list came back into the
 /// probe (review R-5).
 #[tokio::test]
@@ -736,14 +746,14 @@ async fn an_extra_interface_in_a_new_namespace_still_counts_as_one() {
             real = real.display()
         ),
     );
-    for mode in [ContainMode::Auto, ContainMode::Required] {
+    for mode in [ContainMode::Auto, ContainMode::Strict] {
         let s = start_node(&f, Network::Off, mode, &fake, Duration::from_secs(60));
-        if let Some(why) = &s.refusal {
-            // Below Landlock ABI 9 (CI's kernel) `required` refuses for
-            // T.8a's reason, the Unix-socket gap. That is not this test's
-            // subject; a refusal about the network namespace is.
+        if let Some(why) = s.sandbox_refusal() {
+            // Below Landlock ABI 9 (CI's kernel) `strict` does not offer the
+            // mode for T.8a's reason, the Unix-socket gap. That is not this
+            // test's subject; a refusal about the network namespace is.
             assert!(
-                mode == ContainMode::Required
+                mode == ContainMode::Strict
                     && why.contains("Landlock ABI")
                     && !why.contains("network namespace")
                     && !why.contains("--unshare-net"),
@@ -947,14 +957,15 @@ fn pid_of(out: &str) -> u32 {
         .unwrap_or_else(|| panic!("no pid: {out}"))
 }
 
-/// R-1: every probe at start failed (four runs: both forms, with and
-/// without the namespace), so the `auto` node started with Landlock alone.
-/// It keeps the bubblewrap it found and probes again, at most every
-/// interval, beside a shell command: the commands started after a probe
-/// passed are contained, with a network namespace of their own, and the
-/// host hears nothing from them.
+/// N.10a (replaces re-check R-1's step up from Landlock alone): every
+/// probe at start failed (four runs: both forms, with and without the
+/// namespace), so the `auto` node does not offer the sandbox mode. Its
+/// shell is refused there, never run with Landlock alone, and it does not
+/// probe again (nothing would use a containment found later: a node offers
+/// its modes from its start). The uncontained twin (the `host` mode's)
+/// runs outside any PID namespace, as it always does.
 #[tokio::test]
-async fn an_auto_node_that_could_not_contain_at_start_contains_later() {
+async fn an_auto_node_that_could_not_contain_at_start_offers_no_sandbox_mode() {
     use harness_tools::contain::ContainMode;
     let f = fixture();
     if f.contained(Network::Off).is_none() {
@@ -965,37 +976,32 @@ async fn an_auto_node_that_could_not_contain_at_start_contains_later() {
     let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, retry);
     assert_eq!(runs(&count), 4);
     assert!(
-        s.contain_summary.starts_with("NOT CONTAINED"),
+        s.contain_summary.starts_with("NOT OFFERED"),
         "{}",
         s.contain_summary
     );
+    assert!(s.refusal.is_none());
+    let why = s.sandbox_refusal().unwrap().to_string();
     let host = udp_host();
     let cmd = |tag: &str| format!("echo pid=$$; {}", send_cmd(&host, tag));
-
-    // At once: Landlock alone, as the start left it.
-    let out = run_in(&f, &s.confinement, &cmd("alone")).await;
-    assert!(pid_of(&out) > 3 && out.contains(&host_ns()), "{out}");
-    assert_eq!(arrived(std::slice::from_ref(&host))[0], ["alone"], "{out}");
-
-    // After the interval a command starts the probe beside it; the ones
-    // started once it passed are contained.
-    tokio::time::sleep(retry + Duration::from_millis(100)).await;
-    let _ = run_in(&f, &s.confinement, &cmd("trigger")).await;
-    let _ = arrived(std::slice::from_ref(&host));
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    for round in 0..2 {
-        let out = run_in(&f, &s.confinement, &cmd("contained")).await;
-        assert!(pid_of(&out) <= 3, "round {round}: not contained: {out}");
-        assert!(own_ns(&out), "round {round}: {out}");
-        assert!(
-            arrived(std::slice::from_ref(&host))[0].is_empty(),
-            "round {round}: {out}"
-        );
+    for round in 0..3 {
+        let out = run_in(&f, &s.confinement, &cmd("sandbox")).await;
+        assert!(!out.contains("pid="), "round {round}: ran: {out}");
+        assert!(out.contains(&why), "round {round}: {out}");
+        let out = run_in(&f, &s.uncontained, &cmd("host")).await;
+        assert!(pid_of(&out) > 3, "round {round}: contained: {out}");
+        tokio::time::sleep(retry + Duration::from_millis(100)).await;
     }
+    assert_eq!(
+        runs(&count),
+        4,
+        "a node without the sandbox mode probed again"
+    );
+    assert!(!arrived(&[host])[0].contains(&"sandbox".to_string()));
 }
 
-/// R-1: a node that found no bubblewrap at all never probes: one that
-/// appears at that path later is not run, and commands stay as they were.
+/// A node that found no bubblewrap at all never probes: one that appears
+/// at that path later is not run, and nothing is contained.
 #[tokio::test]
 async fn a_node_without_bubblewrap_never_probes() {
     use harness_tools::contain::ContainMode;
@@ -1012,15 +1018,17 @@ async fn a_node_without_bubblewrap_never_probes() {
         Duration::ZERO,
     );
     assert!(
-        s.contain_summary.starts_with("NOT CONTAINED"),
+        s.contain_summary.starts_with("NOT OFFERED"),
         "{}",
         s.contain_summary
     );
     let (fake, count) = failing_first(&f, 0);
     std::fs::rename(&fake, &missing).unwrap();
     for _ in 0..3 {
-        let out = run_in(&f, &s.confinement, "echo pid=$$").await;
+        let out = run_in(&f, &s.uncontained, "echo pid=$$").await;
         assert!(pid_of(&out) > 3, "{out}");
+        let out = run_in(&f, &s.confinement, "echo pid=$$").await;
+        assert!(!out.contains("pid="), "{out}");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert_eq!(runs(&count), 0, "a node without bubblewrap probed");

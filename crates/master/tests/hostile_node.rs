@@ -136,6 +136,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
 
 fn created(node: &str, cwd: &str, parent: Option<SessionId>) -> EventKind {
     EventKind::SessionCreated(SessionCreated {
+        exec_mode: None,
         no_callbacks: false,
         title: "t".into(),
         cwd: cwd.into(),

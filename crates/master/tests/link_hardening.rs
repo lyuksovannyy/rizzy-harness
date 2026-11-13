@@ -109,6 +109,7 @@ fn open_link_with(
 fn event(sid: SessionId, seq: u64, text: &str) -> RawEvent {
     let (kind, payload) = if seq == 1 {
         EventKind::SessionCreated(SessionCreated {
+            exec_mode: None,
             no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,
@@ -719,6 +720,7 @@ async fn a_reconnect_that_resends_acknowledged_events_carries_on() {
 
 fn created_by(sid: SessionId, seq: u64, parent: Option<SessionId>) -> RawEvent {
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        exec_mode: None,
         no_callbacks: false,
         profile: Profile::Agentic,
         agent_id: None,

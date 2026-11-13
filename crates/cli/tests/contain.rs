@@ -960,12 +960,16 @@ fn line<'a>(out: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {name} line: {out}"))
 }
 
-/// `doctor`'s containment line in each state it can be put in from here:
-/// contained (ok from Landlock ABI 9, warn with the gap below), not
-/// contained (warn, never ok: N-5), off (warn), required and refused
-/// (FAIL, with the Landlock line still ok). The shared-`/proc` form and an
-/// ABI below 9 on a newer kernel cannot be forced through the binary; their
-/// lines are `sandbox.rs` `the_containment_line_depends_on_the_landlock_abi`.
+/// `doctor`'s containment and execution-modes lines in each state they
+/// can be put in from here: contained (ok from Landlock ABI 9, warn with
+/// the gap below; the sandbox mode offered); no bubblewrap with `host` off
+/// (the sandbox mode NOT OFFERED and no mode at all: FAIL, in plain words,
+/// with the Landlock line still ok; N.10a: before, a warning and the shell
+/// ran uncontained); the same with `[execution] host = true` (warn: only
+/// `host`, said as such); `[execution] sandbox = "off"`; `strict`. The
+/// shared-`/proc` form and an ABI below 9 on a newer kernel cannot be
+/// forced through the binary; their lines are `sandbox.rs`
+/// `the_containment_line_depends_on_the_landlock_abi`.
 #[test]
 fn doctor_marks_each_containment_state() {
     let f = fixture();
@@ -982,28 +986,54 @@ fn doctor_marks_each_containment_state() {
         assert!(c.starts_with("warn  shell containment: contained ("), "{c}");
         assert!(c.contains("WITH A GAP") && c.contains("session bus"), "{c}");
     }
-
-    let (out, _) = doctor(&f.data, Some("[sandbox]\nbwrap = \"/nonexistent/bwrap\"\n"));
-    let c = line(&out, "shell containment");
+    let e = line(&out, "execution modes");
     assert!(
-        c.starts_with("warn  shell containment: NOT CONTAINED"),
-        "{c}"
+        e.starts_with("ok    execution modes: sandbox; not host ("),
+        "{e}"
     );
+    assert!(e.contains("[execution] host = false"), "{e}");
 
-    let (out, _) = doctor(&f.data, Some("[sandbox]\ncontain = \"off\"\n"));
-    assert!(line(&out, "shell containment").starts_with("warn  shell containment: OFF"));
+    let (out, ok) = doctor(&f.data, Some("[sandbox]\nbwrap = \"/nonexistent/bwrap\"\n"));
+    let c = line(&out, "shell containment");
+    assert!(c.starts_with("FAIL  shell containment: NOT OFFERED"), "{c}");
+    let e = line(&out, "execution modes");
+    assert!(
+        e.starts_with("FAIL  execution modes: NONE")
+            && e.contains("this node offers no way to run commands: install bubblewrap, or set")
+            && e.contains("[execution] host = true"),
+        "{e}"
+    );
+    assert!(line(&out, "shell sandbox").starts_with("ok "), "{out}");
+    assert!(!ok, "doctor passed on a node that offers nothing: {out}");
 
     let (out, ok) = doctor(
         &f.data,
-        Some("[sandbox]\ncontain = \"required\"\nbwrap = \"/nonexistent/bwrap\"\n"),
+        Some("[sandbox]\nbwrap = \"/nonexistent/bwrap\"\n[execution]\nhost = true\n"),
+    );
+    assert!(line(&out, "shell containment").starts_with("warn  shell containment: NOT OFFERED"));
+    let e = line(&out, "execution modes");
+    assert!(
+        e.starts_with("warn  execution modes: not sandbox (") && e.contains("host (OFFERED"),
+        "{e}"
+    );
+    assert!(ok, "{out}");
+
+    let (out, _) = doctor(&f.data, Some("[execution]\nsandbox = \"off\"\n"));
+    let c = line(&out, "shell containment");
+    assert!(c.starts_with("FAIL  shell containment: NOT OFFERED"), "{c}");
+    assert!(c.contains("[execution] sandbox = \"off\""), "{c}");
+
+    let (out, ok) = doctor(
+        &f.data,
+        Some("[execution]\nsandbox = \"strict\"\n[sandbox]\nbwrap = \"/nonexistent/bwrap\"\n"),
     );
     let c = line(&out, "shell containment");
-    assert!(c.starts_with("FAIL  shell containment: REFUSING"), "{c}");
+    assert!(c.starts_with("FAIL  shell containment: NOT OFFERED"), "{c}");
     assert!(line(&out, "shell sandbox").starts_with("ok "), "{out}");
-    assert!(!ok, "doctor passed with a refusal: {out}");
+    assert!(!ok, "doctor passed with nothing offered: {out}");
 
-    // `required` on this kernel: refused below ABI 9 (T8A-1), else ok.
-    let (out, _) = doctor(&f.data, Some("[sandbox]\ncontain = \"required\"\n"));
+    // `strict` on this kernel: not offered below ABI 9 (T8A-1), else ok.
+    let (out, _) = doctor(&f.data, Some("[execution]\nsandbox = \"strict\"\n"));
     let c = line(&out, "shell containment");
     if abi >= 9 {
         assert!(c.starts_with("ok "), "{c}");

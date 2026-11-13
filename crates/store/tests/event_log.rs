@@ -23,6 +23,7 @@ fn created(sid: SessionId) -> RawEvent {
         sid,
         1,
         EventKind::SessionCreated(SessionCreated {
+            exec_mode: None,
             no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,

@@ -155,6 +155,7 @@ fn fake_with(
                     let now = harness_core::now_ms();
                     if let MasterToNode::Create { session_id, agent, .. } = &msg {
                         let created = EventKind::SessionCreated(SessionCreated {
+                            exec_mode: None,
                             title: "t".into(),
                             cwd: "/w".into(),
                             model: "demo::mock".into(),
