@@ -195,8 +195,12 @@ impl RepeatGuard {
 /// run of the same command (`harness_tools::bash`): the random id of the
 /// kept full output after filtering, and a stop's measured time. Each is
 /// masked from the lead to the end of its digits (or before the tail).
-const VOLATILE_AFTER: [&str; 2] = ["tool_output id=", "its guard confirmed the end ("];
-const VOLATILE_BEFORE: [&str; 1] = ["s after the stop was ordered"];
+/// The words are the tool's own constants, so they cannot drift apart.
+const VOLATILE_AFTER: [&str; 2] = [
+    harness_tools::KEPT_OUTPUT_LEAD,
+    harness_tools::ENDED_MS_LEAD,
+];
+const VOLATILE_BEFORE: [&str; 1] = [harness_tools::STILL_ALIVE_TAIL];
 
 /// The result as the guard compares it: without [`VOLATILE_AFTER`] and
 /// [`VOLATILE_BEFORE`]'s values. Only the harness's own tokens: a
@@ -290,33 +294,45 @@ mod tests {
     /// Review T1-R1: what the harness itself makes different on every run
     /// of the same command (the kept output's random id, a stop's measured
     /// time) is not part of the result; a program's own changing text is.
+    /// The texts are what `bash` writes (`tools/src/bash.rs`, through the
+    /// same constants); the filtered one also comes from a real run in
+    /// `repeat_tests::a_failing_build_the_filter_shortens_is_refused_the_fifth_time`.
     #[test]
     fn the_harness_own_volatile_tokens_are_not_the_result() {
+        use harness_tools::{ENDED_MS_LEAD, KEPT_OUTPUT_LEAD, STILL_ALIVE_TAIL};
+        let how = "timed out after 5s (state `timeout_secs`, up to 600 on this node, or run \
+                   it with `background: true`)";
+        let kept = |id: &str| {
+            format!(
+                "error[E0308]: mismatched types\n[filtered: 1 of 2 lines not shown; full \
+                 output: {KEPT_OUTPUT_LEAD}{id}]\n[exit code: 101]"
+            )
+        };
+        let ended = |ms: u32| {
+            format!(
+                "(no output)\n[{how}: the command and everything it started were killed; \
+                 {ENDED_MS_LEAD}{ms} ms)]"
+            )
+        };
+        let alive = |s: f64| {
+            format!(
+                "(no output)\n[{how} and killed, but NOT ended: a process of this command is \
+                 still alive {s:.1}{STILL_ALIVE_TAIL}; the kernel cannot end it yet (it waits \
+                 on I/O that does not return, as on a stalled network or FUSE file system). \
+                 Its guard keeps killing it; it ends when that I/O returns]"
+            )
+        };
         let pairs = [
-            (
-                "error[E0308]: mismatched types\n[filtered: 1 of 2 lines not shown; full \
-                 output: tool_output id=e7b5872348defe99]\n[exit code: 101]",
-                "error[E0308]: mismatched types\n[filtered: 1 of 2 lines not shown; full \
-                 output: tool_output id=247eae90ecb7cbcf]\n[exit code: 101]",
-            ),
-            (
-                "[timed out after 5 s: the command and everything it started were killed; \
-                 its guard confirmed the end (12 ms)]",
-                "[timed out after 5 s: the command and everything it started were killed; \
-                 its guard confirmed the end (347 ms)]",
-            ),
-            (
-                "[timed out after 5 s and killed, but NOT ended: a process of this command \
-                 is still alive 2.0s after the stop was ordered; the kernel cannot end it]",
-                "[timed out after 5 s and killed, but NOT ended: a process of this command \
-                 is still alive 12.3s after the stop was ordered; the kernel cannot end it]",
-            ),
+            (kept("e7b5872348defe99"), kept("247eae90ecb7cbcf")),
+            (ended(12), ended(347)),
+            (alive(2.0), alive(12.34)),
         ];
         for (i, (a, b)) in pairs.into_iter().enumerate() {
             let mut g = RepeatGuard::default();
             let k = key(json!({ "path": i }));
-            assert!(g.record(k, true, false, a).is_none());
-            assert!(g.record(k, true, false, b).is_some(), "pair {i}");
+            assert_ne!(a, b);
+            assert!(g.record(k, true, false, &a).is_none());
+            assert!(g.record(k, true, false, &b).is_some(), "pair {i}: {b}");
         }
         let mut g = RepeatGuard::default();
         let k = key(json!({"path": "poll"}));
