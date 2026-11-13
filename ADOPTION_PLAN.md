@@ -353,7 +353,7 @@ right after T.8a, because it changes how a command is started and T.8d's backgro
 rest on it), T.8b (network off), T.8c (the file view without Landlock) and T.8d (background
 commands), each its own small pull request because they change the sandbox; T.8b and T.8c need
 only T.8a, T.8d needs T.8e. N.4 stays in Phase N, but O13 makes it the way in for members at `container` (below). T.1, A.19 and A.20
-(the lock on the data directory) fit in between; they touch other files. A.21 (B.7's fix: the node's command loop, the agent loop's emit and the pump's acks) comes after N.10a part 1 and before part 2, the two parts as `feat/N.10a-node-modes` names them (not yet on `main`).
+(the lock on the data directory) fit in between; they touch other files. A.21 (B.7's fix: the node's command loop, the agent loop's emit and the pump's acks) comes after N.10a part 1 (on `main` since pull request 78) and before part 2.
 
 **Execution levels (the owner, 2026-11-12; decision O13, task N.10).** The owner's direction:
 a member the workspace does not trust yet (a new employee, a trainee) gets Podman only; a
