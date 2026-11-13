@@ -878,12 +878,17 @@ the code differs from the sections above, the code is described here.
   the last 65 minutes is checked once. A node that is away, does not ack in time or is stopping is
   tried again every 15 s; a node without `CAP_CALLBACK` is not asked. Duplicates are the node's to
   refuse (below), so a restart asks again without harm, and nothing is lost but by the 60-minute
-  rule. The rule uses the end's `ts_ms`, the node's clock, at each check: an end the master could
-  not resume within 60 minutes (it was down, the node away) is refused "it ended more than 60
-  minutes before the agent could be resumed". The age is the master's own: when the mirror took
-  the end (kept in memory per chat); after a master restart, the end's `ts_ms`, or now when that
-  is in the future, from the first check on (review S3-5). So a node clock hours behind or ahead
-  changes nothing, and the retries of one chat end 60 minutes after the master first saw the end.
+  rule. **The 60-minute rule** counts an end from the older of two times: its `ts_ms` (the node's
+  clock) and the moment this master first saw it (kept in memory per chat; after a master restart
+  the `ts_ms` alone, or now when that is in the future). So an end the master could not resume
+  within 60 minutes (it was down, the node away, the end replayed at a later hello) is refused "it
+  ended more than 60 minutes before the agent could be resumed (by its node's clock or this
+  server's)"; a node clock that is ahead keeps nothing fresh (review S3-5); and a node whose clock
+  is more than 60 minutes behind gets no callback turns, because the master cannot tell that from
+  an end replayed hours late (re-check R-1; it fails closed). The retries of one chat end with
+  the same rule. A node that is connected and announces no `CAP_CALLBACK` is not asked and
+  nothing is refused on its behalf, whatever the end's age or the owner's standing: off is silent
+  on the master's side too.
   At the master's start only chats with a `background_ended` in the last 65 minutes are checked,
   and a check reads only the `background_ended` rows after the floor, in the SQL (S3-3).
 - **Admission**, as §4.4 step 2 and exactly what the owner could do themselves at that moment: a

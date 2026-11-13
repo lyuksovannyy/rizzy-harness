@@ -1155,8 +1155,8 @@ routine's chat, a
 chat holding a webhook's data (untrusted) and a sub-agent's chat are never
 resumed, and neither is a chat without an owner account (made with the API
 token). An end recorded more than 60 minutes before the server could resume
-the chat (the server was down, the node away; counted on the server's clock)
-starts nothing. A callback turn
+the chat (the server was down, the node away; counted from the older of the
+node's clock and the moment the server first saw it) starts nothing. A callback turn
 runs in the chat's own approval mode (the node's `max_approval_mode` caps it):
 in `ask` its calls wait on their cards like any turn's, with no time limit, and
 your new message is refused "a turn is already running" until you answer or
