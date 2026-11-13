@@ -2483,7 +2483,7 @@ async fn a_node_with_the_feature_off_offers_no_background_tools() {
 /// Step 2 on the real binary (docs/background-commands.md §4.7): the
 /// person's stop over HTTP ends one background command with
 /// `stopped_by_user` and nothing of it is left 2 s after (the T.8a
-/// escapers); a second stop of it says it had already ended; Stop all ends
+/// escapers); a second stop of it is taken and adds no second end; Stop all ends
 /// every one still running. Another account's stop is 404 and the command
 /// still runs.
 #[tokio::test(flavor = "multi_thread")]
@@ -2519,16 +2519,21 @@ async fn the_persons_stop_over_http_ends_them_with_stopped_by_user() {
         .try_post(&format!("/api/sessions/{sid}/background/bg-1/stop"))
         .await;
     assert_eq!(st, reqwest::StatusCode::OK, "{v}");
-    assert_eq!(v["stopping"], json!(["bg-1"]), "{v}");
     let evs = s.wait_for(&sid, |e| e["kind"] == "background_ended").await;
     assert_eq!(real::ends(&evs), vec!["stopped_by_user"], "{evs:#?}");
     none_left(&one, "the person's stop").await;
-    // Again: it had already ended, and says how.
+    // Again: the node, which still keeps the ended command, takes it and
+    // records no second end.
     let (st, v) = s
         .try_post(&format!("/api/sessions/{sid}/background/bg-1/stop"))
         .await;
     assert_eq!(st, reqwest::StatusCode::OK, "{v}");
-    assert_eq!(v["ended"][0]["reason"], "stopped_by_user", "{v}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        real::ends(&s.events(&sid).await),
+        vec!["stopped_by_user"],
+        "a second stop added an end"
+    );
 
     // Two more in the same chat, then Stop all.
     let (c2, two) = detached(976_110);
@@ -2552,7 +2557,6 @@ async fn the_persons_stop_over_http_ends_them_with_stopped_by_user() {
         .try_post(&format!("/api/sessions/{sid}/background/stop"))
         .await;
     assert_eq!(st, reqwest::StatusCode::OK, "{v}");
-    assert_eq!(v["stopping"], json!(["bg-2", "bg-3"]), "{v}");
     let evs = s
         .wait_for(&sid, |e| {
             e["kind"] == "background_ended" && e["payload"]["bg_id"] == "bg-3"

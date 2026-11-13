@@ -1054,10 +1054,11 @@ more than the command's own timeout or less than zero, and only the node's
 end removes a row. Only the chat's owner can stop its commands (an admin
 cannot, as they cannot read the chat). For scripts: `POST
 /api/sessions/{id}/background/{bg_id}/stop` stops one, `POST
-/api/sessions/{id}/background/stop` all; the answer lists what the node was
-asked to stop (`stopping`) or, for a command that had already ended, how it
-ended (`ended`), and the end itself arrives as the chat's
-`background_ended` event.
+/api/sessions/{id}/background/stop` all. The node is always asked: 200 means
+it took the stop (also for a command that had just ended), 409 carries its
+refusal (an id it does not have), and the end itself arrives as the chat's
+`background_ended` event. An admin who must end another person's runaway
+command has the node: stopping it, or `background_per_session = 0` there.
 
 `bash` with `background: true` and a `timeout_secs`
 (required: a background call without one is refused before anything starts)

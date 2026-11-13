@@ -318,17 +318,14 @@ async fn the_owner_stops_one_and_all_and_the_node_is_told_it_is_the_person() {
 
     let (st, v) = req(&t, Method::POST, &one(sid, "bg-1"), None, &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["stopping"], json!(["bg-1"]), "{v}");
     assert_eq!(
         t.local.stops(),
         vec![(sid, Some("bg-1".to_string()), StopBackgroundBy::User)]
     );
 
-    // Stop all: every command the log shows running (bg-1's end has not
-    // come back yet), one message for all of them.
+    // Stop all: one message for all of them.
     let (st, v) = req(&t, Method::POST, &all(sid), None, &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["stopping"], json!(["bg-1", "bg-2"]), "{v}");
     assert_eq!(t.local.stops()[1], (sid, None, StopBackgroundBy::User));
 }
 
@@ -431,40 +428,29 @@ async fn a_stop_needs_the_login_key_and_the_pages_origin() {
 }
 
 #[tokio::test]
-async fn an_ended_one_is_a_success_that_says_so_and_an_unknown_one_is_the_nodes_refusal() {
+async fn the_node_is_always_asked_and_its_refusal_is_the_answer() {
     let t = start().await;
     let sid = chat(&t, &t.alex, "local", None).await;
     t.local.append(sid, started("bg-1"));
     t.local.append(sid, ended("bg-1", BackgroundReason::Exited));
     mirrored(&t, sid, 3).await;
 
-    // Twice: the same answer, and the node is not asked.
-    for _ in 0..2 {
-        let (st, v) = req(&t, Method::POST, &one(sid, "bg-1"), None, &t.alex).await;
-        assert_eq!(st, StatusCode::OK, "{v}");
-        assert_eq!(v["stopping"], json!([]), "{v}");
-        assert_eq!(
-            v["ended"],
-            json!([{"bg_id": "bg-1", "reason": "exited"}]),
-            "{v}"
-        );
-        assert!(
-            v["message"].as_str().unwrap().contains("had already ended"),
-            "{v}"
-        );
-    }
+    // A command the master's log shows ended is still the node's to
+    // answer: the master reads no log for a stop (review S2-2: that read
+    // scanned the chat's whole log under the mirror's lock).
+    let (st, v) = req(&t, Method::POST, &one(sid, "bg-1"), None, &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        t.local.stops(),
+        vec![(sid, Some("bg-1".to_string()), StopBackgroundBy::User)]
+    );
     // Stop all when the log shows none running: the node is asked all the
-    // same. The log here may be behind, or (a steered agent that starts
-    // thousands of short commands) may show less than the node runs; Stop
-    // all must not be something a command can hide from.
-    assert!(t.local.stops().is_empty(), "{:?}", t.local.stops());
+    // same; Stop all must not be something a command can hide from.
     let (st, v) = req(&t, Method::POST, &all(sid), None, &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["stopping"], json!([]), "{v}");
-    assert_eq!(t.local.stops(), vec![(sid, None, StopBackgroundBy::User)]);
+    assert_eq!(t.local.stops()[1], (sid, None, StopBackgroundBy::User));
 
-    // An id the log does not know: the node decides, and its refusal is
-    // the answer.
+    // An id the node does not have: its refusal is the answer.
     let (st, v) = req(&t, Method::POST, &one(sid, "bg-9"), None, &t.alex).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert!(
@@ -474,7 +460,7 @@ async fn an_ended_one_is_a_success_that_says_so_and_an_unknown_one_is_the_nodes_
             .contains("no background command bg-9"),
         "{v}"
     );
-    assert_eq!(t.local.stops().len(), 2);
+    assert_eq!(t.local.stops().len(), 3);
 
     // Not an id at all: refused here.
     for bad in ["bg-", "bg-1x", "1", "bg-12345678901", "..%2Fbg-1"] {
@@ -484,7 +470,7 @@ async fn an_ended_one_is_a_success_that_says_so_and_an_unknown_one_is_the_nodes_
             "{bad}: {st} {v}"
         );
     }
-    assert_eq!(t.local.stops().len(), 2);
+    assert_eq!(t.local.stops().len(), 3);
 }
 
 #[tokio::test]

@@ -5,20 +5,20 @@
 //! (T10). Like the turn's cancel it needs no settled password and no
 //! agentic grant: stopping work is always allowed (Gate 3 review P-7).
 //!
-//! The master runs nothing. It reads what the log shows (for one command,
-//! an end already recorded is answered here, the same every time, without
-//! asking the node; Stop all is always sent), then relays `session.stop_background { by: user }` to the owning
-//! node, which alone decides: it stops the command and records
-//! `background_ended { reason: stopped_by_user }`, or refuses with its
-//! reason, which is passed on. The answer says what was asked of the node
-//! (`stopping`); the end itself arrives as the event, as every end does.
+//! The master runs nothing and reads no log for this: it relays
+//! `session.stop_background { by: user }` to the owning node, which alone
+//! decides. The node stops the command and records
+//! `background_ended { reason: stopped_by_user }`, takes a stop of a
+//! command that has just ended without a second end, or refuses with its
+//! reason (an id it does not have), which is passed on. Stop all is always
+//! sent: what the master's log shows may be behind what the node runs, and
+//! Stop all must not be something a command can hide from. The end itself
+//! arrives as the event, as every end does.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
-use harness_core::RawEvent;
-use harness_core::event::{BackgroundReason, EventKind};
 use harness_protocol::{CAP_BACKGROUND, StopBackgroundBy};
 use serde_json::{Value, json};
 
@@ -53,30 +53,6 @@ fn is_bg_id(s: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// What the log shows: the commands started and not ended, in the order
-/// they started, and the ended ones with their reason.
-fn shown(events: &[RawEvent]) -> (Vec<String>, Vec<(String, BackgroundReason)>) {
-    let mut running: Vec<String> = Vec::new();
-    let mut ended: Vec<(String, BackgroundReason)> = Vec::new();
-    for e in events {
-        match e.typed() {
-            Ok(EventKind::BackgroundStarted(b)) => {
-                if !running.contains(&b.bg_id) && !ended.iter().any(|(id, _)| *id == b.bg_id) {
-                    running.push(b.bg_id);
-                }
-            }
-            Ok(EventKind::BackgroundEnded(b)) => {
-                running.retain(|id| *id != b.bg_id);
-                if !ended.iter().any(|(id, _)| *id == b.bg_id) {
-                    ended.push((b.bg_id, b.reason));
-                }
-            }
-            _ => {}
-        }
-    }
-    (running, ended)
-}
-
 /// The node is not connected: the stop cannot reach it. Said plainly, with
 /// what happens to the commands instead.
 fn away(node: &str) -> ApiError {
@@ -107,33 +83,6 @@ async fn stop(
         ));
     }
     let sid = row.session_id;
-    let log = m
-        .inner
-        .mirror
-        .call(move |s| s.background_events(sid))
-        .await?;
-    let (running, ended) = shown(&log);
-    let stopping = match &bg {
-        Some(b) => {
-            if let Some((_, reason)) = ended.iter().find(|(id, _)| id == b) {
-                return Ok(Json(json!({
-                    "ok": true,
-                    "stopping": [],
-                    "ended": [{"bg_id": b, "reason": reason}],
-                    "message": format!("{b} had already ended: it {}", reason.words()),
-                })));
-            }
-            // An id the log does not show running is still the node's to
-            // judge (a start whose event is on its way, or a refusal).
-            vec![b.clone()]
-        }
-        // Stop all is always the node's to carry out, whatever this log
-        // shows: it may be behind, and it is read through a bounded window
-        // (`Store::background_events`) that a chat starting thousands of
-        // short commands could push a long-running one out of. The answer
-        // names what the log shows; the node stops what it runs.
-        None => running,
-    };
     let node = row.node_id.clone();
     if !m.is_connected(&node) {
         return Err(away(&node));
@@ -148,9 +97,7 @@ async fn stop(
     }
     tracing::info!(session = %sid, bg = bg.as_deref().unwrap_or("all"), "the owner stops background commands");
     match m.stop_background(sid, bg, StopBackgroundBy::User).await {
-        Ok(()) => Ok(Json(
-            json!({ "ok": true, "stopping": stopping, "ended": [] }),
-        )),
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
         // The link went between the check and the send.
         Err(CommandError::NodeOffline(_)) => Err(away(&node)),
         // The node's refusal (409, its words), no answer in time (504), a
