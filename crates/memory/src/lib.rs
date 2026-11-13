@@ -69,6 +69,9 @@ pub struct NewFact {
 pub enum MemoryError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// The schema version: a newer build's database, or a failed migration.
+    #[error(transparent)]
+    Migrate(#[from] harness_store::migrate::MigrateError),
     #[error("{0}")]
     Invalid(String),
     #[error("embeddings: {0}")]

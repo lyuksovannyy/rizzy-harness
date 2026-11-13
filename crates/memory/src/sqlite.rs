@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
 use harness_core::SessionId;
+use harness_store::migrate::migrate;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::embed::{cosine, from_blob, to_blob};
@@ -108,17 +109,22 @@ fn fts_query(q: &str) -> Option<String> {
 
 impl SqliteMemory {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Before anything else writes: a newer build's file is refused as is.
+        migrate(&mut conn, &path.display().to_string(), MIGRATIONS)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        let mut conn = Connection::open_in_memory()?;
+        migrate(&mut conn, ":memory:", MIGRATIONS)?;
+        Self::init(conn)
     }
 
+    /// Per-connection settings, on a database already at `MIGRATIONS`.
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
         // Deleted memories are overwritten, not just unlinked.
         conn.pragma_update(None, "secure_delete", "ON")?;
         Ok(Self {

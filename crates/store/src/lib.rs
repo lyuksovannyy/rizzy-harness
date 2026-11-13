@@ -34,6 +34,9 @@ pub enum StoreError {
         owner: String,
         claimed: String,
     },
+    /// The schema version: a newer build's database, or a failed migration.
+    #[error(transparent)]
+    Migrate(#[from] migrate::MigrateError),
     #[error("corrupt row: {0}")]
     Corrupt(String),
     #[error("already exists: {0}")]
@@ -611,26 +614,28 @@ fn is_incognito(payload: &serde_json::Value) -> bool {
 
 impl Store {
     pub fn open(path: &Path, durability: Durability) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
+        // Wait for another connection's write (a migration too), not fail.
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Before anything else writes: a newer build's file is refused as is.
+        migrate::migrate(&mut conn, &path.display().to_string(), MIGRATIONS)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let sync = match durability {
             Durability::Full => "FULL",
             Durability::Normal => "NORMAL",
         };
         conn.pragma_update(None, "synchronous", sync)?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
         Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        let mut conn = Connection::open_in_memory()?;
+        migrate::migrate(&mut conn, ":memory:", MIGRATIONS)?;
+        Self::init(conn)
     }
 
-    fn init(mut conn: Connection) -> Result<Self> {
-        migrate::migrate(&mut conn, "store", MIGRATIONS).map_err(|e| match e {
-            migrate::MigrateError::Sqlite { source, .. } => StoreError::Sqlite(source),
-            other => StoreError::Corrupt(other.to_string()),
-        })?;
+    /// Per-connection settings, on a database already at `MIGRATIONS`.
+    fn init(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Deleted chats (incognito, user deletes) are overwritten, not just
         // unlinked, so their text does not linger in free pages.

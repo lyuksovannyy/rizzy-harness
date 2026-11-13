@@ -61,18 +61,56 @@ fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
-/// Placeholder with the behaviour before 4.3: every step runs on every
-/// open and no version is kept.
+/// Bring `conn` to version `steps.len()`, or refuse. `db` names the file in
+/// the error (a path or a file name; never anything secret).
 pub fn migrate(conn: &mut Connection, db: &str, steps: &[Migration]) -> Result<(), MigrateError> {
-    let _ = (TransactionBehavior::Immediate, user_version);
-    for sql in steps.iter().flat_map(|s| s.iter()) {
-        conn.execute_batch(sql)
-            .map_err(|source| MigrateError::Sqlite {
+    let known = steps.len() as i64;
+    let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
+        db: db.to_string(),
+        source,
+    };
+    let refuse = |found: i64| {
+        if found < 0 {
+            Err(MigrateError::Unknown {
                 db: db.to_string(),
-                source,
-            })?;
+                found,
+            })
+        } else if found > known {
+            Err(MigrateError::TooNew {
+                db: db.to_string(),
+                found,
+                known,
+            })
+        } else {
+            Ok(found)
+        }
+    };
+    // Read first, outside any write: an up-to-date or newer file is never
+    // written to (a read-only disk still opens an up-to-date one).
+    if refuse(user_version(conn).map_err(sqlite)?)? == known {
+        return Ok(());
     }
-    Ok(())
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite)?;
+    // Again under the write lock: another process may have migrated it.
+    let from = refuse(user_version(&tx).map_err(sqlite)?)?;
+    for (i, step) in steps.iter().enumerate().skip(from as usize) {
+        for sql in *step {
+            tx.execute_batch(sql)
+                .map_err(|source| MigrateError::Failed {
+                    db: db.to_string(),
+                    from,
+                    to: known,
+                    step: i as i64 + 1,
+                    source,
+                })?;
+        }
+    }
+    // Dropping `tx` on any error above rolls everything back.
+    tx.pragma_update(None, "user_version", known)
+        .map_err(sqlite)?;
+    tx.commit().map_err(sqlite)
 }
 
 /// The schema of `conn` as text: every object in `sqlite_master` (FTS5's
