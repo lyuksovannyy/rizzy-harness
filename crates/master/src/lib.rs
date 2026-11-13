@@ -1745,13 +1745,6 @@ impl Master {
                 && !untrusted
                 && !resume,
         };
-        // What this turn may write, for the `remember` calls it makes. A
-        // callback turn records nothing here: `file_proposal` files nothing
-        // from a turn whose `turn_started` has a cause (the log decides, also
-        // after a restart), and the chat's entry stays the running turn's
-        // when the node answers "nothing to resume" (review S3-1). A
-        // person's prompt the node refuses puts the earlier entry back.
-        let before = (!resume).then(|| lock(&self.inner.turn_memory).insert(sid, allowed));
         projects::offer_remember(r.agents(), &mut agent, allowed);
         if untrusted {
             deny_untrusted(&mut agent);
@@ -1828,6 +1821,14 @@ impl Master {
                 "Too much attached to one message".into(),
             ));
         }
+        // What this turn may write, for the `remember` calls it makes,
+        // recorded only now that nothing but the node can refuse the
+        // prompt, and put back as it was when the node does: the turn that
+        // runs keeps its own (an untrusted turn's none, say). A callback
+        // turn records nothing at all (it returned above): `file_proposal`
+        // files nothing from a turn whose `turn_started` has a cause, which
+        // the log decides, also after a restart (review S3-1).
+        let before = lock(&self.inner.turn_memory).insert(sid, allowed);
         let sent = self
             .send_command(&row.node_id, move |req_id| {
                 if let MasterToNode::Prompt { req_id: r, .. } = &mut msg {
@@ -1836,10 +1837,9 @@ impl Master {
                 msg
             })
             .await;
-        // Refused or never sent: no turn of this prompt runs, so the turn
-        // that does (a callback turn, say) keeps what it had. Not after a
+        // Refused or never sent: no turn of this prompt runs. Not after a
         // timeout: the node may have taken it.
-        if let (Err(e), Some(before)) = (&sent, before)
+        if let Err(e) = &sent
             && !matches!(e, CommandError::Timeout)
         {
             let mut tm = lock(&self.inner.turn_memory);

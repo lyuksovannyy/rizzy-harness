@@ -72,10 +72,9 @@ struct Chat {
     /// Background commands the mirror shows running: id to its deadline
     /// (node clock).
     running: BTreeMap<String, i64>,
-    /// When this master first saw each end that may call back (its seq),
-    /// on its own clock: the 60-minute rule ages ends by it, never by the
-    /// node's clock (review S3-5). An end first seen by a check after a
-    /// restart takes its own `ts_ms`, or now when that is in the future.
+    /// Where the 60-minute rule counts each waiting end from (by its seq):
+    /// the older of the end's `ts_ms` (the node's clock) and the moment
+    /// this master first saw it (review S3-5, R-1).
     seen_at: HashMap<u64, i64>,
     /// A check of this chat runs; `again`: an end came meanwhile.
     busy: bool,
@@ -118,7 +117,9 @@ pub(crate) fn on_applied(m: &Master, e: &RawEvent) {
                 let c = chats.entry(sid).or_default();
                 c.running.remove(&b.bg_id);
                 if b.calls_back() {
-                    c.seen_at.insert(e.seq, harness_core::now_ms());
+                    // The older of the two clocks (R-1): an end replayed
+                    // after the link was down keeps its age.
+                    c.seen_at.insert(e.seq, harness_core::now_ms().min(e.ts_ms));
                 }
             }
             let _ = m.inner.live.send(Live::SessionsChanged);
@@ -238,10 +239,21 @@ async fn check(m: &Master, sid: SessionId) -> Next {
     let Some(newest) = waiting.iter().map(|w| w.0).max() else {
         return Next::Done;
     };
+    // A node that takes no callbacks (`callback_turns = 0`, or an older
+    // one) is not asked, so there is nothing to refuse either: the end
+    // waits for the person as before step 3, without a word. Before every
+    // refusal of the master's own, or off would not be silent.
+    let takes = m.node_has(&row.node_id, harness_protocol::CAP_CALLBACK);
+    if !takes && m.is_connected(&row.node_id) {
+        return Next::Done;
+    }
     let all: Vec<String> = waiting.iter().map(|w| w.2.bg_id.clone()).collect();
     let now = harness_core::now_ms();
-    // Each end's age on this master's clock (S3-5); kept only for ends that
-    // still wait, so the map stays small.
+    // Each end's age: from the older of its `ts_ms` (the node's clock) and
+    // the moment this master first saw it (S3-5, R-1). A node clock that is
+    // ahead keeps nothing fresh; an end replayed hours later, or stamped by
+    // a clock that far behind (the master cannot tell which), is old. Kept
+    // only for ends that still wait, so the map stays small.
     let seen: Vec<i64> = {
         let mut chats = lock(&m.inner.callbacks.chats);
         let c = chats.entry(sid).or_default();
@@ -261,7 +273,9 @@ async fn check(m: &Master, sid: SessionId) -> Next {
         .collect();
     let ts = waiting.iter().map(|w| w.1).max().unwrap_or(now);
     if fresh.is_empty() {
-        let why = "it ended more than 60 minutes before the agent could be resumed".to_string();
+        let why = "it ended more than 60 minutes before the agent could be resumed \
+                   (by its node's clock or this server's)"
+            .to_string();
         refuse(m, &row, all, why, newest, ts).await;
         return Next::Done;
     }
@@ -269,14 +283,9 @@ async fn check(m: &Master, sid: SessionId) -> Next {
         refuse(m, &row, all, why, newest, ts).await;
         return Next::Done;
     }
-    // A node that does not resume chats: nothing to say, the end waits for
-    // the person as before step 3.
-    if !m.node_has(&row.node_id, harness_protocol::CAP_CALLBACK) {
-        return if m.is_connected(&row.node_id) {
-            Next::Done
-        } else {
-            Next::Retry
-        };
+    // Its node is away: what it takes is known at its next hello.
+    if !takes {
+        return Next::Retry;
     }
     let sent = m
         .prompt(
