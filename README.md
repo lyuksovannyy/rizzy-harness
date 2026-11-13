@@ -672,6 +672,9 @@ max_steps = 50                       # model calls one turn may make (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
+background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
+background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
+background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -1016,11 +1019,44 @@ own, smaller cap and says when the live stream was cut.
 
 **Step and time limits.** A turn ends after `[limits] max_steps` model calls
 (default 50, 1 to 1000; a sub-agent's turn has the same cap) with the message
-"stopped after N steps (`max_steps` in node.toml)". `bash` runs at most
-`[limits] bash_timeout_max_s` seconds (default 3600, 1 to 3600): a call that
-asks for more is cut at that value, and the tool description the model sees
-states it. Neither an agent definition, a prompt nor the master can raise
-either; a value outside its range stops the node at start.
+"stopped after N steps (`max_steps` in node.toml)". A `bash` call runs for
+the `timeout_secs` it states, at least 5 s and at most `[limits]
+bash_timeout_max_s` seconds (default 3600, 1 to 3600, which wins over the
+5 s floor if set lower); **a call that states none stops after 60 s** (it was
+600 s before background commands existed): a build or test run that takes
+longer must say so, or run in the background. The timeout result says how.
+The tool description the model sees states the ceiling. Neither an agent
+definition, a prompt nor the master can raise either; a value outside its
+range stops the node at start.
+
+**Background commands.** `bash` with `background: true` and a
+`timeout_secs` (required: a background call without one is refused before
+anything starts) is for a dev server, a watcher or a long build. The call
+waits 3 s: a command that ended by then is an ordinary result; one still
+running is kept by the node as `bg-1`, `bg-2`, … and the call returns its
+id, when its timeout will stop it and what it printed so far. It is the same
+contained command as any other (its own bubblewrap, guard, file view and,
+with the network off, network namespace), so later commands cannot see it in
+`ps` or signal it; the agent reads it with `bash_output { id }` (no id lists
+the chat's commands) and stops it with `bash_stop { id }`. Its output is kept
+in the node's memory only (the first and the last part, `background_output_kb`
+in all, readable for 30 minutes after its end), never on disk. When it ends
+(it exits, its timeout, a stop) the chat log records it once, and the agent
+is told at its next step if a turn is running, or with your next message if
+not; an end never starts a turn by itself (that comes later, as "callback
+turns"). Under `ask` the approval card says the command keeps running and
+for how long. The limits are node.toml's only: at most `background_per_session`
+per chat and `background_per_node` per node (a start over either is refused,
+naming the chat's running ids; nothing is stopped to make room);
+`background_per_session = 0` turns the feature off. Background commands are
+refused in a sub-agent's session and on a node that does not contain the
+shell (`[sandbox] contain = "off"`, or bubblewrap does not work there).
+**With `[sandbox] network = "off"` a server started in the background cannot
+be reached** by a later command: each command has a network namespace of its
+own; the start's result says so. **Stop** of a turn leaves its background
+commands running; they stop at their timeout, with `bash_stop`, when the chat
+is deleted, when its owner loses access to it, and when the node stops or
+dies. An undo is refused while one of the chat's background commands runs.
 
 When a model's answer reaches its output limit while it is writing a tool
 call, that call (and every other call in the same answer) is not run, even if
@@ -1306,6 +1342,12 @@ Upgrade the server first, then its nodes.
 - A **second** signal while it waits exits at once with status 1. Each
   command's guard ends its command when the node process is gone, and the
   next start closes the open turns.
+
+Background commands are not waited for: the stop ends each one as above
+(SIGTERM, then its guard's kill) and the chat records it as ended because
+the node stopped. After a crash or `kill -9` they die with the node (their
+guards end them within half a second), and at the next start each is
+recorded as ended with the node; no turn starts for it.
 
 What can outlive a stop: a command stuck in a read the kernel cannot
 interrupt (a network folder whose server went away) keeps its guard until

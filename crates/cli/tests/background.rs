@@ -1041,10 +1041,8 @@ async fn cancel_leaves_them_revocation_and_delete_stop_them() {
     let (cmd, reaper) = detached(975_400);
     n.turn(json!([
         {"tool": "bash", "input": {"command": format!("{cmd} sleep 1000"), "background": true, "timeout_secs": 600}},
-        {"tool": "bash", "input": {"command": "sleep 975499"}},
     ]))
     .await;
-    // (The second call ran to its 60 s default? No: cancelled below.)
     all_started(&reaper).await;
     // A turn and its cancel: the background command keeps running.
     n.prompt(&format!(
@@ -1164,16 +1162,20 @@ fn processes() -> usize {
 async fn measure_64_background_commands() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
-    let (bg, _ends) = table(Limits::default());
-    let ctx = f.ctx(sb, &bg);
+    // Eight chats of eight: the node's 64.
+    let reg = Registry::new(Limits::default());
+    let (tx, _ends) = mpsc::unbounded_channel();
+    let tables: Vec<Arc<SessionBg>> = (0..8).map(|_| reg.session(1, tx.clone())).collect();
+    let ctxs: Vec<ToolCtx> = tables.iter().map(|t| f.ctx(sb.clone(), t)).collect();
+    let _r = Reaper((975_700..975_764).collect());
     let (rss0, procs0) = (rss_kib(), processes());
     let mut costs = vec![];
-    for i in 0..64 {
+    for i in 0..64u32 {
         let t = Instant::now();
         // Fills its 256 KiB ring, then sleeps.
         let r = run(
             &Bash,
-            &ctx,
+            &ctxs[(i / 8) as usize],
             json!({"command": format!("head -c 600000 /dev/zero | tr '\\0' x; exec sleep {}", 975_700 + i),
                    "background": true, "timeout_secs": 600}),
         )
@@ -1183,8 +1185,7 @@ async fn measure_64_background_commands() {
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     let (rss1, procs1) = (rss_kib(), processes());
-    let o = run(&BashOutput, &ctx, json!({})).await;
-    assert_eq!(o.output.matches("running").count(), 64, "{}", o.output);
+    assert_eq!(reg.running(), 64);
     eprintln!(
         "64 running, rings full: RSS {rss0} -> {rss1} KiB (+{} KiB); processes {procs0} -> {procs1} (+{}); \
          a start's call (its 3 s first wait included) {:?} .. {:?}",
@@ -1193,18 +1194,28 @@ async fn measure_64_background_commands() {
         costs.iter().min().unwrap(),
         costs.iter().max().unwrap()
     );
+    let o = run(&BashOutput, &ctxs[0], json!({"id": "bg-1"})).await;
+    assert!(o.output.contains("600000 bytes"), "{}", &o.output[..300]);
     let r = run(
         &Bash,
-        &ctx,
+        &ctxs[0],
         json!({"command": "true", "background": true, "timeout_secs": 5}),
     )
     .await;
-    eprintln!("the 65th in one chat: {}", r.output);
+    eprintln!("the 65th: {}", r.output);
     let t = Instant::now();
-    bg.stop_all_within(BackgroundReason::StoppedByAgent, Duration::from_secs(30))
-        .await;
-    eprintln!("stopping 64 at once took {:?}", t.elapsed());
-    let _r = Reaper((975_700..975_764).collect());
+    for tb in &tables {
+        tb.stop_all(BackgroundReason::StoppedByAgent);
+    }
+    for tb in &tables {
+        tb.stop_all_within(BackgroundReason::StoppedByAgent, Duration::from_secs(30))
+            .await;
+    }
+    eprintln!(
+        "stopping 64 at once took {:?}; running now {}",
+        t.elapsed(),
+        reg.running()
+    );
 }
 
 /// The guard held long (§9.3): a background command whose guard has run
