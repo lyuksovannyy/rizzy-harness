@@ -33,6 +33,15 @@ fn config_with(
     policy: NodePolicy,
     provider: Arc<dyn harness_agent_native::Provider>,
 ) -> NodeConfig {
+    config_native(store, policy, provider, NativeConfig::default())
+}
+
+fn config_native(
+    store: Store,
+    policy: NodePolicy,
+    provider: Arc<dyn harness_agent_native::Provider>,
+    native: NativeConfig,
+) -> NodeConfig {
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
@@ -41,7 +50,7 @@ fn config_with(
         backend: Arc::new(NativeBackend::new(
             provider,
             harness_tools::builtin(),
-            NativeConfig::default(),
+            native,
         )),
         default_model: "mock".into(),
         secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(
@@ -76,6 +85,33 @@ impl Harness {
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
         let mut cfg = config_with(store, policy(dir.path()), provider);
         cfg.checkpoints_dir = Some(dir.path().join("checkpoints"));
+        Self::started(dir, ws, cfg).await
+    }
+
+    /// A node set up as `rizzy-harness` sets one up: its data directory
+    /// `<tmp>/data` (store, checkpoints, the sub-agents' `sessions`
+    /// folder) is protected for the node's policy and for the file tools.
+    /// The shell is not sandboxed here (`crates/cli/tests` has the
+    /// wrapper).
+    async fn with_data_dir(provider: Arc<dyn harness_agent_native::Provider>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let data = dir.path().join("data");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        let mut policy = auto_policy(dir.path());
+        policy.protect(&data);
+        let native = NativeConfig {
+            protected_dirs: Arc::new(policy.protected_dirs.clone()),
+            ..Default::default()
+        };
+        let store = Store::open(&data.join("node.db"), Durability::Full).unwrap();
+        let mut cfg = config_native(store, policy, provider, native);
+        cfg.checkpoints_dir = Some(data.join("checkpoints"));
+        Self::started(dir, ws, cfg).await
+    }
+
+    async fn started(dir: tempfile::TempDir, ws: std::path::PathBuf, cfg: NodeConfig) -> Self {
         let node = NodeRuntime::start(cfg).await.unwrap();
         let mut link = node.attach().await;
         match link.from_node.recv().await.unwrap() {
@@ -2925,6 +2961,180 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
         .iter()
         .any(|e| e.payload.to_string().contains("SSH-KEY-CANARY"));
     assert!(!leaked, "the other folder's file reached the chat");
+}
+
+/// Every finished tool call of `session` seen so far: `(tool, ok, output)`.
+fn results_of(h: &Harness, session: SessionId) -> Vec<(String, bool, String)> {
+    let mut tools = std::collections::HashMap::new();
+    let mut out = vec![];
+    for e in h.seen.iter().filter(|e| e.session_id == session) {
+        match e.typed() {
+            Ok(EventKind::ToolCallStarted(c)) => {
+                tools.insert(c.call_id, c.tool);
+            }
+            Ok(EventKind::ToolCallFinished(f)) => {
+                let tool = tools.get(&f.call_id).cloned().unwrap_or_default();
+                out.push((tool, f.ok, f.output));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Prompt `sid` (as `agent`) and wait until its own turn ends.
+async fn turn_of(
+    h: &mut Harness,
+    sid: SessionId,
+    agent: Option<harness_core::agent::AgentSpec>,
+    text: String,
+) {
+    h.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent,
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: sid,
+        text,
+        images: vec![],
+    });
+    loop {
+        h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+        if h.seen.last().is_some_and(|e| e.session_id == sid) {
+            break;
+        }
+    }
+}
+
+/// S-2 inside a turn, through the node's real loop: the session's own
+/// shell renames its folder away and puts a link to another folder in its
+/// place (what the review did from a sub-agent). The session's turn check
+/// passed before; every later tool call of the same turn (`read`, `write`,
+/// `bash`) is refused with the pin's reason, and nothing of the other
+/// folder is read or written.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_folder_replaced_during_a_turn_refuses_the_next_tool_calls() {
+    let mut h = Harness::with_provider(auto_policy, Arc::new(Script)).await;
+    let other = h._dir.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
+    let sid = h.create().await;
+    let ws = h.ws.display().to_string();
+    let swap = format!(
+        "cd / && mv {ws} {ws}.moved && ln -s {o} {ws} && echo swapped",
+        o = other.display()
+    );
+    let calls = serde_json::json!([
+        bash(&swap),
+        ["read", {"path": "id_ed25519"}],
+        ["write", {"path": "authorized_keys", "content": "attacker\n"}],
+        bash("cat id_ed25519; echo x > planted"),
+    ]);
+    turn_of(&mut h, sid, None, calls.to_string()).await;
+    let results = results_of(&h, sid);
+    assert_eq!(results.len(), 4, "{results:#?}");
+    assert!(
+        results[0].1 && results[0].2.contains("swapped"),
+        "{results:#?}"
+    );
+    for (tool, ok, out) in &results[1..] {
+        assert!(
+            !ok && out.contains("folder was replaced"),
+            "{tool} ran in the replaced folder: {out}"
+        );
+    }
+    assert!(!other.join("authorized_keys").exists());
+    assert!(!other.join("planted").exists());
+    let leaked = h
+        .seen
+        .iter()
+        .any(|e| e.payload.to_string().contains("SSH-KEY-CANARY"));
+    assert!(!leaked, "the other folder's file reached the chat");
+}
+
+/// T32 through the node's real delegation, on a node set up as the binary
+/// sets one up (its data directory protected): a sub-agent that can change
+/// files works in its own node-owned folder under `<data>/sessions`. Its
+/// `write` and its `bash` work there, its changes are merged back into the
+/// parent's folder, and its file tools still reach neither the rest of the
+/// data directory (the node's database), nor another session's folder, nor
+/// the parent's folder (outside its grants).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_writing_sub_agent_works_in_its_own_folder_and_nowhere_else() {
+    let mut h = Harness::with_data_dir(Arc::new(Script)).await;
+    init_repo(&h.ws);
+    let data = h._dir.path().join("data").canonicalize().unwrap();
+    let sibling = data.join("sessions/other/files");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("s.txt"), "SIBLING-WORK\n").unwrap();
+    std::fs::write(h.ws.join("parent.txt"), "PARENT-ONLY\n").unwrap();
+    let sid = h.create().await;
+    let child_calls = serde_json::json!([
+        ["write", {"path": "made.txt", "content": "by the child\n"}],
+        bash("pwd; echo v2 > keep.txt; cat made.txt"),
+        ["read", {"path": data.join("node.db").display().to_string()}],
+        ["read", {"path": sibling.join("s.txt").display().to_string()}],
+        ["write", {"path": sibling.join("planted").display().to_string(), "content": "x\n"}],
+        ["read", {"path": h.ws.join("parent.txt").display().to_string()}],
+    ]);
+    let dev = agent_with("dev", &["write", "bash", "read"], vec![]);
+    let task = serde_json::json!(["delegate", {"agent": "dev", "task": child_calls.to_string()}]);
+    turn_of(
+        &mut h,
+        sid,
+        Some(agent("lead", vec![dev])),
+        serde_json::json!([task]).to_string(),
+    )
+    .await;
+    let parent = results_of(&h, sid);
+    let child: Vec<_> = h
+        .seen
+        .iter()
+        .map(|e| e.session_id)
+        .filter(|s| *s != sid)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(child.len(), 1, "one child session: {parent:#?}");
+    let r = results_of(&h, child[0]);
+    assert_eq!(r.len(), 6, "{r:#?}");
+    assert!(r[0].1, "the child's write was refused: {}", r[0].2);
+    assert!(r[1].1, "the child's shell failed: {}", r[1].2);
+    let pwd = r[1].2.lines().next().unwrap_or("");
+    assert!(
+        pwd.starts_with(&data.join("sessions").display().to_string()) && pwd.ends_with("/files"),
+        "the child's shell is not in its own folder: {}",
+        r[1].2
+    );
+    assert!(r[1].2.contains("by the child"), "{}", r[1].2);
+    for (i, what) in [
+        (2, "the data directory"),
+        (3, "a sibling"),
+        (4, "a sibling"),
+        (5, "the parent's folder"),
+    ] {
+        assert!(!r[i].1, "the child reached {what}: {}", r[i].2);
+    }
+    assert!(
+        !r.iter()
+            .any(|(_, _, o)| o.contains("SIBLING-WORK") || o.contains("PARENT-ONLY"))
+    );
+    assert!(!sibling.join("planted").exists());
+    let out = &parent.last().expect("the delegate call").2;
+    assert!(out.contains("2 changed file(s) applied"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("made.txt")).unwrap(),
+        "by the child\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("keep.txt")).unwrap(),
+        "v2\n"
+    );
 }
 
 /// Every file under `dir` with its size, `.git` included (to see that

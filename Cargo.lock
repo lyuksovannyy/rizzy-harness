@@ -1403,6 +1403,7 @@ name = "harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "dirs",
@@ -1416,6 +1417,7 @@ dependencies = [
  "harness-master",
  "harness-memory",
  "harness-node",
+ "harness-protocol",
  "harness-store",
  "harness-tools",
  "nix",
