@@ -706,8 +706,12 @@ Where the code differs from the sections above, the code is described here.
   alone, the same at the step boundary and in later history. It does not name the command (the
   event does not carry it, §4.8) and says "kept for 30 minutes after the end" instead of a time
   of day. The output is quoted line by line (every line behind `| `, control characters but tab
-  replaced) under one first line that says how many lines follow, so exactly one line starts
-  with `[harness]` whatever the program prints. Inside the loop it is a `ChatMsg::Note`, which is
+  replaced) under one first line that says how many lines follow, so exactly one line of a note
+  starts with `[harness]` whatever the program prints; and in every tool result sent to the
+  provider a line of the result's own text that starts with `[harness]` is sent as
+  `\[harness]…` (`escape_leads`, review R-2), so a foreground command of the same step cannot put
+  a note of its own beside the real one. The log and the UI keep the program's text as it was.
+  Inside the loop it is a `ChatMsg::Note`, which is
   **not** URL provenance (a `ChatMsg::User` would have made program output trusted for
   `web_fetch`: `observed_text` takes every user message); at the provider boundary
   (`place_notes`) a note joins the step's last tool result, or goes in front of the person's

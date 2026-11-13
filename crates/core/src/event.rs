@@ -285,11 +285,13 @@ impl BackgroundEnded {
     }
 }
 
-/// How the harness's note about a background command begins. Inside a
-/// note only the harness writes a line that starts with it: the command's
-/// own output is quoted. A tool result the note is added to is a different
-/// matter: a foreground command can print the same text there, in the tool
-/// role, where everything is program output anyway.
+/// How the harness's note about a background command begins. In what the
+/// model is sent only the harness writes a line that starts with it: inside
+/// a note the command's own output is quoted, and in every tool result a
+/// line of the result's own text that starts with it is sent as
+/// `\[harness]…` (`agent_native::provider::escape_leads`, R-2), whether a
+/// note joins that result or not. The log and the UI keep the text as it
+/// was printed.
 pub const NOTE_LEAD: &str = "[harness]";
 
 /// The prefix of every quoted line of a background command's output.
