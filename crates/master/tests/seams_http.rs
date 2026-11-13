@@ -37,7 +37,11 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Seen) {
             node_id: node_id.into(),
             hostname: "h".into(),
             version: "0".into(),
-            capabilities: caps.iter().map(|c| c.to_string()).collect(),
+            capabilities: caps
+                .iter()
+                .map(|c| c.to_string())
+                .chain(["exec:sandbox".to_string()])
+                .collect(),
             sessions: vec![],
         })
         .unwrap();

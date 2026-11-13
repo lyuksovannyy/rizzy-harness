@@ -123,6 +123,32 @@ pub struct NodeInfo {
     pub embedded: bool,
     /// Which sessions the node hosts (from its `profile:*` capability).
     pub profile: Profile,
+    /// The execution modes it announced it offers (N.10a; its `exec:*`
+    /// capabilities), most confined first. What the UI offers and names;
+    /// the node refuses a mode it does not offer whatever this says.
+    pub exec_modes: Vec<harness_core::policy::ExecMode>,
+    /// The gaps of those modes it announced (`gap:*`, review T8B-3), for
+    /// the chat to say. Only the known ones.
+    pub exec_gaps: Vec<String>,
+}
+
+/// The execution modes and gaps in a hello's capabilities (N.10a), the
+/// known ones only.
+fn exec_of(caps: &[String]) -> (Vec<harness_core::policy::ExecMode>, Vec<String>) {
+    let mut modes: Vec<_> = caps
+        .iter()
+        .filter_map(|c| c.strip_prefix(harness_protocol::CAP_EXEC_PREFIX))
+        .filter_map(harness_core::policy::ExecMode::parse)
+        .collect();
+    modes.sort();
+    modes.dedup();
+    let mut gaps: Vec<String> = caps
+        .iter()
+        .filter(|c| harness_protocol::GAPS.contains(&c.as_str()))
+        .cloned()
+        .collect();
+    gaps.dedup();
+    (modes, gaps)
 }
 
 struct NodeConn {
@@ -233,7 +259,14 @@ pub struct CreateSpec {
     /// Never resumed by a callback turn (a routine's run chat, T.8d step
     /// 3); the node records it and keeps to it.
     pub no_callbacks: bool,
+    /// The execution mode asked of the node (N.10a): a request it refuses
+    /// when it does not offer that mode; `None`, the node's most confined.
+    /// Who may ask for which is checked by the caller
+    /// (`workspaces::exec_mode_for`).
+    pub exec_mode: Option<harness_core::policy::ExecMode>,
 }
+
+use harness_core::policy::ExecMode;
 
 /// Per-message choices on a prompt.
 #[derive(Debug, Clone, Default)]
@@ -757,6 +790,44 @@ impl Master {
             .is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
+    /// Why connected node `node_id` cannot be sent a chat in `mode`, in
+    /// words that say what it offers and what to do on it (re-check RN-3);
+    /// `None` when it announced the mode, or is not connected now.
+    fn mode_refusal(&self, node_id: &str, mode: ExecMode) -> Option<String> {
+        let nodes = lock(&self.inner.nodes);
+        let n = nodes
+            .get(node_id)
+            .filter(|n| n.info.connected && n.tx.is_some())?;
+        let cap = harness_protocol::exec_capability(mode);
+        if n.capabilities.contains(&cap) {
+            return None;
+        }
+        let offers = match n.info.exec_modes.as_slice() {
+            [] => "it offers no mode (a node from before modes, or one without bubblewrap and \
+                   without the host shell)"
+                .to_string(),
+            m => format!(
+                "it offers the {} mode",
+                m.iter()
+                    .map(|m| m.id())
+                    .collect::<Vec<_>>()
+                    .join(" and the ")
+            ),
+        };
+        let remedy = match mode {
+            ExecMode::Sandbox => "install bubblewrap on that node (README, \"The shell sandbox\") \
+                                  and restart it"
+                .to_string(),
+            ExecMode::Host => "set [execution] host = true in that node's node.toml (README, \
+                               \"Execution modes\": read what it means first) and restart it"
+                .to_string(),
+        };
+        Some(format!(
+            "node {node_id} does not offer the {} mode: {offers}. To have it, {remedy}",
+            mode.id()
+        ))
+    }
+
     /// Whether `node_id`'s latest hello announced `cap`.
     pub fn node_has(&self, node_id: &str, cap: &str) -> bool {
         lock(&self.inner.nodes)
@@ -1006,6 +1077,8 @@ impl Master {
                     connected: false,
                     embedded,
                     profile,
+                    exec_modes: Vec::new(),
+                    exec_gaps: Vec::new(),
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1016,6 +1089,7 @@ impl Master {
             entry.info.version = version;
             entry.info.connected = true;
             entry.info.profile = profile;
+            (entry.info.exec_modes, entry.info.exec_gaps) = exec_of(&capabilities);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -1512,6 +1586,21 @@ impl Master {
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
+        // An agentic chat always carries a mode: `sandbox` unless asked.
+        let exec_mode = match profile {
+            Profile::Agentic => Some(spec.exec_mode.unwrap_or(ExecMode::Sandbox)),
+            Profile::Chat => None,
+        };
+        // A connected node must have announced the mode it is sent (N.10a):
+        // one that does not know modes would run the chat however it runs
+        // commands. A node not linked to this process (away, or not yet
+        // back after a restart) is "not connected" from `send_command`, as
+        // before: a routine retries it (re-check RN-2).
+        if let Some(mode) = exec_mode
+            && let Some(why) = self.mode_refusal(&node_id, mode)
+        {
+            return Err(CommandError::Rejected(why));
+        }
         let sid = SessionId::new();
         // Who asked, recorded before the node hears of it: a session_created
         // that arrives after the ack, or after the ack timed out, is claimed
@@ -1553,6 +1642,7 @@ impl Master {
                 profile: Some(profile),
                 agent: Some(agent),
                 incognito: spec.incognito,
+                exec_mode,
             })
             .await;
         match &sent {

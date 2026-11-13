@@ -71,6 +71,14 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// How this session's commands run (N.10a), as its `session_created`
+    /// recorded it: the backend starts its shell in that mode's
+    /// confinement. `None` for chat sessions and tests (the backend's
+    /// default confinement).
+    fn exec_mode(&self) -> Option<crate::policy::ExecMode> {
+        None
+    }
+
     /// The bytes of this session's images among `sha256` (those it has; an
     /// image it lacks is named to the model instead of shown).
     async fn images(&self, _sha256: &[String]) -> Vec<ImageData> {

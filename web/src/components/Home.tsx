@@ -5,6 +5,7 @@ import { t } from "../lib/i18n";
 import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, RoutineAttention } from "../types";
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
+import type { HostRight } from "../lib/execModes";
 import { Attention } from "./Attention";
 import { Notices } from "./Notices";
 import { Similar, type SimilarHandle } from "./Similar";
@@ -28,6 +29,8 @@ export function Home(props: {
   workers: NodeInfo[];
   prefs: Prefs | null;
   agenticBlocked: string | null;
+  /** Who may pick the host shell for a new chat (N.10a). */
+  hostRight?: HostRight;
   /** The active workspace, which the similar chats come from. */
   workspace: string | null;
   onSubmit: (s: Submission) => Promise<void>;
@@ -103,6 +106,7 @@ export function Home(props: {
           onAgentChange={setAgentId}
           defaultModel={props.prefs?.default_model}
           agenticBlocked={props.agenticBlocked}
+          hostRight={props.hostRight}
           onSubmit={props.onSubmit}
           predict={props.predict}
           onLearn={props.onLearn}

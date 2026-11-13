@@ -88,6 +88,7 @@ fn old_node(id: &str) -> (NodeLink, Arc<Mutex<Vec<MasterToNode>>>) {
             keep.lock().unwrap().push(msg.clone());
             if let MasterToNode::Create { session_id, .. } = &msg {
                 let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+                    exec_mode: None,
                     no_callbacks: false,
                     title: "t".into(),
                     cwd: String::new(),

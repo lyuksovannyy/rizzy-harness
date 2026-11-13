@@ -15,7 +15,7 @@
 //! process (A.20), and the next start closes the turns left open as
 //! `interrupted` and sweeps what a guard could not end. Two limits: a
 //! command in a read the kernel cannot interrupt keeps its guard until the
-//! read returns, and an uncontained command (`[sandbox] contain = "off"`)
+//! read returns, and an uncontained command (a `host` session's)
 //! can outlive the node, as it can outlive a SIGKILL today (C.11).
 
 use std::time::Duration;

@@ -485,6 +485,7 @@ export function Shell(props: {
       ...(s.incognito ? { incognito: true } : {}),
       ...(workspaceId ? { workspace_id: workspaceId } : {}),
       ...(projectId ? { project_id: projectId } : {}),
+      ...(agentic && s.execMode ? { exec_mode: s.execMode } : {}),
     });
     refreshSessions();
     go({ kind: "session", id: session_id });
@@ -703,6 +704,7 @@ export function Shell(props: {
               workers={workers}
               prefs={prefs}
               agenticBlocked={agenticBlocked}
+              hostRight={{ admin: me.role === "admin" }}
               workspace={workspaceId}
               onSubmit={submit}
               predict={predict}
