@@ -48,7 +48,13 @@ It listens on `127.0.0.1:7777` and `[::1]:7777`, the two addresses a browser
 tries for `http://localhost:7777`, and stops with an error if another program
 already holds either: that program would otherwise answer for an address this
 server calls its own, and could be handed your login. (On a machine without
-IPv6 it listens on `127.0.0.1` only and accepts no `[::1]` address.)
+IPv6 it listens on `127.0.0.1` only and accepts no `[::1]` address.) While
+the server is stopped it holds nothing: a command of a second node on the
+same machine keeps running then and can take the port, an open tab keeps
+calling that address, and the next start is refused until the command ends.
+If an agent's node shares the machine with the server, serve with `--tls`
+(the other program has no certificate the browser trusts) or set
+`[sandbox] network = "off"` on that node.
 
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
 (so nobody else can take over a fresh server), creates your **admin**

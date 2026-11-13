@@ -299,3 +299,16 @@ and the missing `Alt-Svc`, not driven. A container. `cargo clippy`, `cargo fmt -
 Every run printed `cleanup killed: nothing`. Afterwards: no process with this run's folders
 or scripts in its command line, nothing listening that a run started, no mount. The owner's
 server and its data directories were not touched.
+
+## After the re-check
+
+Written by the coordinator. From the re-check: the refusal now names how to find the program
+(`ss -ltnp`, R-B); the comment in `main.rs` says what is and is not opened before the binds
+(the directory's lock is); the README names R-A's case, a second node on the server's machine
+whose command outlives a stop of the server, and what closes it today (`--tls`, or the network
+off on that node).
+
+R-A itself is open: while the server is down it holds no socket. The fix is to keep the
+listening sockets across a restart (socket activation, or a small holder process), which is its
+own task and belongs with the update and drain work (N.9). R-C (IPv6 enabled by root after a
+start without it) is left as it is: it needs root and ends at the next start.

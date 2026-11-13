@@ -260,8 +260,9 @@ async fn serve(
     }
     // First, before anything starts that runs commands (security review
     // S2-1): every loopback address accepted as this server's own is held
-    // by it, and a start where another program holds one ends here, having
-    // opened nothing in the data directory.
+    // by it, and a start where another program holds one ends here: no
+    // database, token or key in the data directory has been opened (the
+    // directory's lock was taken and is released as the process ends).
     let ui = listen::bind(bind).await?;
     let env = harness_master::env::EnvSettings::from_env();
     if !env.locked().is_empty() {

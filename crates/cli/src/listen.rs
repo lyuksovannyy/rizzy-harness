@@ -96,7 +96,8 @@ fn in_use(a: SocketAddr, port: u16) -> String {
         "refusing to start: {a} is in use by another program. This server accepts {a} and \
          localhost:{port} as its own address, and browsers try both: a browser opening \
          http://localhost:{port} would reach that program instead of this server, and could \
-         hand it your login. Stop that program, or pick another port (--bind)"
+         hand it your login. Find it with `ss -ltnp 'sport = :{port}'`, then stop it or pick \
+         another port (--bind)"
     )
 }
 
