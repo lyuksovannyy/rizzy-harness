@@ -514,6 +514,7 @@ impl Registry {
             }),
             ends,
             unrecorded: std::sync::atomic::AtomicUsize::new(0),
+            stuck: Mutex::default(),
         });
         self.tables
             .lock()
@@ -590,6 +591,10 @@ pub struct SessionBg {
     /// Ends sent to the session actor that it has not recorded yet
     /// ([`Self::recorded`]): a node stop waits for them.
     unrecorded: std::sync::atomic::AtomicUsize,
+    /// Ended commands whose guard has not exited yet (a still-alive or
+    /// unconfirmed end): they keep their node slot (N-4), and a node stop
+    /// names them instead of waiting for them (R-1).
+    stuck: Mutex<Vec<String>>,
 }
 
 /// A start the caps admitted, before the command runs. Dropped without
@@ -705,6 +710,19 @@ impl SessionBg {
     /// The ids of this session's running commands.
     pub fn running(&self) -> Vec<String> {
         Self::running_ids(&self.lock())
+    }
+
+    /// A command runs, or a start is admitted and not yet handed over:
+    /// what a node stop waits for (not node slots, R-1).
+    pub fn active(&self) -> bool {
+        let t = self.lock();
+        t.reserved > 0 || !Self::running_ids(&t).is_empty()
+    }
+
+    /// Ended commands whose guard has not exited yet, each keeping its
+    /// node slot (a still-alive or unconfirmed end).
+    pub fn stuck(&self) -> Vec<String> {
+        self.stuck.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Admit a start, or refuse it with the reason, naming this chat's
@@ -1128,8 +1146,23 @@ async fn run(
     // its guard still kills, or whose end nobody confirmed, keeps it until
     // its guard has exited.
     let mut child = h.child;
+    if confirmed != BackgroundConfirmed::Ended
+        && let Some(t) = bg.upgrade()
+    {
+        t.stuck
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(id.clone());
+    }
+    let (weak, stuck_id) = (bg.clone(), id.clone());
     release_slot(slot, confirmed, async move {
         let _ = child.wait().await;
+        if let Some(t) = weak.upgrade() {
+            t.stuck
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|i| *i != stuck_id);
+        }
     });
     let Some(bg) = bg.upgrade() else {
         return;
@@ -1146,17 +1179,23 @@ async fn run(
                 how: how.clone(),
             },
         );
-        match old {
+        let (waiters, discard) = match old {
             State::Running {
                 waiters, discard, ..
             } => (waiters, discard),
             State::Ended { .. } => (Vec::new(), true),
+        };
+        // Counted before the table stops showing it running, so a node
+        // stop never sees neither (it waits for running entries and for
+        // unrecorded ends).
+        if !discard {
+            bg.unrecorded
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        (waiters, discard)
     };
     bg.ended_ring(num);
     if !discard {
-        bg.unrecorded
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let sent = bg.ends.send(Ended {
             bg_id: id.clone(),
             reason,

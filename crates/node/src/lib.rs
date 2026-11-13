@@ -981,6 +981,7 @@ impl NodeRuntime {
     pub async fn stop(&self, bound: Duration) -> Vec<SessionId> {
         self.inner.stopping.store(true, Ordering::SeqCst);
         let by = tokio::time::Instant::now() + bound;
+        let mut logged_stuck = std::collections::HashSet::new();
         loop {
             // Read again each time: a prompt that claimed its turn just
             // before the flag was set is cancelled on the next pass (and
@@ -1009,10 +1010,19 @@ impl NodeRuntime {
                     stuck.insert(s.id());
                 }
             }
-            let background = self.inner.background.running() > 0
-                || sessions
-                    .iter()
-                    .any(|s| s.background_unrecorded() && !stuck.contains(&s.id()));
+            // Waited for: commands that run and ends not yet recorded. Not
+            // node slots: a still-alive end keeps its slot until its guard
+            // exits, which a stop cannot hasten (R-1); it is logged once.
+            for s in &sessions {
+                for bg_id in s.background_stuck() {
+                    if logged_stuck.insert((s.id(), bg_id.clone())) {
+                        tracing::warn!(session = %s.id(), bg = %bg_id, "a background command's end is recorded but a process of it is still alive (its guard keeps killing it); the stop does not wait for it");
+                    }
+                }
+            }
+            let background = sessions.iter().any(|s| {
+                s.background_active() || (s.background_unrecorded() && !stuck.contains(&s.id()))
+            });
             // All marked before any is cancelled: a sub-agent cancelled by
             // its parent's token is the stop's too (review N-7).
             for s in &running {

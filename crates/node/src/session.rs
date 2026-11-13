@@ -445,6 +445,16 @@ impl Session {
         }
     }
 
+    /// A background command runs or a start is being handed over.
+    pub(crate) fn background_active(&self) -> bool {
+        self.bg.as_ref().is_some_and(|b| b.active())
+    }
+
+    /// Ended background commands whose guard has not exited yet.
+    pub(crate) fn background_stuck(&self) -> Vec<String> {
+        self.bg.as_ref().map(|b| b.stuck()).unwrap_or_default()
+    }
+
     /// Ends sent and not recorded yet (a stop waits for them).
     pub(crate) fn background_unrecorded(&self) -> bool {
         self.bg.as_ref().is_some_and(|b| b.unrecorded() > 0)
