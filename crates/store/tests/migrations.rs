@@ -554,8 +554,8 @@ fn a_rollback_journal_file_held_by_a_committing_writer_is_refused_as_busy() {
 /// this one is waiting, so the order is not left to a sleep.
 #[test]
 fn a_file_migrated_by_another_process_while_this_one_waited_is_not_migrated_again() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.db");
     drop(open(&path, &[V1]).unwrap());
@@ -697,7 +697,11 @@ fn a_real_migration_is_logged_before_and_after_and_a_creation_is_not() {
         }
         migrate::migrate(&mut c, "node.db", &[V1, V2, BROKEN]).unwrap_err();
         let lines = events.lock().unwrap().clone();
-        assert_eq!(lines.len(), 3, "a failed migration logs its start only: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            3,
+            "a failed migration logs its start only: {lines:?}"
+        );
     });
 }
 

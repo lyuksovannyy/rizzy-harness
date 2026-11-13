@@ -17,20 +17,27 @@
 //! - All pending migrations and the version bump are one `IMMEDIATE`
 //!   transaction: a failure, a full disk or a crash leaves the database as
 //!   it was (the version is in the header page, written in the same
-//!   transaction). A second opener waits for the write lock only as long
-//!   as its busy timeout (5 s in `Store` and `SqliteMemory`) and is then
-//!   refused as `Busy`, unchanged; one that gets the lock re-reads the
-//!   version and finds it migrated. What keeps a second process off the
-//!   data directory is its lock (A.20), not this.
+//!   transaction). A second opener waits for the file only as long as its
+//!   busy timeout (5 s in `Store` and `SqliteMemory`) and is then refused
+//!   as `Busy`, unchanged, wherever the lock hits it (the version read,
+//!   `BEGIN`, the commit); one that gets the lock re-reads the version and
+//!   finds it migrated. What keeps a second process off the data directory
+//!   is its lock (A.20), not this.
 //! - Foreign keys are off while migrations run, so a table rebuilt the way
 //!   SQLite documents it keeps the rows that reference it, and
-//!   `foreign_key_check` must find nothing before the version is bumped.
-//!   The connection's own setting is put back afterwards.
+//!   `foreign_key_check` must find nothing before the first step (else the
+//!   reference dangled before, `DanglingBefore`) and before the version is
+//!   bumped (else the migration left it, `Dangling`). The connection's own
+//!   setting is put back afterwards.
+//! - A version-0 file that already has tables (from before schema
+//!   versions) is adopted as version 1 only when its schema is exactly
+//!   version 1's, and is refused as `Mismatch` otherwise; migration 1 is
+//!   not run over tables it did not make.
 //! - An up-to-date database is only read, never written, on open.
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior, ffi};
 
 /// One schema step: SQL batches run in order, inside the migration's
 /// transaction.
@@ -67,19 +74,37 @@ pub enum MigrateError {
         table: String,
         parent: String,
     },
+    /// The reference was dangling before any migration ran (a row removed
+    /// by hand with foreign keys off, or a bug): not the migration's doing.
+    #[error(
+        "{db}: rows of {table} already point at missing rows of {parent}, before any migration from \
+         schema version {from} to {to} ran (a row removed by hand with foreign keys off, or a bug). \
+         It was not changed: `PRAGMA foreign_key_check` in the sqlite3 shell lists those rows; \
+         repair or remove them and start again"
+    )]
+    DanglingBefore {
+        db: String,
+        from: i64,
+        to: i64,
+        table: String,
+        parent: String,
+    },
     /// The version is one this build knows, the schema is not that
     /// version's: a file from before the first release, another kind of
     /// database (a memory.db in place of a node.db), or one edited by hand.
     #[error(
         "{db} does not match schema version {version} (a database from before the first release, \
-         another kind of file, or one changed by hand). It was not changed: before the first \
-         release a schema change needs a fresh data directory"
+         another kind of file, or one changed by hand). It was not changed. Before the first \
+         release a schema change is not migrated: remove this data directory (or move it aside) \
+         and start again"
     )]
     Mismatch { db: String, version: i64 },
-    /// The write lock was not free within the busy timeout.
+    /// The file was locked past the busy timeout: for the version read
+    /// (a writer committing to a rollback-journal file holds it
+    /// exclusively), for `BEGIN IMMEDIATE`, or for the commit.
     #[error(
-        "{db} needs a schema migration, but another process holds it for writing (waited the busy timeout). \
-         It was not changed: stop the other process and start again"
+        "{db} is held by another process for writing (waited the busy timeout), so its schema version \
+         could not be checked or migrated. It was not changed: stop the other process and start again"
     )]
     Busy { db: String },
     #[error("{db}: reading or writing the schema version: {source}")]
@@ -102,6 +127,21 @@ pub struct Migrated {
 pub struct Schema<'a> {
     pub steps: &'a [Migration],
     pub recorded: &'a str,
+}
+
+/// SQLite's error as a refusal of `db`: a lock not free within the busy
+/// timeout is `Busy` wherever it hits (review R43-5 and its re-check), the
+/// rest is `Sqlite`.
+fn sqlite_error(db: &str, source: rusqlite::Error) -> MigrateError {
+    match source.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => {
+            MigrateError::Busy { db: db.to_string() }
+        }
+        _ => MigrateError::Sqlite {
+            db: db.to_string(),
+            source,
+        },
+    }
 }
 
 /// `found` as a version this build can open or migrate, or the refusal.
@@ -129,10 +169,7 @@ fn same_schema(
     version: i64,
     expected: &str,
 ) -> Result<(), MigrateError> {
-    let now = schema_text(conn).map_err(|source| MigrateError::Sqlite {
-        db: db.to_string(),
-        source,
-    })?;
+    let now = schema_text(conn).map_err(|e| sqlite_error(db, e))?;
     if now == expected {
         Ok(())
     } else {
@@ -162,29 +199,60 @@ pub fn migrate_checked(
 
 /// Start-up preflight (review R43-3): `path` is absent, or at a version
 /// this build can open with that version's schema. Read through a
-/// read-only connection, so nothing is written, not even a checkpoint of a
-/// crashed newer build's WAL on close. Run for every database of the data
-/// directory before any is opened, so a newer file found last does not
-/// leave the ones before it migrated.
+/// read-only connection, so the database file is not changed, not even by
+/// a checkpoint of a crashed newer build's WAL on close (beside a WAL
+/// database SQLite may leave an empty `-wal` and a `-shm`: re-check D2).
+/// Run for every database of the data directory before any is opened, so
+/// a newer file found last does not leave the ones before it migrated.
+///
+/// A file a read-only connection cannot judge, because SQLite must first
+/// roll back a hot journal or recover a WAL (an interrupted creation or
+/// commit: re-check D1), is passed on: the real open recovers it, as it
+/// always did, and then applies the same version and schema checks. For a
+/// newer build's file that recovery is the one the newer build would make
+/// itself, and the file is then refused at its committed version.
 pub fn check_file(path: &Path, schema: &Schema) -> Result<(), MigrateError> {
     if !path.exists() {
         return Ok(());
     }
     let db = path.display().to_string();
-    let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
-        db: db.clone(),
-        source,
-    };
+    match judge(path, &db, schema) {
+        Err(MigrateError::Sqlite { source, .. }) if needs_recovery(&source) => {
+            tracing::info!(
+                db,
+                "a read-only check cannot read this file before SQLite recovers it; \
+                 the open that follows recovers and checks it"
+            );
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn judge(path: &Path, db: &str, schema: &Schema) -> Result<(), MigrateError> {
+    let sqlite = |e| sqlite_error(db, e);
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(sqlite)?;
     let known = schema.steps.len() as i64;
-    if refuse(&db, user_version(&conn).map_err(sqlite)?, known)? == known {
-        same_schema(&conn, &db, known, schema.recorded)?;
+    if refuse(db, user_version(&conn).map_err(sqlite)?, known)? == known {
+        same_schema(&conn, db, known, schema.recorded)?;
     }
     Ok(())
+}
+
+/// A read-only connection's refusal to read a file that needs a writer
+/// first: a hot rollback journal to roll back, or a WAL to recover.
+fn needs_recovery(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _) if matches!(
+            f.extended_code,
+            ffi::SQLITE_READONLY_ROLLBACK | ffi::SQLITE_READONLY_RECOVERY | ffi::SQLITE_READONLY_CANTINIT
+        )
+    )
 }
 
 /// `migrate_checked` without the schema comparison: for building the
@@ -204,10 +272,7 @@ fn apply(
     expected: Option<&str>,
 ) -> Result<Migrated, MigrateError> {
     let known = steps.len() as i64;
-    let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
-        db: db.to_string(),
-        source,
-    };
+    let sqlite = |e| sqlite_error(db, e);
     // Read first, outside any write: an up-to-date or newer file is never
     // written to (a read-only disk still opens an up-to-date one).
     if refuse(db, user_version(conn).map_err(sqlite)?, known)? == known {
@@ -244,18 +309,10 @@ fn run(
     expected: Option<&str>,
 ) -> Result<Migrated, MigrateError> {
     let known = steps.len() as i64;
-    let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
-        db: db.to_string(),
-        source,
-    };
+    let sqlite = |e| sqlite_error(db, e);
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|source| match source.sqlite_error_code() {
-            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
-                MigrateError::Busy { db: db.to_string() }
-            }
-            _ => sqlite(source),
-        })?;
+        .map_err(sqlite)?;
     // Again under the write lock: another process may have migrated it.
     let from = refuse(db, user_version(&tx).map_err(sqlite)?, known)?;
     if from == known {
@@ -264,6 +321,34 @@ fn run(
             same_schema(&tx, db, known, expected)?;
         }
         return Ok(Migrated { from, to: known });
+    }
+    // A version-0 file with tables (owner decision): version 1 only if it
+    // is exactly version 1's schema, never migration 1 run over tables it
+    // did not make (whose IF NOT EXISTS would keep an older shape, or
+    // trip on it and blame the migration).
+    let mut start = from;
+    if from == 0 {
+        let now = schema_text(&tx).map_err(sqlite)?;
+        if !now.is_empty() {
+            if now != schema_of(&steps[..1]).map_err(sqlite)? {
+                return Err(MigrateError::Mismatch {
+                    db: db.to_string(),
+                    version: 1,
+                });
+            }
+            start = 1;
+        }
+    }
+    // Re-check D4: a reference that dangles already is not this
+    // migration's doing, and must not be reported as if it were.
+    if let Some((table, parent)) = dangling(&tx).map_err(sqlite)? {
+        return Err(MigrateError::DanglingBefore {
+            db: db.to_string(),
+            from,
+            to: known,
+            table,
+            parent,
+        });
     }
     // A fresh file (version 0) is a creation, not worth a line; a real
     // migration is: from its commit on, an older build refuses the file,
@@ -278,7 +363,7 @@ fn run(
             "migrating the schema; once done, older builds refuse this file"
         );
     }
-    for (i, step) in steps.iter().enumerate().skip(from as usize) {
+    for (i, step) in steps.iter().enumerate().skip(start as usize) {
         for sql in *step {
             tx.execute_batch(sql)
                 .map_err(|source| MigrateError::Failed {
@@ -379,11 +464,20 @@ pub fn schema_text(conn: &Connection) -> rusqlite::Result<String> {
 }
 
 /// The schema migrations `steps` build on an empty database.
+fn schema_of(steps: &[Migration]) -> rusqlite::Result<String> {
+    let conn = Connection::open_in_memory()?;
+    for step in steps {
+        for sql in *step {
+            conn.execute_batch(sql)?;
+        }
+    }
+    schema_text(&conn)
+}
+
+/// `schema_of`, for the recorded-schema tests.
 #[doc(hidden)]
 pub fn built(steps: &[Migration]) -> String {
-    let mut conn = Connection::open_in_memory().unwrap();
-    migrate(&mut conn, ":memory:", steps).unwrap();
-    schema_text(&conn).unwrap()
+    schema_of(steps).unwrap()
 }
 
 /// Test support (store and memory tests): version `k`'s schema, built from
@@ -391,7 +485,10 @@ pub fn built(steps: &[Migration]) -> String {
 /// exists for a version the code does not have. With
 /// `HARNESS_WRITE_SCHEMA=1` a version without a file gets one; a recorded
 /// file is never rewritten (before the first tag, delete `1.sql` to record
-/// migration 1 again).
+/// migration 1 again). What this guards is the schema a released
+/// migration makes, not its data statements: a backfill `UPDATE` or
+/// `INSERT` changed after release leaves the schema as it was and passes
+/// (review R43-6); only review catches that.
 #[doc(hidden)]
 pub fn check_recorded(dir: &Path, steps: &[Migration]) {
     let write = std::env::var_os("HARNESS_WRITE_SCHEMA").is_some_and(|v| v == "1");

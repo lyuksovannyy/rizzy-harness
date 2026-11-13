@@ -59,9 +59,7 @@ fn a_newer_database_anywhere_in_the_data_directory_stops_serve_before_anything_i
             let data = data_dir(root.path());
             let path = data.join(newer);
             if wal {
-                drop(
-                    harness_store::Store::open(&path, harness_store::Durability::Full).unwrap(),
-                );
+                drop(harness_store::Store::open(&path, harness_store::Durability::Full).unwrap());
             }
             {
                 let c = Connection::open(&path).unwrap();
@@ -91,8 +89,7 @@ fn a_newer_database_anywhere_in_the_data_directory_stops_serve_before_anything_i
                 std::thread::sleep(Duration::from_millis(50));
             };
             let mut stderr = String::new();
-            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr)
-                .unwrap();
+            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
             assert!(!status.success(), "{case}: serve exited 0\n{stderr}");
             assert!(
                 stderr.contains(newer) && stderr.contains("newer rizzy-harness"),
