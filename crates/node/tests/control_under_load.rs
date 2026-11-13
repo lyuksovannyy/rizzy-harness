@@ -18,31 +18,46 @@
 //! the out queue being full; how fast a real node fills it does (review
 //! B7-R4).
 //!
-//! Measured on 2026-11-13 (the owner's machine, Linux 7.2, debug build):
+//! How a stop is seen: the command writes `beat` every 0.1 s, and a look
+//! (`beating`) watches it for 0.4 s. "No write seen" means a look found
+//! none, so the command had stopped by then or within about 0.1 s before;
+//! the times below are the test's clock at the start of that look, not
+//! when the command stopped (re-check B7-D4).
+//!
+//! Measured on 2026-11-13 (the owner's machine, Linux 7.2, debug build,
+//! `--test-threads=1`, re-check run):
 //!
 //! - A command that writes output, Stop sent while the uplink takes
-//!   nothing: still running 6.0 s after the Stop (the whole look), past the
-//!   agent loop's 5 s `TOOL_CANCEL_GRACE`. The agent loop's `coalesce` awaits the next
-//!   `tool_output_delta`'s append inside a `select!` arm, the append waits in
-//!   `publish_wait` for room in the out queue, and while it waits neither the
-//!   tool future nor the cancel is polled. The command ends only once the
-//!   uplink takes bytes again: within 1 µs of the first read, the Stop's
-//!   ack 6.03 s and the turn's end 6.03 s after the Stop. (The review's own
-//!   run: 6.8 s with a 6.8 s stall; with the uplink read as fast as it can,
-//!   the command stopped 11 µs after the Stop.)
-//! - A command that writes nothing, Stop sent first: ended 14 µs after the
-//!   Stop, its ack and the turn's end waiting for the uplink
+//!   nothing: still writing 6.1 s after the Stop (the whole look), past the
+//!   agent loop's 5 s `TOOL_CANCEL_GRACE`. The agent loop's `coalesce`
+//!   awaits the next `tool_output_delta`'s append inside a `select!` arm,
+//!   the append waits in `publish_wait` for room in the out queue, and
+//!   while it waits neither the tool future nor the cancel is polled. Once
+//!   the uplink read again, the first look saw no write; the Stop's ack
+//!   and the turn's end came 6.09 s after the Stop. (The first review's
+//!   control, with the uplink read as fast as it can: no write seen in the
+//!   first look after the Stop, ack after 59 µs.)
+//! - A command that writes nothing, Stop sent first: no write seen in the
+//!   first look after the Stop; its ack and the turn's end waited for the
+//!   uplink (0.41 s, when the test read again)
 //!   (`a_stop_ends_a_silent_command_while_the_uplink_takes_nothing`, the
 //!   control; it passes).
 //! - The same silent command, Stop sent right after an approval answer:
-//!   still running 6.2 s after the Stop; it stopped within 1 µs of the
-//!   uplink reading again, its ack 6.18 s and the turn's end 13.0 s after
-//!   the Stop. The command loop answers both inline and waits in
-//!   `publish_wait` to ack the first, so it does not read the Stop, nor any
-//!   other command of any session, until the uplink moves.
+//!   still writing 6.0 s after the Stop; no write seen once the uplink read
+//!   again, its ack 6.04 s and the turn's end 6.05 s to 6.20 s after the
+//!   Stop (13.0 s in a run of the three tests at once). The command loop answers both
+//!   inline and waits in `publish_wait` to ack the first, so it does not
+//!   read the Stop, nor any other command of any session, until the uplink
+//!   moves.
+//! - No Stop, the uplink taking nothing: a command with the default 60 s
+//!   timeout was still writing 66 s and 75 s after its prompt and ended
+//!   only when the uplink read again, recorded as timed out (re-check
+//!   B7-D1, `a_timeout_ends_a_streaming_command_while_the_uplink_takes_nothing`).
 //!
-//! The two failing tests are `#[ignore]` with these results; they pass once
-//! a Stop is acted on whatever the out queue holds (ADOPTION_PLAN B.7).
+//! Every test here is `#[ignore]`: three fail with these results and pass
+//! once a Stop and a timeout are acted on whatever the out queue holds
+//! (ADOPTION_PLAN A.21); the control costs 5 s and is read with them, so it
+//! runs with `--include-ignored` too.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -286,8 +301,9 @@ async fn beating(dir: &Path) -> bool {
     false
 }
 
-/// How long after `from` the command stopped writing, looking until
-/// `within` has passed since `from`.
+/// When, after `from`, a look first saw no write, looking until `within`
+/// has passed since `from`: the start of that 0.4 s look (the command
+/// stopped by its end), not when the command stopped.
 async fn stopped_after(dir: &Path, from: Instant, within: Duration) -> Option<Duration> {
     while from.elapsed() < within {
         let at = from.elapsed();
@@ -320,11 +336,11 @@ async fn running(node: &Node, cmd: &str) -> (SessionId, PathBuf) {
 /// What one run measured after the Stop.
 #[derive(Debug)]
 struct Stop {
-    /// When the command stopped writing, while the uplink took nothing.
+    /// When a look first saw no write, while the uplink took nothing.
     stalled: Option<Duration>,
     /// How long the uplink took nothing after the Stop.
     stall: Duration,
-    /// When the command stopped writing after the uplink read again.
+    /// When a look first saw no write, after the uplink read again.
     after_read: Option<Duration>,
     ack: Duration,
     turn_ended: Duration,
@@ -371,8 +387,8 @@ async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
         turn_ended,
     };
     eprintln!(
-        "B.7 real node, Stop with the out queue full: command stopped {:?} after the Stop \
-         while the uplink took nothing for {:?}; {:?} after the uplink read again; \
+        "B.7 real node, Stop with the out queue full: no write seen from {:?} after the Stop \
+         while the uplink took nothing for {:?}; from {:?} after the uplink read again; \
          ack {:?} and turn_ended {:?} after the Stop",
         m.stalled, m.stall, m.after_read, m.ack, m.turn_ended
     );
@@ -390,44 +406,81 @@ fn approval_answer() -> MasterToNode {
     }
 }
 
+/// Stopped within a second of the Stop, as the control asks: a fix that
+/// only ends the command at the grace (recorded as abandoned, re-check
+/// B7-D2) does not pass.
+fn promptly(m: &Stop) -> bool {
+    m.stalled.is_some_and(|d| d < Duration::from_secs(1))
+}
+
 /// The control: a command that writes nothing is not held by the full out
 /// queue, so a Stop sent first ends it at once although its ack waits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "B.7 control for the tests below (5 s); run with --include-ignored"]
 async fn a_stop_ends_a_silent_command_while_the_uplink_takes_nothing() {
     let m = stop_while_full(SILENT, None).await;
-    assert!(
-        m.stalled.is_some_and(|d| d < Duration::from_secs(1)),
-        "{m:?}"
-    );
+    assert!(promptly(&m), "{m:?}");
 }
 
 /// B7-R1: a command that writes output is not stopped while the out queue
 /// is full.
 ///
-/// Fails (2026-11-13): still running 6.0 s after the Stop; it stopped
-/// within 1 µs of the uplink reading again, and the Stop's ack and the
-/// turn's end came 6.03 s after the Stop. The hold is the agent loop's `coalesce` awaiting an append
-/// inside a `select!` arm. One workspace's output can keep another
-/// workspace's stopped command running for as long as the uplink takes
-/// nothing (up to `IDLE_LIMIT`, 60 s, by reading) or until it next has
-/// room (seconds on a slow uplink).
+/// Fails (2026-11-13): still writing 6.1 s after the Stop; no write seen
+/// once the uplink read again, and the Stop's ack and the turn's end came
+/// 6.09 s after the Stop. The hold is the agent loop's `coalesce` awaiting
+/// an append inside a `select!` arm. One workspace's output can keep
+/// another workspace's stopped command running until the uplink has taken
+/// one message for each append waiting ahead of it: no fixed cap, since
+/// the link's idle limit times each frame (re-check B7-D1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "B.7 review B7-R1: fails, a Stop does not end a streaming command while the out queue is full"]
 async fn a_stop_ends_a_streaming_command_while_the_uplink_takes_nothing() {
     let m = stop_while_full(TALKING, None).await;
-    assert!(m.stalled.is_some(), "{m:?}");
+    assert!(promptly(&m), "{m:?}");
 }
 
 /// B7-R2: a Stop that comes right after another command the command loop
 /// answers inline (an approval answer here; a second Stop or a
 /// `stop_background` is the same) still ends a command that writes nothing.
 ///
-/// Fails (2026-11-13): still running 6.2 s after the Stop. The command loop
+/// Fails (2026-11-13): still writing 6.0 s after the Stop. The command loop
 /// waits for room to ack the approval answer and reads no command of any
 /// session until the uplink moves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "B.7 review B7-R2: fails, a Stop after an approval answer is not read while the out queue is full"]
 async fn a_stop_after_an_approval_answer_ends_a_silent_command_while_the_uplink_takes_nothing() {
     let m = stop_while_full(SILENT, Some(approval_answer())).await;
-    assert!(m.stalled.is_some(), "{m:?}");
+    assert!(promptly(&m), "{m:?}");
+}
+
+/// The default timeout of a foreground `bash` call that states none
+/// (PLAN.md T9).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Re-check B7-D1: a call's timeout ends a command that streams output while
+/// the out queue is full. No Stop; the uplink takes nothing from the fill
+/// until the look, `DEFAULT_TIMEOUT` and `bound()` after the command was
+/// seen running (so after its call started).
+///
+/// Fails (2026-11-13): still writing 66.05 s after it was seen running
+/// (the re-check's run of the same steps: still writing 66 s and 75 s
+/// after its prompt; it ended only when the uplink read again, recorded
+/// then as "[timed out after 60s …]"). The bash tool's timer
+/// is in the tool future, which `coalesce` does not poll while its append
+/// waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "B.7 re-check B7-D1: fails, a timeout does not end a streaming command while the out queue is full (75 s)"]
+async fn a_timeout_ends_a_streaming_command_while_the_uplink_takes_nothing() {
+    let mut node = Node::new().await;
+    let (sid, dir) = running(&node, TALKING).await;
+    let ran = Instant::now();
+    node.fill().await;
+    tokio::time::sleep((DEFAULT_TIMEOUT + bound()).saturating_sub(ran.elapsed())).await;
+    let still = beating(&dir).await;
+    let at = ran.elapsed();
+    node.tidy(sid).await;
+    eprintln!(
+        "B.7 real node, timeout with the out queue full: still writing {at:?} after it ran: {still}"
+    );
+    assert!(!still, "still writing {at:?} after the call started");
 }

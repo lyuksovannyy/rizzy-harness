@@ -56,10 +56,12 @@
 //!   this machine, not the node's code.
 //! - The out queue is bounded in messages (`OUT_QUEUE`, 256), not bytes.
 //!   With 8 KiB frames its share was 2 MiB; with 64 KiB frames the cancel's
-//!   ack waited 20.2 s behind 18.8 MiB at 1 MiB/s. A real `yes` stream
-//!   averaged 23 KiB an event, and an event may be 4 MiB and a replay's
-//!   snapshot batch 2 MiB, so after a reconnect up to 256 x 2 MiB (by
-//!   reading) can be ahead of an ack.
+//!   ack waited 20.2 s behind 18.8 MiB at 1 MiB/s. On the real node,
+//!   `yes` run through `bash` made events of 8,134 bytes of text on average
+//!   (1,547 events, re-check B7-D3), and a full out queue of them was
+//!   1.4 MiB; but an event may be 4 MiB and a replay's snapshot batch
+//!   2 MiB, so after a reconnect up to 256 x 2 MiB (by reading) can be
+//!   ahead of an ack.
 //! - Of the 6.1 MiB ahead, 4.1 MiB (783 - 256 frames) is the node socket's
 //!   send buffer, autotuned on loopback to this machine's `tcp_wmem`
 //!   maximum (4 MiB) behind the proxy; a real path at these rates need not
@@ -411,7 +413,13 @@ async fn scenario() -> Measured {
 /// reached the model's loop after 1.11 s, when the cancel's ack got room in
 /// the out queue. That wait is made by the model's own `send(ack).await`
 /// and the kernel, so it is printed, not asserted.
+///
+/// A measurement, not a guard (re-check, weak tests): the pump reads while
+/// its writes are blocked by construction (`crates/link/src/pump.rs`), and
+/// no change in `crates/node` can turn this red or green, so it does not
+/// spend 9 s in every run of the crate. Run it with `--include-ignored`.
 #[tokio::test]
+#[ignore = "B.7 measurement: the master-to-node direction under a full uplink (9 s)"]
 async fn the_first_control_frame_reaches_the_node_while_its_uplink_is_full() {
     let m = scenario().await;
     m.print();
