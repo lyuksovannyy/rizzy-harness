@@ -242,5 +242,5 @@ async fn the_model_is_told_this_nodes_ceiling() {
         .find(|s| s["properties"]["timeout_secs"].is_object())
         .map(|s| s["properties"]["timeout_secs"]["description"].to_string())
         .expect("bash offered");
-    assert!(text.contains("max 90") && !text.contains("3600"), "{text}");
+    assert!(text.contains("from 5 to 90") && !text.contains("3600"), "{text}");
 }
