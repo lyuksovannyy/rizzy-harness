@@ -1130,24 +1130,33 @@ anything. Several ends that come together are one turn.
 raise them): at most `callback_turns` (3) callback turns in a row; only your
 own message gives them back. A callback turn may start background commands
 of its own, and their ends spend the same three. Each callback turn makes at
-most `callback_max_steps` (20) model calls (never more than `max_steps`) and
+most `callback_max_steps` (20) steps (never more than `max_steps`) and
 cannot hand work to sub-agents. So the most the agent does without you after
 one of your messages is `callback_turns × callback_max_steps` steps, 60 with
-the defaults (a step's call retried after a passing provider error, and up to
-two summarising calls a turn in a long chat, come on top). When
+the defaults. A step is one answer of the model, which may carry several tool
+calls, so 60 steps is not 60 commands; and on top of the steps come a call
+retried after a passing provider error, the agent's fallback models when its
+own fails (more calls in that step), and up to two summarising passes a turn
+in a long chat (one model call per piece summarised). When
 the budget is spent the chat says "the agent was not resumed: 3 turns in a
 row without you (node limit)" and the end waits for your next message.
-**`callback_turns = 0` turns callback turns off** on that node: ends are still
-recorded and reach the agent with your next message, as before.
+**`callback_turns = 0` turns callback turns off** on that node, silently: the
+node does not offer them, the server asks for none, nothing is added to the
+chat or to "Waiting for you", and ends reach the agent with your next message,
+as before.
 
 *Who and where.* The chat's owner must still be allowed to run it: their
 account exists, is enabled and needs no password change; they still have the
-agentic grant and permission in the chat's workspace and may use its node; the
-chat is still in the workspace its command started in. A routine's chat, a
+agentic grant and permission in the chat's workspace and may use its node:
+exactly what you could do yourself at that moment. (A team chat whose owner
+left the workspace falls back to their Personal workspace, where they may go
+on in it, so it is resumed there if agentic chats are theirs to run.) A
+routine's chat, a
 chat holding a webhook's data (untrusted) and a sub-agent's chat are never
 resumed, and neither is a chat without an owner account (made with the API
 token). An end recorded more than 60 minutes before the server could resume
-the chat (the server was down, the node away) starts nothing. A callback turn
+the chat (the server was down, the node away; counted on the server's clock)
+starts nothing. A callback turn
 runs in the chat's own approval mode (the node's `max_approval_mode` caps it):
 in `ask` its calls wait on their cards like any turn's, with no time limit, and
 your new message is refused "a turn is already running" until you answer or
