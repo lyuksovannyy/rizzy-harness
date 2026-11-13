@@ -124,6 +124,9 @@ pub struct SessionRow {
     /// The effective workspace (see `EFFECTIVE_WS`); `None` only for a chat
     /// without an owner and without a mapping. Master only.
     pub workspace_id: Option<String>,
+    /// Background commands the log shows started and not ended (T.8d): the
+    /// revocation sweep stops them although no turn runs.
+    pub background: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -271,6 +274,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     parent_id  TEXT,
     -- Attention: approvals waiting, or the last turn ended with a question.
     pending_approvals INTEGER NOT NULL DEFAULT 0,
+    -- Background commands started and not ended (T.8d).
+    background INTEGER NOT NULL DEFAULT 0,
     last_asks  INTEGER NOT NULL DEFAULT 0,
     asks_user  INTEGER NOT NULL DEFAULT 0,
     attention_seq INTEGER NOT NULL DEFAULT 0,
@@ -422,7 +427,7 @@ const EFFECTIVE_WS: &str = "COALESCE(
 const WS_JOINS: &str = "LEFT JOIN session_workspaces sw ON sw.session_id = s.session_id
      LEFT JOIN workspaces pw ON pw.personal_owner = s.owner_id";
 
-const SESSION_COLS: &str = "s.session_id, s.node_id, s.title, s.cwd, s.model, s.created_ms, s.updated_ms, s.head_seq, s.running, s.owner_id, s.agent_id, s.profile, s.incognito, s.parent_id";
+const SESSION_COLS: &str = "s.session_id, s.node_id, s.title, s.cwd, s.model, s.created_ms, s.updated_ms, s.head_seq, s.running, s.owner_id, s.agent_id, s.profile, s.incognito, s.parent_id, s.background";
 
 /// The one role the store knows: the master defines the roles and their
 /// permissions; the store needs owners for the last-owner rule.
@@ -854,6 +859,18 @@ impl Store {
                 tx.execute(
                     "UPDATE sessions SET pending_approvals = pending_approvals + 1, attention_seq = ?2 WHERE session_id = ?1",
                     params![sid, e.seq as i64],
+                )?;
+            }
+            "background_started" => {
+                tx.execute(
+                    "UPDATE sessions SET background = background + 1 WHERE session_id = ?1",
+                    params![sid],
+                )?;
+            }
+            "background_ended" => {
+                tx.execute(
+                    "UPDATE sessions SET background = MAX(0, background - 1) WHERE session_id = ?1",
+                    params![sid],
                 )?;
             }
             "approval_resolved" => {
@@ -1528,7 +1545,8 @@ impl Store {
                 profile: r.get(11)?,
                 incognito: r.get::<_, i64>(12)? != 0,
                 parent_id: r.get(13)?,
-                workspace_id: r.get(14)?,
+                background: r.get::<_, i64>(14)?.max(0) as u32,
+                workspace_id: r.get(15)?,
             },
         ))
     }
@@ -1562,13 +1580,14 @@ impl Store {
         rows.map(|r| Self::finish_session(r?)).collect()
     }
 
-    /// The sessions of `node_id` the mirror shows running: what the
+    /// The sessions of `node_id` the mirror shows running (a turn, or a
+    /// background command): what the
     /// revocation sweep looks at when the node's link comes up (Gate 3
     /// review P-3). Filtered in SQL.
     pub fn running_on(&self, node_id: &str) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&Self::session_query(
-            "WHERE s.node_id = ?1 AND s.running = 1 ORDER BY s.updated_ms DESC",
+            "WHERE s.node_id = ?1 AND (s.running = 1 OR s.background > 0) ORDER BY s.updated_ms DESC",
         ))?;
         let rows = stmt.query_map(params![node_id], Self::session_from_row)?;
         rows.map(|r| Self::finish_session(r?)).collect()

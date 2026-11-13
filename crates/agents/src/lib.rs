@@ -184,7 +184,7 @@ pub enum Origin {
 const WEB_TOOLS: &[&str] = &["web_search", "web_fetch"];
 const READ_TOOLS: &[&str] = &["read", "grep", "glob", "outline", "graph_query"];
 const EDIT_TOOLS: &[&str] = &["write", "edit"];
-const COMMAND_TOOLS: &[&str] = &["bash", "tool_output"];
+const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_output"];
 const MEMORY_TOOL: &str = "remember";
 /// Offered with either switch that builds things; no switch of its own.
 const PUBLISH_TOOL: &str = "publish";

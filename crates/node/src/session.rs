@@ -70,6 +70,34 @@ pub(crate) struct Session {
     /// folder. Not kept across a restart (the folder is removed when the
     /// sub-agent ends).
     owned: Option<harness_core::folder::OwnedFolder>,
+    /// This session's background commands (T.8d): an agentic session that
+    /// is not a sub-agent's. Dropping it stops every one.
+    bg: Option<Arc<harness_tools::background::SessionBg>>,
+    /// Ends that came while a turn ran: recorded at its next step boundary
+    /// (`delivered`), or after its end.
+    bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
+    /// Wakes the end recorder when the turn slot is freed.
+    bg_flush: Arc<tokio::sync::Notify>,
+}
+
+type BgEnds = tokio::sync::mpsc::UnboundedReceiver<harness_tools::background::Ended>;
+
+/// A session's background table and the receiver of its ends, where it
+/// gets one; `next` is the number its next id takes.
+fn background_table(
+    node: &Inner,
+    profile: Profile,
+    parent: Option<SessionId>,
+    next: u64,
+) -> (
+    Option<Arc<harness_tools::background::SessionBg>>,
+    Option<BgEnds>,
+) {
+    if profile != Profile::Agentic || parent.is_some() {
+        return (None, None);
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (Some(node.background.session(next, tx)), Some(rx))
 }
 
 /// Pin an agentic session's folder (see [`Session::pin`]).
@@ -136,7 +164,11 @@ impl Session {
             parent_session,
             owned,
         } = new;
+        let (bg, ends) = background_table(&node, profile, parent_session, 1);
         let s = Arc::new(Self {
+            bg,
+            bg_queue: Mutex::new(Vec::new()),
+            bg_flush: Arc::default(),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -155,6 +187,7 @@ impl Session {
             pin: pin_of(profile, &cwd),
             owned,
         });
+        Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
             profile,
             agent_id,
@@ -200,7 +233,19 @@ impl Session {
         // recorded (canonical when the session was made): a folder that now
         // leads elsewhere is not pinned, and the session refuses to work.
         let pin = pin_of(meta.profile, std::path::Path::new(&meta.cwd));
-        Ok(Arc::new(Self {
+        // Ids go on from the log's.
+        let next = view
+            .background
+            .keys()
+            .filter_map(|k| k.strip_prefix("bg-")?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let (bg, ends) = background_table(&node, meta.profile, meta.parent_session, next);
+        let s = Arc::new(Self {
+            bg,
+            bg_queue: Mutex::new(Vec::new()),
+            bg_flush: Arc::default(),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -218,7 +263,176 @@ impl Session {
             last_state: Mutex::new(last_state),
             pin,
             owned: None,
-        }))
+        });
+        Self::record_ends(&s, ends);
+        Ok(s)
+    }
+
+    /// The task that records this session's background ends, one at a
+    /// time: at once when no turn runs, else queued for the turn's next
+    /// step boundary or its end. It holds the session weakly and ends with
+    /// its table.
+    fn record_ends(s: &Arc<Self>, ends: Option<BgEnds>) {
+        let Some(mut rx) = ends else { return };
+        let weak = Arc::downgrade(s);
+        let flush = s.bg_flush.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    m = rx.recv() => {
+                        let Some(e) = m else { break };
+                        let Some(s) = weak.upgrade() else { break };
+                        s.on_background_end(e).await;
+                    }
+                    _ = flush.notified() => {
+                        let Some(s) = weak.upgrade() else { break };
+                        s.flush_background().await;
+                    }
+                }
+            }
+        });
+    }
+
+    async fn on_background_end(&self, e: harness_tools::background::Ended) {
+        let Some(bg) = &self.bg else { return };
+        if e.reason == BackgroundReason::SessionDeleted {
+            bg.recorded();
+            return;
+        }
+        {
+            let turn = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+            if turn.is_some() {
+                self.bg_queue
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(e);
+                return;
+            }
+        }
+        self.record_background(vec![e]).await;
+    }
+
+    /// Ends queued during a turn, once no turn runs.
+    async fn flush_background(&self) {
+        let ends = {
+            let turn = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+            if turn.is_some() {
+                return;
+            }
+            std::mem::take(&mut *self.bg_queue.lock().unwrap_or_else(|p| p.into_inner()))
+        };
+        self.record_background(ends).await;
+    }
+
+    /// Record ends outside a turn (`delivered: false`: the model reads them
+    /// in the next turn's history). One that cannot be written stays queued
+    /// for the next try; it is never dropped silently.
+    async fn record_background(&self, ends: Vec<harness_tools::background::Ended>) {
+        let Some(bg) = &self.bg else { return };
+        for e in ends {
+            match self
+                .append(EventKind::BackgroundEnded(e.event(false)))
+                .await
+            {
+                Ok(_) => bg.recorded(),
+                Err(err) => {
+                    tracing::error!(session = %self.id, error = %err, bg = %e.bg_id, "could not record a background command's end; kept for the next try");
+                    self.bg_queue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(e);
+                }
+            }
+        }
+    }
+
+    /// After a restart: every background command the log shows running
+    /// died with the node (its guard ends it when its node is gone, the
+    /// start's sweep the rest). Recorded as `node_restarted`; no turn
+    /// starts for it (R12).
+    pub(crate) async fn recover_background(&self) {
+        let id = self.id;
+        let events = match self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(session = %self.id, error = %e, "could not read the log for background commands");
+                return;
+            }
+        };
+        let Ok(view) = SessionView::fold(&events) else {
+            return;
+        };
+        for bg_id in view.running_background() {
+            let ended = BackgroundEnded {
+                bg_id,
+                reason: BackgroundReason::NodeRestarted,
+                exit_code: None,
+                signal: None,
+                confirmed: BackgroundConfirmed::Unknown,
+                ran_ms: 0,
+                output_bytes: 0,
+                tail: String::new(),
+                tail_cut: false,
+                delivered: false,
+            };
+            if let Err(e) = self.append(EventKind::BackgroundEnded(ended)).await {
+                tracing::error!(session = %self.id, error = %e, "could not record a background command's end at start");
+            }
+        }
+    }
+
+    /// Stop one background command (`bg_id`) or all, for the master: the
+    /// person's stop (step 2) or the revocation sweep. Not waited for.
+    pub(crate) fn stop_background(
+        &self,
+        bg_id: Option<&str>,
+        by: harness_protocol::StopBackgroundBy,
+    ) -> Result<(), String> {
+        let bg = self
+            .bg
+            .as_ref()
+            .ok_or("this chat has no background commands")?;
+        let reason = match by {
+            harness_protocol::StopBackgroundBy::User => BackgroundReason::StoppedByUser,
+            harness_protocol::StopBackgroundBy::AccessRevoked => BackgroundReason::AccessRevoked,
+        };
+        match bg_id {
+            Some(id) => bg.stop(id, reason).map(|_| ()),
+            None => {
+                bg.stop_all(reason);
+                Ok(())
+            }
+        }
+    }
+
+    /// Order every background command to stop; not waited for.
+    pub(crate) fn stop_background_now(&self, reason: BackgroundReason) {
+        if let Some(bg) = &self.bg {
+            bg.stop_all(reason);
+        }
+    }
+
+    /// Stop every background command and wait for their ends, at most
+    /// `bound`.
+    pub(crate) async fn stop_background_within(
+        &self,
+        reason: BackgroundReason,
+        bound: std::time::Duration,
+    ) {
+        if let Some(bg) = &self.bg {
+            bg.stop_all_within(reason, bound).await;
+        }
+    }
+
+    /// Ends sent and not recorded yet (a stop waits for them).
+    pub(crate) fn background_unrecorded(&self) -> bool {
+        self.bg.as_ref().is_some_and(|b| b.unrecorded() > 0)
     }
 
     /// Close out a turn that was running when the process died (PLAN.md §2).
@@ -637,6 +851,8 @@ impl Session {
         let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
         if t.as_ref().is_some_and(|t| t.turn_id == turn_id) {
             *t = None;
+            // Ends queued while it ran are recorded after it.
+            self.bg_flush.notify_one();
         }
     }
 
@@ -1057,6 +1273,19 @@ impl Session {
     ) -> Result<(), String> {
         if self.is_running() {
             return Err("wait for the running turn to finish".into());
+        }
+        // A command still running would write over what is restored (R17).
+        if let Some(ids) = self
+            .bg
+            .as_ref()
+            .map(|b| b.running())
+            .filter(|i| !i.is_empty())
+        {
+            return Err(format!(
+                "this chat's background commands are running ({}): they could write over what \
+                 an undo puts back. Stop them, or wait for them to end, then undo",
+                ids.join(", ")
+            ));
         }
         self.check_cwd_still_allowed()?;
         let id = self.id;
@@ -1816,6 +2045,36 @@ impl TurnHost for Session {
         self.node.cfg.policy.denied_tools.iter().any(|t| t == tool)
     }
 
+    fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.bg
+            .clone()
+            .map(|b| b as Arc<dyn std::any::Any + Send + Sync>)
+    }
+
+    async fn background_notes(
+        &self,
+    ) -> Result<Vec<BackgroundEnded>, harness_core::backend::LogError> {
+        let Some(bg) = &self.bg else {
+            return Ok(Vec::new());
+        };
+        let queued = std::mem::take(&mut *self.bg_queue.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut out = Vec::new();
+        let mut rest = queued.into_iter();
+        while let Some(e) = rest.next() {
+            let ev = e.event(true);
+            if let Err(err) = Session::emit(self, EventKind::BackgroundEnded(ev.clone())).await {
+                // The turn ends; these are recorded after it.
+                let mut q = self.bg_queue.lock().unwrap_or_else(|p| p.into_inner());
+                q.push(e);
+                q.extend(rest);
+                return Err(err);
+            }
+            bg.recorded();
+            out.push(ev);
+        }
+        Ok(out)
+    }
+
     fn folder_pin(&self) -> Option<harness_core::folder::FolderPin> {
         self.pin.clone()
     }
@@ -1869,7 +2128,7 @@ impl TurnHost for Session {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 input: input.clone(),
-                reason: approval_reason(tool, risk),
+                reason: approval_reason(tool, risk, input, &self.node.cfg.policy),
                 turn_allow: true,
             }))
             .await;
@@ -2002,7 +2261,35 @@ fn restore_notice(
 
 /// What an approval card says the tool would do. Publishing changes nothing
 /// on this node, it sends a copy away, so it says that instead.
-fn approval_reason(tool: &str, risk: ToolRisk) -> String {
+fn approval_reason(
+    tool: &str,
+    risk: ToolRisk,
+    input: &Value,
+    policy: &crate::NodePolicy,
+) -> String {
+    // A background start says what it is, in words (§4.1): the field alone
+    // is easy to miss.
+    if tool == "bash" && input.get("background").and_then(Value::as_bool) == Some(true) {
+        let ceiling = std::time::Duration::from_secs(policy.limits.bash_timeout_max_s);
+        let t = harness_tools::background::timeout_for(
+            input.get("timeout_secs").and_then(Value::as_u64),
+            harness_tools::background::DEFAULT_TIMEOUT,
+            ceiling,
+        );
+        let mut s = format!(
+            "`bash` starts a program that KEEPS RUNNING in the background after this step, \
+             with nobody watching, for up to {} (its timeout), unless it ends or is stopped first",
+            harness_core::text::duration_words(t.as_millis() as u64)
+        );
+        if policy
+            .sandbox
+            .settings()
+            .is_ok_and(|s| s.network == harness_tools::sandbox::Network::On)
+        {
+            s.push_str("; the network is on, so it can accept connections");
+        }
+        return s;
+    }
     match (tool, risk) {
         ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),
         (_, ToolRisk::Mutating) => format!("`{tool}` can change files or run programs"),
@@ -2016,14 +2303,33 @@ mod tests {
 
     #[test]
     fn approval_cards_say_what_the_tool_does() {
-        let publish = approval_reason("publish", ToolRisk::Mutating);
+        let p = crate::NodePolicy::default();
+        let none = Value::Null;
+        let publish = approval_reason("publish", ToolRisk::Mutating, &none, &p);
         assert!(
             publish.contains("Artifacts") && !publish.contains("run programs"),
             "{publish}"
         );
         assert_eq!(
-            approval_reason("bash", ToolRisk::Mutating),
+            approval_reason("bash", ToolRisk::Mutating, &none, &p),
             "`bash` can change files or run programs"
         );
+    }
+
+    /// §7 test 10: the card of a background start says it keeps running,
+    /// and until when, in its reason, not only in the input field.
+    #[test]
+    fn a_background_start_says_it_keeps_running() {
+        let p = crate::NodePolicy::default();
+        let input =
+            serde_json::json!({"command": "npm run dev", "background": true, "timeout_secs": 1800});
+        let r = approval_reason("bash", ToolRisk::Mutating, &input, &p);
+        assert!(
+            r.contains("KEEPS RUNNING") && r.contains("30 min 0 s"),
+            "{r}"
+        );
+        assert!(r.contains("accept connections"), "{r}");
+        let fg = serde_json::json!({"command": "ls", "background": false});
+        assert!(!approval_reason("bash", ToolRisk::Mutating, &fg, &p).contains("KEEPS"));
     }
 }

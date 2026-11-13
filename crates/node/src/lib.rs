@@ -45,6 +45,11 @@ struct CreateArgs {
     incognito: bool,
 }
 
+/// The longest a delete waits for its session's background commands: the
+/// guard's grace and bound, its sweep and the pipes' drain.
+const BACKGROUND_STOP_WAIT: Duration =
+    harness_tools::contain::STOP_BOUND.saturating_add(Duration::from_secs(3));
+
 /// Max events per `session.snapshot` batch.
 const SNAPSHOT_BATCH: usize = 500;
 /// ...and at most this many bytes of serialized events, a quarter of the
@@ -87,6 +92,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
         | MasterToNode::Cancel { .. }
+        | MasterToNode::StopBackground { .. }
         | MasterToNode::ApprovalRespond { .. }
         | MasterToNode::ArtifactFetch { .. } => None,
     }
@@ -144,6 +150,8 @@ pub(crate) struct Inner {
     /// Set once by [`NodeRuntime::stop`]: new work is refused from then on
     /// ([`NODE_STOPPING`]) and a cancelled turn ends `stopped`.
     stopping: AtomicBool,
+    /// Background commands (T.8d): the node's count and its `[limits]`.
+    pub(crate) background: Arc<harness_tools::background::Registry>,
 }
 
 impl Inner {
@@ -343,6 +351,7 @@ impl NodeRuntime {
         let hosted: std::collections::HashSet<SessionId> =
             rows.iter().map(|r| r.session_id).collect();
         let stages = open_stages(&cfg, &hosted);
+        let bg_limits = cfg.policy.limits.background();
         let inner = Arc::new(Inner {
             cfg,
             sessions: Mutex::new(HashMap::new()),
@@ -350,10 +359,14 @@ impl NodeRuntime {
             link: Mutex::new(None),
             stages,
             stopping: AtomicBool::new(false),
+            background: harness_tools::background::Registry::new(bg_limits),
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
             s.recover_interrupted().await;
+            // After the turn's end: what ran in the background died with
+            // the node, and no turn starts for it (R12).
+            s.recover_background().await;
             inner
                 .sessions
                 .lock()
@@ -420,6 +433,9 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
+            if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
+                capabilities.push(harness_protocol::CAP_BACKGROUND.into());
+            }
             // A fresh queue: there is room.
             let _ = out_tx.try_send(NodeToMaster::Hello {
                 protocol_version: PROTOCOL_VERSION,
@@ -472,9 +488,9 @@ impl NodeRuntime {
                         this.handle(msg).await;
                         this.mark_cancel(&lanes, session_id);
                     }
-                    m @ (MasterToNode::ApprovalRespond { .. } | MasterToNode::Welcome { .. }) => {
-                        this.handle(m).await
-                    }
+                    m @ (MasterToNode::ApprovalRespond { .. }
+                    | MasterToNode::StopBackground { .. }
+                    | MasterToNode::Welcome { .. }) => this.handle(m).await,
                     // Everything else goes to its session's lane: in order
                     // for that session, concurrently with other sessions.
                     other => match lane_of(&other) {
@@ -813,6 +829,18 @@ impl NodeRuntime {
                     None => Err("unknown session".into()),
                 }
             }
+            MasterToNode::StopBackground {
+                session_id,
+                bg_id,
+                by,
+                ..
+            } => {
+                self.audit_later("session.stop_background", session_id);
+                match self.session(session_id) {
+                    Some(s) => s.stop_background(bg_id.as_deref(), by),
+                    None => Err("unknown session".into()),
+                }
+            }
             MasterToNode::ApprovalRespond {
                 session_id,
                 approval_id,
@@ -945,6 +973,14 @@ impl NodeRuntime {
                 .cloned()
                 .collect();
             let running: Vec<&Arc<Session>> = sessions.iter().filter(|s| s.is_running()).collect();
+            // Background commands are not waited for: stopped now, each
+            // end recorded as `node_stopping` (R13). Ordered on every pass,
+            // for one a turn started just before the flag.
+            for s in &sessions {
+                s.stop_background_now(harness_core::event::BackgroundReason::NodeStopping);
+            }
+            let background = self.inner.background.running() > 0
+                || sessions.iter().any(|s| s.background_unrecorded());
             // All marked before any is cancelled: a sub-agent cancelled by
             // its parent's token is the stop's too (review N-7).
             for s in &running {
@@ -962,7 +998,7 @@ impl NodeRuntime {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .is_empty();
-            let done = running.is_empty() && !restoring;
+            let done = running.is_empty() && !restoring && !background;
             if done || tokio::time::Instant::now() >= by {
                 // A turn whose end could not be written is not closed
                 // either (review A19-5).
@@ -1011,6 +1047,13 @@ impl NodeRuntime {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            // Its background commands go with it, all at once and before
+            // its log; their ends are not recorded (the log goes).
+            s.stop_background_within(
+                harness_core::event::BackgroundReason::SessionDeleted,
+                BACKGROUND_STOP_WAIT,
+            )
+            .await;
         }
         self.inner
             .sessions

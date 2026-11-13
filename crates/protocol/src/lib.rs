@@ -37,6 +37,23 @@ pub const CAP_ARTIFACTS: &str = "artifacts";
 /// sends images only to nodes whose hello listed it.
 pub const CAP_IMAGES: &str = "images";
 
+/// The node capability that announces `session.stop_background` (T.8d,
+/// docs/background-commands.md). The master sends it only to nodes whose
+/// hello listed it.
+pub const CAP_BACKGROUND: &str = "background";
+
+/// Who asks a node to stop a session's background commands. The node
+/// records the end with this reason; nothing here can start or widen
+/// anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopBackgroundBy {
+    /// The person (step 2: the chat's Stop per command, Stop all).
+    User,
+    /// The master's revocation sweep: the owner lost access.
+    AccessRevoked,
+}
+
 /// At most this many images go with one message...
 pub const MAX_IMAGES: usize = 4;
 /// ...and at most this many bytes of them together (before base64).
@@ -208,6 +225,17 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
     },
+    /// Stop one background command of a session (`bg_id`), or all of them.
+    /// A turn's cancel does not stop them; this does (only to nodes with
+    /// `CAP_BACKGROUND`).
+    #[serde(rename = "session.stop_background")]
+    StopBackground {
+        req_id: String,
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg_id: Option<String>,
+        by: StopBackgroundBy,
+    },
     /// Undo the file changes of one finished turn (git checkpoint).
     #[serde(rename = "session.restore")]
     Restore {
@@ -278,6 +306,7 @@ impl MasterToNode {
             | MasterToNode::Prompt { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
+            | MasterToNode::StopBackground { req_id, .. }
             | MasterToNode::Delete { req_id, .. }
             | MasterToNode::Restore { req_id, .. }
             | MasterToNode::SelectVariant { req_id, .. }

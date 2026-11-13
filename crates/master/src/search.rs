@@ -910,6 +910,7 @@ mod tests {
             incognito: false,
             parent_id: None,
             workspace_id: Some("w1".into()),
+            background: 0,
         }
     }
 

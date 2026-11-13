@@ -593,16 +593,49 @@ async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, 
 }
 
 /// Cancel every running agentic session in `rows` whose owner may no
-/// longer drive it.
+/// longer drive it, and stop its background commands (T.8d: a turn's
+/// cancel leaves them running, and they run without a turn).
 async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
-    let running =
-        rows.filter(|r| r.running && r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
+    let running = rows.filter(|r| {
+        (r.running || r.background > 0)
+            && r.profile.as_deref() != Some("chat")
+            && r.owner_id.is_some()
+    });
     for row in running {
         let Ok(Some(why)) = blocked_reason(m, &row).await else {
             continue;
         };
-        tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
-        cancel_retrying(m, row.session_id).await;
+        if row.background > 0 {
+            tracing::info!(session = %row.session_id, reason = %why, "stopping background commands that lost their access");
+            stop_background_revoked(m, row.session_id).await;
+        }
+        if row.running {
+            tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
+            cancel_retrying(m, row.session_id).await;
+        }
+    }
+}
+
+/// The revocation's stop of a session's background commands. A node
+/// that is offline gets it from the sweep at its next hello (the mirror
+/// still counts them); a failure is logged.
+async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId) {
+    use harness_protocol::StopBackgroundBy;
+    for attempt in 1..=CANCEL_TRIES {
+        match m
+            .stop_background(sid, None, StopBackgroundBy::AccessRevoked)
+            .await
+        {
+            Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {
+                tokio::time::sleep(CANCEL_RETRY).await;
+            }
+            Err(crate::CommandError::NodeOffline(_)) => return,
+            Err(e) => {
+                tracing::warn!(session = %sid, error = %e, "revocation sweep: background stop failed");
+                return;
+            }
+            Ok(()) => return,
+        }
     }
 }
 
