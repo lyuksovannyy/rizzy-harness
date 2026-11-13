@@ -790,6 +790,39 @@ impl Master {
             .is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
+    /// Why connected node `node_id` cannot be sent a chat in `mode`, in
+    /// words that say what it offers and what to do on it (re-check RN-3);
+    /// `None` when it announced the mode, or is not connected now.
+    fn mode_refusal(&self, node_id: &str, mode: ExecMode) -> Option<String> {
+        let nodes = lock(&self.inner.nodes);
+        let n = nodes.get(node_id).filter(|n| n.info.connected && n.tx.is_some())?;
+        let cap = harness_protocol::exec_capability(mode);
+        if n.capabilities.iter().any(|c| *c == cap) {
+            return None;
+        }
+        let offers = match n.info.exec_modes.as_slice() {
+            [] => "it offers no mode (a node from before modes, or one without bubblewrap and \
+                   without the host shell)"
+                .to_string(),
+            m => format!(
+                "it offers the {} mode",
+                m.iter().map(|m| m.id()).collect::<Vec<_>>().join(" and the ")
+            ),
+        };
+        let remedy = match mode {
+            ExecMode::Sandbox => "install bubblewrap on that node (README, \"The shell sandbox\") \
+                                  and restart it"
+                .to_string(),
+            ExecMode::Host => "set [execution] host = true in that node's node.toml (README, \
+                               \"Execution modes\": read what it means first) and restart it"
+                .to_string(),
+        };
+        Some(format!(
+            "node {node_id} does not offer the {} mode: {offers}. To have it, {remedy}",
+            mode.id()
+        ))
+    }
+
     /// Whether `node_id`'s latest hello announced `cap`.
     pub fn node_has(&self, node_id: &str, cap: &str) -> bool {
         lock(&self.inner.nodes)
@@ -1548,21 +1581,20 @@ impl Master {
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
-        // A node must have announced the mode it is sent (N.10a): one
-        // that does not know modes would run the chat however it runs
-        // commands. A chat has none.
-        // An agentic chat always carries one: `sandbox` unless asked.
+        // An agentic chat always carries a mode: `sandbox` unless asked.
         let exec_mode = match profile {
             Profile::Agentic => Some(spec.exec_mode.unwrap_or(ExecMode::Sandbox)),
             Profile::Chat => None,
         };
+        // A connected node must have announced the mode it is sent (N.10a):
+        // one that does not know modes would run the chat however it runs
+        // commands. A node not linked to this process (away, or not yet
+        // back after a restart) is "not connected" from `send_command`, as
+        // before: a routine retries it (re-check RN-2).
         if let Some(mode) = exec_mode
-            && !self.node_has(&node_id, &harness_protocol::exec_capability(mode))
+            && let Some(why) = self.mode_refusal(&node_id, mode)
         {
-            return Err(CommandError::Rejected(format!(
-                "node {node_id} does not offer the {} mode (its hello did not name it)",
-                mode.id()
-            )));
+            return Err(CommandError::Rejected(why));
         }
         let sid = SessionId::new();
         // Who asked, recorded before the node hears of it: a session_created

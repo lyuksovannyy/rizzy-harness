@@ -1620,28 +1620,9 @@ async fn a_routines_chat_is_always_in_the_sandbox() {
     assert_eq!(created["payload"]["exec_mode"], "sandbox", "{created}");
 }
 
-/// Re-check RN-2: after a restart, a routine whose node has not said hello
-/// to this process yet is retried as a node that is away, not blocked and
-/// paused for a mode it was never asked about.
-#[tokio::test]
-async fn a_routine_at_a_node_that_never_said_hello_is_retried() {
-    let dir = tempfile::tempdir().unwrap();
-    let t = start(dir.path()).await;
-    let (alex, _) = alex(&t).await;
-    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "run: true",
-                      "node_id": "node-never1", "cwd": t.root});
-    let id = routine(&t, &alex, None, "Never", spec, every(60)).await;
-    let run = started(&t, &alex, &id).await;
-    let v = wait_attempt(&t, &alex, &id, &run, 2).await;
-    assert_eq!(v["status"], "pending", "{v}");
-    assert!(
-        v["reason"].as_str().unwrap().contains("trying again in 1 min"),
-        "{v}"
-    );
-    let (_, r) = req(&t, Method::GET, &format!("/api/routines/{id}"), None, &alex).await;
-    assert_eq!(r["paused_reason"], Value::Null, "{r}");
-}
-
+/// Also re-check RN-2: the node announced no mode before it went away;
+/// it is retried as away, never blocked for its modes (with the L-g check
+/// on every node it was blocked and paused).
 #[tokio::test]
 async fn an_offline_node_is_retried_then_fails_and_failures_pause() {
     let dir = tempfile::tempdir().unwrap();
