@@ -26,8 +26,8 @@ use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
 use tokio::sync::mpsc;
 
 pub use provider::{
-    ChatMsg, ChatRequest, Completion, Effort, ImagePart, Provider, ProviderError, RetryHint,
-    StopReason, ToolSpec, estimate_tokens,
+    ChatMsg, ChatRequest, Completion, Effort, ImagePart, NOTES_THEN_MESSAGE, Provider,
+    ProviderError, RetryHint, StopReason, ToolSpec, estimate_tokens, place_notes, without_notes,
 };
 pub use retry::RetryPolicy;
 
@@ -1048,7 +1048,7 @@ impl NativeBackend {
             }
             let req = ChatRequest {
                 model: model.clone(),
-                messages: sent,
+                messages: provider::place_notes(sent),
                 tools: tools.clone(),
                 // Only for models that take one (a fallback may not).
                 effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
@@ -1528,10 +1528,12 @@ impl NativeBackend {
             // The step boundary: background ends since the last one, in
             // the log here and so in the next request (no step used).
             match host.background_notes().await {
+                // Scrubbed here as every tool result is, whatever the host
+                // did (T8D-2).
                 Ok(ends) => messages.extend(
                     ends.iter()
                         .filter_map(|b| b.model_note())
-                        .map(ChatMsg::Note),
+                        .map(|n| ChatMsg::Note(self.config.secrets.scrub(&n))),
                 ),
                 Err(_) => return stopped(usage),
             }
@@ -1618,7 +1620,7 @@ impl NativeBackend {
                 };
                 let req = ChatRequest {
                     model: model.clone(),
-                    messages,
+                    messages: provider::place_notes(messages),
                     tools: vec![],
                     effort: None,
                     cache: ctx.extra.savings.prompt_cache,
@@ -4245,7 +4247,8 @@ mod background_tests {
     fn a_sub_agent_gets_no_background_table() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let host = WithTable::new(
-            harness_tools::background::Registry::new(Default::default()).session(1, tx),
+            harness_tools::background::Registry::new(Default::default(), Default::default())
+                .session(1, tx),
         );
         let sub = background_access(&ctx(&host, Some(harness_core::SessionId::new())), &host);
         assert!(
@@ -4263,7 +4266,8 @@ mod background_tests {
     async fn run_turn_forwards_the_table_and_the_notes() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let host = WithTable::new(
-            harness_tools::background::Registry::new(Default::default()).session(1, tx),
+            harness_tools::background::Registry::new(Default::default(), Default::default())
+                .session(1, tx),
         );
         let seen: Arc<std::sync::Mutex<Vec<ChatRequest>>> = Arc::default();
         struct Spy(mock::Mock, Arc<std::sync::Mutex<Vec<ChatRequest>>>);
@@ -4311,13 +4315,17 @@ mod background_tests {
         );
         assert!(host.2.load(std::sync::atomic::Ordering::SeqCst) >= 1);
         let last = seen.lock().unwrap().last().cloned().unwrap();
+        // At the provider the note is part of the step's last tool result
+        // (T8D-3): no note and no user-role message of its own.
         assert!(
             last.messages
                 .iter()
-                .any(|m| matches!(m, ChatMsg::Note(t) if t.contains("bg-9"))),
+                .any(|m| matches!(m, ChatMsg::Tool { content, .. } if content.contains("bg-9"))),
             "{:?}",
             last.messages
         );
+        assert!(!last.messages.iter().any(|m| matches!(m, ChatMsg::Note(_))));
+        assert!(!matches!(last.messages.last(), Some(ChatMsg::User(_))));
     }
 
     /// An end's note is in the history where the log has it, and is never
@@ -4375,5 +4383,64 @@ mod background_tests {
         );
         let seen = observed_text(&m, &Default::default(), None);
         assert!(!seen.iter().any(|t| t.contains("evil.example")), "{seen:?}");
+    }
+}
+
+#[cfg(test)]
+mod place_notes_tests {
+    use super::*;
+
+    fn user_roles(m: &[ChatMsg]) -> Vec<bool> {
+        m.iter()
+            .map(|m| matches!(m, ChatMsg::User(_) | ChatMsg::UserImages { .. }))
+            .collect()
+    }
+
+    /// T8D-3: no note becomes a user-role message of its own; one after a
+    /// step's results joins the last result; one before the person's
+    /// message goes in front of it, the person's text byte-identical.
+    #[test]
+    fn notes_join_a_tool_result_or_the_next_message() {
+        let person = "please go on\n\nwith `this` exactly";
+        let msgs = vec![
+            ChatMsg::System("s".into()),
+            ChatMsg::User("first".into()),
+            ChatMsg::Assistant {
+                text: String::new(),
+                tool_calls: vec![],
+            },
+            ChatMsg::Tool {
+                call_id: "c1".into(),
+                content: "r1".into(),
+            },
+            ChatMsg::Note("[harness] at the boundary".into()),
+            ChatMsg::Assistant {
+                text: "done".into(),
+                tool_calls: vec![],
+            },
+            ChatMsg::Note("[harness] idle one".into()),
+            ChatMsg::Note("[harness] idle two".into()),
+            ChatMsg::User(person.into()),
+        ];
+        let out = place_notes(msgs);
+        assert!(!out.iter().any(|m| matches!(m, ChatMsg::Note(_))));
+        let roles = user_roles(&out);
+        assert!(
+            !roles.windows(2).any(|w| w[0] && w[1]),
+            "two user messages in a row"
+        );
+        assert!(
+            matches!(&out[3], ChatMsg::Tool { content, .. } if content == "r1\n\n[harness] at the boundary")
+        );
+        assert!(
+            matches!(&out[4], ChatMsg::Assistant { .. }),
+            "nothing between the results and the answer"
+        );
+        let ChatMsg::User(last) = out.last().unwrap() else {
+            panic!()
+        };
+        assert!(last.starts_with("[harness] idle one\n\n[harness] idle two"));
+        assert_eq!(without_notes(last), person, "the person's text changed");
+        assert_eq!(out.len(), 6);
     }
 }

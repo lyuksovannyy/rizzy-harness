@@ -48,6 +48,74 @@ impl ChatMsg {
     }
 }
 
+/// Where notes waiting for the person's next message end and the person's
+/// own text, unchanged, begins (T8D-3).
+pub const NOTES_THEN_MESSAGE: &str = "--- the person's message follows, unchanged ---";
+
+/// What a provider is sent instead of the loop's [`ChatMsg::Note`]s
+/// (T8D-3): a note never becomes a user-role message of its own. One right
+/// after a step's tool results is added to the last of them (tool role: the
+/// note's §9.2 fallback); one waiting for the person's next message goes
+/// in front of that message, under [`NOTES_THEN_MESSAGE`], the person's
+/// text after it as it was. Internally a note stays a `Note`, so it is
+/// never URL provenance and the log rebuilds it the same. A note with
+/// neither after it (not made by the loop) joins the last tool result, or
+/// is dropped when there is none.
+pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
+    let mut out: Vec<ChatMsg> = Vec::with_capacity(msgs.len());
+    let mut pending: Vec<String> = Vec::new();
+    let before = |pending: &mut Vec<String>, text: &str| {
+        let mut t = std::mem::take(pending).join("\n\n");
+        t.push_str("\n\n");
+        t.push_str(NOTES_THEN_MESSAGE);
+        t.push('\n');
+        t.push_str(text);
+        t
+    };
+    for m in msgs {
+        match m {
+            ChatMsg::Note(t) => {
+                if pending.is_empty()
+                    && let Some(ChatMsg::Tool { content, .. }) = out.last_mut()
+                {
+                    content.push_str("\n\n");
+                    content.push_str(&t);
+                } else {
+                    pending.push(t);
+                }
+            }
+            ChatMsg::User(t) if !pending.is_empty() => {
+                out.push(ChatMsg::User(before(&mut pending, &t)))
+            }
+            ChatMsg::UserImages { text, images } if !pending.is_empty() => {
+                out.push(ChatMsg::UserImages {
+                    text: before(&mut pending, &text),
+                    images,
+                })
+            }
+            other => out.push(other),
+        }
+    }
+    if !pending.is_empty()
+        && let Some(ChatMsg::Tool { content, .. }) = out
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m, ChatMsg::Tool { .. }))
+    {
+        content.push_str("\n\n");
+        content.push_str(&pending.join("\n\n"));
+    }
+    out
+}
+
+/// The person's own text of a user message a note was put in front of.
+pub fn without_notes(text: &str) -> &str {
+    match text.split_once(NOTES_THEN_MESSAGE) {
+        Some((_, rest)) => rest.strip_prefix('\n').unwrap_or(rest),
+        None => text,
+    }
+}
+
 /// How an image the model does not get is named in the text.
 pub fn image_note(name: &str) -> String {
     format!("[image: {}]", name.replace(['[', ']', '\n'], " "))

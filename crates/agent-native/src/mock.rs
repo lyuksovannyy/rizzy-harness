@@ -207,7 +207,10 @@ impl Provider for Mock {
             .messages
             .iter()
             .rev()
-            .find_map(|m| m.user_text().map(str::to_string))
+            .find_map(|m| {
+                m.user_text()
+                    .map(|t| crate::provider::without_notes(t).to_string())
+            })
             .unwrap_or_default();
         // Just shown images: say how many arrived with their bytes.
         if let Some(ChatMsg::UserImages { images, .. }) = req.messages.last() {
