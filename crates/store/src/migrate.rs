@@ -80,13 +80,24 @@ pub enum MigrateError {
     },
 }
 
+/// What `migrate` did: `from == to` when nothing was to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Migrated {
+    pub from: i64,
+    pub to: i64,
+}
+
 fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
 /// Bring `conn` to version `steps.len()`, or refuse. `db` names the file in
 /// the error (a path or a file name; never anything secret).
-pub fn migrate(conn: &mut Connection, db: &str, steps: &[Migration]) -> Result<(), MigrateError> {
+pub fn migrate(
+    conn: &mut Connection,
+    db: &str,
+    steps: &[Migration],
+) -> Result<Migrated, MigrateError> {
     let known = steps.len() as i64;
     let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
         db: db.to_string(),
@@ -111,7 +122,10 @@ pub fn migrate(conn: &mut Connection, db: &str, steps: &[Migration]) -> Result<(
     // Read first, outside any write: an up-to-date or newer file is never
     // written to (a read-only disk still opens an up-to-date one).
     if refuse(user_version(conn).map_err(sqlite)?)? == known {
-        return Ok(());
+        return Ok(Migrated {
+            from: known,
+            to: known,
+        });
     }
     // Foreign keys off while migrations run (review R43-1): a table change
     // the way SQLite documents it (new table, copy, drop, rename) would
@@ -125,8 +139,9 @@ pub fn migrate(conn: &mut Connection, db: &str, steps: &[Migration]) -> Result<(
         .map_err(sqlite)?;
     let result = run(conn, db, steps, &refuse);
     let restored = conn.pragma_update(None, "foreign_keys", fk);
-    result?;
-    restored.map_err(sqlite)
+    let done = result?;
+    restored.map_err(sqlite)?;
+    Ok(done)
 }
 
 /// The migration transaction itself; foreign keys are off.
@@ -135,7 +150,7 @@ fn run(
     db: &str,
     steps: &[Migration],
     refuse: &dyn Fn(i64) -> Result<i64, MigrateError>,
-) -> Result<(), MigrateError> {
+) -> Result<Migrated, MigrateError> {
     let known = steps.len() as i64;
     let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
         db: db.to_string(),
@@ -151,6 +166,19 @@ fn run(
         })?;
     // Again under the write lock: another process may have migrated it.
     let from = refuse(user_version(&tx).map_err(sqlite)?)?;
+    // A fresh file (version 0) is a creation, not worth a line; a real
+    // migration is: from its commit on, an older build refuses the file,
+    // and a long one should not look like a hang.
+    let logged = from != 0 && from != known;
+    let started = std::time::Instant::now();
+    if logged {
+        tracing::info!(
+            db,
+            from,
+            to = known,
+            "migrating the schema; once done, older builds refuse this file"
+        );
+    }
     for (i, step) in steps.iter().enumerate().skip(from as usize) {
         for sql in *step {
             tx.execute_batch(sql)
@@ -175,7 +203,17 @@ fn run(
     // Dropping `tx` on any error above rolls everything back.
     tx.pragma_update(None, "user_version", known)
         .map_err(sqlite)?;
-    tx.commit().map_err(sqlite)
+    tx.commit().map_err(sqlite)?;
+    if logged {
+        tracing::info!(
+            db,
+            from,
+            to = known,
+            ms = started.elapsed().as_millis() as u64,
+            "schema migrated"
+        );
+    }
+    Ok(Migrated { from, to: known })
 }
 
 /// The first row `PRAGMA foreign_key_check` reports: (child, parent table).
