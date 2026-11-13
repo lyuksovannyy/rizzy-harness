@@ -803,7 +803,7 @@ disk. Turns are not capped: a turn mostly waits for a model.
 | Running containers | Strict: `max(1, max_running / n)` each. | B never waits for A. |
 | Environments | Strict: `max(1, max_environments / n)` each. | B never waits for A. |
 | Spool | `spool_mb` per workspace (§4.12). | A's full spool ends A's turns, not B's. |
-| The link | Shared, first come; one call streams at most `tool_stream_bytes`; B.7 decides whether control frames need a lane. | Not bounded per workspace; measured in B.10. |
+| The link | Shared, first come; one call streams at most `tool_stream_bytes`. B.7 (2026-11-13) showed that control frames need a lane: on a 1 MiB/s uplink kept full by another workspace's output, a cancel acts on the node at once, but its ack reaches the master 6.6 s later and an approval answer sent after it waits 1.1 s on the node (26 s and 5 s at 256 KiB/s). Until the lane is built, a workspace's Stop and approvals wait behind another's output. | Not bounded per workspace; measured in B.10. B's control frames: the bytes queued ahead divided by the uplink's rate (about 6 MiB in B.7). |
 | Disk | A free-space floor for the whole node (§6). No per-workspace quota. | None. Residual. |
 
 `max_workspaces` must not exceed `max_commands` (refused at load). Separately, a turn has a
