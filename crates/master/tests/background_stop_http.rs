@@ -81,6 +81,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
         "native".to_string(),
         "profile:agentic".to_string(),
         "exec:sandbox".to_string(),
+        "exec:host".to_string(),
     ];
     capabilities.extend(caps.iter().map(|c| c.to_string()));
     tx.try_send(NodeToMaster::Hello {
@@ -116,9 +117,9 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                             msg = commands.recv() => {
                                 let Some(msg) = msg else { return };
                                 keep.lock().unwrap().push(msg.clone());
-                                if let MasterToNode::Create { session_id, .. } = &msg {
+                                if let MasterToNode::Create { session_id, exec_mode, .. } = &msg {
                                     let created = EventKind::SessionCreated(SessionCreated {
-            exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
+            exec_mode: *exec_mode,
             no_callbacks: false,
                                         title: "t".into(),
                                         cwd: "/w".into(),
@@ -304,6 +305,18 @@ async fn mirrored(t: &T, sid: SessionId, n: usize) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the mirror of {sid} never held {n} events");
+}
+
+/// Until the mirror shows `sid` running.
+async fn running(t: &T, sid: SessionId) {
+    for _ in 0..400 {
+        let (_, v) = req(t, Method::GET, &format!("/api/sessions/{sid}"), None, TOKEN).await;
+        if v["running"] == true {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{sid} never ran");
 }
 
 fn one(sid: SessionId, bg: &str) -> String {
@@ -518,4 +531,82 @@ async fn a_node_without_background_commands_is_sent_nothing() {
         "{v}"
     );
     assert!(t.old.stops().is_empty());
+}
+
+/// Review RN-1: the revocation sweep's answer depends on the chat's own
+/// mode, not only on its owner, workspace and node. A server admin with a
+/// running `host` chat and a running `sandbox` chat on one node is
+/// demoted: the `host` chat's turn is cancelled and its background
+/// commands stopped; the `sandbox` chat is left alone. In both orders of
+/// creation (the sweep reads the newest first).
+#[tokio::test]
+async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
+    for host_first in [true, false] {
+        let t = start().await;
+        let carol = account(&t, "carol", "admin").await;
+        let (_, me) = req(&t, Method::GET, "/api/me", None, &carol).await;
+        let carol_id = me["user"]["user_id"].as_str().unwrap().to_string();
+        let make = |mode: &'static str| {
+            let (t, carol) = (&t, carol.clone());
+            async move {
+                let body = json!({"cwd": "/w", "title": mode, "node_id": "local", "exec_mode": mode});
+                let (st, v) = req(t, Method::POST, "/api/sessions", Some(body), &carol).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                v["session_id"].as_str().unwrap().parse::<SessionId>().unwrap()
+            }
+        };
+        let (host, sandbox) = if host_first {
+            let h = make("host").await;
+            (h, make("sandbox").await)
+        } else {
+            let s = make("sandbox").await;
+            (make("host").await, s)
+        };
+        for sid in [host, sandbox] {
+            mirrored(&t, sid, 1).await;
+            t.local.append(
+                sid,
+                EventKind::TurnStarted(harness_core::event::TurnStarted {
+                    turn_id: "t1".into(),
+                    agent: None,
+                    cause: None,
+                }),
+            );
+            running(&t, sid).await;
+        }
+        let (st, v) = req(
+            &t,
+            Method::PATCH,
+            &format!("/api/users/{carol_id}"),
+            Some(json!({"role": "member"})),
+            &t.alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let cancels = || -> Vec<SessionId> {
+            t.local
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|m| match m {
+                    MasterToNode::Cancel { session_id, .. } => Some(*session_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        for _ in 0..400 {
+            if cancels().contains(&host) && t.local.stops().iter().any(|s| s.0 == host) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A moment more, for a wrong stop to arrive.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (c, s): (Vec<_>, Vec<_>) = (cancels(), t.local.stops().iter().map(|s| s.0).collect());
+        assert!(c.contains(&host), "host_first={host_first}: host not cancelled: {c:?}");
+        assert!(s.contains(&host), "host_first={host_first}: host not stopped: {s:?}");
+        assert!(!c.contains(&sandbox), "host_first={host_first}: sandbox cancelled");
+        assert!(!s.contains(&sandbox), "host_first={host_first}: sandbox stopped");
+    }
 }
