@@ -188,6 +188,38 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
     r
 }
 
+/// Where a converted request has cache markers (tests).
+#[cfg(test)]
+pub(crate) fn marked(r: &GChatRequest) -> Vec<usize> {
+    r.messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.options
+                .as_ref()
+                .is_some_and(|o| o.cache_control.is_some())
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Each marked prefix of a converted request, as the provider is sent it
+/// with the markers left out (moving a marker does not change what a
+/// cache entry holds). Tests compare these across turns.
+#[cfg(test)]
+pub(crate) fn marked_prefixes(r: &GChatRequest) -> Vec<String> {
+    marked(r)
+        .into_iter()
+        .map(|i| {
+            let msgs: Vec<_> = r.messages[..=i]
+                .iter()
+                .map(|m| (&m.role, &m.content))
+                .collect();
+            serde_json::to_string(&msgs).expect("messages serialise")
+        })
+        .collect()
+}
+
 fn effort(e: Effort) -> ReasoningEffort {
     match e {
         Effort::Low => ReasoningEffort::Low,
@@ -580,6 +612,125 @@ mod tests {
         };
         assert_eq!(b.content_type, "image/png");
         assert!(matches!(&b.source, genai::chat::BinarySource::Base64(d) if &**d == "aGk="));
+    }
+
+    fn user(t: &str) -> ChatMsg {
+        ChatMsg::User(t.into())
+    }
+    fn said(t: &str) -> ChatMsg {
+        ChatMsg::Assistant {
+            text: t.into(),
+            tool_calls: vec![],
+        }
+    }
+    fn called(id: &str) -> [ChatMsg; 2] {
+        [
+            ChatMsg::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCallRef {
+                    call_id: id.into(),
+                    tool: "bash".into(),
+                    input: json!({"command": "ls"}),
+                }],
+            },
+            ChatMsg::Tool {
+                call_id: id.into(),
+                content: "out".into(),
+            },
+        ]
+    }
+    fn cached(messages: Vec<ChatMsg>) -> Vec<usize> {
+        marked(&to_genai(&ChatRequest {
+            model: "m".into(),
+            messages,
+            tools: vec![],
+            effort: None,
+            cache: true,
+        }))
+    }
+
+    /// C43-1: the per-turn context is at the head of this turn's user
+    /// message, so a marker on it or after it is never read by the next
+    /// turn. The message before it ends the history (byte-identical when
+    /// the next turn rebuilds it from the log), and the message before the
+    /// previous user message is where the previous turn put that marker.
+    #[test]
+    fn the_history_before_this_turn_and_the_last_are_marked() {
+        let mut m = vec![ChatMsg::System("s".into()), user("u1"), said("a1")];
+        m.push(user("u2"));
+        m.extend(called("c1"));
+        m.push(said("a2"));
+        m.push(user("context then u3"));
+        // system, a1 (before u2), a2 (before u3), u3 (the newest)
+        assert_eq!(cached(m.clone()), vec![0, 2, 6, 7]);
+        // A later step of the same turn: the history markers stay, the
+        // newest moves to the tool result.
+        m.extend(called("c2"));
+        assert_eq!(cached(m), vec![0, 2, 6, 9]);
+    }
+
+    /// A first turn has no history: the system prompt and the message.
+    /// A second turn's previous history end is the system prompt. A
+    /// callback turn's opening is a user message too.
+    #[test]
+    fn short_requests_mark_each_place_once() {
+        let sys = || ChatMsg::System("s".into());
+        assert_eq!(cached(vec![sys(), user("u1")]), vec![0, 1]);
+        assert_eq!(
+            cached(vec![sys(), user("u1"), said("a1"), user("u2")]),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            cached(vec![
+                sys(),
+                user("u1"),
+                said("a1"),
+                ChatMsg::Opening("ended".into())
+            ]),
+            vec![0, 2, 3]
+        );
+        assert_eq!(cached(vec![user("only")]), Vec::<usize>::new());
+        let off = to_genai(&ChatRequest {
+            model: "m".into(),
+            messages: vec![sys(), user("u1"), said("a1"), user("u2")],
+            tools: vec![],
+            effort: None,
+            cache: false,
+        });
+        assert!(marked(&off).is_empty());
+    }
+
+    /// Anthropic refuses a request with more than 4 breakpoints. Every
+    /// prefix of a conversation that mixes text, tool loops, images and
+    /// several system messages stays within it, and keeps the system
+    /// prompt and the newest message marked.
+    #[test]
+    fn no_request_has_more_than_four_breakpoints() {
+        let mut all = vec![ChatMsg::System("s".into()), ChatMsg::System("s2".into())];
+        for t in 0..6 {
+            all.push(ChatMsg::UserImages {
+                text: format!("u{t}"),
+                images: vec![],
+            });
+            for c in 0..t {
+                all.extend(called(&format!("c{t}-{c}")));
+            }
+            all.push(said(&format!("a{t}")));
+            all.push(user(&format!("again {t}")));
+        }
+        for n in 2..=all.len() {
+            let r = to_genai(&ChatRequest {
+                model: "m".into(),
+                messages: all[..n].to_vec(),
+                tools: vec![],
+                effort: None,
+                cache: true,
+            });
+            let at = marked(&r);
+            assert!(at.len() <= 4, "{n}: {at:?}");
+            assert_eq!(at.first(), Some(&0), "{n}: {at:?}");
+            assert_eq!(at.last(), Some(&(r.messages.len() - 1)), "{n}: {at:?}");
+        }
     }
 
     /// Answers with its own name and the model id it was sent.

@@ -475,7 +475,9 @@ async fn anthropic_prompt_cache_markers_and_usage() {
         body["system"][0]["cache_control"]["type"], "ephemeral",
         "{body}"
     );
-    // ...and on the newest message only.
+    // ...on the end of the history before this turn's message ("pong": the
+    // next turn rebuilds it from the log as it is, review C43-1), and on
+    // the newest message.
     let msgs = body["messages"].as_array().unwrap();
     let marked: Vec<usize> = msgs
         .iter()
@@ -483,7 +485,13 @@ async fn anthropic_prompt_cache_markers_and_usage() {
         .filter(|(_, m)| m.to_string().contains("cache_control"))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(marked, vec![msgs.len() - 1], "{body}");
+    assert_eq!(marked, vec![1, 2], "{body}");
+    assert_eq!(msgs[1]["content"][0]["text"], "pong", "{body}");
+    // Anthropic refuses more than 4 breakpoints in a request.
+    assert!(
+        body.to_string().matches("cache_control").count() <= 4,
+        "{body}"
+    );
 
     // Without the flag: no markers at all.
     let (base, seen) = serve("/v1/messages", String::new()).await;
