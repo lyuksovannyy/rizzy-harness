@@ -1507,6 +1507,7 @@ dependencies = [
  "aws-lc-rs",
  "futures",
  "getrandom 0.4.3",
+ "harness-core",
  "harness-protocol",
  "hex",
  "rcgen",
