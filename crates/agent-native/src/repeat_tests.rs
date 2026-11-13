@@ -969,7 +969,10 @@ async fn a_failing_build_that_moves_after_each_edit_runs() {
     let fin = host.noted();
     assert_eq!(lines_of(dir.path(), "runs"), 7, "{fin:?}");
     assert_eq!((r.probes, r.changes), (6, 6), "{fin:?}");
-    assert!(fin.iter().all(|f| f.2.is_none()), "nothing is warned: {fin:?}");
+    assert!(
+        fin.iter().all(|f| f.2.is_none()),
+        "nothing is warned: {fin:?}"
+    );
     assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
 }
 
@@ -994,7 +997,10 @@ async fn a_second_ask_in_the_refusing_message_does_not_end_the_turn() {
     for f in &fin[4..6] {
         assert!(f.1.contains("Not run"), "{fin:?}");
         let note = f.2.as_deref().unwrap_or("");
-        assert!(note.contains("Asking for it again ends the turn"), "{fin:?}");
+        assert!(
+            note.contains("Asking for it again ends the turn"),
+            "{fin:?}"
+        );
     }
     assert_eq!(r.rec.seen.lock().unwrap().len(), 4, "{fin:?}");
     let told = sent_results(&r);

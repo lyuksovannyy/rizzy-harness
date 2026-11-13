@@ -59,14 +59,19 @@ pub const STOP_ERROR: &str = "stopped: the model asked again for a call the repe
 
 struct Streak {
     outcome: u64,
-    /// Identical results since the last change, refused asks included.
+    /// Identical results since the last change.
     runs: u32,
+    /// The step (assistant message) of its first refusal since the last
+    /// change.
+    refused: Option<u32>,
 }
 
 /// The guard of one turn.
 #[derive(Default)]
 pub struct RepeatGuard {
     calls: HashMap<CallKey, Streak>,
+    /// The model's message whose calls are being admitted.
+    step: u32,
     /// A refusal ended the turn: nothing more runs in it.
     ended: bool,
 }
@@ -79,7 +84,8 @@ pub enum Admission {
     /// [`ENDED_OUTPUT`] is its result.
     Ended,
     /// Not run: [`REFUSED_OUTPUT`] is its result, `note` the model's line;
-    /// `stop` when it was refused before and the turn ends after this step.
+    /// `stop` when the model was sent its refusal and asked for it again,
+    /// and the turn ends after this step.
     Refuse {
         note: String,
         stop: bool,
@@ -87,6 +93,12 @@ pub enum Admission {
 }
 
 impl RepeatGuard {
+    /// The model's next message: its calls are admitted from here on. A
+    /// refusal made before this was sent to the model with the results.
+    pub fn next_step(&mut self) {
+        self.step += 1;
+    }
+
     /// Before approval and dispatch.
     pub fn admit(&mut self, key: CallKey) -> Admission {
         if self.ended {
@@ -98,8 +110,11 @@ impl RepeatGuard {
         if s.runs + 1 < REFUSE_AT {
             return Admission::Run;
         }
-        s.runs += 1;
-        let stop = s.runs > REFUSE_AT;
+        // Only a refusal the model has been sent ends the turn: the same
+        // call again in the message that was refused is refused again,
+        // as the first time (review T1-D2).
+        let stop = s.refused.is_some_and(|at| at < self.step);
+        s.refused.get_or_insert(self.step);
         self.ended = stop;
         let note = if stop {
             format!(
@@ -124,6 +139,7 @@ impl RepeatGuard {
     pub fn restart(&mut self) {
         for s in self.calls.values_mut() {
             s.runs = 0;
+            s.refused = None;
         }
     }
 
@@ -155,7 +171,14 @@ impl RepeatGuard {
         if change {
             self.restart();
         }
-        self.calls.insert(key, Streak { outcome, runs });
+        self.calls.insert(
+            key,
+            Streak {
+                outcome,
+                runs,
+                refused: None,
+            },
+        );
         (runs >= WARN_AT).then(|| {
             format!(
                 "{NOTE_LEAD} This exact call has now given the same result {runs} times in \
@@ -242,6 +265,11 @@ mod tests {
             assert_eq!(note.is_some(), n >= WARN_AT, "call {n}");
         }
         assert!(matches!(g.admit(k), Admission::Refuse { stop: false, .. }));
+        assert!(
+            matches!(g.admit(k), Admission::Refuse { stop: false, .. }),
+            "the model was not sent the refusal yet"
+        );
+        g.next_step();
         assert!(matches!(g.admit(k), Admission::Refuse { stop: true, .. }));
     }
 
@@ -329,6 +357,7 @@ mod tests {
             if let Admission::Refuse { note, .. } = g.admit(k) {
                 notes.push(note);
             }
+            g.next_step();
         }
         assert_eq!(notes.len(), 5);
         for n in notes {

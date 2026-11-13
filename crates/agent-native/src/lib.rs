@@ -1433,6 +1433,8 @@ impl NativeBackend {
                 continue;
             }
             cut_steps = 0;
+            // This message's calls: a refusal before it was sent (T.1).
+            guard.next_step();
 
             // Delegations of this step run in parallel, within the caps.
             let (delegations, calls): (Vec<_>, Vec<_>) = completion
