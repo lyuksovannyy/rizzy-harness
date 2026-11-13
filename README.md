@@ -1035,7 +1035,9 @@ comes next, with a strip above the composer and a Stop per command), so a
 node runs none unless its owner sets `background_per_session` above 0 in
 `[limits]`. A node owner who turns them on now can stop one only by deleting
 the chat, by stopping the node, or by asking the agent to call `bash_stop`;
-the chat's **Stop** button does not stop them.
+the chat's **Stop** button does not stop them. While they are off the agent
+is not offered `bash_output` or `bash_stop` and `bash` does not describe
+`background` (a call that asks for it anyway is refused with the reason).
 
 With the feature on, `bash` with `background: true` and a `timeout_secs`
 (required: a background call without one is refused before anything starts)

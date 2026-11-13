@@ -738,10 +738,13 @@ impl SessionBg {
         self.reg.prune_all();
         let mut t = self.lock();
         if let Some(r) = t.closed {
+            let why = match r {
+                BackgroundReason::AccessRevoked => "its owner lost access".to_string(),
+                other => format!("the chat's commands {}", other.words()),
+            };
             return Err(format!(
-                "not started: this chat's background commands {}; none starts again until its \
-                 owner sends it a message",
-                r.words()
+                "not started: this chat's background commands were stopped ({why}); none starts \
+                 again until its owner sends it a message"
             ));
         }
         let ids = Self::running_ids(&t);
@@ -1617,6 +1620,23 @@ mod tests {
     fn table(limits: Limits) -> (Arc<SessionBg>, mpsc::UnboundedReceiver<Ended>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Registry::new(limits, none()).session(1, tx), rx)
+    }
+
+    #[test]
+    fn a_closed_table_says_why_in_words() {
+        let (bg, _rx) = table(Limits {
+            per_session: 8,
+            ..Default::default()
+        });
+        bg.close(BackgroundReason::AccessRevoked);
+        let e = bg.reserve().err().unwrap();
+        assert_eq!(
+            e,
+            "not started: this chat's background commands were stopped (its owner lost access); \
+             none starts again until its owner sends it a message"
+        );
+        bg.reopen();
+        assert!(bg.reserve().is_ok());
     }
 
     #[test]

@@ -604,8 +604,27 @@ async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, 
 /// start hands over late, until its owner prompts it again.
 async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
     let agentic = rows.filter(|r| r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
+    // The answer depends on the owner, the chat's workspace and its node
+    // only: asked once per such triple, not once per chat (a hello's sweep
+    // reads every chat of the node).
+    type Key = (Option<String>, Option<String>, String);
+    let mut asked: std::collections::HashMap<Key, Result<Option<String>, ()>> =
+        std::collections::HashMap::new();
     for row in agentic {
-        let Ok(Some(why)) = blocked_reason(m, &row).await else {
+        let key = (
+            row.owner_id.clone(),
+            row.workspace_id.clone(),
+            row.node_id.clone(),
+        );
+        let reason = match asked.get(&key) {
+            Some(r) => r.clone(),
+            None => {
+                let r = blocked_reason(m, &row).await;
+                asked.insert(key, r.clone());
+                r
+            }
+        };
+        let Ok(Some(why)) = reason else {
             continue;
         };
         if row.running {

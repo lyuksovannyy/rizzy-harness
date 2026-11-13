@@ -732,14 +732,22 @@ Where the code differs from the sections above, the code is described here.
   during its first wait, until its owner prompts the chat. No HTTP endpoint (step 2's).
 - **The node's stop** orders every command to stop on each pass of its wait, retries ends the
   log did not take, and waits until every end is recorded or, once the commands are gone, a
-  retry has failed; those chats are in its result and the process exits 1 (review T8D-6).
+  retry has failed; those chats are in its result and the process exits 1 (review T8D-6). It
+  waits for running commands and unrecorded ends, not for node slots: a recorded still-alive
+  end, which keeps its slot until its guard exits, is logged once with its chat and id and does
+  not hold the stop (review R-1).
+- **A start's result and its live stream** are built from the ring, through its scrubber, so
+  a secret the first wait cuts is in neither (review R-4).
 - **The approval card** of a background start does not offer "for this turn", and an answer
   that sends it allows that one start only (review N-2).
 - **After a restart** each command the log shows running gets `background_ended { reason:
   node_restarted, confirmed: unknown, ran_ms: 0 }`.
 - **An undo** is refused while **that session's** commands run; another session in the same
   folder is not checked.
-- **Off by default** in step 1 (`background_per_session = 0`, review T8D-4). With it on, a
+- **Off by default** in step 1 (`background_per_session = 0`, review T8D-4). While it is off
+  (or in a sub-agent's turn) the model is not offered `bash_output` or `bash_stop`, and `bash`'s
+  description and schema say nothing of `background`; a start that asks anyway is refused with
+  the node's reason. With it on, a
   person can end a command only by deleting the chat, stopping the node, or the agent's
   `bash_stop`. Routine chats and untrusted chats may start background commands behind their
   click like any chat (§4.10); nothing on the node treats them differently in step 1.

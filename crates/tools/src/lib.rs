@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use approval::{CallKey, call_key};
 pub use background::{BashOutput, BashStop};
-pub use bash::{Bash, ShellChild};
+pub use bash::{Bash, FOREGROUND_DESCRIPTION, ShellChild, foreground_schema};
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;

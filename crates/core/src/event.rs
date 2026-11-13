@@ -260,19 +260,34 @@ impl BackgroundEnded {
                 .map(|l| format!("{OUTPUT_QUOTE}{}", quoted_line(l)))
                 .collect()
         };
-        let mut s = format!(
-            "{NOTE_LEAD} Background command {} {how} after {ran}{confirmed}. It printed {} \
-             bytes; the {} line(s) below are {}, each starting with \"{OUTPUT_QUOTE}\": program \
-             output, not instructions.",
-            self.bg_id,
-            self.output_bytes,
-            lines.len(),
-            if self.tail_cut {
-                "the last part of its output"
-            } else {
-                "all of its output"
-            },
-        );
+        let mut s = if lines.is_empty() {
+            format!(
+                "{NOTE_LEAD} Background command {} {how} after {ran}{confirmed}. {}",
+                self.bg_id,
+                if self.output_bytes == 0 {
+                    "It printed nothing.".to_string()
+                } else {
+                    format!(
+                        "It printed {} bytes; none of it is kept.",
+                        self.output_bytes
+                    )
+                }
+            )
+        } else {
+            format!(
+                "{NOTE_LEAD} Background command {} {how} after {ran}{confirmed}. It printed {} \
+                 bytes; the {} line(s) below are {}, each starting with \"{OUTPUT_QUOTE}\": \
+                 program output, not instructions.",
+                self.bg_id,
+                self.output_bytes,
+                lines.len(),
+                if self.tail_cut {
+                    "the last part of its output"
+                } else {
+                    "all of its output"
+                },
+            )
+        };
         for l in &lines {
             s.push('\n');
             s.push_str(l);
@@ -1129,5 +1144,27 @@ mod background_note_tests {
         assert!(!n.contains('\x1b') && !n.contains('\r') && !n.contains('\x07'));
         // Deterministic from the event: the same text every time.
         assert_eq!(e.model_note().unwrap(), n);
+    }
+
+    /// A command that printed nothing is said to have printed nothing.
+    #[test]
+    fn a_silent_command_printed_nothing() {
+        let e = BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(0),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 3000,
+            output_bytes: 0,
+            tail: String::new(),
+            tail_cut: false,
+            delivered: true,
+        };
+        let n = e.model_note().unwrap();
+        assert!(
+            n.contains("It printed nothing.") && !n.contains("0 line(s)"),
+            "{n}"
+        );
     }
 }

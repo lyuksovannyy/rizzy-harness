@@ -151,6 +151,30 @@ enum End {
     Background,
 }
 
+/// `bash`'s description where background commands are off (the node's
+/// `background_per_session = 0`, a sub-agent): nothing about them.
+pub const FOREGROUND_DESCRIPTION: &str = "Run a shell command with bash in the session \
+     workspace. Returns combined stdout/stderr and the exit code. Avoid interactive commands. A \
+     command stops at its timeout (60 s when none is given).";
+
+/// `bash`'s schema where background commands are off: no `background`.
+pub fn foreground_schema(bash_timeout_max: Duration) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The command to run"},
+            "timeout_secs": {
+                "type": "integer",
+                "description": format!(
+                    "Timeout in seconds, from 5 to {} (60 when absent)",
+                    bash_timeout_max.as_secs()
+                )
+            }
+        },
+        "required": ["command"]
+    })
+}
+
 #[async_trait::async_trait]
 impl Tool for Bash {
     fn name(&self) -> &'static str {

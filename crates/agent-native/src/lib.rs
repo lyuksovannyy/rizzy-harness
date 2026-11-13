@@ -356,21 +356,34 @@ impl NativeBackend {
 
     /// Tools offered to the model: the runtime's tools, narrowed to what the
     /// agent asks for. (Node policy still gates execution separately.)
+    /// `background_on`: this turn's tools get a background table that
+    /// admits starts; when not, `bash_output` and `bash_stop` are not
+    /// offered and `bash` says nothing of `background` (a start that asks
+    /// anyway is still refused with the node's reason).
     fn tool_specs(
         &self,
         agent: Option<&harness_core::agent::AgentSpec>,
         savings: &harness_core::savings::Savings,
         host: &dyn harness_core::backend::TurnHost,
+        background_on: bool,
     ) -> Vec<ToolSpec> {
         let mut specs: Vec<ToolSpec> = self
             .tools
             .iter()
             .filter(|t| t.enabled(savings))
             .filter(|t| agent.is_none_or(|a| a.allows_tool(t.name())))
-            .map(|t| ToolSpec {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                schema: t.schema_for(self.config.bash_timeout_max),
+            .filter(|t| background_on || !matches!(t.name(), "bash_output" | "bash_stop"))
+            .map(|t| match (t.name(), background_on) {
+                ("bash", false) => ToolSpec {
+                    name: t.name().to_string(),
+                    description: harness_tools::FOREGROUND_DESCRIPTION.to_string(),
+                    schema: harness_tools::foreground_schema(self.config.bash_timeout_max),
+                },
+                _ => ToolSpec {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    schema: t.schema_for(self.config.bash_timeout_max),
+                },
             })
             .collect();
         // A delegate with nothing to work with here is left out; a call to
@@ -999,7 +1012,11 @@ impl NativeBackend {
         if !ctx.compare.is_empty() {
             return self.compare(&ctx, messages, usage, author, ui).await;
         }
-        let tools = self.tool_specs(agent, sv, host);
+        let background_on = matches!(
+            background_access(&ctx, host),
+            harness_tools::background::Access::On(b) if b.limits().per_session > 0
+        );
+        let tools = self.tool_specs(agent, sv, host, background_on);
         // The master only puts an effort on the spec when the model supports it.
         let effort = agent
             .and_then(|a| a.effort.as_deref())
@@ -2143,7 +2160,7 @@ mod tests {
         c.agent = Some(scout());
         let b = backend();
         assert_eq!(
-            b.tool_specs(c.agent.as_ref(), &Default::default(), &host)
+            b.tool_specs(c.agent.as_ref(), &Default::default(), &host, false)
                 .len(),
             1
         );
