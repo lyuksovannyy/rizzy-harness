@@ -378,11 +378,17 @@ user who asks for images.
 as the node's current user; the permission is one ordered level, none, Podman, sandbox, host;
 choosing `host` shows a warning that says the risks (N.10's row has the text's content).
 
-**Open, for the owner:** a node that can run neither bubblewrap nor Podman (inside the
-published image; B.11) has only Landlock. Does Landlock alone count as `sandbox`, or only as
-`host`? Until answered N.10 is built to the recommendation: `host` by default, and a node
-setting that counts it as `sandbox` from ABI 9 (where it closes the socket escape but gives no
-PID namespace and no confirmed kill), logged at start.
+**Answered by the owner, 2026-11-13:** a node that can run neither bubblewrap nor Podman (inside
+the published image; B.11) has only Landlock, and Landlock alone counts as `host`, not as
+`sandbox`: it gives no PID namespace and no confirmed kill, which the rest of the sandbox work
+relies on. Such a node offers agent chats only with the unconfined shell turned on in its own
+`node.toml`. The node setting that would count Landlock as `sandbox` from ABI 9 is not built:
+it would give `sandbox` two strengths; it can be added if someone needs it.
+
+**Built in two parts (2026-11-13).** N.10a touches auth, the node link and the UI, so it is two
+changes with a review each: first the node's side (the `[execution]` ceiling, the modes a node
+can enforce announced at hello, the session's mode recorded at creation), then the level per
+member that replaces the role-derived `agentic` permission.
 
 ## 5. Order and dependencies
 
