@@ -1,8 +1,9 @@
 # Background commands: design note
 
-Status: **proposal, 2026-11-12. Nothing here is decided by the owner yet**; every row of the
-decisions table (§3) is a recommendation. Nothing built. Task C.15 of `ADOPTION_PLAN.md`; the
-feature is task T.8d.
+Status: **the six open questions were answered by the owner on 2026-11-13 (§0)**; where §0
+differs from a recommendation further down, §0 holds, and the affected rows are corrected. The
+rest of the decisions table (§3) stands as recommended. Nothing built. Task C.15 of
+`ADOPTION_PLAN.md`; the feature is task T.8d.
 
 **Summary.** `bash` gains `background: true`. The node starts the command in its own contained
 sandbox (T.8a to T.8c) under its own guard (T.8e), exactly as a foreground command, but holds it
@@ -11,14 +12,25 @@ the first output. When the command ends (exit, timeout, stop), the session actor
 `background_ended` with the reason and the last 4 KiB of output. If a turn is running, the agent
 sees it as a note at its next step. If the session is idle, **the master** starts a callback turn
 after the same admission checks a routine passes, and only while the session's budget of turns
-without a person's message lasts. Every command has a timeout (60 s when none is given, never
-above `bash_timeout_max_s`); a background command must name one. Everything dies with the node,
+without a person's message lasts. Every command has a timeout, foreground or background alike:
+60 s when none is given, at least 5 s, never above `bash_timeout_max_s`. Everything dies with the node,
 the session's deletion, the owner losing access, or its own timeout. Bounds come from `[limits]`
 in `node.toml` only.
 
 Claims about code were read on `main` at `6e99313` (T.8c merged; pull request 63 not read).
 "The others" are read from the project's research and the cloned repositories under
 `.claude/research-repos/`, as data; anything not found there says "not verified".
+
+## 0. Decided by the owner (2026-11-13)
+
+| # | Question (§10) | Answer | What it changes below |
+|---|---|---|---|
+| Q1 | Does Stop of a turn stop its background commands? | No, as recommended; **and each background command can be stopped on its own**, by the person and by the agent. | Nothing: `bash_stop { id }` for the agent, Stop per command and Stop all for the person (§4.7, §4.11). |
+| Q2 | Callback turns in `auto` sessions without a click? | Yes, as recommended, within `callback_turns` and `callback_max_steps`. | Nothing. |
+| Q3 | The timeout and its ceiling | **60 s when none is given; the agent may set it from 5 s up to the node's existing ceiling** (`bash_timeout_max_s`). No second ceiling. | R3 and §4.2: a floor of 5 s is new (it was 1). |
+| Q4 | The foreground default | **The same behaviour as a background command**: one rule for both kinds. | R3 and §4.2: the foreground default drops from 600 s to 60 s, as recommended. |
+| Q5 | Must a background command name its timeout? | Answered "agreed", but Q3 and Q4 give one rule with a 60 s default for both kinds. **Built to Q3 and Q4: a background command without `timeout_secs` gets 60 s.** The owner is asked to confirm; if "refused without" was meant, it is one check in the tool. | R3 and §4.2: "required, refused without" is replaced. The cost the note named stays: a server the model forgot to time ends after a minute and, once callbacks exist, spends a callback turn. The start's result and the schema therefore say the deadline plainly. |
+| Q6 | On by default, and the default bounds | On. **`background_per_session = 8`, `background_per_node = 64`.** | R8 and §4.5. Kept output in the node's memory is at most 64 rings of 256 KiB, 16 MiB (it was 4 MiB), and 64 running commands are about 190 processes beside the node (a guard, bubblewrap and its init for each). The node's idle size does not change. |
 
 ## Terms
 
@@ -100,12 +112,12 @@ smaller step cap and counts against a per-session budget of unattended turns.
 |---|---|---|---|
 | R1 | Tool shape | `bash { command, timeout_secs, background }`; read with `bash_output { id? }` (no id lists), stop with `bash_stop { id }`. Both new tools read-only risk. | One `background` tool with an action: risk is per tool (`Tool::risk` has no input), so reading and stopping share one class and one `denied_tools` entry. A separate start tool: every existing `bash` deny, allow-list and approval would have to be repeated for it. |
 | R2 | What returns at once | Waits up to 3 s: if the command ended, an ordinary result and no background command; else the id, the deadline and the output so far. | Return at once: "port in use" or "command not found" then costs a callback turn. Codex's caller-chosen wait: more to approve and to misuse. |
-| R3 | Timeouts | Foreground: `timeout_secs` or 60 s. Background: `timeout_secs` required, refused without. Both capped by `bash_timeout_max_s`. No zero, no "none". | A 60 s default for background too: every dev server the model forgets to time dies after a minute and costs a callback. |
+| R3 | Timeouts (**decided, §0**) | One rule for foreground and background: `timeout_secs` or 60 s, at least 5 s, capped by `bash_timeout_max_s`. No zero, no "none". | A 60 s default for background too: every dev server the model forgets to time dies after a minute and costs a callback. |
 | R4 | Who starts a callback turn | The node records the end; the master starts the turn after a routine's admission checks; the node accepts it only if the ends are undelivered and its budget allows. | The node starts it: no agent spec, no memory, no access re-check, runs after the owner was removed. |
 | R5 | A turn is running | The end becomes a note at the next step boundary, recorded there; no second turn, no step used. Ends that miss the turn's last step are delivered as if the session were idle. | A second turn queued after: the agent acts on stale state for the rest of the turn. |
 | R6 | What the callback carries | Id, the command's first 200 characters, why it ended, exit code or signal, the guard's confirmation, run time, total output bytes, the last 4 KiB of output (scrubbed, marked as program output), and how to read more. | The full output: unattended tokens and a larger injection surface for nothing `bash_output` cannot give. |
 | R7 | Commands the agent or the person stopped | No callback; the stop's own result or the person's click is the end. | Callback on every end: a turn spent on "I stopped it". |
-| R8 | Bounds (`[limits]`) | `background_per_session = 4`, `background_per_node = 16`, `callback_turns = 3`, `callback_max_steps = 20`, `background_output_kb = 256`; ceiling `bash_timeout_max_s`. | Codex-style 64 with LRU eviction: kills a server the person relies on, silently. |
+| R8 | Bounds (`[limits]`; **the first two decided, §0**) | `background_per_session = 8`, `background_per_node = 64`, `callback_turns = 3`, `callback_max_steps = 20`, `background_output_kb = 256`; ceiling `bash_timeout_max_s`. | Codex-style 64 with LRU eviction: kills a server the person relies on, silently. |
 | R9 | At the cap | Refuse the start, naming the running ids. | Evict the oldest (Codex, Hermes). |
 | R10 | Callback turns and approvals | The session's own mode, nothing auto-approved, approvals park as in any turn; untrusted chats get no callback turns. | Clamp callback turns to `ask`: makes `auto` sessions stall at every callback. |
 | R11 | Cancel of a turn (Stop) | Does **not** stop background commands; the chat's strip has Stop per command and Stop all. | Stop kills all: the panic button is total, and the feature dies the first time a person interrupts to say something. |
@@ -174,11 +186,14 @@ The owner's rule, "each command require timeout specified (defaults to 60 second
 literally gives every background command 60 s when the model forgets. A dev server that dies
 after a minute is the commonest failure of that rule, and each one costs a callback turn. So:
 
+**Decided (§0): one rule for both kinds, with the 60 s default.** The paragraph above is why the
+note recommended otherwise; the owner chose the default, so the start's result states the
+deadline in words ("ends at the latest in 60 s; state `timeout_secs` for longer").
+
 | Call | Timeout | Today |
 |---|---|---|
-| Foreground, `timeout_secs` given | `min(timeout_secs, bash_timeout_max_s)`, at least 1 | same |
-| Foreground, none given | 60 s | 600 s (`crates/agent-native/src/lib.rs:201`) |
-| Background | `timeout_secs` **required**, `min(…, bash_timeout_max_s)` | n/a |
+| Foreground or background, `timeout_secs` given | clamped to 5 s at least and `bash_timeout_max_s` at most | foreground: at least 1, same ceiling |
+| Foreground or background, none given | 60 s | foreground: 600 s (`crates/agent-native/src/lib.rs:201`) |
 
 The foreground change is user-visible: a build or test run that takes two minutes and states no
 timeout is stopped at 60 s, where today it runs. The timeout result already says so; it gains a
@@ -289,8 +304,8 @@ New keys in `[limits]` (`crates/node/src/policy.rs:154-173`), checked at start l
 
 | Key | Default | Range | Why this default |
 |---|---|---|---|
-| `background_per_session` | 4 | 0 to 32 | A server, a watcher, a build and one spare. 0 turns the feature off on this node. |
-| `background_per_node` | 16 | 0 to 256 | Each costs three processes (guard, bwrap, init) and its ring; 16 rings of 256 KiB is 4 MiB. |
+| `background_per_session` | 8 (the owner, §0) | 0 to 32 | 0 turns the feature off on this node. |
+| `background_per_node` | 64 (the owner, §0) | 0 to 256 | Each costs three processes (guard, bwrap, init) and its ring; 64 rings of 256 KiB is 16 MiB. |
 | `callback_turns` | 3 | 0 to 20 | Build, then tests, then one fix, then stop and wait. 0: ends are recorded and never start a turn. |
 | `callback_max_steps` | 20 | 1 to `max_steps` | A callback turn should report or take one step forward, not run a whole task unwatched. |
 | `background_output_kb` | 256 | 16 to 4096 | Enough tail for a failing build; bounded memory. |
@@ -617,6 +632,9 @@ Also unsure, smaller: whether 60 s for foreground calls breaks common builds oft
 annoy (Q4 is the owner's).
 
 ## 10. Open, for the owner
+
+**Answered on 2026-11-13: see §0.** One point is left: Q5 against Q3 and Q4 (whether a background
+command without a timeout is refused or gets 60 s). The questions are kept as asked.
 
 - **Q1. Does Stop of a turn stop its background commands?** Recommended: no; a Stop all sits
   next to Stop while any run. The other choice (Stop ends everything) makes the panic button
