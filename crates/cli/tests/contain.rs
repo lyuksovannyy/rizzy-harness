@@ -1043,10 +1043,12 @@ fn doctor_marks_each_containment_state() {
 }
 
 /// Review L-c: `strict` offers the sandbox mode only where no gap is
-/// named. A `[sandbox] write` entry holding other programs' sockets
-/// (`/run/user/<uid>`), or a folder on the node's `PATH`, is such a gap: `auto` warns,
-/// `strict` does not offer the mode. Before, `strict` offered it and only
-/// warned.
+/// named. A `[sandbox] write` entry holding other programs' sockets (`/tmp`,
+/// `/run/user/<uid>`), or a folder on the node's `PATH`, is such a gap:
+/// `auto` warns, `strict` does not offer the mode. Before, `strict` offered
+/// it and only warned. Runs only with bubblewrap and from Landlock ABI 9
+/// (below, `strict` refuses for the socket gap first): **CI's kernel is at
+/// ABI 8, so CI skips it**; it ran on the builder's machine (ABI 9 or newer).
 #[test]
 fn strict_does_not_offer_the_sandbox_with_a_write_entry_gap() {
     let f = fixture();
@@ -1059,22 +1061,27 @@ fn strict_does_not_offer_the_sandbox_with_a_write_entry_gap() {
         eprintln!("SKIPPED: below Landlock ABI 9 `strict` refuses for the socket gap first");
         return;
     }
-    let bin = f.root.join("toolbin");
+    // The data directory outside `/tmp`, so a `/tmp` write entry is allowed.
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let data = dir.path().canonicalize().unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let bin = dir.path().join("toolbin");
     std::fs::create_dir_all(&bin).unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let doctor_path = |toml: &str| {
-        std::fs::write(f.data.join("node.toml"), toml).unwrap();
+        std::fs::write(data.join("node.toml"), toml).unwrap();
         let out = std::process::Command::new(EXE)
-            .args(["--data-dir", f.data.to_str().unwrap(), "doctor"])
+            .args(["--data-dir", data.to_str().unwrap(), "doctor"])
             .env("PATH", &path)
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    // `/run/user/<uid>`, not `/tmp`: this fixture's data directory is in
-    // `/tmp`, which a write entry may not hold.
     let run = format!("/run/user/{}", nix::unistd::getuid());
-    let mut entries = vec![(bin.display().to_string(), "on this node's PATH")];
+    let mut entries = vec![
+        (bin.display().to_string(), "on this node's PATH"),
+        ("/tmp".to_string(), "other programs' sockets"),
+    ];
     if std::path::Path::new(&run).is_dir() {
         entries.push((run, "other programs' sockets"));
     }
