@@ -1274,7 +1274,9 @@ A node refused for its key (revoked, or never joined) exits the same way.
 Both end with exit status **77**, so a service manager can leave the node
 down (the unit below does); a server that is down or restarting is retried
 every few seconds up to 30 s apart. What the master sends in a refusal is
-shown as one line of at most 300 characters, without control characters.
+shown as one line of printable ASCII of at most 300 characters, and the
+node accepts from its master only a node id in the master's own shape
+(`a-z`, `0-9`, `-`, at most 64): anything else is refused, also with 77.
 Upgrade the server first, then its nodes.
 
 ### Stopping a node or the server
@@ -1296,8 +1298,12 @@ Upgrade the server first, then its nodes.
   before stays "cancelled", and one that had already finished stays
   finished. The server keeps serving the page meanwhile, so open chats
   show it; a node keeps its link to the server, so the server sees it too.
-- A routine's run whose turn a stop ended is no failure: it is put back
-  and runs again, in a new chat, once the node or the server is back.
+- A routine's run that a stop cut (its turn running, or not yet started)
+  ends **interrupted** with the reason and does not count toward pausing
+  the routine. **It is not run again by itself**, and a webhook's event is
+  not replayed: the routine's next occurrence runs as scheduled, and
+  **Run now** runs it at once. A run whose node crashed during its turn
+  still counts.
 - When the last turn has closed the process exits with status 0. It waits
   at most 80 s (the cancelled command's grace, the checkpoint's own 60 s
   limit, and a margin); a turn still open then, or one whose end could not
@@ -1311,8 +1317,13 @@ What can outlive a stop: a command stuck in a read the kernel cannot
 interrupt (a network folder whose server went away) keeps its guard until
 the read returns, and with `[sandbox] contain = "off"` a command that
 detached from its shell is not ended at all. A tool of the node's own
-stuck that way is left behind: the process exits 2 s after its work is
-done whatever threads remain.
+stuck that way does not hold the process up: 2 s after its work is done
+the process calls its exit. But the kernel cannot let it go while that
+thread waits in the read: until the read returns (or the mount is forced
+off) the process is a zombie that no signal ends, its data directory stays
+locked, a second start is refused with a message saying the holder has
+exited and waits for a file system that does not answer (`doctor` says the
+same), and under systemd the stop times out and the unit is marked failed.
 
 The data directory stays locked until the process is gone, so a second
 start on it during a stop is refused with the usual "is in use by"

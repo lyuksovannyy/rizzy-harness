@@ -314,8 +314,9 @@ binary and `node.toml` are root-owned is safer, and cannot use `auto`.
   refusal as before and learns nothing of the version. Every `Rejected` ends the node's
   reconnect loop (each needs a person: a revoked or unknown key, a spent token, another
   protocol) and the process exits **77** (`EX_NOPERM`; 75 and 76 stay the update's); the unit
-  sets `RestartPreventExitStatus=77`. The node prints the reason as one line without control
-  characters, at most 300 characters. A master that is down, a network or TLS error, a timeout
+  sets `RestartPreventExitStatus=77`. The node prints the reason as printable ASCII on one line,
+  spaces folded, at most 300 characters, and accepts from its master only an id in the
+  master's own shape (1 to 64 of `a-z0-9-`; otherwise it refuses that master, also 77). A master that is down, a network or TLS error, a timeout
   or a link dropped after `Accepted` is retried. `Hello::Auth` gains no `version` or
   `build_id` yet (step 2).
 - **Stop signals.** SIGTERM is handled like SIGINT by `serve` and `node run`: new turns,
@@ -328,11 +329,13 @@ binary and `node.toml` are root-owned is safer, and cannot use `auto`.
   checkpoint's 60 s limit and 15 s, a constant in `crates/cli/src/stop.rs`; no `[drain]` table)
   and exits 0, or 1 when a turn is still open or its end could not be written; a second signal
   exits 1 at once; the data directory's lock is held until the process is gone, and the runtime
-  gets 2 s before the process exits whatever threads are left. `serve` closes its local and
+  gets 2 s (also after a panic) before the process calls its exit; a thread stuck in an
+  uninterruptible read keeps the process, a zombie, and its lock until the read returns. `serve` closes its local and
   chat turns while HTTP still serves, starts no routine run meanwhile (Run now and webhooks get
   503 and record nothing), then gives HTTP its 30 s grace (§8.2). A routine's run cut by a stop
-  is no failure: it is put back and runs once more, at once if a remote node stopped or at the
-  server's next start (§7.4's rule for `draining`). The README unit sets `KillMode=mixed`,
+  ends `interrupted`, not counted and not run again by itself (the re-check's R-1 to R-4: a
+  relaunch lost a webhook's event and could loop); §7.4's retry of a `draining` node stays
+  N.9's. The README unit sets `KillMode=mixed`,
   `TimeoutStopSec=120` and no `KillSignal`.
 
 **Differs from the full design, on purpose until N.9:** A.19 has no grace before the cancel
