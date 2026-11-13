@@ -87,3 +87,27 @@ fn the_sweep_drops_only_old_uploads() {
             .is_some()
     );
 }
+
+/// Review R-8: an upload the API token took for a message that was then
+/// refused goes back to the account that uploaded it, not to the token,
+/// so its owner can still send it.
+#[test]
+fn a_given_back_upload_keeps_its_owner() {
+    let s = Store::open_in_memory().unwrap();
+    assert!(
+        s.attachment_put("u1", Some("alex"), &att("x"), 3, 1000)
+            .unwrap()
+    );
+    let taken = s
+        .attachments_take_owned(&["u1".into()], None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(taken[0].1.as_deref(), Some("alex"));
+    s.attachments_give_back(&["u1".into()], &taken).unwrap();
+    assert!(
+        s.attachments_take(&["u1".into()], Some("alex"))
+            .unwrap()
+            .is_some(),
+        "the owner cannot send their own upload"
+    );
+}

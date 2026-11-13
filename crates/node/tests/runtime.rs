@@ -3543,3 +3543,59 @@ async fn a_completed_turn_in_its_checkpoint_stays_completed() {
     };
     assert_eq!(end.reason, TurnEndReason::Completed);
 }
+
+/// Review R-7: a writing sub-agent being started (its worktree being made)
+/// when the stop comes never starts its turn after the stop: every child
+/// that has a turn ends `stopped`, none `cancelled`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
+    let mut started_after = Vec::new();
+    for i in 0..12u64 {
+        let mut h = Harness::new(auto_policy).await;
+        init_repo(&h.ws);
+        let sid = h.create().await;
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: Some(agent("lead", vec![agent("dev", vec![])])),
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text: "delegate: dev=slow: 400".into(),
+            images: vec![],
+        });
+        h.until(|k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "delegate"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(i * 7)).await;
+        let left = h.node.stop(Duration::from_secs(30)).await;
+        assert!(left.is_empty(), "{left:?}");
+        for row in h.node.store().sessions().unwrap() {
+            if row.session_id == sid {
+                continue;
+            }
+            let evs = h
+                .node
+                .store()
+                .events_after(row.session_id, 0, 10_000)
+                .unwrap();
+            let v = SessionView::fold(&evs).unwrap();
+            let ends: Vec<TurnEndReason> = v
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    Item::TurnEnd { reason, .. } => Some(*reason),
+                    _ => None,
+                })
+                .collect();
+            if ends.iter().any(|r| *r != TurnEndReason::Stopped) {
+                started_after.push((i, ends));
+            }
+        }
+    }
+    assert!(
+        started_after.is_empty(),
+        "children whose turn did not end by the stop: {started_after:?}"
+    );
+}

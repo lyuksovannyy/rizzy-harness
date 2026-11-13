@@ -1216,7 +1216,7 @@ async fn prompt(
         let (ids, owner) = (b.attachments.clone(), who.user_id.clone());
         m.inner
             .mirror
-            .call(move |s| s.attachments_take(&ids, owner.as_deref()))
+            .call(move |s| s.attachments_take_owned(&ids, owner.as_deref()))
             .await?
             .ok_or_else(|| {
                 ApiError(
@@ -1226,6 +1226,7 @@ async fn prompt(
             })?
     };
     let taken = (!attachments.is_empty()).then(|| (b.attachments.clone(), attachments.clone()));
+    let attachments = attachments.into_iter().map(|(a, _)| a).collect();
     let sent = m
         .prompt(
             sid,
@@ -1253,16 +1254,13 @@ async fn prompt(
     // answer was lost, and giving them back could let one file go twice.
     if let (Err(e), Some((ids, atts))) = (&sent, taken)
         && !matches!(e, CommandError::Timeout)
-    {
-        let owner = who.user_id.clone();
-        if let Err(e) = m
+        && let Err(e) = m
             .inner
             .mirror
-            .call(move |s| s.attachments_give_back(&ids, owner.as_deref(), &atts))
+            .call(move |s| s.attachments_give_back(&ids, &atts))
             .await
-        {
-            tracing::warn!(error = %e, "could not give a refused message's uploads back");
-        }
+    {
+        tracing::warn!(error = %e, "could not give a refused message's uploads back");
     }
     sent?;
     Ok(Json(json!({ "ok": true })))

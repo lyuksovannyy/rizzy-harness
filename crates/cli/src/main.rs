@@ -486,9 +486,11 @@ async fn serve(
             let _ = stopped_tx.send(left.into_iter().map(|s| s.to_string()).collect());
         });
     }
-    let (left_tx, left_rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+    // `None`: the stop's task ended without its answer (it panicked):
+    // that is no clean stop (review R-10).
+    let (left_tx, left_rx) = tokio::sync::oneshot::channel::<Option<Vec<String>>>();
     let shutdown = async move {
-        let left = stopped_rx.await.unwrap_or_default();
+        let left = stopped_rx.await.ok();
         let _ = left_tx.send(left);
     };
     let limits = harness_master::serve::ServeConfig::default();
@@ -525,7 +527,10 @@ async fn serve(
         harness_master::serve::serve(listener, harness_master::router(master), limits, shutdown)
             .await?;
     }
-    stopped(left_rx.await.unwrap_or_default())
+    match left_rx.await {
+        Ok(Some(left)) => stopped(left),
+        _ => bail!("the stop did not finish (its task ended without closing the turns)"),
+    }
 }
 
 /// The end of a stop: 0 when every turn closed, else 1 naming the sessions
@@ -1132,7 +1137,12 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = rt.block_on(async_main(cli, dir, loaded));
+    // A panic too ends in the bounded shutdown below, never in a plain drop
+    // of the runtime (which would wait for a stuck thread without end).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.block_on(async_main(cli, dir, loaded))
+    }))
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("the harness panicked (see above)")));
     // A blocking thread a cancelled tool left (a read on a mount that does
     // not answer) would hold a plain drop of the runtime for ever.
     rt.shutdown_timeout(stop::RUNTIME_SHUTDOWN);
@@ -1143,7 +1153,10 @@ fn main() -> anyhow::Result<()> {
             if e.chain().any(|c| {
                 matches!(
                     c.downcast_ref::<harness_link::LinkError>(),
-                    Some(harness_link::LinkError::Rejected(_))
+                    Some(
+                        harness_link::LinkError::Rejected(_)
+                            | harness_link::LinkError::Untrusted(_)
+                    )
                 )
             }) {
                 stop::EXIT_REFUSED
