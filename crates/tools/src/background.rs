@@ -638,6 +638,11 @@ impl SessionBg {
         self.reg.limits
     }
 
+    /// Bytes of output every table of this node holds now.
+    pub fn node_held(&self) -> usize {
+        self.reg.held()
+    }
+
     /// Prune ends kept past [`KEPT_AFTER_END`], and ended entries beyond
     /// [`MAX_ENDED_ENTRIES`] (the oldest first).
     fn prune(t: &mut Table, now: Instant) {

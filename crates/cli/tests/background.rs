@@ -585,8 +585,53 @@ fn rss_kib() -> u64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_holds_its_ring_and_no_more() {
     let f = fixture();
-    let Some(sb) = f.sandbox() else { return };
-    let _one = memory_lock().await;
+    if f.sandbox().is_none() {
+        return;
+    }
+    // In a process of its own: this one's memory is shared with every
+    // other test of the file running beside it (it failed 2 of 5 whole
+    // runs that way, re-check R-5's runs).
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "helper_floods",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("T8D_FLOOD_HELPER", "1")
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find_map(|l| l.split_once("FLOOD ").map(|(_, v)| v))
+        .unwrap_or_else(|| panic!("the helper said nothing: {text}"));
+    let v: Vec<u64> = line.split(' ').map(|x| x.parse().unwrap()).collect();
+    let (before, peak, printed, held) = (v[0], v[1], v[2], v[3]);
+    eprintln!(
+        "flood: {printed} bytes printed; the helper process {before} KiB before, {peak} KiB at most; the ring held {held} bytes"
+    );
+    assert!(
+        printed > 200 << 20,
+        "too slow a flood to prove anything: {printed}"
+    );
+    assert!(held <= 64 * 1024, "the ring held {held} bytes");
+    assert!(
+        peak.saturating_sub(before) < 32 * 1024,
+        "memory grew {} KiB with the flood",
+        peak - before
+    );
+}
+
+/// Not a test on its own: the flood of the test above, in its process.
+#[tokio::test(flavor = "multi_thread")]
+async fn helper_floods() {
+    if std::env::var_os("T8D_FLOOD_HELPER").is_none() {
+        return;
+    }
+    let f = fixture();
+    let sb = f.sandbox().expect("checked by the parent");
     let (bg, mut ends) = table(Limits {
         output_kb: 64,
         ..on()
@@ -600,22 +645,14 @@ async fn a_flood_holds_its_ring_and_no_more() {
     )
     .await;
     assert!(r.background.is_some(), "{}", r.output);
-    let mut peak = 0;
+    let (mut peak, mut held) = (0, 0);
     let by = Instant::now() + Duration::from_secs(10);
     while Instant::now() < by {
         peak = peak.max(rss_kib());
+        held = held.max(bg.node_held());
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let e = next_end(&mut ends, Duration::from_secs(20)).await;
-    eprintln!(
-        "flood: {} bytes printed; this process {} KiB before, {} KiB at most",
-        e.output_bytes, before, peak
-    );
-    assert!(
-        e.output_bytes > 200 << 20,
-        "too slow a flood to prove anything: {}",
-        e.output_bytes
-    );
     assert!(e.tail.len() <= harness_tools::background::TAIL_IN_EVENT && e.tail_cut);
     assert!(e.tail.contains("0123456789abcdef"));
     let o = run(&BashOutput, &ctx, json!({"id": "bg-1"})).await;
@@ -624,11 +661,7 @@ async fn a_flood_holds_its_ring_and_no_more() {
         "{}",
         &o.output[..200.min(o.output.len())]
     );
-    assert!(
-        peak.saturating_sub(before) < 32 * 1024,
-        "memory grew {} KiB with the flood",
-        peak - before
-    );
+    println!("FLOOD {before} {peak} {} {held}", e.output_bytes);
 }
 
 /// §7 test 8 and §8: the end is recorded exactly once whatever ends it,
