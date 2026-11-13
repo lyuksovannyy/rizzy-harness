@@ -17,8 +17,11 @@
 //! - All pending migrations and the version bump are one `IMMEDIATE`
 //!   transaction: a failure, a full disk or a crash leaves the database as
 //!   it was (the version is in the header page, written in the same
-//!   transaction), and a second process waits for the write lock and then
-//!   sees the new version.
+//!   transaction). A second opener waits for the write lock only as long
+//!   as its busy timeout (5 s in `Store` and `SqliteMemory`) and is then
+//!   refused as `Busy`, unchanged; one that gets the lock re-reads the
+//!   version and finds it migrated. What keeps a second process off the
+//!   data directory is its lock (A.20), not this.
 //! - Foreign keys are off while migrations run, so a table rebuilt the way
 //!   SQLite documents it keeps the rows that reference it, and
 //!   `foreign_key_check` must find nothing before the version is bumped.
@@ -63,6 +66,12 @@ pub enum MigrateError {
         table: String,
         parent: String,
     },
+    /// The write lock was not free within the busy timeout.
+    #[error(
+        "{db} needs a schema migration, but another process holds it for writing (waited the busy timeout). \
+         It was not changed: stop the other process and start again"
+    )]
+    Busy { db: String },
     #[error("{db}: reading or writing the schema version: {source}")]
     Sqlite {
         db: String,
@@ -134,7 +143,12 @@ fn run(
     };
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sqlite)?;
+        .map_err(|source| match source.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                MigrateError::Busy { db: db.to_string() }
+            }
+            _ => sqlite(source),
+        })?;
     // Again under the write lock: another process may have migrated it.
     let from = refuse(user_version(&tx).map_err(sqlite)?)?;
     for (i, step) in steps.iter().enumerate().skip(from as usize) {
