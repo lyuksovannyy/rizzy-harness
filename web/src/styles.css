@@ -773,6 +773,10 @@ select {
   background: var(--accent);
   animation: pulse 1.2s var(--ease-in-out) infinite;
 }
+/* A background command runs in the chat (no turn): a ring, not the pulse. */
+.dot.background {
+  border: 2px solid var(--accent);
+}
 @keyframes pulse {
   50% {
     opacity: 0.3;
