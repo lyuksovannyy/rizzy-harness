@@ -1015,20 +1015,81 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
         "filed after a restart: {:?}",
         facts(&m2, sid).await
     );
+    // The control: this master does file a person's turn's call in the same
+    // chat, so the empty list above is the log's decision.
+    n2.raw(sid, "turn_started", json!({"turn_id": "p2"}));
+    n2.raw(
+        sid,
+        "tool_call_started",
+        json!({"turn_id": "p2", "call_id": "call-c", "tool": "remember",
+               "input": {"text": "control-after-restart"}}),
+    );
+    n2.raw(sid, "error", json!({"message": "barrier"}));
+    for _ in 0..500 {
+        if m2.inner_mirror().head_seq(sid).unwrap() >= head + 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(facts(&m2, sid).await, vec!["control-after-restart"]);
 }
 
-/// Review S3-5: the 60-minute rule ages an end by the master's clock: an
-/// end stamped two hours behind by its node's clock is resumed, and one
-/// stamped two hours ahead too.
+/// The re-check of S3-1: a prompt the node refuses leaves the chat's
+/// recorded memory as the running turn set it. An untrusted turn (no
+/// memory) runs; the owner's own message, which would be allowed memory, is
+/// refused ("a turn is already running"); the untrusted turn's `remember`
+/// is still not filed.
 #[tokio::test]
-async fn the_age_of_an_end_is_the_masters_clock_not_the_nodes() {
+async fn a_refused_prompt_leaves_the_running_turns_memory_as_it_was() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
+    *t.node.hold.lock().unwrap() = true;
+    let sid = memory_chat(&t).await;
+    t.master
+        .prompt(
+            sid,
+            "an external event".into(),
+            harness_master::PromptOpts {
+                untrusted: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    mirrored(&t, sid, 3).await;
+    *t.node.refuse_prompts.lock().unwrap() = Some("a turn is already running".into());
+    let (st, v) = req(
+        &t.base,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "hello"})),
+        &t.alex,
+    )
+    .await;
+    assert!(!st.is_success(), "{st} {v}");
+    remember_in(&t, &t.node, sid, "p", "steered-by-the-event", 5).await;
+    assert!(
+        facts(&t.master, sid).await.is_empty(),
+        "filed: {:?}",
+        facts(&t.master, sid).await
+    );
+}
+
+/// Review S3-5 and its re-check (R-1): an end is aged by the older of the
+/// two clocks. A node clock two hours ahead does not keep an end fresh for
+/// ever: the master's own clock counts from when it first saw it, so it is
+/// resumed now. An end stamped two hours ago that the master sees only now
+/// (the link was down, or the node's clock is behind; it cannot tell which)
+/// starts nothing: the owner gets the reason instead.
+#[tokio::test]
+async fn an_end_is_aged_by_the_older_of_the_two_clocks() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
     let now = harness_core::now_ms();
-    let (behind, ahead) = (chat(&t, &t.alex, None).await, chat(&t, &t.alex, None).await);
-    t.node.append_at(behind, started("bg-1"), now - 120 * MIN);
+    let (old, ahead) = (chat(&t, &t.alex, None).await, chat(&t, &t.alex, None).await);
+    t.node.append_at(old, started("bg-1"), now - 120 * MIN);
     t.node.append_at(
-        behind,
+        old,
         ended("bg-1", BackgroundReason::Exited, false),
         now - 120 * MIN,
     );
@@ -1038,14 +1099,16 @@ async fn the_age_of_an_end_is_the_masters_clock_not_the_nodes() {
         ended("bg-1", BackgroundReason::Exited, false),
         now + 120 * MIN,
     );
-    let mut cbs = until_callbacks(&t.node, 2).await;
-    cbs.sort();
-    let mut want = vec![
-        (behind, vec!["bg-1".to_string()]),
-        (ahead, vec!["bg-1".to_string()]),
-    ];
-    want.sort();
-    assert_eq!(cbs, want);
+    let row = attention_of(&t.base, &t.alex, old).await;
+    assert_eq!(row["reason"], "not_resumed", "{row}");
+    assert!(
+        row["detail"].as_str().unwrap().contains("60 minutes"),
+        "{row}"
+    );
+    until_callbacks(&t.node, 1).await;
+    // Past the settle of both checks: the old end was never asked for.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(t.node.callbacks(), vec![(ahead, vec!["bg-1".to_string()])]);
 }
 
 /// A node that is stopping, then one that went away, is asked again once it
@@ -1117,9 +1180,30 @@ async fn a_busy_or_away_node_is_asked_again_and_one_without_the_capability_never
     old.append(o, ended("bg-1", BackgroundReason::Exited, false));
     // The check runs within its settle; afterwards nothing was sent and the
     // owner has no row (the end waits for them, as before step 3).
+    // Nor is anything said about an end the master would refuse on its own
+    // rules (here its age): a node that takes no callbacks is not asked,
+    // so there is nothing to refuse (re-check of "off is silent").
+    let (st, v) = req(
+        &t.base,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "t", "node_id": "n2"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let stale: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let ago = harness_core::now_ms() - 120 * MIN;
+    old.append_at(stale, started("bg-1"), ago);
+    old.append_at(stale, ended("bg-1", BackgroundReason::Exited, false), ago);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(old.callbacks().is_empty());
     assert!(rows_of(&t.base, &t.alex, o).await.is_empty());
+    assert!(
+        rows_of(&t.base, &t.alex, stale).await.is_empty(),
+        "{:?}",
+        rows_of(&t.base, &t.alex, stale).await
+    );
 }
 
 async fn until_callbacks_within(node: &Fake, n: usize, secs: u64) -> Vec<(SessionId, Vec<String>)> {
