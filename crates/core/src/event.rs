@@ -335,13 +335,16 @@ impl BackgroundEnded {
 /// was printed.
 pub const NOTE_LEAD: &str = "[harness]";
 
-/// The prefix of every quoted line of a background command's output.
+/// The prefix of every quoted line: of a background command's output in its
+/// note, and of every part's text in the summariser's transcript (T38).
 pub const OUTPUT_QUOTE: &str = "| ";
 
 /// One line of program output, quoted: control characters other than tab,
 /// and the line and paragraph separators that are not control characters
-/// (U+2028, U+2029), become U+FFFD, so a quoted line stays one line.
-fn quoted_line(l: &str) -> String {
+/// (U+2028, U+2029), become U+FFFD, so a quoted line stays one line. The
+/// caller splits at `\n` and writes [`OUTPUT_QUOTE`] in front (the note
+/// above; the summariser's transcript in `agent_native`, T38).
+pub fn quoted_line(l: &str) -> String {
     l.chars()
         .map(|c| {
             if (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') {

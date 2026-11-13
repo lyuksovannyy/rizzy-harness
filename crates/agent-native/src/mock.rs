@@ -230,7 +230,8 @@ impl Provider for Mock {
             && p == crate::SUMMARY_PROMPT
         {
             let n = match req.messages.get(1) {
-                Some(ChatMsg::User(t)) => t.matches("User: ").count(),
+                // The transcript's own `User:` lines; a quoted one is text.
+                Some(ChatMsg::User(t)) => t.lines().filter(|l| *l == crate::PART_USER).count(),
                 _ => 0,
             };
             return Ok(Completion {
