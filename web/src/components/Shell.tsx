@@ -704,7 +704,7 @@ export function Shell(props: {
               workers={workers}
               prefs={prefs}
               agenticBlocked={agenticBlocked}
-              hostRight={{ admin: me.role === "admin", owner: me.workspace?.role === "owner" }}
+              hostRight={{ admin: me.role === "admin" }}
               workspace={workspaceId}
               onSubmit={submit}
               predict={predict}

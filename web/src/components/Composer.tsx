@@ -157,7 +157,9 @@ export function Composer(props: {
   const [nodeId, setNodeId] = useState(props.project?.nodeId ?? props.workers[0]?.node_id ?? "");
   const [cwd, setCwd] = useState(() => props.project?.cwd ?? recentFolders()[0] ?? "");
   // The new chat's mode: `host` only after its warning (ExecChoice).
-  const [execMode, setExecMode] = useState<ExecMode | undefined>(undefined);
+  // Bound to the node it was confirmed for (review L-j): a node switch,
+  // the user's or an automatic one, never carries it to another node.
+  const [hostFor, setHostFor] = useState<string | null>(null);
   const worker = props.workers.find((w) => w.node_id === nodeId);
   const hostPickable = mayPickHost(worker, props.hostRight);
   const [caret, setCaret] = useState(0);
@@ -341,7 +343,7 @@ export function Composer(props: {
     }
     // Always a mode the person chose: `host` only once confirmed, else
     // `sandbox`, which a node without it refuses (never the node's default).
-    const exec: ExecMode = hostPickable && execMode === "host" ? "host" : "sandbox";
+    const exec: ExecMode = hostPickable && hostFor === nodeId ? "host" : "sandbox";
     if (mode === "agentic" && hostPickable && exec === "sandbox" && !worker?.exec_modes?.includes("sandbox")) {
       setErr("This node runs commands only in the host shell: choose it under Commands first.");
       return;
@@ -376,7 +378,7 @@ export function Composer(props: {
       setPictures([]);
       setManual(false);
       // The host shell is chosen again, with its warning, for each chat.
-      setExecMode(undefined);
+      setHostFor(null);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -778,7 +780,7 @@ export function Composer(props: {
                 value={nodeId}
                 onChange={(e) => {
                   setNodeId(e.target.value);
-                  setExecMode(undefined);
+                  setHostFor(null);
                 }}
               >
                 {props.workers.map((n) => (
@@ -810,8 +812,8 @@ export function Composer(props: {
                 key={worker.node_id}
                 node={worker.embedded ? "local" : shownName(worker.hostname)}
                 offered={worker.exec_modes ?? []}
-                value={execMode}
-                onChange={setExecMode}
+                value={hostFor === worker.node_id ? "host" : undefined}
+                onChange={(m) => setHostFor(m === "host" ? worker.node_id : null)}
               />
               </Suspense>
             )}

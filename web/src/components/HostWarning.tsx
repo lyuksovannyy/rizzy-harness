@@ -39,7 +39,10 @@ export function HostWarning(props: { node: string; onConfirm: () => void; onCanc
           <li>one web page or file the agent reads can turn all of that against you;</li>
           <li>what a sandbox chat wrote in this folder (a script, a Makefile, git hooks) runs here with all of that too.</li>
         </ul>
-        <p>The approval card is then the only check. The mode cannot be changed once the chat exists.</p>
+        <p>
+          The approval card is then the only check, so this chat always asks before a command that can change things: it
+          never runs in auto. The mode cannot be changed once the chat exists.
+        </p>
         <div className="row end">
           <button type="button" autoFocus onClick={cancel}>
             Cancel
