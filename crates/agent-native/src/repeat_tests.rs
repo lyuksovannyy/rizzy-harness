@@ -284,11 +284,13 @@ async fn run_in(
         tools.extend(harness_tools::builtin());
     }
     let b = NativeBackend::new(rec.clone(), tools, NativeConfig::default());
-    let mut extra: harness_core::backend::TurnExtra = Default::default();
-    extra.savings = o.savings;
+    let extra = harness_core::backend::TurnExtra {
+        savings: o.savings,
+        ..Default::default()
+    };
     let out = b
         .run_turn(TurnCtx {
-            session_id: o.sid.unwrap_or_else(SessionId::new),
+            session_id: o.sid.unwrap_or_default(),
             turn_id: "t2".into(),
             history: o.history,
             user_text: "go".into(),
