@@ -233,7 +233,16 @@ export type Item =
   /** A file the user saved as an artifact ("Save as artifact"). */
   | { type: "artifact"; staged: StagedArtifact }
   /** Saving a file as an artifact failed on the node (`artifact_stage_failed`). */
-  | { type: "artifact_failed"; path: string; name: string | null; error: string };
+  | { type: "artifact_failed"; path: string; name: string | null; error: string }
+  /** A background command ended (`background_ended`); `tail` is program output, shown as text. */
+  | {
+      type: "background_ended";
+      bg_id: string;
+      reason: string;
+      exit_code: number | null;
+      ran_ms: number;
+      tail: string;
+    };
 
 export type UserItem = Extract<Item, { type: "user" }>;
 export type ToolItem = Extract<Item, { type: "tool" }>;
@@ -253,6 +262,14 @@ export interface SessionView {
   /** Context size of the latest turn (its last model call's input). */
   context_tokens: number;
   checkpoints: Record<string, CheckpointState>;
+  /** Background commands by id; absent when there are none (as serde writes it). */
+  background?: Record<string, BackgroundState>;
+}
+
+export interface BackgroundState {
+  call_id: string;
+  ends_by_ms: number;
+  ended: boolean;
 }
 
 export interface CheckpointState {
