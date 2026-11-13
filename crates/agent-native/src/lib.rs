@@ -136,6 +136,17 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.artifacts()
     }
 
+    // Both reach every tool call's context. Not forwarding them (the
+    // trait's default answers `None`) turned the per-call pin check off and
+    // denied a sub-agent its own folder (tests/host_forwarding.rs).
+    fn folder_pin(&self) -> Option<harness_core::folder::FolderPin> {
+        self.host.folder_pin()
+    }
+
+    fn owned_folder(&self) -> Option<harness_core::folder::OwnedFolder> {
+        self.host.owned_folder()
+    }
+
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
         self.host.images(sha256).await
     }

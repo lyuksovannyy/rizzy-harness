@@ -506,3 +506,246 @@ async fn the_wrapper_refuses_a_grant_that_was_replaced_and_names_it() {
     );
     assert!(ws.join("ok").exists());
 }
+
+// ---- Through the node's real delegation (the owned folder reaches the
+// child's tools through the agent loop) ----
+
+/// Calls what its latest user message lists, one per request (a JSON
+/// array of `[tool, input]`), then answers "done". Parent and child alike:
+/// the child's task is its user message.
+struct Script;
+
+#[async_trait::async_trait]
+impl harness_agent_native::Provider for Script {
+    fn name(&self) -> &'static str {
+        "script"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::ChatRequest,
+        _: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<harness_agent_native::Completion, harness_agent_native::ProviderError> {
+        use harness_agent_native::ChatMsg;
+        let since = req
+            .messages
+            .iter()
+            .rposition(|m| m.user_text().is_some())
+            .unwrap_or(0);
+        let user = req.messages[since].user_text().unwrap_or("");
+        let calls: Vec<(String, serde_json::Value)> = user
+            .find('[')
+            .zip(user.rfind(']'))
+            .and_then(|(a, b)| serde_json::from_str(&user[a..=b]).ok())
+            .unwrap_or_default();
+        let done = req.messages[since + 1..]
+            .iter()
+            .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+            .count();
+        Ok(harness_agent_native::Completion {
+            text: "done".into(),
+            tool_calls: calls
+                .get(done)
+                .map(|(tool, input)| harness_core::event::ToolCallRef {
+                    call_id: harness_core::new_id(),
+                    tool: tool.clone(),
+                    input: input.clone(),
+                })
+                .into_iter()
+                .collect(),
+            usage: None,
+            stop: Default::default(),
+        })
+    }
+}
+
+fn spec(
+    id: &str,
+    tools: &[&str],
+    delegates: Vec<harness_core::agent::AgentSpec>,
+) -> harness_core::agent::AgentSpec {
+    harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        budget: Default::default(),
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    }
+}
+
+/// T32 end to end, on a node set up as the binary sets one up: the data
+/// directory protected, every shell command through the real
+/// `sandbox-exec` inside bubblewrap where it works. A sub-agent that can
+/// change files is delegated to by a real turn; its `write` and its `bash`
+/// work in its own folder under `<data>/sessions`, its changes are merged
+/// back into the parent's folder, and its shell still reaches neither the
+/// user's `~/.ssh`, nor the node's data directory, nor a sibling's folder,
+/// nor the parent's folder for writing.
+#[tokio::test]
+async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
+    use harness_core::event::EventKind;
+    use harness_protocol::{MasterToNode, NodeToMaster};
+    let f = fixture();
+    if !f.landlock() {
+        return;
+    }
+    std::fs::write(f.data.join("node-key"), "NODE-KEY-CANARY\n").unwrap();
+    let sandbox = f.sandbox();
+    let mut policy = harness_node::NodePolicy {
+        workspace_roots: vec![f.home.clone()],
+        max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+        ..Default::default()
+    };
+    policy.protect(&f.data);
+    let backend = harness_agent_native::NativeBackend::new(
+        Arc::new(Script),
+        harness_tools::builtin(),
+        harness_agent_native::NativeConfig {
+            protected_dirs: Arc::new(policy.protected_dirs.clone()),
+            sandbox: Confinement::Confined {
+                sandbox: sandbox.clone(),
+                tmp: None,
+            },
+            ..Default::default()
+        },
+    );
+    let node = harness_node::NodeRuntime::start(harness_node::NodeConfig {
+        node_id: "local".into(),
+        hostname: "test".into(),
+        policy,
+        store: harness_store::Store::open(&f.data.join("node.db"), harness_store::Durability::Full)
+            .unwrap(),
+        backend: Arc::new(backend),
+        default_model: "script".into(),
+        secrets: Default::default(),
+        profile: harness_core::event::Profile::Agentic,
+        incognito_ttl: None,
+        checkpoints_dir: Some(f.data.join("checkpoints")),
+        git_sandbox: Some(sandbox.clone()),
+        artifacts: None,
+    })
+    .await
+    .unwrap();
+    let mut link = node.attach().await;
+    let mut seen: Vec<harness_core::RawEvent> = vec![];
+    let sid = harness_core::SessionId::new();
+    link.to_node
+        .try_send(MasterToNode::Create {
+            profile: None,
+            incognito: false,
+            agent: None,
+            req_id: "c".into(),
+            session_id: sid,
+            title: "t".into(),
+            cwd: f.repo.display().to_string(),
+            model: None,
+            approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+        })
+        .unwrap();
+    let shell = format!(
+        "pwd; echo b > a.txt; cat made.txt; \
+         cat {home}/.ssh/id_ed25519; echo ssh=$?; cat {data}/node-key; echo key=$?; \
+         cat {sib}/sibling.txt; echo sib=$?; echo x > {repo}/planted; echo par=$?; \
+         ls {data} >/dev/null 2>&1; echo lsdata=$?; ls {home}; echo view=$(ls / | tr '\\n' ' ')",
+        home = f.home.display(),
+        data = f.data.display(),
+        sib = f.sibling.display(),
+        repo = f.repo.display(),
+    );
+    let child_calls = json!([
+        ["write", {"path": "made.txt", "content": "by the child\n"}],
+        ["bash", {"command": shell}],
+    ]);
+    let task = json!([["delegate", {"agent": "dev", "task": child_calls.to_string()}]]);
+    link.to_node
+        .try_send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: Some(spec(
+                "lead",
+                &["bash"],
+                vec![spec("dev", &["write", "bash"], vec![])],
+            )),
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text: task.to_string(),
+            images: vec![],
+        })
+        .unwrap();
+    loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(60), link.from_node.recv())
+            .await
+            .expect("timed out")
+            .expect("link closed");
+        match msg {
+            NodeToMaster::Event { event } => {
+                let parent_ended =
+                    event.session_id == sid && matches!(event.typed(), Ok(EventKind::TurnEnded(_)));
+                seen.push(event);
+                if parent_ended {
+                    break;
+                }
+            }
+            NodeToMaster::Ack { ok, error, .. } => assert!(ok, "nack: {error:?}"),
+            _ => {}
+        }
+    }
+    let finished = |session: Option<harness_core::SessionId>| -> Vec<(bool, String)> {
+        seen.iter()
+            .filter(|e| match session {
+                Some(s) => e.session_id == s,
+                None => e.session_id != sid,
+            })
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::ToolCallFinished(r)) => Some((r.ok, r.output)),
+                _ => None,
+            })
+            .collect()
+    };
+    let child = finished(None);
+    let parent = finished(Some(sid));
+    eprintln!("child: {child:#?}\nparent: {parent:#?}");
+    assert_eq!(child.len(), 2, "{child:#?} / {parent:#?}");
+    assert!(child[0].0, "the child's write was refused: {}", child[0].1);
+    let out = &child[1].1;
+    let sessions = f.data.join("sessions").display().to_string();
+    assert!(
+        out.lines()
+            .next()
+            .is_some_and(|l| l.starts_with(&sessions) && l.ends_with("/files")),
+        "the child's shell is not in its own folder: {out}"
+    );
+    assert!(out.contains("by the child"), "{out}");
+    for leak in ["SSH-KEY-CANARY", "NODE-KEY-CANARY", "SIBLING-WORK"] {
+        assert!(!out.contains(leak), "{leak}: {out}");
+    }
+    for step in ["ssh", "key", "sib", "par", "lsdata"] {
+        assert!(!out.contains(&format!("{step}=0")), "{step}: {out}");
+    }
+    assert!(!f.repo.join("planted").exists());
+    let merged = &parent.last().expect("the delegate call").1;
+    assert!(merged.contains("2 changed file(s) applied"), "{merged}");
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("made.txt")).unwrap(),
+        "by the child\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
+        "b\n"
+    );
+}
