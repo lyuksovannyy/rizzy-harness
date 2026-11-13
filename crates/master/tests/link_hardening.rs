@@ -109,6 +109,7 @@ fn open_link_with(
 fn event(sid: SessionId, seq: u64, text: &str) -> RawEvent {
     let (kind, payload) = if seq == 1 {
         EventKind::SessionCreated(SessionCreated {
+            no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
@@ -281,6 +282,7 @@ async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &st
         .unwrap();
     send(tx, event(sid, 1, "")).await;
     let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+        cause: None,
         turn_id: "t1".into(),
         agent: None,
     })
@@ -407,6 +409,7 @@ async fn a_turn_known_only_from_the_replay_is_cancelled_when_it_lands() {
     };
     assert_eq!(last_seq, 1);
     let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+        cause: None,
         turn_id: "t1".into(),
         agent: None,
     })
@@ -716,6 +719,7 @@ async fn a_reconnect_that_resends_acknowledged_events_carries_on() {
 
 fn created_by(sid: SessionId, seq: u64, parent: Option<SessionId>) -> RawEvent {
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        no_callbacks: false,
         profile: Profile::Agentic,
         agent_id: None,
         incognito: false,

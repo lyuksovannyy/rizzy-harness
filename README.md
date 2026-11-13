@@ -687,6 +687,8 @@ max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
 background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
+callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
+callback_max_steps = 20              # model calls one such turn may make, never above max_steps (1 .. 1000)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -1092,8 +1094,8 @@ no longer kept). All in all the node holds at most `background_per_node ×
 timeout, a stop) the chat log records it once, and the agent is told, with
 every line of the output quoted: at its next step if a turn is running (in
 that step's last tool result), or in front of your next message if not (your
-text follows unchanged); an end never starts a turn by itself (that comes
-later, as "callback turns"). If the node dies before a running turn's next
+text follows unchanged). If the chat is idle, the end resumes the agent:
+see "Unattended turns" below. If the node dies before a running turn's next
 step, an end that waited for that step is recorded as ended with the node.
 Under `ask` the approval card says the command keeps running and for how
 long, and it is asked for each start ("for this turn" is not offered). The
@@ -1113,6 +1115,60 @@ running. An undo in a chat is
 refused while that chat's own background commands run; a background command
 of another chat in the same folder is not checked and can write over what an
 undo puts back.
+
+**Unattended turns (callback turns).** When a background command exits or
+reaches its timeout while its chat is idle, the server resumes the agent once,
+without anyone writing: a *callback turn*. The chat shows it where your message
+would be, as "Started by bg-3 ended (exit 1), not by you", and the agent reads
+one message from the harness that says you have not written and quotes what
+the command printed, every line behind `| `. Nothing else starts one: a
+command you or the agent stopped, one stopped because the chat's owner lost
+access or the node stopped, and one that died with the node never resume
+anything. Several ends that come together are one turn.
+
+*Bounds* (node.toml `[limits]`, nothing the server or the agent sends can
+raise them): at most `callback_turns` (3) callback turns in a row; only your
+own message gives them back. A callback turn may start background commands
+of its own, and their ends spend the same three. Each callback turn makes at
+most `callback_max_steps` (20) steps (never more than `max_steps`) and
+cannot hand work to sub-agents. So the most the agent does without you after
+one of your messages is `callback_turns × callback_max_steps` steps, 60 with
+the defaults. A step is one answer of the model, which may carry several tool
+calls, so 60 steps is not 60 commands; and on top of the steps come a call
+retried after a passing provider error, the agent's fallback models when its
+own fails (more calls in that step), and up to two summarising passes a turn
+in a long chat (one model call per piece summarised). When
+the budget is spent the chat says "the agent was not resumed: 3 turns in a
+row without you (node limit)" and the end waits for your next message.
+**`callback_turns = 0` turns callback turns off** on that node, silently: the
+node does not offer them, the server asks for none, nothing is added to the
+chat or to "Waiting for you", and ends reach the agent with your next message,
+as before.
+
+*Who and where.* The chat's owner must still be allowed to run it: their
+account exists, is enabled and needs no password change; they still have the
+agentic grant and permission in the chat's workspace and may use its node:
+exactly what you could do yourself at that moment. (A team chat whose owner
+left the workspace falls back to their Personal workspace, where they may go
+on in it, so it is resumed there if agentic chats are theirs to run.) A
+routine's chat, a
+chat holding a webhook's data (untrusted) and a sub-agent's chat are never
+resumed, and neither is a chat without an owner account (made with the API
+token). An end recorded more than 60 minutes before the server could resume
+the chat (the server was down, the node away; counted from the older of the
+node's clock and the moment the server first saw it) starts nothing. A callback turn
+runs in the chat's own approval mode (the node's `max_approval_mode` caps it):
+in `ask` its calls wait on their cards like any turn's, with no time limit, and
+your new message is refused "a turn is already running" until you answer or
+press Stop; in `auto` it runs without a click, within the bounds above. It
+gets no memory (no recall, no project facts, no `remember`) and no page
+context, and nothing the command printed counts as yours: a link it printed is
+not fetched on its say-so.
+
+*Afterwards.* "Waiting for you" lists each chat a callback turn ran in until
+you open it ("bg-3 ended: the agent was resumed without you"), and each chat
+the agent was not resumed in, with the reason. The chat list marks a chat with
+a background command running with a ring (a running turn's pulsing dot wins).
 
 When a model's answer reaches its output limit while it is writing a tool
 call, that call (and every other call in the same answer) is not run, even if
@@ -1715,6 +1771,14 @@ strip's Stop ending it (needs bubblewrap; port 7786):
 
 ```bash
 node web/e2e/background.cjs target/debug/rizzy-harness
+```
+
+A background command that ends while its chat is idle resuming the agent,
+three times, then the chat saying it was not resumed (needs bubblewrap; port
+7893):
+
+```bash
+node web/e2e/callbacks.cjs target/debug/rizzy-harness
 ```
 
 Token savings page (the graphify card is read-only; nothing installs it):

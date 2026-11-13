@@ -57,6 +57,7 @@ impl Chat {
             seen: vec![],
         };
         chat.send(MasterToNode::Create {
+            no_callbacks: false,
             req_id: "c".into(),
             session_id: chat.sid,
             title: "t".into(),

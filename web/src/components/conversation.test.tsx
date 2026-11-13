@@ -331,3 +331,29 @@ describe("drafts (AUDIT L14)", () => {
     }
   });
 });
+
+describe("callback turns (T.8d step 3)", () => {
+  test("a turn nobody wrote says what started it, and a refusal says why", async () => {
+    await show(
+      [
+        { type: "user", turn_id: "t1", text: "build it" },
+        { type: "turn_end", turn_id: "t1", reason: "completed" },
+        { type: "background_ended", bg_id: "bg-3", reason: "exited", exit_code: 1, ran_ms: 9000, tail: "boom" },
+        { type: "callback", turn_id: "t2", bg_ids: ["bg-3"] },
+        { type: "assistant", message_id: "m2", text: "The build failed.", done: true, author: null, variant: null },
+        { type: "turn_end", turn_id: "t2", reason: "completed" },
+        { type: "background_ended", bg_id: "bg-4", reason: "timed_out", exit_code: null, ran_ms: 60000, tail: "" },
+        { type: "callback_refused", bg_ids: ["bg-4"], reason: "3 turns in a row without you (node limit)" },
+      ],
+      sessionRow(),
+    );
+    const started = host.querySelector(".divider.callback")!;
+    expect(started.textContent).toBe("Started by bg-3 ended (exit 1), not by you");
+    // Nothing of it reads as the person's message.
+    expect([...host.querySelectorAll(".msg.user")].map((m) => m.textContent)).toEqual(["build it"]);
+    expect(host.querySelector(".msg.error")!.textContent).toBe(
+      "bg-4 ended (timed out); the agent was not resumed: 3 turns in a row without you (node limit)",
+    );
+  });
+});
+

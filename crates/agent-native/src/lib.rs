@@ -1,6 +1,8 @@
 //! The native agent loop: stream a completion, run requested tools (through the
 //! host's approval gate), feed results back, repeat until the model stops.
 
+#[cfg(test)]
+mod callback_tests;
 pub mod compact;
 #[cfg(test)]
 mod delegate_availability_tests;
@@ -313,7 +315,8 @@ fn transcript(prev: Option<&str>, events: &[RawEvent]) -> String {
                 let short: String = content.chars().take(2000).collect();
                 out.push_str(&format!("Tool result: {short}\n\n"));
             }
-            ChatMsg::Note(t) => out.push_str(&format!("{t}\n\n")),
+            // The harness's own words, not the user's: as they are.
+            ChatMsg::Note(t) | ChatMsg::Opening(t) => out.push_str(&format!("{t}\n\n")),
             ChatMsg::System(_) => {}
         }
     }
@@ -656,6 +659,12 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
                     out.push(ChatMsg::Note(n));
                 }
             }
+            // A callback turn has no `user_message`: its opening stands
+            // where one would, built as the loop built it (T.8d step 3).
+            EventKind::TurnStarted(TurnStarted { cause: Some(c), .. }) => {
+                close_open(&mut out, &mut open);
+                provider::open_callback(&mut out, c.callback_ids());
+            }
             _ => {}
         }
     }
@@ -996,11 +1005,21 @@ impl NativeBackend {
         let mut messages = history_msgs(summary.as_deref(), recent);
         // Per-turn context sits after the history: the system prompt and the
         // history stay byte-identical from turn to turn (prompt cache).
-        let user_text = match &ctx.extra.context {
-            Some(c) => format!("<context>\n{c}\n</context>\n\n{}", ctx.user_text),
-            None => ctx.user_text.clone(),
-        };
-        messages.push(images::user_msg(user_text, &ctx.extra.images));
+        // A callback turn (T.8d step 3) opens with the harness's frame and
+        // the ended commands' notes, from the log alone: no person's text,
+        // no per-turn context (it would not rebuild from the log), no
+        // images. Anything the node passed in them is ignored.
+        let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
+        match &callback {
+            Some(ids) => provider::open_callback(&mut messages, ids),
+            None => {
+                let user_text = match &ctx.extra.context {
+                    Some(c) => format!("<context>\n{c}\n</context>\n\n{}", ctx.user_text),
+                    None => ctx.user_text.clone(),
+                };
+                messages.push(images::user_msg(user_text, &ctx.extra.images));
+            }
+        }
         let mut user_idx = messages.len() - 1;
         let wanted = images::wanted(&messages);
         let loaded = if wanted.is_empty() {
@@ -1029,11 +1048,20 @@ impl NativeBackend {
         let mut trusted = trusted_results(recent);
         // A sub-agent's "user" message is its parent model's task: not the
         // user's words.
-        let own_words = if ctx.parent_session.is_some() {
+        // Nor is a callback turn's opening: the harness wrote it, around
+        // program output (it is not URL provenance either: `Opening` has no
+        // `user_text`).
+        let own_words = if ctx.parent_session.is_some() || callback.is_some() {
             String::new()
         } else {
             ctx.user_text.clone()
         };
+        // A callback turn's own cap (`callback_max_steps`), never above the
+        // backend's.
+        let max_steps = ctx
+            .extra
+            .max_steps
+            .map_or(self.config.max_steps, |n| n.min(self.config.max_steps));
         let (mut subagents, mut sub_tokens) = (0u32, 0u64);
         // Citation labels continue from the whole log (not only the part
         // after a summary), so `[S3]` names one page for the whole session.
@@ -1058,7 +1086,7 @@ impl NativeBackend {
         let mut overflowed = false;
         // Messages in a row whose tool calls were cut by the output limit.
         let mut cut_steps = 0;
-        for _ in 0..self.config.max_steps {
+        for _ in 0..max_steps {
             let message_id = new_id();
             let mut sent = messages.clone();
             if let Some(k) = keep {
@@ -1194,6 +1222,13 @@ impl NativeBackend {
                         summary = Some(text);
                         let this_turn = messages.split_off(user_idx);
                         messages = history_msgs(summary.as_deref(), recent);
+                        // A callback turn's opening already holds the notes
+                        // the rebuilt history ends with.
+                        if callback.is_some() {
+                            while matches!(messages.last(), Some(ChatMsg::Note(_))) {
+                                messages.pop();
+                            }
+                        }
                         user_idx = messages.len();
                         messages.extend(this_turn);
                         images::attach(&mut messages, &loaded);
@@ -1559,10 +1594,14 @@ impl NativeBackend {
         TurnOutcome {
             reason: TurnEndReason::Error,
             usage: Some(usage),
-            error: Some(format!(
-                "stopped after {} steps (`max_steps` in node.toml)",
-                self.config.max_steps
-            )),
+            error: Some(if max_steps < self.config.max_steps || callback.is_some() {
+                format!(
+                    "stopped after {max_steps} steps: a turn nobody started may take no more \
+                     (`callback_max_steps` in node.toml)"
+                )
+            } else {
+                format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
+            }),
         }
     }
 }
@@ -3426,6 +3465,7 @@ mod tests {
         let t = format!("t{n}");
         push(
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: t.clone(),
             }),

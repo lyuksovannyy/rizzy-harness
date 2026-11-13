@@ -129,6 +129,27 @@ impl Fake {
             .unwrap();
     }
 
+    /// `emit`, stamped with the time now (a background end the master's
+    /// 60-minute rule would refuse by its age otherwise).
+    fn emit_now(&self, sid: SessionId, kind: &str, payload: Value) {
+        let seq = {
+            let mut seqs = self.seqs.lock().unwrap();
+            let n = seqs.entry(sid).or_default();
+            *n += 1;
+            *n
+        };
+        let event = RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: harness_core::now_ms(),
+            kind: kind.into(),
+            payload,
+        };
+        self.to_master
+            .try_send(NodeToMaster::Event { event })
+            .unwrap();
+    }
+
     /// A chat of this node, a sub-agent's of `parent` when given.
     fn created(&self, sid: SessionId, title: &str, parent: Option<&str>) {
         let mut payload = json!({"title": title, "cwd": "", "model": "m", "backend": "native",
@@ -157,7 +178,9 @@ fn fake_chat_node() -> (NodeLink, Fake) {
             node_id: "master".into(),
             hostname: "h".into(),
             version: "0".into(),
-            capabilities: vec!["profile:chat".into()],
+            // `callback`: so a run's chat is seen not to be resumed
+            // because of the master's rules, not for want of the node's.
+            capabilities: vec!["profile:chat".into(), harness_protocol::CAP_CALLBACK.into()],
             sessions: vec![],
         })
         .unwrap();
@@ -2015,4 +2038,97 @@ async fn a_webhook_run_cut_by_a_stop_is_not_counted_and_not_run_again() {
     wait_status(&t, &alex, &h.id, &run, "interrupted").await;
     let r = t.master.inner_mirror().routine(&h.id).unwrap().unwrap();
     assert_eq!(r.consecutive_failures, 1, "a crash mid-turn counts");
+}
+
+/// `c`'s attention row saying chat `sid` was not resumed, once there is one.
+async fn refusal_row(t: &T, c: &str, sid: SessionId) -> Value {
+    for _ in 0..500 {
+        let (_, v) = req(t, Method::GET, "/api/attention", None, c).await;
+        if let Some(i) = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["session_id"] == sid.to_string() && i["reason"] == "not_resumed")
+        {
+            return i.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no refusal row for {sid}");
+}
+
+/// T.8d step 3: a background command's end never resumes a routine's
+/// chat, nor an untrusted one once its routine is gone (the mark stays with
+/// the chat): each refusal is an attention row with its reason, and the
+/// node is never asked.
+#[tokio::test]
+async fn a_routines_chat_and_an_untrusted_one_are_never_resumed_by_an_end() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(dir.path(), true).await;
+    let fake = t.fake.clone().unwrap();
+    let alex = alex(&t).await;
+    let h = webhook(&t, &alex, "Inbox", chat_spec("{{event.text}}")).await;
+    let (run, spec, ctx) = fire_node(&t, &h, "hello").await;
+    untrusted_turn(&spec, &ctx, &[]);
+    let sid: SessionId = wait_status(&t, &alex, &h.id, &run, "running").await["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // The runner made the run's chat as one the node never resumes.
+    let made = fake.seen.lock().unwrap().iter().find_map(|m| match m {
+        MasterToNode::Create {
+            session_id,
+            no_callbacks,
+            ..
+        } if *session_id == sid => Some(*no_callbacks),
+        _ => None,
+    });
+    assert_eq!(
+        made,
+        Some(true),
+        "the run's chat was not created with no_callbacks"
+    );
+    let end = |bg: &str| {
+        json!({"bg_id": bg, "reason": "exited", "exit_code": 1, "confirmed": "ended",
+               "ran_ms": 1, "output_bytes": 0, "delivered": false})
+    };
+    fake.emit_now(sid, "background_ended", end("bg-1"));
+    let row = refusal_row(&t, &alex, sid).await;
+    assert!(
+        row["detail"].as_str().unwrap().contains("a routine's chat"),
+        "{row}"
+    );
+    // The routine goes; its runs with it; the chat's mark stays.
+    let (st, v) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/routines/{}", h.id),
+        None,
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    fake.emit_now(sid, "background_ended", end("bg-2"));
+    let mut row = refusal_row(&t, &alex, sid).await;
+    for _ in 0..500 {
+        if row["detail"].as_str().unwrap().contains("bg-2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        row = refusal_row(&t, &alex, sid).await;
+    }
+    let detail = row["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("bg-2") && detail.contains("external event"),
+        "{row}"
+    );
+    let asked = fake
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| matches!(m, MasterToNode::Callback { .. }))
+        .count();
+    assert_eq!(asked, 0, "the node was asked to resume it");
 }

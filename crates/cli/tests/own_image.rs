@@ -65,7 +65,7 @@ impl Fixture {
     /// A copy of the harness binary at `at` (a file of its own).
     fn binary(&self, at: &Path) -> PathBuf {
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::copy(EXE, at).unwrap();
+        copy_exe(EXE, at);
         at.to_owned()
     }
 
@@ -733,4 +733,20 @@ async fn at_mode_000_the_messages_name_the_nodes_binary() {
         );
         assert!(m.contains("chmod"), "{m}");
     }
+}
+
+/// A copy of the executable `from` at `to`, made by `cp` in a child
+/// process. This test binary then never holds a write descriptor of the
+/// copy, so a child that another test's thread forks in the meantime cannot
+/// inherit one, and the kernel does not refuse to start the copy with
+/// "Text file busy" (seen in CI and under load: `std::fs::copy` here, a
+/// fork there).
+fn copy_exe(from: impl AsRef<std::path::Path>, to: &std::path::Path) {
+    let st = std::process::Command::new("cp")
+        .arg("--")
+        .arg(from.as_ref())
+        .arg(to)
+        .status()
+        .expect("cp");
+    assert!(st.success(), "cp to {}", to.display());
 }

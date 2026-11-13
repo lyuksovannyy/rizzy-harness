@@ -27,6 +27,8 @@ export interface SessionCreated {
   incognito?: boolean;
   /** Set on a sub-agent's session: the session that delegated to it. */
   parent_session?: string;
+  /** Never resumed by a background command's end (a routine's chat). */
+  no_callbacks?: boolean;
 }
 
 export interface AgentRef {
@@ -242,7 +244,11 @@ export type Item =
       exit_code: number | null;
       ran_ms: number;
       tail: string;
-    };
+    }
+  /** A turn the harness started because these background commands ended while the chat was idle. */
+  | { type: "callback"; turn_id: string; bg_ids: string[] }
+  /** The node did not resume the agent for these ends (`callback_refused`). */
+  | { type: "callback_refused"; bg_ids: string[]; reason: string };
 
 export type UserItem = Extract<Item, { type: "user" }>;
 export type ToolItem = Extract<Item, { type: "tool" }>;
@@ -589,6 +595,8 @@ export interface SessionRow {
   project_id?: string | null;
   /** Set when a routine run started the chat. */
   routine?: RoutineMark | null;
+  /** Background commands running in it, as far as the server knows. */
+  background?: number;
 }
 
 /** The routine run behind a chat (`SessionRow.routine`). */
@@ -747,7 +755,10 @@ export interface MemoryCfg {
 export interface AttentionItem {
   session_id: string;
   title: string;
-  reason: "approval" | "question";
+  /** `resumed`/`not_resumed`: what a background command's end did while the owner was away. */
+  reason: "approval" | "question" | "resumed" | "not_resumed";
+  /** For `resumed`/`not_resumed`: what happened, in words. */
+  detail?: string;
   seq: number;
   parent_id: string | null;
   updated_ms: number;

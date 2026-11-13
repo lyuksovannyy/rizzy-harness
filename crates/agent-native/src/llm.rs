@@ -121,6 +121,9 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
             ChatMsg::Note(_) => {
                 tracing::warn!("a note reached a provider unplaced; it is not sent");
             }
+            // `place_notes` sends it as the user message it is; the same
+            // here (a request must end in a user or tool message).
+            ChatMsg::Opening(t) => msgs.push(ChatMessage::user(t.clone())),
             ChatMsg::UserImages { text, images } => msgs.push(ChatMessage::user(
                 MessageContent::from_parts(user_parts(text, images)),
             )),

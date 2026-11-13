@@ -155,6 +155,7 @@ impl Harness {
     async fn create(&mut self) -> SessionId {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
+            no_callbacks: false,
             profile: None,
             incognito: false,
             agent: None,
@@ -390,6 +391,7 @@ async fn cwd_outside_roots_is_refused() {
     })
     .await;
     h.send(MasterToNode::Create {
+        no_callbacks: false,
         profile: None,
         incognito: false,
         agent: None,
@@ -425,6 +427,7 @@ async fn a_node_without_its_required_sandbox_refuses_sessions() {
     })
     .await;
     h.send(MasterToNode::Create {
+        no_callbacks: false,
         profile: None,
         incognito: false,
         agent: None,
@@ -491,6 +494,7 @@ async fn cwd_containing_the_data_dir_is_refused() {
     .await;
     for cwd in [h.ws.clone(), h.ws.join(".data")] {
         h.send(MasterToNode::Create {
+            no_callbacks: false,
             profile: None,
             incognito: false,
             agent: None,
@@ -533,6 +537,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
         let link = node.attach().await;
         link.to_node
             .try_send(MasterToNode::Create {
+                no_callbacks: false,
                 profile: None,
                 incognito: false,
                 agent: None,
@@ -697,6 +702,7 @@ async fn recovers_interrupted_turn_on_start() {
         let store = Store::open(&path, Durability::Full).unwrap();
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
+                no_callbacks: false,
                 profile: harness_core::event::Profile::Agentic,
                 agent_id: None,
                 incognito: false,
@@ -709,6 +715,7 @@ async fn recovers_interrupted_turn_on_start() {
                 approval_mode: Default::default(),
             }),
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: "t1".into(),
             }),
@@ -801,6 +808,7 @@ async fn sub_task_sessions_ask_no_questions() {
     let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
     let sid = SessionId::new();
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        no_callbacks: false,
         profile: harness_core::event::Profile::Agentic,
         agent_id: None,
         incognito: false,
@@ -1763,6 +1771,7 @@ async fn ack_time_on_a_long_session() {
         {
             let store = Store::open(&path, Durability::Normal).unwrap();
             let created = EventKind::SessionCreated(SessionCreated {
+                no_callbacks: false,
                 profile: harness_core::event::Profile::Agentic,
                 agent_id: None,
                 incognito: false,
@@ -2608,6 +2617,7 @@ const BUSY: &str = "another chat is working in this folder right now";
 async fn create_in(h: &mut Harness, cwd: &std::path::Path) -> SessionId {
     let sid = SessionId::new();
     h.send(MasterToNode::Create {
+        no_callbacks: false,
         profile: None,
         incognito: false,
         agent: None,
@@ -3317,6 +3327,7 @@ fn asked_in(h: &Harness, sid: SessionId) -> Vec<(String, String)> {
 async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalMode) -> SessionId {
     let sid = SessionId::new();
     h.send(MasterToNode::Create {
+        no_callbacks: false,
         req_id: "c".into(),
         session_id: sid,
         title: "t".into(),
@@ -3558,6 +3569,7 @@ async fn a_stop_closes_the_running_turn_and_refuses_new_work() {
 
     h.send(prompt_msg("p2", idle, "hello"));
     h.send(MasterToNode::Create {
+        no_callbacks: false,
         profile: None,
         incognito: false,
         agent: None,

@@ -48,6 +48,7 @@ fn events() -> Vec<RawEvent> {
     let t = || "t1".to_string();
     let kinds = vec![
         EventKind::SessionCreated(SessionCreated {
+            no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
@@ -61,6 +62,7 @@ fn events() -> Vec<RawEvent> {
             approval_mode: ApprovalMode::Ask,
         }),
         EventKind::TurnStarted(TurnStarted {
+            cause: None,
             agent: None,
             turn_id: t(),
         }),
@@ -223,6 +225,7 @@ fn events() -> Vec<RawEvent> {
             },
         }),
         EventKind::TurnStarted(TurnStarted {
+            cause: None,
             turn_id: "t2".into(),
             agent: Some(AgentRef {
                 agent_id: "writer".into(),
@@ -371,6 +374,43 @@ fn events() -> Vec<RawEvent> {
             tail_cut: false,
             delivered: true,
         }),
+        // T.8d step 3: an end while idle resumes the agent (a callback
+        // turn, no user message), and a later one is not resumed.
+        EventKind::BackgroundEnded(BackgroundEnded {
+            bg_id: "bg-2".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(1),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 9000,
+            output_bytes: 5,
+            tail: "fail\n".into(),
+            tail_cut: false,
+            delivered: false,
+        }),
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t4".into(),
+            agent: None,
+            cause: Some(TurnCause::Callback(vec!["bg-2".into()])),
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: "t4".into(),
+            message_id: "m5".into(),
+            text: "The build failed.".into(),
+            tool_calls: vec![],
+            blocks: vec![],
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t4".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
+        EventKind::CallbackRefused(CallbackRefused {
+            bg_ids: vec!["bg-5".into()],
+            reason: "3 turns in a row without you (node limit)".into(),
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()
@@ -444,6 +484,24 @@ fn a_streamed_message_gets_its_final_blocks() {
     assert_eq!(users[1]["images"][0]["width"], 1280);
     assert!(users[1]["images"][0].get("data").is_none());
     assert!(view["meta"]["parent_session"].is_string());
+}
+
+/// A callback turn stands where a message would, with the ids it was
+/// started for; a refusal is its own item with its reason.
+#[test]
+fn a_callback_turn_and_a_refusal_are_items() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let items = view["items"].as_array().unwrap();
+    let cb = items.iter().position(|i| i["type"] == "callback").unwrap();
+    assert_eq!(items[cb]["bg_ids"], json!(["bg-2"]));
+    assert_eq!(items[cb]["turn_id"], "t4");
+    assert_eq!(items[cb + 1]["message_id"], "m5");
+    let r = items
+        .iter()
+        .find(|i| i["type"] == "callback_refused")
+        .unwrap();
+    assert_eq!(r["bg_ids"], json!(["bg-5"]));
+    assert!(r["reason"].as_str().unwrap().contains("node limit"));
 }
 
 /// Staged files: the agent's joins its `publish` card, the user's and the

@@ -29,6 +29,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
         msg,
         MasterToNode::Create { .. }
             | MasterToNode::Prompt { .. }
+            | MasterToNode::Callback { .. }
             | MasterToNode::Restore { .. }
             | MasterToNode::ArtifactStage { .. }
     )
@@ -43,6 +44,7 @@ struct CreateArgs {
     profile: Option<harness_core::event::Profile>,
     agent: Option<harness_core::agent::AgentSpec>,
     incognito: bool,
+    no_callbacks: bool,
 }
 
 /// The longest a delete waits for its session's background commands: the
@@ -87,6 +89,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Restore { session_id, .. }
         | MasterToNode::Delete { session_id, .. }
         | MasterToNode::Prompt { session_id, .. }
+        | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. }
         | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
@@ -215,6 +218,58 @@ pub mod testing {
     use std::sync::Arc;
 
     use harness_tools::sandbox::Sandbox;
+
+    type Holds = std::sync::Mutex<Vec<(harness_core::SessionId, Arc<EndHold>)>>;
+    static END_HOLD: Holds = std::sync::Mutex::new(Vec::new());
+
+    /// Holds the next background end a session records outside a turn,
+    /// after its check of the turn slot and before its append (review S3-4).
+    pub struct EndHold {
+        held: tokio::sync::Notify,
+        go: tokio::sync::Semaphore,
+        is_held: std::sync::atomic::AtomicBool,
+    }
+
+    impl EndHold {
+        /// Until an end waits here.
+        pub async fn held(&self) {
+            while !self.is_held.load(std::sync::atomic::Ordering::SeqCst) {
+                self.held.notified().await;
+            }
+        }
+        /// Let it go on.
+        pub fn release(&self) {
+            self.go.add_permits(1);
+        }
+    }
+
+    /// Arm the hold for the next end of session `sid`.
+    pub fn hold_next_end(sid: harness_core::SessionId) -> Arc<EndHold> {
+        let h = Arc::new(EndHold {
+            held: tokio::sync::Notify::new(),
+            go: tokio::sync::Semaphore::new(0),
+            is_held: Default::default(),
+        });
+        END_HOLD.lock().unwrap().push((sid, h.clone()));
+        h
+    }
+
+    pub(crate) async fn end_hold(sid: harness_core::SessionId) {
+        let h = {
+            let mut all = END_HOLD.lock().unwrap();
+            all.iter()
+                .position(|(s, _)| *s == sid)
+                .map(|i| all.remove(i).1)
+        };
+        if let Some(h) = h {
+            h.is_held.store(true, std::sync::atomic::Ordering::SeqCst);
+            h.held.notify_waiters();
+            h.held.notify_one();
+            if let Ok(p) = h.go.acquire().await {
+                p.forget();
+            }
+        }
+    }
 
     fn bounds(sandbox: Option<Arc<Sandbox>>, protected: &[PathBuf]) -> crate::git::Bounds {
         crate::git::Bounds {
@@ -453,6 +508,11 @@ impl NodeRuntime {
             capabilities.push(harness_protocol::CAP_IMAGES.into());
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
+                // Off is silent: with `callback_turns = 0` the master asks
+                // nothing, and an end waits for the person as before.
+                if self.inner.cfg.policy.limits.callback_turns > 0 {
+                    capabilities.push(harness_protocol::CAP_CALLBACK.into());
+                }
             }
             // A fresh queue: there is room.
             let _ = out_tx.try_send(NodeToMaster::Hello {
@@ -748,6 +808,7 @@ impl NodeRuntime {
                 Ok(())
             }
             MasterToNode::Create {
+                no_callbacks,
                 session_id,
                 title,
                 cwd,
@@ -769,6 +830,7 @@ impl NodeRuntime {
                         profile,
                         agent,
                         incognito,
+                        no_callbacks,
                     },
                 )
                 .await
@@ -825,6 +887,19 @@ impl NodeRuntime {
                 };
                 match self.session(session_id) {
                     Some(s) => s.prompt(input, agent, compare, extra).await,
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Callback {
+                session_id,
+                bg_ids,
+                agent,
+                savings,
+                ..
+            } => {
+                self.audit("session.callback", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.callback(bg_ids, agent, savings.unwrap_or_default()).await,
                     None => Err("unknown session".into()),
                 }
             }
@@ -917,6 +992,7 @@ impl NodeRuntime {
             profile,
             agent,
             incognito,
+            no_callbacks,
         } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
@@ -956,6 +1032,7 @@ impl NodeRuntime {
                 incognito,
                 parent_session: None,
                 owned: None,
+                no_callbacks,
             },
         )
         .await

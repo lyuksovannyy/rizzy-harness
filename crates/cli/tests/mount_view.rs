@@ -542,7 +542,7 @@ async fn a_socket_outside_the_grants_cannot_be_reached() {
 
     // Landlock ABI 4: the stand-in must be inside the view to run.
     let stand_in = f.ws.join("landlock_abi4.py");
-    std::fs::copy(ABI4, &stand_in).unwrap();
+    copy_exe(ABI4, &stand_in);
     let prefix: Vec<OsString> = vec!["python3".into(), "-I".into(), stand_in.into()];
     let cmd = without_the_wrapper(&f.shell(sb, &connect_script(&bus)), Some(&prefix));
     let (out, _) = run_guarded(cmd).await;
@@ -639,7 +639,7 @@ async fn a_replaced_binary_does_not_run_as_sandbox_exec() {
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("rizzy-harness");
     if std::fs::hard_link(EXE, &exe).is_err() {
-        std::fs::copy(EXE, &exe).unwrap();
+        copy_exe(EXE, &exe);
     }
     let sb = Sandbox::new(
         exe.clone(),
@@ -689,7 +689,7 @@ async fn a_deleted_binary_changes_nothing_for_contained_commands() {
     let bin = f.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("rizzy-harness");
-    std::fs::copy(EXE, &exe).unwrap();
+    copy_exe(EXE, &exe);
     let sb = Sandbox::new(
         exe.clone(),
         &Settings::default(),
@@ -704,7 +704,7 @@ async fn a_deleted_binary_changes_nothing_for_contained_commands() {
     let r = Bash.run(&ctx, json!({ "command": "echo before" })).await;
     assert!(r.output.contains("before"), "{}", r.output);
     std::fs::remove_file(&exe).unwrap();
-    std::fs::copy(EXE, &exe).unwrap();
+    copy_exe(EXE, &exe);
     let r = Bash
         .run(&ctx, json!({ "command": "echo RAN-AFTER-DELETE" }))
         .await;
@@ -941,4 +941,20 @@ fn host_view(cmd: &tokio::process::Command) -> tokio::process::Command {
         c.current_dir(d);
     }
     c
+}
+
+/// A copy of the executable `from` at `to`, made by `cp` in a child
+/// process. This test binary then never holds a write descriptor of the
+/// copy, so a child that another test's thread forks in the meantime cannot
+/// inherit one, and the kernel does not refuse to start the copy with
+/// "Text file busy" (seen in CI and under load: `std::fs::copy` here, a
+/// fork there).
+fn copy_exe(from: impl AsRef<std::path::Path>, to: &std::path::Path) {
+    let st = std::process::Command::new("cp")
+        .arg("--")
+        .arg(from.as_ref())
+        .arg(to)
+        .status()
+        .expect("cp");
+    assert!(st.success(), "cp to {}", to.display());
 }

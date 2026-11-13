@@ -4,10 +4,10 @@ Status: **the six open questions were answered by the owner on 2026-11-13 (§0)*
 differs from a recommendation further down, §0 holds, and the affected rows are corrected. The
 rest of the decisions table (§3) stands as recommended. **Step 1 of §8 is built** (merged in pull
 request 71), reviewed (`docs/security-review/2026-11-T8d-background-commands.md`) and fixed; what
-the code does differently from this note is in §11. **Step 2 is built** on branch
-`feat/T.8d-step2-stop` (not merged, not yet reviewed): the person's strip and stop, and the
-feature **on by default** (§12). Step 3 is not built. Task C.15 of `ADOPTION_PLAN.md`; the
-feature is task T.8d.
+the code does differently from this note is in §11. **Step 2 is built** and merged (pull request
+73): the person's strip and stop, and the feature **on by default** (§12). **Step 3 (callback
+turns) is built** on branch `feat/T.8d-step3-callbacks`, not merged and not yet reviewed; every
+difference from §4 is in §13. Task C.15 of `ADOPTION_PLAN.md`; the feature is task T.8d.
 
 **Summary.** `bash` gains `background: true`. The node starts the command in its own contained
 sandbox (T.8a to T.8c) under its own guard (T.8e), exactly as a foreground command, but holds it
@@ -365,7 +365,8 @@ what ran without them.
 | Stop of the turn (cancel) | Keep running (R11) | none | n/a |
 | Session deleted | All stopped before the log is deleted; `delete` waits up to `STOP_BOUND` for them in parallel | none (the log is gone) | No |
 | Archive | Does not exist; when it does, archive stops them like a person's Stop all | | |
-| Owner leaves the workspace, loses agentic or the grant, account disabled | The revocation sweep sends `session.stop_background` beside its cancel; the mirror marks sessions with live background commands so the sweep finds them although no turn runs | `reason: "access_revoked"` | No (admission refuses) |
+| Owner loses agentic or the grant, account disabled or deleted | The revocation sweep sends `session.stop_background` beside its cancel, to every agentic chat of the owner that they may no longer drive (no count decides, §11) | `reason: "access_revoked"` | No (admission refuses) |
+| Owner leaves a team workspace | The chat falls back to the owner's Personal workspace, where they may go on in it themselves; its commands are stopped, and callbacks refused, only if the owner may not run agentic chats there (§13) | `reason: "access_revoked"` only then | As the owner's own prompt would be |
 | Node restart or crash | Dead with the node (guard: channel closed or parent changed, within 500 ms; the start's sweep for the rest) | At start, for each started and not ended: `reason: "node_restarted"`, tail empty (the ring was in memory) | No (R12) |
 | Drain (`docs/node-update.md` §7) | Not waited for. The drain's note lists them. At exit: `stop(true)` | `reason: "node_stopping"`, with tails | No (new turns are refused while draining) |
 | Master unreachable at the end | Nothing changes on the node; the event is stored and replays at the next hello | as usual | Only if seen within 60 min (§4.4) |
@@ -847,3 +848,168 @@ step 1), the callback turn's mark and the attention items (step 3).
   it beyond the reason (`stopped_by_user`: the chat has one owner); the review proofs in
   `crates/cli/tests/support/review_t8d/` still assert step 1's default (T8D-4's proof expects a
   refusal with the defaults) and are the reviewer's to update.
+
+## 13. Step 3 as built (2026-11-13)
+
+Built on `feat/T.8d-step3-callbacks`: §4.4's callback turn when idle and its step limit, §4.5's
+two callback keys, §4.6, §4.8's `turn_started.cause`, §4.9's watcher, admission and attention, the
+callback rows of §4.7, and what step 2 left open (the chat list shows a running command). Where
+the code differs from the sections above, the code is described here.
+
+- **The request is its own message**, `session.callback { req_id, session_id, bg_ids, agent?,
+  savings? }`, not `session.prompt` with a `cause`: a callback has no text, attachment, image,
+  reply, parallel answer or context, and a message without those fields cannot carry them
+  (a `text` field sent anyway is ignored by serde). Sent only to nodes announcing
+  `CAP_CALLBACK` (`callback`). At most `MAX_CALLBACK_IDS` (64) distinct ids. The node's answer
+  that finds nothing to resume begins `nothing to resume` (`CALLBACK_NOTHING`; the master drops it
+  quietly); a refusal on the node's rules begins `the agent was not resumed` (`CALLBACK_REFUSED`).
+- **The master's side** is `crates/master/src/callbacks.rs` and goes through `Master::prompt`
+  with `PromptOpts.callback` (its third caller): the chat's own agent as for a prompt; the turn
+  gets **no per-turn context and no memory** (no recall, no project facts, no `remember`): the
+  context block would not rebuild from the log (below), and program output must not steer what is
+  remembered. Any text, context, attachment, image, reply or `untrusted` with it is refused.
+- **The watcher** is called from `Master::apply` for every event the mirror takes (not from the
+  broadcast, which can lag). An end that may call back (`BackgroundEnded::calls_back`: it exited or
+  timed out and no step was told of it, R7, R12) starts one check of its chat after 300 ms; ends
+  that come during a check make it look once more, so ends together are one request. **Its
+  position is the log**: a check reads the ends after the chat's last `turn_started` and last
+  `callback_refused`, less those a refusal of the master's covers (its attention mark's `seq`).
+  At the master's start (`Master::start_callbacks`, from `serve`) every chat whose log moved in
+  the last 65 minutes is checked once. A node that is away, does not ack in time or is stopping is
+  tried again every 15 s; a node without `CAP_CALLBACK` is not asked. Duplicates are the node's to
+  refuse (below), so a restart asks again without harm, and nothing is lost but by the 60-minute
+  rule. **The 60-minute rule** counts an end from the older of two times: its `ts_ms` (the node's
+  clock) and the moment this master first saw it (kept in memory per chat; after a master restart
+  the `ts_ms` alone, or now when that is in the future). So an end the master could not resume
+  within 60 minutes (it was down, the node away, the end replayed at a later hello) is refused "it
+  ended more than 60 minutes before the agent could be resumed (by its node's clock or this
+  server's)"; a node clock that is ahead keeps nothing fresh (review S3-5); and a node whose clock
+  is more than 60 minutes behind gets no callback turns, because the master cannot tell that from
+  an end replayed hours late (re-check R-1; it fails closed). The retries of one chat end with
+  the same rule. A node that is connected and announces no `CAP_CALLBACK` is not asked and
+  nothing is refused on its behalf, whatever the end's age or the owner's standing: off is silent
+  on the master's side too.
+  At the master's start only chats with a `background_ended` in the last 65 minutes are checked,
+  and a check reads only the `background_ended` rows after the floor, in the SQL (S3-3).
+- **Admission**, as §4.4 step 2 and exactly what the owner could do themselves at that moment: a
+  chat **without an owner account** (made with the API token) is never resumed; nor a sub-agent's
+  (`parent_id`); the account must exist, be enabled and owe no password change; then
+  `workspaces::agentic_blocked` (grant, `agentic`, the local node rule) on the chat's effective
+  workspace, as for the owner's own prompt. When its owner leaves a team workspace a chat falls
+  back to their Personal workspace (`EFFECTIVE_WS`), where they may go on in it, so it is resumed
+  there if they may run agentic chats there; nodes and folders are not workspace-scoped, so a
+  removed member could open the same folder from Personal anyway. (A check of the workspace a
+  command started in was built first and removed on the review's decision: it failed open three
+  ways and guarded nothing the owner could not do by hand.)
+- **Routine and untrusted chats** (§4.10 said routine chats are allowed; the step 3 brief says
+  none): every routine run's chat is created with `no_callbacks` (`CreateSpec`,
+  `session.create`), which the node records in `session_created` and holds to for good; the master
+  also refuses a chat with a routine mark, and an untrusted one through `routines::chat_untrusted`
+  (fails closed). It does not call `routines::on_owner_prompt`, which would mark a run's chat
+  continued; it reads the same mark.
+- **The node decides** (`Session::callback`), under the turn slot and the session's end gate
+  (`bg_gate`): an end is checked against the slot and appended under the gate, and a turn holds it
+  from its history read to its `turn_started` (a person's turn in `begin` too), so an end whose
+  check passed just before the slot was taken is in the log the turn reads, and every later one
+  is queued for the turn (review S3-4; as first built the end could land between the read and
+  `turn_started`): every id
+  must name an end in its log that may call back, with no turn and no `callback_refused` after it
+  (else "nothing to resume", recorded nowhere; a turn already running is that too); then, on its
+  rules, refused and recorded as `callback_refused { bg_ids, reason }`: a `no_callbacks` chat, a
+  table a revocation closed (until the owner writes), `callback_turns = 0`, or `callback_turns`
+  callback turns since the last `user_message`. A node that is stopping refuses with
+  `NODE_STOPPING`. Then `turn_started { cause: { callback: [ids] } }` and the turn, with **no
+  `user_message`**, the session's own mode (clamped at load), its table not reopened, **no
+  sub-agents** (the spec's delegates cleared) and the cap `min(max_steps, callback_max_steps)`
+  (`TurnExtra.max_steps`; the end says "stopped after N steps: a turn nobody started may take no
+  more (`callback_max_steps` in node.toml)"). It takes a checkpoint like every turn.
+- **Off is silent.** A node with `callback_turns = 0` does not announce `CAP_CALLBACK`, so the
+  master asks nothing and raises no row, and the chat records nothing: the end waits for the
+  person as before step 3. Asked anyway, the node still refuses and records why.
+- **Memory** (review S3-1): `file_proposal` files nothing for a `remember` call whose turn's
+  `turn_started` has a `cause` (read from the mirror, so a restart or a refused message changes
+  nothing; it fails closed), a callback leaves the chat's recorded turn memory alone, and a
+  person's prompt the node refuses puts the earlier entry back.
+- **The demo provider never obeys program output** (review S3-2): it answers a callback turn's
+  opening "Noted: the command ended." Only `mock_obeys_output = true` beside `mock_delay_ms` in
+  config.toml (`mock::Obedient`, set by the step 3 tests and `web/e2e/callbacks.cjs`) makes it read
+  the first quoted line of output as the message: the steered model the tests need.
+- **Known, not fixed (S3-6):** an owner disabled in the milliseconds between admission and
+  `turn_started` gets one callback turn, bounded by `callback_max_steps`: the same shape as the
+  owner's own prompt racing a disable.
+- **`callback_refused`** is a new event kind (not in §4.8): the chat says "bg-4 ended (exit 1); the
+  agent was not resumed: 3 turns in a row without you (node limit)" from it, after a reload too;
+  the model never reads it. Recorded once per refusal: a second ask for the same ends finds them
+  covered.
+- **What the model reads.** Not §4.4's frame (its `<output>` block is what review T8D-3
+  replaced): one user-role message, `ChatMsg::Opening`, whose first line is the harness's
+  (`CALLBACK_LEAD`, "[harness] The person has NOT written anything. The harness started this turn
+  because background command(s) bg-3 ended while the chat was idle; …") followed by the ended
+  commands' notes exactly as step 1 renders them (every output line behind `| `, control
+  characters and line separators replaced). `provider::open_callback` takes the notes at the end
+  of the history into it; `history_to_messages` does the same at the turn's `turn_started` on
+  every later request, from the log alone, so the bytes are the same (cache prefix; also after a
+  restart). `place_notes` sends it as a user message; `user_text()` is `None` for it, so it is not
+  URL provenance, not `own_words`, and the summariser writes it without "User:". **Where the
+  bytes are not the same:** a later compaction whose cut falls at a callback turn's
+  `turn_started` puts the ended commands' notes into the summary, and the rebuilt opening is then
+  the lead line alone (the cache prefix moves at a compaction anyway).
+- **Every place that reads "the last user message"**, and what it does with a callback turn:
+  `observed_text` (URL provenance): not provenance. The loop's `own_words`: empty. The node's
+  budget: refilled by `user_message` only, which a callback turn has none of. `ui::check_reply`
+  and the store's `open_message_author` (an answer to a `ui:` question is still taken after a
+  callback turn: the person has not answered yet). The search index: indexes `user_message` and
+  `assistant_message` text; the opening is no event, so it is never indexed as the person's; the
+  callback turn's answers are the assistant's, as usual. Memory: no recall, no `remember`, the
+  turn's memory recorded as none (`file_proposal` files nothing). Titles: nothing derives one from
+  a message. The mirror's `asks_user`: a callback turn ends the previous turn's question mark, and
+  one ending with a question makes its own. Routines: the watcher binds only a run chat's first
+  turn, and run chats get none. The UI: `turnStart` (a user message or a callback) bounds a turn
+  for the live part of the timeline, fallback notes, the agent's face and progress blocks; a
+  question block is answered only by a user message; the link provenance (`rich.ts`) counts user
+  items, which a callback is not; the web notice of a question counts hosts since the person's last
+  message, so a callback turn's question names the previous turn's hosts too (more notice, not
+  less). The demo provider (`mock`) answers it "Noted"; only `mock::Obedient` (tests) reads
+  its first quoted line as the message.
+- **Attention.** One kv row per chat (`callback-attention:<sid>`, owner id inside): `resumed` with
+  the ids and the count of callback turns since the person's last turn, or `not_resumed` with the
+  reason; `GET /api/attention` puts them in `items` (`reason` `resumed` or `not_resumed`, and a
+  `detail` in words) for the owner only (the API token sees all, as for the other items) while the
+  owner's `seen` is below its `seq`. Opening the chat marks it seen (the Shell's effect now takes
+  every row but an approval); a person's turn and the chat's deletion remove it.
+- **The chat list** gives each row `background`, the commands the mirror shows running whose
+  deadline has not passed, from memory (rebuilt at the master's start from chats updated in the
+  last 65 minutes); the sidebar draws a ring for it, and a running turn's pulsing dot wins.
+- **The UI**: `Item::Callback { turn_id, bg_ids }` stands where the message would ("Started by
+  bg-3 ended (exit 1), not by you"); `Item::CallbackRefused` is an error line; both folds and the
+  shared fixture. First load 99.6 KB (99.5 before), total 370.5 KB, unchanged; no new chunk.
+- **Cost bound** (the README says it): after each of the person's messages, at most
+  `callback_turns × callback_max_steps` steps without them, 60 at the defaults. A step is one
+  model answer and may carry several tool calls, so 60 steps is not 60 commands; on top come a
+  call retried after a passing provider error, the agent's fallback models (more calls in a
+  step), and up to two summarising passes a turn (one model call per piece). No sub-agents.
+  `callback_turns = 0` turns it off on the node, silently (review S3-7).
+
+**Tests.** `cli/tests/callbacks_real.rs` (the real binary: one turn per end, exactly once each;
+the budget with a self-restarting command and the refill; the step cap; `callback_turns = 0`;
+`ask` parks and the person's message is refused), `cli/tests/callbacks.rs` (the node over the
+protocol: two ends one turn, a second ask, another chat's id, a forged id, a stop, a deleted chat,
+a routine's chat, a revoked chat; the opening at the provider with a forged header, the separator
+and text for the model, rebuilt the same on the next message), `master/tests/callbacks_http.rs`
+(ends together, stops and restarts, attention for the owner only, the 60-minute rule, the node's
+refusals, a removed owner, a disabled account, a restart of the master), `master/tests/
+hooks_http.rs` (a routine's chat, an untrusted one after its routine is gone),
+`agent-native/src/callback_tests.rs` (the opening, provenance, the cap), `core` (wire shapes,
+`calls_back`, the fold), `node/src/policy.rs` (the keys), `web/e2e/callbacks.cjs`. §7 test 9 with
+the watcher on is `cli/tests/background.rs`'s existing `after_kill_9_…`.
+
+**Owner leaves a team workspace** (found while building step 3, confirmed by the review, and
+decided as the code does): the chat falls back to the owner's Personal workspace and the
+revocation sweep (`cancel_blocked`) finds them not blocked there, so their background commands go
+on and the chat may be resumed, as the owner could go on in it themselves; only a lost grant, a
+disabled or deleted account, or a Personal workspace without `agentic` stops them. §4.7's table
+says so now.
+
+**Not done:** the start call's card states (§12); a per-workspace share of the budget; any
+notification beyond the attention row (no browser notification for a callback turn).
+

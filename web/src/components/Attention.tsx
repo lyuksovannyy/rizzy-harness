@@ -24,11 +24,15 @@ export function Attention(props: {
           <div className="similar-label">Waiting for you</div>
           <ul>
             {props.items.map((a) => (
-              <li key={a.session_id}>
+              <li key={`${a.reason}-${a.session_id}`}>
                 <button type="button" onClick={() => props.onOpen(a.session_id)}>
                   <span className="similar-title ellipsis">{shownName(a.title)}</span>
                   <span className="similar-snippet ellipsis">
-                    {a.reason === "approval" ? "Needs your approval" : "Asked you a question"}
+                    {a.reason === "approval"
+                      ? "Needs your approval"
+                      : a.reason === "question"
+                        ? "Asked you a question"
+                        : (a.detail ?? "A background command ended")}
                     {a.parent_id ? " (sub-task)" : ""}
                   </span>
                 </button>
