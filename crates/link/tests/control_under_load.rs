@@ -8,9 +8,11 @@
 //! cap": a node whose uplink is slower than what it produces. The node side
 //! is a model of `NodeRuntime::attach` (`crates/node/src/lib.rs`) with its
 //! real queue depths: events go into an out queue of `OUT_QUEUE`, commands
-//! come out of an in queue of `IN_QUEUE`, and the command loop handles a
-//! cancel or an approval answer at once and then waits for room in the out
-//! queue to send its ack (`publish_wait`), as the node does. The master side
+//! come out of an in queue of `IN_QUEUE`, and the command loop takes a
+//! cancel or an approval answer and then waits for room in the out queue to
+//! send its ack (`publish_wait`), as the node does. It does not run a
+//! session: what a Stop does to a command is measured on the real node in
+//! `crates/node/tests/control_under_load.rs`. The master side
 //! reads as fast as it can (its mirror is opened `Durability::Normal`, so an
 //! append does not fsync).
 //!
@@ -19,8 +21,8 @@
 //! reaches the node's command loop (master to node) and when each one's ack
 //! reaches the master's consumer (node to master).
 //!
-//! Measured on 2026-11-13 (loopback, the proxy at 1 MiB/s, 8 KiB events as
-//! `bash` streams them, Linux 7.2, the owner's machine; see
+//! Measured on 2026-11-13 (loopback, the proxy at 1 MiB/s, 8 KiB frames,
+//! one `bash` pipe read; Linux 7.2, the owner's machine; see
 //! `ADOPTION_PLAN.md`, results of Phase B):
 //!
 //! | Frame | Direction | At 1 MiB/s | At 256 KiB/s |
@@ -35,15 +37,48 @@
 //! agreed to within 30 ms (`B7_RATE_KIB=256 cargo test -p harness-link
 //! --test control_under_load -- --include-ignored --nocapture`).
 //!
-//! Master to node, the link holds nothing back: the direction is idle, and
-//! the node acts on a cancel before it acks it. But the node's command loop
-//! waits for room in the out queue to ack, so the next command (here the
-//! approval answer) waits for the uplink. Node to master, a control frame
-//! waits behind everything already queued: the node's out queue alone holds
-//! `OUT_QUEUE` events (2 MiB of 8 KiB deltas), plus what the kernel holds,
-//! so its delay is that many bytes divided by the uplink's rate, whatever
-//! the rate is. The control in both tests is the same run's own other
-//! direction.
+//! What these numbers are (review B7-R1 to B7-R6, 2026-11-13):
+//!
+//! - "At the node's command loop" is when this test's model of the loop
+//!   received the frame, not when the node acted on it. On the real node a
+//!   Stop does not end a command that streams output while the out queue
+//!   is full (`crates/node/tests/control_under_load.rs`).
+//! - The cancel is sent first, so it gets the idle loop. Whichever of the
+//!   commands the loop answers inline (cancel, approval answer,
+//!   `stop_background`) comes second waits for the first one's ack to get
+//!   room: sent the other way round, the cancel reached the loop after
+//!   1.12 s. While it waits, the loop reads no command of any session.
+//! - That wait is the time to the socket's next writable moment, so it
+//!   depends on when the frames are sent: 41 ms to 1.21 s at 1 MiB/s and
+//!   41 ms to 4.99 s at 256 KiB/s in the review's runs; 1.11 s and 4.99 s
+//!   above are the moment this test picks (0.5 s after the queue filled).
+//!   It grows with the kernel's send buffer, so it bounds the model and
+//!   this machine, not the node's code.
+//! - The out queue is bounded in messages (`OUT_QUEUE`, 256), not bytes.
+//!   With 8 KiB frames its share was 2 MiB; with 64 KiB frames the cancel's
+//!   ack waited 20.2 s behind 18.8 MiB at 1 MiB/s. A real `yes` stream
+//!   averaged 23 KiB an event, and an event may be 4 MiB and a replay's
+//!   snapshot batch 2 MiB, so after a reconnect up to 256 x 2 MiB (by
+//!   reading) can be ahead of an ack.
+//! - Of the 6.1 MiB ahead, 4.1 MiB (783 - 256 frames) is the node socket's
+//!   send buffer, autotuned on loopback to this machine's `tcp_wmem`
+//!   maximum (4 MiB) behind the proxy; a real path at these rates need not
+//!   grow it that far. So 6.6 s and 26.2 s are loopback numbers; the
+//!   node's own 256 frames of 8 KiB alone would be about 2 s at 1 MiB/s.
+//! - The flood is a tight loop of in-memory sends. A real node writes each
+//!   event to node.db with `Durability::Full` before it publishes it; on
+//!   the slow disk of this checkout it produced about 2.5 messages a second
+//!   (one rough count), which no uplink faster than about 20 KiB/s backs
+//!   up. On a disk with a 1 to 5 ms fsync it fills the queue. The real
+//!   node's production rate on a fast disk was not measured.
+//!
+//! Master to node, the link holds nothing back: the direction is idle. But
+//! the node's command loop waits for room in the out queue to ack, so the
+//! next inline command waits for the uplink. Node to master, a control
+//! frame waits behind everything already queued: `OUT_QUEUE` messages of
+//! whatever size, plus what the kernel holds, so its delay is those bytes
+//! divided by the uplink's rate. The control in both tests is the same
+//! run's own other direction.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -67,8 +102,9 @@ use tokio_util::sync::CancellationToken;
 const OUT_QUEUE: usize = 256;
 /// `crates/node/src/lib.rs` `IN_QUEUE` (private there).
 const IN_QUEUE: usize = 64;
-/// What one `read` of a command's pipe becomes: one `tool_output_delta`
-/// event (`crates/tools/src/bash.rs`, `chunk = [0u8; 8192]`).
+/// One `read` of a command's pipe (`crates/tools/src/bash.rs`,
+/// `chunk = [0u8; 8192]`). The agent loop coalesces reads into events of
+/// `FLUSH_BYTES` (2 KiB) or more, so real events vary (review B7-R3).
 const DELTA: usize = 8192;
 /// `harness_agent_native::TOOL_CANCEL_GRACE` (not a dependency here): the
 /// plan's "grace" a control frame may not wait past.
@@ -363,26 +399,24 @@ async fn scenario() -> Measured {
     }
 }
 
-/// Master to node: the cancel reaches the node and is acted on within a
-/// second while the uplink is full, and the approval answer sent right
-/// after it within the grace. The control: in the same run the cancel's own
-/// ack, going the full direction, had at least the node's whole out queue
-/// ahead of it.
+/// Master to node: the first control frame the master sends reaches the
+/// node's command loop (this test's model of it) within a second while the
+/// uplink is full: the link holds nothing back in that direction. The
+/// control: in the same run the cancel's own ack, going the full direction,
+/// had at least the node's whole out queue ahead of it.
 ///
-/// Passes, with a caveat it does not assert: the approval answer reached
-/// the node's command loop 1.11 s after it was sent, at the moment the
-/// cancel's ack got room in the out queue. The command loop handles one
-/// command at a time and waits for room for each ack (`publish_wait`), so
-/// every command after a cancel waits for the node's uplink to take more
-/// bytes; that wait grows as the uplink slows (4.99 s at 256 KiB/s, at the
-/// edge of the grace).
+/// It does not say the node acts on it (on the real node a streaming
+/// command is not stopped, `crates/node/tests/control_under_load.rs`), nor
+/// anything of the second frame: the approval answer sent right after it
+/// reached the model's loop after 1.11 s, when the cancel's ack got room in
+/// the out queue. That wait is made by the model's own `send(ack).await`
+/// and the kernel, so it is printed, not asserted.
 #[tokio::test]
-async fn cancel_and_approval_reach_the_node_while_its_uplink_is_full() {
+async fn the_first_control_frame_reaches_the_node_while_its_uplink_is_full() {
     let m = scenario().await;
     m.print();
     assert!(m.behind >= OUT_QUEUE - 2, "the uplink was not full: {m:?}");
     assert!(m.cancel_at_node < Duration::from_secs(1), "{m:?}");
-    assert!(m.approval_at_node < GRACE, "{m:?}");
 }
 
 /// Node to master: the ack of a cancel (and anything else the node sends,
@@ -390,13 +424,13 @@ async fn cancel_and_approval_reach_the_node_while_its_uplink_is_full() {
 ///
 /// Fails (B.7, 2026-11-13): at 1 MiB/s the cancel's ack reached the master
 /// after 6.6 s and the approval answer's after 7.2 s, with 781 frames
-/// (6.1 MiB) read ahead of the cancel's ack: the node's out queue (256
-/// events, 2 MiB) and what the kernel's socket buffers held. The node had
-/// stopped the turn 0.2 ms after the cancel was sent; the master and the
-/// person did not learn it for 6.6 s, and below about 410 KiB/s the wait
-/// passes the master's 15 s `ACK_TIMEOUT`, so Stop answers 504 for a
-/// cancel that worked (at 256 KiB/s: 26.2 s and 28.2 s). The decision it
-/// feeds: a control lane (ADOPTION_PLAN B.7).
+/// (6.1 MiB) read ahead of the cancel's ack: the node's 256 messages
+/// (2 MiB of 8 KiB frames) and 4.1 MiB the kernel's loopback send buffer
+/// held (see the caveats above). At 256 KiB/s: 26.2 s and 28.2 s, past the
+/// master's 15 s `ACK_TIMEOUT` (by reading the master, Stop then answers
+/// 504; the route was not driven). The command loop here is a model: when a
+/// lane is built, this test must drive the real node's loop, or it cannot
+/// go green from a fix in `crates/node` (ADOPTION_PLAN B.7).
 #[tokio::test]
 #[ignore = "B.7: fails, control frames from the node wait 6.6 s behind a full uplink at 1 MiB/s"]
 async fn control_frames_from_the_node_arrive_within_the_grace() {
