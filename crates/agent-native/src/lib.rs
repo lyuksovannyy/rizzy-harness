@@ -4157,12 +4157,45 @@ mod background_tests {
     use super::*;
     use harness_core::backend::TurnHost;
 
-    struct WithTable(Arc<harness_tools::background::SessionBg>);
+    struct WithTable(
+        Arc<harness_tools::background::SessionBg>,
+        std::sync::Mutex<Vec<EventKind>>,
+        std::sync::atomic::AtomicUsize,
+    );
+
+    impl WithTable {
+        fn new(t: Arc<harness_tools::background::SessionBg>) -> Self {
+            Self(t, Default::default(), Default::default())
+        }
+    }
 
     #[async_trait::async_trait]
     impl TurnHost for WithTable {
-        async fn emit(&self, _: EventKind) -> Result<(), harness_core::backend::LogError> {
+        async fn emit(&self, k: EventKind) -> Result<(), harness_core::backend::LogError> {
+            self.1.lock().unwrap().push(k);
             Ok(())
+        }
+        async fn background_notes(
+            &self,
+        ) -> Result<Vec<BackgroundEnded>, harness_core::backend::LogError> {
+            // One end, at the first step boundary.
+            let n = self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(if n == 0 {
+                vec![BackgroundEnded {
+                    bg_id: "bg-9".into(),
+                    reason: BackgroundReason::Exited,
+                    exit_code: Some(0),
+                    signal: None,
+                    confirmed: BackgroundConfirmed::Ended,
+                    ran_ms: 1,
+                    output_bytes: 0,
+                    tail: String::new(),
+                    tail_cut: false,
+                    delivered: true,
+                }]
+            } else {
+                vec![]
+            })
         }
         async fn approve(
             &self,
@@ -4200,8 +4233,9 @@ mod background_tests {
     #[test]
     fn a_sub_agent_gets_no_background_table() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let host =
-            WithTable(harness_tools::background::Registry::new(Default::default()).session(1, tx));
+        let host = WithTable::new(
+            harness_tools::background::Registry::new(Default::default()).session(1, tx),
+        );
         let sub = background_access(&ctx(&host, Some(harness_core::SessionId::new())), &host);
         assert!(
             matches!(&sub, harness_tools::background::Access::Off(w) if w.contains("sub-agent")),
@@ -4209,6 +4243,70 @@ mod background_tests {
         );
         let own = background_access(&ctx(&host, None), &host);
         assert!(matches!(own, harness_tools::background::Access::On(_)));
+    }
+
+    /// Through `run_turn` (the loop's `Logged` wrapper between it and the
+    /// host): the turn's tools get the host's table, and the loop asks the
+    /// host for ends at each step boundary and sends the note on.
+    #[tokio::test]
+    async fn run_turn_forwards_the_table_and_the_notes() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let host = WithTable::new(
+            harness_tools::background::Registry::new(Default::default()).session(1, tx),
+        );
+        let seen: Arc<std::sync::Mutex<Vec<ChatRequest>>> = Arc::default();
+        struct Spy(mock::Mock, Arc<std::sync::Mutex<Vec<ChatRequest>>>);
+        #[async_trait::async_trait]
+        impl Provider for Spy {
+            fn name(&self) -> &'static str {
+                "spy"
+            }
+            async fn complete(
+                &self,
+                req: &ChatRequest,
+                deltas: mpsc::UnboundedSender<String>,
+            ) -> Result<Completion, ProviderError> {
+                self.1.lock().unwrap().push(req.clone());
+                self.0.complete(req, deltas).await
+            }
+        }
+        let b = NativeBackend::new(
+            Arc::new(Spy(
+                mock::Mock {
+                    delay: Duration::from_millis(1),
+                },
+                seen.clone(),
+            )),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        );
+        let mut c = ctx(&host, None);
+        c.user_text = r#"script: [{"tool": "bash_output", "input": {}}]"#.into();
+        let out = b.run_turn(c).await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{out:?}");
+        let finished: Vec<String> = host
+            .1
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|k| match k {
+                EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            finished[0].contains("No background commands"),
+            "{finished:?}"
+        );
+        assert!(host.2.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        let last = seen.lock().unwrap().last().cloned().unwrap();
+        assert!(
+            last.messages
+                .iter()
+                .any(|m| matches!(m, ChatMsg::Note(t) if t.contains("bg-9"))),
+            "{:?}",
+            last.messages
+        );
     }
 
     /// An end's note is in the history where the log has it, and is never
