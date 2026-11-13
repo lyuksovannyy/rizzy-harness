@@ -3,7 +3,9 @@
 Status: **the six open questions were answered by the owner on 2026-11-13 (§0)**; where §0
 differs from a recommendation further down, §0 holds, and the affected rows are corrected. The
 rest of the decisions table (§3) stands as recommended. **Step 1 of §8 is built** (branch
-`feat/T.8d-background-commands`); what the code does differently from this note is in §11.
+`feat/T.8d-background-commands`), reviewed (`docs/security-review/2026-11-T8d-background-commands.md`)
+and fixed, and ships **off by default** until step 2; what the code does differently from this
+note is in §11.
 Steps 2 and 3 are not built. Task C.15 of `ADOPTION_PLAN.md`; the feature is task T.8d.
 
 **Summary.** `bash` gains `background: true`. The node starts the command in its own contained
@@ -32,7 +34,7 @@ Claims about code were read on `main` at `6e99313` (T.8c merged; pull request 63
 | Q3 | The timeout and its ceiling | **The agent may set it from 5 s up to the node's existing ceiling** (`bash_timeout_max_s`); 60 s for a foreground command that states none. No second ceiling. | R3 and §4.2: a floor of 5 s is new (it was 1). |
 | Q4 | The foreground default | **The range and the clamp are shared by both kinds; the 60 s default is foreground's only** (Q5). | R3 and §4.2: the foreground default drops from 600 s to 60 s, as recommended. |
 | Q5 | Must a background command name its timeout? | **Yes: it must name its timeout, and is refused without** (decided by the owner on 2026-11-13, after a first reading of Q3 and Q4 as one 60 s default for both kinds). | R3 and §4.2: a background call without `timeout_secs` is refused before anything starts, with the range in words. |
-| Q6 | On by default, and the default bounds | On. **`background_per_session = 8`, `background_per_node = 64`.** | R8 and §4.5. Kept output in the node's memory is at most 64 rings of 256 KiB, 16 MiB (it was 4 MiB), and 64 running commands are about 190 processes beside the node (a guard, bubblewrap and its init for each). The node's idle size does not change. |
+| Q6 | On by default, and the default bounds | On. **`background_per_session = 8`, `background_per_node = 64`.** **Step 1 ships it off** (`background_per_session = 0`, the coordinator's decision after review T8D-4): until step 2 a person can neither see a running command nor stop it with a control; step 2 sets the default to the owner's 8. | R8 and §4.5. Kept output in the node's memory is at most `background_per_node × (background_output_kb + 32 KiB)`, 16.3 MiB at the defaults (64 running rings of 256 KiB, and at most 64 ended ones cut to 32 KiB: §11), and 64 running commands are about 300 processes beside the node (measured, §11). The node's idle size does not change. |
 
 ## Terms
 
@@ -95,9 +97,10 @@ long as its call and the turn waits on it the whole time. That is the problem.
 5. **Invariants touched.** "The node decides": every bound is `[limits]`, and the node checks
    every callback it is asked to run. "The master never runs tools": it only decides whether to
    start a turn, as for routines. "One writer per session": every new event is appended by the
-   owning session actor. "No secret in an event": the output tail is scrubbed at append. "The
-   harness process stays light": output is a bounded ring in memory, at most 16 MiB per node by
-   default (64 rings of 256 KiB, §0). **`PLAN.md` T9 changes wording**: a command's processes may outlive its call, never
+   owning session actor. "No secret in an event": output is scrubbed where it enters the node,
+   before any cut. "The harness process stays light": output is bounded in memory, at most
+   `background_per_node × (background_output_kb + 32 KiB)` per node (16.3 MiB at the defaults,
+   §0, §11). **`PLAN.md` T9 changes wording**: a command's processes may outlive its call, never
    its timeout, its session, its owner's access or the node (§5.4).
 6. **How we will know.** The abuse tests of §7 first, then each step's tests in §8.
 
@@ -251,8 +254,12 @@ it to the session actor once. The actor appends `background_ended` (§4.8):
 - **the turn ends with ends still queued** (its last model answer had no tool call): `end_turn`
   appends them after `turn_ended`, and they are treated as ends of an idle session.
 
-If an append fails, the end stays queued and the session's next append tries again; it is never
-dropped silently.
+If an append fails, the end stays queued and is tried again at the next step boundary, the next
+release of the turn slot, the next end of that chat, and on every pass of a node stop; a stop
+that still cannot write it, once the commands are gone, names the chat and exits 1, and the next
+start records it as `node_restarted`. An end that waits for a running turn's step boundary when
+the node dies is recorded as `node_restarted` too (its exit code and output are lost: review
+N-3).
 
 **A note inside a running turn** costs no step and no model call: it rides on the next request.
 The agent may react or ignore it.
@@ -307,8 +314,8 @@ New keys in `[limits]` (`crates/node/src/policy.rs:154-173`), checked at start l
 
 | Key | Default | Range | Why this default |
 |---|---|---|---|
-| `background_per_session` | 8 (the owner, §0) | 0 to 32 | 0 turns the feature off on this node. |
-| `background_per_node` | 64 (the owner, §0) | 0 to 256 | Each costs three processes (guard, bwrap, init) and its ring; 64 rings of 256 KiB is 16 MiB. |
+| `background_per_session` | 8 (the owner, §0); **0 in step 1** (§0 Q6) | 0 to 32 | 0 turns the feature off on this node. |
+| `background_per_node` | 64 (the owner, §0) | 0 to 256 | Each costs about five processes (measured, §11) and its ring; with the ended rings the node holds at most `per_node × (output_kb + 32 KiB)`, 16.3 MiB at the defaults. |
 | `callback_turns` | 3 | 0 to 20 | Build, then tests, then one fix, then stop and wait. 0: ends are recorded and never start a turn. |
 | `callback_max_steps` | 20 | 1 to `max_steps` | A callback turn should report or take one step forward, not run a whole task unwatched. |
 | `background_output_kb` | 256 | 16 to 4096 | Enough tail for a failing build; bounded memory. |
@@ -482,10 +489,12 @@ debug it.
   the same needs the cgroup delegation C.11 avoided, so it is not proposed here.
 - **Turns without a person** (callback turns), bounded in §4.5, and in `auto` without clicks.
 - **An injection channel into a later turn.** The tail goes into a model request later, maybe
-  in a turn nobody watches. It is scrubbed, framed as program output, capped at 4 KiB, and
-  counts as observed tool text for URL provenance exactly as a foreground result does today (a
-  callback turn has no person's words, `crates/agent-native/src/lib.rs:971-975`). This is the
-  same channel a foreground result is, moved in time.
+  in a turn nobody watches. It is scrubbed where the output entered the node and again in the
+  loop, capped at 4 KiB, and quoted line by line (every line behind `| `, control characters
+  replaced, one harness line before it saying how many lines follow), so the program can neither
+  end the quote nor write a line that begins like the harness's. It reaches the provider inside
+  the step's last tool result, or in front of the person's next message under a fixed separator,
+  never as a user-role message of its own, and it is never URL provenance (review T8D-2, T8D-3).
 - **Disk.** Output never reaches disk (a ring in memory). Files the command writes do, without a
   bound, as for a foreground command; `PLAN.md` T28 covers the store failing on a full disk.
 - **Grants that outlive the turn.** C.3 (not built) binds credential grants to a turn and renews
@@ -500,7 +509,7 @@ debug it.
 | Start a miner | The same, plus the count. Not prevented in `auto`: bounded. |
 | Wait for the person to grant something | Its view and network are fixed at its start (§5.1). |
 | Chain callbacks to act while nobody watches | `callback_turns` (3) in a row, reset only by a person's message; `callback_max_steps` (20); no callbacks in untrusted chats; no callbacks for the agent's own stops; approvals still park. |
-| Put instructions in its output for a later turn | Framed, scrubbed, capped; the same trust as any tool output; no web tools in untrusted chats as today. |
+| Put instructions in its output for a later turn | Quoted line by line, scrubbed, capped, inside a tool result or before the person's message, never a message of its own; no URL provenance; no web tools in untrusted chats as today. It is still text the model reads: a model that obeys quoted program output is not stopped by the quote. |
 | Fill the node | Per-session and per-node counts; a bounded ring per command; the pipe channel stays bounded. |
 | Raise its own bounds | No argument or event changes `[limits]`; the master's `cause` is checked against the node's log and budget. |
 | Survive the session's deletion or the owner's removal | Stopped on both (§4.7), tested in §7. |
@@ -614,8 +623,10 @@ the foreground).
 | 4 | Later, each its own decision: a live tail for the person; a person's "move to background"; a per-session network namespace for network-off dev servers; a lower CPU priority. | | | |
 
 Step 1 is useful alone (servers and long builds work; the agent learns of ends at its next step
-or the person's next message) and is safe alone (no turn starts without a person). Step 2 before
-step 3, so the person can see and stop what runs before anything acts unwatched.
+or the person's next message), but it is not safe to turn on alone: the person can neither see a
+running command nor stop it with a control until step 2, so step 1 ships with the feature off
+(review T8D-4, §0 Q6). Step 2 before step 3, so the person can see and stop what runs before
+anything acts unwatched.
 
 ## 9. What I am least sure of
 
@@ -623,10 +634,11 @@ step 3, so the person can see and stop what runs before anything acts unwatched.
    `Master::prompt`'s signature (`crates/master/src/lib.rs:1530`) and the routine runner's
    pattern; not read: how the agent, memory and project context are resolved inside it.
    Settled by reading `Master::prompt` in full and writing step 3's first test against it.
-2. **The note after tool results in one request.** A user-role text after tool results is
-   accepted by the providers I know of, but nothing here tests it through `genai` 0.7.2 for each
-   provider kind. Settled by a provider test per kind in step 1; the fallback is to append the
-   note to the last tool result's text.
+2. **The note after tool results in one request.** **Decided (review T8D-3):** no note is a
+   user-role message. At a step boundary it is appended to the step's last tool result (the
+   fallback this item named); an end waiting for the person goes in front of their next message
+   under a fixed separator. Both are ordinary message shapes for every provider; no provider was
+   contacted to test them.
 3. **The guard held for an hour.** The T.8e tests cover seconds. Its 500 ms parent check, its
    memory and its report over an hour, and three processes per command at 64 per node, are not
    measured (step 1 measured them: §11). Settled by step 1's long test and an RSS reading.
@@ -675,7 +687,16 @@ Where the code differs from the sections above, the code is described here.
   for step 1); its text keeps the first third and the end of what is held, with a marker, inside
   the result's cap. A `bash_stop` of a command that already ended says so.
 - **The ring** keeps `min(16 KiB, budget / 4)` of the head, the rest of `background_output_kb`
-  as the tail.
+  as the tail, scrubbed where the output enters (the streaming scrubber of the live stream), cut
+  on character boundaries; `output_bytes` counts the bytes the pipes read. **When the command
+  ends** its ring is cut to its head and the last 16 KiB (`ENDED_MAX` = 32 KiB); a chat keeps
+  output for its newest `background_per_session` ended commands and the node for its newest
+  `background_per_node`, older entries say their output is no longer kept, and a chat lists at
+  most 64 ended entries. Every table is pruned by time (30 minutes after an end) by one node task
+  every minute and at every start, whether its chat calls in or not. The bound on what the node
+  holds is `background_per_node × (background_output_kb × 1 KiB + 32 KiB)` (review T8D-1).
+- **A node slot** is given back only for a confirmed end; a command whose guard reported it
+  still alive, or gave no report, keeps its slot until the guard has exited (review N-4).
 - **The table** is the node's (`Registry`, made from `[limits]` at start) and is handed to the
   loop through `TurnHost::background`, type-erased (`Arc<dyn Any>`), because `harness-core` does
   not know the tools; the loop gives it to a turn's tools only when the turn is not a
@@ -684,11 +705,15 @@ Where the code differs from the sections above, the code is described here.
 - **The note.** `background_ended` is rendered by `BackgroundEnded::model_note` from the event
   alone, the same at the step boundary and in later history. It does not name the command (the
   event does not carry it, §4.8) and says "kept for 30 minutes after the end" instead of a time
-  of day. It reaches the provider as a new `ChatMsg::Note`, a user-role message that is **not**
-  URL provenance (a `ChatMsg::User` would have made program output trusted for `web_fetch`:
-  `observed_text` takes every user message). An end the agent ordered itself gives no note. Not
-  tested against real providers (§9.2): a user message right after tool results, and two user
-  messages in a row (an idle end before the person's message), are what is sent.
+  of day. The output is quoted line by line (every line behind `| `, control characters but tab
+  replaced) under one first line that says how many lines follow, so exactly one line starts
+  with `[harness]` whatever the program prints. Inside the loop it is a `ChatMsg::Note`, which is
+  **not** URL provenance (a `ChatMsg::User` would have made program output trusted for
+  `web_fetch`: `observed_text` takes every user message); at the provider boundary
+  (`place_notes`) a note joins the step's last tool result, or goes in front of the person's
+  next message under `--- the person's message follows, unchanged ---`: no note is ever a
+  user-role message of its own. The loop scrubs every note, and the node returns the scrubbed
+  end it appended (review T8D-2, T8D-3). An end the agent ordered itself gives no note.
 - **The step boundary** is `TurnHost::background_notes`, called after a step's tool results and
   before the next model call; an end queued when the turn's last answer had no tool call is
   recorded after `turn_ended` (the slot's release wakes the session's end recorder).
@@ -696,17 +721,27 @@ Where the code differs from the sections above, the code is described here.
   before its log goes, and records nothing; dropping a session's table stops them too.
 - **Revocation.** `session.stop_background { session_id, bg_id?, by: user | access_revoked }`,
   answered inline by the node, sent by the master only to nodes announcing `CAP_BACKGROUND`. The
-  mirror counts each session's running background commands (`sessions.background`, from the two
-  events); the revocation sweep and the hello's sweep take sessions with a running turn **or**
-  a count above 0. No HTTP endpoint (step 2's).
-- **The node's stop** orders every command to stop on each pass of its wait and waits until
-  every end is recorded, inside the same bound as the turns.
+  revocation sweep and the hello's sweep send it to **every** agentic chat of a blocked owner on
+  such a node, after its cancel, whatever the mirror shows: no count decides (review N-1, N-8),
+  and the mirror's count and its `sessions.background` column were removed again (so this branch
+  changes no table). A revoked chat's table then refuses starts and stops a start handed over
+  during its first wait, until its owner prompts the chat. No HTTP endpoint (step 2's).
+- **The node's stop** orders every command to stop on each pass of its wait, retries ends the
+  log did not take, and waits until every end is recorded or, once the commands are gone, a
+  retry has failed; those chats are in its result and the process exits 1 (review T8D-6).
+- **The approval card** of a background start does not offer "for this turn", and an answer
+  that sends it allows that one start only (review N-2).
 - **After a restart** each command the log shows running gets `background_ended { reason:
   node_restarted, confirmed: unknown, ran_ms: 0 }`.
 - **An undo** is refused while **that session's** commands run; another session in the same
   folder is not checked.
-- **Schema in place:** the master's and the node's `sessions` table gained a column; a data
-  directory made before this branch must be wiped (no migration before the first tag).
+- **Off by default** in step 1 (`background_per_session = 0`, review T8D-4). With it on, a
+  person can end a command only by deleting the chat, stopping the node, or the agent's
+  `bash_stop`. Routine chats and untrusted chats may start background commands behind their
+  click like any chat (§4.10); nothing on the node treats them differently in step 1.
+- **Not said elsewhere:** one user's chats can hold every slot of the node, and a chat refused
+  at the node's cap learns that other chats fill it (N-5); a delete whose log removal fails has
+  stopped the commands already, and their starts get `node_restarted` at the next start (N-7).
 
 **Measured** (debug build, this machine, `cli/tests/background.rs` `measure_*`, run by hand,
 2026-11-13). 64 commands in eight chats, each ring filled (600,000 bytes printed into 256 KiB):
@@ -717,7 +752,13 @@ was refused naming its eight ids; stopping all 64 at once took 19 ms. A start's 
 its first wait, 3.00 s; the spawn itself is a foreground command's. A guard held for 600 s
 (not the hour §9 asks for): its RSS went from 20.2 MiB to 7.1 MiB (pages it no longer touches
 reclaimed), and its stop was confirmed in 335 ms. A flood (`yes`, 68 GB in 15 s) kept a 64 KiB
-ring; the test process grew 12.2 MiB (its runtime's threads), not with the flood.
+ring; the test process grew 12.2 MiB (its runtime's threads), not with the flood. After the
+review's fixes (2026-11-13): twelve 4.5 MB starts in one turn with `background_per_session = 2`,
+`background_per_node = 2`, `background_output_kb = 4096` left 64 KiB of output in the tables
+(the bound is 8256 KiB; before the fix the review measured 86 MiB of RSS for the same run). The
+test process's RSS still grew by about 50 to 60 MiB in that test: its own copy of every event,
+the twelve calls' live streams of up to 1 MiB each and the allocator; the tables' own count is
+the measure the test asserts.
 
 **Not built of step 1:** the person's stop and its HTTP endpoint (step 2), `turn_started.cause`
 and `callback_turns`/`callback_max_steps` (step 3), a live view of the output.
