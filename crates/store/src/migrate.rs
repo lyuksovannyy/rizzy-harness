@@ -226,49 +226,83 @@ fn dangling(conn: &Connection) -> rusqlite::Result<Option<(String, String)>> {
     }
 }
 
-/// The schema of `conn` as text: every object in `sqlite_master` (FTS5's
-/// shadow tables and automatic indexes included), sorted by name.
+/// The tables FTS5 makes for each of its virtual tables (`<name>_<suffix>`).
+const FTS5_SHADOWS: [&str; 5] = ["config", "content", "data", "docsize", "idx"];
+
+/// The schema of `conn` as text: every object the migrations made, from
+/// `sqlite_master`, sorted by name. What SQLite makes beside them is left
+/// out (review R43-6): its own `sqlite_*` objects (automatic indexes,
+/// `sqlite_sequence`, `sqlite_stat*`) and FTS5's shadow tables. Their text
+/// follows from the statements recorded here, and a SQLite update may
+/// change it without any migration changing.
 pub fn schema_text(conn: &Connection) -> rusqlite::Result<String> {
-    let mut stmt =
-        conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name, type")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, Option<String>>(3)?,
-        ))
-    })?;
+    let mut stmt = conn.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master
+         WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+         ORDER BY name, type",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let fts5: Vec<&str> = rows
+        .iter()
+        .filter(|(kind, _, _, sql)| {
+            kind == "table" && sql.starts_with("CREATE VIRTUAL TABLE") && sql.contains("fts5")
+        })
+        .map(|(_, name, _, _)| name.as_str())
+        .collect();
+    let shadow = |table: &str| {
+        fts5.iter().any(|v| {
+            table
+                .strip_prefix(v)
+                .and_then(|rest| rest.strip_prefix('_'))
+                .is_some_and(|suffix| FTS5_SHADOWS.contains(&suffix))
+        })
+    };
     let mut out = String::new();
-    for row in rows {
-        let (kind, name, table, sql) = row?;
-        out.push_str(&format!("-- {kind} {name} on {table}\n"));
-        match sql {
-            Some(sql) => out.push_str(&format!("{sql};\n\n")),
-            None => out.push_str("-- (created by SQLite)\n\n"),
+    for (kind, name, table, sql) in &rows {
+        if shadow(table) {
+            continue;
         }
+        out.push_str(&format!("-- {kind} {name} on {table}\n{sql};\n\n"));
     }
     Ok(out)
 }
 
-fn built(steps: &[Migration]) -> String {
+/// The schema migrations `steps` build on an empty database.
+#[doc(hidden)]
+pub fn built(steps: &[Migration]) -> String {
     let mut conn = Connection::open_in_memory().unwrap();
     migrate(&mut conn, ":memory:", steps).unwrap();
     schema_text(&conn).unwrap()
 }
 
 /// Test support (store and memory tests): version `k`'s schema, built from
-/// migrations `1..=k`, equals `dir/<k>.sql` for every `k`, no file exists
-/// for a version the code does not have, and a database migrated from any
-/// earlier version ends with the same schema as a fresh one. With
-/// `HARNESS_WRITE_SCHEMA=1` the files are written instead of compared.
+/// migrations `1..=k`, equals `dir/<k>.sql` for every `k`, and no file
+/// exists for a version the code does not have. With
+/// `HARNESS_WRITE_SCHEMA=1` a version without a file gets one; a recorded
+/// file is never rewritten (before the first tag, delete `1.sql` to record
+/// migration 1 again).
 #[doc(hidden)]
 pub fn check_recorded(dir: &Path, steps: &[Migration]) {
     let write = std::env::var_os("HARNESS_WRITE_SCHEMA").is_some_and(|v| v == "1");
+    check_recorded_with(dir, steps, write);
+}
+
+/// `check_recorded` with write mode given, for its own tests.
+#[doc(hidden)]
+pub fn check_recorded_with(dir: &Path, steps: &[Migration], write: bool) {
     for k in 1..=steps.len() {
         let file = dir.join(format!("{k}.sql"));
         let now = built(&steps[..k]);
-        if write {
+        if write && !file.exists() {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(&file, &now).unwrap();
             continue;
@@ -288,15 +322,4 @@ pub fn check_recorded(dir: &Path, steps: &[Migration]) {
     }
     let next = dir.join(format!("{}.sql", steps.len() + 1));
     assert!(!next.exists(), "{} has no migration", next.display());
-    let fresh = built(steps);
-    for k in 1..steps.len() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate(&mut conn, ":memory:", &steps[..k]).unwrap();
-        migrate(&mut conn, ":memory:", steps).unwrap();
-        assert_eq!(
-            schema_text(&conn).unwrap(),
-            fresh,
-            "migrating from version {k} does not give the fresh schema"
-        );
-    }
 }

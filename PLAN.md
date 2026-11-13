@@ -47,8 +47,10 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   (`master.db`, `chat.db`, `node.db` through `Store`, `memory.db` through `SqliteMemory`)
   carries `PRAGMA user_version` and is opened through numbered migrations; migration 1 is the
   whole schema. Until the first tag migration 1 is edited in place and its recorded schema
-  (`crates/store/schema/1.sql`, `crates/memory/schema/1.sql`) rewritten with
-  `HARNESS_WRITE_SCHEMA=1`; from the tag on a released migration never changes, every change
+  (`crates/store/schema/1.sql`, `crates/memory/schema/1.sql`) deleted and recorded again with
+  `HARNESS_WRITE_SCHEMA=1`, which only creates files that do not exist; the recorded text is
+  what the migrations make (SQLite's own `sqlite_*` objects and FTS5's shadow tables are left
+  out, so a SQLite update does not change it); from the tag on a released migration never changes, every change
   is a new migration with its own recorded file, and the tests fail otherwise. A value that is
   queried or joined is a column; the `kv` table holds opaque documents only.
 

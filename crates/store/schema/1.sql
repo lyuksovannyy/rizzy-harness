@@ -2,21 +2,6 @@
 CREATE VIRTUAL TABLE artifact_fts USING fts5(artifact_id UNINDEXED, name, filenames, notes,
     tokenize = 'unicode61 remove_diacritics 2');
 
--- table artifact_fts_config on artifact_fts_config
-CREATE TABLE 'artifact_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
-
--- table artifact_fts_content on artifact_fts_content
-CREATE TABLE 'artifact_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3);
-
--- table artifact_fts_data on artifact_fts_data
-CREATE TABLE 'artifact_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
-
--- table artifact_fts_docsize on artifact_fts_docsize
-CREATE TABLE 'artifact_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
-
--- table artifact_fts_idx on artifact_fts_idx
-CREATE TABLE 'artifact_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
-
 -- table artifact_projects on artifact_projects
 CREATE TABLE artifact_projects (
     artifact_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id) ON DELETE CASCADE,
@@ -174,21 +159,6 @@ CREATE VIRTUAL TABLE chat_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
--- table chat_fts_config on chat_fts_config
-CREATE TABLE 'chat_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
-
--- table chat_fts_content on chat_fts_content
-CREATE TABLE 'chat_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2);
-
--- table chat_fts_data on chat_fts_data
-CREATE TABLE 'chat_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
-
--- table chat_fts_docsize on chat_fts_docsize
-CREATE TABLE 'chat_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
-
--- table chat_fts_idx on chat_fts_idx
-CREATE TABLE 'chat_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
-
 -- table deleted_sessions on deleted_sessions
 CREATE TABLE deleted_sessions (
     session_id TEXT PRIMARY KEY,
@@ -224,21 +194,6 @@ CREATE TABLE kv (
 -- table media_fts on media_fts
 CREATE VIRTUAL TABLE media_fts USING fts5(media_id UNINDEXED, name,
     tokenize = 'unicode61 remove_diacritics 2');
-
--- table media_fts_config on media_fts_config
-CREATE TABLE 'media_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
-
--- table media_fts_content on media_fts_content
-CREATE TABLE 'media_fts_content'(id INTEGER PRIMARY KEY, c0, c1);
-
--- table media_fts_data on media_fts_data
-CREATE TABLE 'media_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
-
--- table media_fts_docsize on media_fts_docsize
-CREATE TABLE 'media_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
-
--- table media_fts_idx on media_fts_idx
-CREATE TABLE 'media_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
 
 -- table media_items on media_items
 CREATE TABLE media_items (
@@ -443,114 +398,6 @@ CREATE TABLE sessions (
 
 -- index sessions_owner on sessions
 CREATE INDEX sessions_owner ON sessions(owner_id, updated_ms);
-
--- index sqlite_autoindex_artifact_projects_1 on artifact_projects
--- (created by SQLite)
-
--- index sqlite_autoindex_artifact_versions_1 on artifact_versions
--- (created by SQLite)
-
--- index sqlite_autoindex_artifact_versions_2 on artifact_versions
--- (created by SQLite)
-
--- index sqlite_autoindex_artifact_versions_3 on artifact_versions
--- (created by SQLite)
-
--- index sqlite_autoindex_artifacts_1 on artifacts
--- (created by SQLite)
-
--- index sqlite_autoindex_attachments_1 on attachments
--- (created by SQLite)
-
--- index sqlite_autoindex_blob_previews_1 on blob_previews
--- (created by SQLite)
-
--- index sqlite_autoindex_blobs_1 on blobs
--- (created by SQLite)
-
--- index sqlite_autoindex_board_cards_1 on board_cards
--- (created by SQLite)
-
--- index sqlite_autoindex_board_columns_1 on board_columns
--- (created by SQLite)
-
--- index sqlite_autoindex_board_templates_1 on board_templates
--- (created by SQLite)
-
--- index sqlite_autoindex_deleted_sessions_1 on deleted_sessions
--- (created by SQLite)
-
--- index sqlite_autoindex_join_tokens_1 on join_tokens
--- (created by SQLite)
-
--- index sqlite_autoindex_kv_1 on kv
--- (created by SQLite)
-
--- index sqlite_autoindex_media_items_1 on media_items
--- (created by SQLite)
-
--- index sqlite_autoindex_media_uses_1 on media_uses
--- (created by SQLite)
-
--- index sqlite_autoindex_nodes_1 on nodes
--- (created by SQLite)
-
--- index sqlite_autoindex_nodes_2 on nodes
--- (created by SQLite)
-
--- index sqlite_autoindex_projects_1 on projects
--- (created by SQLite)
-
--- index sqlite_autoindex_routine_dedupe_1 on routine_dedupe
--- (created by SQLite)
-
--- index sqlite_autoindex_routine_runs_1 on routine_runs
--- (created by SQLite)
-
--- index sqlite_autoindex_routine_runs_2 on routine_runs
--- (created by SQLite)
-
--- index sqlite_autoindex_routine_triggers_1 on routine_triggers
--- (created by SQLite)
-
--- index sqlite_autoindex_routines_1 on routines
--- (created by SQLite)
-
--- index sqlite_autoindex_seen_1 on seen
--- (created by SQLite)
-
--- index sqlite_autoindex_session_images_1 on session_images
--- (created by SQLite)
-
--- index sqlite_autoindex_session_projects_1 on session_projects
--- (created by SQLite)
-
--- index sqlite_autoindex_session_workspaces_1 on session_workspaces
--- (created by SQLite)
-
--- index sqlite_autoindex_sessions_1 on sessions
--- (created by SQLite)
-
--- index sqlite_autoindex_ui_sessions_1 on ui_sessions
--- (created by SQLite)
-
--- index sqlite_autoindex_users_1 on users
--- (created by SQLite)
-
--- index sqlite_autoindex_users_2 on users
--- (created by SQLite)
-
--- index sqlite_autoindex_workspace_members_1 on workspace_members
--- (created by SQLite)
-
--- index sqlite_autoindex_workspaces_1 on workspaces
--- (created by SQLite)
-
--- index sqlite_autoindex_workspaces_2 on workspaces
--- (created by SQLite)
-
--- table sqlite_sequence on sqlite_sequence
-CREATE TABLE sqlite_sequence(name,seq);
 
 -- table ui_sessions on ui_sessions
 CREATE TABLE ui_sessions (
