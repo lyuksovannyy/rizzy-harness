@@ -25,12 +25,12 @@ const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
   ...over,
 });
 
-function mount(workers: NodeInfo[], hostRight = { admin: false, owner: true }) {
+function mount(workers: NodeInfo[], hostRight = { admin: true }) {
   const sent: Submission[] = [];
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  act(() =>
+  const render = (workers: NodeInfo[]) =>
     root.render(
       <Composer
         where="home"
@@ -45,8 +45,9 @@ function mount(workers: NodeInfo[], hostRight = { admin: false, owner: true }) {
           sent.push(s);
         }}
       />,
-    ),
-  );
+    );
+  act(() => render(workers));
+  const rerender = (w: NodeInfo[]) => act(() => render(w));
   act(() => [...host.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.textContent === "Agentic")!.click());
   const set = (el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) =>
     act(() => {
@@ -75,7 +76,7 @@ function mount(workers: NodeInfo[], hostRight = { admin: false, owner: true }) {
   const send = async () => {
     await act(async () => host.querySelector<HTMLButtonElement>("button.send")!.click());
   };
-  return { host, sent, set, select, loaded, dialog, button, send, unmount: () => act(() => root.unmount()) };
+  return { host, sent, set, select, loaded, dialog, button, send, rerender, unmount: () => act(() => root.unmount()) };
 }
 
 describe("the host shell for a new chat", () => {
@@ -93,6 +94,8 @@ describe("the host shell for a new chat", () => {
       "can keep running after the chat ends",
       "one web page or file the agent reads can turn all of that against you",
       "The approval card is then the only check",
+      "never runs in auto",
+      "what a sandbox chat wrote in this folder",
     ]) {
       expect(text).toContain(risk);
     }
@@ -117,17 +120,36 @@ describe("the host shell for a new chat", () => {
     c.unmount();
   });
 
-  test("not offered to a plain member, nor where the node has no host shell", async () => {
+  test("offered to server admins only, and only where the node has a host shell", async () => {
+    // Review H1: not to a plain account, workspace owner or not (every
+    // account owns its Personal workspace).
     for (const [workers, right] of [
-      [[node()], { admin: false, owner: false }],
-      [[node({ exec_modes: ["sandbox"] })], { admin: true, owner: true }],
-      [[node({ embedded: true })], { admin: false, owner: true }],
+      [[node()], { admin: false }],
+      [[node({ embedded: true })], { admin: false }],
+      [[node({ exec_modes: ["sandbox"] })], { admin: true }],
     ] as const) {
       const c = mount([...workers], right);
       expect(await c.loaded()).toBeNull();
       c.unmount();
     }
-    expect(mayPickHost(node({ embedded: true }), { admin: true, owner: false })).toBe(true);
+    expect(mayPickHost(node({ embedded: true }), { admin: true })).toBe(true);
+    expect(mayPickHost(node(), { admin: false })).toBe(false);
+  });
+
+  test("a confirmed choice stays with its node when the selection moves on its own", async () => {
+    // Review L-j: two nodes offer the host shell; it is confirmed for the
+    // first, which then drops out of the list: the bar moves to the
+    // second, and the message goes in the sandbox there.
+    const second = node({ node_id: "node-2", hostname: "other" });
+    const c = mount([node(), second]);
+    c.set((await c.loaded())!, "host");
+    c.button((await c.dialog())!, "Use the host shell");
+    expect(c.select()!.value).toBe("host");
+    c.rerender([second]);
+    expect((await c.loaded())!.value).toBe("sandbox");
+    await c.send();
+    expect(c.sent.map((s) => [s.nodeId, s.execMode])).toEqual([["node-2", "sandbox"]]);
+    c.unmount();
   });
 
   test("a node with only the host shell sends nothing until it is confirmed", async () => {
@@ -147,5 +169,11 @@ describe("the chat header's gaps", () => {
     expect(modeGaps("sandbox", ["gap:host:netns"])).toEqual([]);
     expect(modeGaps("host", ["gap:host:netns"])).toHaveLength(2);
     expect(modeGaps(undefined, ["gap:host:netns"])).toEqual([]);
+    // Review L-d: where nothing stops TCP, the host chat says everything goes out.
+    expect(modeGaps("host", ["gap:host:net-open"])[1]).toContain("everything goes out");
+    // Review L-e: the other gaps the containment line names.
+    expect(modeGaps("sandbox", ["gap:sandbox:sockets"])[0]).toContain("outside the sandbox");
+    expect(modeGaps("sandbox", ["gap:sandbox:proc"])[0]).toContain("/proc");
+    expect(modeGaps("host", ["gap:sandbox:proc", "gap:sandbox:sockets"])).toHaveLength(1);
   });
 });

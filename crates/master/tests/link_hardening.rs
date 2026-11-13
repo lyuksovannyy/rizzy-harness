@@ -19,7 +19,11 @@ fn link(id: &str, hostname: &str, caps: &[&str]) -> (NodeLink, mpsc::Receiver<Ma
         node_id: id.into(),
         hostname: hostname.into(),
         version: "1".repeat(200),
-        capabilities: caps.iter().map(|c| c.to_string()).collect(),
+        capabilities: caps
+            .iter()
+            .map(|c| c.to_string())
+            .chain(["exec:sandbox".to_string()])
+            .collect(),
         sessions: vec![],
     })
     .unwrap();
@@ -79,7 +83,7 @@ fn open_link(
     mpsc::Receiver<MasterToNode>,
     mpsc::Sender<NodeToMaster>,
 ) {
-    open_link_with(id, heads, vec![])
+    open_link_with(id, heads, vec!["exec:sandbox".into()])
 }
 
 fn open_link_with(
@@ -109,7 +113,7 @@ fn open_link_with(
 fn event(sid: SessionId, seq: u64, text: &str) -> RawEvent {
     let (kind, payload) = if seq == 1 {
         EventKind::SessionCreated(SessionCreated {
-            exec_mode: None,
+            exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
             no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,
@@ -720,7 +724,7 @@ async fn a_reconnect_that_resends_acknowledged_events_carries_on() {
 
 fn created_by(sid: SessionId, seq: u64, parent: Option<SessionId>) -> RawEvent {
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
-        exec_mode: None,
+        exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
         no_callbacks: false,
         profile: Profile::Agentic,
         agent_id: None,

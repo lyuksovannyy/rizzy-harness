@@ -166,8 +166,26 @@ impl Node {
             .unwrap();
         self.ack().await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);
+        let mut answered = std::collections::HashSet::new();
         loop {
             let log = self.rt.store().events_after(sid, 0, 10_000).unwrap();
+            // A `host` session always asks (review N-e): allow each card.
+            for e in &log {
+                if let Ok(EventKind::ApprovalRequested(a)) = e.typed()
+                    && answered.insert(a.approval_id.clone())
+                {
+                    assert!(a.reason.contains("in the host shell"), "{}", a.reason);
+                    self.link
+                        .to_node
+                        .try_send(MasterToNode::ApprovalRespond {
+                            req_id: "a".into(),
+                            session_id: sid,
+                            approval_id: a.approval_id,
+                            decision: harness_core::policy::Decision::Allow,
+                        })
+                        .unwrap();
+                }
+            }
             let ended = log.iter().filter(|e| e.kind == "turn_ended").count();
             if ended > 0 && log.last().is_some_and(|e| e.kind == "turn_ended") {
                 return log

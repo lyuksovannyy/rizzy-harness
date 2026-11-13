@@ -1042,6 +1042,56 @@ fn doctor_marks_each_containment_state() {
     }
 }
 
+/// Review L-c: `strict` offers the sandbox mode only where no gap is
+/// named. A `[sandbox] write` entry holding other programs' sockets
+/// (`/run/user/<uid>`), or a folder on the node's `PATH`, is such a gap: `auto` warns,
+/// `strict` does not offer the mode. Before, `strict` offered it and only
+/// warned.
+#[test]
+fn strict_does_not_offer_the_sandbox_with_a_write_entry_gap() {
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let (out, _) = doctor(&f.data, None);
+    let abi = harness_tools::sandbox::effective_abi(line(&out, "shell sandbox"));
+    if abi < 9 {
+        eprintln!("SKIPPED: below Landlock ABI 9 `strict` refuses for the socket gap first");
+        return;
+    }
+    let bin = f.root.join("toolbin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let doctor_path = |toml: &str| {
+        std::fs::write(f.data.join("node.toml"), toml).unwrap();
+        let out = std::process::Command::new(EXE)
+            .args(["--data-dir", f.data.to_str().unwrap(), "doctor"])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // `/run/user/<uid>`, not `/tmp`: this fixture's data directory is in
+    // `/tmp`, which a write entry may not hold.
+    let run = format!("/run/user/{}", nix::unistd::getuid());
+    let mut entries = vec![(bin.display().to_string(), "on this node's PATH")];
+    if std::path::Path::new(&run).is_dir() {
+        entries.push((run, "other programs' sockets"));
+    }
+    for (entry, want) in entries {
+        for (setting, mark) in [("auto", "warn "), ("strict", "FAIL ")] {
+            let out = doctor_path(&format!(
+                "[execution]\nsandbox = \"{setting}\"\n[sandbox]\nwrite = [\"{entry}\"]\n"
+            ));
+            let c = line(&out, "shell containment");
+            assert!(c.starts_with(mark), "{entry} {setting}: {c}");
+            if setting == "strict" {
+                assert!(c.contains("NOT OFFERED") && c.contains(want), "{c}");
+            }
+        }
+    }
+}
+
 // ---- R-1 (re-check of the fixes): the answer nobody reads ----
 //
 // Before T.8e the spawn waited on the spawner thread, and an answer the

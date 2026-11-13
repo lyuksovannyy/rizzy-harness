@@ -33,16 +33,58 @@ fn policy(root: &std::path::Path, o: ExecOffers) -> NodePolicy {
     }
 }
 
+/// The mock, keeping the tools of every request it is sent.
+struct Spy(Mock, Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+
+#[async_trait::async_trait]
+impl harness_agent_native::Provider for Spy {
+    fn name(&self) -> &'static str {
+        "spy"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::ChatRequest,
+        deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<harness_agent_native::Completion, harness_agent_native::ProviderError> {
+        self.1
+            .lock()
+            .unwrap()
+            .push(req.tools.iter().map(|t| t.name.clone()).collect());
+        self.0.complete(req, deltas).await
+    }
+}
+
+type Seen = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+
+fn spied() -> (Arc<Spy>, Seen) {
+    let seen: Seen = Arc::default();
+    let spy = Spy(
+        Mock {
+            delay: Duration::from_millis(5),
+        },
+        seen.clone(),
+    );
+    (Arc::new(spy), seen)
+}
+
 fn config(store: Store, policy: NodePolicy, profile: Profile) -> NodeConfig {
+    config_with(store, policy, profile, spied().0, None)
+}
+
+fn config_with(
+    store: Store,
+    policy: NodePolicy,
+    profile: Profile,
+    provider: Arc<Spy>,
+    artifacts: Option<std::path::PathBuf>,
+) -> NodeConfig {
     NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
         policy,
         store,
         backend: Arc::new(NativeBackend::new(
-            Arc::new(Mock {
-                delay: Duration::from_millis(5),
-            }),
+            provider,
             harness_tools::builtin(),
             NativeConfig::default(),
         )),
@@ -52,7 +94,7 @@ fn config(store: Store, policy: NodePolicy, profile: Profile) -> NodeConfig {
         incognito_ttl: None,
         checkpoints_dir: None,
         git_sandbox: None,
-        artifacts: None,
+        artifacts: artifacts.map(harness_node::artifacts::StageConfig::new),
     }
 }
 
@@ -63,13 +105,16 @@ struct Node {
 }
 
 async fn start(db: &std::path::Path, policy: NodePolicy, profile: Profile) -> Node {
-    let node = NodeRuntime::start(config(
+    start_cfg(config(
         Store::open(db, Durability::Full).unwrap(),
         policy,
         profile,
     ))
     .await
-    .unwrap();
+}
+
+async fn start_cfg(cfg: NodeConfig) -> Node {
+    let node = NodeRuntime::start(cfg).await.unwrap();
     let mut link = node.attach().await;
     let capabilities = match link.from_node.recv().await.unwrap() {
         NodeToMaster::Hello { capabilities, .. } => capabilities,
@@ -288,7 +333,15 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
             }
         }
         let after = offers(kept == ExecMode::Sandbox, kept == ExecMode::Host);
-        let mut n = start(&db, policy(dir.path(), after), Profile::Agentic).await;
+        // With publishing on, so "Save as artifact" reaches its check.
+        let mut n = start_cfg(config_with(
+            Store::open(&db, Durability::Full).unwrap(),
+            policy(dir.path(), after),
+            Profile::Agentic,
+            spied().0,
+            Some(dir.path().join("data")),
+        ))
+        .await;
         let marker = dir.path().join("ran.txt");
         n.link
             .to_node
@@ -313,8 +366,282 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
             "{lost:?}: a turn started"
         );
         assert!(!marker.exists());
+        // Review N-b: and nothing else that does work: an undo, a
+        // callback, "Save as artifact".
+        for (what, m) in [
+            (
+                "restore",
+                MasterToNode::Restore {
+                    req_id: "r".into(),
+                    session_id: gone,
+                    turn_id: "t1".into(),
+                    force: true,
+                    rewind: false,
+                },
+            ),
+            (
+                "callback",
+                MasterToNode::Callback {
+                    req_id: "cb".into(),
+                    session_id: gone,
+                    bg_ids: vec!["bg-1".into()],
+                    agent: None,
+                    savings: None,
+                },
+            ),
+            (
+                "stage",
+                MasterToNode::ArtifactStage {
+                    req_id: "s".into(),
+                    session_id: gone,
+                    path: "x".into(),
+                    name: None,
+                },
+            ),
+        ] {
+            n.link.to_node.try_send(m).unwrap();
+            let e = ack(&mut n).await.unwrap_err();
+            // A host chat has no background table, so its callback is
+            // refused for that before the mode is looked at.
+            let ok = e.contains(&format!("runs in the {} mode", lost.id()))
+                || (what == "callback" && lost == ExecMode::Host && e.contains("no background"));
+            assert!(ok, "{lost:?} {what}: {e}");
+        }
         n.link.to_node.try_send(prompt(stays, "hello")).unwrap();
         ack(&mut n).await.unwrap();
+    }
+}
+
+/// Review N-b: an agentic session whose `session_created` names no mode
+/// (a log written by hand, or by a node from before modes) runs nothing.
+#[tokio::test]
+async fn an_agentic_session_without_a_recorded_mode_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("node.db");
+    let sid = SessionId::new();
+    {
+        let store = Store::open(&db, Durability::Full).unwrap();
+        let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+            exec_mode: None,
+            no_callbacks: false,
+            profile: Profile::Agentic,
+            agent_id: None,
+            incognito: false,
+            parent_session: None,
+            title: "t".into(),
+            cwd: dir.path().display().to_string(),
+            model: "mock".into(),
+            backend: "native".into(),
+            node_id: "n".into(),
+            approval_mode: harness_core::policy::ApprovalMode::Auto,
+        })
+        .into_parts();
+        store
+            .append(
+                "n",
+                &harness_core::RawEvent {
+                    session_id: sid,
+                    seq: 1,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                },
+            )
+            .unwrap();
+    }
+    let mut n = start(
+        &db,
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+    )
+    .await;
+    n.link.to_node.try_send(prompt(sid, "run: true")).unwrap();
+    let e = ack(&mut n).await.unwrap_err();
+    assert!(e.contains("no execution mode"), "{e}");
+}
+
+/// Review L-a: a create that names no mode is never given `host`: on a
+/// node whose only mode is `host` it is refused, saying it must be asked
+/// for by name.
+#[tokio::test]
+async fn host_is_never_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), offers(false, true)),
+        Profile::Agentic,
+    )
+    .await;
+    let sid = SessionId::new();
+    n.link
+        .to_node
+        .try_send(create(sid, dir.path(), None))
+        .unwrap();
+    let e = ack(&mut n).await.unwrap_err();
+    assert!(
+        e.contains("only the host mode") && e.contains("by name"),
+        "{e}"
+    );
+    assert!(created(&n, sid).is_none());
+}
+
+/// Review N-e: a `host` session never runs in `auto`, whatever the master
+/// asks and whatever node.toml allows: recorded as `ask` at create, and a
+/// log that says `auto` loads as `ask` (its next command waits for a card).
+#[tokio::test]
+async fn a_host_session_is_never_in_auto() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("node.db");
+    let (made, on_disk) = (SessionId::new(), SessionId::new());
+    {
+        let mut n = start(
+            &db,
+            policy(dir.path(), offers(true, true)),
+            Profile::Agentic,
+        )
+        .await;
+        // `create` asks for `auto`; node.toml allows `auto`.
+        n.link
+            .to_node
+            .try_send(create(made, dir.path(), Some(ExecMode::Host)))
+            .unwrap();
+        ack(&mut n).await.unwrap();
+        assert_eq!(
+            created(&n, made).unwrap().approval_mode,
+            harness_core::policy::ApprovalMode::Ask
+        );
+        // A sandbox session keeps `auto`.
+        let sb = SessionId::new();
+        n.link
+            .to_node
+            .try_send(create(sb, dir.path(), Some(ExecMode::Sandbox)))
+            .unwrap();
+        ack(&mut n).await.unwrap();
+        assert_eq!(
+            created(&n, sb).unwrap().approval_mode,
+            harness_core::policy::ApprovalMode::Auto
+        );
+    }
+    {
+        let store = Store::open(&db, Durability::Full).unwrap();
+        let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+            exec_mode: Some(ExecMode::Host),
+            no_callbacks: false,
+            profile: Profile::Agentic,
+            agent_id: None,
+            incognito: false,
+            parent_session: None,
+            title: "t".into(),
+            cwd: dir.path().display().to_string(),
+            model: "mock".into(),
+            backend: "native".into(),
+            node_id: "n".into(),
+            approval_mode: harness_core::policy::ApprovalMode::Auto,
+        })
+        .into_parts();
+        store
+            .append(
+                "n",
+                &harness_core::RawEvent {
+                    session_id: on_disk,
+                    seq: 1,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                },
+            )
+            .unwrap();
+    }
+    let mut n = start(
+        &db,
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+    )
+    .await;
+    let marker = dir.path().join("ran-auto.txt");
+    n.link
+        .to_node
+        .try_send(prompt(
+            on_disk,
+            &format!("run: echo x > {}", marker.display()),
+        ))
+        .unwrap();
+    ack(&mut n).await.unwrap();
+    let by = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let log = n.node.store().events_after(on_disk, 0, 1000).unwrap();
+        if let Some(a) = log.iter().find_map(|e| match e.typed() {
+            Ok(EventKind::ApprovalRequested(a)) => Some(a),
+            _ => None,
+        }) {
+            assert!(a.reason.contains("in the host shell"), "{}", a.reason);
+            break;
+        }
+        assert!(
+            !log.iter().any(|e| e.kind == "turn_ended"),
+            "the turn ended without a card: {log:?}"
+        );
+        assert!(std::time::Instant::now() < by, "no approval card");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!marker.exists(), "ran without the card");
+}
+
+/// Review N-c: a `host` session has no background table, so its model is
+/// not offered `bash_output` or `bash_stop` (nor `background` on bash); a
+/// `sandbox` session is.
+#[tokio::test]
+async fn a_host_session_is_not_offered_background_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spy, seen) = spied();
+    let mut n = start_cfg(config_with(
+        Store::open(&dir.path().join("node.db"), Durability::Full).unwrap(),
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+        spy,
+        None,
+    ))
+    .await;
+    for (mode, offered) in [(ExecMode::Host, false), (ExecMode::Sandbox, true)] {
+        let sid = SessionId::new();
+        n.link
+            .to_node
+            .try_send(create(sid, dir.path(), Some(mode)))
+            .unwrap();
+        ack(&mut n).await.unwrap();
+        seen.lock().unwrap().clear();
+        n.link.to_node.try_send(prompt(sid, "hello")).unwrap();
+        ack(&mut n).await.unwrap();
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while seen.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < by, "no model call");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let tools = seen.lock().unwrap()[0].clone();
+        assert!(tools.contains(&"bash".to_string()), "{tools:?}");
+        assert_eq!(
+            tools.contains(&"bash_output".to_string()),
+            offered,
+            "{mode:?}: {tools:?}"
+        );
+        assert_eq!(
+            tools.contains(&"bash_stop".to_string()),
+            offered,
+            "{mode:?}: {tools:?}"
+        );
+        // Until the turn ends, so the next session's request is its own.
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while !n
+            .node
+            .store()
+            .events_after(sid, 0, 1000)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "turn_ended")
+        {
+            assert!(std::time::Instant::now() < by, "the turn did not end");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 

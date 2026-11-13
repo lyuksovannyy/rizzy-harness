@@ -1506,7 +1506,7 @@ async fn offline_node(t: &T) {
             node_id: "gone".into(),
             hostname: "h".into(),
             version: "0".into(),
-            capabilities: vec![],
+            capabilities: vec!["exec:sandbox".into()],
             sessions: vec![],
         })
         .unwrap();
@@ -1539,6 +1539,83 @@ async fn wait_attempt(t: &T, c: &str, id: &str, run: &str, n: i64) -> Value {
         "run never reached attempt {n}: {}",
         run_of(t, c, id, run).await
     );
+}
+
+/// Review L-k: a routine's chat always asks for the sandbox mode, whoever
+/// owns the routine (an admin here), however the node is set up: at a node
+/// that offers only the host shell the run is blocked and makes no chat; at one
+/// that offers both, its chat records `sandbox`.
+#[tokio::test]
+async fn a_routines_chat_is_always_in_the_sandbox() {
+    use harness_node::exec::ExecOffers;
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path()).await;
+    let (alex, _) = alex(&t).await;
+    for (id, offers) in [
+        (
+            "node-hostonly1",
+            ExecOffers::new(Err("bubblewrap not found".into()), Ok(()), vec![]),
+        ),
+        ("node-both1", ExecOffers::new(Ok(()), Ok(()), vec![])),
+    ] {
+        let node = NodeRuntime::start(NodeConfig {
+            node_id: id.into(),
+            hostname: id.into(),
+            policy: NodePolicy {
+                workspace_roots: vec![t.root.clone().into()],
+                exec: offers,
+                ..Default::default()
+            },
+            store: Store::open_in_memory().unwrap(),
+            backend: Arc::new(NativeBackend::new(
+                Arc::new(Mock {
+                    delay: Duration::from_millis(5),
+                }),
+                harness_tools::builtin(),
+                NativeConfig::default(),
+            )),
+            default_model: "mock".into(),
+            secrets: Default::default(),
+            profile: Profile::Agentic,
+            incognito_ttl: None,
+            checkpoints_dir: None,
+            git_sandbox: None,
+            artifacts: None,
+        })
+        .await
+        .unwrap();
+        t.master.add_link(node.attach().await, false).await.unwrap();
+    }
+    let spec = |node: &str| {
+        json!({"profile": "agentic", "agent_id": "coder", "prompt": "hello",
+               "node_id": node, "cwd": t.root})
+    };
+    let id = routine(
+        &t,
+        &alex,
+        None,
+        "Host only",
+        spec("node-hostonly1"),
+        every(60),
+    )
+    .await;
+    let run = started(&t, &alex, &id).await;
+    let v = wait_status(&t, &alex, &id, &run, "blocked").await;
+    assert!(
+        v["reason"].as_str().unwrap().contains("sandbox mode"),
+        "{v}"
+    );
+    assert_eq!(v["session_id"], Value::Null, "{v}");
+    let id = routine(&t, &alex, None, "Both", spec("node-both1"), every(60)).await;
+    let run = started(&t, &alex, &id).await;
+    let v = wait_status(&t, &alex, &id, &run, "completed").await;
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let created = events(&t, &alex, &sid)
+        .await
+        .into_iter()
+        .find(|e| e["kind"] == "session_created")
+        .unwrap();
+    assert_eq!(created["payload"]["exec_mode"], "sandbox", "{created}");
 }
 
 #[tokio::test]

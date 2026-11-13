@@ -957,13 +957,51 @@ fn pid_of(out: &str) -> u32 {
         .unwrap_or_else(|| panic!("no pid: {out}"))
 }
 
+/// Review L-b (the start is the only moment that counts, N.10a): a probe
+/// that fails for a moment at start (the stand-in fails its first four
+/// runs, one whole try: both forms, with and without the namespace) is
+/// tried again after a pause, and the node offers the sandbox mode,
+/// contained with the namespace. Before, that one failed try was final.
+#[tokio::test]
+async fn a_probe_that_fails_for_a_moment_at_start_is_tried_again() {
+    use harness_tools::contain::ContainMode;
+    let f = fixture();
+    if f.contained(Network::Off).is_none() {
+        return;
+    }
+    let (fake, count) = failing_first(&f, 4);
+    let s = start_node(
+        &f,
+        Network::Off,
+        ContainMode::Auto,
+        &fake,
+        Duration::from_secs(60),
+    );
+    assert_eq!(runs(&count), 5);
+    assert!(s.sandbox_refusal().is_none(), "{:?}", s.sandbox_refusal());
+    assert!(
+        s.contain_summary.starts_with("contained")
+            && s.contain_summary.contains("a network namespace of its own"),
+        "{}",
+        s.contain_summary
+    );
+    let host = udp_host();
+    let out = run_in(
+        &f,
+        &s.confinement,
+        &format!("echo pid=$$; {}", send_cmd(&host, "x")),
+    )
+    .await;
+    assert!(pid_of(&out) <= 3 && own_ns(&out), "{out}");
+}
+
 /// N.10a (replaces re-check R-1's step up from Landlock alone): every
-/// probe at start failed (four runs: both forms, with and without the
-/// namespace), so the `auto` node does not offer the sandbox mode. Its
-/// shell is refused there, never run with Landlock alone, and it does not
-/// probe again (nothing would use a containment found later: a node offers
-/// its modes from its start). The uncontained twin (the `host` mode's)
-/// runs outside any PID namespace, as it always does.
+/// probe of every try at start failed, so the `auto` node does not offer
+/// the sandbox mode. Its shell is refused there, never run with Landlock
+/// alone, and it does not probe again (nothing would use a containment
+/// found later: a node offers its modes from its start). The uncontained
+/// twin (the `host` mode's) runs outside any PID namespace, as it always
+/// does.
 #[tokio::test]
 async fn an_auto_node_that_could_not_contain_at_start_offers_no_sandbox_mode() {
     use harness_tools::contain::ContainMode;
@@ -971,10 +1009,18 @@ async fn an_auto_node_that_could_not_contain_at_start_offers_no_sandbox_mode() {
     if f.contained(Network::Off).is_none() {
         return;
     }
-    let (fake, count) = failing_first(&f, 4);
+    let (fake, count) = failing_first(&f, 1000);
     let retry = Duration::from_millis(500);
     let s = start_node(&f, Network::Off, ContainMode::Auto, &fake, retry);
-    assert_eq!(runs(&count), 4);
+    let tries = harness_tools::sandbox::START_PROBE_TRIES;
+    assert_eq!(runs(&count), 4 * tries);
+    assert!(
+        s.sandbox_refusal()
+            .unwrap()
+            .contains(&format!("{tries} tries at start")),
+        "{:?}",
+        s.sandbox_refusal()
+    );
     assert!(
         s.contain_summary.starts_with("NOT OFFERED"),
         "{}",
@@ -994,7 +1040,7 @@ async fn an_auto_node_that_could_not_contain_at_start_offers_no_sandbox_mode() {
     }
     assert_eq!(
         runs(&count),
-        4,
+        4 * tries,
         "a node without the sandbox mode probed again"
     );
     assert!(!arrived(&[host])[0].contains(&"sandbox".to_string()));

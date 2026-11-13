@@ -77,7 +77,11 @@ impl Fake {
 fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
-    let mut capabilities = vec!["native".to_string(), "profile:agentic".to_string()];
+    let mut capabilities = vec![
+        "native".to_string(),
+        "profile:agentic".to_string(),
+        "exec:sandbox".to_string(),
+    ];
     capabilities.extend(caps.iter().map(|c| c.to_string()));
     tx.try_send(NodeToMaster::Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -114,7 +118,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                 keep.lock().unwrap().push(msg.clone());
                                 if let MasterToNode::Create { session_id, .. } = &msg {
                                     let created = EventKind::SessionCreated(SessionCreated {
-            exec_mode: None,
+            exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
             no_callbacks: false,
                                         title: "t".into(),
                                         cwd: "/w".into(),

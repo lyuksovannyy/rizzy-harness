@@ -76,7 +76,11 @@ fn fake_with(
         node_id: id.into(),
         hostname: "evil".into(),
         version: "0".into(),
-        capabilities: caps.iter().map(|c| c.to_string()).collect(),
+        capabilities: caps
+            .iter()
+            .map(|c| c.to_string())
+            .chain(["exec:sandbox".to_string()])
+            .collect(),
         sessions: vec![],
     })
     .unwrap();
@@ -136,7 +140,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
 
 fn created(node: &str, cwd: &str, parent: Option<SessionId>) -> EventKind {
     EventKind::SessionCreated(SessionCreated {
-        exec_mode: None,
+        exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
         no_callbacks: false,
         title: "t".into(),
         cwd: cwd.into(),

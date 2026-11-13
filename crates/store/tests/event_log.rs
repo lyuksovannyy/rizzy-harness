@@ -929,3 +929,21 @@ fn the_watchers_read_of_a_long_last_turn_is_its_ends_only() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].seq, 503);
 }
+
+/// N.10a: the mode `session_created` recorded is on the session's row, so
+/// the master can check who may drive a `host` chat on every action; a log
+/// without one leaves it empty.
+#[test]
+fn the_recorded_execution_mode_is_on_the_row() {
+    let s = Store::open_in_memory().unwrap();
+    let (host, none) = (SessionId::new(), SessionId::new());
+    let mut e = created(host);
+    e.payload["exec_mode"] = json!("host");
+    s.append("local", &e).unwrap();
+    s.append("local", &created(none)).unwrap();
+    assert_eq!(
+        s.session(host).unwrap().unwrap().exec_mode.as_deref(),
+        Some("host")
+    );
+    assert_eq!(s.session(none).unwrap().unwrap().exec_mode, None);
+}

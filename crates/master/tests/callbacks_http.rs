@@ -111,6 +111,7 @@ fn fake_with(
         capabilities: [
             "native",
             "profile:agentic",
+            "exec:sandbox",
             harness_protocol::CAP_BACKGROUND,
             harness_protocol::CAP_CALLBACK,
         ]
@@ -155,7 +156,7 @@ fn fake_with(
                     let now = harness_core::now_ms();
                     if let MasterToNode::Create { session_id, agent, .. } = &msg {
                         let created = EventKind::SessionCreated(SessionCreated {
-                            exec_mode: None,
+                            exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
                             title: "t".into(),
                             cwd: "/w".into(),
                             model: "demo::mock".into(),
