@@ -95,4 +95,10 @@ fn a_memory_db_and_a_node_db_do_not_open_as_each_other() {
 fn every_version_matches_its_recorded_schema() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema");
     harness_store::migrate::check_recorded(&dir, MIGRATIONS);
+    assert_eq!(
+        harness_memory::DB_SCHEMA.recorded,
+        harness_store::migrate::built(MIGRATIONS),
+        "DB_SCHEMA must include_str! schema/{}.sql",
+        MIGRATIONS.len()
+    );
 }

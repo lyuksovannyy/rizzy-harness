@@ -410,6 +410,13 @@ CREATE TABLE IF NOT EXISTS session_workspaces (
 CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace_id);
 "#;
 
+/// `master.db`, `chat.db` and `node.db`: the migrations and the schema the
+/// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
+pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
+    steps: MIGRATIONS,
+    recorded: include_str!("../schema/1.sql"),
+};
+
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
 pub const MIGRATIONS: &[migrate::Migration] = &[&[
     SCHEMA,
@@ -618,7 +625,7 @@ impl Store {
         // Wait for another connection's write (a migration too), not fail.
         conn.pragma_update(None, "busy_timeout", 5000)?;
         // Before anything else writes: a newer build's file is refused as is.
-        migrate::migrate(&mut conn, &path.display().to_string(), MIGRATIONS)?;
+        migrate::migrate_checked(&mut conn, &path.display().to_string(), &DB_SCHEMA)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let sync = match durability {
             Durability::Full => "FULL",
@@ -630,7 +637,7 @@ impl Store {
 
     pub fn open_in_memory() -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;
-        migrate::migrate(&mut conn, ":memory:", MIGRATIONS)?;
+        migrate::migrate_checked(&mut conn, ":memory:", &DB_SCHEMA)?;
         Self::init(conn)
     }
 

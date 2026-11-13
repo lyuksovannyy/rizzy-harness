@@ -66,6 +66,15 @@ pub enum MigrateError {
         table: String,
         parent: String,
     },
+    /// The version is one this build knows, the schema is not that
+    /// version's: a file from before the first release, another kind of
+    /// database (a memory.db in place of a node.db), or one edited by hand.
+    #[error(
+        "{db} does not match schema version {version} (a database from before the first release, \
+         another kind of file, or one changed by hand). It was not changed: before the first \
+         release a schema change needs a fresh data directory"
+    )]
+    Mismatch { db: String, version: i64 },
     /// The write lock was not free within the busy timeout.
     #[error(
         "{db} needs a schema migration, but another process holds it for writing (waited the busy timeout). \
@@ -87,41 +96,91 @@ pub struct Migrated {
     pub to: i64,
 }
 
+/// A database kind: its migrations and the schema the last one leaves
+/// (`schema/<n>.sql`, recorded and checked by `check_recorded`).
+pub struct Schema<'a> {
+    pub steps: &'a [Migration],
+    pub recorded: &'a str,
+}
+
+/// `found` as a version this build can open or migrate, or the refusal.
+fn refuse(db: &str, found: i64, known: i64) -> Result<i64, MigrateError> {
+    if found < 0 {
+        Err(MigrateError::Unknown {
+            db: db.to_string(),
+            found,
+        })
+    } else if found > known {
+        Err(MigrateError::TooNew {
+            db: db.to_string(),
+            found,
+            known,
+        })
+    } else {
+        Ok(found)
+    }
+}
+
+/// The schema of `conn` is `expected`, or the refusal for `version`.
+fn same_schema(conn: &Connection, db: &str, version: i64, expected: &str) -> Result<(), MigrateError> {
+    let now = schema_text(conn).map_err(|source| MigrateError::Sqlite {
+        db: db.to_string(),
+        source,
+    })?;
+    if now == expected {
+        Ok(())
+    } else {
+        Err(MigrateError::Mismatch {
+            db: db.to_string(),
+            version,
+        })
+    }
+}
+
 fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
-/// Bring `conn` to version `steps.len()`, or refuse. `db` names the file in
-/// the error (a path or a file name; never anything secret).
+/// Bring `conn` to `schema`'s last version, or refuse. `db` names the file
+/// in the error (a path or a file name; never anything secret). The
+/// version is trusted only with the schema (review R43-2): an up-to-date
+/// file must have exactly the recorded schema, and a migrated one must end
+/// with it before its version is bumped, or it is refused unchanged.
+pub fn migrate_checked(
+    conn: &mut Connection,
+    db: &str,
+    schema: &Schema,
+) -> Result<Migrated, MigrateError> {
+    apply(conn, db, schema.steps, Some(schema.recorded))
+}
+
+/// `migrate_checked` without the schema comparison: for building the
+/// recorded schema and for the runner's own tests.
 pub fn migrate(
     conn: &mut Connection,
     db: &str,
     steps: &[Migration],
+) -> Result<Migrated, MigrateError> {
+    apply(conn, db, steps, None)
+}
+
+fn apply(
+    conn: &mut Connection,
+    db: &str,
+    steps: &[Migration],
+    expected: Option<&str>,
 ) -> Result<Migrated, MigrateError> {
     let known = steps.len() as i64;
     let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
         db: db.to_string(),
         source,
     };
-    let refuse = |found: i64| {
-        if found < 0 {
-            Err(MigrateError::Unknown {
-                db: db.to_string(),
-                found,
-            })
-        } else if found > known {
-            Err(MigrateError::TooNew {
-                db: db.to_string(),
-                found,
-                known,
-            })
-        } else {
-            Ok(found)
-        }
-    };
     // Read first, outside any write: an up-to-date or newer file is never
     // written to (a read-only disk still opens an up-to-date one).
-    if refuse(user_version(conn).map_err(sqlite)?)? == known {
+    if refuse(db, user_version(conn).map_err(sqlite)?, known)? == known {
+        if let Some(expected) = expected {
+            same_schema(conn, db, known, expected)?;
+        }
         return Ok(Migrated {
             from: known,
             to: known,
@@ -137,7 +196,7 @@ pub fn migrate(
         .map_err(sqlite)?;
     conn.pragma_update(None, "foreign_keys", "OFF")
         .map_err(sqlite)?;
-    let result = run(conn, db, steps, &refuse);
+    let result = run(conn, db, steps, expected);
     let restored = conn.pragma_update(None, "foreign_keys", fk);
     let done = result?;
     restored.map_err(sqlite)?;
@@ -149,7 +208,7 @@ fn run(
     conn: &mut Connection,
     db: &str,
     steps: &[Migration],
-    refuse: &dyn Fn(i64) -> Result<i64, MigrateError>,
+    expected: Option<&str>,
 ) -> Result<Migrated, MigrateError> {
     let known = steps.len() as i64;
     let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
@@ -165,7 +224,14 @@ fn run(
             _ => sqlite(source),
         })?;
     // Again under the write lock: another process may have migrated it.
-    let from = refuse(user_version(&tx).map_err(sqlite)?)?;
+    let from = refuse(db, user_version(&tx).map_err(sqlite)?, known)?;
+    if from == known {
+        // Migrated by another process while this one waited for the lock.
+        if let Some(expected) = expected {
+            same_schema(&tx, db, known, expected)?;
+        }
+        return Ok(Migrated { from, to: known });
+    }
     // A fresh file (version 0) is a creation, not worth a line; a real
     // migration is: from its commit on, an older build refuses the file,
     // and a long one should not look like a hang.
@@ -190,6 +256,9 @@ fn run(
                     source,
                 })?;
         }
+    }
+    if let Some(expected) = expected {
+        same_schema(&tx, db, known, expected)?;
     }
     if let Some((table, parent)) = dangling(&tx).map_err(sqlite)? {
         return Err(MigrateError::Dangling {

@@ -448,4 +448,11 @@ fn write_mode_creates_missing_files_and_never_rewrites_a_recorded_one() {
 fn every_version_matches_its_recorded_schema() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema");
     migrate::check_recorded(&dir, MIGRATIONS);
+    // What `Store::open` compares against is the last recorded version.
+    assert_eq!(
+        harness_store::DB_SCHEMA.recorded,
+        migrate::built(MIGRATIONS),
+        "DB_SCHEMA must include_str! schema/{}.sql",
+        MIGRATIONS.len()
+    );
 }

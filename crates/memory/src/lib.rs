@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub use embed::{ApiStyle, Embedder, Preset};
 pub use mem0::Mem0Memory;
 pub use qdrant::QdrantIndex;
-pub use sqlite::{MIGRATIONS, SqliteMemory};
+pub use sqlite::{DB_SCHEMA, MIGRATIONS, SqliteMemory};
 pub use tool::Remember;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
