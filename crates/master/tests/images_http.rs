@@ -453,7 +453,10 @@ async fn the_model_gets_the_images_as_binary_parts() {
     assert_eq!(users.len(), 5);
     assert!(users[0].1.is_empty(), "{:?}", users[0].0);
     assert!(
-        users[0].0.contains("[image: a.png] [image: b.png]"),
+        users[0].0.contains(
+            "[harness] Image \"a.png\": sent by the person with this message, not shown in this \
+             request.\n[harness] Image \"b.png\""
+        ),
         "{}",
         users[0].0
     );

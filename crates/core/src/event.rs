@@ -543,8 +543,8 @@ pub struct Attachment {
 }
 
 /// How the harness's line about an attached file begins. It starts with
-/// [`NOTE_LEAD`]; [`own_words`] ends the person's text where the first
-/// one stands.
+/// [`NOTE_LEAD`], like every line the harness writes after the person's
+/// text; [`own_words`] ends the person's text where the first one stands.
 pub const ATTACHMENT_LEAD: &str = "[harness] Attached file \"";
 
 /// The longest file name and type shown in the harness's line.
@@ -564,6 +564,26 @@ fn is_quotation_mark(c: char) -> bool {
     )
 }
 
+/// A name as it stands in quotes in a line of the harness's (a file's, an
+/// image's): one line ([`crate::text::clean_line`]: controls, line and
+/// paragraph separators and hidden characters out, whitespace runs one
+/// space, at most 120 characters), every quotation mark read as `'`
+/// ([`is_quotation_mark`]), so it cannot seem to close the quotes it
+/// stands in (review R76-2), and `unnamed` for a name left empty. The name
+/// comes from the master and, before it, from a file or a site: it is not
+/// trusted here.
+pub fn shown_name(name: &str) -> String {
+    let name: String = crate::text::clean_line(name, ATTACHMENT_NAME_CHARS)
+        .chars()
+        .map(|c| if is_quotation_mark(c) { '\'' } else { c })
+        .collect();
+    if name.is_empty() {
+        "unnamed".into()
+    } else {
+        name
+    }
+}
+
 impl Attachment {
     /// The file as the model is sent it: one line the harness wrote, then
     /// every line of the file's text behind [`OUTPUT_QUOTE`]. Nothing of
@@ -576,11 +596,7 @@ impl Attachment {
     /// type and the text come from the master and, before it, from the
     /// file: none is trusted here.
     fn model_block(&self) -> String {
-        let name: String = crate::text::clean_line(&self.name, ATTACHMENT_NAME_CHARS)
-            .chars()
-            .map(|c| if is_quotation_mark(c) { '\'' } else { c })
-            .collect();
-        let name = if name.is_empty() { "unnamed" } else { &name };
+        let name = shown_name(&self.name);
         // RFC 6838's characters for a type and a subtype, and the slash.
         let plain = !self.mime.is_empty()
             && self.mime.len() <= ATTACHMENT_TYPE_BYTES
@@ -630,14 +646,21 @@ impl UserMessage {
 }
 
 /// The person's own words in a user message as the model is sent it
-/// ([`UserMessage::model_text`]): the text before the first attached
-/// file's line. Files come last and the harness writes that line, so
-/// nothing of a file (its text, its name, its type) is ever in front of
-/// it; what follows is not what the person typed, and is not URL
-/// provenance. A person who types that very line after an empty one is
-/// read up to there: less of their own text counts, never more.
+/// ([`UserMessage::model_text`], and after it the loop's notes for images
+/// it does not show, `agent_native::provider::image_note`): the text
+/// before the first line the harness wrote ([`NOTE_LEAD`]) after an empty
+/// line, or nothing when the message starts with one. Files and image
+/// notes come after the person's text and the harness writes the line
+/// each starts with, so nothing of a file (its text, its name, its type)
+/// or of an image's name is ever in front of it; what follows is not what
+/// the person typed, and is not URL provenance. A person who types
+/// `[harness]` at the start or after an empty line is read up to there:
+/// less of their own text counts, never more.
 pub fn own_words(model_text: &str) -> &str {
-    match model_text.find(&format!("\n\n{ATTACHMENT_LEAD}")) {
+    if model_text.starts_with(NOTE_LEAD) {
+        return "";
+    }
+    match model_text.find(&format!("\n\n{NOTE_LEAD}")) {
         Some(i) => &model_text[..i],
         None => model_text,
     }
@@ -1518,6 +1541,24 @@ mod attachment_frame_tests {
         typed.text =
             format!("see https://a.example\n\n{ATTACHMENT_LEAD}mine\" and https://b.example");
         assert_eq!(own_words(&typed.model_text()), "see https://a.example");
+    }
+
+    /// Any line the harness wrote after the person's text ends their own
+    /// words, not only a file's: an image's note too (R76-3). A message
+    /// that starts with one has no own words.
+    #[test]
+    fn own_words_end_at_the_first_line_the_harness_wrote() {
+        let note = "[harness] Image \"https://b.example\": sent by the person with this \
+                    message, not shown in this request.";
+        assert_eq!(
+            own_words(&format!("see https://a.example\n\n{note}")),
+            "see https://a.example"
+        );
+        assert_eq!(own_words(note), "");
+        assert_eq!(
+            own_words("a [harness] b\n[harness] c"),
+            "a [harness] b\n[harness] c"
+        );
     }
 
     /// Whatever a file, its name or its type holds, no line of them starts

@@ -370,7 +370,8 @@ async fn chats_join_and_get_the_project_context() {
     let ctx = last_context(&t);
     assert!(ctx.contains("Project \"Garden\""), "{ctx}");
     assert!(
-        ctx.contains("Project instructions:\nUse metric units."),
+        ctx.starts_with("[harness] Context for this turn")
+            && ctx.contains("\n| Project instructions:\n| Use metric units.\n"),
         "{ctx}"
     );
     assert!(ctx.contains("scope \"project\""), "{ctx}");

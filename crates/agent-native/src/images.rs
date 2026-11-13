@@ -31,13 +31,15 @@ pub fn user_msg(text: String, images: &[ImageRef]) -> ChatMsg {
     }
 }
 
-/// The text with each image named instead of shown.
-fn named(text: &str, images: &[ImagePart]) -> String {
+/// The text with each image named instead of shown: after it, one line of
+/// the harness's per image ([`image_note`]), so no name is part of the
+/// person's own words (`harness_core::event::own_words`).
+pub(crate) fn named(text: &str, images: &[ImagePart]) -> String {
     let notes: Vec<String> = images.iter().map(|i| image_note(&i.name)).collect();
     if text.is_empty() {
-        notes.join(" ")
+        notes.join("\n")
     } else {
-        format!("{text}\n\n{}", notes.join(" "))
+        format!("{text}\n\n{}", notes.join("\n"))
     }
 }
 
@@ -155,8 +157,14 @@ mod tests {
         let loaded: Vec<ImageData> = (3..=5).map(data).collect();
         attach(&mut msgs, &loaded);
         let users: Vec<&ChatMsg> = msgs.iter().filter(|m| m.user_text().is_some()).collect();
-        assert_eq!(users[0], &ChatMsg::User("look 1\n\n[image: p1.png]".into()));
-        assert_eq!(users[1], &ChatMsg::User("look 2\n\n[image: p2.png]".into()));
+        assert_eq!(
+            users[0],
+            &ChatMsg::User(format!("look 1\n\n{}", image_note("p1.png")))
+        );
+        assert_eq!(
+            users[1],
+            &ChatMsg::User(format!("look 2\n\n{}", image_note("p2.png")))
+        );
         for (k, n) in [(2usize, 3u8), (3, 4), (4, 5)] {
             let ChatMsg::UserImages { text, images } = users[k] else {
                 panic!("{:?}", users[k]);
@@ -174,14 +182,70 @@ mod tests {
         let ChatMsg::UserImages { text, images } = &msgs[0] else {
             panic!("{msgs:?}");
         };
-        assert_eq!(text, "two\n\n[image: p1.png]");
+        assert_eq!(text, &format!("two\n\n{}", image_note("p1.png")));
         assert_eq!(images.len(), 1);
         let mut none = vec![user_msg(String::new(), &[r(1)])];
         attach(&mut none, &[]);
-        assert_eq!(none[0], ChatMsg::User("[image: p1.png]".into()));
+        assert_eq!(none[0], ChatMsg::User(image_note("p1.png")));
         assert_eq!(
-            as_text(&user_msg("t".into(), &[r(3)])).as_deref(),
-            Some("t\n\n[image: p3.png]")
+            as_text(&user_msg("t".into(), &[r(3), r(4)])),
+            Some(format!(
+                "t\n\n{}\n{}",
+                image_note("p3.png"),
+                image_note("p4.png")
+            ))
         );
+        assert_eq!(
+            image_note("p1.png"),
+            "[harness] Image \"p1.png\": sent by the person with this message, not shown in \
+             this request."
+        );
+    }
+
+    /// A message whose images are not shown keeps no image name in the
+    /// person's own words, whatever else it holds: empty text, text,
+    /// files, several images; the summariser's text agrees (review of
+    /// T43, C43-4).
+    #[test]
+    fn no_image_name_is_in_the_persons_own_words() {
+        use harness_core::event::{Attachment, UserMessage, own_words};
+        let url = "https://evil.example/x";
+        for text in ["", "look", "look\n", "a\n\nb"] {
+            for files in 0..3 {
+                for n in 1..4u8 {
+                    let m = UserMessage {
+                        turn_id: "t".into(),
+                        text: text.into(),
+                        attachments: (0..files)
+                            .map(|i| Attachment {
+                                name: format!("f{i}"),
+                                mime: "text/plain".into(),
+                                text: "x".into(),
+                                truncated: false,
+                            })
+                            .collect(),
+                        reply: None,
+                        images: (0..n)
+                            .map(|i| ImageRef {
+                                name: url.into(),
+                                ..r(i)
+                            })
+                            .collect(),
+                    };
+                    let mut msgs = vec![user_msg(m.model_text(), &m.images)];
+                    attach(&mut msgs, &[]);
+                    let t = msgs[0].user_text().unwrap();
+                    assert_eq!(
+                        t.matches(crate::provider::IMAGE_LEAD).count(),
+                        usize::from(n)
+                    );
+                    let own = own_words(t);
+                    assert!(text.starts_with(own), "{text:?}/{files}/{n}: {own:?}");
+                    assert!(!own.contains("evil.example"), "{own:?}");
+                    let s = as_text(&user_msg(m.model_text(), &m.images)).unwrap();
+                    assert_eq!(own_words(&s), own);
+                }
+            }
+        }
     }
 }

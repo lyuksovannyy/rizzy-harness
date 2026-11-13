@@ -81,10 +81,16 @@ impl LlmProvider {
 /// without bytes is named instead; `images::attach` leaves none).
 fn user_parts(text: &str, images: &[ImagePart]) -> Vec<ContentPart> {
     let mut parts = Vec::with_capacity(images.len() + 1);
-    let mut text = text.to_string();
-    for i in images.iter().filter(|i| i.data.is_none()) {
-        text = format!("{text}\n\n{}", image_note(&i.name));
-    }
+    let missing: Vec<ImagePart> = images
+        .iter()
+        .filter(|i| i.data.is_none())
+        .cloned()
+        .collect();
+    let text = if missing.is_empty() {
+        text.to_string()
+    } else {
+        crate::images::named(text, &missing)
+    };
     if !text.is_empty() {
         parts.push(ContentPart::Text(text));
     }
@@ -568,7 +574,7 @@ mod tests {
         let ContentPart::Text(t) = &parts[0] else {
             panic!("{parts:?}")
         };
-        assert_eq!(t, "what is this?\n\n[image: gone.jpg]");
+        assert_eq!(t, &format!("what is this?\n\n{}", image_note("gone.jpg")));
         let ContentPart::Binary(b) = &parts[1] else {
             panic!("{parts:?}")
         };

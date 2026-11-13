@@ -129,8 +129,13 @@ A custom agent gets the `remember` tool when either switch is on.
 
 ## Better context
 
-What every turn of a project chat gets, in one `<context>` block after the history (PLAN.md
-"Token savings": never in the system prompt, which must stay byte-identical for the cache):
+What every turn of a project chat gets, in the per-turn context after the history (PLAN.md
+"Token savings": never in the system prompt, which must stay byte-identical for the cache).
+The node sends it in front of the person's message under one line of its own,
+`[harness] Context for this turn, not part of the person's message: …`, with every line of
+it behind `| ` and an empty line after it (`provider::with_context`, PLAN.md T43): the
+instructions and card titles are written by other members and cannot close the frame or
+pose as the person's message. Unquoted, it reads:
 
 ```
 Project "<name>" — <description>
