@@ -391,9 +391,9 @@ async fn host_is_for_server_admins_only() {
     let lines = s.mirror.audit_lines("session.create.host").unwrap();
     let granted: Vec<bool> = lines
         .iter()
-        .map(|(_, d)| serde_json::from_str::<Value>(d).unwrap()["granted"] == true)
+        .map(|(_, d)| serde_json::from_str::<Value>(d).unwrap()["outcome"] == "granted")
         .collect();
-    assert_eq!(granted, [false, false, false, true, true], "{lines:?}");
+    assert_eq!(granted, [false, false, false, true, false], "{lines:?}");
     let first: Value = serde_json::from_str(&lines[0].1).unwrap();
     assert_eq!(first["node"], BOTH, "{first}");
     assert!(
@@ -411,6 +411,57 @@ async fn host_is_for_server_admins_only() {
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}
+
+/// Re-check RN-4: every create that asks for `host` writes one audit line,
+/// whichever check refuses it (no agentic grant, the admins-only rule, the
+/// node), with the user (or "api token"), the workspace, the node as
+/// resolved, and the outcome: a refusal's first words, or "granted" with
+/// the session id once the chat exists.
+#[tokio::test]
+async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
+    let s = start().await;
+    let lines = |s: &Server| s.mirror.audit_lines("session.create.host").unwrap();
+    let last = |s: &Server| -> Value {
+        serde_json::from_str(&lines(s).last().unwrap().1).unwrap()
+    };
+    // No agentic grant: refused before the mode rule.
+    let (grace, grace_id) = account_with(&s, "grace", false).await;
+    let (st, _) = create_in(&s, &grace, None, BOTH, Some("host")).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let l = last(&s);
+    assert_eq!(l["user"], grace_id.as_str(), "{l}");
+    assert_eq!(l["node"], BOTH, "{l}");
+    assert!(l["workspace"].is_string(), "{l}");
+    assert!(l["outcome"].as_str().unwrap().starts_with("refused: agentic sessions"), "{l}");
+    // The API token, no node named: the node as the master resolves it
+    // (the embedded one), refused there by the node.
+    let (st, _) = call(
+        &s,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": s.ws.display().to_string(), "title": "t", "exec_mode": "host"})),
+        TOKEN,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
+    let l = last(&s);
+    assert_eq!(l["user"], "api token", "{l}");
+    assert_eq!(l["node"], "local", "{l}");
+    assert!(l["outcome"].as_str().unwrap().starts_with("refused: "), "{l}");
+    // Granted: after the create, with its session id.
+    let ws = personal(&s, &s.admin).await;
+    let (st, v) = create(&s, &s.admin, &ws, BOTH, Some("host")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let l = last(&s);
+    assert_eq!(l["outcome"], "granted", "{l}");
+    assert_eq!(l["session"], v["session_id"], "{l}");
+    // One line per request; none for a request that did not ask for host.
+    let n = lines(&s).len();
+    let (st, _) = create(&s, &s.admin, &ws, BOTH, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(lines(&s).len(), n);
+    assert_eq!(n, 3, "{:?}", lines(&s));
 }
 
 /// L-g: a node is sent only a mode it announced; one that names none (a
