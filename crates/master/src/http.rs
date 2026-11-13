@@ -470,6 +470,14 @@ async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<se
         .nodes()
         .into_iter()
         .filter(|n| local_ok || !m.is_local_node(&n.node_id))
+        // What a node can contain says how to get out of it: only for those
+        // who may run agentic chats (N.10a).
+        .map(|mut n| {
+            if !who.can_agentic {
+                (n.exec_modes, n.exec_gaps) = Default::default();
+            }
+            n
+        })
         .collect();
     Ok(Json(json!({ "nodes": nodes })))
 }
@@ -1088,14 +1096,10 @@ async fn create_session(
         {
             return Err(ApiError(StatusCode::FORBIDDEN, why));
         }
-        // The node the chat goes to, as `create_session` would pick it:
-        // the rule for `host` depends on whether it is the embedded one.
-        b.node_id = b
-            .node_id
-            .or_else(|| m.default_node(harness_core::event::Profile::Agentic));
-        b.exec_mode =
-            ws::exec_mode_for(&m, &who, scope.as_ref(), b.node_id.as_deref(), b.exec_mode)
-                .map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?;
+        let asked = b.exec_mode;
+        let mode = ws::exec_mode_for(&who, asked);
+        ws::audit_host_create(&m, &who, scope.as_ref(), b.node_id.as_deref(), asked, &mode).await;
+        b.exec_mode = Some(mode.map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?);
     } else if b.exec_mode.is_some() {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,

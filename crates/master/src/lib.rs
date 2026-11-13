@@ -144,13 +144,7 @@ fn exec_of(caps: &[String]) -> (Vec<harness_core::policy::ExecMode>, Vec<String>
     modes.dedup();
     let mut gaps: Vec<String> = caps
         .iter()
-        .filter(|c| {
-            [
-                harness_protocol::GAP_SANDBOX_NETNS,
-                harness_protocol::GAP_HOST_NETNS,
-            ]
-            .contains(&c.as_str())
-        })
+        .filter(|c| harness_protocol::GAPS.contains(&c.as_str()))
         .cloned()
         .collect();
     gaps.dedup();
@@ -271,6 +265,8 @@ pub struct CreateSpec {
     /// (`workspaces::exec_mode_for`).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
 }
+
+use harness_core::policy::ExecMode;
 
 /// Per-message choices on a prompt.
 #[derive(Debug, Clone, Default)]
@@ -1552,6 +1548,22 @@ impl Master {
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
+        // A node must have announced the mode it is sent (N.10a): one
+        // that does not know modes would run the chat however it runs
+        // commands. A chat has none.
+        // An agentic chat always carries one: `sandbox` unless asked.
+        let exec_mode = match profile {
+            Profile::Agentic => Some(spec.exec_mode.unwrap_or(ExecMode::Sandbox)),
+            Profile::Chat => None,
+        };
+        if let Some(mode) = exec_mode
+            && !self.node_has(&node_id, &harness_protocol::exec_capability(mode))
+        {
+            return Err(CommandError::Rejected(format!(
+                "node {node_id} does not offer the {} mode (its hello did not name it)",
+                mode.id()
+            )));
+        }
         let sid = SessionId::new();
         // Who asked, recorded before the node hears of it: a session_created
         // that arrives after the ack, or after the ack timed out, is claimed
@@ -1593,7 +1605,7 @@ impl Master {
                 profile: Some(profile),
                 agent: Some(agent),
                 incognito: spec.incognito,
-                exec_mode: spec.exec_mode,
+                exec_mode,
             })
             .await;
         match &sent {

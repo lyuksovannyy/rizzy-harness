@@ -469,42 +469,76 @@ pub fn node_refusal(m: &Master, who: &Principal, node_id: &str) -> Option<String
         .then(|| LOCAL_NODE_ADMINS_ONLY.to_string())
 }
 
-/// The refusal of `host` to a caller who may not ask for it (N.10a part 1,
-/// until the levels of part 2 replace it).
-pub const HOST_OWNERS_ONLY: &str = "only the workspace's owner or a server admin may start a \
-     chat in the host mode (commands as the node's own user, without the sandbox)";
+/// The refusal of `host` to anyone but a server admin (N.10a part 1, until
+/// the levels per member of part 2 replace it). Not the workspace's owner:
+/// every account owns its Personal workspace, and by default any account
+/// can make a team and own it, so ownership says nothing about trust.
+pub const HOST_ADMINS_ONLY: &str = "the host mode (commands as the node's own user, without \
+     the sandbox) is for server admins until per-member levels exist; ask a server admin";
 
-/// The refusal of `host` on the embedded node to anyone but a server admin.
-pub const HOST_LOCAL_ADMINS_ONLY: &str = "the host mode on this server's own node is for server \
-     admins: its commands would run as the server's user, next to its keys and every account's \
-     chats";
+/// Whether `who` may have a `host` chat (create and every later action):
+/// server admins only, the API token among them.
+pub fn host_refusal(who: &Principal) -> Option<String> {
+    (!who.is_admin()).then(|| HOST_ADMINS_ONLY.to_string())
+}
 
-/// The execution mode to ask node `node_id` for, for `who` creating an
-/// agentic chat in `ws` (N.10a part 1, the interim rule): `host` only for
-/// the workspace's owner or a server admin, and on the embedded node only
-/// for a server admin; everyone else is refused it with the reason. Without
-/// a request the node's default applies, except for a caller who may not
-/// have `host`: they are sent `sandbox` explicitly, so a node whose only
-/// mode is `host` refuses them instead of handing it over by default. The
-/// node decides in the end: it refuses any mode it does not offer.
-pub fn exec_mode_for(
+/// The execution mode to ask the node for, for `who` creating an agentic
+/// chat (N.10a part 1, the interim rule): `host` only for a server admin,
+/// and only when asked for by name; without a request, `sandbox`, always
+/// sent explicitly, so a node whose only mode is `host` refuses rather than
+/// hand it over by default. The node decides last: it refuses any mode it
+/// does not offer.
+pub fn exec_mode_for(who: &Principal, requested: Option<ExecMode>) -> Result<ExecMode, String> {
+    match requested.unwrap_or(ExecMode::Sandbox) {
+        ExecMode::Host => host_refusal(who).map_or(Ok(ExecMode::Host), Err),
+        m => Ok(m),
+    }
+}
+
+/// One audit line for every create that asked for `host`, granted by the
+/// master or refused (N.10a): who, in which workspace, on which node; no
+/// chat content. The node may still refuse a granted one (its own audit
+/// line names the mode).
+pub async fn audit_host_create(
     m: &Master,
     who: &Principal,
     ws: Option<&Access>,
     node_id: Option<&str>,
-    requested: Option<ExecMode>,
-) -> Result<Option<ExecMode>, String> {
-    let local = node_id.is_none_or(|n| m.is_local_node(n));
-    let may_host = if local {
-        who.is_admin()
-    } else {
-        who.is_admin() || ws.is_some_and(Access::is_owner)
-    };
-    match requested {
-        Some(ExecMode::Host) if !may_host && local => Err(HOST_LOCAL_ADMINS_ONLY.into()),
-        Some(ExecMode::Host) if !may_host => Err(HOST_OWNERS_ONLY.into()),
-        None if !may_host => Ok(Some(ExecMode::Sandbox)),
-        r => Ok(r),
+    asked: Option<ExecMode>,
+    outcome: &Result<ExecMode, String>,
+) {
+    if asked != Some(ExecMode::Host) {
+        return;
+    }
+    let detail = serde_json::json!({
+        "user": who.user_id,
+        "workspace": ws.map(|a| a.id().to_string()),
+        "node": node_id,
+        "granted": outcome.is_ok(),
+    })
+    .to_string();
+    if let Err(e) = m
+        .inner
+        .mirror
+        .call(move |s| s.audit("session.create.host", &detail))
+        .await
+    {
+        tracing::warn!(error = %e, "could not write the host-mode audit line");
+    }
+}
+
+/// Whether `who` may drive the agentic chat `row` in its recorded mode:
+/// the create's rule, again (a demoted admin's `host` chats do no more
+/// work). Fails closed on an agentic row whose mode cannot be read.
+fn mode_refusal(who: &Principal, row: &SessionRow) -> Option<String> {
+    match row.exec_mode.as_deref().map(ExecMode::parse) {
+        Some(Some(ExecMode::Host)) => host_refusal(who),
+        Some(Some(_)) => None,
+        _ => Some(
+            "this chat's execution mode is not known here (its first event has not arrived, or \
+             names none), so it does no work"
+                .into(),
+        ),
     }
 }
 
@@ -528,7 +562,9 @@ pub async fn agentic_blocked(m: &Master, who: &Principal, row: &SessionRow) -> O
             Err(_) => return Some("this chat is in a workspace you are not a member of".into()),
         },
     };
-    agentic_refusal(who, ws.as_ref()).or_else(|| node_refusal(m, who, &row.node_id))
+    agentic_refusal(who, ws.as_ref())
+        .or_else(|| node_refusal(m, who, &row.node_id))
+        .or_else(|| mode_refusal(who, row))
 }
 
 /// Whether chat `row` may use its owner's personal memory (recall, and the
