@@ -1545,6 +1545,10 @@ impl NativeBackend {
                 for (call, (outcome, u)) in admitted.into_iter().zip(results) {
                     sub_tokens += u.input_tokens + u.output_tokens;
                     usage.add(&u);
+                    // A sub-agent's work is a change, as an edit is (T.1).
+                    if outcome.ok {
+                        guard.restart();
+                    }
                     let output = self.config.secrets.scrub(&outcome.output);
                     if host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
@@ -1673,11 +1677,17 @@ impl NativeBackend {
             match host.background_notes().await {
                 // Scrubbed here as every tool result is, whatever the host
                 // did (T8D-2).
-                Ok(ends) => messages.extend(
-                    ends.iter()
-                        .filter_map(|b| b.model_note())
-                        .map(|n| ChatMsg::Note(self.config.secrets.scrub(&n))),
-                ),
+                Ok(ends) => {
+                    // An end is a change: what waited on it may run (T.1).
+                    if !ends.is_empty() {
+                        guard.restart();
+                    }
+                    messages.extend(
+                        ends.iter()
+                            .filter_map(|b| b.model_note())
+                            .map(|n| ChatMsg::Note(self.config.secrets.scrub(&n))),
+                    )
+                }
                 Err(_) => return stopped(usage),
             }
             if repeat_stop {

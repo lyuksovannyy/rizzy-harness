@@ -1,6 +1,6 @@
 //! The repeated-call guard (T.1): a model that asks for the same call and
 //! gets the same result again is told so, and after four identical results
-//! in a row the call is not run.
+//! with nothing changing in between the call is not run.
 //!
 //! - **The same call** is [`harness_tools::call_key`]: the tool, the
 //!   session's folder and the input as canonical JSON (object keys sorted,
@@ -13,10 +13,14 @@
 //!   whose answer changes (a running background command, a file that
 //!   changed) is a new result and starts the count again, so it is never
 //!   refused.
-//! - **Progress** is a successful call to a tool that changes things whose
-//!   result is new for that call (an edit, then the test run again): it
-//!   starts every other call's count again; each keeps its last result,
-//!   so a change that only repeats itself is no progress.
+//! - **A change** starts every call's count again ([`RepeatGuard::restart`];
+//!   each keeps its last result, so a call that only repeats itself after
+//!   it is no change): a new result of a call made before in this turn (a
+//!   poll whose answer moved, so the wait before the next poll is not
+//!   counted on), the first successful run of a tool that changes things
+//!   (an edit, then the test run again), a sub-agent that completed, and a
+//!   background command's end told at the step boundary. Calls in between
+//!   that change nothing do not break a count: it is not "in a row".
 //! - **The window** is one turn: a new guard for every turn, every callback
 //!   turn and every sub-agent's turn. A restart ends the turn.
 //!
@@ -34,14 +38,14 @@ use std::hash::{Hash, Hasher};
 use harness_core::event::NOTE_LEAD;
 use harness_tools::CallKey;
 
-/// From this many identical results in a row the result carries a warning.
+/// From this many identical results the result carries a warning.
 pub const WARN_AT: u32 = 2;
-/// The call that would be the this-many-th in a row is not run.
+/// The call that would be the this-many-th is not run.
 pub const REFUSE_AT: u32 = 5;
 
 /// What the person sees as the result of a refused call.
 pub const REFUSED_OUTPUT: &str = "Not run: this exact call gave the same result several \
-     times in a row in this turn (the harness's repeated-call guard).";
+     times in this turn, with nothing changing in between (the harness's repeated-call guard).";
 
 /// Why the turn ended, for the person.
 pub const STOP_ERROR: &str = "stopped: the model asked again for a call the repeated-call guard \
@@ -49,7 +53,7 @@ pub const STOP_ERROR: &str = "stopped: the model asked again for a call the repe
 
 struct Streak {
     outcome: u64,
-    /// Identical results in a row, refused asks included.
+    /// Identical results since the last change, refused asks included.
     runs: u32,
 }
 
@@ -90,8 +94,8 @@ impl RepeatGuard {
         } else {
             format!(
                 "{NOTE_LEAD} This call was not run: the same call gave the same result {} \
-                 times in a row in this turn, with nothing changed in between, so it would \
-                 again. Try a different approach, or end your turn and tell the person what \
+                 times in this turn, with nothing changing in between that the harness can \
+                 see, so it would again. Try a different approach, or end your turn and tell the person what \
                  blocks you. Asking for it again ends the turn.",
                 REFUSE_AT - 1
             )
@@ -120,26 +124,23 @@ impl RepeatGuard {
         let mut h = std::hash::DefaultHasher::new();
         (ok, stable(output).as_ref()).hash(&mut h);
         let outcome = h.finish();
-        let runs = match self.calls.get_mut(&key) {
-            Some(s) if s.outcome == outcome => {
-                s.runs += 1;
-                s.runs
-            }
-            _ => {
-                if changes && ok {
-                    self.restart();
-                }
-                self.calls.insert(key, Streak { outcome, runs: 1 });
-                1
-            }
+        let (runs, change) = match self.calls.get(&key) {
+            Some(s) if s.outcome == outcome => (s.runs + 1, false),
+            // A new result of a call made before: something moved.
+            Some(_) => (1, true),
+            None => (1, changes && ok),
         };
+        if change {
+            self.restart();
+        }
+        self.calls.insert(key, Streak { outcome, runs });
         (runs >= WARN_AT).then(|| {
             format!(
-                "{NOTE_LEAD} This exact call has now given the same result {runs} times in a \
-                 row in this turn; asking again will not change it. If you are waiting for \
-                 something outside to change, wait inside one command (a loop with a sleep \
-                 and a deadline) or run it in the background. Call number {REFUSE_AT} in a \
-                 row will not be run."
+                "{NOTE_LEAD} This exact call has now given the same result {runs} times in \
+                 this turn, with nothing changing in between that the harness can see; asking \
+                 again will not change it. If you are waiting for something outside to \
+                 change, wait inside one command (a loop with a sleep and a deadline) or run \
+                 it in the background. Call number {REFUSE_AT} of it will not be run."
             )
         })
     }
