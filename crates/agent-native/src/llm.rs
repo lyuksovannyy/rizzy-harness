@@ -118,7 +118,7 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
             // The loop places every note before it sends (`place_notes`,
             // T8D-3). One that arrives here was not placed: it is left out,
             // never sent as a user-role message of its own.
-            ChatMsg::Note(_) => {
+            ChatMsg::Note(_) | ChatMsg::CallNote(_) => {
                 tracing::warn!("a note reached a provider unplaced; it is not sent");
             }
             // `place_notes` sends it as the user message it is; the same

@@ -781,6 +781,12 @@ pub struct ToolCallFinished {
     /// (`[S3]`), so the UI can resolve the model's citations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<Source>,
+    /// The harness's own line about this call (the repeated-call guard,
+    /// T.1), sent to the model after the result's text as a note: the
+    /// result's own lines are escaped (`NOTE_LEAD`), this one is not. Only
+    /// the node's loop writes it, never from the tool or the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A web page behind a citation label. Only the harness's web tools write
@@ -1112,6 +1118,7 @@ mod tests {
                 url: "https://tokio.rs/".into(),
                 title: "Tokio".into(),
             }],
+            note: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(

@@ -26,6 +26,12 @@ pub enum ChatMsg {
     /// command's end): sent as a user-role message, kept out of the URL
     /// provenance (`user_text` is `None` for it).
     Note(String),
+    /// The harness's line about the tool result right before it (the
+    /// repeated-call guard, T.1; `tool_call_finished.note`). Sent added to
+    /// that result as a [`ChatMsg::Note`] after it would be, but never
+    /// taken for a background command's note: a callback turn's opening
+    /// ([`open_callback`]) does not take it.
+    CallNote(String),
     /// A callback turn's opening (T.8d step 3): the harness's fixed first
     /// line ([`harness_core::event::callback_opening`]) and the ended
     /// commands' notes, quoted. The one user-role message the harness
@@ -102,6 +108,17 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
                     text: before(&mut pending, &text),
                     images,
                 })
+            }
+            // Right after its result, so on the last one sent.
+            ChatMsg::CallNote(t) => {
+                if let Some(ChatMsg::Tool { content, .. }) = out
+                    .iter_mut()
+                    .rev()
+                    .find(|m| matches!(m, ChatMsg::Tool { .. }))
+                {
+                    content.push_str("\n\n");
+                    content.push_str(&t);
+                }
             }
             ChatMsg::Tool { call_id, content } => out.push(ChatMsg::Tool {
                 call_id,
@@ -457,9 +474,11 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
     let chars: usize = messages
         .iter()
         .map(|m| match m {
-            ChatMsg::System(t) | ChatMsg::User(t) | ChatMsg::Note(t) | ChatMsg::Opening(t) => {
-                t.len()
-            }
+            ChatMsg::System(t)
+            | ChatMsg::User(t)
+            | ChatMsg::Note(t)
+            | ChatMsg::CallNote(t)
+            | ChatMsg::Opening(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()

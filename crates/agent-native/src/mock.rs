@@ -354,7 +354,7 @@ impl Provider for Mock {
             .messages
             .iter()
             .rev()
-            .find(|m| !matches!(m, ChatMsg::Note(_)));
+            .find(|m| !matches!(m, ChatMsg::Note(_) | ChatMsg::CallNote(_)));
         if let Some(ChatMsg::Tool { content, .. }) = last_real {
             let words = if user.starts_with("cite:") {
                 cite_answer(content)

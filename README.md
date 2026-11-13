@@ -1132,6 +1132,30 @@ The tool description the model sees states the ceiling. Neither an agent
 definition, a prompt nor the master can raise either; a value outside its
 range stops the node at start.
 
+**Repeated calls.** Within one turn, a call the agent makes again with the same
+arguments that gives the same result is answered with a warning from the
+second time on. The fifth such call is not run (nor offered for approval):
+its result reads "Not run: this exact call gave the same result several
+times in this turn, with nothing changing in between", and if the agent asks
+for it again in a later message (after it was sent that refusal) the turn
+ends there with "stopped: the model asked again for a call the repeated-call
+guard had refused" (other calls of that same message are not run either).
+Something changing starts every count again: a call that succeeded with a
+new result (a poll of a running command, a file that changed, so a wait
+between polls is never refused), a change that did something new (an edit,
+then the test run again), a sub-agent that completed, a background command
+that ended. Calls in between that change nothing do not, and neither does a
+call that failed in new words: a failing test runner that prints its run
+time is never caught itself (its result is new every time), but the same
+read, or the same change you denied, between its runs is still refused the
+fifth time, so you are asked at most four times. The harness's own changing
+tokens (the id of a kept full output, a stop's measured time) do not make a
+result new. A new turn starts from zero. It is the same in a chat and in a
+routine: a fifth identical call with an identical result is as useless in
+either, and you see the refusal as that call's result. The thresholds are
+fixed, not `node.toml` keys, and the guard cannot be turned off. The
+warnings are for the agent only and are not shown in the chat.
+
 **Background commands** are on by default (8 a chat, 64 a node); a node owner
 turns them off with `background_per_session = 0` in `[limits]`. While they
 are off the agent is not offered `bash_output` or `bash_stop` and `bash` does
