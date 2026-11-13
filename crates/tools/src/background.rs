@@ -457,6 +457,12 @@ impl Registry {
     fn keep(&self, bg: &Arc<SessionBg>, num: u64) {
         let evict: Vec<(Weak<SessionBg>, u64)> = {
             let mut k = self.kept.lock().unwrap_or_else(|p| p.into_inner());
+            // Only entries that still keep output count (a chat's own
+            // bound may have dropped some already).
+            k.retain(|(w, n)| {
+                w.upgrade()
+                    .is_some_and(|t| t.lock().cmds.get(n).is_some_and(|c| c.keeps_output()))
+            });
             k.push_back((Arc::downgrade(bg), num));
             let over = k.len().saturating_sub(self.limits.per_node);
             k.drain(..over).collect()
@@ -1407,12 +1413,17 @@ mod tests {
         h.push(S);
         h.push(&"z".repeat(200_000));
         h.finish();
+        // The whole of what is held, and what bash_output shows of it.
+        assert!(h.text().contains("[REDACTED]"));
         let text = h.text_within(crate::MAX_OUTPUT_CHARS - 2000);
+        assert!(
+            !h.text().contains("sk-test-01") && !h.text().contains("456789abcdef"),
+            "secret in the ring"
+        );
         assert!(
             !text.contains("sk-test-01") && !text.contains("456789abcdef"),
             "secret in head"
         );
-        assert!(text.contains("[REDACTED]"));
     }
 
     /// An ended entry, as a finished command leaves it.
