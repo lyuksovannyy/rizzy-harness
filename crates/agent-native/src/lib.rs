@@ -12,6 +12,8 @@ pub mod mask;
 pub mod mock;
 pub mod models;
 pub mod provider;
+#[cfg(test)]
+mod repeat_tests;
 pub mod retry;
 pub mod style;
 
