@@ -746,9 +746,11 @@ per-member levels exist (N.10, part 2), only a server admin may choose
 its Personal one), and choosing it shows that warning first; the rule is
 checked again on every later action, so the `host` chats of someone who is
 no longer a server admin do no more work. Every request for `host`,
-granted or refused, is written to the audit log. A routine's chat always
-asks for `sandbox`. A node must have announced the mode it is sent: one
-from before modes gets no agent chat. The chat's header names its mode and
+granted or refused by any check, is written to the audit log (who, the
+workspace, the node, the outcome; never chat content). A routine's chat always
+asks for `sandbox`. A connected node must have announced the mode it is sent: one
+from before modes gets no agent chat, and the refusal says what to do on
+the node; a node that is away is "not connected", as before. The chat's header names its mode and
 the gaps its node announced at connect (network off without a namespace,
 or not applied at all; the socket gap below Linux 7.1; no `/proc` of its
 own); which modes a node offers is shown only to accounts that may run
@@ -756,7 +758,11 @@ agent chats.
 A node that offers neither mode runs no agent chats and says so at start,
 in `doctor` and when a chat is created ("this node offers no way to run
 commands: install bubblewrap, or set `[execution] host = true`"); `node
-run` refuses to start. **This changed:** a node where bubblewrap did not
+run` refuses to start. **A data directory made by an earlier build does
+not open with this one** (`serve` exits with "no such column:
+s.exec_mode": the session table changed in place, with no migration
+before the first release): remove it, or start with a new one. **This
+changed:** a node where bubblewrap did not
 work used to run the shell with Landlock alone and only warn; it now
 offers no `sandbox`, and without `host = true` nothing. A chat whose mode
 the node no longer offers after a restart (bubblewrap gone, `host` turned

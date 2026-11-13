@@ -36,7 +36,7 @@ host = false       # the unconfined shell; off unless the node's admin turns it 
 ```
 
 What a node offers is computed once, at start, from this table and its own
-self-test, never from anything received (`cli/src/main.rs` `exec_offers`,
+self-test, never from anything received (`ExecOffers::from_start`,
 `node/src/exec.rs` `ExecOffers`):
 
 * `sandbox` is offered only where the containment probe passes at start.
@@ -57,7 +57,10 @@ self-test, never from anything received (`cli/src/main.rs` `exec_offers`,
   `START_PROBE_TRIES` (3) times, `START_PROBE_PAUSE` (1 s) apart, each
   failure logged (review L-b: one failure of the moment used to remove the
   mode until a restart); a node that fails all of them offers no `sandbox`
-  until it is restarted. No later probe adds the mode.
+  until it is restarted. No later probe adds the mode. The cost (review
+  RN-7): a probe that fails slowly fails three times as slowly at start,
+  and a bubblewrap that hangs for good still hangs the start, as before
+  the retries (the start's probes have no bound).
 * `host` is offered only with `host = true`, and not where the Landlock
   sandbox is required and does not work (`[sandbox] mode = "required"`
   refuses the node in every mode, as before).
@@ -66,6 +69,12 @@ self-test, never from anything received (`cli/src/main.rs` `exec_offers`,
   in `doctor` (`FAIL execution modes: NONE …`) and in every refusal:
   "this node offers no way to run commands: install bubblewrap, or set
   `[execution] host = true` in node.toml and read what that means".
+
+**Existing data directories do not open** (review RN-6). The master's
+session table gained a column (`sessions.exec_mode`), changed in place
+with no migration (none before the first tag): a data directory made by
+an earlier build makes `serve` exit with "no such column: s.exec_mode".
+Remove or recreate it before this build runs on it.
 
 **The break.** Before, `contain = "auto"` with a failed probe ran the shell
 with Landlock alone and only warned. It no longer runs commands: such a
@@ -143,18 +152,27 @@ still shown until the node's next hello.
 * Every agentic create carries a mode: `sandbox` unless `host` is asked
   for by name (`Master::create_session`), so a node whose only mode is
   `host` refuses rather than hand it over by default.
-* A node is sent a mode only if its hello named it (`exec:<mode>`); one
-  that names none (a node from before modes) gets no agentic chat, refused
-  by the master naming the node (review L-g).
+* A connected node is sent a mode only if its hello named it
+  (`exec:<mode>`); one that names none (a node from before modes) gets no
+  agentic chat, refused by the master naming the node, what it offers and
+  what to do on it: install bubblewrap for the sandbox mode, `[execution]
+  host = true` for the host shell (reviews L-g, RN-3). A node not linked to
+  this process now (away, or not yet back after a restart) is "not
+  connected", as before: a routine retries it (review RN-2).
 * The recorded mode is mirrored onto the chat's row (`sessions.exec_mode`)
   and the create's rule is applied again in `agentic_blocked`, on every
   prompt, allowing approval, restore and callback admission; an agentic
   row without a readable mode is refused (fails closed). A server admin
   who is demoted loses their `host` chats at the next action, and the
   revocation sweep stops a running turn as for a lost grant (review L-h).
-* Every create that asks for `host` writes `session.create.host` to the
-  audit log, granted or refused: user, workspace, node; no content (review
-  N-d).
+  The sweep asks once per owner, workspace, node and recorded mode (review
+  RN-1: keyed without the mode it gave a host chat's answer to a sandbox
+  chat of the same owner on the same node, or the other way round).
+* Every create that asks for `host` writes one `session.create.host` line
+  to the audit log, whichever check refused it: the user (or `api token`),
+  the workspace and node as resolved, and the outcome (`granted` with the
+  session id, or `refused: ` and the refusal's first words); no content
+  (reviews N-d, RN-4).
 * The UI offers `host` only to a server admin, binds a confirmed choice to
   the node it was confirmed for (review L-j), and never offers `auto`
   (the composer sends no approval mode; the warning says a host chat

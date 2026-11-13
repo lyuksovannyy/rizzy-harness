@@ -243,7 +243,8 @@ pub enum MasterToNode {
         no_callbacks: bool,
         /// How the session's commands run (N.10a). A request only: the node
         /// refuses a mode it does not offer, whatever the master sends, and
-        /// without one takes the most confined mode it offers. Recorded in
+        /// without one takes `sandbox` or refuses (never `host` unless asked
+        /// for by name). The master always sends one. Recorded in
         /// `session_created`; no later command carries or changes it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exec_mode: Option<harness_core::policy::ExecMode>,

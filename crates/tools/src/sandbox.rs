@@ -2178,7 +2178,7 @@ fn containment(
         }
     };
     let advice = "install bubblewrap and allow unprivileged user namespaces (README, \
-                  \"The shell sandbox\"), then restart the node: it probes once, at start";
+                  \"The shell sandbox\"), then restart the node: it probes only at start (up to three tries)";
     let setting = match settings.contain {
         ContainMode::Strict => "strict",
         _ => "auto",

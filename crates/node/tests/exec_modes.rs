@@ -261,7 +261,7 @@ async fn the_node_refuses_a_mode_it_does_not_offer_whatever_the_master_asks() {
     }
 }
 
-/// Without a request the node takes the most confined mode it offers; the
+/// Without a request the node takes `sandbox` (never `host`); the
 /// mode is in `session_created`, and no later command changes it (a second
 /// create for the same session asking for another mode is refused, and the
 /// session runs on in its own).
