@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 harness-core.workspace = true
+harness-store.workspace = true
 harness-tools.workspace = true
 jiff.workspace = true
 reqwest.workspace = true

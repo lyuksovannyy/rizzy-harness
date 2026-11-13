@@ -1579,6 +1579,7 @@ dependencies = [
  "async-trait",
  "axum",
  "harness-core",
+ "harness-store",
  "harness-tools",
  "jiff",
  "reqwest",

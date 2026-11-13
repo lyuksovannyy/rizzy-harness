@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub mod artifacts;
 pub mod blobs;
 pub mod media;
+pub mod migrate;
 mod projects;
 pub mod routines;
 pub mod session_images;
@@ -406,6 +407,18 @@ CREATE TABLE IF NOT EXISTS session_workspaces (
 CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace_id);
 "#;
 
+/// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
+pub const MIGRATIONS: &[migrate::Migration] = &[&[
+    SCHEMA,
+    projects::SCHEMA,
+    // In this order: each one's tables reference the ones before.
+    blobs::SCHEMA,
+    media::SCHEMA,
+    artifacts::SCHEMA,
+    routines::SCHEMA,
+    session_images::SCHEMA,
+]];
+
 /// A session's effective workspace: its `session_workspaces` row while the
 /// owner is still a member of that workspace (or the chat has no owner),
 /// else the owner's Personal workspace, else NULL. Checking membership here
@@ -613,15 +626,11 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(projects::SCHEMA)?;
-        // In this order: each one's tables reference the ones before.
-        conn.execute_batch(blobs::SCHEMA)?;
-        conn.execute_batch(media::SCHEMA)?;
-        conn.execute_batch(artifacts::SCHEMA)?;
-        conn.execute_batch(routines::SCHEMA)?;
-        conn.execute_batch(session_images::SCHEMA)?;
+    fn init(mut conn: Connection) -> Result<Self> {
+        migrate::migrate(&mut conn, "store", MIGRATIONS).map_err(|e| match e {
+            migrate::MigrateError::Sqlite { source, .. } => StoreError::Sqlite(source),
+            other => StoreError::Corrupt(other.to_string()),
+        })?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Deleted chats (incognito, user deletes) are overwritten, not just
         // unlinked, so their text does not linger in free pages.

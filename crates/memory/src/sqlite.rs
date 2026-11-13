@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS fact_indexed (
 );
 "#;
 
+/// The schema of `memory.db`, one entry per version (`harness_store::migrate`).
+pub const MIGRATIONS: &[harness_store::migrate::Migration] = &[&[SCHEMA]];
+
 pub struct SqliteMemory {
     conn: Arc<Mutex<Connection>>,
     embedder: RwLock<Option<Arc<Embedder>>>,
