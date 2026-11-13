@@ -19,6 +19,10 @@
 //!   it was (the version is in the header page, written in the same
 //!   transaction), and a second process waits for the write lock and then
 //!   sees the new version.
+//! - Foreign keys are off while migrations run, so a table rebuilt the way
+//!   SQLite documents it keeps the rows that reference it, and
+//!   `foreign_key_check` must find nothing before the version is bumped.
+//!   The connection's own setting is put back afterwards.
 //! - An up-to-date database is only read, never written, on open.
 
 use std::path::Path;
@@ -48,6 +52,16 @@ pub enum MigrateError {
         step: i64,
         #[source]
         source: rusqlite::Error,
+    },
+    #[error(
+        "{db}: migrating the schema from version {from} to {to} left rows of {table} pointing at missing rows of {parent}; nothing was changed"
+    )]
+    Dangling {
+        db: String,
+        from: i64,
+        to: i64,
+        table: String,
+        parent: String,
     },
     #[error("{db}: reading or writing the schema version: {source}")]
     Sqlite {
@@ -90,6 +104,34 @@ pub fn migrate(conn: &mut Connection, db: &str, steps: &[Migration]) -> Result<(
     if refuse(user_version(conn).map_err(sqlite)?)? == known {
         return Ok(());
     }
+    // Foreign keys off while migrations run (review R43-1): a table change
+    // the way SQLite documents it (new table, copy, drop, rename) would
+    // otherwise cascade the DROP into every child row. The pragma is a
+    // no-op inside a transaction, so it is set before BEGIN, and put back
+    // whatever happens; `foreign_key_check` stands in for it before commit.
+    let fk: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .map_err(sqlite)?;
+    conn.pragma_update(None, "foreign_keys", "OFF")
+        .map_err(sqlite)?;
+    let result = run(conn, db, steps, &refuse);
+    let restored = conn.pragma_update(None, "foreign_keys", fk);
+    result?;
+    restored.map_err(sqlite)
+}
+
+/// The migration transaction itself; foreign keys are off.
+fn run(
+    conn: &mut Connection,
+    db: &str,
+    steps: &[Migration],
+    refuse: &dyn Fn(i64) -> Result<i64, MigrateError>,
+) -> Result<(), MigrateError> {
+    let known = steps.len() as i64;
+    let sqlite = |source: rusqlite::Error| MigrateError::Sqlite {
+        db: db.to_string(),
+        source,
+    };
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sqlite)?;
@@ -107,10 +149,29 @@ pub fn migrate(conn: &mut Connection, db: &str, steps: &[Migration]) -> Result<(
                 })?;
         }
     }
+    if let Some((table, parent)) = dangling(&tx).map_err(sqlite)? {
+        return Err(MigrateError::Dangling {
+            db: db.to_string(),
+            from,
+            to: known,
+            table,
+            parent,
+        });
+    }
     // Dropping `tx` on any error above rolls everything back.
     tx.pragma_update(None, "user_version", known)
         .map_err(sqlite)?;
     tx.commit().map_err(sqlite)
+}
+
+/// The first row `PRAGMA foreign_key_check` reports: (child, parent table).
+fn dangling(conn: &Connection) -> rusqlite::Result<Option<(String, String)>> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    match rows.next()? {
+        Some(r) => Ok(Some((r.get(0)?, r.get(2)?))),
+        None => Ok(None),
+    }
 }
 
 /// The schema of `conn` as text: every object in `sqlite_master` (FTS5's
