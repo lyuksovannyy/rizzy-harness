@@ -1492,6 +1492,24 @@ impl Store {
         Ok(out)
     }
 
+    /// Whether turn `turn_id` of `sid` was started with a `cause` (a
+    /// callback turn): `Some(true)` or `Some(false)` from its
+    /// `turn_started`, `None` when the mirror has none.
+    pub fn turn_cause(&self, sid: SessionId, turn_id: &str) -> Result<Option<bool>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'turn_started' ORDER BY seq DESC",
+        )?;
+        let mut rows = stmt.query(params![sid.to_string()])?;
+        while let Some(row) = rows.next()? {
+            let v: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            if v.get("turn_id").and_then(|t| t.as_str()) == Some(turn_id) {
+                return Ok(Some(v.get("cause").is_some_and(|c| !c.is_null())));
+            }
+        }
+        Ok(None)
+    }
+
     /// The seq up to which `user` has seen chat `sid` (0 when never).
     pub fn seen_seq(&self, user: &str, sid: SessionId) -> Result<u64> {
         let conn = self.lock();
