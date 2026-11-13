@@ -12,7 +12,10 @@ Prints the exit status and time, what of the run is still alive after the
 exit and for how long, whether the lock is free meanwhile, and what the
 next start makes of the turn.
 
-    stop_bound.py [size, default 60G]
+At `5add735` the stop's wait was 60 s too: exit 1 and `interrupted`. Since
+`859e59c` it is 80 s (5 s + the snapshot's 60 s + 15 s).
+
+    stop_bound.py [size, default 60G] [repo]     repo: the folder is a git repository
 """
 import os, signal, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +23,7 @@ from common import *
 
 N = 979000 + os.getpid() % 900
 SIZE = sys.argv[1] if len(sys.argv) > 1 else "60G"
+REPO = "repo" in sys.argv[2:]
 
 
 def main():
@@ -27,20 +31,26 @@ def main():
     data, ws = os.path.join(root, "data"), os.path.join(root, "ws")
     os.makedirs(ws, exist_ok=True)
     write_config(data, ws)
+    if REPO:
+        # The session's folder is a git repository of the user's (one commit).
+        import subprocess
+        for a in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "first"]):
+            subprocess.run(["git", "-c", "user.name=review", "-c", "user.email=review@example.invalid"] + a,
+                           cwd=ws, check=True)
     procs = []
     try:
         s = Server(data)
         procs.append(s)
         sid = s.session(ws)
-        s.post("/api/sessions/%s/prompt" % sid, {"text": "run: truncate -s %s big; sleep %d" % (SIZE, N)})
+        text = "run: truncate -s %s big; sleep %d" % (SIZE, N)
+        s.post("/api/sessions/%s/prompt" % sid, {"text": text})
         assert wait_for(lambda: sleeps(N)), "the command never started:\n" + s.log(10)
-        print("the command made a sparse %s file (%d bytes on disk) and sleeps"
-              % (SIZE, os.stat(os.path.join(ws, "big")).st_blocks * 512))
+        print("the command made a sparse %s file and sleeps" % SIZE)
         t0 = time.monotonic()
         s.signal(signal.SIGTERM)
         assert not gone_within(lambda: sleeps(N), 10), "the command was not ended"
         print("%.1f s after SIGTERM the command is gone" % (time.monotonic() - t0))
-        code = s.exited(100)
+        code = s.exited(200)
         took = time.monotonic() - t0
         print("exit status %r, %.1f s after SIGTERM" % (code, took))
         for l in s.log(3).split("\n"):
@@ -61,9 +71,11 @@ def main():
     finally:
         k = cleanup(procs, needle=root, secs=[N])
         print("cleanup killed: %s" % (k or "nothing"))
-        try:
-            os.unlink(os.path.join(ws, "big"))
-        except OSError:
-            pass
+        for d, _, fs in os.walk(root):
+            if "big" in fs:
+                try:
+                    os.unlink(os.path.join(d, "big"))
+                except OSError:
+                    pass
 
 main()

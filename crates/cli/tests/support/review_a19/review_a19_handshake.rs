@@ -191,14 +191,15 @@ async fn a_refused_hello_does_not_touch_the_live_link_and_a_lying_hello_is_refus
 }
 
 /// What an unauthenticated peer can time: the same refusal whatever version
-/// it claims (the comparison runs only after the signature held).
+/// it claims (the comparison runs only after the signature held). Since
+/// `859e59c` the field is required: a hello without it is closed, not
+/// answered (`the_fields_shapes`), so the claims here all carry one.
 #[tokio::test]
 async fn a_strangers_refusal_takes_as_long_whatever_it_claims() {
     let env = master().await;
     let (id, _key) = joined(&env, "box").await;
     let stranger = NodeKey::load_or_create(&env.dir.path().join("stranger.key")).unwrap();
-    let mut med = Vec::new();
-    for v in ["", r#","protocol_version":1"#, r#","protocol_version":99"#] {
+    for v in [r#","protocol_version":1"#, r#","protocol_version":99"#, r#","protocol_version":0"#] {
         let mut ts = Vec::new();
         for _ in 0..40 {
             let t = std::time::Instant::now();
@@ -207,7 +208,53 @@ async fn a_strangers_refusal_takes_as_long_whatever_it_claims() {
             assert_eq!(a["reason"], "unknown or revoked node");
         }
         ts.sort();
-        med.push(ts[20]);
         println!("claim {v:<26} median {:?} (min {:?}, max {:?})", ts[20], ts[0], ts[39]);
     }
+}
+
+fn join_hello(token: &str, key: &NodeKey, sig: &str, version: &str) -> String {
+    format!(
+        r#"{{"type":"join","token":"{token}","public_key":"{}","hostname":"probe","signature":"{sig}"{version}}}"#,
+        key.public_hex()
+    )
+}
+
+/// Re-check, N-9: the join's version check. What a peer with a guess of a
+/// token is told, with the token valid and not, with the right protocol
+/// claimed and another; whether the token is touched; how long each takes.
+#[tokio::test]
+async fn what_a_join_of_another_protocol_tells_about_its_token() {
+    let env = master().await;
+    let token = env.master.create_join_token(None).await.unwrap();
+    let guess = "0".repeat(token.len());
+    let key = NodeKey::load_or_create(&env.dir.path().join("probe.key")).unwrap();
+    let other = format!(r#","protocol_version":{}"#, PROTOCOL_VERSION + 1);
+    let same = format!(r#","protocol_version":{PROTOCOL_VERSION}"#);
+    println!("a token of {} characters", token.len());
+    for (name, t) in [("the valid token", token.as_str()), ("a wrong token", guess.as_str())] {
+        let mut ts = Vec::new();
+        let mut answer = Value::Null;
+        for _ in 0..30 {
+            let at = std::time::Instant::now();
+            let (a, _ws) = raw(&env, &key, |s| join_hello(t, &key, s, &other)).await;
+            ts.push(at.elapsed());
+            answer = a;
+        }
+        ts.sort();
+        println!("{name}, another protocol, 30 times: {answer}  (median {:?})", ts[15]);
+    }
+    for shape in ["", r#","protocol_version":"x""#] {
+        let (a, _ws) = raw(&env, &key, |s| join_hello(&token, &key, s, shape)).await;
+        println!("the valid token, version {:?}: {a}", shape);
+    }
+    let (a, _ws) = raw(&env, &key, |_| join_hello(&token, &key, "00", &other)).await;
+    println!("the valid token, another protocol, a bad signature: {a}");
+    let (a, _ws) = raw(&env, &key, |s| join_hello(&guess, &key, s, &same)).await;
+    println!("a wrong token, the master's protocol: {a}");
+    // 30 refusals later the token still joins: it was never spent.
+    let (a, _ws) = raw(&env, &key, |s| join_hello(&token, &key, s, &same)).await;
+    println!("after 30 refused joins, the valid token with the master's protocol: {a}");
+    assert_eq!(a["type"], "accepted");
+    let (a, _ws) = raw(&env, &key, |s| join_hello(&token, &key, s, &other)).await;
+    println!("the same token again (now spent), another protocol: {a}");
 }

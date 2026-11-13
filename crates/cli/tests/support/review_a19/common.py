@@ -30,13 +30,13 @@ def scratch(*parts):
     return os.path.realpath(p)
 
 
-def write_config(data, ws, extra_node=""):
+def write_config(data, ws, extra_node="", delay_ms=1):
     os.makedirs(data, exist_ok=True)
     with open(os.path.join(data, "node.toml"), "w") as f:
         f.write('workspace_roots = ["%s"]\nmax_approval_mode = "auto"\n%s' % (ws, extra_node))
     with open(os.path.join(data, "config.toml"), "w") as f:
         f.write('[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\n'
-                'mock_delay_ms = 1\n\n[[providers.models]]\nid = "mock"\n')
+                'mock_delay_ms = %d\n\n[[providers.models]]\nid = "mock"\n' % delay_ms)
 
 
 class Proc:
@@ -110,7 +110,7 @@ class Server(Proc):
     def __init__(self, data, extra=(), env=None, preexec=None, restore_signals=True):
         super().__init__(data, ["serve", "--bind", "127.0.0.1:0"] + list(extra), env, preexec,
                          restore_signals=restore_signals)
-        line = self.wait_line("listening on http://")
+        line = self.wait_line("listening on http://", secs=240)
         self.addr = line.split("listening on http://")[1].strip()
         with open(os.path.join(data, "api-token")) as f:
             self.token = f.read().strip()

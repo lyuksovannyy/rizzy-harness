@@ -7,7 +7,9 @@
    may say "stopping" for a chat that is not theirs).
 2. A routine's "run now" during the stop: what the caller is told and what
    the next start makes of the run (claim 4: not failed for good by a stop;
-   what was due fires at the next start).
+   what was due fires at the next start). At `5add735` it was taken (202)
+   and ended `interrupted` at the next start; since `859e59c` it is answered
+   503 and no run is recorded.
 """
 import os, signal, sys, time, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

