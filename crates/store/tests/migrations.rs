@@ -763,6 +763,26 @@ fn write_mode_creates_missing_files_and_never_rewrites_a_recorded_one() {
     );
 }
 
+/// Before the first tag version 1 is recorded again in place. The file
+/// cannot be deleted for that (`DB_SCHEMA` includes it with
+/// `include_str!`, so the crate would not build), so an empty file counts
+/// as not recorded yet and write mode fills it. No released version is
+/// empty, so this cannot rewrite one.
+#[test]
+fn write_mode_fills_an_emptied_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("1.sql"), "").unwrap();
+    migrate::check_recorded_with(dir.path(), &[V1], true);
+    let one = std::fs::read_to_string(dir.path().join("1.sql")).unwrap();
+    assert!(one.contains("CREATE TABLE t"), "{one:?}");
+    // Without write mode an empty file is a failure, not a pass.
+    std::fs::write(dir.path().join("1.sql"), "").unwrap();
+    let passed = std::panic::catch_unwind(|| {
+        migrate::check_recorded_with(dir.path(), &[V1], false);
+    });
+    assert!(passed.is_err(), "an empty recorded schema passed");
+}
+
 /// Every version's schema as recorded in `crates/store/schema/<k>.sql`. A
 /// migration that is already released must never change: a database made
 /// with it would no longer match what the next one expects. Change the
