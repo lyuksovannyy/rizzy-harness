@@ -442,6 +442,10 @@ const ENABLED_OWNER: &str =
 /// was refused: someone changed that role in between.
 const ROLE_CHANGED: &str = "this member's role just changed; reload and try again";
 
+/// At most this many background events are read for a stop
+/// ([`Store::background_events`]).
+pub const BACKGROUND_EVENTS: usize = 4096;
+
 fn no_owner_left(workspace: &str) -> StoreError {
     StoreError::Refused(format!(
         "{workspace} would be left without an owner; make another member an owner first"
@@ -1467,6 +1471,40 @@ impl Store {
                 payload: serde_json::from_str(&payload)?,
             });
         }
+        Ok(out)
+    }
+
+    /// The session's newest [`BACKGROUND_EVENTS`] `background_started` and
+    /// `background_ended` events, ascending: what the person's stop reads
+    /// to know which commands the log shows running and which ended
+    /// (T.8d). Far more than a chat can hold running at once (32), so the
+    /// newest are enough; a node that floods them costs one bounded read.
+    pub fn background_events(&self, sid: SessionId) -> Result<Vec<RawEvent>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1 \
+             AND kind IN ('background_started', 'background_ended') ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![sid.to_string(), BACKGROUND_EVENTS as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
+        out.reverse();
         Ok(out)
     }
 

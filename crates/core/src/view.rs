@@ -154,7 +154,10 @@ pub struct SessionView {
 pub struct BackgroundState {
     /// The `bash` call that started it.
     pub call_id: String,
+    /// When its timeout ends it at the latest, on the node's clock.
     pub ends_by_ms: i64,
+    /// The timeout it runs under: what is left can never be more.
+    pub timeout_s: u64,
     pub ended: bool,
 }
 
@@ -403,6 +406,7 @@ impl SessionView {
                     BackgroundState {
                         call_id: b.call_id,
                         ends_by_ms: b.ends_by_ms,
+                        timeout_s: b.timeout_s,
                         ended: false,
                     },
                 );

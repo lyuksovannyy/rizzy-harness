@@ -13,6 +13,7 @@ use crate::{CommandError, Master, auth};
 
 mod agent_edits;
 mod artifacts;
+mod background;
 mod hooks;
 mod links;
 mod media;
@@ -197,6 +198,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(hooks::routes())
         .merge(media::routes())
         .merge(artifacts::routes())
+        .merge(background::routes())
         .merge(storage::routes())
         .merge(links::routes())
         // Matched routes only (the embedded UI files are not handlers); which

@@ -1979,6 +1979,78 @@ mod real {
         }
     }
 
+    impl Serve {
+        /// A logged-in member `name` with a password of its own, as a
+        /// browser holds the login: (cookie, login key).
+        pub async fn account(&self, name: &str) -> (String, String) {
+            let c = reqwest::Client::new();
+            let v: Value = c
+                .post(format!("http://{}/api/users", self.addr))
+                .bearer_auth(&self.token)
+                .json(&json!({"username": name}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let pw = v["password"].as_str().unwrap().to_string();
+            let r = c
+                .post(format!("http://{}/api/login", self.addr))
+                .json(&json!({"username": name, "password": pw}))
+                .send()
+                .await
+                .unwrap();
+            let login = |r: &reqwest::Response| {
+                r.headers()["set-cookie"]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            };
+            let cookie = login(&r);
+            let key = r.json::<Value>().await.unwrap()["login_key"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let r = self
+                .browser(&cookie, &key, "/api/me/password")
+                .json(&json!({"current": pw, "new": "a password of my own"}))
+                .send()
+                .await
+                .unwrap();
+            assert!(r.status().is_success(), "{}", r.status());
+            let cookie = login(&r);
+            let key = r.json::<Value>().await.unwrap()["login_key"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            (cookie, key)
+        }
+
+        /// A POST as the page sends it: the cookie, its key, the Origin.
+        pub fn browser(&self, cookie: &str, key: &str, path: &str) -> reqwest::RequestBuilder {
+            reqwest::Client::new()
+                .post(format!("http://{}{path}", self.addr))
+                .header("cookie", cookie)
+                .header("x-harness-login", key)
+                .header("origin", format!("http://{}", self.addr))
+        }
+
+        /// A POST with the API token: (status, body).
+        pub async fn try_post(&self, path: &str) -> (reqwest::StatusCode, Value) {
+            let r = reqwest::Client::new()
+                .post(format!("http://{}{path}", self.addr))
+                .bearer_auth(&self.token)
+                .send()
+                .await
+                .unwrap();
+            (r.status(), r.json().await.unwrap_or(Value::Null))
+        }
+    }
+
     pub fn ends(evs: &[Value]) -> Vec<String> {
         evs.iter()
             .filter(|e| e["kind"] == "background_ended")
@@ -2376,4 +2448,100 @@ async fn a_node_with_the_feature_off_offers_no_background_tools() {
     let reqs = on.requests.lock().unwrap().clone();
     let names: Vec<String> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
     assert!(names.contains(&"bash_output".to_string()) && names.contains(&"bash_stop".to_string()));
+}
+
+/// Step 2 on the real binary (docs/background-commands.md §4.7): the
+/// person's stop over HTTP ends one background command with
+/// `stopped_by_user` and nothing of it is left 2 s after (the T.8a
+/// escapers); a second stop of it says it had already ended; Stop all ends
+/// every one still running. Another account's stop is 404 and the command
+/// still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_persons_stop_over_http_ends_them_with_stopped_by_user() {
+    let (_dir, data, ws) = real::setup();
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let s = real::serve(&data);
+    let (cmd, one) = detached(976_100);
+    let sid = s.with_background(&ws, &format!("{cmd} sleep 1000")).await;
+    all_started(&one).await;
+
+    // Not the owner: the same 404 as for no chat, and nothing stopped.
+    let (cookie, key) = s.account("bob").await;
+    for path in [
+        format!("/api/sessions/{sid}/background/bg-1/stop"),
+        format!("/api/sessions/{sid}/background/stop"),
+    ] {
+        let r = s.browser(&cookie, &key, &path).send().await.unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        one.0.iter().all(|x| !sleeps(*x).is_empty()),
+        "another account's stop stopped it"
+    );
+    assert!(real::ends(&s.events(&sid).await).is_empty());
+
+    // The owner (here the API token, which sees every chat).
+    let (st, v) = s
+        .try_post(&format!("/api/sessions/{sid}/background/bg-1/stop"))
+        .await;
+    assert_eq!(st, reqwest::StatusCode::OK, "{v}");
+    assert_eq!(v["stopping"], json!(["bg-1"]), "{v}");
+    let evs = s.wait_for(&sid, |e| e["kind"] == "background_ended").await;
+    assert_eq!(real::ends(&evs), vec!["stopped_by_user"], "{evs:#?}");
+    none_left(&one, "the person's stop").await;
+    // Again: it had already ended, and says how.
+    let (st, v) = s
+        .try_post(&format!("/api/sessions/{sid}/background/bg-1/stop"))
+        .await;
+    assert_eq!(st, reqwest::StatusCode::OK, "{v}");
+    assert_eq!(v["ended"][0]["reason"], "stopped_by_user", "{v}");
+
+    // Two more in the same chat, then Stop all.
+    let (c2, two) = detached(976_110);
+    let (c3, three) = detached(976_120);
+    let script = json!([
+        {"tool": "bash", "input": {"command": format!("{c2} sleep 1000"), "background": true, "timeout_secs": 3600}},
+        {"tool": "bash", "input": {"command": format!("{c3} sleep 1000"), "background": true, "timeout_secs": 3600}},
+    ]);
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("script: {script}")}),
+    )
+    .await;
+    s.wait_for(&sid, |e| {
+        e["kind"] == "background_started" && e["payload"]["bg_id"] == "bg-3"
+    })
+    .await;
+    all_started(&two).await;
+    all_started(&three).await;
+    let (st, v) = s
+        .try_post(&format!("/api/sessions/{sid}/background/stop"))
+        .await;
+    assert_eq!(st, reqwest::StatusCode::OK, "{v}");
+    assert_eq!(v["stopping"], json!(["bg-2", "bg-3"]), "{v}");
+    let evs = s
+        .wait_for(&sid, |e| {
+            e["kind"] == "background_ended" && e["payload"]["bg_id"] == "bg-3"
+        })
+        .await;
+    let evs = if real::ends(&evs).len() < 3 {
+        s.wait_for(&sid, |e| {
+            e["kind"] == "background_ended" && e["payload"]["bg_id"] == "bg-2"
+        })
+        .await
+    } else {
+        evs
+    };
+    assert_eq!(
+        real::ends(&evs),
+        vec!["stopped_by_user"; 3],
+        "{evs:#?}\n{}",
+        s.log()
+    );
+    none_left(&two, "Stop all").await;
+    none_left(&three, "Stop all").await;
 }

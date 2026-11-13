@@ -268,7 +268,10 @@ export interface SessionView {
 
 export interface BackgroundState {
   call_id: string;
+  /** When its timeout ends it at the latest, on the node's clock. */
   ends_by_ms: number;
+  /** The timeout it runs under: what is left can never be more. */
+  timeout_s: number;
   ended: boolean;
 }
 

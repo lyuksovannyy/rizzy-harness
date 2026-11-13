@@ -1,0 +1,53 @@
+/* The chat's background strip (BackgroundStrip.tsx), above the composer. */
+.bg-strip {
+  margin: 0 auto var(--space-2);
+  width: min(760px, 100%);
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  font-size: var(--text-sm);
+}
+.bg-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.bg-strip-away {
+  color: var(--warn);
+  margin-top: var(--space-1);
+}
+.bg-rows {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+}
+.bg-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 30px;
+}
+.bg-id {
+  flex: none;
+  color: var(--fg-2);
+}
+.bg-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+.bg-left {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.bg-state {
+  flex: none;
+  max-width: 40%;
+  overflow-wrap: anywhere;
+}
+.bg-row-ended {
+  color: var(--fg-2);
+}

@@ -634,12 +634,14 @@
       "bg-1": {
         "call_id": "c1",
         "ended": true,
-        "ends_by_ms": 1700000600000
+        "ends_by_ms": 1700000600000,
+        "timeout_s": 600
       },
       "bg-2": {
         "call_id": "c1",
         "ended": false,
-        "ends_by_ms": 1700000060000
+        "ends_by_ms": 1700000060000,
+        "timeout_s": 60
       }
     },
     "checkpoints": {
