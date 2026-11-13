@@ -28,4 +28,6 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_
 tokio-tungstenite.workspace = true
 
 [dev-dependencies]
+# Ids and decisions for the protocol messages the B.7 test sends.
+harness-core.workspace = true
 tempfile.workspace = true
