@@ -558,7 +558,9 @@ pub async fn cancel_revoked(m: &Master, users: &[String]) {
 /// review P-3, T11).
 pub async fn cancel_revoked_on(m: &Master, node_id: &str) {
     let node = node_id.to_string();
-    match m.inner.mirror.call(move |s| s.running_on(&node)).await {
+    // Every session there, not only the running ones: a background command
+    // runs without a turn, and no count of them is trusted (review N-1).
+    match m.inner.mirror.call(move |s| s.sessions_on(&node)).await {
         Ok(rows) => cancel_blocked(m, rows.into_iter()).await,
         Err(e) => {
             tracing::warn!(node = %node_id, error = %e, "revocation sweep: could not list sessions")
@@ -592,33 +594,31 @@ async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, 
     }
 }
 
-/// Cancel every running agentic session in `rows` whose owner may no
-/// longer drive it, and stop its background commands (T.8d: a turn's
-/// cancel leaves them running, and they run without a turn).
+/// For every agentic session in `rows` whose owner may no longer drive it:
+/// cancel its running turn, then stop its background commands (T.8d: a
+/// turn's cancel leaves them running, and they run without a turn). The
+/// stop goes to every such session on a node that has background commands
+/// at all, whatever the mirror shows: a node with none answers it as a
+/// no-op, and no count that can lag decides (review N-1, N-8). After the
+/// stop the node refuses that chat's background starts, and stops one a
+/// start hands over late, until its owner prompts it again.
 async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
-    let running = rows.filter(|r| {
-        (r.running || r.background > 0)
-            && r.profile.as_deref() != Some("chat")
-            && r.owner_id.is_some()
-    });
-    for row in running {
+    let agentic = rows.filter(|r| r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
+    for row in agentic {
         let Ok(Some(why)) = blocked_reason(m, &row).await else {
             continue;
         };
-        if row.background > 0 {
-            tracing::info!(session = %row.session_id, reason = %why, "stopping background commands that lost their access");
-            stop_background_revoked(m, row.session_id).await;
-        }
         if row.running {
             tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
             cancel_retrying(m, row.session_id).await;
         }
+        stop_background_revoked(m, row.session_id).await;
     }
 }
 
 /// The revocation's stop of a session's background commands. A node
-/// that is offline gets it from the sweep at its next hello (the mirror
-/// still counts them); a failure is logged.
+/// that is offline gets it from the sweep at its next hello (which sends
+/// it for every blocked session there); a failure is logged.
 async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId) {
     use harness_protocol::StopBackgroundBy;
     for attempt in 1..=CANCEL_TRIES {

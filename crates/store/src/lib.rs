@@ -1590,6 +1590,18 @@ impl Store {
         rows.map(|r| Self::finish_session(r?)).collect()
     }
 
+    /// Every session of `node_id`: the hello's sweep stops the background
+    /// commands of every blocked owner's chat there, whatever runs (T.8d,
+    /// review N-1). Filtered in SQL.
+    pub fn sessions_on(&self, node_id: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&Self::session_query(
+            "WHERE s.node_id = ?1 ORDER BY s.updated_ms DESC",
+        ))?;
+        let rows = stmt.query_map(params![node_id], Self::session_from_row)?;
+        rows.map(|r| Self::finish_session(r?)).collect()
+    }
+
     pub fn session(&self, sid: SessionId) -> Result<Option<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&Self::session_query("WHERE s.session_id = ?1"))?;
