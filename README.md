@@ -385,7 +385,7 @@ fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
 [agent_avatars.coder]                # how the agent looks; unset: derived from its id
 shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
 eyes = "wide"                        # round | long | short | wide | sleepy
-accent = "green"                     # blue | violet | green | orange | pink | gray
+accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -

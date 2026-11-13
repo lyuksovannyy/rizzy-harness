@@ -2,7 +2,8 @@
 // Theme and accent on <html> and in the mirrors public/theme.js reads
 // before the first paint.
 import { beforeEach, describe, expect, test } from "vitest";
-import { ACCENT_KEY, applyAppearance, BACKDROP_KEY, readBackdropMirror, THEME_KEY, writeBackdropMirror } from "./appearance";
+import script from "../../public/theme.js?raw";
+import { ACCENT_KEY, ACCENTS, applyAppearance, BACKDROP_KEY, normalizeAccent, readBackdropMirror, THEME_KEY, writeBackdropMirror } from "./appearance";
 
 const root = () => document.documentElement;
 
@@ -39,9 +40,9 @@ describe("applyAppearance", () => {
 
   test("a preview changes the page but not what the next load starts with", () => {
     applyAppearance("dark", "orange");
-    applyAppearance("light", "violet", false);
+    applyAppearance("light", "purple", false);
     expect(root().dataset.theme).toBe("light");
-    expect(root().dataset.accent).toBe("violet");
+    expect(root().dataset.accent).toBe("purple");
     expect(localStorage.getItem(THEME_KEY)).toBe("dark");
     expect(localStorage.getItem(ACCENT_KEY)).toBe("orange");
   });
@@ -53,6 +54,39 @@ describe("applyAppearance", () => {
     applyAppearance(null, null);
     expect(metas()).toEqual(["#111113", "#fcfcfc"]);
     root().style.removeProperty("--bg");
+  });
+});
+
+describe("accent presets", () => {
+  test("the eight Rizzy Glass presets, in the design system's order", () => {
+    expect(ACCENTS).toEqual(["blue", "purple", "pink", "red", "orange", "yellow", "green", "graphite"]);
+  });
+
+  test("the retired names map to their successors; anything unknown is the default", () => {
+    expect(normalizeAccent("violet")).toBe("purple");
+    expect(normalizeAccent("gray")).toBe("graphite");
+    for (const a of ACCENTS) expect(normalizeAccent(a)).toBe(a);
+    for (const a of [null, undefined, "", "teal", "Blue", "blue;x"]) expect(normalizeAccent(a)).toBeNull();
+  });
+
+  test("a saved old name is shown, and mirrored, as the new one", () => {
+    applyAppearance(null, "violet");
+    expect(root().dataset.accent).toBe("purple");
+    expect(localStorage.getItem(ACCENT_KEY)).toBe("purple");
+    applyAppearance(null, "teal");
+    expect(root().dataset.accent).toBeUndefined();
+    expect(localStorage.getItem(ACCENT_KEY)).toBeNull();
+  });
+
+  // public/theme.js runs before the bundle: the same mapping, by hand.
+  test("theme.js applies the same mapping before the first paint", () => {
+        const run = () => new Function(script)();
+    for (const [saved, shown] of [["violet", "purple"], ["gray", "graphite"], ["yellow", "yellow"], ["graphite", "graphite"], ["blue", undefined], ["teal", undefined], ['x" onload="', undefined]] as const) {
+      delete root().dataset.accent;
+      localStorage.setItem(ACCENT_KEY, saved);
+      run();
+      expect(root().dataset.accent, saved).toBe(shown);
+    }
   });
 });
 

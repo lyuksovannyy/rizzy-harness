@@ -1030,7 +1030,7 @@ async fn agent_avatars() {
         ),
         (
             "coder",
-            json!({"shape": "circle", "eyes": "round", "accent": "red"}),
+            json!({"shape": "circle", "eyes": "round", "accent": "teal"}),
             StatusCode::BAD_REQUEST,
         ),
         ("nobody", mine.clone(), StatusCode::NOT_FOUND),

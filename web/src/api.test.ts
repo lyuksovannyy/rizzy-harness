@@ -84,3 +84,18 @@ describe("the login key", () => {
     for (const [path] of fetchFn.mock.calls) expect(String(path)).not.toContain(KEY);
   });
 });
+
+describe("settings", () => {
+  // The accent presets changed (Rizzy Glass); the server only takes the
+  // new names, so an old saved one must not come back to be saved again.
+  test("a retired accent comes back as its successor", async () => {
+    answers = [
+      { status: 200, body: { search_url: "https://e.com/?q={q}", accent: "violet" } },
+      { status: 200, body: { search_url: "https://e.com/?q={q}", accent: "gray" } },
+      { status: 200, body: { search_url: "https://e.com/?q={q}", accent: "orange" } },
+    ];
+    expect((await api.settings()).accent).toBe("purple");
+    expect((await api.settings()).accent).toBe("graphite");
+    expect((await api.settings()).accent).toBe("orange");
+  });
+});

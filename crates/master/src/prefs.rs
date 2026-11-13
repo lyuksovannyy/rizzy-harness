@@ -82,7 +82,12 @@ fn default_image_search() -> String {
     DEFAULT_IMAGE_SEARCH_URL.into()
 }
 
-pub const ACCENTS: &[&str] = &["blue", "violet", "green", "orange", "pink", "gray"];
+/// The Rizzy Glass accent presets, in the design system's order
+/// (docs/rizzy-glass.md); the web UI keeps the same list in
+/// `web/src/lib/appearance.ts`.
+pub const ACCENTS: &[&str] = &[
+    "blue", "purple", "pink", "red", "orange", "yellow", "green", "graphite",
+];
 pub const THEMES: &[&str] = &["system", "light", "dark"];
 pub const BACKDROPS: &[&str] = &["animated", "still", "off"];
 
@@ -291,6 +296,11 @@ mod context_tests {
             Err("theme must be one of system, light, dark".into())
         );
         assert!(one_of("accent", &Some("teal".into()), ACCENTS).is_err());
+        for a in ["red", "yellow", "graphite"] {
+            assert_eq!(one_of("accent", &Some(a.into()), ACCENTS), Ok(()));
+        }
+        // Retired names: the web maps them before it saves.
+        assert!(one_of("accent", &Some("violet".into()), ACCENTS).is_err());
     }
 
     #[test]

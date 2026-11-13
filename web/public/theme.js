@@ -7,6 +7,9 @@
     var t = localStorage.getItem("harness.theme");
     var a = localStorage.getItem("harness.accent");
     if (t === "light" || t === "dark") d.setAttribute("data-theme", t);
-    if (a && /^(violet|green|orange|pink|gray)$/.test(a)) d.setAttribute("data-accent", a);
+    // The same mapping as normalizeAccent in src/lib/appearance.ts.
+    if (a === "violet") a = "purple";
+    if (a === "gray") a = "graphite";
+    if (a && /^(purple|pink|red|orange|yellow|green|graphite)$/.test(a)) d.setAttribute("data-accent", a);
   } catch (e) {}
 })();

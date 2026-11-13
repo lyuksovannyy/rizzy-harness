@@ -12,6 +12,20 @@ export const ACCENT_KEY = "harness.accent";
 /** The home background choice, so Home never starts one the user turned off before the preferences arrive. */
 export const BACKDROP_KEY = "harness.backdrop";
 
+/** The accent presets of the Rizzy Glass design system, in its order; blue is the default. */
+export const ACCENTS = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "graphite"] as const;
+export type Accent = (typeof ACCENTS)[number];
+
+/** Names an earlier palette used, and the preset each became. */
+const RETIRED: Record<string, Accent> = { violet: "purple", gray: "graphite" };
+
+/** A saved accent as one of `ACCENTS`, or null for anything else (the default). */
+export function normalizeAccent(accent: string | null | undefined): Accent | null {
+  if (!accent) return null;
+  if (Object.hasOwn(RETIRED, accent)) return RETIRED[accent]!;
+  return (ACCENTS as readonly string[]).includes(accent) ? (accent as Accent) : null;
+}
+
 function remember(key: string, value: string | null) {
   try {
     if (value) localStorage.setItem(key, value);
@@ -23,13 +37,14 @@ function remember(key: string, value: string | null) {
 
 /**
  * Shows `theme` (anything but light or dark follows the OS) and `accent`
- * (null or blue is the default). A preview passes `mirror: false`, so a
+ * (null or blue is the default; a retired name shows as its successor). A preview passes `mirror: false`, so a
  * reload before Save comes back to what is saved.
  */
 export function applyAppearance(theme: string | null | undefined, accent: string | null | undefined, mirror = true): void {
   const root = document.documentElement;
   const forced = theme === "light" || theme === "dark" ? theme : null;
-  const tint = accent && accent !== "blue" ? accent : null;
+  const preset = normalizeAccent(accent);
+  const tint = preset && preset !== "blue" ? preset : null;
   if (forced) root.dataset.theme = forced;
   else delete root.dataset.theme;
   if (tint) root.dataset.accent = tint;

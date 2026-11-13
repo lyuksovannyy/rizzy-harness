@@ -31,11 +31,18 @@ pub enum Eyes {
 #[serde(rename_all = "snake_case")]
 pub enum Accent {
     Blue,
-    Violet,
-    Green,
-    Orange,
+    // `violet` and `gray` were this palette's names before Rizzy Glass;
+    // an admin's config.toml may still say them, and a config that no
+    // longer parses would take every agent's look with it.
+    #[serde(alias = "violet")]
+    Purple,
     Pink,
-    Gray,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    #[serde(alias = "gray")]
+    Graphite,
 }
 
 const SHAPES: [Shape; 6] = [
@@ -53,13 +60,15 @@ const EYES: [Eyes; 5] = [
     Eyes::Wide,
     Eyes::Sleepy,
 ];
+/// The accents a default look is drawn from: the six of the palette before
+/// Rizzy Glass, renamed, so no unconfigured agent changes colour.
 const ACCENTS: [Accent; 6] = [
     Accent::Blue,
-    Accent::Violet,
+    Accent::Purple,
     Accent::Green,
     Accent::Orange,
     Accent::Pink,
-    Accent::Gray,
+    Accent::Graphite,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +125,18 @@ mod tests {
         let a: AgentAvatar =
             serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"gray"}"#).unwrap();
         assert_eq!(a.shape, Shape::Drop);
+        assert_eq!(a.accent, Accent::Graphite);
+        let v: AgentAvatar =
+            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"violet"}"#).unwrap();
+        assert_eq!(v.accent, Accent::Purple);
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"shape":"drop","eyes":"sleepy","accent":"purple"}"#
+        );
+        for a in ["red", "yellow", "graphite"] {
+            let s = format!(r#"{{"shape":"drop","eyes":"sleepy","accent":"{a}"}}"#);
+            assert!(serde_json::from_str::<AgentAvatar>(&s).is_ok(), "{a}");
+        }
         assert!(
             serde_json::from_str::<AgentAvatar>(
                 r#"{"shape":"star","eyes":"round","accent":"blue"}"#

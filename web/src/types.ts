@@ -372,7 +372,7 @@ export interface NewAgent {
 
 export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";
 export type AvatarEyes = "round" | "long" | "short" | "wide" | "sleepy";
-export type AvatarAccent = "blue" | "violet" | "green" | "orange" | "pink" | "gray";
+export type AvatarAccent = "blue" | "purple" | "pink" | "red" | "orange" | "yellow" | "green" | "graphite";
 
 /** How an agent looks: a shape with eyes, in one of the accents. */
 export interface AgentAvatar {
