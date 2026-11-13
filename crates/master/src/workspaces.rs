@@ -681,10 +681,11 @@ async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, 
 /// start hands over late, until its owner prompts it again.
 async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
     let agentic = rows.filter(|r| r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
-    // The answer depends on the owner, the chat's workspace and its node
-    // only: asked once per such triple, not once per chat (a hello's sweep
+    // The answer depends on the owner, the chat's workspace, its node and
+    // its recorded mode (N.10a: a `host` chat has its own rule, review
+    // RN-1): asked once per such tuple, not once per chat (a hello's sweep
     // reads every chat of the node).
-    type Key = (Option<String>, Option<String>, String);
+    type Key = (Option<String>, Option<String>, String, Option<String>);
     let mut asked: std::collections::HashMap<Key, Result<Option<String>, ()>> =
         std::collections::HashMap::new();
     for row in agentic {
@@ -692,6 +693,7 @@ async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
             row.owner_id.clone(),
             row.workspace_id.clone(),
             row.node_id.clone(),
+            row.exec_mode.clone(),
         );
         let reason = match asked.get(&key) {
             Some(r) => r.clone(),
