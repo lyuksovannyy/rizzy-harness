@@ -108,10 +108,16 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
     out
 }
 
-/// The person's own text of a user message a note was put in front of.
+/// The person's own text of a user message [`place_notes`] put notes in
+/// front of. The separator counts only as a line of its own after an empty
+/// line, the way `place_notes` writes it: a note's lines are the harness's
+/// or quoted program output, so the first such line is the harness's. A
+/// person who types that very line after an empty one is read from there
+/// on; only the demo provider reads a message this way.
 pub fn without_notes(text: &str) -> &str {
-    match text.split_once(NOTES_THEN_MESSAGE) {
-        Some((_, rest)) => rest.strip_prefix('\n').unwrap_or(rest),
+    let at = format!("\n\n{NOTES_THEN_MESSAGE}\n");
+    match text.find(&at) {
+        Some(i) => &text[i + at.len()..],
         None => text,
     }
 }

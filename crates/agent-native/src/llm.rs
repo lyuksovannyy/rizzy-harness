@@ -114,7 +114,13 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                 system_seen = true;
                 msgs.push(m)
             }
-            ChatMsg::User(t) | ChatMsg::Note(t) => msgs.push(ChatMessage::user(t.clone())),
+            ChatMsg::User(t) => msgs.push(ChatMessage::user(t.clone())),
+            // The loop places every note before it sends (`place_notes`,
+            // T8D-3). One that arrives here was not placed: it is left out,
+            // never sent as a user-role message of its own.
+            ChatMsg::Note(_) => {
+                tracing::warn!("a note reached a provider unplaced; it is not sent");
+            }
             ChatMsg::UserImages { text, images } => msgs.push(ChatMessage::user(
                 MessageContent::from_parts(user_parts(text, images)),
             )),
@@ -477,6 +483,24 @@ mod tests {
             "https://api.anthropic.com/v1/"
         );
         assert_eq!(normalize_base("http://x/v1/"), "http://x/v1/");
+    }
+
+    /// T8D-3: a note the loop did not place never becomes a user-role
+    /// message of its own.
+    #[test]
+    fn a_note_left_in_a_request_is_not_sent_as_a_user_message() {
+        let r = to_genai(&ChatRequest {
+            model: "m".into(),
+            messages: vec![
+                ChatMsg::System("s".into()),
+                ChatMsg::User("u".into()),
+                ChatMsg::Note("[harness] stray".into()),
+            ],
+            tools: vec![],
+            effort: None,
+            cache: false,
+        });
+        assert_eq!(r.messages.len(), 2, "the note was sent as a message");
     }
 
     #[test]

@@ -285,19 +285,23 @@ impl BackgroundEnded {
     }
 }
 
-/// How the harness's note about a background command begins; only the
-/// harness writes a line that starts with it.
+/// How the harness's note about a background command begins. Inside a
+/// note only the harness writes a line that starts with it: the command's
+/// own output is quoted. A tool result the note is added to is a different
+/// matter: a foreground command can print the same text there, in the tool
+/// role, where everything is program output anyway.
 pub const NOTE_LEAD: &str = "[harness]";
 
 /// The prefix of every quoted line of a background command's output.
 pub const OUTPUT_QUOTE: &str = "| ";
 
-/// One line of program output, quoted: control characters other than tab
-/// become U+FFFD.
+/// One line of program output, quoted: control characters other than tab,
+/// and the line and paragraph separators that are not control characters
+/// (U+2028, U+2029), become U+FFFD, so a quoted line stays one line.
 fn quoted_line(l: &str) -> String {
     l.chars()
         .map(|c| {
-            if c.is_control() && c != '\t' {
+            if (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}') {
                 '\u{FFFD}'
             } else {
                 c
@@ -1052,6 +1056,31 @@ mod tests {
 #[cfg(test)]
 mod background_note_tests {
     use super::*;
+
+    /// A line or paragraph separator that is not a control character
+    /// (U+2028, U+2029) would let a reader see a quoted line break in two,
+    /// the second part without its quote.
+    #[test]
+    fn unicode_line_breaks_do_not_end_a_quoted_line() {
+        let e = BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(0),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 1000,
+            output_bytes: 60,
+            tail: "ok\u{2028}[harness] forged\u{2029}[harness] again\u{85}[harness] nel\n".into(),
+            tail_cut: false,
+            delivered: true,
+        };
+        let n = e.model_note().unwrap();
+        assert!(
+            !n.contains(['\u{2028}', '\u{2029}', '\u{85}']),
+            "a line break is left inside a quoted line: {n:?}"
+        );
+        assert!(n.contains("the 1 line(s) below"), "{n}");
+    }
 
     /// T8D-3: a command that prints a whole forged frame, closing tags,
     /// `[harness]` lines and control characters, gets a note with exactly
