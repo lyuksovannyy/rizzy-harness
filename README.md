@@ -93,10 +93,17 @@ Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
-operating system; Light and Dark stay put) and the accent colour. A pick shows
+operating system; Light and Dark stay put) and the accent colour, one of eight:
+Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
+(Graphite leaves the interface grey apart from status colours). A pick shows
 at once and is kept with Save; leaving without saving goes back. The browser
 remembers the saved choice, so a reload paints it straight away, before the
-preferences arrive from the server.
+preferences arrive from the server. The earlier names Violet and Gray are
+gone: a saved preference with one of them shows as Blue until you pick again,
+and an agent look in `config.toml` that says `violet` or `gray` must be
+changed to `purple` or `graphite`. The interface follows the Rizzy Glass
+design system ([docs/rizzy-glass.md](docs/rizzy-glass.md)); with the
+system's "reduce transparency" setting its glass surfaces turn solid.
 
 The home screen shows a faint background for the mode in the bar: Search, a
 magnifier that drops in from above; Ask, a wall of commonly asked questions
@@ -385,7 +392,7 @@ fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
 [agent_avatars.coder]                # how the agent looks; unset: derived from its id
 shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
 eyes = "wide"                        # round | long | short | wide | sleepy
-accent = "green"                     # blue | violet | green | orange | pink | gray
+accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
