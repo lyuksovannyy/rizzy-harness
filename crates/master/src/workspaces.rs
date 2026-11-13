@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use harness_store::{SessionRow, StoreError, WorkspaceRow};
 use serde::{Deserialize, Serialize};
 
+use harness_core::policy::ExecMode;
+
 use crate::Master;
 use crate::auth::Principal;
 use crate::config::{AgentChain, check_chain};
@@ -467,6 +469,91 @@ pub fn node_refusal(m: &Master, who: &Principal, node_id: &str) -> Option<String
         .then(|| LOCAL_NODE_ADMINS_ONLY.to_string())
 }
 
+/// The refusal of `host` to anyone but a server admin (N.10a part 1, until
+/// the levels per member of part 2 replace it). Not the workspace's owner:
+/// every account owns its Personal workspace, and by default any account
+/// can make a team and own it, so ownership says nothing about trust.
+pub const HOST_ADMINS_ONLY: &str = "the host mode (commands as the node's own user, without \
+     the sandbox) is for server admins until per-member levels exist; ask a server admin";
+
+/// Whether `who` may have a `host` chat (create and every later action):
+/// server admins only, the API token among them.
+pub fn host_refusal(who: &Principal) -> Option<String> {
+    (!who.is_admin()).then(|| HOST_ADMINS_ONLY.to_string())
+}
+
+/// The execution mode to ask the node for, for `who` creating an agentic
+/// chat (N.10a part 1, the interim rule): `host` only for a server admin,
+/// and only when asked for by name; without a request, `sandbox`, always
+/// sent explicitly, so a node whose only mode is `host` refuses rather than
+/// hand it over by default. The node decides last: it refuses any mode it
+/// does not offer.
+pub fn exec_mode_for(who: &Principal, requested: Option<ExecMode>) -> Result<ExecMode, String> {
+    match requested.unwrap_or(ExecMode::Sandbox) {
+        ExecMode::Host => host_refusal(who).map_or(Ok(ExecMode::Host), Err),
+        m => Ok(m),
+    }
+}
+
+/// What a create had resolved when it ended, for its host-mode audit line.
+#[derive(Debug, Default)]
+pub struct HostAudit {
+    pub workspace: Option<String>,
+    pub node: Option<String>,
+}
+
+/// One audit line for every create that asked for `host`, whichever check
+/// refused it (N.10a reviews N-d, RN-4): who ("api token" for the token),
+/// the workspace and node as resolved, and the outcome: "granted" with the
+/// session id once the chat exists, or "refused: " and the refusal's first
+/// words. No chat content.
+pub async fn audit_host_create(
+    m: &Master,
+    who: &Principal,
+    seen: &HostAudit,
+    outcome: Result<harness_core::SessionId, &str>,
+) {
+    let user = who.user_id.clone().unwrap_or_else(|| "api token".into());
+    let (outcome, session) = match outcome {
+        Ok(sid) => ("granted".to_string(), Some(sid.to_string())),
+        Err(why) => {
+            let words: String = why.chars().take(80).collect();
+            (format!("refused: {words}"), None)
+        }
+    };
+    let detail = serde_json::json!({
+        "user": user,
+        "workspace": seen.workspace,
+        "node": seen.node,
+        "outcome": outcome,
+        "session": session,
+    })
+    .to_string();
+    if let Err(e) = m
+        .inner
+        .mirror
+        .call(move |s| s.audit("session.create.host", &detail))
+        .await
+    {
+        tracing::warn!(error = %e, "could not write the host-mode audit line");
+    }
+}
+
+/// Whether `who` may drive the agentic chat `row` in its recorded mode:
+/// the create's rule, again (a demoted admin's `host` chats do no more
+/// work). Fails closed on an agentic row whose mode cannot be read.
+fn mode_refusal(who: &Principal, row: &SessionRow) -> Option<String> {
+    match row.exec_mode.as_deref().map(ExecMode::parse) {
+        Some(Some(ExecMode::Host)) => host_refusal(who),
+        Some(Some(_)) => None,
+        _ => Some(
+            "this chat's execution mode is not known here (its first event has not arrived, or \
+             names none), so it does no work"
+                .into(),
+        ),
+    }
+}
+
 /// Why `who` may not make the agentic session `row` do work, or `None`
 /// when they may (always `None` for chats). A row not mirrored far enough
 /// to know its profile counts as agentic, so the check fails closed.
@@ -487,7 +574,9 @@ pub async fn agentic_blocked(m: &Master, who: &Principal, row: &SessionRow) -> O
             Err(_) => return Some("this chat is in a workspace you are not a member of".into()),
         },
     };
-    agentic_refusal(who, ws.as_ref()).or_else(|| node_refusal(m, who, &row.node_id))
+    agentic_refusal(who, ws.as_ref())
+        .or_else(|| node_refusal(m, who, &row.node_id))
+        .or_else(|| mode_refusal(who, row))
 }
 
 /// Whether chat `row` may use its owner's personal memory (recall, and the
@@ -604,10 +693,11 @@ async fn blocked_reason(m: &Master, row: &SessionRow) -> Result<Option<String>, 
 /// start hands over late, until its owner prompts it again.
 async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
     let agentic = rows.filter(|r| r.profile.as_deref() != Some("chat") && r.owner_id.is_some());
-    // The answer depends on the owner, the chat's workspace and its node
-    // only: asked once per such triple, not once per chat (a hello's sweep
+    // The answer depends on the owner, the chat's workspace, its node and
+    // its recorded mode (N.10a: a `host` chat has its own rule, review
+    // RN-1): asked once per such tuple, not once per chat (a hello's sweep
     // reads every chat of the node).
-    type Key = (Option<String>, Option<String>, String);
+    type Key = (Option<String>, Option<String>, String, Option<String>);
     let mut asked: std::collections::HashMap<Key, Result<Option<String>, ()>> =
         std::collections::HashMap::new();
     for row in agentic {
@@ -615,6 +705,7 @@ async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
             row.owner_id.clone(),
             row.workspace_id.clone(),
             row.node_id.clone(),
+            row.exec_mode.clone(),
         );
         let reason = match asked.get(&key) {
             Some(r) => r.clone(),

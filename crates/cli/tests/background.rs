@@ -847,6 +847,7 @@ async fn node_opts(
     };
     let mode: harness_core::policy::ApprovalMode = serde_json::from_value(json!(mode)).unwrap();
     node.send(MasterToNode::Create {
+        exec_mode: None,
         no_callbacks: false,
         profile: None,
         incognito: false,

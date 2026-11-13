@@ -114,6 +114,7 @@ fn agent(ui: UiLevel) -> AgentSpec {
 
 fn session_created(parent: Option<SessionId>) -> RawEvent {
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        exec_mode: None,
         no_callbacks: false,
         title: "t".into(),
         cwd: String::new(),

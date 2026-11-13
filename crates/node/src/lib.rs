@@ -2,6 +2,7 @@
 //! session's event log, and talks to the master over a `NodeLink`.
 
 pub mod artifacts;
+pub mod exec;
 mod git;
 mod images;
 pub mod policy;
@@ -45,6 +46,8 @@ struct CreateArgs {
     agent: Option<harness_core::agent::AgentSpec>,
     incognito: bool,
     no_callbacks: bool,
+    /// A request only: [`exec::ExecOffers::choose`] decides.
+    exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
 /// The longest a delete waits for its session's background commands: the
@@ -507,6 +510,9 @@ impl NodeRuntime {
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
+                // The modes it offers and their gaps (N.10a), as decided at
+                // start.
+                capabilities.extend(self.inner.cfg.policy.exec.capabilities());
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
@@ -760,7 +766,13 @@ impl NodeRuntime {
     }
 
     async fn audit(&self, kind: &'static str, sid: SessionId) {
-        let detail = serde_json::json!({ "session_id": sid }).to_string();
+        self.audit_with(kind, sid, serde_json::json!({})).await
+    }
+
+    /// [`Self::audit`] with more ids (never content).
+    async fn audit_with(&self, kind: &'static str, sid: SessionId, mut extra: serde_json::Value) {
+        extra["session_id"] = serde_json::json!(sid);
+        let detail = extra.to_string();
         let _ = self
             .inner
             .cfg
@@ -817,9 +829,17 @@ impl NodeRuntime {
                 profile,
                 agent,
                 incognito,
+                exec_mode,
                 ..
             } => {
-                self.audit("session.create", session_id).await;
+                // The mode asked for (N.10a review N-d); what was chosen is
+                // in `session_created`.
+                self.audit_with(
+                    "session.create",
+                    session_id,
+                    serde_json::json!({ "exec_mode": exec_mode.map(|m| m.id()) }),
+                )
+                .await;
                 self.create(
                     session_id,
                     CreateArgs {
@@ -831,6 +851,7 @@ impl NodeRuntime {
                         agent,
                         incognito,
                         no_callbacks,
+                        exec_mode,
                     },
                 )
                 .await
@@ -993,6 +1014,7 @@ impl NodeRuntime {
             agent,
             incognito,
             no_callbacks,
+            exec_mode,
         } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
@@ -1008,12 +1030,25 @@ impl NodeRuntime {
             ));
         }
         let policy = &self.inner.cfg.policy;
+        // The mode first (N.10a): chosen inside what this node offers,
+        // whatever the master asked; a chat session runs no commands and has
+        // none.
+        let exec_mode = match profile {
+            Profile::Agentic => Some(policy.exec.choose(exec_mode)?),
+            Profile::Chat if exec_mode.is_some() => {
+                return Err("a chat session runs no commands and has no execution mode".into());
+            }
+            Profile::Chat => None,
+        };
         // Chat sessions have no workspace; their runtime offers no file tools.
         let cwd = match profile {
             Profile::Agentic => policy.check_cwd(&cwd)?,
             Profile::Chat => std::path::PathBuf::new(),
         };
         let mode = policy.effective_mode(approval_mode);
+        // A `host` session asks, whatever was asked and whatever node.toml
+        // allows (review N-e).
+        let mode = exec_mode.map_or(mode, |e| mode.min(e.max_approval()));
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())
@@ -1033,6 +1068,7 @@ impl NodeRuntime {
                 parent_session: None,
                 owned: None,
                 no_callbacks,
+                exec_mode,
             },
         )
         .await

@@ -377,6 +377,12 @@ pub struct SessionCreated {
     /// callbacks into it for good, whatever a later command says.
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_callbacks: bool,
+    /// How this session's commands run (N.10a): chosen by the node at
+    /// create from what it offers, never changed. `None` for a chat
+    /// session, which runs no commands; an agentic session without one
+    /// runs nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_mode: Option<crate::policy::ExecMode>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -978,6 +984,7 @@ mod tests {
         };
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
+                exec_mode: None,
                 no_callbacks: false,
                 title: "t".into(),
                 cwd: "".into(),

@@ -590,15 +590,18 @@ async fn agentic_node(
     // no file tool may touch it, whatever node.toml allows (AUDIT S1).
     let mut policy = policy;
     policy.protect(dir);
-    // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once.
-    let sandbox = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;
-    // The node's own git reads a session's folder in the same sandbox
-    // (R.1, R1b-2); with `mode = "off"` it runs unconfined.
-    let git_sandbox = match &sandbox {
+    // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once; the
+    // execution modes this node offers follow from it (N.10a).
+    let (sandbox, host_shell) = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;
+    // The node's own git reads a session's folder in the same Landlock
+    // rules, never contained (R.1, R1b-2); with `mode = "off"` it runs
+    // unconfined.
+    use harness_core::policy::ExecMode;
+    let git_sandbox = match &host_shell {
         harness_tools::sandbox::Confinement::Confined { sandbox, .. } => Some(sandbox.clone()),
         _ => None,
     };
-    tracing::info!("checkpoints: {}", checkpoint_confinement(&sandbox));
+    tracing::info!("checkpoints: {}", checkpoint_confinement(&host_shell));
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
@@ -617,7 +620,10 @@ async fn agentic_node(
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),
-            sandbox,
+            // Each mode's confinement only where the node offers it (review
+            // L-f): a log that names another mode starts nothing.
+            sandbox: policy.exec.confinement_for(ExecMode::Sandbox, sandbox),
+            host_shell: policy.exec.confinement_for(ExecMode::Host, host_shell),
             // The master puts the provider's default effort on each turn's
             // spec, for models that take one.
             effort: None,
@@ -666,18 +672,44 @@ fn checkpoint_confinement(c: &harness_tools::sandbox::Confinement) -> &'static s
     }
 }
 
-/// Set up the shell sandbox for an agentic runtime and record the result
-/// in its policy. `node run` refuses to start without it (`required`);
-/// `serve` starts and its node refuses agentic sessions.
+/// The one line on the execution modes, for the log and `doctor`: which
+/// modes this node offers, or the refusal of a node that offers none.
+fn exec_line(o: &harness_node::exec::ExecOffers) -> Result<String, String> {
+    use harness_core::policy::ExecMode;
+    if let Some(why) = o.none_offered() {
+        return Err(format!("NONE: no agentic session runs here: {why}"));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for m in ExecMode::ALL {
+        match o.why_not(m) {
+            None if m == ExecMode::Host => parts.push(
+                "host (OFFERED: its commands run as this OS user without bubblewrap; README, \
+                 \"Execution modes\")"
+                    .into(),
+            ),
+            None => parts.push(m.id().into()),
+            Some(why) => parts.push(format!("not {} ({why})", m.id())),
+        }
+    }
+    Ok(parts.join("; "))
+}
+
+/// Set up the shell sandbox for an agentic runtime and record the modes
+/// it lets the node offer in its policy: the `sandbox` mode's confinement
+/// and the `host` mode's (and the helpers'). `node run` refuses to start
+/// when the node offers no mode; `serve` starts and its node refuses
+/// agentic sessions, saying why.
 fn start_sandbox(
     dir: &Path,
     policy: &mut NodePolicy,
     refuse_to_start: bool,
-) -> anyhow::Result<harness_tools::sandbox::Confinement> {
+) -> anyhow::Result<(
+    harness_tools::sandbox::Confinement,
+    harness_tools::sandbox::Confinement,
+)> {
     let node_toml = dir.join("node.toml");
     let settings = policy
-        .sandbox
-        .settings()
+        .sandbox_settings()
         .map_err(|e| anyhow::anyhow!("{}: {e}", node_toml.display()))?;
     // A node in the network-off gap logs, once, that it left it (T8B-1).
     harness_tools::sandbox::set_network_log(|l| tracing::info!("{l}"));
@@ -689,6 +721,7 @@ fn start_sandbox(
         &node_toml,
     )
     .map_err(anyhow::Error::msg)?;
+    let offers = harness_node::exec::ExecOffers::from_start(&s, policy);
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
@@ -704,17 +737,23 @@ fn start_sandbox(
         harness_tools::sandbox::ContainLevel::Warn => {
             tracing::warn!("shell containment: {}", s.contain_summary)
         }
-        harness_tools::sandbox::ContainLevel::Refused => {
+        harness_tools::sandbox::ContainLevel::Refused if offers.offered().is_empty() => {
             tracing::error!("shell containment: {}", s.contain_summary)
         }
+        harness_tools::sandbox::ContainLevel::Refused => {
+            tracing::warn!("shell containment: {}", s.contain_summary)
+        }
     }
-    if s.view_summary.is_empty() {
-        tracing::warn!(
-            "file view: none, the shell is not contained: a command sees this machine's whole \
-             file system and only Landlock decides what it can open"
-        );
-    } else {
+    if !s.view_summary.is_empty() {
         tracing::info!("file view: {}", s.view_summary);
+    }
+    match exec_line(&offers) {
+        Err(why) if refuse_to_start => bail!("{why}"),
+        Err(why) => tracing::error!("execution modes: {why}"),
+        Ok(line) if offers.offers(harness_core::policy::ExecMode::Host) => {
+            tracing::warn!("execution modes: {line}")
+        }
+        Ok(line) => tracing::info!("execution modes: {line}"),
     }
     if let Some(root) = &s.tmp_root {
         // Before it serves: what a dead node left that its guard could not
@@ -760,9 +799,9 @@ fn start_sandbox(
         }
         harness_tools::sandbox::reset_tmp(root).map_err(anyhow::Error::msg)?;
     }
-    policy.sandbox_refusal = s.refusal;
+    policy.exec = offers;
     policy.sandbox_tmp = s.tmp_root;
-    Ok(s.confinement)
+    Ok((s.confinement, s.uncontained))
 }
 
 async fn node_join(dir: &Path, url: &str, token: &str, fingerprint: &str) -> anyhow::Result<()> {
@@ -924,77 +963,73 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
             })
             .map_err(|e| e.to_string()),
     );
-    check(
-        "shell sandbox",
-        NodePolicy::load(&dir.join("node.toml"))
-            .map_err(|e| e.to_string())
-            .and_then(|mut p| {
-                p.protect(dir);
-                let node_toml = dir.join("node.toml");
-                harness_tools::sandbox::start(
-                    &p.sandbox.settings()?,
-                    dir,
-                    &p.protected_dirs,
-                    &p.workspace_roots,
-                    &node_toml,
-                )
-            })
-            .and_then(|s| match s.refusal {
-                // A refusal for the containment is reported on its own line.
-                Some(_) if s.contain_level != ContainLevel::Refused => Err(s.summary),
-                _ => Ok(s.summary),
-            }),
-    );
-    // Three marks: a containment with a named gap, or none, is a warning,
-    // never "ok" (review N-5); one that makes the node refuse is a failure.
-    let containment = NodePolicy::load(&dir.join("node.toml"))
+    // The sandbox's start, once, as the node makes it (its own data
+    // directory protected), and the modes it lets the node offer (N.10a).
+    let started = NodePolicy::load(&dir.join("node.toml"))
         .map_err(|e| e.to_string())
         .and_then(|mut p| {
             p.protect(dir);
             harness_tools::sandbox::start(
-                &p.sandbox.settings()?,
+                &p.sandbox_settings()?,
                 dir,
                 &p.protected_dirs,
                 &p.workspace_roots,
                 &dir.join("node.toml"),
             )
+            .map(|s| {
+                let offers = harness_node::exec::ExecOffers::from_start(&s, &p);
+                (s, offers)
+            })
         });
-    match &containment {
-        Ok(s) if s.contain_level == ContainLevel::Warn => {
+    check(
+        "shell sandbox",
+        started
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|(s, _)| match &s.refusal {
+                Some(_) => Err(s.summary.clone()),
+                None => Ok(s.summary.clone()),
+            }),
+    );
+    // Three marks: a containment with a named gap is a warning, never "ok"
+    // (review N-5); the sandbox mode not offered is a warning where the node
+    // offers `host`, a failure where it then offers nothing.
+    match &started {
+        Ok((s, _)) if s.contain_level == ContainLevel::Warn => {
             println!("warn  shell containment: {}", s.contain_summary)
         }
-        Ok(s) if s.contain_level == ContainLevel::Refused => {
+        Ok((s, o)) if s.contain_level == ContainLevel::Refused && !o.offered().is_empty() => {
+            println!("warn  shell containment: {}", s.contain_summary)
+        }
+        Ok((s, _)) if s.contain_level == ContainLevel::Refused => {
             check("shell containment", Err(s.contain_summary.clone()))
         }
-        Ok(s) => check("shell containment", Ok(s.contain_summary.clone())),
+        Ok((s, _)) => check("shell containment", Ok(s.contain_summary.clone())),
         Err(e) => check("shell containment", Err(e.clone())),
     }
-    // What a contained command can see (T.8c), or that there is no view.
-    match &containment {
-        Ok(s) if !s.view_summary.is_empty() => check("file view", Ok(s.view_summary.clone())),
-        Ok(s) if s.contain_level != ContainLevel::Refused => println!(
-            "warn  file view: none, the shell is not contained: a command sees this machine's \
-             whole file system and only Landlock decides what it can open"
-        ),
-        _ => {}
+    // What a contained command can see (T.8c).
+    if let Ok((s, _)) = &started
+        && !s.view_summary.is_empty()
+    {
+        check("file view", Ok(s.view_summary.clone()));
+    }
+    match &started {
+        Ok((_, o)) => match exec_line(o) {
+            Ok(line) if o.offers(harness_core::policy::ExecMode::Host) => {
+                println!("warn  execution modes: {line}")
+            }
+            line => check("execution modes", line),
+        },
+        Err(e) => check("execution modes", Err(e.clone())),
     }
     check(
         "checkpoint git",
-        NodePolicy::load(&dir.join("node.toml"))
-            .map_err(|e| e.to_string())
-            .and_then(|mut p| {
-                p.protect(dir);
-                harness_tools::sandbox::start(
-                    &p.sandbox.settings()?,
-                    dir,
-                    &p.protected_dirs,
-                    &p.workspace_roots,
-                    &dir.join("node.toml"),
-                )
-            })
-            .and_then(|s| match &s.confinement {
+        started
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|(s, _)| match &s.uncontained {
                 harness_tools::sandbox::Confinement::Confined { .. } => {
-                    Ok(checkpoint_confinement(&s.confinement).to_string())
+                    Ok(checkpoint_confinement(&s.uncontained).to_string())
                 }
                 c => Err(checkpoint_confinement(c).to_string()),
             }),

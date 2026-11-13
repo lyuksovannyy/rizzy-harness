@@ -13,12 +13,15 @@ import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, e
 import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
-import type { Agent, AvatarState, Effort, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+import type { Agent, AvatarState, Effort, ExecMode, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+import { type HostRight, mayPickHost } from "../lib/execModes";
 import { shownName } from "../md/hiddenChars";
 
 // An attached image's chip loads through a link (P-1); its own chunk, so
 // the first load does not carry the link code.
 const LinkedImg = lazy(() => import("./Linked"));
+// The host shell's choice: only those who may pick it load it (N.10a).
+const ExecChoice = lazy(() => import("./ExecChoice"));
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -57,6 +60,8 @@ export interface Submission {
   search?: { url: string; query: string };
   /** Media item ids of images sent with the message. */
   images?: string[];
+  /** Agentic: how its commands run (N.10a); `host` only once its warning was confirmed. */
+  execMode?: ExecMode;
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -107,6 +112,8 @@ export function Composer(props: {
    * upload to `workspace`'s Media. `pending`: pick up "Use in chat" (the
    * home screen). `left`: how many more this chat takes. */
   images?: { workspace: string | null; pending?: boolean; left?: number } | null;
+  /** Home: who may pick the host shell (N.10a); absent, nobody here. */
+  hostRight?: HostRight;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -149,6 +156,12 @@ export function Composer(props: {
   const [effort, setEffort] = useState<Effort | null>(null);
   const [nodeId, setNodeId] = useState(props.project?.nodeId ?? props.workers[0]?.node_id ?? "");
   const [cwd, setCwd] = useState(() => props.project?.cwd ?? recentFolders()[0] ?? "");
+  // The new chat's mode: `host` only after its warning (ExecChoice).
+  // Bound to the node it was confirmed for (review L-j): a node switch,
+  // the user's or an automatic one, never carries it to another node.
+  const [hostFor, setHostFor] = useState<string | null>(null);
+  const worker = props.workers.find((w) => w.node_id === nodeId);
+  const hostPickable = mayPickHost(worker, props.hostRight);
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
   const [popupClosed, setPopupClosed] = useState(false);
@@ -328,6 +341,13 @@ export function Composer(props: {
       setErr(t("composer.folder"));
       return;
     }
+    // Always a mode the person chose: `host` only once confirmed, else
+    // `sandbox`, which a node without it refuses (never the node's default).
+    const exec: ExecMode = hostPickable && hostFor === nodeId ? "host" : "sandbox";
+    if (mode === "agentic" && hostPickable && exec === "sandbox" && !worker?.exec_modes?.includes("sandbox")) {
+      setErr("This node runs commands only in the host shell: choose it under Commands first.");
+      return;
+    }
     const images = pictures.map((x) => x.media_id!);
     if (images.length && (blind || tempChat)) {
       setErr(`${blind ? `${modelLabel(blind, props.models)} can't read images` : "A temporary chat takes no images"}; remove them to send.`);
@@ -349,6 +369,7 @@ export function Composer(props: {
         compareWith: home && mode === "ask" && compareWith && compareWith !== model ? compareWith : null,
         search: searching ? { url: engineUrl, query: typedEngine ? typedEngine.query.trim() || body : body } : undefined,
         ...(images.length ? { images } : {}),
+        ...(home && mode === "agentic" ? { execMode: exec } : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
@@ -356,6 +377,8 @@ export function Composer(props: {
       setFiles([]);
       setPictures([]);
       setManual(false);
+      // The host shell is chosen again, with its warning, for each chat.
+      setHostFor(null);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -752,7 +775,14 @@ export function Composer(props: {
           <div className="composer-row agentic-row">
             <label>
               {t("composer.node")}
-              <select className="pill" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
+              <select
+                className="pill"
+                value={nodeId}
+                onChange={(e) => {
+                  setNodeId(e.target.value);
+                  setHostFor(null);
+                }}
+              >
                 {props.workers.map((n) => (
                   <option key={n.node_id} value={n.node_id}>
                     {n.embedded ? `local (${shownName(n.hostname)})` : shownName(n.hostname)}
@@ -775,6 +805,18 @@ export function Composer(props: {
                 ))}
               </datalist>
             </label>
+            {hostPickable && worker && (
+              <Suspense fallback={null}>
+              <ExecChoice
+                // A choice is for one node: another starts at the sandbox.
+                key={worker.node_id}
+                node={worker.embedded ? "local" : shownName(worker.hostname)}
+                offered={worker.exec_modes ?? []}
+                value={hostFor === worker.node_id ? "host" : undefined}
+                onChange={(m) => setHostFor(m === "host" ? worker.node_id : null)}
+              />
+              </Suspense>
+            )}
           </div>
         )}
       </div>
