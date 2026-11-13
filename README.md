@@ -4,9 +4,17 @@
 [![image](https://img.shields.io/badge/ghcr.io-rizzy--harness-blue?logo=docker)](https://github.com/lyuksovannyy/rizzy-harness/pkgs/container/rizzy-harness)
 [![release](https://img.shields.io/github/v/release/lyuksovannyy/rizzy-harness?include_prereleases&sort=semver)](https://github.com/lyuksovannyy/rizzy-harness/releases)
 
-> **Pre-release.** There is no tagged release and no upgrade path yet: the
-> data directory's format still changes without migrations, so an update can
-> require wiping it. Do not keep anything in it you cannot lose. A security
+> **Pre-release.** There is no tagged release and no upgrade path yet: until
+> the first tag the data directory's format still changes in place, so an
+> update can require wiping it. Each database records its schema version, and
+> a build refuses to start on one it would misread, naming the file and
+> leaving it unchanged. A database a newer build wrote (a downgrade, a rolled
+> back update) means: run that build or a newer one; the data is intact. A
+> database whose tables are not those of its version, including one from
+> before schema versions whose tables are not exactly version 1's (a data
+> directory from an earlier pre-release commit), means, until the first tag:
+> remove the data directory (or move it aside) and start again. Do not keep
+> anything in it you cannot lose. A security
 > review ([`AUDIT.md`](AUDIT.md)) is being worked through in
 > [`FIX_PLAN.md`](FIX_PLAN.md); until its Phase 2 is done, run it on
 > `127.0.0.1` for yourself only.

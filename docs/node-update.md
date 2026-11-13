@@ -226,6 +226,15 @@ its master within 2 minutes. If it does, it deletes the file and reports success
 fetches that build again and reports the rollback. A build that crashes before its own code runs
 is caught by the preflight, not here.
 
+**Open point for N.9: rollback across a schema version** (fix plan 4.3, PLAN.md T42). A build
+refuses a database with a newer schema version than its own. A new build that migrates `node.db`
+at start and then fails its handshake leaves a `node.db` the rolled-back build refuses, and the
+rollback ends in a node that does not start. N.9 must choose one of: the new build migrates only
+after the handshake is accepted (`Accepted`); or it keeps a copy of `node.db` made before the
+migration (`VACUUM INTO`, fix plan 4.4) and the rollback restores that copy, losing what the new
+build logged; or an update that changes a schema version is never installed automatically (never
+`auto`). Not decided; N.9 is not done until it is.
+
 ### 6.4 What trust this is
 
 Today a compromised master can drive agent turns only inside each node's policy and sandbox

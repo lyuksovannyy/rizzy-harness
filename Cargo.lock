@@ -1422,6 +1422,7 @@ dependencies = [
  "harness-tools",
  "nix",
  "reqwest",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",
@@ -1580,6 +1581,7 @@ dependencies = [
  "async-trait",
  "axum",
  "harness-core",
+ "harness-store",
  "harness-tools",
  "jiff",
  "reqwest",
@@ -1641,6 +1643,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
