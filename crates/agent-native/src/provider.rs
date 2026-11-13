@@ -115,28 +115,27 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
 /// A tool result's own text as the provider is sent it (R-2): a line that
 /// starts like the harness's note (`[harness]`) gets a `\` in front, in
 /// every tool result, whether a note joins it or not, so the only lines
-/// that start that way are the harness's own. Deterministic (the cache
-/// prefix does not move); the log and the UI keep the text as it was. No
-/// allocation when no line starts that way.
+/// that start that way are the harness's own. A line starts after any line
+/// break a reader may show as one: a carriage return (a progress line),
+/// vertical tab, form feed, NEL, U+2028, U+2029. Deterministic (the cache
+/// prefix does not move); the log and the UI keep the text as it was. The
+/// text is returned as it came when no line starts that way.
 pub fn escape_leads(content: String) -> String {
     use harness_core::event::NOTE_LEAD;
-    // `NOTE_LEAD` after a line break, without building it.
-    const AFTER_BREAK: &str = "\n[harness]";
-    debug_assert_eq!(&AFTER_BREAK[1..], NOTE_LEAD);
-    if !content.starts_with(NOTE_LEAD) && !content.contains(AFTER_BREAK) {
+    const BREAKS: [char; 7] = ['\n', '\r', '\x0b', '\x0c', '\u{85}', '\u{2028}', '\u{2029}'];
+    if !content.contains(NOTE_LEAD) {
         return content;
     }
     let mut out = String::with_capacity(content.len() + 8);
-    for (i, line) in content.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
+    let mut escaped = false;
+    for line in content.split_inclusive(BREAKS) {
         if line.starts_with(NOTE_LEAD) {
             out.push('\\');
+            escaped = true;
         }
         out.push_str(line);
     }
-    out
+    if escaped { out } else { content }
 }
 
 /// The person's own text of a user message [`place_notes`] put notes in

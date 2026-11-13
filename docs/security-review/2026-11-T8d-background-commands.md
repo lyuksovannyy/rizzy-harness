@@ -1034,3 +1034,24 @@ process with `review_t8d` in its command line or working directory, no
 temporary folder and unmount it), no copy of the proofs left in
 `crates/cli/tests/`. The owner's server was never signalled and its data
 directory never opened.
+
+## 8. After the re-check: R-1, R-2, R-4 and R-5 closed
+
+Written by the coordinator, not by the reviewer. These four were fixed after section 7 and were
+not sent back for a third review; each is covered by a test in `crates/cli/tests/background.rs`
+that failed before its fix. The three `remainder_…` proofs asserted the open state and are
+removed from `review_t8d_proofs.rs`.
+
+| Item | Fix | Test |
+|---|---|---|
+| R-5 | `3064b52`, `500ad76`: the two tests look at the events already seen and hold the idle command on a file; the flood's memory is measured in a process of its own | the file passed whole five times in a row (30 tests) |
+| R-4 | `af25dfa`: a background start's result and its live stream come from the scrubbed ring | `a_secret_cut_by_the_first_wait_reaches_neither_the_result_nor_the_stream` |
+| R-1 | `90c4d30`: the stop waits for running commands and unrecorded ends, not for node slots; a recorded still-alive end is logged once | `a_stuck_background_command_does_not_hold_the_nodes_stop` |
+| R-2 | `d7d9ac6` and the commit that adds this section: a line of a tool result's own text that starts `[harness]`, after any line break, is sent to the provider as `\[harness]` | `a_foreground_result_cannot_carry_a_note_of_its_own`, `a_lead_after_any_line_break_is_escaped` |
+
+Also after section 7: where background commands are off (`background_per_session = 0`, a
+sub-agent's turn) the model is not offered `bash_output` and `bash_stop`, and `bash` says nothing
+of `background` (`6eca089`).
+
+Still not tested: compaction with a note in the summarised part, any real provider, the approval
+card in a browser, the hello's sweep with the link down.

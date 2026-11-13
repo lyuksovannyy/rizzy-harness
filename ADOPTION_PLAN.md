@@ -339,7 +339,7 @@ be closed. These come first, in the order below the table.
 | The approval card shows what runs but cannot make anyone read it | As Claude Desktop does: the composer's text field is replaced by the choice to allow or deny, and the browser sends a notification | **W.6** |
 | The static API token acts as every user | No static token. API keys per user and per workspace; creating a workspace key needs its own permission | **T.5**, extended |
 | The sandbox exists only where the kernel has Landlock | First: replace it with Podman, after a separate branch with quick Podman tests. **Superseded the same day by O12** ("Bubblewrap + Podman", from B.11's results): bubblewrap for plain sessions, rootless Podman for image-based environments, Landlock kept for the helpers, inside bubblewrap and where bubblewrap cannot run | **B.11, done and decided**; then T.8a to T.8c; N.4 for environments, in Phase N |
-| Processes an agent leaves running outlive their command | Background commands that call the agent back when they end; every command states a timeout (60 s when none is given) | **T.8d**, on T.8a's containment |
+| Processes an agent leaves running outlive their command | Background commands that call the agent back when they end; a foreground command stops at its timeout (60 s when none is given), a background command must state one | **T.8d**, on T.8a's containment |
 
 Not reopened, so they stay as recorded: the workspace `agentic` role is not a boundary until
 the nodes design is built (N.1 to N.4); the tree-sitter parsers run in the process that holds
