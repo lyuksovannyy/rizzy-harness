@@ -1043,6 +1043,17 @@ The tool description the model sees states the ceiling. Neither an agent
 definition, a prompt nor the master can raise either; a value outside its
 range stops the node at start.
 
+**Repeated calls.** Within one turn, a call the agent makes again with the same
+arguments that gives the same result is answered with a warning from the
+second time on. The fifth such call in a row is not run (nor offered for
+approval): its result reads "Not run: this exact call gave the same result
+several times in a row in this turn", and if the agent asks for it once more
+the turn ends with "stopped: the model asked again for a call the
+repeated-call guard had refused". A result that changes (a poll of a running
+command, a file that changed) starts the count again, and so does a change
+that did something new in between (an edit, then the test run again). A new
+turn starts from zero. The guard is not configurable.
+
 **Background commands** are on by default (8 a chat, 64 a node); a node owner
 turns them off with `background_per_session = 0` in `[limits]`. While they
 are off the agent is not offered `bash_output` or `bash_stop` and `bash` does

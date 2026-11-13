@@ -483,6 +483,7 @@ async fn a_new_turn_starts_a_new_count() {
                 exit_code: None,
                 truncated: false,
                 sources: vec![],
+                note: None,
             }),
         ));
     }

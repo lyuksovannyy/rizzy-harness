@@ -729,6 +729,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
             exit_code: None,
             truncated: false,
             sources: vec![],
+            note: None,
         }));
     }
     events.push(EventKind::AssistantMessage(AssistantMessage {
