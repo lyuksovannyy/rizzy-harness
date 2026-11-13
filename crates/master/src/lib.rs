@@ -795,9 +795,11 @@ impl Master {
     /// `None` when it announced the mode, or is not connected now.
     fn mode_refusal(&self, node_id: &str, mode: ExecMode) -> Option<String> {
         let nodes = lock(&self.inner.nodes);
-        let n = nodes.get(node_id).filter(|n| n.info.connected && n.tx.is_some())?;
+        let n = nodes
+            .get(node_id)
+            .filter(|n| n.info.connected && n.tx.is_some())?;
         let cap = harness_protocol::exec_capability(mode);
-        if n.capabilities.iter().any(|c| *c == cap) {
+        if n.capabilities.contains(&cap) {
             return None;
         }
         let offers = match n.info.exec_modes.as_slice() {
@@ -806,7 +808,10 @@ impl Master {
                 .to_string(),
             m => format!(
                 "it offers the {} mode",
-                m.iter().map(|m| m.id()).collect::<Vec<_>>().join(" and the ")
+                m.iter()
+                    .map(|m| m.id())
+                    .collect::<Vec<_>>()
+                    .join(" and the ")
             ),
         };
         let remedy = match mode {

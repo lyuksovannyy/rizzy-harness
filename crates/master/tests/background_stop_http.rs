@@ -553,10 +553,15 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
         let make = |mode: &'static str| {
             let (t, carol) = (&t, carol.clone());
             async move {
-                let body = json!({"cwd": "/w", "title": mode, "node_id": "node-r1", "exec_mode": mode});
+                let body =
+                    json!({"cwd": "/w", "title": mode, "node_id": "node-r1", "exec_mode": mode});
                 let (st, v) = req(t, Method::POST, "/api/sessions", Some(body), &carol).await;
                 assert_eq!(st, StatusCode::OK, "{v}");
-                v["session_id"].as_str().unwrap().parse::<SessionId>().unwrap()
+                v["session_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<SessionId>()
+                    .unwrap()
             }
         };
         let (host, sandbox) = if host_first {
@@ -608,9 +613,21 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
         // A moment more, for a wrong stop to arrive.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let (c, s): (Vec<_>, Vec<_>) = (cancels(), remote.stops().iter().map(|s| s.0).collect());
-        assert!(c.contains(&host), "host_first={host_first}: host not cancelled: {c:?}");
-        assert!(s.contains(&host), "host_first={host_first}: host not stopped: {s:?}");
-        assert!(!c.contains(&sandbox), "host_first={host_first}: sandbox cancelled");
-        assert!(!s.contains(&sandbox), "host_first={host_first}: sandbox stopped");
+        assert!(
+            c.contains(&host),
+            "host_first={host_first}: host not cancelled: {c:?}"
+        );
+        assert!(
+            s.contains(&host),
+            "host_first={host_first}: host not stopped: {s:?}"
+        );
+        assert!(
+            !c.contains(&sandbox),
+            "host_first={host_first}: sandbox cancelled"
+        );
+        assert!(
+            !s.contains(&sandbox),
+            "host_first={host_first}: sandbox stopped"
+        );
     }
 }

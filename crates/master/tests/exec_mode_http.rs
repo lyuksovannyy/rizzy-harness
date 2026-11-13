@@ -422,9 +422,7 @@ async fn host_is_for_server_admins_only() {
 async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
     let s = start().await;
     let lines = |s: &Server| s.mirror.audit_lines("session.create.host").unwrap();
-    let last = |s: &Server| -> Value {
-        serde_json::from_str(&lines(s).last().unwrap().1).unwrap()
-    };
+    let last = |s: &Server| -> Value { serde_json::from_str(&lines(s).last().unwrap().1).unwrap() };
     // No agentic grant: refused before the mode rule.
     let (grace, grace_id) = account_with(&s, "grace", false).await;
     let (st, _) = create_in(&s, &grace, None, BOTH, Some("host")).await;
@@ -433,7 +431,13 @@ async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
     assert_eq!(l["user"], grace_id.as_str(), "{l}");
     assert_eq!(l["node"], BOTH, "{l}");
     assert!(l["workspace"].is_string(), "{l}");
-    assert!(l["outcome"].as_str().unwrap().starts_with("refused: agentic sessions"), "{l}");
+    assert!(
+        l["outcome"]
+            .as_str()
+            .unwrap()
+            .starts_with("refused: agentic sessions"),
+        "{l}"
+    );
     // The API token, no node named: the node as the master resolves it
     // (the embedded one), refused there by the node.
     let (st, _) = call(
@@ -448,7 +452,10 @@ async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
     let l = last(&s);
     assert_eq!(l["user"], "api token", "{l}");
     assert_eq!(l["node"], "local", "{l}");
-    assert!(l["outcome"].as_str().unwrap().starts_with("refused: "), "{l}");
+    assert!(
+        l["outcome"].as_str().unwrap().starts_with("refused: "),
+        "{l}"
+    );
     // Granted: after the create, with its session id.
     let ws = personal(&s, &s.admin).await;
     let (st, v) = create(&s, &s.admin, &ws, BOTH, Some("host")).await;
@@ -471,14 +478,24 @@ async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
 async fn a_node_that_did_not_announce_the_mode_gets_no_chat() {
     let s = start().await;
     let ws = personal(&s, &s.admin).await;
-    for (mode, remedy) in [(None, "install bubblewrap"), (Some("host"), "[execution] host = true")] {
+    for (mode, remedy) in [
+        (None, "install bubblewrap"),
+        (Some("host"), "[execution] host = true"),
+    ] {
         let (st, v) = create(&s, &s.admin, &ws, SILENT, mode).await;
         assert_ne!(st, StatusCode::OK, "{v}");
         let msg = v.to_string();
-        assert!(msg.contains(SILENT) && msg.contains("offers no mode"), "{msg}");
+        assert!(
+            msg.contains(SILENT) && msg.contains("offers no mode"),
+            "{msg}"
+        );
         assert!(msg.contains(remedy), "{mode:?}: {msg}");
     }
-    assert_eq!(*s.creates.lock().unwrap(), 0, "the careless node was sent a create");
+    assert_eq!(
+        *s.creates.lock().unwrap(),
+        0,
+        "the careless node was sent a create"
+    );
 }
 
 /// RN-3: a connected node that lacks the mode asked for is refused with
