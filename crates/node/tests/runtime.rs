@@ -3309,3 +3309,293 @@ async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
     assert_eq!(tree(&h.ws), before, "the nested writer changed the folder");
     assert!(!h.ws.join("nested.txt").exists());
 }
+
+fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
+    MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: None,
+        attachments: vec![],
+        compare: vec![],
+        req_id: req_id.into(),
+        session_id: sid,
+        text: text.into(),
+        images: vec![],
+    }
+}
+
+/// A.19: a stop denies a pending approval, ends the turn `stopped` (not
+/// `cancelled`, not left for the next start), and from then on refuses a
+/// prompt and a new session with `NODE_STOPPING`, while a cancel is still
+/// answered.
+#[tokio::test]
+async fn a_stop_closes_the_running_turn_and_refuses_new_work() {
+    let mut h = Harness::new(default_policy).await;
+    let sid = h.create().await;
+    let idle = h.create().await;
+    h.send(prompt_msg("p", sid, "run: sleep 100"));
+    h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
+        .await;
+    let left = h.node.stop(Duration::from_secs(20)).await;
+    assert!(left.is_empty(), "turns left running: {left:?}");
+    let EventKind::TurnEnded(end) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
+        unreachable!()
+    };
+    assert_eq!(end.reason, TurnEndReason::Stopped);
+    let v = SessionView::fold(&h.node.store().events_after(sid, 0, 1000).unwrap()).unwrap();
+    assert!(v.running_turn.is_none() && v.pending_approvals.is_empty());
+
+    h.send(prompt_msg("p2", idle, "hello"));
+    h.send(MasterToNode::Create {
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: "c2".into(),
+        session_id: SessionId::new(),
+        title: "t".into(),
+        cwd: h.ws.display().to_string(),
+        model: None,
+        approval_mode: None,
+    });
+    h.send(MasterToNode::Cancel {
+        req_id: "x".into(),
+        session_id: idle,
+    });
+    // A restore and a staged file are new work too (review N-11).
+    h.send(MasterToNode::Restore {
+        req_id: "r2".into(),
+        session_id: sid,
+        turn_id: "any".into(),
+        force: false,
+        rewind: false,
+    });
+    h.send(MasterToNode::ArtifactStage {
+        req_id: "s2".into(),
+        session_id: idle,
+        path: "a.txt".into(),
+        name: None,
+    });
+    let mut acks = std::collections::HashMap::new();
+    while acks.len() < 5 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), h.link.from_node.recv())
+            .await
+            .expect("no ack")
+            .unwrap();
+        if let NodeToMaster::Ack { req_id, ok, error } = msg {
+            acks.insert(req_id, (ok, error));
+        }
+    }
+    let stopping = (false, Some(harness_protocol::NODE_STOPPING.to_string()));
+    assert_eq!(acks["p2"], stopping);
+    assert_eq!(acks["c2"], stopping);
+    assert_eq!(acks["r2"], stopping);
+    assert_eq!(acks["s2"], stopping);
+    assert_eq!(acks["x"], (true, None));
+    // Nothing was started on the idle session.
+    let idle_log = h.node.store().events_after(idle, 0, 1000).unwrap();
+    assert_eq!(idle_log.len(), 1, "{idle_log:?}");
+}
+
+/// Review A19-4: a restore that passed the refusal but had not yet claimed
+/// its folder when the stop looked. Every restore racing a stop is either
+/// refused or has finished (its `restored` checkpoint in the log) by the
+/// time `stop` returns; never cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_racing_a_stop_is_refused_or_finished_before_it_returns() {
+    let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
+    for i in 0..16u64 {
+        let mut h = Harness::new(auto_policy).await;
+        let sid = h.create().await;
+        let turn = prompt_turn(&mut h, sid, "run: echo one > file.txt").await;
+        h.send(MasterToNode::Restore {
+            req_id: "r".into(),
+            session_id: sid,
+            turn_id: turn,
+            force: true,
+            rewind: false,
+        });
+        tokio::time::sleep(Duration::from_micros(i * 700)).await;
+        let left = h.node.stop(Duration::from_secs(30)).await;
+        assert!(left.is_empty(), "{left:?}");
+        let at_return = h.node.store().events_after(sid, 0, 1000).unwrap();
+        let restored = at_return.iter().any(|e| {
+            matches!(e.typed(), Ok(EventKind::Checkpoint(c)) if c.phase == CheckpointPhase::Restored)
+        });
+        match ack_for(&mut h, "r").await {
+            Err(e) if e == harness_protocol::NODE_STOPPING => {
+                *outcomes.entry("refused").or_default() += 1
+            }
+            Ok(()) if restored => *outcomes.entry("finished").or_default() += 1,
+            other => panic!(
+                "try {i}: the restore was cut by the stop: ack {other:?}, restored before stop returned: {restored}"
+            ),
+        }
+    }
+    eprintln!("outcomes: {outcomes:?}");
+}
+
+/// Review A19-5: a turn whose end could not be written is not closed, and
+/// the stop says so instead of "every turn is closed".
+#[tokio::test]
+async fn a_stop_names_a_turn_whose_end_could_not_be_written() {
+    let mut h = Harness::new(auto_policy).await;
+    let sid = h.create().await;
+    let db = rusqlite::Connection::open(h._dir.path().join("node.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER break_log BEFORE INSERT ON events
+         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message')
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+    h.send(prompt_msg("p", sid, "run: true"));
+    h.until(|k| matches!(k, EventKind::AssistantMessage(_)))
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let left = h.node.stop(Duration::from_secs(5)).await;
+    assert_eq!(left, vec![sid]);
+}
+
+/// Review N-8: an "allow" that arrives after the stop began never starts
+/// its command (the cancel wins the approval's wait), in 40 tries.
+#[tokio::test]
+async fn an_approval_allowed_after_the_stop_began_never_runs() {
+    for i in 0..40 {
+        let mut h = Harness::new(default_policy).await;
+        let sid = h.create().await;
+        let marker = format!("ran-{i}");
+        h.send(prompt_msg("p", sid, &format!("run: touch {marker}")));
+        let EventKind::ApprovalRequested(a) = h
+            .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        let allow = h.node.handle(MasterToNode::ApprovalRespond {
+            req_id: "a".into(),
+            session_id: sid,
+            approval_id: a.approval_id,
+            decision: Decision::Allow,
+        });
+        // The stop is polled first: its flag and cancel are set before the
+        // answer is handed over.
+        let (left, ()) = tokio::join!(h.node.stop(Duration::from_secs(20)), allow);
+        assert!(left.is_empty());
+        assert!(!h.ws.join(&marker).exists(), "try {i}: the command ran");
+        // And the log says the stop's cancel decided, not the late allow.
+        let EventKind::ApprovalResolved(r) = h
+            .until(|k| matches!(k, EventKind::ApprovalResolved(_)))
+            .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (r.decision, r.by),
+            (Decision::Deny, ResolvedBy::Cancelled),
+            "try {i}"
+        );
+    }
+}
+
+/// Review N-7: a turn the person cancelled just before the stop ended by
+/// their cancel, not by the stop.
+#[tokio::test]
+async fn a_cancel_before_the_stop_stays_the_users() {
+    let mut h = Harness::new(auto_policy).await;
+    let sid = h.create().await;
+    // Ignores SIGTERM: the cancel takes the tool's 2 s grace, so the stop
+    // comes while the cancelled turn is still ending.
+    h.send(prompt_msg("p", sid, "run: trap '' TERM; sleep 100"));
+    h.until(|k| matches!(k, EventKind::ToolCallStarted(_)))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    h.node
+        .handle(MasterToNode::Cancel {
+            req_id: "x".into(),
+            session_id: sid,
+        })
+        .await;
+    let left = h.node.stop(Duration::from_secs(20)).await;
+    assert!(left.is_empty());
+    let EventKind::TurnEnded(end) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
+        unreachable!()
+    };
+    assert_eq!(end.reason, TurnEndReason::Cancelled);
+}
+
+/// Review N-7: a turn that had completed and was only taking its after-turn
+/// checkpoint when the stop came ended `completed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_turn_in_its_checkpoint_stays_completed() {
+    let mut h = Harness::new(auto_policy).await;
+    let sid = h.create().await;
+    // A sparse file: its snapshot takes seconds and no disk.
+    h.send(prompt_msg("p", sid, "run: truncate -s 2G big"));
+    // The second message is the summary: the model is done.
+    h.until(|k| matches!(k, EventKind::AssistantMessage(m) if m.tool_calls.is_empty()))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let left = h.node.stop(Duration::from_secs(120)).await;
+    assert!(left.is_empty());
+    let EventKind::TurnEnded(end) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
+        unreachable!()
+    };
+    assert_eq!(end.reason, TurnEndReason::Completed);
+}
+
+/// Review R-7: a writing sub-agent being started (its worktree being made)
+/// when the stop comes never starts its turn after the stop: every child
+/// that has a turn ends `stopped`, none `cancelled`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
+    let mut started_after = Vec::new();
+    for i in 0..12u64 {
+        let mut h = Harness::new(auto_policy).await;
+        init_repo(&h.ws);
+        let sid = h.create().await;
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: Some(agent("lead", vec![agent("dev", vec![])])),
+            attachments: vec![],
+            compare: vec![],
+            req_id: "p".into(),
+            session_id: sid,
+            text: "delegate: dev=slow: 400".into(),
+            images: vec![],
+        });
+        h.until(|k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "delegate"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(i * 7)).await;
+        let left = h.node.stop(Duration::from_secs(30)).await;
+        assert!(left.is_empty(), "{left:?}");
+        for row in h.node.store().sessions().unwrap() {
+            if row.session_id == sid {
+                continue;
+            }
+            let evs = h
+                .node
+                .store()
+                .events_after(row.session_id, 0, 10_000)
+                .unwrap();
+            let v = SessionView::fold(&evs).unwrap();
+            let ends: Vec<TurnEndReason> = v
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    Item::TurnEnd { reason, .. } => Some(*reason),
+                    _ => None,
+                })
+                .collect();
+            if ends.iter().any(|r| *r != TurnEndReason::Stopped) {
+                started_after.push((i, ends));
+            }
+        }
+    }
+    assert!(
+        started_after.is_empty(),
+        "children whose turn did not end by the stop: {started_after:?}"
+    );
+}

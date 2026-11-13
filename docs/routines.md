@@ -115,8 +115,22 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
   (24), or running longer than its `max_runtime_min` (counted from when it last started or
   resumed running), is cancelled and recorded as `timed_out`.
 - **Restart.** `pending` runs become `interrupted` and are never retried (turns are not resumed,
-  PLAN §2). `running` and `waiting` runs are followed again, or finished from their chat's first
-  `turn_ended`.
+  PLAN §2); they are not counted (below). `running` and `waiting` runs are followed
+  again, or finished from their chat's first `turn_ended`.
+- **A stop (A.19).** A run that a stop cut is recorded and **not counted** toward the five
+  failures, and **not run again by itself**: it ends `interrupted` with a reason that says
+  which: "the node or the server was stopped while the run's turn ran" (its turn ended
+  `stopped`), "the server stopped before the run's turn started" (a launch the stopping server
+  refused, or, at the next start, a `running` run whose chat has no `turn_started`), "the
+  server restarted before the run started" (a `pending` run at start, such as a retry that
+  was waiting in memory). A webhook's event of a cut run is not replayed. The next occurrence
+  runs as scheduled; the person can use **Run now**. A run whose turn a crash interrupted
+  (`turn_ended` `interrupted`, written by the node's next start, or a chat whose turn started
+  and never ended) still counts, so a routine that brings its node down every time is paused.
+  A run waiting for an absent or stopping remote node is retried as for any offline node and
+  ends `failed`, counted, when the retries run out. While the server stops, the scheduler
+  starts nothing and **Run now** and webhook calls are answered 503 ("the server is stopping:
+  try again once it is back") with no run recorded.
 - **Losing access mid-run.** Agentic turns are cancelled by the existing revocation sweep and the
   run records `cancelled`; a chat-profile run finishes its current turn. Either way the next fire
   is blocked and pauses the routine.

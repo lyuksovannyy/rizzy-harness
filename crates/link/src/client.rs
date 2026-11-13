@@ -19,7 +19,12 @@ pub struct Remote {
 /// Run until `stop`. `attach` connects the node runtime and returns its
 /// channels (called once per connection; it replays `hello` with heads, so
 /// the master resumes whatever it missed while the link was down).
-/// A rejection (revoked key) ends the loop with an error.
+/// A rejection ends the loop with an error: each one the master sends needs
+/// a person to act (a revoked or unknown key: join again; another protocol
+/// version: upgrade the older side), so trying again changes nothing.
+/// Everything else (a master that is down or restarting, a network error,
+/// a TLS failure, a timeout, a link dropped after `accepted`) is retried
+/// with backoff up to 30 s.
 ///
 /// The channels are bounded: when the runtime's command queue is full the
 /// master's socket is not read, so a master cannot make the node buffer
@@ -53,7 +58,7 @@ where
     while !stop.is_cancelled() {
         match session(&remote, &key, &stop, timing, &attach).await {
             Ok(()) => backoff = Duration::from_millis(250),
-            Err(LinkError::Rejected(r)) => return Err(LinkError::Rejected(r)),
+            Err(e @ (LinkError::Rejected(_) | LinkError::Untrusted(_))) => return Err(e),
             Err(e) => tracing::warn!(error = %e, "link to master failed"),
         }
         tokio::select! {
@@ -73,13 +78,21 @@ pub async fn connect_node(
     key: &NodeKey,
     timing: Timing,
 ) -> Result<(ClientStream, String), LinkError> {
-    open(&remote.url, &remote.fingerprint, key, timing, |signature| {
+    let (ws, id) = open(&remote.url, &remote.fingerprint, key, timing, |signature| {
         Hello::Auth {
             node_id: remote.node_id.clone(),
             signature,
+            protocol_version: harness_protocol::PROTOCOL_VERSION,
         }
     })
-    .await
+    .await?;
+    // `auth` names this node: the master confirms that id, no other.
+    if id != remote.node_id {
+        return Err(LinkError::Untrusted(
+            "it accepted this node under another id".into(),
+        ));
+    }
+    Ok((ws, id))
 }
 
 async fn open(
@@ -130,6 +143,7 @@ pub async fn join(
             public_key: key.public_hex(),
             hostname: hostname.to_string(),
             signature,
+            protocol_version: harness_protocol::PROTOCOL_VERSION,
         }
     })
     .await?;

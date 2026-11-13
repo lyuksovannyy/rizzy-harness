@@ -1109,6 +1109,17 @@ impl Store {
         Ok(())
     }
 
+    /// Whether a join token is known and unexpired, without spending it
+    /// (a join of another protocol is refused before the token is spent,
+    /// and only to whoever holds a valid one).
+    pub fn join_token_valid(&self, token_hash: &str, now_ms: i64) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM join_tokens WHERE token_hash = ?1 AND expires_ms > ?2)",
+            params![token_hash, now_ms],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Consume a join token and register the node, atomically. Returns the
     /// assigned node id, or `None` if the token is unknown, used or expired,
     /// or the key is already registered.
@@ -1322,6 +1333,19 @@ impl Store {
         ids: &[String],
         owner: Option<&str>,
     ) -> Result<Option<Vec<harness_core::event::Attachment>>> {
+        Ok(self
+            .attachments_take_owned(ids, owner)?
+            .map(|v| v.into_iter().map(|(a, _)| a).collect()))
+    }
+
+    /// [`Self::attachments_take`], with each upload's own owner (the API
+    /// token may send anyone's): what [`Self::attachments_give_back`] needs.
+    #[allow(clippy::type_complexity)]
+    pub fn attachments_take_owned(
+        &self,
+        ids: &[String],
+        owner: Option<&str>,
+    ) -> Result<Option<Vec<(harness_core::event::Attachment, Option<String>)>>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut out = Vec::new();
@@ -1344,7 +1368,7 @@ impl Store {
                 )
                 .optional()?;
             match row {
-                Some((a, o)) if owner.is_none() || o.as_deref() == owner => out.push(a),
+                Some((a, o)) if owner.is_none() || o.as_deref() == owner => out.push((a, o)),
                 _ => return Ok(None),
             }
             tx.execute(
@@ -1354,6 +1378,29 @@ impl Store {
         }
         tx.commit()?;
         Ok(Some(out))
+    }
+
+    /// Put back uploads [`Self::attachments_take_owned`] returned for a
+    /// message that was not sent, under their own ids and to their own
+    /// owners (review R-8; an id taken again since is left). Not checked
+    /// against the unsent-uploads limit: each was within it when it was
+    /// uploaded, so an owner may briefly hold more than the limit (as many
+    /// as their refused messages carried); the purge by age still applies.
+    pub fn attachments_give_back(
+        &self,
+        ids: &[String],
+        atts: &[(harness_core::event::Attachment, Option<String>)],
+    ) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        for (id, (a, owner)) in ids.iter().zip(atts) {
+            tx.execute(
+                "INSERT OR IGNORE INTO attachments (attachment_id, owner_id, name, mime, text, truncated, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, owner, a.name, a.mime, a.text, a.truncated, harness_core::now_ms()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Drop uploads never sent, created before `before_ms`.

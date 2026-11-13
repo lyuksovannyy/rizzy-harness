@@ -77,6 +77,8 @@ struct T {
     master: Master,
     clock: Arc<AtomicI64>,
     root: String,
+    /// The chat runtime (a test stops it as the server's stop does).
+    chat: NodeRuntime,
 }
 
 /// A server on `store` with a chat runtime and an agentic node "local"
@@ -111,6 +113,7 @@ async fn serve(store: Store, dir: &Path, clock: Arc<AtomicI64>, claim: bool) -> 
         master,
         clock,
         root: root.display().to_string(),
+        chat,
     }
 }
 
@@ -1028,6 +1031,13 @@ async fn an_interval_fires_across_a_restart_and_catches_up() {
         left["status"], "interrupted",
         "never retried after a restart"
     );
+    // Never started: not the routine's failure (review R-2).
+    assert_eq!(
+        left["reason"],
+        "the server restarted before the run started"
+    );
+    let r = t2.master.inner_mirror().routine(&stray).unwrap().unwrap();
+    assert_eq!(r.consecutive_failures, 0);
     let list = wait_runs(&t2, &alex, &skip, |r| {
         r.len() == 2 && r[0]["status"] == "completed"
     })
@@ -1632,4 +1642,146 @@ async fn agentic_routines_on_the_local_node_are_for_admins() {
     assert!(v.to_string().contains("remote node"), "{v}");
     let (st, v) = create(&t, &alex, None, "a", agentic, every(60)).await;
     assert_eq!(st, StatusCode::CREATED, "{v}");
+}
+
+/// Prompts this master's chats were sent, over every chat of the
+/// routine's runs: one `turn_started` per prompt that ran.
+async fn turns_of_runs(t: &T, c: &str, id: &str) -> usize {
+    let mut n = 0;
+    for r in runs(t, c, id).await {
+        if let Some(sid) = r["session_id"].as_str() {
+            n += events(t, c, sid)
+                .await
+                .iter()
+                .filter(|e| e["kind"] == "turn_started")
+                .count();
+        }
+    }
+    n
+}
+
+/// Review A19-2 and the re-check's R-1 to R-4: a run a stop cut is
+/// recorded `interrupted` with the reason, is not counted, and is not run
+/// again by itself; the next occurrence runs as scheduled. Five stops in a
+/// row (scheduled and manual runs) leave the routine unpaused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_cut_by_a_stop_is_interrupted_uncounted_and_not_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("master.db");
+    let clock = Arc::new(AtomicI64::new(t0()));
+    let open = || Store::open(&db, Durability::Normal).unwrap();
+    let mut t = serve(open(), dir.path(), clock.clone(), true).await;
+    let (mut alex, _) = alex(&t).await;
+    let id = routine(&t, &alex, None, "Long", chat_spec("slow: 400"), every(5)).await;
+    let mut kept = Vec::new();
+    for stop in 1..=5 {
+        // Stops 1 and 2: the schedule's run; then "run now".
+        let run = if stop <= 2 {
+            t.set_clock(t0() + 5 * MIN * stop);
+            t.tick().await;
+            let list = wait_runs(&t, &alex, &id, |r| r.len() == stop as usize).await;
+            list[0]["run_id"].as_str().unwrap().to_string()
+        } else {
+            started(&t, &alex, &id).await
+        };
+        wait_status(&t, &alex, &id, &run, "running").await;
+        t.master.begin_stop();
+        assert!(t.chat.stop(Duration::from_secs(20)).await.is_empty());
+        let v = wait_status(&t, &alex, &id, &run, "interrupted").await;
+        assert_eq!(
+            v["reason"],
+            "the node or the server was stopped while the run's turn ran; it is not run again by itself",
+            "stop {stop}"
+        );
+        let r = t.master.inner_mirror().routine(&id).unwrap().unwrap();
+        assert_eq!(
+            (r.consecutive_failures, r.paused_reason.as_deref()),
+            (0, None),
+            "stop {stop}: {v}"
+        );
+        let turns = turns_of_runs(&t, &alex, &id).await;
+        assert_eq!(turns, stop as usize, "stop {stop}");
+        // The next start, on the same files: nothing is run again.
+        let d = tempfile::tempdir().unwrap();
+        let next = serve(open(), d.path(), clock.clone(), false).await;
+        kept.push((t, d));
+        t = next;
+        alex = login(&t, "alex", "admin password").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(runs(&t, &alex, &id).await.len(), stop as usize);
+        assert_eq!(
+            turns_of_runs(&t, &alex, &id).await,
+            stop as usize,
+            "relaunched"
+        );
+        assert_eq!(run_of(&t, &alex, &id, &run).await["status"], "interrupted");
+    }
+    // The next occurrence fires as scheduled and completes.
+    t.set_clock(t0() + 5 * MIN * 3);
+    t.tick().await;
+    let list = wait_runs(&t, &alex, &id, |r| {
+        r.len() == 6 && r[0]["status"] == "completed"
+    })
+    .await;
+    assert_eq!(list[0]["trigger_kind"], "schedule");
+    let r = t.master.inner_mirror().routine(&id).unwrap().unwrap();
+    assert_eq!((r.consecutive_failures, r.paused_reason), (0, None));
+}
+
+/// Review R-3: a stop in the moment of a run's launch leaves a `running`
+/// run whose chat never started its turn; the next start ends it
+/// `interrupted`, uncounted, and runs nothing.
+#[tokio::test]
+async fn a_run_whose_turn_never_started_is_interrupted_uncounted() {
+    use harness_store::routines::RunPatch;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("master.db");
+    let clock = Arc::new(AtomicI64::new(t0()));
+    let open = || Store::open(&db, Durability::Normal).unwrap();
+    let t = serve(open(), dir.path(), clock.clone(), true).await;
+    let (alex, _) = alex(&t).await;
+    let id = routine(&t, &alex, None, "Cut", chat_spec("x"), every(60)).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "chat"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let run = NewRun {
+        run_id: "0193f1c2a4b57d6e8f90123456780001".into(),
+        routine_id: id.clone(),
+        trigger_id: None,
+        trigger_kind: "manual".into(),
+        scheduled_ms: None,
+        started_ms: t0(),
+        status: "pending".into(),
+        reason: None,
+        repeats: 1,
+        event: None,
+    };
+    let store = t.master.inner_mirror();
+    store.run_start(&run).unwrap();
+    let patch = RunPatch {
+        status: Some("running".into()),
+        session_id: Some(sid.clone()),
+        ..Default::default()
+    };
+    assert!(store.run_update(&run.run_id, &patch).unwrap());
+    let d = tempfile::tempdir().unwrap();
+    let t2 = serve(open(), d.path(), clock.clone(), false).await;
+    let alex = login(&t2, "alex", "admin password").await;
+    let v = wait_status(&t2, &alex, &id, &run.run_id, "interrupted").await;
+    assert_eq!(
+        v["reason"],
+        "the server stopped before the run's turn started; it is not run again by itself"
+    );
+    let r = t2.master.inner_mirror().routine(&id).unwrap().unwrap();
+    assert_eq!(r.consecutive_failures, 0);
+    let evs = events(&t2, &alex, &sid).await;
+    assert!(!evs.iter().any(|e| e["kind"] == "turn_started"), "{evs:?}");
+    drop(t);
 }

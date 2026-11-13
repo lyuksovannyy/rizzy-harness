@@ -36,8 +36,14 @@ pub enum LinkError {
     Key(String),
     #[error("protocol: {0}")]
     Protocol(String),
-    #[error("rejected: {0}")]
+    /// The master's `rejected` reason, made printable
+    /// (`wire::printable`).
+    #[error("the master refused this node: {0}")]
     Rejected(String),
+    /// The node refuses its master: it answered outside the protocol's
+    /// shape (an id that is not one). Like a refusal, it needs a person.
+    #[error("this node refused its master: {0}")]
+    Untrusted(String),
 }
 
 pub type Result<T> = std::result::Result<T, LinkError>;

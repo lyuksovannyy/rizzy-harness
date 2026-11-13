@@ -8,16 +8,31 @@ pub mod policy;
 mod session;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use harness_core::SessionId;
 use harness_core::backend::AgentBackend;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, SessionHead};
+use harness_protocol::{MasterToNode, NODE_STOPPING, NodeToMaster, PROTOCOL_VERSION, SessionHead};
 use harness_store::Store;
 use tokio::sync::mpsc;
 
+pub use git::SNAPSHOT_TIMEOUT;
 pub use policy::NodePolicy;
 use session::Session;
+
+/// Commands that start new work, refused while the node stops: a session,
+/// a turn, a restore, a staged file.
+fn starts_work(msg: &MasterToNode) -> bool {
+    matches!(
+        msg,
+        MasterToNode::Create { .. }
+            | MasterToNode::Prompt { .. }
+            | MasterToNode::Restore { .. }
+            | MasterToNode::ArtifactStage { .. }
+    )
+}
 
 /// The fields of a `session.create` command.
 struct CreateArgs {
@@ -126,9 +141,16 @@ pub(crate) struct Inner {
     /// Where published files are staged; `None` when this runtime does not
     /// publish (the chat runtime, or `[artifacts] enabled = false`).
     pub(crate) stages: Option<Arc<artifacts::Stages>>,
+    /// Set once by [`NodeRuntime::stop`]: new work is refused from then on
+    /// ([`NODE_STOPPING`]) and a cancelled turn ends `stopped`.
+    stopping: AtomicBool,
 }
 
 impl Inner {
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn session(&self, sid: SessionId) -> Option<Arc<Session>> {
         self.sessions
             .lock()
@@ -327,6 +349,7 @@ impl NodeRuntime {
             restoring: Mutex::new(Vec::new()),
             link: Mutex::new(None),
             stages,
+            stopping: AtomicBool::new(false),
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
@@ -662,6 +685,20 @@ impl NodeRuntime {
     /// Handle one message from the master.
     pub async fn handle(&self, msg: MasterToNode) {
         let req_id = msg.req_id().map(str::to_string);
+        // A stopping node starts nothing new; answers to approvals, cancels,
+        // replays, deletes and fetches are still taken.
+        if self.inner.is_stopping() && starts_work(&msg) {
+            if let Some(req_id) = req_id {
+                self.inner
+                    .publish_wait(NodeToMaster::Ack {
+                        req_id,
+                        ok: false,
+                        error: Some(NODE_STOPPING.into()),
+                    })
+                    .await;
+            }
+            return;
+        }
         let result: Result<(), String> = match msg {
             MasterToNode::Welcome { protocol_version } => {
                 if protocol_version != PROTOCOL_VERSION {
@@ -883,6 +920,84 @@ impl NodeRuntime {
             .unwrap_or_else(|p| p.into_inner())
             .insert(sid, s);
         Ok(())
+    }
+
+    /// Stop (SIGTERM or SIGINT, A.19): from now on new work is refused with
+    /// [`NODE_STOPPING`]; every running turn is cancelled through its normal
+    /// cancel path (a command gets SIGTERM, then its guard's kill; a pending
+    /// approval is denied) and ends `stopped`; then this waits for every
+    /// turn and restore to end, at most `bound`. Returns the sessions whose
+    /// turn had not ended by then, or ended without its end in the log
+    /// (the next start closes them as `interrupted`). Idempotent.
+    pub async fn stop(&self, bound: Duration) -> Vec<SessionId> {
+        self.inner.stopping.store(true, Ordering::SeqCst);
+        let by = tokio::time::Instant::now() + bound;
+        loop {
+            // Read again each time: a prompt that claimed its turn just
+            // before the flag was set is cancelled on the next pass (and
+            // one after it refuses itself, `Session::prompt`).
+            let sessions: Vec<Arc<Session>> = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+                .cloned()
+                .collect();
+            let running: Vec<&Arc<Session>> = sessions.iter().filter(|s| s.is_running()).collect();
+            // All marked before any is cancelled: a sub-agent cancelled by
+            // its parent's token is the stop's too (review N-7).
+            for s in &running {
+                s.mark_stopped();
+            }
+            for s in &running {
+                s.cancel();
+            }
+            // After the flag, under the registry's lock: a restore either
+            // registered before (and is waited for) or refuses itself
+            // (`Session::claim_folder`, review A19-4).
+            let restoring = !self
+                .inner
+                .restoring
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty();
+            let done = running.is_empty() && !restoring;
+            if done || tokio::time::Instant::now() >= by {
+                // A turn whose end could not be written is not closed
+                // either (review A19-5).
+                return sessions
+                    .iter()
+                    .filter(|s| s.is_running() || s.is_unclosed())
+                    .map(|s| s.id())
+                    .collect();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Wait until every message queued for the master has been taken by the
+    /// link, at most `bound` (a stop's last events reach the master before
+    /// the process ends; anything left replays at the next hello). True
+    /// when the queue emptied or there is no link.
+    pub async fn flush(&self, bound: Duration) -> bool {
+        let by = tokio::time::Instant::now() + bound;
+        loop {
+            let empty = self
+                .inner
+                .link
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_none_or(|tx| tx.is_closed() || tx.capacity() == tx.max_capacity());
+            if empty {
+                return true;
+            }
+            if tokio::time::Instant::now() >= by {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Delete a session: cancel its turn, wait for it to end, drop the log.

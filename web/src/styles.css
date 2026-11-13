@@ -1672,6 +1672,7 @@ pre.diff .del {
   color: var(--fg-2);
 }
 .divider.r-interrupted,
+.divider.r-stopped,
 .divider.r-cancelled,
 .divider.r-error {
   color: var(--warn);

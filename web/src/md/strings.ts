@@ -114,6 +114,7 @@ const en = {
   "ui.turn.cancelled": "turn cancelled",
   "ui.turn.error": "turn failed",
   "ui.turn.interrupted": "turn interrupted",
+  "ui.turn.stopped": "node stopped",
 } as const;
 
 export type RichKey = keyof typeof en;

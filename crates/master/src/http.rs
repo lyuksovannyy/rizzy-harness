@@ -244,7 +244,9 @@ impl From<CommandError> for ApiError {
     fn from(e: CommandError) -> Self {
         let code = match &e {
             CommandError::UnknownSession => StatusCode::NOT_FOUND,
-            CommandError::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
+            CommandError::NodeOffline(_) | CommandError::NodeStopping => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             CommandError::Rejected(_)
             | CommandError::AgentGone(_)
@@ -1214,7 +1216,7 @@ async fn prompt(
         let (ids, owner) = (b.attachments.clone(), who.user_id.clone());
         m.inner
             .mirror
-            .call(move |s| s.attachments_take(&ids, owner.as_deref()))
+            .call(move |s| s.attachments_take_owned(&ids, owner.as_deref()))
             .await?
             .ok_or_else(|| {
                 ApiError(
@@ -1223,25 +1225,44 @@ async fn prompt(
                 )
             })?
     };
-    m.prompt(
-        sid,
-        b.text,
-        crate::PromptOpts {
-            agent_id: b.agent_id,
-            effort: b.effort,
-            context: Some(
-                crate::prefs::Prefs::load(&m, who.user_id.as_deref())
-                    .await
-                    .model_context(&who.username, jiff::Timestamp::now()),
-            ),
-            attachments,
-            compare: b.compare,
-            reply: b.reply,
-            untrusted: flags.untrusted,
-            images,
-        },
-    )
-    .await?;
+    let taken = (!attachments.is_empty()).then(|| (b.attachments.clone(), attachments.clone()));
+    let attachments = attachments.into_iter().map(|(a, _)| a).collect();
+    let sent = m
+        .prompt(
+            sid,
+            b.text,
+            crate::PromptOpts {
+                agent_id: b.agent_id,
+                effort: b.effort,
+                context: Some(
+                    crate::prefs::Prefs::load(&m, who.user_id.as_deref())
+                        .await
+                        .model_context(&who.username, jiff::Timestamp::now()),
+                ),
+                attachments,
+                compare: b.compare,
+                reply: b.reply,
+                untrusted: flags.untrusted,
+                images,
+            },
+        )
+        .await;
+    // A prompt the node certainly did not take gives its uploads back, so
+    // "send this again" works (review A19-8): a refusal (a stopping node,
+    // a turn already running) or one never sent (the node away, too
+    // large). Not after a timeout: the node may have taken it and only its
+    // answer was lost, and giving them back could let one file go twice.
+    if let (Err(e), Some((ids, atts))) = (&sent, taken)
+        && !matches!(e, CommandError::Timeout)
+        && let Err(e) = m
+            .inner
+            .mirror
+            .call(move |s| s.attachments_give_back(&ids, &atts))
+            .await
+    {
+        tracing::warn!(error = %e, "could not give a refused message's uploads back");
+    }
+    sent?;
     Ok(Json(json!({ "ok": true })))
 }
 
