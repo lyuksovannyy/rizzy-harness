@@ -1550,6 +1550,16 @@ node accepts from its master only a node id in the master's own shape
 (`a-z`, `0-9`, `-`, at most 64): anything else is refused, also with 77.
 Upgrade the server first, then its nodes.
 
+**A node on a slow link.** A node's chats share one link to the server.
+When they produce output faster than the link carries (several chats
+streaming command output over a slow uplink), the node holds back until
+the link has room, and so do Stop and approvals: a stopped command that
+is still printing keeps running until then, and so does one past its
+timeout; an approval answer or a second Stop is read late, and the
+server may report a Stop as timed out (after 15 s) although the Stop
+reached the node. This is a known limitation (experiment B.7 in
+`ADOPTION_PLAN.md`), not yet fixed (task A.21).
+
 ### Stopping a node or the server
 
 `serve` and `node run` stop the same way on SIGTERM (`systemctl stop`,
