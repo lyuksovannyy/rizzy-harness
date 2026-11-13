@@ -508,7 +508,11 @@ impl NodeRuntime {
             capabilities.push(harness_protocol::CAP_IMAGES.into());
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
-                capabilities.push(harness_protocol::CAP_CALLBACK.into());
+                // Off is silent: with `callback_turns = 0` the master asks
+                // nothing, and an end waits for the person as before.
+                if self.inner.cfg.policy.limits.callback_turns > 0 {
+                    capabilities.push(harness_protocol::CAP_CALLBACK.into());
+                }
             }
             // A fresh queue: there is room.
             let _ = out_tx.try_send(NodeToMaster::Hello {
