@@ -1,6 +1,8 @@
 //! The native agent loop: stream a completion, run requested tools (through the
 //! host's approval gate), feed results back, repeat until the model stops.
 
+#[cfg(test)]
+mod callback_tests;
 pub mod compact;
 #[cfg(test)]
 mod delegate_availability_tests;

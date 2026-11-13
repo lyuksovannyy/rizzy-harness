@@ -211,6 +211,13 @@ describe("sidebar", () => {
     expect(marks).toEqual([true, false]);
   });
 
+  test("a chat with a background command running says so; a running turn's dot wins", async () => {
+    await render({ sessions: [chat("a", { background: 2 }), chat("b", { background: 1, running: true }), chat("c")] });
+    const dots = all("a.session-item[href^='#/s/']").map((a) => [...a.querySelectorAll(".dot")].map((d) => d.className));
+    expect(dots).toEqual([["dot background"], ["dot running"], []]);
+    expect(q(".dot.background")!.getAttribute("title")).toBe("2 background command(s) running");
+  });
+
   test("a section closes and stays closed", async () => {
     await render({ sessions: [chat("a")] });
     const recent = byText(".section-toggle", "Recent");

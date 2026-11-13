@@ -1167,4 +1167,79 @@ mod background_note_tests {
             "{n}"
         );
     }
+
+    /// T.8d step 3: a callback turn's cause on the wire is
+    /// `{"callback": [ids]}`, absent for a person's turn; the refusal is an
+    /// event of its own.
+    #[test]
+    fn a_callback_cause_and_its_refusal_on_the_wire() {
+        let k = EventKind::TurnStarted(TurnStarted {
+            turn_id: "t".into(),
+            agent: None,
+            cause: Some(TurnCause::Callback(vec!["bg-1".into(), "bg-3".into()])),
+        });
+        let (kind, payload) = k.clone().into_parts();
+        assert_eq!(
+            payload,
+            serde_json::json!({"turn_id": "t", "cause": {"callback": ["bg-1", "bg-3"]}})
+        );
+        assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), k);
+        let person =
+            EventKind::from_parts("turn_started", serde_json::json!({"turn_id": "t"})).unwrap();
+        assert!(matches!(
+            person,
+            EventKind::TurnStarted(TurnStarted { cause: None, .. })
+        ));
+        let r = EventKind::CallbackRefused(CallbackRefused {
+            bg_ids: vec!["bg-4".into()],
+            reason: "3 turns in a row without you (node limit)".into(),
+        });
+        let (kind, payload) = r.clone().into_parts();
+        assert_eq!(kind, "callback_refused");
+        assert_eq!(EventKind::from_parts(&kind, payload).unwrap(), r);
+    }
+
+    /// The opening's first line is the harness's and says the person did
+    /// not write; it holds the ids and nothing else variable, so it is the
+    /// same for every rebuild.
+    #[test]
+    fn the_callback_opening_says_the_person_did_not_write() {
+        let o = callback_opening(&["bg-3".into()]);
+        assert!(o.starts_with(NOTE_LEAD), "{o}");
+        assert!(o.contains("has NOT written") && o.contains("bg-3"), "{o}");
+        assert!(!o.contains('\n'), "one line: {o}");
+        assert_eq!(o, callback_opening(&["bg-3".into()]));
+    }
+
+    /// Only an undelivered exit or timeout calls back (R7, R12).
+    #[test]
+    fn only_an_undelivered_exit_or_timeout_calls_back() {
+        let end = |reason, delivered| BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason,
+            exit_code: Some(1),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 1,
+            output_bytes: 0,
+            tail: String::new(),
+            tail_cut: false,
+            delivered,
+        };
+        use BackgroundReason::*;
+        assert!(end(Exited, false).calls_back());
+        assert!(end(TimedOut, false).calls_back());
+        assert!(!end(Exited, true).calls_back());
+        for r in [
+            StoppedByAgent,
+            StoppedByUser,
+            AccessRevoked,
+            SessionDeleted,
+            NodeStopping,
+            NodeRestarted,
+        ] {
+            assert!(!end(r, false).calls_back(), "{r:?}");
+        }
+        assert_eq!(end(Exited, false).short(), "exit 1");
+    }
 }

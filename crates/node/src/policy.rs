@@ -580,6 +580,32 @@ mod tests {
         }
     }
 
+    /// T.8d step 3: the callback bounds are node.toml's, 3 turns of 20
+    /// steps by default, checked; 0 turns callbacks off; a callback turn's
+    /// cap is never above `max_steps`.
+    #[test]
+    fn callback_limits_default_and_range() {
+        let d = NodePolicy::default().limits;
+        assert_eq!((d.callback_turns, d.callback_max_steps), (3, 20));
+        assert_eq!(d.callback_steps(), 20);
+        let p: NodePolicy = toml::from_str(
+            "[limits]\ncallback_turns = 0\ncallback_max_steps = 70\nmax_steps = 30\n",
+        )
+        .unwrap();
+        assert!(p.validate().is_ok());
+        assert_eq!(p.limits.callback_turns, 0);
+        assert_eq!(p.limits.callback_steps(), 30, "never above max_steps");
+        for bad in [
+            "callback_turns = 21",
+            "callback_max_steps = 0",
+            "callback_max_steps = 1001",
+        ] {
+            let p: NodePolicy = toml::from_str(&format!("[limits]\n{bad}\n")).unwrap();
+            let e = p.validate().unwrap_err();
+            assert!(e.contains(bad.split(' ').next().unwrap()), "{bad}: {e}");
+        }
+    }
+
     #[test]
     fn master_cannot_loosen() {
         let p = NodePolicy::default();

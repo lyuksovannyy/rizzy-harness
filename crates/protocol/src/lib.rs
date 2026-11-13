@@ -484,4 +484,54 @@ mod tests {
         );
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), p);
     }
+
+    /// T.8d step 3: `session.callback` carries ids and the agent, nothing a
+    /// person writes; `session.create` says a chat takes no callbacks only
+    /// when it is so.
+    #[test]
+    fn callback_and_no_callbacks_wire_shapes() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let c = MasterToNode::Callback {
+            req_id: "r".into(),
+            session_id: sid,
+            bg_ids: vec!["bg-1".into(), "bg-2".into()],
+            agent: None,
+            savings: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "session.callback", "req_id": "r",
+                   "session_id": "0193f2a0-0000-7000-8000-000000000001", "bg_ids": ["bg-1", "bg-2"]})
+        );
+        assert_eq!(c.req_id(), Some("r"));
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), c);
+        // Text, attachments or context are not fields of it: ignored.
+        let extra: MasterToNode = serde_json::from_value(json!({"type": "session.callback",
+            "req_id": "r", "session_id": sid, "bg_ids": ["bg-1"], "text": "do it"}))
+        .unwrap();
+        assert!(matches!(extra, MasterToNode::Callback { .. }));
+        let create = |no_callbacks| MasterToNode::Create {
+            req_id: "r".into(),
+            session_id: sid,
+            title: "t".into(),
+            cwd: "/w".into(),
+            model: None,
+            approval_mode: None,
+            profile: None,
+            agent: None,
+            incognito: false,
+            no_callbacks,
+        };
+        assert!(
+            serde_json::to_value(create(false))
+                .unwrap()
+                .get("no_callbacks")
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::to_value(create(true)).unwrap()["no_callbacks"],
+            true
+        );
+    }
 }
