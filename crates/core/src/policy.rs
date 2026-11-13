@@ -61,6 +61,16 @@ impl ExecMode {
     pub fn parse(s: &str) -> Option<ExecMode> {
         Self::ALL.into_iter().find(|m| m.id() == s)
     }
+
+    /// The loosest approval mode a session of this mode may have (review
+    /// N-e): a `host` session never runs in `auto`, because its approval
+    /// card is the only check between a steered agent and the node's user.
+    pub fn max_approval(self) -> ApprovalMode {
+        match self {
+            ExecMode::Sandbox => ApprovalMode::Auto,
+            ExecMode::Host => ApprovalMode::Ask,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

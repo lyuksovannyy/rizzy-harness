@@ -596,6 +596,7 @@ async fn agentic_node(
     // The node's own git reads a session's folder in the same Landlock
     // rules, never contained (R.1, R1b-2); with `mode = "off"` it runs
     // unconfined.
+    use harness_core::policy::ExecMode;
     let git_sandbox = match &host_shell {
         harness_tools::sandbox::Confinement::Confined { sandbox, .. } => Some(sandbox.clone()),
         _ => None,
@@ -619,8 +620,10 @@ async fn agentic_node(
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),
-            sandbox,
-            host_shell,
+            // Each mode's confinement only where the node offers it (review
+            // L-f): a log that names another mode starts nothing.
+            sandbox: policy.exec.confinement_for(ExecMode::Sandbox, sandbox),
+            host_shell: policy.exec.confinement_for(ExecMode::Host, host_shell),
             // The master puts the provider's default effort on each turn's
             // spec, for models that take one.
             effort: None,
@@ -667,34 +670,6 @@ fn checkpoint_confinement(c: &harness_tools::sandbox::Confinement) -> &'static s
         }
         Confinement::Refused(_) => "no agentic sessions here, so no checkpoints",
     }
-}
-
-/// The execution modes a started sandbox lets this node offer (N.10a):
-/// `sandbox` where its containment works, `host` where `[execution] host =
-/// true` and the Landlock sandbox does not refuse the node; with their
-/// gaps. Decided here, once, from the node's own self-test and node.toml.
-fn exec_offers(
-    s: &harness_tools::sandbox::Started,
-    policy: &NodePolicy,
-) -> harness_node::exec::ExecOffers {
-    use harness_tools::sandbox::{Confinement, Network};
-    let sandbox = match s.sandbox_refusal() {
-        Some(why) => Err(why.to_string()),
-        None => Ok(()),
-    };
-    let host = match (&s.uncontained, policy.execution.host) {
-        (Confinement::Refused(why), _) => Err(why.to_string()),
-        (_, false) => Err(harness_node::exec::host_off()),
-        (_, true) => Ok(()),
-    };
-    let mut gaps = Vec::new();
-    if sandbox.is_ok() && s.sandbox_netns_gap() {
-        gaps.push(harness_node::exec::GAP_SANDBOX_NETNS);
-    }
-    if host.is_ok() && policy.sandbox.network == Network::Off {
-        gaps.push(harness_node::exec::GAP_HOST_NETNS);
-    }
-    harness_node::exec::ExecOffers::new(sandbox, host, gaps)
 }
 
 /// The one line on the execution modes, for the log and `doctor`: which
@@ -746,7 +721,7 @@ fn start_sandbox(
         &node_toml,
     )
     .map_err(anyhow::Error::msg)?;
-    let offers = exec_offers(&s, policy);
+    let offers = harness_node::exec::ExecOffers::from_start(&s, policy);
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),
@@ -1002,7 +977,7 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                 &dir.join("node.toml"),
             )
             .map(|s| {
-                let offers = exec_offers(&s, &p);
+                let offers = harness_node::exec::ExecOffers::from_start(&s, &p);
                 (s, offers)
             })
         });

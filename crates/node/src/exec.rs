@@ -4,7 +4,9 @@
 //! The master's request only chooses inside it.
 
 use harness_core::policy::ExecMode;
-pub use harness_protocol::{GAP_HOST_NETNS, GAP_SANDBOX_NETNS};
+pub use harness_protocol::{
+    GAP_HOST_NET_OPEN, GAP_HOST_NETNS, GAP_SANDBOX_NETNS, GAP_SANDBOX_PROC, GAP_SANDBOX_SOCKETS,
+};
 
 /// Where `[execution] host = true` is explained: every refusal that names
 /// it points there.
@@ -57,6 +59,46 @@ impl ExecOffers {
         }
     }
 
+    /// What a started sandbox lets this node offer (N.10a): `sandbox` where
+    /// its containment works, `host` where `[execution] host = true` and
+    /// the Landlock sandbox does not refuse the node; with every gap the
+    /// containment line names, so the chat says it too (reviews T8B-3, L-d,
+    /// L-e). Decided once at start from the node's own self-test and
+    /// node.toml.
+    pub fn from_start(s: &harness_tools::sandbox::Started, policy: &crate::NodePolicy) -> Self {
+        use harness_tools::sandbox::{Confinement, Network};
+        let sandbox = match s.sandbox_refusal() {
+            Some(why) => Err(why.to_string()),
+            None => Ok(()),
+        };
+        let host = match (&s.uncontained, policy.execution.host) {
+            (Confinement::Refused(why), _) => Err(why.to_string()),
+            (_, false) => Err(host_off()),
+            (_, true) => Ok(()),
+        };
+        let mut gaps = Vec::new();
+        if sandbox.is_ok() {
+            if s.sandbox_netns_gap() {
+                gaps.push(GAP_SANDBOX_NETNS);
+            }
+            if s.landlock_abi < harness_tools::sandbox::ABI_PATHNAME_SOCKETS {
+                gaps.push(GAP_SANDBOX_SOCKETS);
+            }
+            if s.sandbox_form() == Some(harness_tools::contain::Form::SharedProc) {
+                gaps.push(GAP_SANDBOX_PROC);
+            }
+        }
+        if host.is_ok() && policy.sandbox.network == Network::Off {
+            // Landlock stops TCP only where it is there and enforces it.
+            gaps.push(if s.host_tcp_stopped() {
+                GAP_HOST_NETNS
+            } else {
+                GAP_HOST_NET_OPEN
+            });
+        }
+        Self::new(sandbox, host, gaps)
+    }
+
     fn of(&self, mode: ExecMode) -> &Result<(), String> {
         match mode {
             ExecMode::Sandbox => &self.sandbox,
@@ -103,8 +145,9 @@ impl ExecOffers {
     }
 
     /// The mode of a new agentic session: `requested` if this node offers
-    /// it, else refused; without one, the most confined mode offered. What
-    /// the master asks for never widens what is offered.
+    /// it, else refused; without one, `sandbox` (review L-a: `host` is only
+    /// ever given when asked for by name, never as a default). What the
+    /// master asks for never widens what is offered.
     pub fn choose(&self, requested: Option<ExecMode>) -> Result<ExecMode, String> {
         if let Some(why) = self.none_offered() {
             return Err(why);
@@ -117,7 +160,12 @@ impl ExecOffers {
                     m.id()
                 )),
             },
-            None => Ok(self.offered()[0]),
+            None if self.offers(ExecMode::Sandbox) => Ok(ExecMode::Sandbox),
+            None => Err(format!(
+                "this node offers only the host mode (commands without the sandbox), and it \
+                 must be asked for by name; the sandbox mode: {}",
+                self.why_not(ExecMode::Sandbox).unwrap_or_default()
+            )),
         }
     }
 
@@ -141,6 +189,21 @@ impl ExecOffers {
                  node's admin",
                 m.id()
             )),
+        }
+    }
+
+    /// The confinement the backend gets for `mode` (review L-f): `c` where
+    /// this node offers the mode, else one that refuses every command with
+    /// the reason. So a session whose log says a mode the node does not
+    /// offer can start nothing, even if a check before its turn were missed.
+    pub fn confinement_for(
+        &self,
+        mode: ExecMode,
+        c: harness_tools::sandbox::Confinement,
+    ) -> harness_tools::sandbox::Confinement {
+        match self.why_not(mode) {
+            None => c,
+            Some(why) => harness_tools::sandbox::Confinement::Refused(why.into()),
         }
     }
 
@@ -196,7 +259,13 @@ mod tests {
         assert!(e.contains("does not offer the host mode"), "{e}");
         assert!(e.contains("[execution] host = false"), "{e}");
         let host = ExecOffers::new(off("bubblewrap not found"), Ok(()), vec![]);
-        assert_eq!(host.choose(None).unwrap(), ExecMode::Host);
+        // Review L-a: never `host` by default.
+        let e = host.choose(None).unwrap_err();
+        assert!(
+            e.contains("only the host mode") && e.contains("by name"),
+            "{e}"
+        );
+        assert_eq!(host.choose(Some(ExecMode::Host)).unwrap(), ExecMode::Host);
         let e = host.choose(Some(ExecMode::Sandbox)).unwrap_err();
         assert!(
             e.contains("does not offer the sandbox mode: bubblewrap"),
@@ -221,6 +290,128 @@ mod tests {
             .unwrap_err();
         assert!(e.contains("runs in the host mode"), "{e}");
         assert!(sandbox_only.check_session(None).is_err());
+    }
+
+    /// Review L-f: the backend's confinement for a mode the node does not
+    /// offer refuses every command, whatever the session's log says.
+    #[test]
+    fn a_mode_not_offered_gets_a_confinement_that_runs_nothing() {
+        use harness_tools::sandbox::Confinement;
+        let o = ExecOffers::default();
+        let dir = tempfile::tempdir().unwrap();
+        let shell = |c: &Confinement| {
+            c.shell(
+                std::ffi::OsStr::new("bash"),
+                &[],
+                dir.path(),
+                None,
+                &Default::default(),
+                &[],
+                Default::default(),
+            )
+            .map(|_| ())
+        };
+        let host = o.confinement_for(ExecMode::Host, Confinement::Unconfined);
+        let e = shell(&host).unwrap_err();
+        assert!(e.contains("[execution] host = false"), "{e}");
+        let sandbox = o.confinement_for(ExecMode::Sandbox, Confinement::Unconfined);
+        assert!(shell(&sandbox).is_ok());
+    }
+
+    fn started(
+        confinement: harness_tools::sandbox::Confinement,
+        uncontained: harness_tools::sandbox::Confinement,
+        abi: u32,
+    ) -> harness_tools::sandbox::Started {
+        harness_tools::sandbox::Started {
+            confinement,
+            uncontained,
+            refusal: None,
+            summary: String::new(),
+            contain_summary: String::new(),
+            contain_level: harness_tools::sandbox::ContainLevel::Ok,
+            view_summary: String::new(),
+            tmp_root: None,
+            landlock_abi: abi,
+        }
+    }
+
+    fn landlock(
+        contain: Option<harness_tools::contain::Form>,
+        network: harness_tools::sandbox::Network,
+    ) -> harness_tools::sandbox::Confinement {
+        use harness_tools::sandbox::{Confinement, Sandbox, Settings};
+        let settings = Settings {
+            network,
+            ..Default::default()
+        };
+        let mut sb = Sandbox::new("/bin/true".into(), &settings, None, &[]).unwrap();
+        if let Some(form) = contain {
+            sb = sb.with_containment(
+                harness_tools::contain::Contain::new("/usr/bin/bwrap".into(), form)
+                    .without_network_namespace(),
+            );
+        }
+        Confinement::Confined {
+            sandbox: std::sync::Arc::new(sb),
+            tmp: None,
+        }
+    }
+
+    /// Review L-d: with the network off, a `host` chat is told TCP is
+    /// stopped only where Landlock is there and enforces it; where nothing
+    /// applies it (no Landlock, `mode = "off"`) it is told everything goes
+    /// out.
+    #[test]
+    fn a_host_chat_is_told_whether_anything_stops_its_network() {
+        use harness_tools::sandbox::{Confinement, Network};
+        let mut p = crate::NodePolicy::default();
+        p.execution.host = true;
+        p.sandbox.network = Network::Off;
+        let refused = || Confinement::Refused("no sandbox here".into());
+        for (uncontained, abi, want) in [
+            (landlock(None, Network::Off), 6, GAP_HOST_NETNS),
+            (landlock(None, Network::Off), 0, GAP_HOST_NET_OPEN),
+            (Confinement::Unconfined, 0, GAP_HOST_NET_OPEN),
+        ] {
+            let o = ExecOffers::from_start(&started(refused(), uncontained, abi), &p);
+            assert_eq!(o.capabilities(), ["exec:host", want], "abi {abi}");
+        }
+    }
+
+    /// Review L-e: every gap the containment line names reaches the hello:
+    /// below Landlock ABI 9 the socket gap, the shared-`/proc` form, the
+    /// network namespace missing with the network off.
+    #[test]
+    fn the_hello_announces_every_gap_of_the_sandbox() {
+        use harness_tools::contain::Form;
+        use harness_tools::sandbox::Network;
+        let mut p = crate::NodePolicy::default();
+        p.sandbox.network = Network::Off;
+        let s = started(
+            landlock(Some(Form::SharedProc), Network::Off),
+            landlock(None, Network::Off),
+            8,
+        );
+        assert_eq!(
+            ExecOffers::from_start(&s, &p).capabilities(),
+            [
+                "exec:sandbox",
+                GAP_SANDBOX_NETNS,
+                GAP_SANDBOX_SOCKETS,
+                GAP_SANDBOX_PROC
+            ]
+        );
+        p.sandbox.network = Network::On;
+        let s = started(
+            landlock(Some(Form::Full), Network::On),
+            landlock(None, Network::On),
+            9,
+        );
+        assert_eq!(
+            ExecOffers::from_start(&s, &p).capabilities(),
+            ["exec:sandbox"]
+        );
     }
 
     #[test]

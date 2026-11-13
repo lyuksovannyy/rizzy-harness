@@ -57,14 +57,37 @@ pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
     format!("{CAP_EXEC_PREFIX}{}", mode.id())
 }
 
-/// A gap of a mode the node offers, for the UI to say in the chat (review
-/// T8B-3): with `[sandbox] network = "off"`, that mode's commands have no
-/// network namespace of their own, so UDP and DNS still go out (Landlock
-/// stops TCP only). `gap:host:netns` whenever the network is off and `host`
-/// is offered (it never has one); `gap:sandbox:netns` where bubblewrap
-/// could not make one at start.
+/// The gaps of the modes a node offers, for the UI to say in the chat
+/// (reviews T8B-3, N.10a L-d, L-e). The node's state at its hello: one the
+/// node closes later (the network namespace taken by a later probe) is
+/// still announced until its next hello.
+///
+/// With `[sandbox] network = "off"`: the sandbox mode's commands have no
+/// network namespace (bubblewrap could not make one at start), so UDP and
+/// DNS still go out; Landlock stops TCP.
 pub const GAP_SANDBOX_NETNS: &str = "gap:sandbox:netns";
+/// With the network off: a `host` chat never has a namespace; Landlock
+/// stops TCP, UDP and DNS go out.
 pub const GAP_HOST_NETNS: &str = "gap:host:netns";
+/// With the network off: a `host` chat where nothing applies it (`[sandbox]
+/// mode = "off"`, or Landlock not enforcing its TCP rule): everything goes
+/// out.
+pub const GAP_HOST_NET_OPEN: &str = "gap:host:net-open";
+/// Below Landlock ABI 9: a sandbox command can reach a service of the
+/// node's user over a socket inside a granted folder and have it start a
+/// process outside the containment.
+pub const GAP_SANDBOX_SOCKETS: &str = "gap:sandbox:sockets";
+/// The shared-`/proc` form: every process ends with the command, but
+/// `/proc` lists this machine's processes.
+pub const GAP_SANDBOX_PROC: &str = "gap:sandbox:proc";
+/// Every gap a node may announce.
+pub const GAPS: [&str; 5] = [
+    GAP_SANDBOX_NETNS,
+    GAP_HOST_NETNS,
+    GAP_HOST_NET_OPEN,
+    GAP_SANDBOX_SOCKETS,
+    GAP_SANDBOX_PROC,
+];
 
 /// How a node's refusal of a `session.callback` begins when there is
 /// nothing to resume: every named end was already delivered, covered by a

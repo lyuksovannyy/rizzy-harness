@@ -766,7 +766,13 @@ impl NodeRuntime {
     }
 
     async fn audit(&self, kind: &'static str, sid: SessionId) {
-        let detail = serde_json::json!({ "session_id": sid }).to_string();
+        self.audit_with(kind, sid, serde_json::json!({})).await
+    }
+
+    /// [`Self::audit`] with more ids (never content).
+    async fn audit_with(&self, kind: &'static str, sid: SessionId, mut extra: serde_json::Value) {
+        extra["session_id"] = serde_json::json!(sid);
+        let detail = extra.to_string();
         let _ = self
             .inner
             .cfg
@@ -826,7 +832,14 @@ impl NodeRuntime {
                 exec_mode,
                 ..
             } => {
-                self.audit("session.create", session_id).await;
+                // The mode asked for (N.10a review N-d); what was chosen is
+                // in `session_created`.
+                self.audit_with(
+                    "session.create",
+                    session_id,
+                    serde_json::json!({ "exec_mode": exec_mode.map(|m| m.id()) }),
+                )
+                .await;
                 self.create(
                     session_id,
                     CreateArgs {
@@ -1033,6 +1046,9 @@ impl NodeRuntime {
             Profile::Chat => std::path::PathBuf::new(),
         };
         let mode = policy.effective_mode(approval_mode);
+        // A `host` session asks, whatever was asked and whatever node.toml
+        // allows (review N-e).
+        let mode = exec_mode.map_or(mode, |e| mode.min(e.max_approval()));
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())

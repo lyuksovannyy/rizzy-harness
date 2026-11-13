@@ -2164,6 +2164,10 @@ fn background_access(
     if ctx.parent_session.is_some() {
         return Access::Off(SUB_AGENT.into());
     }
+    // A `host` session's commands are never contained (review N-c).
+    if host.exec_mode() == Some(harness_core::policy::ExecMode::Host) {
+        return Access::Off(harness_tools::background::NOT_CONTAINED.into());
+    }
     match host
         .background()
         .and_then(|a| a.downcast::<SessionBg>().ok())

@@ -95,17 +95,24 @@ pub(crate) struct Session {
 type BgEnds = tokio::sync::mpsc::UnboundedReceiver<harness_tools::background::Ended>;
 
 /// A session's background table and the receiver of its ends, where it
-/// gets one; `next` is the number its next id takes.
+/// gets one; `next` is the number its next id takes. A `host` session gets
+/// none (review N-c): its commands are never contained, so a background
+/// start could only be refused, and without a table the model is not
+/// offered the background tools at all.
 fn background_table(
     node: &Inner,
     profile: Profile,
     parent: Option<SessionId>,
+    exec_mode: Option<harness_core::policy::ExecMode>,
     next: u64,
 ) -> (
     Option<Arc<harness_tools::background::SessionBg>>,
     Option<BgEnds>,
 ) {
-    if profile != Profile::Agentic || parent.is_some() {
+    if profile != Profile::Agentic
+        || parent.is_some()
+        || exec_mode == Some(harness_core::policy::ExecMode::Host)
+    {
         return (None, None);
     }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -223,7 +230,7 @@ impl Session {
             no_callbacks,
             exec_mode,
         } = new;
-        let (bg, ends) = background_table(&node, profile, parent_session, 1);
+        let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
             bg,
             bg_queue: Mutex::new(Vec::new()),
@@ -283,6 +290,8 @@ impl Session {
             .ok_or_else(|| StoreError::Corrupt(format!("session {id} has no session_created")))?;
         // Re-clamp on load: the node policy may have been tightened since.
         let mode = ApprovalMode::clamp(meta.approval_mode, node.cfg.policy.max_approval_mode);
+        // A `host` session asks, whatever its log says (review N-e).
+        let mode = meta.exec_mode.map_or(mode, |e| mode.min(e.max_approval()));
         let last_state = events.iter().rev().find_map(|e| match e.typed() {
             Ok(EventKind::Checkpoint(c))
                 if !matches!(
@@ -306,7 +315,13 @@ impl Session {
             .max()
             .unwrap_or(0)
             + 1;
-        let (bg, ends) = background_table(&node, meta.profile, meta.parent_session, next);
+        let (bg, ends) = background_table(
+            &node,
+            meta.profile,
+            meta.parent_session,
+            meta.exec_mode,
+            next,
+        );
         let s = Arc::new(Self {
             bg,
             bg_queue: Mutex::new(Vec::new()),
@@ -2443,7 +2458,7 @@ impl TurnHost for Session {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 input: input.clone(),
-                reason: approval_reason(tool, risk, input, &self.node.cfg.policy),
+                reason: approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode),
                 // "For this turn" would cover every identical start of the
                 // turn (N-2): a background start is asked for each time.
                 turn_allow: !background_start,
@@ -2593,7 +2608,19 @@ fn approval_reason(
     risk: ToolRisk,
     input: &Value,
     policy: &crate::NodePolicy,
+    exec_mode: Option<harness_core::policy::ExecMode>,
 ) -> String {
+    let reason = tool_reason(tool, risk, input, policy);
+    // In a `host` chat the card is the only check (review N-e): it says so.
+    if exec_mode == Some(harness_core::policy::ExecMode::Host) && tool != "publish" {
+        return format!(
+            "{reason}; in the host shell: as this node's own user, without the sandbox"
+        );
+    }
+    reason
+}
+
+fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePolicy) -> String {
     // A background start says what it is, in words (§4.1): the field alone
     // is easy to miss.
     if is_background_start(tool, input) {
@@ -2628,13 +2655,39 @@ mod tests {
     fn approval_cards_say_what_the_tool_does() {
         let p = crate::NodePolicy::default();
         let none = Value::Null;
-        let publish = approval_reason("publish", ToolRisk::Mutating, &none, &p);
+        let publish = approval_reason("publish", ToolRisk::Mutating, &none, &p, None);
         assert!(
             publish.contains("Artifacts") && !publish.contains("run programs"),
             "{publish}"
         );
         assert_eq!(
-            approval_reason("bash", ToolRisk::Mutating, &none, &p),
+            approval_reason("bash", ToolRisk::Mutating, &none, &p, None),
+            "`bash` can change files or run programs"
+        );
+    }
+
+    /// Review N-e: a `host` chat's card says the command runs in the host
+    /// shell; a `sandbox` chat's says what it always said.
+    #[test]
+    fn a_host_chats_card_says_the_host_shell() {
+        use harness_core::policy::ExecMode;
+        let p = crate::NodePolicy::default();
+        let none = Value::Null;
+        let host = approval_reason("bash", ToolRisk::Mutating, &none, &p, Some(ExecMode::Host));
+        assert!(
+            host.starts_with("`bash` can change files or run programs")
+                && host.contains("in the host shell")
+                && host.contains("without the sandbox"),
+            "{host}"
+        );
+        assert_eq!(
+            approval_reason(
+                "bash",
+                ToolRisk::Mutating,
+                &none,
+                &p,
+                Some(ExecMode::Sandbox)
+            ),
             "`bash` can change files or run programs"
         );
     }
@@ -2646,13 +2699,13 @@ mod tests {
         let p = crate::NodePolicy::default();
         let input =
             serde_json::json!({"command": "npm run dev", "background": true, "timeout_secs": 1800});
-        let r = approval_reason("bash", ToolRisk::Mutating, &input, &p);
+        let r = approval_reason("bash", ToolRisk::Mutating, &input, &p, None);
         assert!(
             r.contains("KEEPS RUNNING") && r.contains("30 min 0 s"),
             "{r}"
         );
         assert!(r.contains("accept connections"), "{r}");
         let fg = serde_json::json!({"command": "ls", "background": false});
-        assert!(!approval_reason("bash", ToolRisk::Mutating, &fg, &p).contains("KEEPS"));
+        assert!(!approval_reason("bash", ToolRisk::Mutating, &fg, &p, None).contains("KEEPS"));
     }
 }
