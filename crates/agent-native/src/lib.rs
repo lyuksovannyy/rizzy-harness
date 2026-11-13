@@ -377,7 +377,9 @@ fn transcript(prev: Option<&str>, events: &[RawEvent]) -> String {
                 quoted_part(&mut out, PART_RESULT, &short);
             }
             // The harness's own words, not the user's: as they are.
-            ChatMsg::Note(t) | ChatMsg::Opening(t) => out.push_str(&format!("{t}\n\n")),
+            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) => {
+                out.push_str(&format!("{t}\n\n"))
+            }
             ChatMsg::System(_) => {}
         }
     }
@@ -710,7 +712,7 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
                         call_id: f.call_id,
                         content: f.output,
                     });
-                    out.extend(f.note.map(ChatMsg::Note));
+                    out.extend(f.note.map(ChatMsg::CallNote));
                 }
             }
             // Where the log has it: after a step's results, or between
@@ -1664,7 +1666,7 @@ impl NativeBackend {
                     content: output,
                 });
                 // After the result's escaped text, as the log rebuilds it.
-                messages.extend(note.map(ChatMsg::Note));
+                messages.extend(note.map(ChatMsg::CallNote));
                 if cancelled {
                     return TurnOutcome {
                         reason: TurnEndReason::Cancelled,
