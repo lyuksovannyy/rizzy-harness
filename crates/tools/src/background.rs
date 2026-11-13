@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::contain::{ContainedChild, Stopped};
 use crate::{Tool, ToolCtx, ToolOutcome};
+use harness_core::secret::StreamScrubber;
 
 /// How long a background start waits before it returns: a command that
 /// fails at once ("port in use", "not found") is an ordinary result.
@@ -43,8 +44,33 @@ pub const HEAD_MAX: usize = 16 * 1024;
 /// The characters of a command kept for the list.
 const COMMAND_SHOWN: usize = 200;
 
-/// `[limits]` defaults and ranges (node.toml).
-pub const DEFAULT_PER_SESSION: usize = 8;
+/// What an ended command's ring keeps of its tail (its head stays): an
+/// ended command holds at most `HEAD_MAX + ENDED_TAIL` bytes.
+pub const ENDED_TAIL: usize = 16 * 1024;
+
+/// The most an ended command keeps, head and tail: the per-command term of
+/// the bound on kept output (T8D-1).
+pub const ENDED_MAX: usize = HEAD_MAX + ENDED_TAIL;
+
+/// Ended entries a chat lists at most (the oldest go first); only the
+/// newest `background_per_session` of them keep their output.
+pub const MAX_ENDED_ENTRIES: usize = 64;
+
+/// How often the node prunes every table by time, chat or no chat.
+pub const PRUNE_EVERY: Duration = Duration::from_secs(60);
+
+/// The most output the node holds for background commands, from its
+/// `[limits]`: every running command its full ring, and as many ended ones
+/// as may run, each cut to [`ENDED_MAX`] (T8D-1):
+/// `per_node × output_kb KiB + per_node × 32 KiB`.
+pub fn kept_bound(l: Limits) -> usize {
+    l.per_node * (l.output_kb * 1024 + ENDED_MAX)
+}
+
+/// `[limits]` defaults and ranges (node.toml). Off by default in step 1
+/// (T8D-4): a person can neither see nor stop a background command until
+/// step 2 ships the strip and its stop; then the default becomes 8.
+pub const DEFAULT_PER_SESSION: usize = 0;
 pub const MAX_PER_SESSION: usize = 32;
 pub const DEFAULT_PER_NODE: usize = 64;
 pub const MAX_PER_NODE: usize = 256;
@@ -129,47 +155,125 @@ pub struct Started {
 
 /// A command's output: the first [`HEAD_MAX`] bytes (or a quarter of the
 /// budget, if smaller), then the last bytes up to the rest of the budget.
-/// Everything between is counted and dropped.
-#[derive(Debug)]
+/// Everything between is counted and dropped. Scrubbed where it enters
+/// (T8D-5): the head, the tail, `bash_output` and the end's tail are all
+/// cut from text the node's secrets were taken out of. Kept as valid
+/// UTF-8: every cut is on a character boundary, so no read grows it.
 pub struct Ring {
     head: Vec<u8>,
     head_max: usize,
     tail: VecDeque<u8>,
     tail_max: usize,
-    total: u64,
+    /// Bytes stored in all (after scrubbing), for the "not shown" marker.
+    seen: u64,
+    /// Bytes the command printed, counted by the pipe readers (N-6).
+    printed: Arc<std::sync::atomic::AtomicU64>,
+    scrub: StreamScrubber,
+    /// The set the scrubber reads, to skip it while it is empty.
+    secrets: harness_core::SecretSet,
+    /// The scrubber has been used (it may hold bytes back).
+    scrub_held: u8,
+    /// Its output was dropped to stay inside the node's bound.
+    dropped: bool,
+}
+
+impl std::fmt::Debug for Ring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ring({} held, {} printed)", self.held(), self.total())
+    }
+}
+
+/// The first char boundary at or after `at` in `b` (valid UTF-8 cut
+/// anywhere): continuation bytes are `0b10xx_xxxx`.
+fn boundary_after(b: &[u8], mut at: usize) -> usize {
+    while at < b.len() && (b[at] & 0xC0) == 0x80 {
+        at += 1;
+    }
+    at
 }
 
 impl Ring {
-    pub fn new(budget: usize) -> Self {
+    pub fn new(budget: usize, secrets: harness_core::SecretSet) -> Self {
         let head_max = HEAD_MAX.min(budget / 4);
         Self {
             head: Vec::new(),
             head_max,
             tail: VecDeque::new(),
             tail_max: budget - head_max,
-            total: 0,
+            seen: 0,
+            printed: Arc::default(),
+            scrub: StreamScrubber::new(secrets.clone()),
+            secrets,
+            scrub_held: 0,
+            dropped: false,
         }
     }
 
-    pub fn push(&mut self, s: &[u8]) {
-        self.total += s.len() as u64;
-        let room = self.head_max - self.head.len();
-        let (h, rest) = s.split_at(room.min(s.len()));
-        self.head.extend_from_slice(h);
-        if rest.len() >= self.tail_max {
-            self.tail.clear();
-            self.tail
-                .extend(&rest[rest.len() - self.tail_max..rest.len()]);
+    /// The counter the pipe readers add the bytes they read to.
+    pub fn printed(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.printed.clone()
+    }
+
+    /// Text from the pipes: scrubbed (a secret split across pieces too),
+    /// then stored.
+    pub fn push(&mut self, s: &str) {
+        // No secret to look for (yet): stored as it came, no copy.
+        if self.secrets.is_empty() && self.scrub_held == 0 {
+            self.store(s);
             return;
         }
-        let over = (self.tail.len() + rest.len()).saturating_sub(self.tail_max);
-        self.tail.drain(..over);
-        self.tail.extend(rest);
+        let clean = self.scrub.push(s);
+        self.scrub_held = 1;
+        self.store(&clean);
+    }
+
+    /// The pipes are done: what the scrubber held back.
+    pub fn finish(&mut self) {
+        let rest = self.scrub.finish();
+        self.store(&rest);
+    }
+
+    fn store(&mut self, s: &str) {
+        if self.dropped || s.is_empty() {
+            return;
+        }
+        self.seen += s.len() as u64;
+        let mut room = (self.head_max - self.head.len()).min(s.len());
+        while !s.is_char_boundary(room) {
+            room -= 1;
+        }
+        // Once anything went to the tail, the head is closed.
+        let (h, rest) = if self.tail.is_empty() {
+            s.split_at(room)
+        } else {
+            ("", s)
+        };
+        self.head.extend_from_slice(h.as_bytes());
+        let rest = rest.as_bytes();
+        if rest.is_empty() {
+            return;
+        }
+        if rest.len() >= self.tail_max {
+            let from = boundary_after(rest, rest.len() - self.tail_max);
+            self.tail.clear();
+            self.tail.extend(&rest[from..]);
+        } else {
+            let over = (self.tail.len() + rest.len()).saturating_sub(self.tail_max);
+            self.tail.drain(..over);
+            self.tail.extend(rest);
+            while self.tail.front().is_some_and(|b| (b & 0xC0) == 0x80) {
+                self.tail.pop_front();
+            }
+        }
+        if self.head.len() < self.head_max && !self.tail.is_empty() {
+            // A head cut short by a wide character stays as it is.
+            self.head_max = self.head.len();
+        }
     }
 
     /// Bytes printed in all.
     pub fn total(&self) -> u64 {
-        self.total
+        self.printed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Bytes held (the bound is the budget).
@@ -177,16 +281,41 @@ impl Ring {
         self.head.len() + self.tail.len()
     }
 
-    /// The last `n` bytes, and whether that is not all of it.
+    /// Whether its output was dropped.
+    pub fn is_dropped(&self) -> bool {
+        self.dropped
+    }
+
+    /// The command ended: keep the head and the last [`ENDED_TAIL`] bytes.
+    pub fn cut_to_ended(&mut self) {
+        if self.tail.len() > ENDED_TAIL {
+            let (a, b) = self.tail.as_slices();
+            let mut all = a.to_vec();
+            all.extend_from_slice(b);
+            let from = boundary_after(&all, all.len() - ENDED_TAIL);
+            self.tail = all[from..].iter().copied().collect();
+        }
+        self.tail.shrink_to_fit();
+        self.head.shrink_to_fit();
+    }
+
+    /// Give the output up (the bound on kept output); the entry stays.
+    pub fn drop_output(&mut self) {
+        self.head = Vec::new();
+        self.tail = VecDeque::new();
+        self.dropped = true;
+    }
+
+    /// The last `n` bytes, and whether that is not all of it. Never more
+    /// than `n` bytes (the cut moves forward to a character boundary).
     pub fn last(&self, n: usize) -> (String, bool) {
         let all = self.whole();
+        let cut = self.seen > all.len() as u64;
         if all.len() <= n {
-            return (String::from_utf8_lossy(&all).into_owned(), false);
+            return (String::from_utf8_lossy(&all).into_owned(), cut);
         }
-        (
-            String::from_utf8_lossy(&all[all.len() - n..]).into_owned(),
-            true,
-        )
+        let from = boundary_after(&all, all.len() - n);
+        (String::from_utf8_lossy(&all[from..]).into_owned(), true)
     }
 
     /// Head and tail joined, with no marker (`last` cuts from it).
@@ -205,36 +334,138 @@ impl Ring {
     /// the end of the tail (the rest), and a marker naming what is left
     /// out between them, so a reader of the result sees the cut.
     pub fn text_within(&self, max: usize) -> String {
+        if self.dropped {
+            return "[its output is no longer kept: the node keeps the output of at most \
+                    `background_per_session` ended commands a chat and `background_per_node` a \
+                    node]"
+                .into();
+        }
         let all = self.whole();
-        let head_n = self.head.len().min(max / 3);
+        let mut head_n = self.head.len().min(max / 3);
+        while head_n > 0 && head_n < all.len() && (all[head_n] & 0xC0) == 0x80 {
+            head_n -= 1;
+        }
         let tail_n = (all.len() - head_n).min(max.saturating_sub(head_n));
-        let skipped = self.total - (head_n + tail_n) as u64;
+        let tail_from = boundary_after(&all, all.len() - tail_n);
+        let skipped = self
+            .seen
+            .saturating_sub((head_n + all.len() - tail_from) as u64);
         let mut s = String::from_utf8_lossy(&all[..head_n]).into_owned();
         if skipped > 0 {
             s.push_str(&format!(
                 "\n[... {skipped} bytes not shown (the node keeps the first {} and the last {} \
-                 bytes of a background command's output) ...]\n",
+                 bytes of a running background command's output, and less once it ended) ...]\n",
                 self.head_max, self.tail_max
             ));
         }
-        s.push_str(&String::from_utf8_lossy(&all[all.len() - tail_n..]));
+        s.push_str(&String::from_utf8_lossy(&all[tail_from..]));
         s
     }
 }
 
-/// The node's count of running background commands, and its bounds.
-#[derive(Debug)]
+/// The node's count of running background commands, its bounds, and what
+/// it keeps of ended ones.
 pub struct Registry {
     limits: Limits,
     running: Mutex<usize>,
+    /// The node's secrets, taken out of every ring where output enters.
+    secrets: harness_core::SecretSet,
+    /// Every table, for the prune by time that needs no chat (T8D-1).
+    tables: Mutex<Vec<Weak<SessionBg>>>,
+    /// Ended commands that still keep output, oldest first: at most
+    /// `per_node` of them node-wide.
+    kept: Mutex<VecDeque<(Weak<SessionBg>, u64)>>,
+    /// Added to the clock (tests move it).
+    skew: Mutex<Duration>,
+}
+
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Registry({:?}, {} running)", self.limits, self.running())
+    }
 }
 
 impl Registry {
-    pub fn new(limits: Limits) -> Arc<Self> {
+    pub fn new(limits: Limits, secrets: harness_core::SecretSet) -> Arc<Self> {
         Arc::new(Self {
             limits,
             running: Mutex::new(0),
+            secrets,
+            tables: Mutex::default(),
+            kept: Mutex::default(),
+            skew: Mutex::default(),
         })
+    }
+
+    /// The registry's clock.
+    fn now(&self) -> Instant {
+        Instant::now() + *self.skew.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Bytes of output every table holds now, running and ended: what
+    /// [`kept_bound`] bounds.
+    pub fn held(&self) -> usize {
+        let tables: Vec<Arc<SessionBg>> = self
+            .tables
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        tables
+            .iter()
+            .map(|t| {
+                t.lock()
+                    .cmds
+                    .values()
+                    .map(|c| c.ring.lock().unwrap_or_else(|p| p.into_inner()).held())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Move the clock on (tests of the prune by time).
+    #[doc(hidden)]
+    pub fn advance_clock_for_test(&self, by: Duration) {
+        *self.skew.lock().unwrap_or_else(|p| p.into_inner()) += by;
+    }
+
+    /// Prune every table by time, whether its chat calls in or not: an
+    /// ended entry goes [`KEPT_AFTER_END`] after its end. The node runs
+    /// this every [`PRUNE_EVERY`] and at every start.
+    pub fn prune_all(&self) {
+        let now = self.now();
+        let tables: Vec<Arc<SessionBg>> = {
+            let mut t = self.tables.lock().unwrap_or_else(|p| p.into_inner());
+            t.retain(|w| w.strong_count() > 0);
+            t.iter().filter_map(Weak::upgrade).collect()
+        };
+        for bg in tables {
+            SessionBg::prune(&mut bg.lock(), now);
+        }
+        self.kept
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(w, num)| {
+                w.upgrade()
+                    .is_some_and(|bg| bg.lock().cmds.get(num).is_some_and(|c| c.keeps_output()))
+            });
+    }
+
+    /// An ended command keeps its (cut) output: the oldest beyond the
+    /// node's count lose theirs.
+    fn keep(&self, bg: &Arc<SessionBg>, num: u64) {
+        let evict: Vec<(Weak<SessionBg>, u64)> = {
+            let mut k = self.kept.lock().unwrap_or_else(|p| p.into_inner());
+            k.push_back((Arc::downgrade(bg), num));
+            let over = k.len().saturating_sub(self.limits.per_node);
+            k.drain(..over).collect()
+        };
+        for (w, n) in evict {
+            if let Some(t) = w.upgrade() {
+                t.drop_output(n);
+            }
+        }
     }
 
     pub fn limits(&self) -> Limits {
@@ -253,16 +484,22 @@ impl Registry {
         next: u64,
         ends: mpsc::UnboundedSender<Ended>,
     ) -> Arc<SessionBg> {
-        Arc::new(SessionBg {
+        let bg = Arc::new(SessionBg {
             reg: self.clone(),
             table: Mutex::new(Table {
                 next: next.max(1),
                 reserved: 0,
+                closed: None,
                 cmds: BTreeMap::new(),
             }),
             ends,
             unrecorded: std::sync::atomic::AtomicUsize::new(0),
-        })
+        });
+        self.tables
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Arc::downgrade(&bg));
+        bg
     }
 }
 
@@ -280,6 +517,9 @@ impl Drop for NodeSlot {
 struct Table {
     next: u64,
     reserved: usize,
+    /// Set by [`SessionBg::close`]: no start is admitted, and one handed
+    /// over late is stopped with this reason at once.
+    closed: Option<BackgroundReason>,
     cmds: BTreeMap<u64, Cmd>,
 }
 
@@ -291,6 +531,16 @@ struct Cmd {
     ends_by_ms: i64,
     ring: Arc<Mutex<Ring>>,
     state: State,
+}
+
+impl Cmd {
+    fn keeps_output(&self) -> bool {
+        !self
+            .ring
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_dropped()
+    }
 }
 
 #[derive(Debug)]
@@ -363,12 +613,65 @@ impl SessionBg {
         self.reg.limits
     }
 
-    /// Prune ends kept past [`KEPT_AFTER_END`].
-    fn prune(t: &mut Table) {
+    /// Prune ends kept past [`KEPT_AFTER_END`], and ended entries beyond
+    /// [`MAX_ENDED_ENTRIES`] (the oldest first).
+    fn prune(t: &mut Table, now: Instant) {
         t.cmds.retain(|_, c| match &c.state {
-            State::Ended { at, .. } => at.elapsed() < KEPT_AFTER_END,
+            State::Ended { at, .. } => now.saturating_duration_since(*at) < KEPT_AFTER_END,
             State::Running { .. } => true,
         });
+        let ended: Vec<u64> = t
+            .cmds
+            .iter()
+            .filter(|(_, c)| matches!(c.state, State::Ended { .. }))
+            .map(|(n, _)| *n)
+            .collect();
+        for n in ended
+            .iter()
+            .take(ended.len().saturating_sub(MAX_ENDED_ENTRIES))
+        {
+            t.cmds.remove(n);
+        }
+    }
+
+    /// Drop the output of entry `num` (the node's bound).
+    fn drop_output(&self, num: u64) {
+        if let Some(c) = self.lock().cmds.get(&num) {
+            c.ring
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .drop_output();
+        }
+    }
+
+    /// Entry `num` ended: cut its ring, and keep at most `per_session`
+    /// ended rings in this chat (the oldest lose theirs).
+    fn ended_ring(self: &Arc<Self>, num: u64) {
+        let per_session = self.reg.limits.per_session.max(1);
+        {
+            let t = self.lock();
+            if let Some(c) = t.cmds.get(&num) {
+                c.ring
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .cut_to_ended();
+            }
+            let with_output: Vec<&Cmd> = t
+                .cmds
+                .values()
+                .filter(|c| matches!(c.state, State::Ended { .. }) && c.keeps_output())
+                .collect();
+            for c in with_output
+                .iter()
+                .take(with_output.len().saturating_sub(per_session))
+            {
+                c.ring
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .drop_output();
+            }
+        }
+        self.reg.keep(self, num);
     }
 
     fn running_ids(t: &Table) -> Vec<String> {
@@ -393,8 +696,16 @@ impl SessionBg {
                         background_per_session = 0 in its node.toml)"
                 .into());
         }
+        // Every chat's ended entries, by time, before the caps are read.
+        self.reg.prune_all();
         let mut t = self.lock();
-        Self::prune(&mut t);
+        if let Some(r) = t.closed {
+            return Err(format!(
+                "not started: this chat's background commands {}; none starts again until its \
+                 owner sends it a message",
+                r.words()
+            ));
+        }
         let ids = Self::running_ids(&t);
         let named = if ids.is_empty() {
             "none of them in this chat".to_string()
@@ -433,7 +744,10 @@ impl SessionBg {
 
     /// The ring a reserved start's output goes to.
     pub fn new_ring(&self) -> Arc<Mutex<Ring>> {
-        Arc::new(Mutex::new(Ring::new(self.reg.limits.output_kb * 1024)))
+        Arc::new(Mutex::new(Ring::new(
+            self.reg.limits.output_kb * 1024,
+            self.reg.secrets.clone(),
+        )))
     }
 
     /// Take a still-running command over from its call: it gets its id and
@@ -468,6 +782,15 @@ impl SessionBg {
                     },
                 },
             );
+            // Closed while this start was in its first wait (a revocation
+            // racing the hand-over): stopped at once.
+            if let Some(r) = t.closed
+                && let Some(c) = t.cmds.get_mut(&num)
+                && let State::Running { stop, .. } = &mut c.state
+                && let Some(s) = stop.take()
+            {
+                let _ = s.send(r);
+            }
             (num, id)
         };
         let timeout_s = h.timeout.as_secs();
@@ -487,7 +810,7 @@ impl SessionBg {
         reason: BackgroundReason,
     ) -> Result<oneshot::Receiver<String>, String> {
         let mut t = self.lock();
-        Self::prune(&mut t);
+        Self::prune(&mut t, self.reg.now());
         let known: Vec<String> = t.cmds.values().map(|c| c.id.clone()).collect();
         let Some(c) = t.cmds.values_mut().find(|c| c.id == id) else {
             return Err(if known.is_empty() {
@@ -512,6 +835,18 @@ impl SessionBg {
             }
         }
         Ok(rx)
+    }
+
+    /// Stop every command with `reason` and admit no start until
+    /// [`Self::reopen`]; a start handed over meanwhile is stopped at once.
+    pub fn close(&self, reason: BackgroundReason) -> Vec<oneshot::Receiver<String>> {
+        self.lock().closed = Some(reason);
+        self.stop_all(reason)
+    }
+
+    /// Admit starts again (its owner prompts the chat).
+    pub fn reopen(&self) {
+        self.lock().closed = None;
     }
 
     /// Order every running command to stop with `reason`.
@@ -576,7 +911,7 @@ impl SessionBg {
     /// The session's commands, running and recently ended, in words.
     pub fn list(&self) -> String {
         let mut t = self.lock();
-        Self::prune(&mut t);
+        Self::prune(&mut t, self.reg.now());
         if t.cmds.is_empty() {
             return "No background commands in this chat.".into();
         }
@@ -603,7 +938,7 @@ impl SessionBg {
     /// One command's status and output (head and tail).
     pub fn output(&self, id: &str) -> Result<String, String> {
         let mut t = self.lock();
-        Self::prune(&mut t);
+        Self::prune(&mut t, self.reg.now());
         let Some(c) = t.cmds.values().find(|c| c.id == id) else {
             let known: Vec<String> = t.cmds.values().map(|c| c.id.clone()).collect();
             return Err(format!(
@@ -649,11 +984,8 @@ async fn run(
     mut stop_rx: oneshot::Receiver<BackgroundReason>,
     slot: Option<NodeSlot>,
 ) {
-    let push = |ring: &Arc<Mutex<Ring>>, s: &str| {
-        ring.lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(s.as_bytes())
-    };
+    let push =
+        |ring: &Arc<Mutex<Ring>>, s: &str| ring.lock().unwrap_or_else(|p| p.into_inner()).push(s);
     let end = loop {
         tokio::select! {
             Some((_, s)) = h.rx.recv() => push(&h.ring, &s),
@@ -767,12 +1099,18 @@ async fn run(
     }
     let ran_ms = h.started.elapsed().as_millis() as u64;
     let (output_bytes, tail, tail_cut) = {
-        let ring = h.ring.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ring = h.ring.lock().unwrap_or_else(|p| p.into_inner());
+        ring.finish();
         let (tail, cut) = ring.last(TAIL_IN_EVENT);
         (ring.total(), tail, cut)
     };
-    // The slot goes back once the command is gone.
-    drop(slot);
+    // The node's slot goes back only with a confirmed end (N-4): a command
+    // its guard still kills, or whose end nobody confirmed, keeps it until
+    // its guard has exited.
+    let mut child = h.child;
+    release_slot(slot, confirmed, async move {
+        let _ = child.wait().await;
+    });
     let Some(bg) = bg.upgrade() else {
         return;
     };
@@ -784,7 +1122,7 @@ async fn run(
         let old = std::mem::replace(
             &mut c.state,
             State::Ended {
-                at: Instant::now(),
+                at: bg.reg.now(),
                 how: how.clone(),
             },
         );
@@ -795,6 +1133,7 @@ async fn run(
             State::Ended { .. } => (Vec::new(), true),
         }
     };
+    bg.ended_ring(num);
     if !discard {
         bg.unrecorded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -816,6 +1155,23 @@ async fn run(
     for w in waiters {
         let _ = w.send(format!("{id} {how}"));
     }
+}
+
+/// Give a node slot back now for a confirmed end, else once `gone`
+/// (the guard's exit) completes.
+fn release_slot(
+    slot: Option<NodeSlot>,
+    confirmed: BackgroundConfirmed,
+    gone: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    if confirmed == BackgroundConfirmed::Ended {
+        drop(slot);
+        return;
+    }
+    tokio::spawn(async move {
+        gone.await;
+        drop(slot);
+    });
 }
 
 /// What a tool gets: this session's table, or why there is none.
@@ -958,15 +1314,28 @@ mod tests {
         assert_eq!(timeout_for(Some(2), d, low), low);
     }
 
+    fn none() -> harness_core::SecretSet {
+        harness_core::SecretSet::default()
+    }
+
+    fn secrets(v: &[&str]) -> harness_core::SecretSet {
+        harness_core::SecretSet::new(
+            v.iter()
+                .map(|s| harness_core::Secret::new(s.to_string()))
+                .collect(),
+        )
+    }
+
     #[test]
     fn the_ring_holds_its_budget_and_no_more() {
-        let mut r = Ring::new(64 * 1024);
-        let chunk = vec![b'x'; 8192];
+        let mut r = Ring::new(64 * 1024, none());
+        let chunk = "x".repeat(8192);
         for _ in 0..10_000 {
             r.push(&chunk);
         }
-        r.push(b"END");
-        assert_eq!(r.total(), 10_000 * 8192 + 3);
+        r.push("END");
+        r.finish();
+        assert_eq!(r.seen, 10_000 * 8192 + 3);
         assert_eq!(r.held(), 64 * 1024);
         assert!(r.tail.capacity() < 2 * 64 * 1024, "{}", r.tail.capacity());
         let (tail, cut) = r.last(TAIL_IN_EVENT);
@@ -979,20 +1348,211 @@ mod tests {
             t.len()
         );
         // A small output is kept whole, and says nothing was cut.
-        let mut s = Ring::new(64 * 1024);
-        s.push(b"hello ");
-        s.push(b"world");
+        let mut s = Ring::new(64 * 1024, none());
+        s.push("hello ");
+        s.push("world");
+        s.finish();
         assert_eq!(s.text(), "hello world");
         assert_eq!(s.last(TAIL_IN_EVENT), ("hello world".into(), false));
         // One push larger than everything.
-        let mut b = Ring::new(16 * 1024);
-        b.push(&vec![b'y'; 1 << 20]);
+        let mut b = Ring::new(16 * 1024, none());
+        b.push(&"y".repeat(1 << 20));
         assert_eq!(b.held(), 16 * 1024);
+        // Ended: the head and the last ENDED_TAIL bytes.
+        r.cut_to_ended();
+        assert!(
+            r.held() <= ENDED_MAX && r.text().ends_with("END"),
+            "{}",
+            r.held()
+        );
+    }
+
+    /// N-6: wide characters cut anywhere never grow a read past its size.
+    #[test]
+    fn cuts_stay_on_character_boundaries() {
+        let mut r = Ring::new(16 * 1024, none());
+        for _ in 0..20_000 {
+            r.push("é€😀");
+        }
+        r.finish();
+        assert!(std::str::from_utf8(&r.whole()).is_ok());
+        let (t, cut) = r.last(TAIL_IN_EVENT);
+        assert!(
+            cut && t.len() <= TAIL_IN_EVENT && !t.contains('\u{FFFD}'),
+            "{}",
+            t.len()
+        );
+        assert!(!r.text().contains('\u{FFFD}'));
+    }
+
+    /// T8D-5: secrets are taken out where output enters, so no cut (the
+    /// tail's, the head's end, `bash_output`'s) leaves part of one.
+    #[test]
+    fn a_secret_is_scrubbed_before_any_cut() {
+        const S: &str = "sk-test-0123456789abcdef";
+        // Across the event tail's cut: the secret, then 4073 bytes.
+        let mut r = Ring::new(256 * 1024, secrets(&[S]));
+        r.push("sk-test-0123");
+        r.push("456789abcdef");
+        r.push(&"x".repeat(4073));
+        r.finish();
+        let (t, _) = r.last(TAIL_IN_EVENT);
+        assert!(
+            !t.contains("k-test-0123456789abcdef") && !t.contains("456789abcdef"),
+            "{t:.40}"
+        );
+        // Across the head's end, read as bash_output reads it.
+        let mut h = Ring::new(64 * 1024, secrets(&[S]));
+        h.push(&"y".repeat(HEAD_MAX - 10));
+        h.push(S);
+        h.push(&"z".repeat(200_000));
+        h.finish();
+        let text = h.text_within(crate::MAX_OUTPUT_CHARS - 2000);
+        assert!(
+            !text.contains("sk-test-01") && !text.contains("456789abcdef"),
+            "secret in head"
+        );
+        assert!(text.contains("[REDACTED]"));
+    }
+
+    /// An ended entry, as a finished command leaves it.
+    fn ended(bg: &Arc<SessionBg>, bytes: usize) -> u64 {
+        let ring = bg.new_ring();
+        ring.lock().unwrap().push(&"o".repeat(bytes));
+        let num = {
+            let mut t = bg.lock();
+            let num = t.next;
+            t.next += 1;
+            t.cmds.insert(
+                num,
+                Cmd {
+                    id: format!("bg-{num}"),
+                    command: "c".into(),
+                    started: Instant::now(),
+                    ends_by_ms: 0,
+                    ring,
+                    state: State::Ended {
+                        at: bg.reg.now(),
+                        how: "exited with code 0".into(),
+                    },
+                },
+            );
+            num
+        };
+        bg.ended_ring(num);
+        num
+    }
+
+    fn held(reg: &Registry) -> usize {
+        reg.tables
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .map(|t| {
+                t.lock()
+                    .cmds
+                    .values()
+                    .map(|c| c.ring.lock().unwrap().held())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// T8D-1: what ended commands keep is bounded by the node's counts: at
+    /// most `per_session` rings a chat, `per_node` a node, each cut to
+    /// `ENDED_MAX`, whatever the number of starts.
+    #[test]
+    fn kept_output_is_bounded_by_the_counts() {
+        let l = Limits {
+            per_session: 2,
+            per_node: 3,
+            output_kb: 4096,
+        };
+        let reg = Registry::new(l, none());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let chats: Vec<_> = (0..4).map(|_| reg.session(1, tx.clone())).collect();
+        for c in &chats {
+            for _ in 0..12 {
+                ended(c, 4_500_000);
+            }
+        }
+        let with = |c: &Arc<SessionBg>| c.lock().cmds.values().filter(|c| c.keeps_output()).count();
+        assert!(chats.iter().all(|c| with(c) <= 2));
+        assert_eq!(chats.iter().map(with).sum::<usize>(), 3, "the node's count");
+        assert!(held(&reg) <= 3 * ENDED_MAX, "{}", held(&reg));
+        assert!(held(&reg) <= kept_bound(l));
+        // An entry that lost its output says so.
+        let o = chats[0].output("bg-1").unwrap();
+        assert!(o.contains("no longer kept"), "{o}");
+    }
+
+    /// T8D-1: a chat that never calls in again gives its ended entries
+    /// back 30 minutes after their end (the node-wide prune).
+    #[test]
+    fn an_idle_chats_ended_entry_is_gone_after_30_minutes() {
+        let reg = Registry::new(
+            Limits {
+                per_session: 8,
+                ..Default::default()
+            },
+            none(),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let idle = reg.session(1, tx);
+        ended(&idle, 100_000);
+        reg.prune_all();
+        assert_eq!(idle.lock().cmds.len(), 1);
+        reg.advance_clock_for_test(KEPT_AFTER_END - Duration::from_secs(1));
+        reg.prune_all();
+        assert_eq!(idle.lock().cmds.len(), 1, "too early");
+        reg.advance_clock_for_test(Duration::from_secs(2));
+        reg.prune_all();
+        assert_eq!(idle.lock().cmds.len(), 0, "still held after 30 minutes");
+        assert!(reg.kept.lock().unwrap().is_empty());
+    }
+
+    /// N-4: an end its guard did not confirm keeps its node slot until the
+    /// guard is gone.
+    #[tokio::test]
+    async fn an_unconfirmed_end_keeps_its_slot_until_the_guard_is_gone() {
+        let reg = Registry::new(
+            Limits {
+                per_session: 8,
+                ..Default::default()
+            },
+            none(),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let bg = reg.session(1, tx);
+        for confirmed in [
+            BackgroundConfirmed::StillAlive,
+            BackgroundConfirmed::Unconfirmed,
+        ] {
+            let mut r = bg.reserve().unwrap();
+            r.done = true;
+            let slot = r.node.take();
+            bg.lock().reserved = 0;
+            let (gone_tx, gone_rx) = oneshot::channel::<()>();
+            release_slot(slot, confirmed, async move {
+                let _ = gone_rx.await;
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(reg.running(), 1, "{confirmed:?} freed its slot");
+            let _ = gone_tx.send(());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(reg.running(), 0);
+        }
+        let mut r = bg.reserve().unwrap();
+        r.done = true;
+        let slot = r.node.take();
+        release_slot(slot, BackgroundConfirmed::Ended, std::future::pending());
+        assert_eq!(reg.running(), 0);
     }
 
     fn table(limits: Limits) -> (Arc<SessionBg>, mpsc::UnboundedReceiver<Ended>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Registry::new(limits).session(1, tx), rx)
+        (Registry::new(limits, none()).session(1, tx), rx)
     }
 
     #[test]
@@ -1017,11 +1577,14 @@ mod tests {
         drop((b, c));
         assert_eq!(bg.reg.running(), 0);
         // The node's cap spans sessions.
-        let reg = Registry::new(Limits {
-            per_session: 8,
-            per_node: 1,
-            output_kb: 16,
-        });
+        let reg = Registry::new(
+            Limits {
+                per_session: 8,
+                per_node: 1,
+                output_kb: 16,
+            },
+            none(),
+        );
         let (tx, _rx2) = mpsc::unbounded_channel();
         let s1 = reg.session(1, tx.clone());
         let s2 = reg.session(1, tx);

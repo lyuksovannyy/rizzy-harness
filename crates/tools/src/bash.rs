@@ -99,6 +99,7 @@ async fn pump<R: AsyncRead + Unpin>(
     mut r: R,
     stream: OutputStream,
     tx: mpsc::Sender<(OutputStream, String)>,
+    printed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 ) {
     let mut chunk = [0u8; 8192];
     let mut pending = Vec::new();
@@ -106,6 +107,10 @@ async fn pump<R: AsyncRead + Unpin>(
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                // The bytes as the command printed them, before decoding (N-6).
+                if let Some(p) = &printed {
+                    p.fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
+                }
                 pending.extend_from_slice(&chunk[..n]);
                 let s = drain_utf8(&mut pending);
                 if !s.is_empty() && tx.send((stream, s)).await.is_err() {
@@ -293,15 +298,20 @@ impl Tool for Bash {
         let mut group = KillGroupOnDrop(pgid.filter(|_| !contained));
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
+        let printed = ring
+            .as_ref()
+            .map(|r| r.lock().unwrap_or_else(|p| p.into_inner()).printed());
         let out_task = tokio::spawn(pump(
             child.stdout.take().expect("piped"),
             OutputStream::Stdout,
             tx.clone(),
+            printed.clone(),
         ));
         let err_task = tokio::spawn(pump(
             child.stderr.take().expect("piped"),
             OutputStream::Stderr,
             tx,
+            printed,
         ));
 
         let mut combined = String::new();
@@ -320,9 +330,7 @@ impl Tool for Bash {
                 combined.push_str(s);
             }
             if let Some(r) = &ring {
-                r.lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(s.as_bytes());
+                r.lock().unwrap_or_else(|p| p.into_inner()).push(s);
             }
         };
 
