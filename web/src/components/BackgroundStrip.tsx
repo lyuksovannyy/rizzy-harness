@@ -22,6 +22,7 @@ type Click =
   | { state: "failed"; error: string }
   | { state: "ended"; at: number };
 
+/** The server's words (they may carry the node's): shown as text, hidden characters marked. */
 function message(x: unknown): string {
   return x instanceof Error ? x.message : String(x);
 }
@@ -135,7 +136,7 @@ export default function BackgroundStrip(props: {
               </code>
               <span className="muted bg-left">{away ? "node away" : leftText(msLeft(r, now))}</span>
               <span className="bg-state" role="status">
-                {stopping ? "stopping…" : c?.state === "failed" ? <span className="error-text">{c.error}</span> : null}
+                {stopping ? "stopping…" : c?.state === "failed" ? <span className="error-text">{showHidden(c.error)}</span> : null}
               </span>
               <button
                 type="button"

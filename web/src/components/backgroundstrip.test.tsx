@@ -184,11 +184,12 @@ describe("the strip", () => {
   });
 
   test("a refused stop says why and can be tried again", async () => {
-    call.mockImplementation(() => Promise.reject(new Error("no background command bg-1 in this chat (it has none)")));
+    // The node's words reach the page: a hidden character in them shows as its code.
+    call.mockImplementation(() => Promise.reject(new Error("no background command bg-1 in this chat (it has none)\u202E")));
     await show(view({ "bg-1": {} }));
     await until(strip);
     await act(async () => button("Stop bg-1")!.click());
-    expect(row("bg-1")!.querySelector(".error-text")!.textContent).toBe("no background command bg-1 in this chat (it has none)");
+    expect(row("bg-1")!.querySelector(".error-text")!.textContent).toBe("no background command bg-1 in this chat (it has none)<U+202E>");
     expect(button("Stop bg-1")!.disabled).toBe(false);
   });
 
