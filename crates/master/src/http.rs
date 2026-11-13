@@ -1054,9 +1054,28 @@ struct CreateBody {
 async fn create_session(
     State(m): State<Master>,
     headers: HeaderMap,
-    Json(mut b): Json<CreateBody>,
+    Json(b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
+    // Every request for the host shell is audited, whatever refuses it.
+    let host = b.exec_mode == Some(harness_core::policy::ExecMode::Host);
+    let mut seen = ws::HostAudit::default();
+    let out = create_checked(&m, &who, b, &mut seen).await;
+    if host {
+        let res = out.as_ref().map(|s| *s).map_err(|e| e.1.as_str());
+        ws::audit_host_create(&m, &who, &seen, res).await;
+    }
+    Ok(Json(json!({ "session_id": out? })))
+}
+
+async fn create_checked(
+    m: &Master,
+    who: &crate::auth::Principal,
+    mut b: CreateBody,
+    seen: &mut ws::HostAudit,
+) -> ApiResult<SessionId> {
+    let (m, who) = (m.clone(), who.clone());
+    seen.node = b.node_id.clone();
     if b.incognito && b.profile != Some(harness_core::event::Profile::Chat) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -1064,6 +1083,7 @@ async fn create_session(
         ));
     }
     let scope = ws::scope(&m, &who, b.workspace_id.as_deref()).await?;
+    seen.workspace = scope.as_ref().map(|a| a.id().to_string());
     // Agentic sessions run shell commands on a worker node: they need the
     // account's grant and the workspace's permission.
     if b.profile.unwrap_or(harness_core::event::Profile::Agentic)
@@ -1096,9 +1116,12 @@ async fn create_session(
         {
             return Err(ApiError(StatusCode::FORBIDDEN, why));
         }
-        let asked = b.exec_mode;
-        let mode = ws::exec_mode_for(&who, asked);
-        ws::audit_host_create(&m, &who, scope.as_ref(), b.node_id.as_deref(), asked, &mode).await;
+        // The node as `create_session` will pick it, for the audit line.
+        b.node_id = b
+            .node_id
+            .or_else(|| m.default_node(harness_core::event::Profile::Agentic));
+        seen.node = b.node_id.clone();
+        let mode = ws::exec_mode_for(&who, b.exec_mode);
         b.exec_mode = Some(mode.map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?);
     } else if b.exec_mode.is_some() {
         return Err(ApiError(
@@ -1129,7 +1152,7 @@ async fn create_session(
             exec_mode: b.exec_mode,
         })
         .await?;
-    Ok(Json(json!({ "session_id": sid })))
+    Ok(sid)
 }
 
 #[derive(Deserialize)]

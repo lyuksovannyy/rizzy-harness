@@ -495,26 +495,38 @@ pub fn exec_mode_for(who: &Principal, requested: Option<ExecMode>) -> Result<Exe
     }
 }
 
-/// One audit line for every create that asked for `host`, granted by the
-/// master or refused (N.10a): who, in which workspace, on which node; no
-/// chat content. The node may still refuse a granted one (its own audit
-/// line names the mode).
+/// What a create had resolved when it ended, for its host-mode audit line.
+#[derive(Debug, Default)]
+pub struct HostAudit {
+    pub workspace: Option<String>,
+    pub node: Option<String>,
+}
+
+/// One audit line for every create that asked for `host`, whichever check
+/// refused it (N.10a reviews N-d, RN-4): who ("api token" for the token),
+/// the workspace and node as resolved, and the outcome: "granted" with the
+/// session id once the chat exists, or "refused: " and the refusal's first
+/// words. No chat content.
 pub async fn audit_host_create(
     m: &Master,
     who: &Principal,
-    ws: Option<&Access>,
-    node_id: Option<&str>,
-    asked: Option<ExecMode>,
-    outcome: &Result<ExecMode, String>,
+    seen: &HostAudit,
+    outcome: Result<harness_core::SessionId, &str>,
 ) {
-    if asked != Some(ExecMode::Host) {
-        return;
-    }
+    let user = who.user_id.clone().unwrap_or_else(|| "api token".into());
+    let (outcome, session) = match outcome {
+        Ok(sid) => ("granted".to_string(), Some(sid.to_string())),
+        Err(why) => {
+            let words: String = why.chars().take(80).collect();
+            (format!("refused: {words}"), None)
+        }
+    };
     let detail = serde_json::json!({
-        "user": who.user_id,
-        "workspace": ws.map(|a| a.id().to_string()),
-        "node": node_id,
-        "granted": outcome.is_ok(),
+        "user": user,
+        "workspace": seen.workspace,
+        "node": seen.node,
+        "outcome": outcome,
+        "session": session,
     })
     .to_string();
     if let Err(e) = m
