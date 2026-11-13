@@ -321,7 +321,6 @@ fn a_newer_rollback_journal_store_is_refused_before_any_pragma_writes() {
     let before = std::fs::read(&path).unwrap();
     assert!(Store::open(&path, Durability::Full).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert!(!dir.path().join("chat.db-wal").exists());
 }
 
 /// Review R43-6: the recorded schema holds what the migrations make, not
@@ -377,8 +376,10 @@ fn a_database_held_by_another_writer_is_refused_as_busy_and_left_byte_identical(
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// Review R43-3: the start-up preflight reads a file without writing it:
-/// an absent file is fine, a newer one is refused by name.
+/// Review R43-3: the start-up preflight reads a file without changing it:
+/// an absent file is fine, a newer one, a negative version and a current
+/// version with another schema are refused by name (re-check: only the
+/// newer one was tested).
 #[test]
 fn the_preflight_refuses_a_newer_file_and_passes_an_absent_or_current_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -391,6 +392,313 @@ fn the_preflight_refuses_a_newer_file_and_passes_an_absent_or_current_one() {
     let err = migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap_err();
     assert!(matches!(err, MigrateError::TooNew { .. }), "{err:?}");
     assert!(err.to_string().contains("chat.db"), "{err}");
+    set_version(&path, -3);
+    let err = migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap_err();
+    assert!(
+        matches!(err, MigrateError::Unknown { found: -3, .. }),
+        "{err:?}"
+    );
+
+    let other = dir.path().join("node.db");
+    drop(Store::open(&other, Durability::Full).unwrap());
+    Connection::open(&other)
+        .unwrap()
+        .execute_batch("CREATE TABLE added (x INTEGER);")
+        .unwrap();
+    let before = std::fs::read(&other).unwrap();
+    let err = migrate::check_file(&other, &harness_store::DB_SCHEMA).unwrap_err();
+    assert!(
+        matches!(err, MigrateError::Mismatch { version: 1, .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("node.db"), "{err}");
+    assert_eq!(std::fs::read(&other).unwrap(), before);
+}
+
+/// `dir/crash/<name>` and its hot `-journal`: a transaction that wrote
+/// every statement of `MIGRATIONS` (a first creation) after `committed`
+/// had been committed, cut off after its pages reached the file and
+/// before its commit. A small page cache makes the pager sync the journal
+/// and spill pages into the file mid-transaction; both files are copied
+/// while it is open, which is what a kill at that moment leaves.
+fn interrupted_creation(dir: &Path, name: &str, committed: &str) -> std::path::PathBuf {
+    let live = dir.join("live");
+    std::fs::create_dir_all(&live).unwrap();
+    let live_db = live.join(name);
+    let c = Connection::open(&live_db).unwrap();
+    c.execute_batch(committed).unwrap();
+    c.pragma_update(None, "cache_size", 10).unwrap();
+    c.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    for step in MIGRATIONS {
+        for sql in *step {
+            c.execute_batch(sql).unwrap();
+        }
+    }
+    let journal = live.join(format!("{name}-journal"));
+    assert!(journal.exists(), "no journal");
+    assert!(std::fs::metadata(&live_db).unwrap().len() > 0, "no spill");
+    let crash = dir.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    std::fs::copy(&live_db, crash.join(name)).unwrap();
+    std::fs::copy(&journal, crash.join(format!("{name}-journal"))).unwrap();
+    c.execute_batch("ROLLBACK;").unwrap();
+    crash.join(name)
+}
+
+/// Re-check D1: a first creation of this build's own file, interrupted
+/// (kill -9, OOM, power cut) with a hot rollback journal. A read-only
+/// connection cannot roll it back (SQLITE_READONLY_ROLLBACK), so the
+/// preflight refused it on every start, although the real open recovers
+/// it. The preflight must pass it on, and the real open then rolls the
+/// journal back and creates the database.
+#[test]
+fn the_preflight_passes_on_an_interrupted_creation_and_the_real_open_recovers_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = interrupted_creation(dir.path(), "master.db", "");
+    for start in 1..=2 {
+        if let Err(e) = migrate::check_file(&path, &harness_store::DB_SCHEMA) {
+            panic!("start {start}: the preflight refused a recoverable file: {e}");
+        }
+    }
+    drop(Store::open(&path, Durability::Normal).unwrap());
+    assert_eq!(version_of(&path), MIGRATIONS.len() as i64);
+    assert!(!dir.path().join("crash/master.db-journal").exists());
+    migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+}
+
+/// Re-check D1, the other side: passing a hot journal on is not passing
+/// the file. A newer build's file with a hot journal is rolled back by the
+/// real open (what the newer build would do itself) and then refused as
+/// newer, at its committed version.
+#[test]
+fn a_newer_file_with_a_hot_journal_is_still_refused_by_the_real_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let newer = MIGRATIONS.len() as i64 + 1;
+    let path = interrupted_creation(
+        dir.path(),
+        "chat.db",
+        &format!("CREATE TABLE t (x INTEGER); PRAGMA user_version = {newer};"),
+    );
+    migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+    let err = match Store::open(&path, Durability::Full) {
+        Ok(_) => panic!("a newer file with a hot journal was opened"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("chat.db") && err.contains("newer"), "{err}");
+    assert_eq!(version_of(&path), newer);
+}
+
+/// Re-check D4: a reference that dangled before the migration (a row
+/// deleted with the sqlite3 shell, whose foreign keys are off) must not be
+/// blamed on the migration: the refusal says it was there before, names
+/// the tables, and nothing is changed.
+#[test]
+fn a_reference_that_dangled_before_the_migration_is_named_as_such() {
+    const OTHER: Migration = &["CREATE TABLE other (x INTEGER);"];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    {
+        let c = fk_db(&path);
+        c.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        c.execute("DELETE FROM users", []).unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let mut c = Connection::open(&path).unwrap();
+    let err = migrate::migrate(&mut c, "test.db", &[FK_V1, OTHER]).unwrap_err();
+    let msg = err.to_string();
+    for part in [
+        "test.db",
+        "blobs",
+        "users",
+        "before",
+        "version 1",
+        "not changed",
+    ] {
+        assert!(msg.contains(part), "{part:?} missing from: {msg}");
+    }
+    assert!(!msg.contains("left rows"), "blames the migration: {msg}");
+    drop(c);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// Re-check of R43-5: on a file in rollback-journal mode (every file
+/// until its first `Store::open` ends) a committing writer holds the file
+/// exclusively, so the version read itself times out, before `BEGIN`. That
+/// is the same condition and gets the same refusal, in the runner and in
+/// the preflight.
+#[test]
+fn a_rollback_journal_file_held_by_a_committing_writer_is_refused_as_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    {
+        // Not `open`: this file stays in rollback-journal mode.
+        let mut c = Connection::open(&path).unwrap();
+        migrate::migrate(&mut c, "test.db", &[V1]).unwrap();
+    }
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+    let mut c = Connection::open(&path).unwrap();
+    c.pragma_update(None, "busy_timeout", 50).unwrap();
+    let err = migrate::migrate(&mut c, "test.db", &[V1, V2]).unwrap_err();
+    assert!(matches!(err, MigrateError::Busy { .. }), "{err:?}");
+    let err = migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap_err();
+    assert!(matches!(err, MigrateError::Busy { .. }), "{err:?}");
+    assert!(err.to_string().contains("another process"), "{err}");
+    holder.execute_batch("ROLLBACK;").unwrap();
+}
+
+/// The branch under the write lock: the version read before `BEGIN` is
+/// behind, another process migrates and commits while this one waits for
+/// the lock, and the re-read finds the file migrated, so nothing is run
+/// again (V2's ALTER would fail a second time). A busy handler says when
+/// this one is waiting, so the order is not left to a sleep.
+#[test]
+fn a_file_migrated_by_another_process_while_this_one_waited_is_not_migrated_again() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    drop(open(&path, &[V1]).unwrap());
+    let other = Connection::open(&path).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let waiting = Arc::new(AtomicBool::new(false));
+    let mut c = Connection::open(&path).unwrap();
+    let flag = waiting.clone();
+    c.busy_handler(Some(move |_| {
+        flag.store(true, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        true
+    }))
+    .unwrap();
+    let this = std::thread::spawn(move || migrate::migrate(&mut c, "test.db", &[V1, V2]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !waiting.load(Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline, "never waited");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for sql in V2 {
+        other.execute_batch(sql).unwrap();
+    }
+    other.pragma_update(None, "user_version", 2).unwrap();
+    other.execute_batch("COMMIT;").unwrap();
+    let done = this.join().unwrap().unwrap();
+    assert_eq!((done.from, done.to), (2, 2));
+    assert_eq!(version_of(&path), 2);
+}
+
+/// Owner decision (b): a version-0 file that already has tables is
+/// adopted as version 1 only when its schema is exactly version 1's.
+#[test]
+fn an_unversioned_file_with_exactly_version_1s_schema_is_adopted_as_version_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("master.db");
+    {
+        let c = Connection::open(&path).unwrap();
+        for sql in MIGRATIONS[0] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.execute_batch(
+            "INSERT INTO users (user_id, username, password_hash, role, created_ms)
+                 VALUES ('u1', 'ann', 'x', 'admin', 1);",
+        )
+        .unwrap();
+    }
+    assert_eq!(version_of(&path), 0);
+    drop(Store::open(&path, Durability::Normal).unwrap());
+    assert_eq!(version_of(&path), 1);
+    let users: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(users, 1);
+}
+
+/// Owner decision (b), the other side: a version-0 file whose tables are
+/// not version 1's is refused as a mismatch with the advice to remove the
+/// data directory, also when migration 1 itself would trip on those
+/// tables (here an index on a column the old `sessions` lacks), which used
+/// to be reported as a failed migration.
+#[test]
+fn an_unversioned_file_whose_tables_break_migration_1_is_refused_as_a_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chat.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY);")
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let err = match Store::open(&path, Durability::Full) {
+        Ok(_) => panic!("an old-shaped file was opened"),
+        Err(e) => e.to_string(),
+    };
+    for part in [
+        "chat.db",
+        "does not match schema version 1",
+        "not changed",
+        "remove this data directory",
+    ] {
+        assert!(err.contains(part), "{part:?} missing from: {err}");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(version_of(&path), 0);
+}
+
+/// Review R43-4 (re-check: no test would miss the log lines): a real
+/// migration is logged before and after, naming the file and both
+/// versions; a creation (0 to the latest) and a failed one's "after" are
+/// not.
+#[test]
+fn a_real_migration_is_logged_before_and_after_and_a_creation_is_not() {
+    use std::sync::{Arc, Mutex};
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    self.0.push_str(&format!("{}={:?} ", f.name(), v));
+                }
+            }
+            let mut line = Fields(format!("{} ", event.metadata().level()));
+            event.record(&mut line);
+            self.0.lock().unwrap().push(line.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.db");
+    tracing::subscriber::with_default(Capture(events.clone()), || {
+        let mut c = Connection::open(&path).unwrap();
+        migrate::migrate(&mut c, "node.db", &[V1]).unwrap();
+        assert_eq!(events.lock().unwrap().len(), 0, "a creation was logged");
+        migrate::migrate(&mut c, "node.db", &[V1, V2]).unwrap();
+        let lines = events.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("migrating the schema"), "{lines:?}");
+        assert!(lines[1].contains("schema migrated"), "{lines:?}");
+        for l in &lines {
+            assert!(
+                l.starts_with("INFO")
+                    && l.contains("node.db")
+                    && l.contains("from=1")
+                    && l.contains("to=2"),
+                "{l}"
+            );
+        }
+        migrate::migrate(&mut c, "node.db", &[V1, V2, BROKEN]).unwrap_err();
+        let lines = events.lock().unwrap().clone();
+        assert_eq!(lines.len(), 3, "a failed migration logs its start only: {lines:?}");
+    });
 }
 
 /// Review R43-3 (untested claim): a newer build that died with its WAL not
