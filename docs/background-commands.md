@@ -838,7 +838,7 @@ step 1), the callback turn's mark and the attention items (step 3).
   chat (it hides itself) so an end the tab asked for can show; a chat with none never loads it.
   `size.mjs` checks it stays out of the first load. Measured: 1.9 KB gzipped (its stylesheet
   0.4 KB), the conversation +0.1 KB; the first load unchanged at 99.5 KB of the 104 KB ceiling;
-  the total 370.4 KB, its soft line raised by 2.0 KB to 370.5.
+  the total 370.5 KB (368.4 before), its soft line raised by 2.1 KB to 370.6.
 - **On by default.** `background_per_session` defaults to 8 (`DEFAULT_PER_SESSION`). The step 1
   tests that meant "off" now set 0 explicitly (`a_node_with_the_feature_off_offers_no_background_tools`,
   `the_default_node_takes_a_background_start_and_0_refuses_it`), and the latter also shows that a
