@@ -796,8 +796,11 @@ step 1), the callback turn's mark and the attention items (step 3).
 - **What the master answers itself, from the log** (`Store::background_events`, the newest 4096
   `background_started`/`background_ended` events of the chat, one bounded read): a command the
   log shows ended is a 200 with `ended: [{bg_id, reason}]` and a message ("bg-1 had already
-  ended: it exited"), the same every time and the node is not asked; Stop all with nothing the
-  log shows running is a 200 with `stopping: []`. Everything else is the node's to decide: an id
+  ended: it exited"), the same every time and the node is not asked. Everything else is the
+  node's to decide. Stop all is always sent, also when the log shows nothing running (`stopping`
+  then is `[]`): the log may be behind, and its window is bounded, so a chat that starts
+  thousands of short commands could otherwise push a long-running one out of it and hide it
+  from Stop all. An id
   the log does not show running is still relayed (a start whose event is on its way), and the
   node's refusal ("no background command bg-9 in this chat (it has bg-1)") is passed on as 409.
 - **Relayed** as `session.stop_background { bg_id?, by: user }`; the node stops it and records

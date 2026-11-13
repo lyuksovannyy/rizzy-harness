@@ -453,11 +453,15 @@ async fn an_ended_one_is_a_success_that_says_so_and_an_unknown_one_is_the_nodes_
             "{v}"
         );
     }
-    // Stop all with nothing running: nothing to do, nothing sent.
+    // Stop all when the log shows none running: the node is asked all the
+    // same. The log here may be behind, or (a steered agent that starts
+    // thousands of short commands) may show less than the node runs; Stop
+    // all must not be something a command can hide from.
+    assert!(t.local.stops().is_empty(), "{:?}", t.local.stops());
     let (st, v) = req(&t, Method::POST, &all(sid), None, &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["stopping"], json!([]), "{v}");
-    assert!(t.local.stops().is_empty(), "{:?}", t.local.stops());
+    assert_eq!(t.local.stops(), vec![(sid, None, StopBackgroundBy::User)]);
 
     // An id the log does not know: the node decides, and its refusal is
     // the answer.
@@ -470,7 +474,7 @@ async fn an_ended_one_is_a_success_that_says_so_and_an_unknown_one_is_the_nodes_
             .contains("no background command bg-9"),
         "{v}"
     );
-    assert_eq!(t.local.stops().len(), 1);
+    assert_eq!(t.local.stops().len(), 2);
 
     // Not an id at all: refused here.
     for bad in ["bg-", "bg-1x", "1", "bg-12345678901", "..%2Fbg-1"] {
@@ -480,7 +484,7 @@ async fn an_ended_one_is_a_success_that_says_so_and_an_unknown_one_is_the_nodes_
             "{bad}: {st} {v}"
         );
     }
-    assert_eq!(t.local.stops().len(), 1);
+    assert_eq!(t.local.stops().len(), 2);
 }
 
 #[tokio::test]

@@ -5,9 +5,9 @@
 //! (T10). Like the turn's cancel it needs no settled password and no
 //! agentic grant: stopping work is always allowed (Gate 3 review P-7).
 //!
-//! The master runs nothing. It reads what the log shows (an end already
-//! recorded is answered here, the same every time, without asking the
-//! node), then relays `session.stop_background { by: user }` to the owning
+//! The master runs nothing. It reads what the log shows (for one command,
+//! an end already recorded is answered here, the same every time, without
+//! asking the node; Stop all is always sent), then relays `session.stop_background { by: user }` to the owning
 //! node, which alone decides: it stops the command and records
 //! `background_ended { reason: stopped_by_user }`, or refuses with its
 //! reason, which is passed on. The answer says what was asked of the node
@@ -127,14 +127,11 @@ async fn stop(
             // judge (a start whose event is on its way, or a refusal).
             vec![b.clone()]
         }
-        None if running.is_empty() => {
-            return Ok(Json(json!({
-                "ok": true,
-                "stopping": [],
-                "ended": [],
-                "message": "no background command runs in this chat",
-            })));
-        }
+        // Stop all is always the node's to carry out, whatever this log
+        // shows: it may be behind, and it is read through a bounded window
+        // (`Store::background_events`) that a chat starting thousands of
+        // short commands could push a long-running one out of. The answer
+        // names what the log shows; the node stops what it runs.
         None => running,
     };
     let node = row.node_id.clone();
