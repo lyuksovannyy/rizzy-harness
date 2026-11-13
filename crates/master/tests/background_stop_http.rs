@@ -543,13 +543,17 @@ async fn a_node_without_background_commands_is_sent_nothing() {
 async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
     for host_first in [true, false] {
         let t = start().await;
+        // A remote node: the embedded one is for admins in every mode, so a
+        // demotion would block both chats there for that reason.
+        let (l, remote) = fake("node-r1", &[harness_protocol::CAP_BACKGROUND]);
+        t.master.add_link(l, false).await.unwrap();
         let carol = account(&t, "carol", "admin").await;
         let (_, me) = req(&t, Method::GET, "/api/me", None, &carol).await;
         let carol_id = me["user"]["user_id"].as_str().unwrap().to_string();
         let make = |mode: &'static str| {
             let (t, carol) = (&t, carol.clone());
             async move {
-                let body = json!({"cwd": "/w", "title": mode, "node_id": "local", "exec_mode": mode});
+                let body = json!({"cwd": "/w", "title": mode, "node_id": "node-r1", "exec_mode": mode});
                 let (st, v) = req(t, Method::POST, "/api/sessions", Some(body), &carol).await;
                 assert_eq!(st, StatusCode::OK, "{v}");
                 v["session_id"].as_str().unwrap().parse::<SessionId>().unwrap()
@@ -564,7 +568,7 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
         };
         for sid in [host, sandbox] {
             mirrored(&t, sid, 1).await;
-            t.local.append(
+            remote.append(
                 sid,
                 EventKind::TurnStarted(harness_core::event::TurnStarted {
                     turn_id: "t1".into(),
@@ -584,7 +588,7 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
         .await;
         assert_eq!(st, StatusCode::OK, "{v}");
         let cancels = || -> Vec<SessionId> {
-            t.local
+            remote
                 .seen
                 .lock()
                 .unwrap()
@@ -596,14 +600,14 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
                 .collect()
         };
         for _ in 0..400 {
-            if cancels().contains(&host) && t.local.stops().iter().any(|s| s.0 == host) {
+            if cancels().contains(&host) && remote.stops().iter().any(|s| s.0 == host) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // A moment more, for a wrong stop to arrive.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let (c, s): (Vec<_>, Vec<_>) = (cancels(), t.local.stops().iter().map(|s| s.0).collect());
+        let (c, s): (Vec<_>, Vec<_>) = (cancels(), remote.stops().iter().map(|s| s.0).collect());
         assert!(c.contains(&host), "host_first={host_first}: host not cancelled: {c:?}");
         assert!(s.contains(&host), "host_first={host_first}: host not stopped: {s:?}");
         assert!(!c.contains(&sandbox), "host_first={host_first}: sandbox cancelled");
