@@ -1506,7 +1506,9 @@ async fn offline_node(t: &T) {
             node_id: "gone".into(),
             hostname: "h".into(),
             version: "0".into(),
-            capabilities: vec!["exec:sandbox".into()],
+            // No modes: a node that is away is retried whatever it said
+            // (re-check RN-2: announcing one here hid the regression).
+            capabilities: vec![],
             sessions: vec![],
         })
         .unwrap();
@@ -1616,6 +1618,28 @@ async fn a_routines_chat_is_always_in_the_sandbox() {
         .find(|e| e["kind"] == "session_created")
         .unwrap();
     assert_eq!(created["payload"]["exec_mode"], "sandbox", "{created}");
+}
+
+/// Re-check RN-2: after a restart, a routine whose node has not said hello
+/// to this process yet is retried as a node that is away, not blocked and
+/// paused for a mode it was never asked about.
+#[tokio::test]
+async fn a_routine_at_a_node_that_never_said_hello_is_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path()).await;
+    let (alex, _) = alex(&t).await;
+    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "run: true",
+                      "node_id": "node-never1", "cwd": t.root});
+    let id = routine(&t, &alex, None, "Never", spec, every(60)).await;
+    let run = started(&t, &alex, &id).await;
+    let v = wait_attempt(&t, &alex, &id, &run, 2).await;
+    assert_eq!(v["status"], "pending", "{v}");
+    assert!(
+        v["reason"].as_str().unwrap().contains("trying again in 1 min"),
+        "{v}"
+    );
+    let (_, r) = req(&t, Method::GET, &format!("/api/routines/{id}"), None, &alex).await;
+    assert_eq!(r["paused_reason"], Value::Null, "{r}");
 }
 
 #[tokio::test]

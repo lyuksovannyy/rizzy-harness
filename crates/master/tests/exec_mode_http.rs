@@ -37,7 +37,70 @@ struct Server {
     admin: String,
     mirror: Store,
     master: Master,
+    /// The creates the careless node was sent.
+    creates: Arc<std::sync::Mutex<usize>>,
     _dir: tempfile::TempDir,
+}
+
+/// A node from before modes: its hello names no `exec:` mode, and it runs
+/// any chat it is sent, ignoring the mode (it acks the create and records
+/// its `session_created` without one). Counts the creates it gets.
+fn careless_node(id: &str) -> (harness_node::NodeLink, Arc<std::sync::Mutex<usize>>) {
+    use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+    let (to_node, mut commands) = tokio::sync::mpsc::channel::<MasterToNode>(64);
+    let (tx, from_node) = tokio::sync::mpsc::channel::<NodeToMaster>(64);
+    tx.try_send(NodeToMaster::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        node_id: id.into(),
+        hostname: "h".into(),
+        version: "0".into(),
+        capabilities: vec!["native".into(), "profile:agentic".into()],
+        sessions: vec![],
+    })
+    .unwrap();
+    let count: Arc<std::sync::Mutex<usize>> = Arc::default();
+    let (seen, node) = (count.clone(), id.to_string());
+    tokio::spawn(async move {
+        while let Some(msg) = commands.recv().await {
+            if let MasterToNode::Create { session_id, .. } = &msg {
+                *seen.lock().unwrap() += 1;
+                let (kind, payload) = harness_core::event::EventKind::SessionCreated(
+                    harness_core::event::SessionCreated {
+                        title: "t".into(),
+                        cwd: "/w".into(),
+                        model: "m".into(),
+                        backend: "native".into(),
+                        node_id: node.clone(),
+                        approval_mode: harness_core::policy::ApprovalMode::Auto,
+                        profile: Profile::Agentic,
+                        agent_id: None,
+                        incognito: false,
+                        parent_session: None,
+                        no_callbacks: false,
+                        exec_mode: None,
+                    },
+                )
+                .into_parts();
+                let _ = tx.try_send(NodeToMaster::Event {
+                    event: harness_core::RawEvent {
+                        session_id: *session_id,
+                        seq: 1,
+                        ts_ms: 0,
+                        kind,
+                        payload,
+                    },
+                });
+            }
+            if let Some(r) = msg.req_id() {
+                let _ = tx.try_send(NodeToMaster::Ack {
+                    req_id: r.into(),
+                    ok: true,
+                    error: None,
+                });
+            }
+        }
+    });
+    (harness_node::NodeLink { to_node, from_node }, count)
 }
 
 async fn node(root: &std::path::Path, id: &str, profile: Profile, exec: ExecOffers) -> NodeRuntime {
@@ -101,14 +164,12 @@ async fn start() -> Server {
     let chats = node(dir.path(), "master", Profile::Chat, ExecOffers::default()).await;
     master.add_link(local.attach().await, true).await.unwrap();
     master.add_link(chats.attach().await, true).await.unwrap();
-    let silent = || {
-        let no = || Err("off in this test".to_string());
-        ExecOffers::new(no(), no(), vec![])
-    };
-    for (id, o) in [(BOTH, both()), (HOST_ONLY, host_only()), (SILENT, silent())] {
+    for (id, o) in [(BOTH, both()), (HOST_ONLY, host_only())] {
         let n = node(dir.path(), id, Profile::Agentic, o).await;
         master.add_link(n.attach().await, false).await.unwrap();
     }
+    let (link, creates) = careless_node(SILENT);
+    master.add_link(link, false).await.unwrap();
     let app = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
     let mut s = Server {
@@ -117,6 +178,7 @@ async fn start() -> Server {
         admin: String::new(),
         mirror,
         master,
+        creates,
         _dir: dir,
     };
     let (st, cookie, v) = send(
@@ -352,20 +414,54 @@ async fn host_is_for_server_admins_only() {
 }
 
 /// L-g: a node is sent only a mode it announced; one that names none (a
-/// node from before modes) gets no agentic chat, refused by the master,
-/// naming the node.
+/// node from before modes, which would run the chat) gets no agentic chat,
+/// refused by the master, naming the node and what to do on it (RN-3).
 #[tokio::test]
 async fn a_node_that_did_not_announce_the_mode_gets_no_chat() {
     let s = start().await;
     let ws = personal(&s, &s.admin).await;
-    for mode in [None, Some("host")] {
+    for (mode, remedy) in [(None, "install bubblewrap"), (Some("host"), "[execution] host = true")] {
         let (st, v) = create(&s, &s.admin, &ws, SILENT, mode).await;
         assert_ne!(st, StatusCode::OK, "{v}");
         let msg = v.to_string();
-        assert!(
-            msg.contains(SILENT) && msg.contains("its hello did not name it"),
-            "{msg}"
-        );
+        assert!(msg.contains(SILENT) && msg.contains("offers no mode"), "{msg}");
+        assert!(msg.contains(remedy), "{mode:?}: {msg}");
+    }
+    assert_eq!(*s.creates.lock().unwrap(), 0, "the careless node was sent a create");
+}
+
+/// RN-3: a connected node that lacks the mode asked for is refused with
+/// what it does offer and what to do on it, not only "not announced".
+#[tokio::test]
+async fn the_masters_refusal_names_what_the_node_offers_and_the_remedy() {
+    let s = start().await;
+    let ws = personal(&s, &s.admin).await;
+    let (st, v) = create(&s, &s.admin, &ws, HOST_ONLY, None).await;
+    assert_ne!(st, StatusCode::OK, "{v}");
+    let msg = v.to_string();
+    assert!(
+        msg.contains("does not offer the sandbox mode")
+            && msg.contains("offers the host mode")
+            && msg.contains("install bubblewrap"),
+        "{msg}"
+    );
+    let (st, v) = create(&s, &s.admin, &ws, "local", Some("host")).await;
+    assert_ne!(st, StatusCode::OK, "{v}");
+    let msg = v.to_string();
+    assert!(msg.contains("[execution] host = true"), "{msg}");
+}
+
+/// RN-2: a node that has not said hello to this process (after a server
+/// restart, before it reconnects) is "not connected", as before modes:
+/// 503, not a refusal about its modes.
+#[tokio::test]
+async fn a_node_that_never_said_hello_is_not_connected() {
+    let s = start().await;
+    let ws = personal(&s, &s.admin).await;
+    for mode in [None, Some("host")] {
+        let (st, v) = create(&s, &s.admin, &ws, "node-never1", mode).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert!(v.to_string().contains("not connected"), "{v}");
     }
 }
 
