@@ -1442,7 +1442,7 @@ async fn a_replaced_binary_does_not_run_as_the_guard() {
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("rizzy-harness");
     if std::fs::hard_link(EXE, &exe).is_err() {
-        std::fs::copy(EXE, &exe).unwrap();
+        copy_exe(EXE, &exe);
     }
     let sb = Sandbox::new(
         exe.clone(),
@@ -1745,4 +1745,20 @@ fn a_session_with_a_line_break_injects_nothing() {
     let _ = reader.wait();
     let _ = v.kill();
     let _ = v.wait();
+}
+
+/// A copy of the executable `from` at `to`, made by `cp` in a child
+/// process. This test binary then never holds a write descriptor of the
+/// copy, so a child that another test's thread forks in the meantime cannot
+/// inherit one, and the kernel does not refuse to start the copy with
+/// "Text file busy" (seen in CI and under load: `std::fs::copy` here, a
+/// fork there).
+fn copy_exe(from: impl AsRef<std::path::Path>, to: &std::path::Path) {
+    let st = std::process::Command::new("cp")
+        .arg("--")
+        .arg(from.as_ref())
+        .arg(to)
+        .status()
+        .expect("cp");
+    assert!(st.success(), "cp to {}", to.display());
 }
