@@ -82,6 +82,10 @@ pub(crate) struct Session {
     bg_flush: Arc<tokio::sync::Notify>,
     /// The last try to record a queued end failed (T8D-6).
     bg_failed: AtomicBool,
+    /// Held while an end is checked against the turn slot and recorded,
+    /// and while a turn reads its history and records `turn_started`: no
+    /// end lands between a turn's read and its start (review S3-4).
+    bg_gate: tokio::sync::Mutex<()>,
 }
 
 type BgEnds = tokio::sync::mpsc::UnboundedReceiver<harness_tools::background::Ended>;
@@ -218,6 +222,7 @@ impl Session {
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
+            bg_gate: tokio::sync::Mutex::new(()),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -298,6 +303,7 @@ impl Session {
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
+            bg_gate: tokio::sync::Mutex::new(()),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -352,6 +358,7 @@ impl Session {
             bg.recorded();
             return;
         }
+        let _gate = self.bg_gate.lock().await;
         {
             let turn = self.turn.lock().unwrap_or_else(|p| p.into_inner());
             if turn.is_some() {
@@ -362,11 +369,14 @@ impl Session {
                 return;
             }
         }
+        #[cfg(feature = "testing")]
+        crate::testing::end_hold(self.id).await;
         self.record_background(vec![e]).await;
     }
 
     /// Ends queued during a turn, once no turn runs.
     async fn flush_background(&self) {
+        let _gate = self.bg_gate.lock().await;
         let ends = {
             let turn = self.turn.lock().unwrap_or_else(|p| p.into_inner());
             if turn.is_some() {
@@ -904,6 +914,10 @@ impl Session {
             }
             self.unclosed.store(false, Ordering::SeqCst);
         }
+        // Held from the read to `turn_started`: an end whose check passed
+        // before the slot was taken is in the log before the read, and
+        // every later one is queued for the turn (S3-4).
+        let gate = self.bg_gate.lock().await;
         let id = self.id;
         let history = match self
             .node
@@ -920,6 +934,7 @@ impl Session {
         };
         let refusal = match callback_check(&history, &bg_ids) {
             Err(e) => {
+                drop(gate);
                 self.release(&turn_id);
                 return Err(e);
             }
@@ -948,6 +963,7 @@ impl Session {
                     reason: reason.clone(),
                 }))
                 .await;
+            drop(gate);
             self.release(&turn_id);
             recorded.map_err(|e| e.to_string())?;
             return Err(format!("{}: {reason}", harness_protocol::CALLBACK_REFUSED));
@@ -973,9 +989,11 @@ impl Session {
             }))
             .await
         {
+            drop(gate);
             self.release(&turn_id);
             return Err(e.to_string());
         }
+        drop(gate);
         let extra = TurnExtra {
             savings,
             cause: Some(cause),
@@ -1007,6 +1025,9 @@ impl Session {
         msg: &UserMessage,
         agent: Option<&AgentSpec>,
     ) -> Result<Vec<RawEvent>, String> {
+        // As for a callback turn (S3-4): no end lands between the read and
+        // `turn_started`.
+        let gate = self.bg_gate.lock().await;
         let id = self.id;
         let history = self
             .node
@@ -1027,6 +1048,7 @@ impl Session {
                 turn_id: msg.turn_id.clone(),
             }))
             .await;
+        drop(gate);
         if let Err(e) = started {
             return Err(e.to_string());
         }

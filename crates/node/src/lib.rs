@@ -219,6 +219,58 @@ pub mod testing {
 
     use harness_tools::sandbox::Sandbox;
 
+    type Holds = std::sync::Mutex<Vec<(harness_core::SessionId, Arc<EndHold>)>>;
+    static END_HOLD: Holds = std::sync::Mutex::new(Vec::new());
+
+    /// Holds the next background end a session records outside a turn,
+    /// after its check of the turn slot and before its append (review S3-4).
+    pub struct EndHold {
+        held: tokio::sync::Notify,
+        go: tokio::sync::Semaphore,
+        is_held: std::sync::atomic::AtomicBool,
+    }
+
+    impl EndHold {
+        /// Until an end waits here.
+        pub async fn held(&self) {
+            while !self.is_held.load(std::sync::atomic::Ordering::SeqCst) {
+                self.held.notified().await;
+            }
+        }
+        /// Let it go on.
+        pub fn release(&self) {
+            self.go.add_permits(1);
+        }
+    }
+
+    /// Arm the hold for the next end of session `sid`.
+    pub fn hold_next_end(sid: harness_core::SessionId) -> Arc<EndHold> {
+        let h = Arc::new(EndHold {
+            held: tokio::sync::Notify::new(),
+            go: tokio::sync::Semaphore::new(0),
+            is_held: Default::default(),
+        });
+        END_HOLD.lock().unwrap().push((sid, h.clone()));
+        h
+    }
+
+    pub(crate) async fn end_hold(sid: harness_core::SessionId) {
+        let h = {
+            let mut all = END_HOLD.lock().unwrap();
+            all.iter()
+                .position(|(s, _)| *s == sid)
+                .map(|i| all.remove(i).1)
+        };
+        if let Some(h) = h {
+            h.is_held.store(true, std::sync::atomic::Ordering::SeqCst);
+            h.held.notify_waiters();
+            h.held.notify_one();
+            if let Ok(p) = h.go.acquire().await {
+                p.forget();
+            }
+        }
+    }
+
     fn bounds(sandbox: Option<Arc<Sandbox>>, protected: &[PathBuf]) -> crate::git::Bounds {
         crate::git::Bounds {
             ceiling: None,
