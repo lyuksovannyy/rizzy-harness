@@ -137,6 +137,33 @@ Tests: `crates/store/tests/event_log.rs` (the inverted proof tests:
 the per-owner listing), `crates/master/tests/link_hardening.rs` and
 `hostile_node.rs` (a fake node sends the hostile frames to a real master).
 
+## A refused node is told why (2026-11-12, ADOPTION_PLAN A.19)
+
+The protocol version was compared in `add_link`, after `accepted`: a node
+of another protocol was accepted, dropped and reconnected for ever without
+a reason. The `auth` and `join` hellos now carry `protocol_version`, a
+required field (a hello without it is malformed and closed), and
+`node_connection` compares it **after** the signature check (for a join,
+once the token is found valid, before it is spent) and before `accepted`,
+answering `rejected` with both versions and the side to upgrade. The node
+prints a refusal as one line without control characters, at most 300
+characters, and exits 77 (review A19-6, A19-7: a master could otherwise
+write escape sequences and forged log lines on the node's terminal). Order matters: a peer without a registered key gets "unknown or
+revoked node" whatever it claims (`an_unauthenticated_peer_does_not_learn_the_version`),
+so only the master's own nodes learn its protocol and crate version. Every
+`rejected` ends the node's reconnect loop (each needs a person); a master
+that is down, TLS and network errors are retried. `add_link` keeps its
+check for a `node.hello` that contradicts the `auth`. Tests:
+`crates/master/tests/version_refusal.rs`; the node's exit in
+`crates/cli/tests/stop_signal.rs`. Since the re-check (R-5, R-6): only
+printable ASCII, runs of spaces folded, and the node accepts from its
+master only an id in the master's own shape (`wire::is_node_id`, the rule
+the master holds node ids to), at `node join` and at every `accepted`;
+anything else is a refusal of that master. A join of another protocol with
+a valid token is told why without spending it, so it also tells its holder
+that the token is valid (R-11); tokens are 128 random bits, so this helps
+no guesser, and only the holder learns it.
+
 ## Left open
 
 - **Channel binding** uses the certificate fingerprint, not a TLS exporter

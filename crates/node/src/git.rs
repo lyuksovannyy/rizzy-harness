@@ -104,7 +104,8 @@ const SHADOW_EXCLUDES: &str =
     "node_modules/\ntarget/\n.venv/\nvenv/\n__pycache__/\ndist/\nbuild/\n.cache/\n*.pyc\n";
 
 /// A snapshot that takes longer than this is abandoned (huge folders).
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A stop's wait is derived from it (`crates/cli/src/stop.rs`).
+pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The longest any single git process may run before it is killed.
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(120);

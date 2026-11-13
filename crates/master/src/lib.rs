@@ -152,6 +152,8 @@ pub struct MasterInner {
     /// Audit rows written for failed node handshakes, per node id and per
     /// peer address (Gate 3 review L-7).
     node_auth_audits: auth::limits::FailureMap,
+    /// Set by [`Master::begin_stop`] (SIGTERM or SIGINT to `serve`, A.19).
+    server_stopping: std::sync::atomic::AtomicBool,
     pub auth: auth::Auth,
     models: Mutex<Vec<ModelInfo>>,
     agents: Mutex<agent_edits::Agents>,
@@ -367,6 +369,10 @@ pub enum CommandError {
     NodeOffline(String),
     #[error("node did not answer in time")]
     Timeout,
+    /// The node is stopping (`harness_protocol::NODE_STOPPING`): new work
+    /// waits until it is back, as for a node that is away.
+    #[error("{}", harness_protocol::NODE_STOPPING)]
+    NodeStopping,
     #[error("{0}")]
     Rejected(String),
     #[error("store: {0}")]
@@ -484,6 +490,7 @@ impl Master {
                 live,
                 acks: Mutex::new(HashMap::new()),
                 node_auth_audits: nodes::auth_audit_limit(),
+                server_stopping: Default::default(),
                 auth,
                 models: Mutex::new(Vec::new()),
                 providers: Mutex::new(None),
@@ -726,6 +733,21 @@ impl Master {
 
     /// Start the routine scheduler (after the node links, so the chats it
     /// starts have somewhere to run).
+    /// The server is stopping (A.19): routines start no new run from now
+    /// on. HTTP, WebSockets and remote nodes keep working while the local
+    /// runtimes close their turns; the caller then ends HTTP.
+    pub fn begin_stop(&self) {
+        self.inner
+            .server_stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.inner
+            .server_stopping
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn start_routines(&self) {
         routines::start(self);
     }
@@ -891,10 +913,11 @@ impl Master {
                 .collect();
             (clean_label(&hostname, 64), clean_label(&version, 64), caps)
         };
-        if protocol_version != PROTOCOL_VERSION {
-            return Err(format!(
-                "protocol version {protocol_version} not supported (want {PROTOCOL_VERSION})"
-            ));
+        // A remote node was refused for its version before `accepted`
+        // (`nodes.rs`, with the reason); this catches a `node.hello` that
+        // says otherwise than its `auth` did, and the in-process links.
+        if let Some(why) = nodes::protocol_refusal(protocol_version) {
+            return Err(why);
         }
         // A node revoked before this process started, or while its
         // handshake ran (Gate 3 review L-4): `node_connection` checked the
@@ -1369,6 +1392,9 @@ impl Master {
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) if e == harness_protocol::NODE_STOPPING => {
+                Err(CommandError::NodeStopping)
+            }
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
             Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }

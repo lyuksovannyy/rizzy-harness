@@ -27,16 +27,30 @@ const AUTH_FAILURE_WINDOW_MS: i64 = 15 * 60 * 1000;
 /// Node ids the master assigns: `[a-z0-9-]`, at most 64 characters. Others
 /// are refused before any lookup or audit row.
 fn plausible_node_id(id: &str) -> bool {
-    (1..=64).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    // The same rule the node holds its master to (review R-5).
+    harness_link::wire::is_node_id(id)
 }
 
 /// The limiter of audit rows for failed handshakes ([`AUTH_FAILURE_AUDITS`]
 /// per key; keys are `node:<id>` and `peer:<address>`).
 pub(crate) fn auth_audit_limit() -> crate::auth::limits::FailureMap {
     crate::auth::limits::FailureMap::new(4096, AUTH_FAILURE_AUDITS, AUTH_FAILURE_WINDOW_MS)
+}
+
+/// Why a node speaking `node` is refused, for the person who runs it: both
+/// versions and which side to upgrade. `None` when it speaks the master's.
+/// No range is admitted before the first tag (`docs/node-update.md` §8.3).
+pub(crate) fn protocol_refusal(node: u32) -> Option<String> {
+    use harness_protocol::PROTOCOL_VERSION as MASTER;
+    let older = match node.cmp(&MASTER) {
+        std::cmp::Ordering::Equal => return None,
+        std::cmp::Ordering::Greater => "the master is older: upgrade the master first",
+        std::cmp::Ordering::Less => "this node is older: upgrade it to the master's build",
+    };
+    Some(format!(
+        "this node speaks protocol {node} and the master (rizzy-harness {}) protocol {MASTER}: {older}",
+        env!("CARGO_PKG_VERSION")
+    ))
 }
 
 fn token_hash(t: &str) -> String {
@@ -167,10 +181,30 @@ impl Master {
                 public_key,
                 hostname,
                 signature,
+                protocol_version,
             }) => {
                 // Possession of the key first, then the token is spent.
                 if !identity::verify(&public_key, &signed, &signature) {
                     send_json(&mut ws, &reject("bad signature")).await?;
+                    return Ok(());
+                }
+                // A join of another protocol is refused with the reason
+                // before the token is spent, and only to whoever holds a
+                // valid token (review N-9): a stranger learns nothing.
+                if let Some(why) = protocol_refusal(protocol_version) {
+                    let h = token_hash(&token);
+                    let valid = self
+                        .inner
+                        .mirror
+                        .call(move |s| s.join_token_valid(&h, harness_core::now_ms()))
+                        .await?;
+                    let why = if valid {
+                        tracing::warn!("refused a node's join: {why}");
+                        why
+                    } else {
+                        "invalid or expired join token".to_string()
+                    };
+                    send_json(&mut ws, &reject(&why)).await?;
                     return Ok(());
                 }
                 let hostname: String = hostname
@@ -200,7 +234,11 @@ impl Master {
                 }
                 Ok(())
             }
-            Some(Hello::Auth { node_id, signature }) => {
+            Some(Hello::Auth {
+                node_id,
+                signature,
+                protocol_version,
+            }) => {
                 if !plausible_node_id(&node_id) {
                     send_json(&mut ws, &reject("unknown or revoked node")).await?;
                     return Ok(());
@@ -229,6 +267,14 @@ impl Master {
                         tracing::info!(node = %node_id, "auth from an unknown node id");
                     }
                     send_json(&mut ws, &reject("unknown or revoked node")).await?;
+                    return Ok(());
+                }
+                // Only now, with the key proved: the versions are told to
+                // the master's own nodes, never to a stranger (A.19). A
+                // node refused here stops reconnecting and shows the reason.
+                if let Some(why) = protocol_refusal(protocol_version) {
+                    tracing::warn!(node = %node_id, "refused a node: {why}");
+                    send_json(&mut ws, &reject(&why)).await?;
                     return Ok(());
                 }
                 send_json(

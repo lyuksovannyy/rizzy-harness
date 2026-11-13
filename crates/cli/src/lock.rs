@@ -79,6 +79,15 @@ fn take_with(
             Err(TryLockError::WouldBlock) => {
                 let mut text = String::new();
                 let _ = file.read_to_string(&mut text);
+                if let Some(z) = exited_holder(&text) {
+                    bail!(
+                        "{} is in use by {z}: it has exited and waits for a read on a file \
+                         system that does not answer (a network or FUSE mount); it goes, and \
+                         the directory is free, once that read returns or the mount is forced \
+                         off (`umount -f` or `fusermount -u -z`)",
+                        dir.display(),
+                    );
+                }
                 bail!(
                     "{} is in use by {}: one data directory serves one process; stop that \
                      one first, or give this one its own --data-dir",
@@ -136,6 +145,17 @@ fn holder(text: &str) -> String {
     }
 }
 
+/// The holder in words when the hint's pid is a zombie (`/proc/<pid>/stat`
+/// state `Z`): a holder that has exited and is kept by a thread stuck in
+/// the kernel (review R-9). The hint is only a hint: another process may
+/// have that pid now, so this is said only when the lock is held.
+fn exited_holder(text: &str) -> Option<String> {
+    let pid = text.split_whitespace().next()?.parse::<u32>().ok()?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state = stat.rsplit(')').next()?.trim_start().chars().next()?;
+    (state == 'Z').then(|| holder(text))
+}
+
 /// What `doctor` found, in words.
 pub enum Status {
     Free(String),
@@ -171,10 +191,16 @@ pub fn status(dir: &Path) -> Result<Status, String> {
         Err(TryLockError::WouldBlock) => {
             let mut text = String::new();
             let _ = file.read_to_string(&mut text);
-            Ok(Status::Held(format!(
-                "held by {}: a second server or node on this directory is refused",
-                holder(&text)
-            )))
+            Ok(Status::Held(match exited_holder(&text) {
+                Some(z) => format!(
+                    "held by {z}, which has exited and waits for a read on a file system that \
+                     does not answer: the directory is free once that read returns"
+                ),
+                None => format!(
+                    "held by {}: a second server or node on this directory is refused",
+                    holder(&text)
+                ),
+            }))
         }
         Err(TryLockError::Error(e)) if unsupported(&e) => Ok(Status::Unsupported(format!(
             "{}: this file system does not support file locks ({e}): nothing stops a second \

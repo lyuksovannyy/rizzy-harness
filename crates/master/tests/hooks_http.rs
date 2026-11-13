@@ -1914,3 +1914,105 @@ async fn webhook_content_never_reaches_logs_or_audit() {
         );
     }
 }
+
+/// Review A19-2: a webhook call while the server stops is answered 503
+/// with the reason and records no run (it would only be ended at the next
+/// start, "never retried").
+#[tokio::test]
+async fn a_webhook_while_stopping_is_503_and_adds_no_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), false).await;
+    let alex = alex(&t).await;
+    let h = webhook(&t, &alex, "Hook", chat_spec("hello")).await;
+    t.master.begin_stop();
+    let (st, _, v) = post_hook(
+        &t,
+        &h.tid,
+        Some(&h.secret),
+        "text/plain",
+        b"x".to_vec(),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert!(v.to_string().contains("stopping"), "{v}");
+    assert!(runs(&t, &alex, &h.id).await.is_empty());
+}
+
+/// The session of the `n`th prompt the fake chat node received.
+fn prompt_session(fake: &Fake, n: usize) -> SessionId {
+    let seen = fake.seen.lock().unwrap();
+    seen.iter()
+        .filter_map(|m| match m {
+            MasterToNode::Prompt { session_id, .. } => Some(*session_id),
+            _ => None,
+        })
+        .nth(n)
+        .unwrap()
+}
+
+async fn wait_prompts(fake: &Fake, n: usize) {
+    for _ in 0..500 {
+        if fake.prompts() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} prompts, not {n}", fake.prompts());
+}
+
+/// Review R-1, R-4: a webhook's run whose turn its node ended `stopped`
+/// is `interrupted`, not counted and not run again (no second prompt: its
+/// event is not replayed without its mark); five in a row do not pause the
+/// routine. A turn its node's crash interrupted still counts.
+#[tokio::test]
+async fn a_webhook_run_cut_by_a_stop_is_not_counted_and_not_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), true).await;
+    let fake = t.fake.clone().unwrap();
+    let alex = alex(&t).await;
+    let h = webhook(&t, &alex, "Hook", chat_spec("Handle: {{event.text}}")).await;
+    for n in 0..5 {
+        // A minute apart: the hook's own rate limit is not under test.
+        t.set_clock(t0() + (n as i64 + 1) * 61_000);
+        let run = fire_text(&t, &h, "TICKET-4711").await;
+        wait_prompts(&fake, n + 1).await;
+        let sid = prompt_session(&fake, n);
+        fake.emit(sid, "turn_started", json!({"turn_id": "t1"}));
+        fake.emit(
+            sid,
+            "turn_ended",
+            json!({"turn_id": "t1", "reason": "stopped"}),
+        );
+        let v = wait_status(&t, &alex, &h.id, &run, "interrupted").await;
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap()
+                .contains("stopped while the run's turn ran"),
+            "{v}"
+        );
+        let r = t.master.inner_mirror().routine(&h.id).unwrap().unwrap();
+        assert_eq!(
+            (r.consecutive_failures, r.paused_reason.as_deref()),
+            (0, None),
+            "{v}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.prompts(), 5, "a cut run was run again");
+    // A crash: the node's next start closes the turn `interrupted`.
+    t.set_clock(t0() + 7 * 61_000);
+    let run = fire_text(&t, &h, "TICKET-4712").await;
+    wait_prompts(&fake, 6).await;
+    let sid = prompt_session(&fake, 5);
+    fake.emit(sid, "turn_started", json!({"turn_id": "t1"}));
+    fake.emit(
+        sid,
+        "turn_ended",
+        json!({"turn_id": "t1", "reason": "interrupted"}),
+    );
+    wait_status(&t, &alex, &h.id, &run, "interrupted").await;
+    let r = t.master.inner_mirror().routine(&h.id).unwrap().unwrap();
+    assert_eq!(r.consecutive_failures, 1, "a crash mid-turn counts");
+}

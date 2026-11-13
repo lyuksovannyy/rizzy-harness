@@ -197,6 +197,10 @@ pub fn handle(m: &Master) -> Option<&RoutinesHandle> {
 }
 
 /// Routines run as their owner, which the API token is not.
+/// What "run now" and a webhook call get while the server stops (503): no
+/// run is recorded, so nothing is left to end at the next start.
+pub const STOPPING: &str = "the server is stopping: try again once it is back";
+
 pub(crate) const TOKEN_CANNOT_OWN: &str = "The API token can read routines but cannot own one";
 
 /// Why `who` may not own routines in `a`, or `None` when they may.

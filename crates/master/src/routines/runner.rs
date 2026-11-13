@@ -134,7 +134,9 @@ pub(super) async fn tick(h: &RoutinesHandle, m: &Master) {
     let mut ready = h.ready.clone();
     let _ = ready.wait_for(|r| *r).await;
     let cfg = config(m);
-    if !cfg.enabled {
+    // A server that is stopping starts no run: what is due stays due and
+    // fires at the next start (on time or by its catch-up rule).
+    if !cfg.enabled || m.is_stopping() {
         return;
     }
     let now = h.clock.now();
@@ -726,7 +728,12 @@ async fn launch_failed(m: &Master, a: &Admitted, run: &RunRow, e: CommandError) 
     let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
     let r = &a.routine;
     match e {
-        CommandError::NodeOffline(_) | CommandError::Timeout => {
+        // This server is stopping: a retry kept in memory would be lost
+        // with it. Recorded, not counted, not run again by itself.
+        CommandError::NodeStopping if m.is_stopping() => {
+            end_uncounted(m, &run.run_id, &r.owner_id, NOT_STARTED).await
+        }
+        CommandError::NodeOffline(_) | CommandError::NodeStopping | CommandError::Timeout => {
             retry_later(m, run, r, e.to_string(), a.event.clone()).await
         }
         CommandError::UnknownAgent(_)
@@ -902,6 +909,8 @@ async fn block(m: &Master, r: &RoutineRow, run_id: Option<&str>, why: &str, now:
 /// Run now: start a run of `r` that no trigger owns.
 pub(crate) enum Manual {
     Started(String),
+    /// The server is stopping: no run is recorded (review A19-2).
+    Stopping,
     /// `overlap` or `cap`.
     Skipped(&'static str),
     Blocked(String),
@@ -914,6 +923,9 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow, sample: Option<Event>) -
     let Some(h) = handle(m) else {
         return Manual::Failed;
     };
+    if m.is_stopping() {
+        return Manual::Stopping;
+    }
     let run = NewRun {
         run_id: new_id(),
         routine_id: r.routine_id.clone(),
@@ -967,6 +979,8 @@ pub enum Fired {
     Skipped(&'static str),
     /// Its owner may no longer run it: blocked, and the routine paused.
     Paused,
+    /// The server is stopping: no run is recorded (review A19-2).
+    Stopping,
     Failed,
 }
 
@@ -976,6 +990,9 @@ pub(crate) async fn fire_event(m: &Master, t: &TriggerRow, r: &RoutineRow, event
     let Some(h) = handle(m) else {
         return Fired::Failed;
     };
+    if m.is_stopping() {
+        return Fired::Stopping;
+    }
     let now = h.clock.now();
     let claim = NewRun {
         run_id: new_id(),
@@ -1188,9 +1205,45 @@ async fn finalize(m: &Master, b: &Bound, end: &Value) {
         Some("completed") => ("completed", None),
         Some("cancelled") => ("cancelled", Some("the turn was cancelled".to_string())),
         Some("interrupted") => ("interrupted", Some("the turn was interrupted".to_string())),
+        // A stop, not the run's failure (review A19-2): recorded, not
+        // counted, not run again by itself (R-1 to R-4).
+        Some("stopped") => {
+            end_uncounted(m, &b.run_id, &b.owner, CUT_BY_STOP).await;
+            return;
+        }
         _ => ("error", Some("the turn ended with an error".to_string())),
     };
     end_run(m, &b.run_id, &b.routine_id, &b.owner, status, reason).await;
+}
+
+/// Why a run ended `interrupted` without counting against its routine: a
+/// stop of its node or of the server, never the routine's fault. A run
+/// whose turn a crash interrupted (`turn_ended{reason: interrupted}`, or a
+/// chat whose turn started and never ended) is still counted, so a routine
+/// that brings its node down every time is paused.
+pub(crate) const CUT_BY_STOP: &str =
+    "the node or the server was stopped while the run's turn ran; it is not run again by itself";
+/// The server stopped between the run's start and its turn's (its prompt
+/// refused by the stopping node, or not yet on its way).
+pub(crate) const NOT_STARTED: &str =
+    "the server stopped before the run's turn started; it is not run again by itself";
+/// A run that was waiting (a retry kept in memory) when the server stopped.
+pub(crate) const RESTARTED: &str = "the server restarted before the run started";
+
+/// End a run `interrupted` with `why`, not counted (`counted` is skipped).
+async fn end_uncounted(m: &Master, run_id: &str, owner: &str, why: &str) {
+    let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
+    let (id, why) = (run_id.to_string(), why.to_string());
+    let ended = m
+        .inner
+        .mirror
+        .call(move |s| s.run_finish(&id, "interrupted", Some(&why), now))
+        .await;
+    match ended {
+        Ok(true) => changed(m, owner),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(run = %run_id, error = %e, "routines: could not end a run"),
+    }
 }
 
 /// Bring active runs in line with the mirror: at startup, pending runs were
@@ -1209,8 +1262,10 @@ async fn reconcile(m: &Master, startup: bool) {
     for run in runs {
         if run.status == "pending" {
             if startup {
-                let why = "the server restarted before the run started";
-                end_run_of(m, &run, "interrupted", why).await;
+                // Never started (a retry waiting in memory, or a stop in the
+                // moment of its launch): not counted (R-2).
+                let owner = owner_of(m, &run).await;
+                end_uncounted(m, &run.run_id, &owner, RESTARTED).await;
             }
             continue;
         }
@@ -1218,17 +1273,20 @@ async fn reconcile(m: &Master, startup: bool) {
     }
 }
 
-async fn end_run_of(m: &Master, run: &RunRow, status: &str, why: &str) {
+async fn owner_of(m: &Master, run: &RunRow) -> String {
     let rid = run.routine_id.clone();
-    let owner = m
-        .inner
+    m.inner
         .mirror
         .call(move |s| s.routine(&rid))
         .await
         .ok()
         .flatten()
         .map(|r| r.owner_id)
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+async fn end_run_of(m: &Master, run: &RunRow, status: &str, why: &str) {
+    let owner = owner_of(m, run).await;
     end_run(
         m,
         &run.run_id,
@@ -1296,6 +1354,12 @@ async fn reconcile_run(m: &Master, h: &RoutinesHandle, run: &RunRow, all: bool) 
     }
     if let Some(end) = end {
         finalize(m, &b, &end).await;
+        return;
+    }
+    // Its chat never started the turn: the launch was cut, by a stop in
+    // the moment of the prompt (R-3). Not the routine's failure.
+    if start.is_none() && !row.as_ref().is_some_and(|r| r.running) {
+        end_uncounted(m, &b.run_id, &b.owner, NOT_STARTED).await;
         return;
     }
     if !row.is_some_and(|r| r.running) {
