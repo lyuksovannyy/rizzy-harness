@@ -64,7 +64,7 @@ fn a_memory_db_whose_schema_is_not_its_versions_is_refused_and_left_byte_identic
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// Review R43-2 (and T41's residual): a memory.db copied in place of a
+/// Review R43-2 (and T42's residual): a memory.db copied in place of a
 /// node.db carries a valid version, but not the node's schema. Neither
 /// file kind opens as the other.
 #[test]

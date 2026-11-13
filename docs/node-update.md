@@ -226,7 +226,7 @@ its master within 2 minutes. If it does, it deletes the file and reports success
 fetches that build again and reports the rollback. A build that crashes before its own code runs
 is caught by the preflight, not here.
 
-**Open point for N.9: rollback across a schema version** (fix plan 4.3, PLAN.md T41). A build
+**Open point for N.9: rollback across a schema version** (fix plan 4.3, PLAN.md T42). A build
 refuses a database with a newer schema version than its own. A new build that migrates `node.db`
 at start and then fails its handshake leaves a `node.db` the rolled-back build refuses, and the
 rollback ends in a node that does not start. N.9 must choose one of: the new build migrates only
