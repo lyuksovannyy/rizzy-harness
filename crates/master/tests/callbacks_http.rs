@@ -39,6 +39,10 @@ const MIN: i64 = 60_000;
 
 enum Do {
     Append(SessionId, Box<EventKind>, i64),
+    /// Send this event, then drop the link: a node that went away.
+    AppendThenLeave(SessionId, Box<EventKind>),
+    /// Send a raw event (a kind this build may not type).
+    Raw(SessionId, String, Value),
 }
 
 #[derive(Clone)]
@@ -47,6 +51,11 @@ struct Fake {
     tx: mpsc::UnboundedSender<Do>,
     /// The answer to the next callbacks (`None`: start the turn).
     refuse: Arc<Mutex<Option<String>>>,
+    /// The answer to the next prompts (`None`: start the person's turn).
+    refuse_prompts: Arc<Mutex<Option<String>>>,
+    /// A started turn (a callback's or a person's) stays running: its
+    /// `turn_ended` is the test's to send.
+    hold: Arc<Mutex<bool>>,
 }
 
 impl Fake {
@@ -71,10 +80,27 @@ impl Fake {
     fn append(&self, sid: SessionId, k: EventKind) {
         self.append_at(sid, k, harness_core::now_ms());
     }
+
+    fn append_then_leave(&self, sid: SessionId, k: EventKind) {
+        self.tx.send(Do::AppendThenLeave(sid, Box::new(k))).unwrap();
+    }
+
+    fn raw(&self, sid: SessionId, kind: &str, payload: Value) {
+        self.tx.send(Do::Raw(sid, kind.into(), payload)).unwrap();
+    }
 }
 
 /// An agentic node `id` announcing `background` and `callback`.
 fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fake) {
+    fake_with(id, sessions, true)
+}
+
+/// `fake`, announcing `callback` only when `callback`.
+fn fake_with(
+    id: &str,
+    sessions: Vec<harness_protocol::SessionHead>,
+    callback: bool,
+) -> (NodeLink, Fake) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
     tx.try_send(NodeToMaster::Hello {
@@ -82,19 +108,26 @@ fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fa
         node_id: id.into(),
         hostname: "h".into(),
         version: "1".into(),
-        capabilities: vec![
-            "native".into(),
-            "profile:agentic".into(),
-            harness_protocol::CAP_BACKGROUND.into(),
-            harness_protocol::CAP_CALLBACK.into(),
-        ],
+        capabilities: [
+            "native",
+            "profile:agentic",
+            harness_protocol::CAP_BACKGROUND,
+            harness_protocol::CAP_CALLBACK,
+        ]
+        .into_iter()
+        .filter(|c| callback || *c != harness_protocol::CAP_CALLBACK)
+        .map(String::from)
+        .collect(),
         sessions: sessions.clone(),
     })
     .unwrap();
     let seen: Arc<Mutex<Vec<MasterToNode>>> = Arc::default();
     let refuse: Arc<Mutex<Option<String>>> = Arc::default();
+    let refuse_prompts: Arc<Mutex<Option<String>>> = Arc::default();
+    let hold: Arc<Mutex<bool>> = Arc::default();
     let (do_tx, mut do_rx) = mpsc::unbounded_channel::<Do>();
     let (node, keep, no) = (id.to_string(), seen.clone(), refuse.clone());
+    let (no_prompt, held) = (refuse_prompts.clone(), hold.clone());
     tokio::spawn(async move {
         let mut seqs: HashMap<SessionId, u64> = sessions
             .iter()
@@ -120,7 +153,7 @@ fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fa
                     let Some(msg) = msg else { return };
                     keep.lock().unwrap().push(msg.clone());
                     let now = harness_core::now_ms();
-                    if let MasterToNode::Create { session_id, .. } = &msg {
+                    if let MasterToNode::Create { session_id, agent, .. } = &msg {
                         let created = EventKind::SessionCreated(SessionCreated {
                             title: "t".into(),
                             cwd: "/w".into(),
@@ -129,7 +162,7 @@ fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fa
                             node_id: node.clone(),
                             approval_mode: ApprovalMode::Auto,
                             profile: Profile::Agentic,
-                            agent_id: None,
+                            agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
                             incognito: false,
                             parent_session: None,
                             no_callbacks: false,
@@ -145,11 +178,37 @@ fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fa
                                 agent: None,
                                 cause: Some(TurnCause::Callback(bg_ids.clone())),
                             }), now);
-                            send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
-                                turn_id: "cb".into(),
-                                reason: TurnEndReason::Completed,
-                                usage: None,
+                            if !*held.lock().unwrap() {
+                                send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
+                                    turn_id: "cb".into(),
+                                    reason: TurnEndReason::Completed,
+                                    usage: None,
+                                }), now);
+                            }
+                        }
+                    }
+                    if let MasterToNode::Prompt { session_id, text, .. } = &msg {
+                        error = no_prompt.lock().unwrap().clone();
+                        if error.is_none() {
+                            send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
+                                turn_id: "p".into(),
+                                agent: None,
+                                cause: None,
                             }), now);
+                            send(&mut seqs, *session_id, EventKind::UserMessage(harness_core::event::UserMessage {
+                                turn_id: "p".into(),
+                                text: text.clone(),
+                                attachments: vec![],
+                                reply: None,
+                                images: vec![],
+                            }), now);
+                            if !*held.lock().unwrap() {
+                                send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
+                                    turn_id: "p".into(),
+                                    reason: TurnEndReason::Completed,
+                                    usage: None,
+                                }), now);
+                            }
                         }
                     }
                     if let Some(req_id) = msg.req_id() {
@@ -162,6 +221,17 @@ fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fa
                 }
                 d = do_rx.recv() => match d {
                     Some(Do::Append(sid, k, ts)) => send(&mut seqs, sid, *k, ts),
+                    Some(Do::AppendThenLeave(sid, k)) => {
+                        send(&mut seqs, sid, *k, harness_core::now_ms());
+                        return;
+                    }
+                    Some(Do::Raw(sid, kind, payload)) => {
+                        let seq = seqs.entry(sid).or_insert(0);
+                        *seq += 1;
+                        let _ = tx.try_send(NodeToMaster::Event {
+                            event: RawEvent { session_id: sid, seq: *seq, ts_ms: harness_core::now_ms(), kind, payload },
+                        });
+                    }
                     None => return,
                 },
             }
@@ -173,12 +243,15 @@ fn fake(id: &str, sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fa
             seen,
             tx: do_tx,
             refuse,
+            refuse_prompts,
+            hold,
         },
     )
 }
 
 struct T {
     base: String,
+    master: Master,
     alex: String,
     node: Fake,
 }
@@ -197,6 +270,9 @@ async fn start(store: Store, dir: &std::path::Path) -> T {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let master = Master::new(store, auth(dir, &addr.to_string()));
+    master.set_memory(Arc::new(
+        harness_memory::SqliteMemory::open_in_memory().unwrap(),
+    ));
     let (l, node) = fake("n1", vec![]);
     master.add_link(l, false).await.unwrap();
     let m2 = master.clone();
@@ -210,7 +286,12 @@ async fn start(store: Store, dir: &std::path::Path) -> T {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let alex = common::signed_in(r).await;
-    T { base, alex, node }
+    T {
+        base,
+        master,
+        alex,
+        node,
+    }
 }
 
 async fn req(
@@ -435,32 +516,97 @@ async fn ends_together_are_one_callback_and_only_the_owner_sees_it() {
     assert_eq!(cbs[1], (sid, vec!["bg-6".to_string()]));
 }
 
-/// The 60-minute rule, and a node's refusals: an end recorded more than 60
-/// minutes before the master sees it starts nothing and says so; a node
-/// that finds nothing to resume is not the owner's business; a node that
-/// refuses on its rules recorded it in the chat, where the owner sees it.
+/// The 60-minute rule, on the master's clock (S3-5): an end this master
+/// first saw more than 60 minutes ago starts nothing and says so. Here the
+/// master that mirrored it could not ask (its node did not offer
+/// callbacks), and the master that starts next, on the same store, ages it
+/// by its `ts_ms`, the only time it has.
 #[tokio::test]
-async fn an_old_end_and_the_nodes_refusals() {
+async fn an_end_older_than_60_minutes_starts_nothing() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
-    let sid = chat(&t, &t.alex, None).await;
-    t.node.append(sid, started("bg-1"));
-    t.node.append_at(
-        sid,
-        ended("bg-1", BackgroundReason::Exited, false),
-        harness_core::now_ms() - 61 * MIN,
+    let store = Store::open(
+        &dir.path().join("mirror.db"),
+        harness_store::Durability::Full,
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let m1 = Master::new(store, auth(dir.path(), &addr.to_string()));
+    let (l, n1) = fake_with("n1", vec![], false);
+    m1.add_link(l, false).await.unwrap();
+    let m = m1.clone();
+    tokio::spawn(async move { axum::serve(listener, router(m)).await.unwrap() });
+    let base = format!("http://{addr}");
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/setup"))
+        .json(&json!({"claim_code": "CLAIM", "username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    let alex = common::signed_in(r).await;
+    let (st, v) = req(
+        &base,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "t", "node_id": "n1"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let old = harness_core::now_ms() - 61 * MIN;
+    n1.append_at(sid, started("bg-1"), old);
+    n1.append_at(sid, ended("bg-1", BackgroundReason::Exited, false), old);
+    for _ in 0..500 {
+        if m1.inner_mirror().head_seq(sid).unwrap() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop((m1, n1));
+    let store = Store::open(
+        &dir.path().join("mirror.db"),
+        harness_store::Durability::Full,
+    )
+    .unwrap();
+    let m2 = Master::new(store, auth(dir.path(), "127.0.0.1:1"));
+    let (l, n2) = fake(
+        "n1",
+        vec![harness_protocol::SessionHead {
+            session_id: sid,
+            head_seq: 3,
+        }],
     );
-    let row = attention_of(&t.base, &t.alex, sid).await;
-    assert_eq!(row["reason"], "not_resumed", "{row}");
+    m2.add_link(l, false).await.unwrap();
+    m2.start_callbacks();
+    let key = format!("callback-attention:{sid}");
+    let mut mark = None;
+    for _ in 0..500 {
+        mark = m2.inner_mirror().kv_get(&key).unwrap();
+        if mark.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mark: Value = serde_json::from_str(&mark.expect("no refusal recorded")).unwrap();
+    assert_eq!(mark["kind"], "not_resumed", "{mark}");
     assert!(
-        row["detail"]
+        mark["reason"]
             .as_str()
             .unwrap()
             .contains("more than 60 minutes"),
-        "{row}"
+        "{mark}"
     );
-    assert!(t.node.callbacks().is_empty());
+    assert!(n2.callbacks().is_empty());
+}
 
+/// A node's refusals: one that finds nothing to resume is not the owner's
+/// business; one on its rules recorded it in the chat, where the owner
+/// sees it.
+#[tokio::test]
+async fn the_nodes_refusals() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
     // Nothing to resume: quiet.
     let other = chat(&t, &t.alex, None).await;
     *t.node.refuse.lock().unwrap() = Some(format!(
@@ -495,15 +641,17 @@ async fn an_old_end_and_the_nodes_refusals() {
     assert_eq!(rows_of(&t.base, &t.alex, other).await.len(), 1);
 }
 
-/// §7 test 6 at the master: an owner who left the chat's workspace, and a
-/// disabled account, get no callback turn; each refusal is an attention
-/// row; nothing is sent to the node.
+/// Admission is exactly what the owner could do themselves now (the
+/// review's decision on item 9): an owner removed from a team workspace
+/// keeps the chat in their Personal workspace and may go on in it, so it is
+/// resumed; a disabled account, a password to change, a lost agentic grant,
+/// a chat without an owner and a sub-agent's chat get none, each with an
+/// attention row and nothing sent to the node.
 #[tokio::test]
-async fn a_removed_owner_and_a_disabled_account_get_none() {
+async fn admission_is_what_the_owner_could_do_now() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
     let (bob, bob_id) = account(&t, "bob", "member").await;
-    let (carol, carol_id) = account(&t, "carol", "member").await;
     let (st, v) = req(
         &t.base,
         Method::POST,
@@ -526,8 +674,6 @@ async fn a_removed_owner_and_a_disabled_account_get_none() {
     let sid = chat(&t, &bob, Some(&team)).await;
     t.node.append(sid, started("bg-1"));
     mirrored(&t, sid, 2).await;
-    // Let the watcher note where it started.
-    tokio::task::yield_now().await;
     let (st, v) = req(
         &t.base,
         Method::DELETE,
@@ -539,20 +685,34 @@ async fn a_removed_owner_and_a_disabled_account_get_none() {
     assert!(st.is_success(), "{st} {v}");
     t.node
         .append(sid, ended("bg-1", BackgroundReason::Exited, false));
-    let row = attention_of(&t.base, &bob, sid).await;
-    assert_eq!(row["reason"], "not_resumed", "{row}");
-    assert!(
-        row["detail"]
-            .as_str()
-            .unwrap()
-            .contains("no longer in the workspace"),
-        "{row}"
+    let cbs = until_callbacks(&t.node, 1).await;
+    assert_eq!(
+        cbs,
+        vec![(sid, vec!["bg-1".to_string()])],
+        "the owner could go on in Personal"
     );
-    // A disabled account.
-    let sid2 = chat(&t, &carol, None).await;
-    t.node.append(sid2, started("bg-1"));
-    mirrored(&t, sid2, 2).await;
-    let (st, v) = req(
+
+    // Each refusal: an account that cannot act, or a chat that is not one.
+    let refused = |sid: SessionId, who: String, want: &'static str| {
+        let base = t.base.clone();
+        async move {
+            let row = attention_of(&base, &who, sid).await;
+            assert_eq!(row["reason"], "not_resumed", "{row}");
+            assert!(
+                row["detail"].as_str().unwrap().contains(want),
+                "{want}: {row}"
+            );
+        }
+    };
+    let end_in = |sid: SessionId| {
+        t.node.append(sid, started("bg-1"));
+        t.node
+            .append(sid, ended("bg-1", BackgroundReason::Exited, false));
+    };
+    // Disabled.
+    let (carol, carol_id) = account(&t, "carol", "member").await;
+    let c = chat(&t, &carol, None).await;
+    let (st, _) = req(
         &t.base,
         Method::PATCH,
         &format!("/api/users/{carol_id}"),
@@ -560,16 +720,57 @@ async fn a_removed_owner_and_a_disabled_account_get_none() {
         &t.alex,
     )
     .await;
-    assert!(st.is_success(), "{st} {v}");
-    t.node
-        .append(sid2, ended("bg-1", BackgroundReason::Exited, false));
-    let row = attention_of(&t.base, TOKEN, sid2).await;
-    assert!(
-        row["detail"].as_str().unwrap().contains("disabled"),
-        "{row}"
+    assert!(st.is_success());
+    end_in(c);
+    refused(c, TOKEN.into(), "disabled").await;
+    // A password to change (an admin reset it).
+    let (dana, dana_id) = account(&t, "dana", "member").await;
+    let d = chat(&t, &dana, None).await;
+    let (st, _) = req(
+        &t.base,
+        Method::POST,
+        &format!("/api/users/{dana_id}/password"),
+        None,
+        &t.alex,
+    )
+    .await;
+    assert!(st.is_success());
+    end_in(d);
+    refused(d, TOKEN.into(), "password").await;
+    // A lost agentic grant.
+    let (erin, erin_id) = account(&t, "erin", "member").await;
+    let e = chat(&t, &erin, None).await;
+    let (st, _) = req(
+        &t.base,
+        Method::PATCH,
+        &format!("/api/users/{erin_id}"),
+        Some(json!({"can_agentic": false})),
+        &t.alex,
+    )
+    .await;
+    assert!(st.is_success());
+    end_in(e);
+    let row = attention_of(&t.base, TOKEN, e).await;
+    assert_eq!(row["reason"], "not_resumed", "{row}");
+    // No owner: a chat the API token made.
+    let o = chat(&t, TOKEN, None).await;
+    end_in(o);
+    refused(o, TOKEN.into(), "no owner account").await;
+    // A sub-agent's chat (the node names alex's chat as its parent).
+    let parent = chat(&t, &t.alex, None).await;
+    mirrored(&t, parent, 1).await;
+    let kid = SessionId::new();
+    t.node.raw(
+        kid,
+        "session_created",
+        json!({"title": "@scout", "cwd": "/w", "model": "m", "backend": "native", "node_id": "n1",
+               "profile": "agentic", "approval_mode": "auto", "parent_session": parent}),
     );
-    assert!(t.node.callbacks().is_empty(), "{:?}", t.node.callbacks());
-    let _ = carol;
+    mirrored(&t, kid, 1).await;
+    end_in(kid);
+    refused(kid, t.alex.clone(), "sub-agent").await;
+    assert_eq!(t.node.callbacks().len(), 1, "{:?}", t.node.callbacks());
+    let _ = (bob, carol, dana, erin);
 }
 
 /// The master restarts mid-way: its position is the log. Ends a master
@@ -664,4 +865,300 @@ async fn a_restarted_master_asks_once_and_loses_nothing() {
     assert_eq!(cbs[0], (b, vec!["bg-2".to_string()]));
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(n3.callbacks().len(), 1, "asked again: {:?}", n3.callbacks());
+}
+
+/// A `remember` call of `turn` in `sid`, then a barrier event: the mirror
+/// takes events in order and files a proposal while it takes the call, so
+/// once the barrier is mirrored the call has been decided.
+async fn remember_in(t: &T, node: &Fake, sid: SessionId, turn: &str, text: &str, n: usize) {
+    node.raw(
+        sid,
+        "tool_call_started",
+        json!({"turn_id": turn, "call_id": format!("call-{text}"), "tool": "remember",
+               "input": {"text": text}}),
+    );
+    node.raw(sid, "error", json!({"message": "barrier"}));
+    mirrored(t, sid, n).await;
+}
+
+/// Alex's agentic chat with the General agent, whose memory is on (the
+/// Software Developer's is off, which would file nothing either way).
+async fn memory_chat(t: &T) -> SessionId {
+    let body = json!({"cwd": "/w", "title": "t", "node_id": "n1", "agent_id": "general"});
+    let (st, v) = req(&t.base, Method::POST, "/api/sessions", Some(body), &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v["session_id"].as_str().unwrap().parse().unwrap()
+}
+
+/// The memory facts (proposals included) of `sid`'s owner.
+async fn facts(m: &Master, sid: SessionId) -> Vec<String> {
+    let owner = m.inner_mirror().session(sid).unwrap().unwrap().owner_id;
+    m.memory()
+        .unwrap()
+        .list(owner.as_deref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| f.text)
+        .collect()
+}
+
+/// Review S3-1: a callback turn's `remember` is never filed: not after the
+/// owner's message was refused while it ran ("a turn is already running"),
+/// not after a master restart (no recorded memory); and a callback the node
+/// answers "nothing to resume" leaves the person's running turn its own.
+#[tokio::test]
+async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its_own() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let store = Store::open(
+        &dir.path().join("mirror.db"),
+        harness_store::Durability::Full,
+    )
+    .unwrap();
+    let t = start(store, dir.path()).await;
+    *t.node.hold.lock().unwrap() = true;
+    let sid = memory_chat(&t).await;
+    t.node.append(sid, started("bg-1"));
+    t.node
+        .append(sid, ended("bg-1", BackgroundReason::Exited, false));
+    until_callbacks(&t.node, 1).await;
+    mirrored(&t, sid, 4).await;
+    // The owner writes while the callback turn runs: refused by the node.
+    *t.node.refuse_prompts.lock().unwrap() = Some("a turn is already running".into());
+    let (st, v) = req(
+        &t.base,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "remember nothing"})),
+        &t.alex,
+    )
+    .await;
+    assert!(!st.is_success(), "{st} {v}");
+    remember_in(&t, &t.node, sid, "cb", "steered-after-refusal", 6).await;
+    assert!(
+        !facts(&t.master, sid)
+            .await
+            .iter()
+            .any(|f| f.contains("steered")),
+        "filed after the refused message"
+    );
+
+    // The reverse: the person's turn runs, a callback is answered "nothing
+    // to resume"; the person's turn still files its proposal.
+    let p = memory_chat(&t).await;
+    *t.node.refuse_prompts.lock().unwrap() = None;
+    let (st, v) = req(
+        &t.base,
+        Method::POST,
+        &format!("/api/sessions/{p}/prompt"),
+        Some(json!({"text": "keep notes"})),
+        &t.alex,
+    )
+    .await;
+    assert!(st.is_success(), "{st} {v}");
+    mirrored(&t, p, 3).await;
+    *t.node.refuse.lock().unwrap() = Some(format!(
+        "{}: a turn is already running",
+        harness_protocol::CALLBACK_NOTHING
+    ));
+    t.node.append(p, started("bg-1"));
+    t.node
+        .append(p, ended("bg-1", BackgroundReason::Exited, false));
+    until_callbacks(&t.node, 2).await;
+    remember_in(&t, &t.node, p, "p", "persons-own-fact", 7).await;
+    assert!(
+        facts(&t.master, p)
+            .await
+            .iter()
+            .any(|f| f == "persons-own-fact"),
+        "the person's turn lost its proposal: {:?}",
+        facts(&t.master, p).await
+    );
+
+    // A restart while the callback turn runs: no recorded memory, and still
+    // nothing is filed (the log says whose turn it is).
+    let head = t.master.inner_mirror().head_seq(sid).unwrap();
+    drop(t);
+    let store = Store::open(
+        &dir.path().join("mirror.db"),
+        harness_store::Durability::Full,
+    )
+    .unwrap();
+    let m2 = Master::new(store, auth(dir.path(), "127.0.0.1:1"));
+    m2.set_memory(Arc::new(
+        harness_memory::SqliteMemory::open_in_memory().unwrap(),
+    ));
+    let (l, n2) = fake(
+        "n1",
+        vec![harness_protocol::SessionHead {
+            session_id: sid,
+            head_seq: head,
+        }],
+    );
+    m2.add_link(l, false).await.unwrap();
+    n2.raw(
+        sid,
+        "tool_call_started",
+        json!({"turn_id": "cb", "call_id": "call-r", "tool": "remember",
+               "input": {"text": "steered-after-restart"}}),
+    );
+    n2.raw(sid, "error", json!({"message": "barrier"}));
+    for _ in 0..500 {
+        if m2.inner_mirror().head_seq(sid).unwrap() >= head + 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(m2.inner_mirror().head_seq(sid).unwrap() >= head + 2);
+    assert!(
+        facts(&m2, sid).await.is_empty(),
+        "filed after a restart: {:?}",
+        facts(&m2, sid).await
+    );
+}
+
+/// Review S3-5: the 60-minute rule ages an end by the master's clock: an
+/// end stamped two hours behind by its node's clock is resumed, and one
+/// stamped two hours ahead too.
+#[tokio::test]
+async fn the_age_of_an_end_is_the_masters_clock_not_the_nodes() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
+    let now = harness_core::now_ms();
+    let (behind, ahead) = (chat(&t, &t.alex, None).await, chat(&t, &t.alex, None).await);
+    t.node.append_at(behind, started("bg-1"), now - 120 * MIN);
+    t.node.append_at(
+        behind,
+        ended("bg-1", BackgroundReason::Exited, false),
+        now - 120 * MIN,
+    );
+    t.node.append_at(ahead, started("bg-1"), now + 120 * MIN);
+    t.node.append_at(
+        ahead,
+        ended("bg-1", BackgroundReason::Exited, false),
+        now + 120 * MIN,
+    );
+    let mut cbs = until_callbacks(&t.node, 2).await;
+    cbs.sort();
+    let mut want = vec![
+        (behind, vec!["bg-1".to_string()]),
+        (ahead, vec!["bg-1".to_string()]),
+    ];
+    want.sort();
+    assert_eq!(cbs, want);
+}
+
+/// A node that is stopping, then one that went away, is asked again once it
+/// is back (every 15 s); a node without `CAP_CALLBACK` is never asked.
+#[tokio::test]
+async fn a_busy_or_away_node_is_asked_again_and_one_without_the_capability_never() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
+    let sid = chat(&t, &t.alex, None).await;
+    *t.node.refuse.lock().unwrap() = Some(harness_protocol::NODE_STOPPING.into());
+    t.node.append(sid, started("bg-1"));
+    t.node
+        .append(sid, ended("bg-1", BackgroundReason::Exited, false));
+    until_callbacks(&t.node, 1).await;
+    *t.node.refuse.lock().unwrap() = None;
+    let cbs = until_callbacks_within(&t.node, 2, 40).await;
+    assert_eq!(
+        cbs[1],
+        (sid, vec!["bg-1".to_string()]),
+        "asked again once it was back"
+    );
+    for _ in 0..500 {
+        if rows_of(&t.base, &t.alex, sid)
+            .await
+            .iter()
+            .any(|r| r["reason"] == "resumed")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Away: the end arrives and the link drops before the master asks.
+    let head = t.master.inner_mirror().head_seq(sid).unwrap();
+    t.node.append(sid, started("bg-2"));
+    t.node
+        .append_then_leave(sid, ended("bg-2", BackgroundReason::Exited, false));
+    for _ in 0..500 {
+        if t.master.inner_mirror().head_seq(sid).unwrap() >= head + 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (l, back) = fake(
+        "n1",
+        vec![harness_protocol::SessionHead {
+            session_id: sid,
+            head_seq: head + 2,
+        }],
+    );
+    t.master.add_link(l, false).await.unwrap();
+    let cbs = until_callbacks_within(&back, 1, 40).await;
+    assert_eq!(cbs[0], (sid, vec!["bg-2".to_string()]));
+
+    // A node that does not announce callbacks.
+    let (l, old) = fake_with("n2", vec![], false);
+    t.master.add_link(l, false).await.unwrap();
+    let (st, v) = req(
+        &t.base,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "t", "node_id": "n2"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let o: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    old.append(o, started("bg-1"));
+    old.append(o, ended("bg-1", BackgroundReason::Exited, false));
+    // The check runs within its settle; afterwards nothing was sent and the
+    // owner has no row (the end waits for them, as before step 3).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(old.callbacks().is_empty());
+    assert!(rows_of(&t.base, &t.alex, o).await.is_empty());
+}
+
+async fn until_callbacks_within(node: &Fake, n: usize, secs: u64) -> Vec<(SessionId, Vec<String>)> {
+    let by = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let c = node.callbacks();
+        if c.len() >= n {
+            return c;
+        }
+        assert!(
+            std::time::Instant::now() < by,
+            "{n} callbacks never came: {c:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// `PromptOpts.callback` carries no person's input: with text or context
+/// it is refused before anything is sent.
+#[tokio::test]
+async fn a_callback_with_text_or_context_is_refused() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
+    let sid = chat(&t, &t.alex, None).await;
+    for (text, context) in [("do it", None), ("", Some("<page>".to_string()))] {
+        let e = t
+            .master
+            .prompt(
+                sid,
+                text.into(),
+                harness_master::PromptOpts {
+                    callback: vec!["bg-1".into()],
+                    context,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("carries no message"), "{e}");
+    }
+    assert!(t.node.callbacks().is_empty());
 }

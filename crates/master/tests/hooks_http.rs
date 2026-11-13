@@ -2075,6 +2075,20 @@ async fn a_routines_chat_and_an_untrusted_one_are_never_resumed_by_an_end() {
         .unwrap()
         .parse()
         .unwrap();
+    // The runner made the run's chat as one the node never resumes.
+    let made = fake.seen.lock().unwrap().iter().find_map(|m| match m {
+        MasterToNode::Create {
+            session_id,
+            no_callbacks,
+            ..
+        } if *session_id == sid => Some(*no_callbacks),
+        _ => None,
+    });
+    assert_eq!(
+        made,
+        Some(true),
+        "the run's chat was not created with no_callbacks"
+    );
     let end = |bg: &str| {
         json!({"bg_id": bg, "reason": "exited", "exit_code": 1, "confirmed": "ended",
                "ran_ms": 1, "output_bytes": 0, "delivered": false})

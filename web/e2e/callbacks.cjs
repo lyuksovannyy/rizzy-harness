@@ -18,7 +18,7 @@ const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = path.resolve(process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2ecb-')));
 fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.mkdirSync(`${S}/ws`, { recursive: true });
-fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 5\nmodels = [{ id = "mock" }]\n');
+fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 5\nmock_obeys_output = true\nmodels = [{ id = "mock" }]\n');
 // The defaults: callback turns on, 3 in a row, 20 steps each.
 fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\nmax_approval_mode = "auto"\n`);
 const PORT = 7893;

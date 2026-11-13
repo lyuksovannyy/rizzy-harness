@@ -80,6 +80,7 @@ struct Node {
     seen: Vec<RawEvent>,
     n: u32,
     requests: Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>>,
+    caps: Vec<String>,
 }
 
 /// The scripted mock, keeping every request it is sent.
@@ -105,6 +106,12 @@ impl harness_agent_native::Provider for Spy {
 
 /// A node in `auto`, or `None` where the shell cannot be contained here.
 async fn node() -> Option<Node> {
+    node_with(|_| {}).await
+}
+
+/// `node` with its policy changed by `edit`; its hello's capabilities are
+/// in `caps`.
+async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<Node> {
     use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
     let dir = tempdir();
     let root = dir.path().canonicalize().unwrap();
@@ -113,11 +120,12 @@ async fn node() -> Option<Node> {
     let sb = contained(&data)?;
     let store =
         harness_store::Store::open(&data.join("node.db"), harness_store::Durability::Full).unwrap();
-    let policy = harness_node::NodePolicy {
+    let mut policy = harness_node::NodePolicy {
         workspace_roots: vec![root.clone()],
         max_approval_mode: harness_core::policy::ApprovalMode::Auto,
         ..Default::default()
     };
+    edit(&mut policy);
     policy.validate().unwrap();
     let requests: Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>> = Arc::default();
     let backend = NativeBackend::new(
@@ -153,17 +161,10 @@ async fn node() -> Option<Node> {
     .await
     .unwrap();
     let mut link = rt.attach().await;
-    match link.from_node.recv().await.unwrap() {
-        harness_protocol::NodeToMaster::Hello { capabilities, .. } => {
-            assert!(
-                capabilities
-                    .iter()
-                    .any(|c| c == harness_protocol::CAP_CALLBACK),
-                "{capabilities:?}"
-            );
-        }
+    let caps = match link.from_node.recv().await.unwrap() {
+        harness_protocol::NodeToMaster::Hello { capabilities, .. } => capabilities,
         other => panic!("{other:?}"),
-    }
+    };
     Some(Node {
         _dir: dir,
         ws,
@@ -172,6 +173,7 @@ async fn node() -> Option<Node> {
         seen: vec![],
         n: 0,
         requests,
+        caps,
     })
 }
 
@@ -535,5 +537,170 @@ async fn the_opening_at_the_provider_quotes_every_line_and_rebuilds_the_same() {
             .iter()
             .any(|m| m == &harness_agent_native::ChatMsg::User(opening.clone())),
         "not rebuilt the same: {later:?}"
+    );
+}
+
+/// More than `MAX_CALLBACK_IDS` ids are refused before anything is read,
+/// and a node that is stopping starts no callback turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn too_many_ids_and_a_stopping_node_are_refused() {
+    let Some(mut n) = node().await else { return };
+    assert!(n.caps.iter().any(|c| c == harness_protocol::CAP_CALLBACK));
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    let ids: Vec<String> = (1..=65).map(|i| format!("bg-{i}")).collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let e = n.callback(sid, &refs).await.unwrap_err();
+    assert!(e.contains("1 to 64"), "{e}");
+    let left = n._rt.stop(Duration::from_secs(10)).await;
+    assert!(left.is_empty(), "{left:?}");
+    let e = n.callback(sid, &["bg-1"]).await.unwrap_err();
+    assert_eq!(e, harness_protocol::NODE_STOPPING);
+}
+
+/// `callback_turns = 0` is silent: the node does not announce
+/// `CAP_CALLBACK` (the master asks nothing), and still refuses if asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_turns_0_announces_nothing_and_still_refuses() {
+    let Some(mut n) = node_with(|p| p.limits.callback_turns = 0).await else {
+        return;
+    };
+    assert!(
+        !n.caps.iter().any(|c| c == harness_protocol::CAP_CALLBACK),
+        "{:?}",
+        n.caps
+    );
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    std::fs::write(n.ws.join("out.txt"), "done\n").unwrap();
+    n.prompt(
+        sid,
+        &format!("script: {}", json!([bg(&held("out.txt"), 120)])),
+    );
+    n.started(sid, "bg-1").await;
+    n.turn_ended(sid).await;
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    let e = n.callback(sid, &["bg-1"]).await.unwrap_err();
+    assert!(e.contains("callback_turns = 0"), "{e}");
+    assert_eq!(callback_turns(&n.of(sid)), 0);
+}
+
+/// An agent that may delegate, as a person's turn gets it, and as a
+/// callback turn does not.
+fn delegating_agent() -> Value {
+    json!({"agent_id": "coder", "name": "Coder", "system_prompt": "code", "tools": "all",
+           "prompt_hash": "h1",
+           "delegates": [{"agent_id": "scout", "name": "Scout", "system_prompt": "look",
+                          "tools": "all", "prompt_hash": "h2"}]})
+}
+
+/// A callback turn has no sub-agents: the model is not offered `delegate`,
+/// whatever the agent the master sent allows; a person's turn with the same
+/// agent is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_turn_is_offered_no_sub_agents() {
+    let Some(mut n) = node().await else { return };
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    std::fs::write(n.ws.join("out.txt"), "done\n").unwrap();
+    n.n += 1;
+    n.send(
+        json!({"type": "session.prompt", "req_id": format!("p{}", n.n), "session_id": sid,
+        "text": format!("script: {}", json!([bg(&held("out.txt"), 120)])),
+        "agent": delegating_agent()}),
+    );
+    n.started(sid, "bg-1").await;
+    n.turn_ended(sid).await;
+    let offered =
+        |r: &harness_agent_native::ChatRequest| r.tools.iter().any(|t| t.name == "delegate");
+    assert!(
+        n.requests.lock().unwrap().iter().all(offered),
+        "the person's turn is offered delegate (the control)"
+    );
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    let before = n.requests.lock().unwrap().len();
+    n.n += 1;
+    let req = format!("cb{}", n.n);
+    n.send(
+        json!({"type": "session.callback", "req_id": req, "session_id": sid,
+        "bg_ids": ["bg-1"], "agent": delegating_agent()}),
+    );
+    n.turn_ended(sid).await;
+    let reqs = n.requests.lock().unwrap().clone();
+    assert!(reqs.len() > before);
+    assert!(
+        !reqs[before..].iter().any(offered),
+        "a callback turn was offered delegate"
+    );
+}
+
+/// Review S3-4: an end whose check of the turn slot passed just before a
+/// callback took the slot is in the log before the turn's history is read,
+/// so it is in the opening (never appended after `turn_started` as an end
+/// that waits for nothing). The end is held, by a test hook, between its
+/// check and its append; the callback is sent then.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_end_racing_the_callback_lands_before_its_turn() {
+    let Some(mut n) = node().await else { return };
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    std::fs::write(n.ws.join("a.txt"), "first\n").unwrap();
+    std::fs::write(n.ws.join("b.txt"), "second\n").unwrap();
+    let b_cmd = "while [ ! -e go-b ]; do sleep 0.05; done; cat b.txt; exit 1";
+    n.prompt(
+        sid,
+        &format!(
+            "script: {}",
+            json!([bg(&held("a.txt"), 120), bg(b_cmd, 120)])
+        ),
+    );
+    n.started(sid, "bg-2").await;
+    n.turn_ended(sid).await;
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    // bg-2 ends; its recording stops after its check (no turn runs).
+    let hold = harness_node::testing::hold_next_end(sid);
+    std::fs::write(n.ws.join("go-b"), "").unwrap();
+    hold.held().await;
+    n.n += 1;
+    let req = format!("cb{}", n.n);
+    n.send(
+        json!({"type": "session.callback", "req_id": req, "session_id": sid,
+        "bg_ids": ["bg-1"]}),
+    );
+    // On the old code the turn starts now, without bg-2; give it the time
+    // to (a margin only for showing the old behaviour: the new code waits
+    // for bg-2's append whatever the time).
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        n.until(move |e, k| e.session_id == sid && matches!(k, EventKind::TurnStarted(_))),
+    )
+    .await;
+    hold.release();
+    n.ended(sid, "bg-2").await;
+    n.drain().await;
+    let at = |want: &dyn Fn(&EventKind) -> bool| {
+        n.seen
+            .iter()
+            .filter(|e| e.session_id == sid)
+            .position(|e| want(&e.typed().unwrap()))
+            .unwrap_or(usize::MAX)
+    };
+    let end_b = at(&|k| matches!(k, EventKind::BackgroundEnded(b) if b.bg_id == "bg-2"));
+    let started = at(&|k| {
+        matches!(
+            k,
+            EventKind::TurnStarted(TurnStarted { cause: Some(_), .. })
+        )
+    });
+    let delivered = n
+        .of(sid)
+        .iter()
+        .any(|k| matches!(k, EventKind::BackgroundEnded(b) if b.bg_id == "bg-2" && b.delivered));
+    assert!(
+        end_b < started || delivered,
+        "bg-2 was appended after the callback turn started, undelivered"
     );
 }

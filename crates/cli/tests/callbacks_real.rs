@@ -111,7 +111,7 @@ mod real {
         std::fs::write(
             data.join("config.toml"),
             "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\n\
-             mock_delay_ms = 1\n\n[[providers.models]]\nid = \"mock\"\n",
+             mock_delay_ms = 1\nmock_obeys_output = true\n\n[[providers.models]]\nid = \"mock\"\n",
         )
         .unwrap();
         (dir, data, ws)
@@ -544,7 +544,7 @@ async fn a_fourth_callback_in_a_row_is_refused_and_a_persons_message_refills() {
 
 /// A callback turn's steps stop at `callback_max_steps`, below `max_steps`,
 /// and the chat says which key stopped it; `callback_turns = 0` starts no
-/// turn and says why.
+/// turn and says nothing (off is silent).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_step_cap_holds_and_callback_turns_0_starts_none() {
     let (_dir, data, ws) = real::setup("callback_max_steps = 2\n");
@@ -607,19 +607,26 @@ async fn the_step_cap_holds_and_callback_turns_0_starts_none() {
     s.wait_for(&sid, |e| real::count(e, "turn_ended") == 1)
         .await;
     std::fs::write(ws.join("go"), "").unwrap();
-    let evs = s
-        .wait_for(&sid, |e| real::count(e, "callback_refused") == 1)
+    s.wait_for(&sid, |e| real::count(e, "background_ended") == 1)
         .await;
-    let r = evs
-        .iter()
-        .find(|e| e["kind"] == "callback_refused")
-        .unwrap();
-    assert_eq!(
-        r["payload"]["reason"],
-        "callback turns are off on this node (callback_turns = 0)"
+    // Off is silent: the node does not announce callbacks, the server asks
+    // nothing, the chat records no refusal and the owner gets no row; the
+    // end waits for the next message, as before step 3.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let evs = s.events(&sid).await;
+    assert!(real::callbacks(&evs).is_empty());
+    assert_eq!(real::count(&evs, "callback_refused"), 0, "{evs:#?}");
+    let (_, att) = s
+        .owner_req(reqwest::Method::GET, "/api/attention", None)
+        .await;
+    assert!(
+        !att["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["session_id"] == sid.as_str()),
+        "{att}"
     );
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(real::callbacks(&s.events(&sid).await).is_empty());
 }
 
 /// §4.6 in `ask`: a callback turn's call parks on its card with no timeout,
