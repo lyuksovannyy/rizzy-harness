@@ -55,7 +55,11 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   one must end with it before its version is bumped, or it is refused unchanged. So from this
   change on **every** pre-tag schema edit, an added table or index included, needs a wiped dev
   data directory (the build names the file and refuses to start), and no pre-tag file is ever
-  taken for a released version 1. From the tag on a released migration never changes, every change
+  taken for a released version 1. **Open, for the owner before the first tag** (review R43-8):
+  `master.db`, `chat.db` and `node.db` share one migration list, so a master-only change bumps
+  every node's `node.db` (and a node rolled back afterwards is refused over a table it never
+  reads), and node and chat files carry the account tables unused. One list per role is cheap
+  to split before the tag and a migration per role after it. From the tag on a released migration never changes, every change
   is a new migration with its own recorded file, and the tests fail otherwise. A value that is
   queried or joined is a column; the `kv` table holds opaque documents only.
 
