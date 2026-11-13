@@ -285,8 +285,14 @@ async fn a_url_only_in_an_attachment_is_not_url_provenance() {
     let plain = |turn: &str| message(turn, "hello", vec![]);
     let with = |turn: &str, a: Attachment| message(turn, "read this", vec![a]);
     // In the file's text: this turn, and an earlier one.
-    assert_eq!(probed(plain("t1"), with("t2", hostile())).await, "seen=false");
-    assert_eq!(probed(with("t1", hostile()), plain("t2")).await, "seen=false");
+    assert_eq!(
+        probed(plain("t1"), with("t2", hostile())).await,
+        "seen=false"
+    );
+    assert_eq!(
+        probed(with("t1", hostile()), plain("t2")).await,
+        "seen=false"
+    );
     // A file that only mentions it, with no trick at all.
     let mention = file("links.txt", "text/plain", &format!("see {U}"));
     assert_eq!(
@@ -303,4 +309,54 @@ async fn a_url_only_in_an_attachment_is_not_url_provenance() {
     let typed_it = |turn: &str| message(turn, &format!("fetch {U} too"), vec![hostile()]);
     assert_eq!(probed(plain("t1"), typed_it("t2")).await, "seen=true");
     assert_eq!(probed(typed_it("t1"), plain("t2")).await, "seen=true");
+}
+
+/// The demo provider's command language (`run: <command>`) reads what the
+/// person typed, not the file beside it: a file's lines are never part of
+/// the command it asks `bash` to run. Its echo still says the file's text.
+#[tokio::test]
+async fn the_demo_provider_takes_no_command_from_a_file() {
+    let sid = SessionId::new();
+    let mock = || {
+        Arc::new(mock::Mock {
+            delay: std::time::Duration::from_millis(1),
+        })
+    };
+    let host = Host(Mutex::new(vec![]));
+    let b = NativeBackend::new(mock(), vec![], NativeConfig::default());
+    let m = message(
+        "t1",
+        "run: echo hi",
+        vec![file("x.sh", "text/plain", "touch /tmp/from-the-file")],
+    );
+    b.run_turn(turn(&host, sid, vec![], &m)).await;
+    let asked = host
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            EventKind::AssistantMessage(a) => a.tool_calls.first().map(|c| c.input.clone()),
+            _ => None,
+        })
+        .expect("the demo provider called bash");
+    assert_eq!(asked, json!({"command": "echo hi"}));
+    let host = Host(Mutex::new(vec![]));
+    let b = NativeBackend::new(mock(), vec![], NativeConfig::default());
+    let m = message("t1", "hello", vec![file("x.txt", "text/plain", "buy milk")]);
+    b.run_turn(turn(&host, sid, vec![], &m)).await;
+    let said = host
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            EventKind::AssistantMessage(a) => Some(a.text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        said.starts_with("You said: hello") && said.contains("| buy milk"),
+        "{said}"
+    );
 }

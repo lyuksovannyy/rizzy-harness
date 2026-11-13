@@ -285,6 +285,12 @@ impl Provider for Mock {
             Some((c, u)) => (c.to_string(), u.to_string()),
             None => (String::new(), raw_user),
         };
+        // A file the person attached is not their words: the commands
+        // below read what they typed, so no line of a file is ever part
+        // of one (`run:` would hand it to `bash`). Only the echo at the
+        // end says the whole message, files included.
+        let said = user;
+        let user = harness_core::event::own_words(&said).to_string();
         // Before the generic tool-result branch: a progress job goes on
         // after each of its own calls.
         if let Some((n, k)) = progress_step(&user, &req.messages) {
@@ -492,7 +498,7 @@ impl Provider for Mock {
             "You said: ".to_string()
         };
         let words = std::iter::once(lead)
-            .chain(user.split_inclusive(' ').map(str::to_string))
+            .chain(said.split_inclusive(' ').map(str::to_string))
             .collect();
         let text = self.stream_words(words, &deltas).await;
         Ok(Completion {

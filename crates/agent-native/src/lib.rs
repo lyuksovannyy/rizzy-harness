@@ -707,11 +707,14 @@ fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
 }
 
 /// What the user and trusted tool results said in this conversation (not
-/// the model, not the system prompt, not memory or page context, not bash,
-/// not errors): the provenance set for network tools. `current` is the
-/// index of this turn's user message in `messages` and the user's own words
-/// for it (empty for a sub-agent, whose "user" message is its parent model's
-/// task); the message itself also carries the per-turn context block.
+/// the model, not the system prompt, not memory or page context, not a
+/// file the user attached, not bash, not errors): the provenance set for
+/// network tools. `current` is the index of this turn's user message in
+/// `messages` and the user's own words for it (empty for a sub-agent, whose
+/// "user" message is its parent model's task); the message itself also
+/// carries the per-turn context block. Of an earlier message only the
+/// user's own words count ([`harness_core::event::own_words`]): an attached
+/// file's text, name and type ride in the same message and are not theirs.
 fn observed_text(
     messages: &[ChatMsg],
     trusted: &HashSet<String>,
@@ -726,7 +729,7 @@ fn observed_text(
             }
             other => other.user_text().map(|t| match current {
                 Some((idx, own)) if idx == i => own.to_string(),
-                _ => t.to_string(),
+                _ => harness_core::event::own_words(t).to_string(),
             }),
         })
         .collect()
@@ -1052,11 +1055,12 @@ impl NativeBackend {
         // user's words.
         // Nor is a callback turn's opening: the harness wrote it, around
         // program output (it is not URL provenance either: `Opening` has no
-        // `user_text`).
+        // `user_text`). Nor is a file the person attached: their words end
+        // where the first file's line stands.
         let own_words = if ctx.parent_session.is_some() || callback.is_some() {
             String::new()
         } else {
-            ctx.user_text.clone()
+            harness_core::event::own_words(&ctx.user_text).to_string()
         };
         // A callback turn's own cap (`callback_max_steps`), never above the
         // backend's.
