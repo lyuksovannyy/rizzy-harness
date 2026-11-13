@@ -1,3 +1,4 @@
+import { normalizeAccent } from "./lib/appearance";
 import type {
   Agent,
   Notice,
@@ -211,7 +212,8 @@ export const api = {
   },
   classifier: () => call<unknown>("GET", "/api/me/classifier"),
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
-  settings: () => call<Prefs>("GET", "/api/me/settings"),
+  /** An accent the server holds that is not one of the presets comes back as null (the default), so the next save passes the server's list. */
+  settings: () => call<Prefs>("GET", "/api/me/settings").then((p) => ({ ...p, accent: normalizeAccent(p.accent) })),
   memories: () => call<{ memories: MemoryFact[]; backend: string }>("GET", "/api/memory"),
   workspaces: () => call<WorkspaceList>("GET", "/api/workspaces"),
   /** Makes it the active workspace (lists, defaults and new chats follow it). */

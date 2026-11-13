@@ -5,13 +5,14 @@
 import { AlertTriangle } from "lucide-react";
 import { useId, useRef } from "react";
 import { useMedia } from "../bg/hooks";
+import { ACCENTS, normalizeAccent } from "../lib/appearance";
 import { fnv1a } from "../lib/fnv";
 import { rawModel } from "../lib/models";
 import type { Agent, AgentAvatar as Avatar, AvatarAccent, AvatarEyes, AvatarShape, AvatarState } from "../types";
 
 export const SHAPES: AvatarShape[] = ["circle", "triangle", "square", "hexagon", "diamond", "drop"];
 export const EYES: AvatarEyes[] = ["round", "long", "short", "wide", "sleepy"];
-export const AVATAR_ACCENTS: AvatarAccent[] = ["blue", "violet", "green", "orange", "pink", "gray"];
+export const AVATAR_ACCENTS: AvatarAccent[] = [...ACCENTS];
 export const STATES: AvatarState[] = ["idle", "thinking", "working", "unsure", "done", "error"];
 
 const REDUCE = "(prefers-reduced-motion: reduce)";
@@ -53,7 +54,9 @@ export function AgentAvatar(props: {
   /** Read out and shown on hover; without one the avatar is decoration. */
   title?: string;
 }) {
-  const { shape, eyes, accent } = props.avatar;
+  const { shape, eyes } = props.avatar;
+  // Anything that is not a preset draws in the default.
+  const accent = normalizeAccent(props.avatar.accent) ?? "blue";
   const state = props.state ?? "idle";
   const size = props.size ?? 24;
   const still = useMedia(REDUCE);
@@ -95,7 +98,7 @@ export function AgentAvatar(props: {
       role={props.title ? "img" : undefined}
       aria-label={props.title}
       aria-hidden={props.title ? undefined : true}
-      style={{ "--av-c": `var(--accent-${accent})`, "--av-delay": delay } as React.CSSProperties}
+      style={{ "--av-c": `var(--ac-${accent}-2)`, "--av-delay": delay } as React.CSSProperties}
       onPointerMove={still ? undefined : (e) => svg.current && gaze(svg.current, e)}
       onPointerLeave={() => {
         svg.current?.style.removeProperty("--av-gx");

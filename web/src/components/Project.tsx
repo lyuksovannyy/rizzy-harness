@@ -19,6 +19,7 @@ import {
 } from "../lib/projects";
 import { artifactHash, type ProjectTab } from "../lib/routes";
 import { PROJECT_ICONS } from "../lib/projectIconSet";
+import { normalizeAccent } from "../lib/appearance";
 import { accentColor, ProjectIcon } from "../lib/projectIcons";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
@@ -168,7 +169,7 @@ function LookFields(props: { icon: string; accent: string; onIcon: (i: string) =
               disabled={props.disabled}
               onClick={() => props.onIcon(name)}
             >
-              <ProjectIcon icon={name} accent={props.icon === name ? props.accent : "gray"} size={18} />
+              <ProjectIcon icon={name} accent={props.icon === name ? props.accent : "graphite"} size={18} />
             </button>
           ))}
         </div>
@@ -181,10 +182,10 @@ function LookFields(props: { icon: string; accent: string; onIcon: (i: string) =
               key={a}
               type="button"
               role="radio"
-              aria-checked={props.accent === a}
-              tabIndex={radioTab(props.accent === a)}
+              aria-checked={normalizeAccent(props.accent) === a}
+              tabIndex={radioTab(normalizeAccent(props.accent) === a)}
               aria-label={a}
-              className={`swatch sw-${a} ${props.accent === a ? "on" : ""}`}
+              className={`swatch sw-${a} ${normalizeAccent(props.accent) === a ? "on" : ""}`}
               disabled={props.disabled}
               onClick={() => props.onAccent(a)}
             />
@@ -799,7 +800,9 @@ function ProjectSettings(props: {
     setError(null);
     try {
       const { name, description, icon, accent, instructions, settings } = draft;
-      props.onSaved(await projectsApi.update(p.project_id, { name, description, icon, accent, instructions, settings }));
+      // An accent that is not a preset is saved as the default.
+      const look = normalizeAccent(accent) ?? "blue";
+      props.onSaved(await projectsApi.update(p.project_id, { name, description, icon, accent: look, instructions, settings }));
       setSaved(true);
     } catch (e) {
       setError(message(e));
