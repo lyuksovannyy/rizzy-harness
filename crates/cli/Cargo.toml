@@ -44,6 +44,7 @@ flate2.workspace = true
 futures.workspace = true
 harness-core.workspace = true
 harness-node = { workspace = true, features = ["testing"] }
+harness-protocol.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

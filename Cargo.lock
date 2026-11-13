@@ -1416,6 +1416,7 @@ dependencies = [
  "harness-master",
  "harness-memory",
  "harness-node",
+ "harness-protocol",
  "harness-store",
  "harness-tools",
  "nix",

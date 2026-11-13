@@ -394,10 +394,13 @@ async fn exit_codes_output_and_the_graceful_stop_are_unchanged() {
     assert!(r.output.contains("out") && r.output.contains("err"));
     assert!(r.output.contains("[exit code: 3]"), "{}", r.output);
 
+    // T.8d: a timeout is at least 5 s.
     let r = run(&ctx, json!({"command": "sleep 100", "timeout_secs": 1})).await;
     assert!(
-        r.output
-            .contains("[timed out after 1s: the command and everything it started were killed; its guard confirmed the end"),
+        r.output.contains("[timed out after 5s")
+            && r.output.contains(
+                "the command and everything it started were killed; its guard confirmed the end"
+            ),
         "{}",
         r.output
     );
