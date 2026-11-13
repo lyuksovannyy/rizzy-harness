@@ -41,6 +41,8 @@ const KNOWN = new Set([
   "model_fallback",
   "artifact_staged",
   "artifact_stage_failed",
+  "background_started",
+  "background_ended",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -255,6 +257,22 @@ export function apply(v: SessionView, e: RawEvent): void {
       const card = p.by === "agent" && p.call_id != null ? lastTool(v, p.call_id) : undefined;
       if (card) card.staged = staged(p);
       else v.items.push({ type: "artifact", staged: staged(p) });
+      break;
+    }
+    case "background_started":
+      (v.background ??= {})[p.bg_id] = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, ended: false };
+      break;
+    case "background_ended": {
+      const b = v.background?.[p.bg_id];
+      if (b) b.ended = true;
+      v.items.push({
+        type: "background_ended",
+        bg_id: p.bg_id,
+        reason: p.reason,
+        exit_code: p.exit_code ?? null,
+        ran_ms: p.ran_ms,
+        tail: p.tail ?? "",
+      });
       break;
     }
     case "artifact_stage_failed":

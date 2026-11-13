@@ -5,6 +5,8 @@ use harness_agents::{AgentError, AgentSet, DEFAULT_AGENT, builtins, parse};
 /// and "Assistant has no bash" stay true.
 const ALL_TOOLS: &[&str] = &[
     "bash",
+    "bash_output",
+    "bash_stop",
     "tool_output",
     "read",
     "write",
@@ -25,6 +27,8 @@ const ALL_TOOLS: &[&str] = &[
 fn builtin_roster_is_exactly_the_table() {
     const DEV: &[&str] = &[
         "bash",
+        "bash_output",
+        "bash_stop",
         "tool_output",
         "read",
         "write",

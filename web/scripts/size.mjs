@@ -73,8 +73,13 @@ const R6_KB = 3.5;
 // fetched with the login key through the links chunk (+0.1).
 const SPLIT_KB = 1.7;
 
+// T.8d step 1, measured 368.4 (initial 99.5): the fold knows the two
+// background events and the conversation shows a background command's end
+// as a plain line with its tail as text (+0.2).
+const T8D_KB = 0.2;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

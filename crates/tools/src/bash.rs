@@ -99,6 +99,7 @@ async fn pump<R: AsyncRead + Unpin>(
     mut r: R,
     stream: OutputStream,
     tx: mpsc::Sender<(OutputStream, String)>,
+    printed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 ) {
     let mut chunk = [0u8; 8192];
     let mut pending = Vec::new();
@@ -106,6 +107,10 @@ async fn pump<R: AsyncRead + Unpin>(
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                // The bytes as the command printed them, before decoding (N-6).
+                if let Some(p) = &printed {
+                    p.fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
+                }
                 pending.extend_from_slice(&chunk[..n]);
                 let s = drain_utf8(&mut pending);
                 if !s.is_empty() && tx.send((stream, s)).await.is_err() {
@@ -122,7 +127,7 @@ async fn pump<R: AsyncRead + Unpin>(
 }
 
 /// What [`crate::contain::sweep_session`] found, for the tool result.
-fn sweep_note(found: &[crate::contain::Swept]) -> String {
+pub(crate) fn sweep_note(found: &[crate::contain::Swept]) -> String {
     if found.is_empty() {
         return "the node found nothing of it outside a live guard".into();
     }
@@ -142,6 +147,32 @@ enum End {
     Exited(Option<std::process::ExitStatus>),
     Cancelled,
     TimedOut,
+    /// A background call still running after its first wait.
+    Background,
+}
+
+/// `bash`'s description where background commands are off (the node's
+/// `background_per_session = 0`, a sub-agent): nothing about them.
+pub const FOREGROUND_DESCRIPTION: &str = "Run a shell command with bash in the session \
+     workspace. Returns combined stdout/stderr and the exit code. Avoid interactive commands. A \
+     command stops at its timeout (60 s when none is given).";
+
+/// `bash`'s schema where background commands are off: no `background`.
+pub fn foreground_schema(bash_timeout_max: Duration) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The command to run"},
+            "timeout_secs": {
+                "type": "integer",
+                "description": format!(
+                    "Timeout in seconds, from 5 to {} (60 when absent)",
+                    bash_timeout_max.as_secs()
+                )
+            }
+        },
+        "required": ["command"]
+    })
 }
 
 #[async_trait::async_trait]
@@ -151,7 +182,15 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &'static str {
-        "Run a shell command with bash in the session workspace. Returns combined stdout/stderr and the exit code. Avoid interactive commands."
+        "Run a shell command with bash in the session workspace. Returns combined stdout/stderr \
+         and the exit code. Avoid interactive commands. A command stops at its timeout (60 s when \
+         none is given). For a server, a watcher or a long build, set `background: true` with \
+         `timeout_secs` (required then): if it is still running after 3 s you get its id (bg-1) \
+         and its first output, and it keeps running until it exits, its timeout or bash_stop. You \
+         are told when it ends, at your next step or the person's next message: do not poll. \
+         Later commands cannot see it in `ps` or stop it with `kill` (each command has its own \
+         process namespace); use bash_output and bash_stop. Where the node's network is off, a \
+         later command cannot connect to it either."
     }
 
     fn schema(&self) -> Value {
@@ -166,9 +205,14 @@ impl Tool for Bash {
                 "timeout_secs": {
                     "type": "integer",
                     "description": format!(
-                        "Optional timeout in seconds (max {})",
+                        "Timeout in seconds, from 5 to {}. Optional for a foreground command \
+                         (60 when absent); required with `background: true`",
                         bash_timeout_max.as_secs()
                     )
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Keep it running after this call (needs timeout_secs)"
                 }
             },
             "required": ["command"]
@@ -184,15 +228,40 @@ impl Tool for Bash {
             Ok(c) => c.to_string(),
             Err(e) => return ToolOutcome::err(e),
         };
-        // The node's ceiling applies to what the call asks for and to the
-        // default alike.
-        let ceiling = ctx.bash_timeout_max.max(Duration::from_secs(1));
-        let timeout = input
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .map(|s| Duration::from_secs(s.max(1)))
-            .unwrap_or(ctx.timeout)
-            .min(ceiling);
+        let background = match input.get("background") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return ToolOutcome::err("`background` must be true or false"),
+        };
+        let asked = input.get("timeout_secs").and_then(|v| v.as_u64());
+        // A background command must say how long it may run (the owner,
+        // 2026-11-13): refused before anything starts.
+        if background && asked.is_none() {
+            return ToolOutcome::err(format!(
+                "not started: a background command needs `timeout_secs`, how long it may run \
+                 at most, from 5 to {} seconds on this node. State it and call again.",
+                ctx.bash_timeout_max.as_secs().max(1)
+            ));
+        }
+        // One rule (docs/background-commands.md §4.2): the default is a
+        // foreground call's only; at least 5 s; the node's ceiling applies
+        // to what the call asks for and to the default alike.
+        let timeout = crate::background::timeout_for(asked, ctx.timeout, ctx.bash_timeout_max);
+        // The table's caps, before anything starts.
+        let mut reservation = None;
+        let mut table = None;
+        if background {
+            match &ctx.background {
+                crate::background::Access::Off(why) => return ToolOutcome::err(why.to_string()),
+                crate::background::Access::On(bg) => match bg.reserve() {
+                    Ok(r) => {
+                        reservation = Some(r);
+                        table = Some(bg.clone());
+                    }
+                    Err(e) => return ToolOutcome::err(e),
+                },
+            }
+        }
 
         // The allow-listed environment (node.toml `env_pass`), nothing else,
         // in the Landlock sandbox where the node has one (node.toml
@@ -214,6 +283,11 @@ impl Tool for Bash {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(e),
         };
+        // Only a contained command can outlive its call: its guard confirms
+        // its end and nothing it starts escapes (R16).
+        if background && !contained {
+            return ToolOutcome::err(crate::background::NOT_CONTAINED);
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -222,8 +296,12 @@ impl Tool for Bash {
         // The spawn is a `fork` and `exec` on this thread; a contained
         // command's guard starts in `/`, so it does not wait on the session's
         // folder (the folder was resolved above, in this task).
+        let started = std::time::Instant::now();
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
+        let first_wait = tokio::time::sleep(crate::background::FIRST_WAIT);
+        tokio::pin!(first_wait);
+        let ring = table.as_ref().map(|t| t.new_ring());
         // What runs first: the node's own image (the guard, or the wrapper)
         // where the shell is confined, else bash.
         let program = cmd.as_std().get_program().to_owned();
@@ -244,15 +322,20 @@ impl Tool for Bash {
         let mut group = KillGroupOnDrop(pgid.filter(|_| !contained));
 
         let (tx, mut rx) = mpsc::channel(PIPE_CHANNEL);
+        let printed = ring
+            .as_ref()
+            .map(|r| r.lock().unwrap_or_else(|p| p.into_inner()).printed());
         let out_task = tokio::spawn(pump(
             child.stdout.take().expect("piped"),
             OutputStream::Stdout,
             tx.clone(),
+            printed.clone(),
         ));
         let err_task = tokio::spawn(pump(
             child.stderr.take().expect("piped"),
             OutputStream::Stderr,
             tx,
+            printed,
         ));
 
         let mut combined = String::new();
@@ -266,16 +349,22 @@ impl Tool for Bash {
         // Keep the model's copy (capped) and pass the chunk on to the UI
         // stream, which has its own budget: past it `send` returns at once,
         // so the pipes are still read (and discarded) at full speed.
-        let keep = |s: &str, combined: &mut String| {
+        // A background start's output goes through its ring's scrubber
+        // first: the live stream gets what the ring stored, never the
+        // held-back start of a secret the first wait may cut (R-4).
+        // `None`: send the chunk as it came.
+        let keep = |s: &str, combined: &mut String| -> Option<String> {
             if combined.len() < keep_chars {
                 combined.push_str(s);
             }
+            ring.as_ref()
+                .and_then(|r| r.lock().unwrap_or_else(|p| p.into_inner()).push_clean(s))
         };
 
         let end = loop {
             tokio::select! {
                 Some((stream, s)) = rx.recv() => {
-                    keep(&s, &mut combined);
+                    let s = keep(&s, &mut combined).unwrap_or(s);
                     if let Some(ui) = &ctx.output {
                         // The consumer may be behind (the channel is
                         // bounded): waiting for it must not delay a cancel
@@ -290,8 +379,77 @@ impl Tool for Bash {
                 status = child.wait() => break End::Exited(status.ok()),
                 _ = ctx.cancel.cancelled() => break End::Cancelled,
                 _ = &mut deadline => break End::TimedOut,
+                _ = &mut first_wait, if background => break End::Background,
             }
         };
+
+        // Still running after the first wait: the table takes it over, the
+        // same contained command, with what it printed so far.
+        if end == End::Background {
+            // Checked above: background means contained and admitted.
+            let (Some(bg), Some(res), Some(ring), ShellChild::Contained(c)) =
+                (table, reservation.take(), ring.clone(), child)
+            else {
+                return ToolOutcome::err("internal error: a background start lost its slot");
+            };
+            let net_off = matches!(&ctx.sandbox,
+                crate::sandbox::Confinement::Confined { sandbox, .. }
+                    if sandbox.network() == crate::sandbox::Network::Off);
+            // From the ring: scrubbed, without a possible secret's start
+            // that the first wait cut (R-4).
+            let (so_far, truncated) = {
+                let r = ring.lock().unwrap_or_else(|p| p.into_inner());
+                cap(r.text_within(crate::MAX_OUTPUT_CHARS - 2000))
+            };
+            let st = bg.adopt(
+                res,
+                crate::background::Handover {
+                    child: c,
+                    rx,
+                    pumps: [out_task, err_task],
+                    ring,
+                    deadline: tokio::time::Instant::now()
+                        + timeout.saturating_sub(started.elapsed()),
+                    timeout,
+                    started,
+                    command: command.clone(),
+                    mark: ctx.sandbox.mark(),
+                },
+            );
+            let mut note = format!(
+                "[running in the background as {id}: it keeps running after this step and is \
+                 stopped at its timeout in {left} at the latest ({t} s; timeout_secs, up to {max} \
+                 s on this node). You will be told when it ends, at your next step or at the \
+                 person's next message: do not poll. bash_output {{\"id\": \"{id}\"}} reads its \
+                 output; bash_stop {{\"id\": \"{id}\"}} stops it. Later commands cannot see it in \
+                 `ps` or signal it.]",
+                id = st.bg_id,
+                left = harness_core::text::duration_words(
+                    timeout.saturating_sub(started.elapsed()).as_millis() as u64
+                ),
+                t = timeout.as_secs(),
+                max = ctx.bash_timeout_max.as_secs(),
+            );
+            if net_off {
+                note.push_str(
+                    "\n[the network is off on this node: each command has its own network \
+                     namespace, so no later command can connect to this one (a server it starts \
+                     cannot be reached)]",
+                );
+            }
+            let output = if so_far.is_empty() {
+                format!("(no output yet)\n{note}")
+            } else {
+                format!("{so_far}\n{note}")
+            };
+            return ToolOutcome {
+                ok: true,
+                output,
+                truncated,
+                background: Some(st),
+                ..Default::default()
+            };
+        }
 
         // Contained: the guard's report of the stop (T.8e). A command that
         // exited needs none: its guard exits only after it has reaped
@@ -306,7 +464,7 @@ impl Tool for Bash {
                 _ => None,
             };
             match (&end, killed) {
-                (End::Cancelled | End::TimedOut, _) => {
+                (End::Cancelled | End::TimedOut | End::Background, _) => {
                     // The graceful stop first (SIGTERM to the command's
                     // session, the guard's 2 s grace), then the kill, repeated
                     // until the guard has reaped the namespace or reports it
@@ -380,7 +538,7 @@ impl Tool for Bash {
                     // background children cannot hold the pipes open forever.
                     signal_group(pgid, Signal::SIGKILL);
                 }
-                End::Cancelled | End::TimedOut => {
+                End::Cancelled | End::TimedOut | End::Background => {
                     signal_group(pgid, Signal::SIGTERM);
                     if tokio::time::timeout(TERM_GRACE, child.wait())
                         .await
@@ -406,9 +564,17 @@ impl Tool for Bash {
         };
         let _ = tokio::time::timeout(drain, async {
             while let Some((stream, s)) = rx.recv().await {
-                keep(&s, &mut combined);
+                let s = keep(&s, &mut combined).unwrap_or(s);
                 if let Some(ui) = &ctx.output {
                     ui.send(stream, s).await;
+                }
+            }
+            // A background call that ended in its first wait: what its
+            // ring's scrubber still held, now the output is whole.
+            if let Some(r) = &ring {
+                let rest = r.lock().unwrap_or_else(|p| p.into_inner()).finish_clean();
+                if let (false, Some(ui)) = (rest.is_empty(), &ctx.output) {
+                    ui.send(OutputStream::Stdout, rest).await;
                 }
             }
         })
@@ -463,11 +629,16 @@ impl Tool for Bash {
                     ..Default::default()
                 }
             }
-            End::Cancelled | End::TimedOut => {
+            End::Cancelled | End::TimedOut | End::Background => {
                 let how = if end == End::Cancelled {
                     "cancelled".to_string()
                 } else {
-                    format!("timed out after {}s", timeout.as_secs())
+                    format!(
+                        "timed out after {}s (state `timeout_secs`, up to {} on this node, or \
+                         run it with `background: true`)",
+                        timeout.as_secs(),
+                        ctx.bash_timeout_max.as_secs()
+                    )
                 };
                 let note = match stopped {
                     Some(crate::contain::Stopped::StillAlive(d)) => format!(
@@ -668,10 +839,11 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
         ctx.output = Some(sink);
         let started = Instant::now();
+        // T.8d: a timeout is at least 5 s.
         let r = Bash
             .run(&ctx, json!({"command": "yes", "timeout_secs": 1}))
             .await;
-        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(r.output.contains("timed out"));
     }
 
@@ -681,7 +853,7 @@ mod tests {
         let (ctx, reader) = streaming(dir.path(), 8192);
         let started = Instant::now();
         let r = run_streaming(ctx, json!({"command": "yes", "timeout_secs": 1})).await;
-        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(r.output.contains("timed out"));
         let all = reader.await.unwrap().0.concat();
         assert_eq!(all.len(), 8192 + TRUNCATED_MARKER.len());

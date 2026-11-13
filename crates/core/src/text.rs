@@ -11,6 +11,17 @@
 //! The other default-ignorable code points (soft hyphen, Hangul fillers,
 //! the Mongolian and BMP variation selectors, …) shape real text and stay.
 
+/// A duration in words: `850 ms`, `12 s`, `4 min 12 s`, `1 h 2 min`.
+pub fn duration_words(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0 => format!("{ms} ms"),
+        1..60 => format!("{s} s"),
+        60..3600 => format!("{} min {} s", s / 60, s % 60),
+        _ => format!("{} h {} min", s / 3600, (s % 3600) / 60),
+    }
+}
+
 /// True for a character of the hidden set.
 pub fn is_hidden(c: char) -> bool {
     matches!(c,

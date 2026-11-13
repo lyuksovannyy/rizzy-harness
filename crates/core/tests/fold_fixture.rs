@@ -344,6 +344,33 @@ fn events() -> Vec<RawEvent> {
             name: None,
             error: "out/missing.bin: no such file or folder".into(),
         }),
+        // T.8d: one background command ends, one still runs.
+        EventKind::BackgroundStarted(BackgroundStarted {
+            bg_id: "bg-1".into(),
+            call_id: "c1".into(),
+            turn_id: t(),
+            timeout_s: 600,
+            ends_by_ms: 1_700_000_600_000,
+        }),
+        EventKind::BackgroundStarted(BackgroundStarted {
+            bg_id: "bg-2".into(),
+            call_id: "c1".into(),
+            turn_id: t(),
+            timeout_s: 60,
+            ends_by_ms: 1_700_000_060_000,
+        }),
+        EventKind::BackgroundEnded(BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(1),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 4200,
+            output_bytes: 12,
+            tail: "<b>not html</b>".into(),
+            tail_cut: false,
+            delivered: true,
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()

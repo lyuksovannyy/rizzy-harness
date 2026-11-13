@@ -4,6 +4,7 @@
 //! confined to the workspace unless the node policy says otherwise.
 
 pub mod approval;
+pub mod background;
 mod bash;
 pub mod contain;
 pub mod guard;
@@ -30,7 +31,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub use approval::{CallKey, call_key};
-pub use bash::{Bash, ShellChild};
+pub use background::{BashOutput, BashStop};
+pub use bash::{Bash, FOREGROUND_DESCRIPTION, ShellChild, foreground_schema};
 pub use env::ToolEnv;
 pub use fs::{Edit, Read, Write};
 pub use outline::Outline;
@@ -181,6 +183,9 @@ pub struct ToolCtx {
     /// the node's protected sessions folder): paths inside it are not
     /// refused as protected, for this session only.
     pub owned: Option<harness_core::folder::OwnedFolder>,
+    /// This session's background commands (`bash` with `background: true`,
+    /// `bash_output`, `bash_stop`), or why there are none here.
+    pub background: background::Access,
 }
 
 impl ToolCtx {
@@ -191,7 +196,7 @@ impl ToolCtx {
             output: None,
             allow_outside_workspace: false,
             protected: Arc::default(),
-            timeout: Duration::from_secs(600),
+            timeout: background::DEFAULT_TIMEOUT,
             bash_timeout_max: Duration::from_secs(bash::DEFAULT_TIMEOUT_MAX_S),
             env: ToolEnv::default(),
             observed: Arc::default(),
@@ -203,6 +208,7 @@ impl ToolCtx {
             sandbox: Default::default(),
             pin: None,
             owned: None,
+            background: Default::default(),
         }
     }
 
@@ -476,6 +482,9 @@ pub struct ToolOutcome {
     pub truncated: bool,
     /// Pages behind the `[S<n>]` labels in `output` (web tools only).
     pub sources: Vec<Source>,
+    /// A `bash` call that left a background command running: the loop
+    /// records `background_started` before this call's result.
+    pub background: Option<background::Started>,
 }
 
 impl ToolOutcome {
@@ -541,6 +550,8 @@ pub type ToolSet = Vec<Arc<dyn Tool>>;
 pub fn builtin() -> ToolSet {
     vec![
         Arc::new(Bash),
+        Arc::new(BashOutput),
+        Arc::new(BashStop),
         Arc::new(Read),
         Arc::new(Write),
         Arc::new(Edit),

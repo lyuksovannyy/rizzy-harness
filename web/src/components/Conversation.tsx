@@ -510,6 +510,17 @@ export default function Conversation(props: {
                         {showHidden(it.message)}
                       </div>
                     );
+                  case "background_ended":
+                    // Program output: plain text, never rendered.
+                    return (
+                      <details key={i} className="divider">
+                        <summary>
+                          {it.bg_id} ended ({it.reason.replace(/_/g, " ")}
+                          {it.exit_code != null ? `, code ${it.exit_code}` : ""}) after {Math.round(it.ran_ms / 1000)} s
+                        </summary>
+                        {it.tail && <pre>{showHidden(it.tail)}</pre>}
+                      </details>
+                    );
                   case "agent_changed":
                     return (
                       <div key={i} className="divider">

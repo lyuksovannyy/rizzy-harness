@@ -22,6 +22,9 @@
 //!   message per step with the same `ui:progress` block moved on, each with
 //!   a cheap call (bash `true`, else web_search) so the next step is a new
 //!   request; the last message has every step done and calls nothing
+//! * `script: [{"tool": .., "input": ..}, ..]` -> one call per step, in order
+//!   (step k = the k-th tool result since the message), then a summary of
+//!   the last result
 //! * a message with images -> `I see N image(s).` (the images it was shown)
 //! * anything else   -> echoes the message back, streamed word by word; an
 //!   answer to a question or form echoes its canonical text
@@ -204,7 +207,10 @@ impl Provider for Mock {
             .messages
             .iter()
             .rev()
-            .find_map(|m| m.user_text().map(str::to_string))
+            .find_map(|m| {
+                m.user_text()
+                    .map(|t| crate::provider::without_notes(t).to_string())
+            })
             .unwrap_or_default();
         // Just shown images: say how many arrived with their bytes.
         if let Some(ChatMsg::UserImages { images, .. }) = req.messages.last() {
@@ -258,8 +264,39 @@ impl Provider for Mock {
                 stop: Default::default(),
             });
         }
-        // After a tool result, summarise it (or cite it) and stop.
-        if let Some(ChatMsg::Tool { content, .. }) = req.messages.last() {
+        if let Some(script) = user.strip_prefix("script:") {
+            let steps: Vec<serde_json::Value> =
+                serde_json::from_str(script.trim()).unwrap_or_default();
+            let since = req
+                .messages
+                .iter()
+                .rposition(|m| m.user_text().is_some())
+                .map_or(0, |i| i + 1);
+            let done = req.messages[since..]
+                .iter()
+                .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                .count();
+            if let Some(step) = steps.get(done) {
+                return Ok(Completion {
+                    text: String::new(),
+                    tool_calls: vec![ToolCallRef {
+                        call_id: harness_core::new_id(),
+                        tool: step["tool"].as_str().unwrap_or("bash").into(),
+                        input: step["input"].clone(),
+                    }],
+                    usage,
+                    stop: Default::default(),
+                });
+            }
+        }
+        // After a tool result (and any harness notes after it), summarise
+        // it (or cite it) and stop.
+        let last_real = req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| !matches!(m, ChatMsg::Note(_)));
+        if let Some(ChatMsg::Tool { content, .. }) = last_real {
             let words = if user.starts_with("cite:") {
                 cite_answer(content)
             } else if let Some(answer) = delegate_answer(content) {

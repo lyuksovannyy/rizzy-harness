@@ -79,6 +79,18 @@ fn open_link(
     mpsc::Receiver<MasterToNode>,
     mpsc::Sender<NodeToMaster>,
 ) {
+    open_link_with(id, heads, vec![])
+}
+
+fn open_link_with(
+    id: &str,
+    heads: Vec<SessionHead>,
+    capabilities: Vec<String>,
+) -> (
+    NodeLink,
+    mpsc::Receiver<MasterToNode>,
+    mpsc::Sender<NodeToMaster>,
+) {
     // The size of the master's queue per node (PLAN.md §3, FROM_NODE_QUEUE).
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(9);
     let (to_node, commands) = mpsc::channel::<MasterToNode>(1024);
@@ -87,7 +99,7 @@ fn open_link(
         node_id: id.into(),
         hostname: "h".into(),
         version: "1".into(),
-        capabilities: vec![],
+        capabilities,
         sessions: heads,
     })
     .unwrap();
@@ -1105,4 +1117,144 @@ async fn what_a_remote_node_answers_is_cleaned() {
     assert!(err.chars().count() <= 300, "{} chars", err.chars().count());
     assert!(!err.chars().any(char::is_control), "{err:?}");
     assert!(err.starts_with("no [2J way z"), "{err:?}");
+}
+
+/// The next `session.stop_background` for `sid` on `c` within `secs`, and
+/// who it says asks.
+async fn stop_background_within(
+    c: &mut mpsc::Receiver<MasterToNode>,
+    sid: SessionId,
+    secs: u64,
+) -> Option<harness_protocol::StopBackgroundBy> {
+    stop_background_acking(c, None, sid, secs).await
+}
+
+/// [`stop_background_within`], acknowledging every command on `ack` as a
+/// node does (a cancel then does not wait out its timeout first).
+async fn stop_background_acking(
+    c: &mut mpsc::Receiver<MasterToNode>,
+    ack: Option<&mpsc::Sender<NodeToMaster>>,
+    sid: SessionId,
+    secs: u64,
+) -> Option<harness_protocol::StopBackgroundBy> {
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let m = tokio::time::timeout_at(end, c.recv()).await;
+        if let (Some(tx), Ok(Some(msg))) = (ack, &m)
+            && let Some(req_id) = msg.req_id()
+        {
+            let _ = tx
+                .send(NodeToMaster::Ack {
+                    req_id: req_id.to_string(),
+                    ok: true,
+                    error: None,
+                })
+                .await;
+        }
+        match m {
+            Ok(Some(MasterToNode::StopBackground {
+                session_id,
+                by,
+                bg_id,
+                ..
+            })) if session_id == sid => {
+                assert_eq!(bg_id, None, "a revocation stops them all");
+                return Some(by);
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+/// T.8d review N-1 and N-8: the revocation sweep stops a chat's background
+/// commands whatever the mirror knows of them: here the node's
+/// `background_started` never reached the master (held back, or still on
+/// the way), no turn runs, and the stop still goes, as `access_revoked`.
+#[tokio::test]
+async fn the_sweep_stops_background_commands_the_mirror_does_not_know_of() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (l1, mut c1, tx1) =
+        open_link_with("n1", vec![], vec![harness_protocol::CAP_BACKGROUND.into()]);
+    m.add_link(l1, false).await.unwrap();
+    // Bob's chat, idle in the mirror: no turn, no background event.
+    let sid = running_turn(&store, &tx1, "bob").await;
+    let (kind, payload) = EventKind::TurnEnded(harness_core::event::TurnEnded {
+        turn_id: "t1".into(),
+        reason: harness_core::event::TurnEndReason::Completed,
+        usage: None,
+    })
+    .into_parts();
+    send(
+        &tx1,
+        RawEvent {
+            session_id: sid,
+            seq: 3,
+            ts_ms: 3,
+            kind,
+            payload,
+        },
+    )
+    .await;
+    barrier(&store, &tx1).await;
+    assert!(!store.session(sid).unwrap().unwrap().running);
+
+    revoke_grant(&store, "bob");
+    let m2 = m.clone();
+    tokio::spawn(async move {
+        harness_master::workspaces::cancel_revoked(&m2, &["bob".to_string()]).await
+    });
+    assert_eq!(
+        stop_background_within(&mut c1, sid, 5).await,
+        Some(harness_protocol::StopBackgroundBy::AccessRevoked),
+        "the idle chat's background commands were not stopped"
+    );
+}
+
+/// The same while the node is away: its next hello's sweep sends the stop
+/// for every blocked chat on it, running or not.
+#[tokio::test]
+async fn a_node_back_from_away_is_told_to_stop_a_revoked_chats_background_commands() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let caps = vec![harness_protocol::CAP_BACKGROUND.to_string()];
+    let (l1, c1, tx1) = open_link_with("n1", vec![], caps.clone());
+    m.add_link(l1, false).await.unwrap();
+    let sid = running_turn(&store, &tx1, "bob").await;
+    drop((tx1, c1));
+    wait_for(|| m.nodes().iter().all(|n| !n.connected)).await;
+    revoke_grant(&store, "bob");
+    harness_master::workspaces::cancel_revoked(&m, &["bob".to_string()]).await;
+    let (l2, mut c2, tx2) = open_link_with(
+        "n1",
+        vec![SessionHead {
+            session_id: sid,
+            head_seq: 2,
+        }],
+        caps,
+    );
+    m.add_link(l2, false).await.unwrap();
+    assert_eq!(
+        stop_background_acking(&mut c2, Some(&tx2), sid, 10).await,
+        Some(harness_protocol::StopBackgroundBy::AccessRevoked)
+    );
+}
+
+/// A node without the capability is never sent the message (an unknown
+/// message drops the link).
+#[tokio::test]
+async fn a_node_without_background_commands_is_not_sent_their_stop() {
+    let store = Store::open_in_memory().unwrap();
+    let m = master_on(&store);
+    let (l1, mut c1, tx1) = open_link("n1", vec![]);
+    m.add_link(l1, false).await.unwrap();
+    let sid = running_turn(&store, &tx1, "bob").await;
+    revoke_grant(&store, "bob");
+    let m2 = m.clone();
+    tokio::spawn(async move {
+        harness_master::workspaces::cancel_revoked(&m2, &["bob".to_string()]).await
+    });
+    assert!(cancel_within(&mut c1, sid, 5).await);
+    assert_eq!(stop_background_within(&mut c1, sid, 2).await, None);
 }

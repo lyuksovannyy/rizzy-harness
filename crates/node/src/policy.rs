@@ -170,6 +170,14 @@ pub struct LimitsPolicy {
     /// How deep delegation may nest: 1 lets a turn's agent delegate and
     /// its sub-agents not; 0 turns delegation off on this node.
     pub max_delegation_depth: u32,
+    /// Background commands one chat may run at once (`bash` with
+    /// `background: true`, T.8d); 0 turns them off on this node.
+    pub background_per_session: usize,
+    /// Background commands this node runs at once, all chats together.
+    pub background_per_node: usize,
+    /// KiB of output kept in memory per background command (its first and
+    /// last part); never written to disk.
+    pub background_output_kb: usize,
 }
 
 /// The most `[limits] max_subagents` and `max_delegation_depth` may say.
@@ -186,11 +194,23 @@ impl Default for LimitsPolicy {
             // resolves a sub-agent's own delegates to none).
             max_subagents: harness_core::agent::DelegateCaps::default().max_subagents,
             max_delegation_depth: 1,
+            background_per_session: harness_tools::background::DEFAULT_PER_SESSION,
+            background_per_node: harness_tools::background::DEFAULT_PER_NODE,
+            background_output_kb: harness_tools::background::DEFAULT_OUTPUT_KB,
         }
     }
 }
 
 impl LimitsPolicy {
+    /// The background table's bounds.
+    pub fn background(&self) -> harness_tools::background::Limits {
+        harness_tools::background::Limits {
+            per_session: self.background_per_session,
+            per_node: self.background_per_node,
+            output_kb: self.background_output_kb,
+        }
+    }
+
     /// The master's agent spec within this node's delegation bounds: its
     /// per-turn sub-agent cap no higher than `max_subagents`, at every
     /// level, and no delegates below `max_delegation_depth`.
@@ -302,6 +322,33 @@ impl NodePolicy {
             return Err(format!(
                 "[limits] max_delegation_depth = {n}: must be between 0 and {MAX_DELEGATION_DEPTH}"
             ));
+        }
+        use harness_tools::background as bg;
+        for (key, n, min, max) in [
+            (
+                "background_per_session",
+                self.limits.background_per_session,
+                0,
+                bg::MAX_PER_SESSION,
+            ),
+            (
+                "background_per_node",
+                self.limits.background_per_node,
+                0,
+                bg::MAX_PER_NODE,
+            ),
+            (
+                "background_output_kb",
+                self.limits.background_output_kb,
+                bg::MIN_OUTPUT_KB,
+                bg::MAX_OUTPUT_KB,
+            ),
+        ] {
+            if !(min..=max).contains(&n) {
+                return Err(format!(
+                    "[limits] {key} = {n}: must be between {min} and {max}"
+                ));
+            }
         }
         self.sandbox.settings()?;
         Ok(())
@@ -506,6 +553,31 @@ mod tests {
         p.limits.max_subagents = 0;
         p.limits.max_delegation_depth = MAX_DELEGATION_DEPTH + 1;
         assert!(p.validate().unwrap_err().contains("max_delegation_depth"));
+    }
+
+    /// T.8d: the background bounds are node.toml's, with the owner's
+    /// defaults (0 a chat in step 1, 64 a node, 256 KiB each), and checked.
+    #[test]
+    fn background_limits_default_and_range() {
+        let l = NodePolicy::default().limits.background();
+        // Off in step 1 (T8D-4): the person cannot see or stop one yet.
+        assert_eq!((l.per_session, l.per_node, l.output_kb), (0, 64, 256));
+        let p: NodePolicy = toml::from_str(
+            "[limits]\nbackground_per_session = 0\nbackground_per_node = 3\nbackground_output_kb = 16\n",
+        )
+        .unwrap();
+        assert!(p.validate().is_ok());
+        assert_eq!(p.limits.background().per_session, 0);
+        for bad in [
+            "background_per_session = 33",
+            "background_per_node = 257",
+            "background_output_kb = 15",
+            "background_output_kb = 4097",
+        ] {
+            let p: NodePolicy = toml::from_str(&format!("[limits]\n{bad}\n")).unwrap();
+            let e = p.validate().unwrap_err();
+            assert!(e.contains(bad.split(' ').next().unwrap()), "{bad}: {e}");
+        }
     }
 
     #[test]

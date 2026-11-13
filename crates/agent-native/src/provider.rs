@@ -22,6 +22,10 @@ pub enum ChatMsg {
         call_id: String,
         content: String,
     },
+    /// Text from the harness, never the person's words (a background
+    /// command's end): sent as a user-role message, kept out of the URL
+    /// provenance (`user_text` is `None` for it).
+    Note(String),
 }
 
 /// One image of a user message.
@@ -41,6 +45,110 @@ impl ChatMsg {
             ChatMsg::User(t) | ChatMsg::UserImages { text: t, .. } => Some(t),
             _ => None,
         }
+    }
+}
+
+/// Where notes waiting for the person's next message end and the person's
+/// own text, unchanged, begins (T8D-3).
+pub const NOTES_THEN_MESSAGE: &str = "--- the person's message follows, unchanged ---";
+
+/// What a provider is sent instead of the loop's [`ChatMsg::Note`]s
+/// (T8D-3): a note never becomes a user-role message of its own. One right
+/// after a step's tool results is added to the last of them (tool role: the
+/// note's §9.2 fallback); one waiting for the person's next message goes
+/// in front of that message, under [`NOTES_THEN_MESSAGE`], the person's
+/// text after it as it was. Internally a note stays a `Note`, so it is
+/// never URL provenance and the log rebuilds it the same. A note with
+/// neither after it (not made by the loop) joins the last tool result, or
+/// is dropped when there is none.
+pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
+    let mut out: Vec<ChatMsg> = Vec::with_capacity(msgs.len());
+    let mut pending: Vec<String> = Vec::new();
+    let before = |pending: &mut Vec<String>, text: &str| {
+        let mut t = std::mem::take(pending).join("\n\n");
+        t.push_str("\n\n");
+        t.push_str(NOTES_THEN_MESSAGE);
+        t.push('\n');
+        t.push_str(text);
+        t
+    };
+    for m in msgs {
+        match m {
+            ChatMsg::Note(t) => {
+                if pending.is_empty()
+                    && let Some(ChatMsg::Tool { content, .. }) = out.last_mut()
+                {
+                    content.push_str("\n\n");
+                    content.push_str(&t);
+                } else {
+                    pending.push(t);
+                }
+            }
+            ChatMsg::User(t) if !pending.is_empty() => {
+                out.push(ChatMsg::User(before(&mut pending, &t)))
+            }
+            ChatMsg::UserImages { text, images } if !pending.is_empty() => {
+                out.push(ChatMsg::UserImages {
+                    text: before(&mut pending, &text),
+                    images,
+                })
+            }
+            ChatMsg::Tool { call_id, content } => out.push(ChatMsg::Tool {
+                call_id,
+                content: escape_leads(content),
+            }),
+            other => out.push(other),
+        }
+    }
+    if !pending.is_empty()
+        && let Some(ChatMsg::Tool { content, .. }) = out
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m, ChatMsg::Tool { .. }))
+    {
+        content.push_str("\n\n");
+        content.push_str(&pending.join("\n\n"));
+    }
+    out
+}
+
+/// A tool result's own text as the provider is sent it (R-2): a line that
+/// starts like the harness's note (`[harness]`) gets a `\` in front, in
+/// every tool result, whether a note joins it or not, so the only lines
+/// that start that way are the harness's own. A line starts after any line
+/// break a reader may show as one: a carriage return (a progress line),
+/// vertical tab, form feed, NEL, U+2028, U+2029. Deterministic (the cache
+/// prefix does not move); the log and the UI keep the text as it was. The
+/// text is returned as it came when no line starts that way.
+pub fn escape_leads(content: String) -> String {
+    use harness_core::event::NOTE_LEAD;
+    const BREAKS: [char; 7] = ['\n', '\r', '\x0b', '\x0c', '\u{85}', '\u{2028}', '\u{2029}'];
+    if !content.contains(NOTE_LEAD) {
+        return content;
+    }
+    let mut out = String::with_capacity(content.len() + 8);
+    let mut escaped = false;
+    for line in content.split_inclusive(BREAKS) {
+        if line.starts_with(NOTE_LEAD) {
+            out.push('\\');
+            escaped = true;
+        }
+        out.push_str(line);
+    }
+    if escaped { out } else { content }
+}
+
+/// The person's own text of a user message [`place_notes`] put notes in
+/// front of. The separator counts only as a line of its own after an empty
+/// line, the way `place_notes` writes it: a note's lines are the harness's
+/// or quoted program output, so the first such line is the harness's. A
+/// person who types that very line after an empty one is read from there
+/// on; only the demo provider reads a message this way.
+pub fn without_notes(text: &str) -> &str {
+    let at = format!("\n\n{NOTES_THEN_MESSAGE}\n");
+    match text.find(&at) {
+        Some(i) => &text[i + at.len()..],
+        None => text,
     }
 }
 
@@ -313,7 +421,7 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
     let chars: usize = messages
         .iter()
         .map(|m| match m {
-            ChatMsg::System(t) | ChatMsg::User(t) => t.len(),
+            ChatMsg::System(t) | ChatMsg::User(t) | ChatMsg::Note(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()

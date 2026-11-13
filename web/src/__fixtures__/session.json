@@ -576,17 +576,72 @@
       "ts_ms": 1700000000036
     },
     {
+      "kind": "background_started",
+      "payload": {
+        "bg_id": "bg-1",
+        "call_id": "c1",
+        "ends_by_ms": 1700000600000,
+        "timeout_s": 600,
+        "turn_id": "t1"
+      },
+      "seq": 38,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000037
+    },
+    {
+      "kind": "background_started",
+      "payload": {
+        "bg_id": "bg-2",
+        "call_id": "c1",
+        "ends_by_ms": 1700000060000,
+        "timeout_s": 60,
+        "turn_id": "t1"
+      },
+      "seq": 39,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000038
+    },
+    {
+      "kind": "background_ended",
+      "payload": {
+        "bg_id": "bg-1",
+        "confirmed": "ended",
+        "delivered": true,
+        "exit_code": 1,
+        "output_bytes": 12,
+        "ran_ms": 4200,
+        "reason": "exited",
+        "tail": "<b>not html</b>",
+        "tail_cut": false
+      },
+      "seq": 40,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000039
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 38,
+      "seq": 41,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
   ],
   "expected": {
     "active_agent": "coder",
+    "background": {
+      "bg-1": {
+        "call_id": "c1",
+        "ended": true,
+        "ends_by_ms": 1700000600000
+      },
+      "bg-2": {
+        "call_id": "c1",
+        "ended": false,
+        "ends_by_ms": 1700000060000
+      }
+    },
     "checkpoints": {
       "t1": {
         "after": null,
@@ -596,7 +651,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 38,
+    "head_seq": 41,
     "items": [
       {
         "text": "fix the bug",
@@ -899,6 +954,14 @@
         "name": null,
         "path": "out/missing.bin",
         "type": "artifact_failed"
+      },
+      {
+        "bg_id": "bg-1",
+        "exit_code": 1,
+        "ran_ms": 4200,
+        "reason": "exited",
+        "tail": "<b>not html</b>",
+        "type": "background_ended"
       }
     ],
     "meta": {

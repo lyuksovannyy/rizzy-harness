@@ -423,6 +423,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         MasterToNode::Welcome { .. }
         | MasterToNode::Create { .. }
         | MasterToNode::Cancel { .. }
+        | MasterToNode::StopBackground { .. }
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
@@ -1797,6 +1798,27 @@ impl Master {
         self.send_command(&node, |req_id| MasterToNode::Cancel {
             req_id,
             session_id: sid,
+        })
+        .await
+    }
+
+    /// Stop a session's background commands (one, or all), on a node that
+    /// announced them (`CAP_BACKGROUND`). A turn's cancel does not.
+    pub async fn stop_background(
+        &self,
+        sid: SessionId,
+        bg_id: Option<String>,
+        by: harness_protocol::StopBackgroundBy,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        if !self.node_has(&node, harness_protocol::CAP_BACKGROUND) {
+            return Ok(());
+        }
+        self.send_command(&node, |req_id| MasterToNode::StopBackground {
+            req_id,
+            session_id: sid,
+            bg_id,
+            by,
         })
         .await
     }
