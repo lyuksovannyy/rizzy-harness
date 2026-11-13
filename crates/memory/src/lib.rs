@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub use embed::{ApiStyle, Embedder, Preset};
 pub use mem0::Mem0Memory;
 pub use qdrant::QdrantIndex;
-pub use sqlite::SqliteMemory;
+pub use sqlite::{DB_SCHEMA, MIGRATIONS, SqliteMemory};
 pub use tool::Remember;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -69,6 +69,9 @@ pub struct NewFact {
 pub enum MemoryError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// The schema version: a newer build's database, or a failed migration.
+    #[error(transparent)]
+    Migrate(#[from] harness_store::migrate::MigrateError),
     #[error("{0}")]
     Invalid(String),
     #[error("embeddings: {0}")]

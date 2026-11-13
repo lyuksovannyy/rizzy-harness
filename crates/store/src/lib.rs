@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub mod artifacts;
 pub mod blobs;
 pub mod media;
+pub mod migrate;
 mod projects;
 pub mod routines;
 pub mod session_images;
@@ -33,6 +34,9 @@ pub enum StoreError {
         owner: String,
         claimed: String,
     },
+    /// The schema version: a newer build's database, or a failed migration.
+    #[error(transparent)]
+    Migrate(#[from] migrate::MigrateError),
     #[error("corrupt row: {0}")]
     Corrupt(String),
     #[error("already exists: {0}")]
@@ -412,6 +416,25 @@ CREATE TABLE IF NOT EXISTS session_workspaces (
 CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace_id);
 "#;
 
+/// `master.db`, `chat.db` and `node.db`: the migrations and the schema the
+/// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
+pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
+    steps: MIGRATIONS,
+    recorded: include_str!("../schema/1.sql"),
+};
+
+/// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
+pub const MIGRATIONS: &[migrate::Migration] = &[&[
+    SCHEMA,
+    projects::SCHEMA,
+    // In this order: each one's tables reference the ones before.
+    blobs::SCHEMA,
+    media::SCHEMA,
+    artifacts::SCHEMA,
+    routines::SCHEMA,
+    session_images::SCHEMA,
+]];
+
 /// A session's effective workspace: its `session_workspaces` row while the
 /// owner is still a member of that workspace (or the chat has no owner),
 /// else the owner's Personal workspace, else NULL. Checking membership here
@@ -604,30 +627,28 @@ fn is_incognito(payload: &serde_json::Value) -> bool {
 
 impl Store {
     pub fn open(path: &Path, durability: Durability) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
+        // Wait for another connection's write (a migration too), not fail.
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Before anything else writes: a newer build's file is refused as is.
+        migrate::migrate_checked(&mut conn, &path.display().to_string(), &DB_SCHEMA)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let sync = match durability {
             Durability::Full => "FULL",
             Durability::Normal => "NORMAL",
         };
         conn.pragma_update(None, "synchronous", sync)?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
         Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        let mut conn = Connection::open_in_memory()?;
+        migrate::migrate_checked(&mut conn, ":memory:", &DB_SCHEMA)?;
+        Self::init(conn)
     }
 
+    /// Per-connection settings, on a database already at `MIGRATIONS`.
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(projects::SCHEMA)?;
-        // In this order: each one's tables reference the ones before.
-        conn.execute_batch(blobs::SCHEMA)?;
-        conn.execute_batch(media::SCHEMA)?;
-        conn.execute_batch(artifacts::SCHEMA)?;
-        conn.execute_batch(routines::SCHEMA)?;
-        conn.execute_batch(session_images::SCHEMA)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Deleted chats (incognito, user deletes) are overwritten, not just
         // unlinked, so their text does not linger in free pages.

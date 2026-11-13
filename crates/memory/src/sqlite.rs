@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
 use harness_core::SessionId;
+use harness_store::migrate::migrate_checked;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::embed::{cosine, from_blob, to_blob};
@@ -41,6 +42,16 @@ CREATE TABLE IF NOT EXISTS fact_indexed (
     PRIMARY KEY (id, model)
 );
 "#;
+
+/// The schema of `memory.db`, one entry per version (`harness_store::migrate`).
+pub const MIGRATIONS: &[harness_store::migrate::Migration] = &[&[SCHEMA]];
+
+/// `memory.db`'s migrations and the schema the last one leaves, as
+/// recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
+pub const DB_SCHEMA: harness_store::migrate::Schema<'static> = harness_store::migrate::Schema {
+    steps: MIGRATIONS,
+    recorded: include_str!("../schema/1.sql"),
+};
 
 pub struct SqliteMemory {
     conn: Arc<Mutex<Connection>>,
@@ -105,17 +116,22 @@ fn fts_query(q: &str) -> Option<String> {
 
 impl SqliteMemory {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Before anything else writes: a newer build's file is refused as is.
+        migrate_checked(&mut conn, &path.display().to_string(), &DB_SCHEMA)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        let mut conn = Connection::open_in_memory()?;
+        migrate_checked(&mut conn, ":memory:", &DB_SCHEMA)?;
+        Self::init(conn)
     }
 
+    /// Per-connection settings, on a database already at `MIGRATIONS`.
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
         // Deleted memories are overwritten, not just unlinked.
         conn.pragma_update(None, "secure_delete", "ON")?;
         Ok(Self {

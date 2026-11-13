@@ -186,6 +186,19 @@ struct RemoteToml {
     node_id: String,
 }
 
+/// Every database of the data directory, read only, before any is opened
+/// (fix plan 4.3, review R43-3): one written by a newer build stops the
+/// start before anything is created, migrated or swept, so no file is
+/// migrated before a later one turns out to be newer.
+fn check_schemas(dir: &Path) -> anyhow::Result<()> {
+    use harness_store::migrate::check_file;
+    for name in ["master.db", "chat.db", "node.db"] {
+        check_file(&dir.join(name), &harness_store::DB_SCHEMA)?;
+    }
+    check_file(&dir.join("memory.db"), &harness_memory::DB_SCHEMA)?;
+    Ok(())
+}
+
 fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let d = match cli {
         Some(d) => d.clone(),
@@ -1170,6 +1183,9 @@ fn main() -> anyhow::Result<()> {
         _ => None,
     };
     let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
+    if role.is_some() {
+        check_schemas(&dir)?;
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
