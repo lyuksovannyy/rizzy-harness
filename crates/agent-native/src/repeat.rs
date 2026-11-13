@@ -170,6 +170,64 @@ mod tests {
         assert!(g.record(b, false, false, "x").is_none(), "ok differs");
     }
 
+    /// Review T1-R1: what the harness itself makes different on every run
+    /// of the same command (the kept output's random id, a stop's measured
+    /// time) is not part of the result; a program's own changing text is.
+    #[test]
+    fn the_harness_own_volatile_tokens_are_not_the_result() {
+        let pairs = [
+            (
+                "error[E0308]: mismatched types\n[filtered: 1 of 2 lines not shown; full \
+                 output: tool_output id=e7b5872348defe99]\n[exit code: 101]",
+                "error[E0308]: mismatched types\n[filtered: 1 of 2 lines not shown; full \
+                 output: tool_output id=247eae90ecb7cbcf]\n[exit code: 101]",
+            ),
+            (
+                "[timed out after 5 s: the command and everything it started were killed; \
+                 its guard confirmed the end (12 ms)]",
+                "[timed out after 5 s: the command and everything it started were killed; \
+                 its guard confirmed the end (347 ms)]",
+            ),
+            (
+                "[timed out after 5 s and killed, but NOT ended: a process of this command \
+                 is still alive 2.0s after the stop was ordered; the kernel cannot end it]",
+                "[timed out after 5 s and killed, but NOT ended: a process of this command \
+                 is still alive 12.3s after the stop was ordered; the kernel cannot end it]",
+            ),
+        ];
+        for (i, (a, b)) in pairs.into_iter().enumerate() {
+            let mut g = RepeatGuard::default();
+            let k = key(json!({ "path": i }));
+            assert!(g.record(k, true, false, a).is_none());
+            assert!(g.record(k, true, false, b).is_some(), "pair {i}");
+        }
+        let mut g = RepeatGuard::default();
+        let k = key(json!({"path": "poll"}));
+        g.record(k, false, true, "bg-1 (running for 30 s)");
+        assert!(
+            g.record(k, false, true, "bg-1 (running for 60 s)")
+                .is_none()
+        );
+    }
+
+    /// Review T1-R2: a restart keeps each call's last result, so a call
+    /// that only repeats itself after it is no progress.
+    #[test]
+    fn a_restart_keeps_the_last_results() {
+        let mut g = RepeatGuard::default();
+        let (a, b, x) = (
+            key(json!({"path": "a"})),
+            key(json!({"path": "b"})),
+            key(json!({"path": "x"})),
+        );
+        for _ in 1..REFUSE_AT {
+            g.record(a, true, true, "a");
+            g.record(b, true, true, "b");
+            g.record(x, false, false, "error");
+        }
+        assert!(matches!(g.admit(x), Admission::Refuse { .. }));
+    }
+
     #[test]
     fn notes_hold_no_text_of_the_call_and_lead_as_the_harness() {
         let mut g = RepeatGuard::default();

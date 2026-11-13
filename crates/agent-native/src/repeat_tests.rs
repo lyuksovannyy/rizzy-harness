@@ -23,6 +23,10 @@ struct Host {
     /// The answer to a `Mutating` call; read-only calls are allowed.
     mutating: Decision,
     asked: AtomicUsize,
+    /// A background command's end, delivered at this step boundary (0 is
+    /// the first).
+    end_at: Option<usize>,
+    boundaries: AtomicUsize,
 }
 
 impl Host {
@@ -31,7 +35,22 @@ impl Host {
             events: Mutex::new(vec![]),
             mutating,
             asked: AtomicUsize::new(0),
+            end_at: None,
+            boundaries: AtomicUsize::new(0),
         }
+    }
+
+    /// Every finished call, in order: (ok, output, the harness's note).
+    fn noted(&self) -> Vec<(bool, String, Option<String>)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallFinished(f) => Some((f.ok, f.output.clone(), f.note.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Every finished call, in order: (ok, output).
@@ -61,12 +80,63 @@ impl TurnHost for Host {
         self.asked.fetch_add(1, Ordering::SeqCst);
         self.mutating
     }
+    /// A sub-agent that did its work (as one that edited the folder).
+    async fn delegate(
+        &self,
+        _agent: harness_core::agent::AgentSpec,
+        _task: String,
+        _refs: harness_core::refs::SharedRefs,
+        _observed: Arc<Vec<String>>,
+        _cancel: tokio_util::sync::CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        let child = SessionId::new();
+        started(child);
+        Ok(harness_core::backend::DelegateOutcome {
+            child,
+            text: "edited src/lib.rs".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+            sources: vec![],
+        })
+    }
+    async fn background_notes(
+        &self,
+    ) -> Result<Vec<BackgroundEnded>, harness_core::backend::LogError> {
+        let n = self.boundaries.fetch_add(1, Ordering::SeqCst);
+        if self.end_at != Some(n) {
+            return Ok(vec![]);
+        }
+        let end = ended("bg-1");
+        self.events
+            .lock()
+            .unwrap()
+            .push(EventKind::BackgroundEnded(end.clone()));
+        Ok(vec![end])
+    }
+}
+
+fn ended(bg_id: &str) -> BackgroundEnded {
+    BackgroundEnded {
+        bg_id: bg_id.into(),
+        reason: BackgroundReason::Exited,
+        exit_code: Some(0),
+        signal: None,
+        confirmed: BackgroundConfirmed::Ended,
+        ran_ms: 90_000,
+        output_bytes: 5,
+        tail: "built".into(),
+        tail_cut: false,
+        delivered: false,
+    }
 }
 
 /// Records each request; calls the listed tools one per request (counted
-/// from the last user-role message), then answers.
+/// from the last user-role message), then answers. With `steps`, sends
+/// the calls of step `n` in its `n`-th message instead.
 struct Rec {
     calls: Vec<(&'static str, Value)>,
+    steps: Option<Vec<Vec<(&'static str, Value)>>>,
     seen: Mutex<Vec<ChatRequest>>,
 }
 
@@ -86,20 +156,27 @@ impl Provider for Rec {
             .iter()
             .rposition(|m| m.user_text().is_some())
             .map_or(0, |i| i + 1);
-        let done = req.messages[since..]
-            .iter()
-            .filter(|m| matches!(m, ChatMsg::Tool { .. }))
-            .count();
-        let tool_calls = self
-            .calls
-            .get(done)
-            .map(|(t, i)| ToolCallRef {
-                call_id: harness_core::new_id(),
-                tool: (*t).into(),
-                input: i.clone(),
-            })
-            .into_iter()
-            .collect();
+        let call = |(t, i): &(&'static str, Value)| ToolCallRef {
+            call_id: harness_core::new_id(),
+            tool: (*t).into(),
+            input: i.clone(),
+        };
+        let tool_calls = if let Some(steps) = &self.steps {
+            let step = req.messages[since..]
+                .iter()
+                .filter(|m| matches!(m, ChatMsg::Assistant { .. }))
+                .count();
+            steps
+                .get(step)
+                .map(|s| s.iter().map(call).collect())
+                .unwrap_or_default()
+        } else {
+            let done = req.messages[since..]
+                .iter()
+                .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                .count();
+            self.calls.get(done).map(call).into_iter().collect()
+        };
         Ok(Completion {
             text: "done".into(),
             tool_calls,
@@ -166,38 +243,61 @@ struct Run {
     changes: usize,
 }
 
-async fn run_with(
+/// How a test turn runs beyond its calls.
+#[derive(Default)]
+struct Opts {
+    history: Vec<RawEvent>,
+    sid: Option<SessionId>,
+    /// Several calls in one message: step `n`'s calls in the `n`-th.
+    steps: Option<Vec<Vec<(&'static str, Value)>>>,
+    /// The built-in tools (the real `bash`, `read`, `edit` ...) beside the
+    /// stand-ins.
+    builtin: bool,
+    savings: harness_core::savings::Savings,
+    agent: Option<harness_core::agent::AgentSpec>,
+}
+
+async fn run_opts(host: &Host, calls: Vec<(&'static str, Value)>, o: Opts) -> Run {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run_in(host, calls, o, dir.path()).await;
+    drop(dir);
+    r
+}
+
+async fn run_in(
     host: &Host,
     calls: Vec<(&'static str, Value)>,
-    history: Vec<RawEvent>,
-    sid: SessionId,
+    o: Opts,
+    dir: &std::path::Path,
 ) -> Run {
-    let dir = tempfile::tempdir().unwrap();
     let rec = Arc::new(Rec {
         calls,
+        steps: o.steps,
         seen: Mutex::new(vec![]),
     });
     let (probes, changes) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-    let b = NativeBackend::new(
-        rec.clone(),
-        vec![
-            Arc::new(Probe(probes.clone())),
-            Arc::new(Change(changes.clone())),
-        ],
-        NativeConfig::default(),
-    );
+    let mut tools: Vec<Arc<dyn harness_tools::Tool>> = vec![
+        Arc::new(Probe(probes.clone())),
+        Arc::new(Change(changes.clone())),
+    ];
+    if o.builtin {
+        tools.extend(harness_tools::builtin());
+    }
+    let b = NativeBackend::new(rec.clone(), tools, NativeConfig::default());
+    let mut extra: harness_core::backend::TurnExtra = Default::default();
+    extra.savings = o.savings;
     let out = b
         .run_turn(TurnCtx {
-            session_id: sid,
+            session_id: o.sid.unwrap_or_else(SessionId::new),
             turn_id: "t2".into(),
-            history,
+            history: o.history,
             user_text: "go".into(),
-            cwd: dir.path().to_path_buf(),
+            cwd: dir.to_path_buf(),
             model: "rec".into(),
-            agent: None,
+            agent: o.agent,
             compare: vec![],
             parent_session: None,
-            extra: Default::default(),
+            extra,
             cancel: Default::default(),
             host,
         })
@@ -208,6 +308,20 @@ async fn run_with(
         probes: probes.load(Ordering::SeqCst),
         changes: changes.load(Ordering::SeqCst),
     }
+}
+
+async fn run_with(
+    host: &Host,
+    calls: Vec<(&'static str, Value)>,
+    history: Vec<RawEvent>,
+    sid: SessionId,
+) -> Run {
+    let o = Opts {
+        history,
+        sid: Some(sid),
+        ..Default::default()
+    };
+    run_opts(host, calls, o).await
 }
 
 async fn run(host: &Host, calls: Vec<(&'static str, Value)>) -> Run {
@@ -502,4 +616,267 @@ async fn a_person_is_not_asked_a_fifth_time() {
     let r = run(&host, vec![("change", json!({"n": 1})); 5]).await;
     assert_eq!(r.changes, 0);
     assert_eq!(host.asked.load(Ordering::SeqCst), 4);
+}
+
+fn bash(cmd: &str) -> (&'static str, Value) {
+    ("bash", json!({"command": cmd}))
+}
+
+fn lines_of(dir: &std::path::Path, name: &str) -> usize {
+    std::fs::read_to_string(dir.join(name))
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+/// Review T1-R1: with shell-output filtering on (the default of an agentic
+/// turn), a failing build whose `Compiling` line the filter drops gets a
+/// new random `tool_output id=` every run. That id is the harness's own,
+/// not the command's result: the fifth identical run is not run.
+#[tokio::test]
+async fn a_failing_build_the_filter_shortens_is_refused_the_fifth_time() {
+    let savings = harness_core::savings::TokenSavings::default().for_turn(false);
+    assert!(
+        savings.filter_shell_output,
+        "the default of an agentic turn"
+    );
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let x = bash(
+        "echo run >> runs; echo '   Compiling app v0.1.0 (/w)'; \
+         echo 'error[E0308]: mismatched types'; exit 101",
+    );
+    let o = Opts {
+        builtin: true,
+        savings,
+        ..Default::default()
+    };
+    let r = run_in(&host, vec![x; 6], o, dir.path()).await;
+    let fin = host.noted();
+    assert!(fin[0].1.contains("tool_output id="), "{}", fin[0].1);
+    assert_eq!(lines_of(dir.path(), "runs"), 4, "{fin:?}");
+    assert!(fin[1].2.is_some(), "the second run is warned: {fin:?}");
+    assert!(fin[4].1.contains("Not run"), "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
+}
+
+/// Review T1-R2: two successful commands with unchanging results do not
+/// hide the failing one between them (A, B, X, A, B, X ...).
+#[tokio::test]
+async fn two_unchanging_commands_do_not_hide_the_loop_between_them() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (bash("echo a"), bash("echo b"));
+    let x = bash("echo run >> runs; echo 'error: nope'; exit 1");
+    let mut calls = vec![];
+    for _ in 0..10 {
+        calls.extend([a.clone(), b.clone(), x.clone()]);
+    }
+    let o = Opts {
+        builtin: true,
+        ..Default::default()
+    };
+    let r = run_in(&host, calls, o, dir.path()).await;
+    assert_eq!(lines_of(dir.path(), "runs"), 4, "{:?}", host.noted());
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
+}
+
+/// Review T1-R3 (a): wait, then look. A poll whose answer changes every
+/// time shows the world moving, so the wait between polls is never
+/// refused, and the turn is not ended.
+#[tokio::test]
+async fn a_wait_between_changing_polls_is_never_refused() {
+    let host = Host::new(Decision::Allow);
+    let (wait, poll) = (bash("sleep 0.05"), probe(json!({"vary": true})));
+    let mut calls = vec![];
+    for _ in 0..8 {
+        calls.extend([wait.clone(), poll.clone()]);
+    }
+    let o = Opts {
+        builtin: true,
+        ..Default::default()
+    };
+    let r = run_opts(&host, calls, o).await;
+    let fin = host.noted();
+    assert!(!fin.iter().any(|f| f.1.contains("Not run")), "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert_eq!(r.probes, 8);
+}
+
+/// Review T1-R3 (b): a sub-agent that did its work starts the counts
+/// again, as the parent's own edit does: the test after each delegation
+/// runs.
+#[tokio::test]
+async fn a_test_run_after_each_delegation_runs() {
+    let host = Host::new(Decision::Allow);
+    let worker = harness_core::agent::AgentSpec {
+        agent_id: "worker".into(),
+        name: "Worker".into(),
+        system_prompt: "edits".into(),
+        tools: harness_core::agent::ToolSelection::List(vec![]),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        budget: Default::default(),
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates: vec![],
+        caps: None,
+    };
+    let lead = harness_core::agent::AgentSpec {
+        agent_id: "lead".into(),
+        tools: harness_core::agent::ToolSelection::List(vec!["probe".into()]),
+        delegates: vec![worker.clone()],
+        ..worker
+    };
+    let test = probe(json!({"cmd": "cargo test", "out": "1 failed"}));
+    let delegate = (DELEGATE, json!({"agent": "worker", "task": "fix it"}));
+    let mut calls = vec![];
+    for _ in 0..4 {
+        calls.extend([test.clone(), delegate.clone()]);
+    }
+    calls.push(test.clone());
+    let o = Opts {
+        agent: Some(lead),
+        ..Default::default()
+    };
+    let r = run_opts(&host, calls, o).await;
+    let fin = host.noted();
+    assert_eq!(r.probes, 5, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+}
+
+/// Review T1-R3 (c): a background command's end, told at the step
+/// boundary, starts the counts again: a check refused before the end runs
+/// after it, and the turn is not ended.
+#[tokio::test]
+async fn a_background_end_starts_the_counts_again() {
+    let mut host = Host::new(Decision::Allow);
+    host.end_at = Some(4);
+    let r = run(&host, vec![probe(json!({"path": "a"})); 6]).await;
+    let fin = host.noted();
+    assert!(fin[4].1.contains("Not run"), "{fin:?}");
+    assert_eq!(r.probes, 5, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+}
+
+/// Review T1-R4: after the refusal that ends the turn, the other calls of
+/// the same message are not run, and the person is not asked about them.
+#[tokio::test]
+async fn calls_after_the_final_refusal_are_not_run() {
+    let host = Host::new(Decision::Allow);
+    let a = probe(json!({"path": "a"}));
+    let mut steps = vec![vec![a.clone()]; 5];
+    steps.push(vec![a.clone(), ("change", json!({"n": 1}))]);
+    let o = Opts {
+        steps: Some(steps),
+        ..Default::default()
+    };
+    let r = run_opts(&host, vec![], o).await;
+    let fin = host.noted();
+    assert_eq!(fin.len(), 7, "{fin:?}");
+    assert!(
+        fin[5].2.as_deref().unwrap_or("").contains("turn ends"),
+        "{fin:?}"
+    );
+    assert_eq!(r.changes, 0, "{fin:?}");
+    assert_eq!(host.asked.load(Ordering::SeqCst), 0);
+    assert!(!fin[6].0 && fin[6].1.contains("Not run"), "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
+}
+
+/// The events of a turn as the log holds them, after its user message.
+fn log_of(sid: SessionId, host: &Host, more: Vec<EventKind>) -> Vec<RawEvent> {
+    let mut kinds = vec![EventKind::UserMessage(UserMessage {
+        turn_id: "t2".into(),
+        text: "go".into(),
+        attachments: vec![],
+        reply: None,
+        images: vec![],
+    })];
+    kinds.extend(host.events.lock().unwrap().iter().cloned());
+    kinds.extend(more);
+    kinds
+        .into_iter()
+        .enumerate()
+        .map(|(i, k)| ev(sid, i as u64 + 1, k))
+        .collect()
+}
+
+/// Review T1-R5: the guard's last note of a turn it ended stays on its
+/// result; a callback turn's opening takes only the background ends.
+#[tokio::test]
+async fn a_callback_turn_after_a_guard_ended_turn_opens_with_the_ends_only() {
+    let host = Host::new(Decision::Allow);
+    let r = run(&host, vec![probe(json!({"path": "a"})); 6]).await;
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
+    let log = log_of(
+        SessionId::new(),
+        &host,
+        vec![
+            EventKind::BackgroundEnded(ended("bg-1")),
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "t3".into(),
+                agent: None,
+                cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            }),
+        ],
+    );
+    let sent = place_notes(history_to_messages(&log));
+    let last_result = sent
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ChatMsg::Tool { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let opening = sent.last().and_then(|m| m.user_text()).unwrap().to_string();
+    assert!(!opening.contains("turn ends"), "{opening}");
+    assert!(opening.contains("bg-1"), "{opening}");
+    assert!(
+        harness_lines(&last_result)
+            .iter()
+            .any(|l| l.contains("turn ends")),
+        "{last_result:?}"
+    );
+}
+
+/// The cache prefix with several calls in a message: every result, its
+/// note included, rebuilds from the log as the turn sent it.
+#[tokio::test]
+async fn several_calls_a_step_rebuild_from_the_log() {
+    let host = Host::new(Decision::Allow);
+    let a = probe(json!({"path": "a"}));
+    let steps = vec![
+        vec![a.clone(), a.clone()],
+        vec![a.clone(), ("change", json!({"n": 1})), a.clone()],
+        vec![a.clone(), a.clone()],
+    ];
+    let o = Opts {
+        steps: Some(steps),
+        ..Default::default()
+    };
+    let r = run_opts(&host, vec![], o).await;
+    let live = sent_results(&r);
+    assert_eq!(live.len(), 7);
+    assert!(
+        live.iter().any(|s| !harness_lines(s).is_empty()),
+        "{live:?}"
+    );
+    let rebuilt: Vec<String> = place_notes(history_to_messages(&log_of(
+        SessionId::new(),
+        &host,
+        vec![],
+    )))
+    .into_iter()
+    .filter_map(|m| match m {
+        ChatMsg::Tool { content, .. } => Some(content),
+        _ => None,
+    })
+    .collect();
+    assert_eq!(rebuilt, live);
 }
