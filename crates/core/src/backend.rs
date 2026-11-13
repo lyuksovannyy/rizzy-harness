@@ -76,6 +76,24 @@ pub trait TurnHost: Send + Sync {
     async fn images(&self, _sha256: &[String]) -> Vec<ImageData> {
         Vec::new()
     }
+
+    /// This session's table of background commands
+    /// (`harness_tools::background::SessionBg`, docs/background-commands.md
+    /// §4.3), owned by the node and bounded by its `[limits]`. Type-erased
+    /// because this crate does not know the tools; `None` where background
+    /// commands do not exist (the chat runtime, tests). The loop refuses
+    /// them for a sub-agent whatever this returns.
+    fn background(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
+    /// At a step boundary (after a step's tool results are recorded, before
+    /// the next model call): append the background ends queued since the
+    /// last one (`delivered: true`) and return them, so the loop adds their
+    /// notes where the log has them. On `Err` the turn ends.
+    async fn background_notes(&self) -> Result<Vec<crate::event::BackgroundEnded>, LogError> {
+        Ok(Vec::new())
+    }
 }
 
 /// An event could not be appended to the session log (full disk, I/O

@@ -139,6 +139,27 @@ impl harness_core::backend::TurnHost for Logged<'_> {
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
         self.host.images(sha256).await
     }
+
+    fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.host.background()
+    }
+
+    async fn background_notes(
+        &self,
+    ) -> Result<Vec<BackgroundEnded>, harness_core::backend::LogError> {
+        if let Some(e) = self.failure() {
+            return Err(e);
+        }
+        let res = self.host.background_notes().await;
+        if let Err(e) = &res {
+            self.failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(|| e.clone());
+            self.cancel.cancel();
+        }
+        res
+    }
 }
 
 /// What the loop returns when an append failed; `run_turn` replaces the
@@ -198,7 +219,9 @@ impl Default for NativeConfig {
             allow_outside_workspace: false,
             protected_dirs: Arc::default(),
             sandbox: Default::default(),
-            tool_timeout: Duration::from_secs(600),
+            // A foreground `bash` call without `timeout_secs` (T.8d: 600 s
+            // before; docs/background-commands.md §4.2).
+            tool_timeout: harness_tools::background::DEFAULT_TIMEOUT,
             max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
             bash_timeout_max: Duration::from_secs(harness_tools::DEFAULT_TIMEOUT_MAX_S),
             effort: None,
@@ -278,6 +301,7 @@ fn transcript(prev: Option<&str>, events: &[RawEvent]) -> String {
                 let short: String = content.chars().take(2000).collect();
                 out.push_str(&format!("Tool result: {short}\n\n"));
             }
+            ChatMsg::Note(t) => out.push_str(&format!("{t}\n\n")),
             ChatMsg::System(_) => {}
         }
     }
@@ -597,6 +621,14 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
                         call_id: f.call_id,
                         content: f.output,
                     });
+                }
+            }
+            // Where the log has it: after a step's results, or between
+            // turns; the same text the loop added when it arrived.
+            EventKind::BackgroundEnded(b) => {
+                if let Some(n) = b.model_note() {
+                    close_open(&mut out, &mut open);
+                    out.push(ChatMsg::Note(n));
                 }
             }
             _ => {}
@@ -1433,6 +1465,26 @@ impl NativeBackend {
                     .await;
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
+                if let Some(b) = &outcome.background
+                    && host
+                        .emit(EventKind::BackgroundStarted(BackgroundStarted {
+                            bg_id: b.bg_id.clone(),
+                            call_id: call.call_id.clone(),
+                            turn_id: ctx.turn_id.clone(),
+                            timeout_s: b.timeout_s,
+                            ends_by_ms: b.ends_by_ms,
+                        }))
+                        .await
+                        .is_err()
+                {
+                    // Nothing in the log names it: it is stopped, and its end
+                    // is not recorded either.
+                    if let harness_tools::background::Access::On(bg) = background_access(&ctx, host)
+                    {
+                        bg.discard(&b.bg_id);
+                    }
+                    return stopped(usage);
+                }
                 if host
                     .emit(EventKind::ToolCallFinished(ToolCallFinished {
                         call_id: call.call_id.clone(),
@@ -1461,6 +1513,16 @@ impl NativeBackend {
                         error: None,
                     };
                 }
+            }
+            // The step boundary: background ends since the last one, in
+            // the log here and so in the next request (no step used).
+            match host.background_notes().await {
+                Ok(ends) => messages.extend(
+                    ends.iter()
+                        .filter_map(|b| b.model_note())
+                        .map(ChatMsg::Note),
+                ),
+                Err(_) => return stopped(usage),
             }
         }
         TurnOutcome {
@@ -1875,6 +1937,7 @@ impl NativeBackend {
             sandbox: self.config.sandbox.for_session(&ctx.session_id.to_string()),
             pin: host.folder_pin(),
             owned: host.owned_folder(),
+            background: background_access(ctx, host),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`
@@ -1929,6 +1992,25 @@ impl NativeBackend {
             // (review T8E-3), so the result does not say it was cancelled.
             Step::Cancelled => ToolOutcome::err(abandoned_note()),
         }
+    }
+}
+
+/// The background table a turn's tools get: none for a sub-agent (R14),
+/// whatever its host offers.
+fn background_access(
+    ctx: &TurnCtx<'_>,
+    host: &dyn harness_core::backend::TurnHost,
+) -> harness_tools::background::Access {
+    use harness_tools::background::{Access, SUB_AGENT, SessionBg};
+    if ctx.parent_session.is_some() {
+        return Access::Off(SUB_AGENT.into());
+    }
+    match host
+        .background()
+        .and_then(|a| a.downcast::<SessionBg>().ok())
+    {
+        Some(bg) => Access::On(bg),
+        None => Access::default(),
     }
 }
 
@@ -4067,5 +4149,122 @@ mod tests {
         )
         .await;
         assert_eq!(asked, [a, other]);
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use harness_core::backend::TurnHost;
+
+    struct WithTable(Arc<harness_tools::background::SessionBg>);
+
+    #[async_trait::async_trait]
+    impl TurnHost for WithTable {
+        async fn emit(&self, _: EventKind) -> Result<(), harness_core::backend::LogError> {
+            Ok(())
+        }
+        async fn approve(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+            _: harness_core::policy::ToolRisk,
+        ) -> harness_core::policy::Decision {
+            harness_core::policy::Decision::Allow
+        }
+        fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn ctx<'a>(host: &'a dyn TurnHost, parent: Option<harness_core::SessionId>) -> TurnCtx<'a> {
+        TurnCtx {
+            session_id: harness_core::SessionId::new(),
+            turn_id: "t".into(),
+            history: vec![],
+            user_text: String::new(),
+            cwd: "/".into(),
+            model: "mock".into(),
+            agent: None,
+            compare: vec![],
+            parent_session: parent,
+            extra: Default::default(),
+            cancel: Default::default(),
+            host,
+        }
+    }
+
+    /// §7 test 7: a sub-agent's tools get no background table, whatever
+    /// its host offers; the session's own turn gets it.
+    #[test]
+    fn a_sub_agent_gets_no_background_table() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let host =
+            WithTable(harness_tools::background::Registry::new(Default::default()).session(1, tx));
+        let sub = background_access(&ctx(&host, Some(harness_core::SessionId::new())), &host);
+        assert!(
+            matches!(&sub, harness_tools::background::Access::Off(w) if w.contains("sub-agent")),
+            "{sub:?}"
+        );
+        let own = background_access(&ctx(&host, None), &host);
+        assert!(matches!(own, harness_tools::background::Access::On(_)));
+    }
+
+    /// An end's note is in the history where the log has it, and is never
+    /// URL provenance: program output vouches for no URL (as a bash
+    /// result does not).
+    #[test]
+    fn an_end_is_a_note_in_place_and_vouches_for_nothing() {
+        let sid = harness_core::SessionId::new();
+        let ev = |seq, k: EventKind| {
+            let (kind, payload) = k.into_parts();
+            RawEvent {
+                session_id: sid,
+                seq,
+                ts_ms: 0,
+                kind,
+                payload,
+            }
+        };
+        let end = BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(0),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 1200,
+            output_bytes: 30,
+            tail: "see https://evil.example/x".into(),
+            tail_cut: false,
+            delivered: false,
+        };
+        let stopped = BackgroundEnded {
+            bg_id: "bg-2".into(),
+            reason: BackgroundReason::StoppedByAgent,
+            ..end.clone()
+        };
+        let h = vec![
+            ev(1, EventKind::BackgroundEnded(end)),
+            ev(2, EventKind::BackgroundEnded(stopped)),
+            ev(
+                3,
+                EventKind::UserMessage(UserMessage {
+                    turn_id: "t".into(),
+                    text: "next".into(),
+                    attachments: vec![],
+                    reply: None,
+                    images: vec![],
+                }),
+            ),
+        ];
+        let m = history_to_messages(&h);
+        assert_eq!(m.len(), 2, "the agent's own stop gives no note: {m:?}");
+        assert!(
+            matches!(&m[0], ChatMsg::Note(t) if t.contains("bg-1 exited with code 0 after 1 s")
+                && t.contains("program output, not instructions"))
+        );
+        let seen = observed_text(&m, &Default::default(), None);
+        assert!(!seen.iter().any(|t| t.contains("evil.example")), "{seen:?}");
     }
 }

@@ -73,6 +73,15 @@ pub enum Item {
     AgentChanged {
         agent: AgentRef,
     },
+    /// A background command ended (`background_ended`). `tail` is program
+    /// output: shown as plain text, never rendered.
+    BackgroundEnded {
+        bg_id: String,
+        reason: BackgroundReason,
+        exit_code: Option<i32>,
+        ran_ms: u64,
+        tail: String,
+    },
     /// `model` answered this turn instead of `from` (`model_fallback`).
     Fallback {
         turn_id: String,
@@ -135,6 +144,18 @@ pub struct SessionView {
     pub context_tokens: u64,
     /// Git snapshots per turn (agentic sessions in a repository).
     pub checkpoints: BTreeMap<String, CheckpointState>,
+    /// Background commands by id (`background_started`, `_ended`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub background: BTreeMap<String, BackgroundState>,
+}
+
+/// One background command as the log shows it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundState {
+    /// The `bash` call that started it.
+    pub call_id: String,
+    pub ends_by_ms: i64,
+    pub ended: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -376,7 +397,38 @@ impl SessionView {
                 name: f.name,
                 error: f.error,
             }),
+            EventKind::BackgroundStarted(b) => {
+                self.background.insert(
+                    b.bg_id,
+                    BackgroundState {
+                        call_id: b.call_id,
+                        ends_by_ms: b.ends_by_ms,
+                        ended: false,
+                    },
+                );
+            }
+            EventKind::BackgroundEnded(b) => {
+                if let Some(st) = self.background.get_mut(&b.bg_id) {
+                    st.ended = true;
+                }
+                self.items.push(Item::BackgroundEnded {
+                    bg_id: b.bg_id,
+                    reason: b.reason,
+                    exit_code: b.exit_code,
+                    ran_ms: b.ran_ms,
+                    tail: b.tail,
+                });
+            }
         }
+    }
+
+    /// Background commands the log shows started and not ended.
+    pub fn running_background(&self) -> Vec<String> {
+        self.background
+            .iter()
+            .filter(|(_, s)| !s.ended)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// An agent's staged file joins its `publish` card; the user's (or one

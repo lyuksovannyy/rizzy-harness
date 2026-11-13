@@ -114,7 +114,7 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                 system_seen = true;
                 msgs.push(m)
             }
-            ChatMsg::User(t) => msgs.push(ChatMessage::user(t.clone())),
+            ChatMsg::User(t) | ChatMsg::Note(t) => msgs.push(ChatMessage::user(t.clone())),
             ChatMsg::UserImages { text, images } => msgs.push(ChatMessage::user(
                 MessageContent::from_parts(user_parts(text, images)),
             )),

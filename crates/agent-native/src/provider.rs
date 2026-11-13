@@ -22,6 +22,10 @@ pub enum ChatMsg {
         call_id: String,
         content: String,
     },
+    /// Text from the harness, never the person's words (a background
+    /// command's end): sent as a user-role message, kept out of the URL
+    /// provenance (`user_text` is `None` for it).
+    Note(String),
 }
 
 /// One image of a user message.
@@ -313,7 +317,7 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
     let chars: usize = messages
         .iter()
         .map(|m| match m {
-            ChatMsg::System(t) | ChatMsg::User(t) => t.len(),
+            ChatMsg::System(t) | ChatMsg::User(t) | ChatMsg::Note(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()
