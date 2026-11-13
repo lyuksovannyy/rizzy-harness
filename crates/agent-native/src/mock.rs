@@ -278,12 +278,10 @@ impl Provider for Mock {
                 stop: Default::default(),
             });
         }
-        // Per-turn context comes first in the user message; commands follow it.
-        let (context, user) = match raw_user
-            .strip_prefix("<context>\n")
-            .and_then(|r| r.split_once("\n</context>\n\n"))
-        {
-            Some((c, u)) => (c.to_string(), u.to_string()),
+        // Per-turn context comes first in the user message, quoted under
+        // the harness's line; commands follow it, and no line of it is one.
+        let (context, user) = match crate::provider::split_context(&raw_user) {
+            Some((c, u)) => (c, u.to_string()),
             None => (String::new(), raw_user),
         };
         // A file the person attached is not their words: the commands

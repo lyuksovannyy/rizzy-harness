@@ -589,7 +589,8 @@ quoted document under a line that names it. Nothing in a file, its name
 included, is ever taken as your words: the model is told it is the file's
 content, not your request (though a model may still be swayed by what it
 reads), and a link that is only inside a file is not fetched on the file's
-say-so.
+say-so. The same holds for an image's name, which older messages show in
+place of the image.
 To have such a link read, paste it into your message.
 
 Every agentic turn is checkpointed and its file changes can be undone
@@ -1364,7 +1365,11 @@ own chats. Start chats from the project's page, or add a chat from its header's
 project picker. Every message in a project's chats gets, after the history:
 the project's **instructions** (Settings tab, up to 4,000 characters), the
 project **memory** recalled for that message, and the open cards of its
-**board**. The model proposes project facts with `remember` (scope
+**board**. That context is sent quoted under a line the harness writes, in
+front of your message: a card title or an instruction another member wrote
+can say anything, but it cannot pose as your message (a model may still be
+swayed by what it reads), and a link that is only in it is not fetched on its
+say-so. The model proposes project facts with `remember` (scope
 `project`); a proposal shows only to the owner of the chat it came from until
 they keep it on the project's Memory tab. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project

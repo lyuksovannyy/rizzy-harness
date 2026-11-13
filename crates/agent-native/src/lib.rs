@@ -806,7 +806,8 @@ fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
 /// "user" message is its parent model's task); the message itself also
 /// carries the per-turn context block. Of an earlier message only the
 /// user's own words count ([`harness_core::event::own_words`]): an attached
-/// file's text, name and type ride in the same message and are not theirs.
+/// file's text, name and type, and the note naming an image that is not
+/// shown, ride in the same message and are not theirs.
 fn observed_text(
     messages: &[ChatMsg],
     trusted: &HashSet<String>,
@@ -1110,8 +1111,11 @@ impl NativeBackend {
         match &callback {
             Some(ids) => provider::open_callback(&mut messages, ids),
             None => {
+                // Quoted under a line of the harness's (R76-1): project
+                // text, board cards and recalled facts are written by
+                // other people and cannot pose as the person's message.
                 let user_text = match &ctx.extra.context {
-                    Some(c) => format!("<context>\n{c}\n</context>\n\n{}", ctx.user_text),
+                    Some(c) => provider::with_context(c, &ctx.user_text),
                     None => ctx.user_text.clone(),
                 };
                 messages.push(images::user_msg(user_text, &ctx.extra.images));

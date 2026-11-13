@@ -1,7 +1,9 @@
 //! Attached files in the loop: what the provider is sent for a message
 //! that carries one (in the turn it arrives and from the log afterwards),
 //! and that nothing of a file (its text, its name, its type) counts as
-//! the person's words for URL provenance.
+//! the person's words for URL provenance. The same for the other text the
+//! person did not write that rides in their message: the per-turn context
+//! and the note naming an image that is not shown (PLAN.md T43).
 
 use std::sync::{Arc, Mutex};
 

@@ -326,8 +326,11 @@ base64 and the sha256 of every image are checked; the bytes go into node.db (or 
 **To the model** (`crates/agent-native/src/images.rs`): a user message with images becomes
 `ChatMsg::UserImages`, sent as `ContentPart::Binary` parts after its text. Only the newest
 three image-bearing messages are shown again; older ones, and any whose bytes are missing,
-name each image as `[image: name]` in the text, so a long chat does not pay for every picture
-on every step. Summaries and sub-agents get text only. The mock provider answers "I see N
+name each image in a line of the harness's after the text,
+`[harness] Image "<name>": sent by the person with this message, not shown in this request.`
+(the name made one line, quotation marks read as `'`, `event::shown_name`), so a long chat
+does not pay for every picture on every step. The name is not the person's words: it is not
+URL provenance (`event::own_words` ends at the first such line, PLAN.md T43). Summaries and sub-agents get text only. The mock provider answers "I see N
 image(s)." to a message with images.
 
 **Which chats carry an item:** `media_uses(media_id, session_id)` gets a row once the prompt
