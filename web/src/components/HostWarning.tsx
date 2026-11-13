@@ -32,7 +32,7 @@ export function HostWarning(props: { node: string; onConfirm: () => void; onCanc
       <div className="stack">
         <h2 id="host-warning-title">Run this chat's commands without the sandbox?</h2>
         <p>In the host shell on {props.node}:</p>
-        <ul>
+        <ul className="host-risks">
           <li>the agent's commands run as the node's own user, with nothing between them and the machine;</li>
           <li>they can read and change every file that user can, its keys and other projects included;</li>
           <li>what they start can keep running after the chat ends;</li>
@@ -47,7 +47,7 @@ export function HostWarning(props: { node: string; onConfirm: () => void; onCanc
           <button type="button" autoFocus onClick={cancel}>
             Cancel
           </button>
-          <button type="button" className="danger" onClick={confirm}>
+          <button type="button" className="danger-fill" onClick={confirm}>
             Use the host shell
           </button>
         </div>

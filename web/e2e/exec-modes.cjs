@@ -65,11 +65,13 @@ const SELECT = 'select[aria-label="How this chat\'s commands run"]';
     await p.fill('.composer input.mono', `${S}/ws`);
     await p.waitForSelector(SELECT);
     check((await p.inputValue(SELECT)) === 'sandbox', 'the sandbox is the default');
+    await p.screenshot({ path: `${S}/x-0-choice-light.png` });
 
     // Picking the host shell: the warning, with its risks, before anything.
     const before = await sessions();
     await p.selectOption(SELECT, 'host');
     await p.waitForSelector('dialog.host-warning[open]');
+    await sleep(400);
     const text = await p.innerText('dialog.host-warning');
     for (const risk of [
       "as the node's own user, with nothing between them and the machine",
@@ -79,7 +81,7 @@ const SELECT = 'select[aria-label="How this chat\'s commands run"]';
       'what a sandbox chat wrote in this folder',
       'The approval card is then the only check',
     ]) check(text.includes(risk), `the warning says: ${risk}`);
-    await p.screenshot({ path: `${S}/x-1-warning.png` });
+    await p.screenshot({ path: `${S}/x-1-warning-light.png` });
     log('warning shown with its risks');
 
     // Cancel: still the sandbox, nothing created.
@@ -101,8 +103,9 @@ const SELECT = 'select[aria-label="How this chat\'s commands run"]';
     log('host chat header:', head);
     check(head.includes('host shell'), 'the header names the host shell');
     check(head.includes('not contained'), 'the header says it is not contained');
-    await p.screenshot({ path: `${S}/x-2-host-chat.png` });
-    const sid = (await p.evaluate(() => location.hash)).split('/').pop();
+    await p.screenshot({ path: `${S}/x-2-host-chat-light.png` });
+    const hostHash = await p.evaluate(() => location.hash);
+    const sid = hostHash.split('/').pop();
     const created = await p.evaluate(async (id) => (await (await fetch(`/api/sessions/${id}/events`)).json()).events.find((e) => e.kind === 'session_created'), sid);
     check(created.payload.exec_mode === 'host', `recorded ${created.payload.exec_mode}`);
 
@@ -121,6 +124,24 @@ const SELECT = 'select[aria-label="How this chat\'s commands run"]';
     } else {
       log('SKIPPED the sandbox chat: bubblewrap does not work here');
     }
+
+    // The same in the dark theme: the choice, the warning, the host chat's header.
+    await p.emulateMedia({ colorScheme: 'dark' });
+    await p.goto(`${URL_}${hostHash}`);
+    await p.waitForSelector('.conversation .exec-mode');
+    await p.screenshot({ path: `${S}/x-2-host-chat-dark.png` });
+    await p.click('aside.sidebar a:has-text("New chat")');
+    await p.waitForSelector('h1.greeting');
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await p.fill('.composer input.mono', `${S}/ws`);
+    await p.waitForSelector(SELECT);
+    await p.screenshot({ path: `${S}/x-0-choice-dark.png` });
+    await p.selectOption(SELECT, 'host');
+    await p.waitForSelector('dialog.host-warning[open]');
+    await sleep(400);
+    await p.screenshot({ path: `${S}/x-1-warning-dark.png` });
+    await p.click('dialog.host-warning button:text-is("Cancel")');
+    log('dark screenshots taken');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);
