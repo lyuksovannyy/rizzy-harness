@@ -152,6 +152,12 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.owned_folder()
     }
 
+    // Not forwarding it would start a `host` session's shell in the
+    // `sandbox` mode's confinement (tests/host_forwarding.rs).
+    fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
+        self.host.exec_mode()
+    }
+
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
         self.host.images(sha256).await
     }
@@ -205,8 +211,13 @@ pub struct NativeConfig {
     /// Folders file tools never touch (the node's data directory).
     pub protected_dirs: Arc<Vec<std::path::PathBuf>>,
     /// How tool child processes are started (node.toml `[sandbox]`); each
-    /// session gets its own temp folder under it.
+    /// session gets its own temp folder under it. The `sandbox` execution
+    /// mode's (N.10a), and the default where a session names no mode.
     pub sandbox: harness_tools::sandbox::Confinement,
+    /// The `host` execution mode's (N.10a): the same rules without the
+    /// containment. `Refused` where the node does not offer that mode
+    /// (the default), so a session that somehow claims it runs nothing.
+    pub host_shell: harness_tools::sandbox::Confinement,
     pub tool_timeout: Duration,
     /// Model calls one turn (and each sub-agent's turn) may make (node.toml
     /// `[limits] max_steps`).
@@ -225,6 +236,20 @@ pub struct NativeConfig {
     pub retry: retry::RetryPolicy,
 }
 
+impl NativeConfig {
+    /// The confinement of a session's tools for its execution mode
+    /// (N.10a): decided by the mode its log recorded, never by a call.
+    pub fn confinement(
+        &self,
+        mode: Option<harness_core::policy::ExecMode>,
+    ) -> &harness_tools::sandbox::Confinement {
+        match mode {
+            Some(harness_core::policy::ExecMode::Host) => &self.host_shell,
+            Some(harness_core::policy::ExecMode::Sandbox) | None => &self.sandbox,
+        }
+    }
+}
+
 impl Default for NativeConfig {
     fn default() -> Self {
         Self {
@@ -235,6 +260,9 @@ impl Default for NativeConfig {
             allow_outside_workspace: false,
             protected_dirs: Arc::default(),
             sandbox: Default::default(),
+            host_shell: harness_tools::sandbox::Confinement::Refused(
+                "this node does not offer the host mode".into(),
+            ),
             // A foreground `bash` call without `timeout_secs` (T.8d: 600 s
             // before; docs/background-commands.md §4.2).
             tool_timeout: harness_tools::background::DEFAULT_TIMEOUT,
@@ -2068,7 +2096,10 @@ impl NativeBackend {
             refs: refs.clone(),
             artifacts: host.artifacts(),
             call_id: call.call_id.clone(),
-            sandbox: self.config.sandbox.for_session(&ctx.session_id.to_string()),
+            sandbox: self
+                .config
+                .confinement(host.exec_mode())
+                .for_session(&ctx.session_id.to_string()),
             pin: host.folder_pin(),
             owned: host.owned_folder(),
             background: background_access(ctx, host),
@@ -2138,6 +2169,10 @@ fn background_access(
     use harness_tools::background::{Access, SUB_AGENT, SessionBg};
     if ctx.parent_session.is_some() {
         return Access::Off(SUB_AGENT.into());
+    }
+    // A `host` session's commands are never contained (review N-c).
+    if host.exec_mode() == Some(harness_core::policy::ExecMode::Host) {
+        return Access::Off(harness_tools::background::NOT_CONTAINED.into());
     }
     match host
         .background()

@@ -122,9 +122,9 @@ pub enum Network {
     On,
     /// Deny TCP connect and bind (Landlock ABI 4), and run the agent's
     /// contained shell in a network namespace of its own (bubblewrap, T.8b),
-    /// which closes UDP and DNS too. Where the shell is not contained (the
-    /// Landlock-only fallback, `contain = "off"`) and for the node's own
-    /// helpers, only TCP: Landlock does not cover UDP, and so DNS.
+    /// which closes UDP and DNS too. Where the shell is not contained (a
+    /// `host` session) and for the node's own helpers, only TCP: Landlock
+    /// does not cover UDP, and so DNS.
     Off,
 }
 
@@ -135,7 +135,8 @@ pub struct Settings {
     pub network: Network,
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
-    /// `[sandbox] contain`: the agent shell's process containment (T.8a).
+    /// `[execution] sandbox`: whether the `sandbox` mode, the agent shell's
+    /// process containment (T.8a), is offered (N.10a).
     pub contain: crate::contain::ContainMode,
     /// Where bubblewrap is (`[sandbox] bwrap`, absolute, taken as given);
     /// `None`: the first `bwrap` on `PATH` the node's user cannot replace,
@@ -161,11 +162,15 @@ pub struct Sandbox {
     /// start, from node.toml and the probe; nothing per session or per
     /// call can change it).
     contain: std::sync::OnceLock<crate::contain::Contain>,
-    /// Set only where an `auto` start found a bubblewrap and could not use
-    /// it in full (review T8B-1, re-check R-1): Landlock alone, or contained
-    /// in the network-off gap. The way up, which is the only way the node
-    /// ever moves.
+    /// Set only where an `auto` start contains without the network
+    /// namespace the network-off setting wants (review T8B-1): the way up to
+    /// it, which is the only way the node ever moves.
     step_up: Option<StepUp>,
+    /// The `sandbox` mode's own (N.10a): a shell command without a
+    /// containment is refused, never run with Landlock alone. Set by
+    /// [`start`] on the sandbox it offers; its uncontained twin (the `host`
+    /// mode's and the helpers', [`Sandbox::uncontained`]) never contains.
+    require_contain: bool,
     /// The harness binary as it was when first opened, held open (`O_PATH`)
     /// for the process's life: the guard, the helpers' and the uncontained
     /// shell's `sandbox-exec` are started from it (`/proc/self/fd/<n>`), so
@@ -382,7 +387,7 @@ pub fn check_extras_against_roots(settings: &Settings, roots: &[PathBuf]) -> Res
 
 /// A node.toml `[sandbox] read`/`write` entry, as it resolved when the node
 /// started (R1d-1).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Extra {
     /// Its real path at start (canonical, or normalized if it did not exist).
     real: PathBuf,
@@ -495,7 +500,30 @@ impl Sandbox {
             protected: protected.to_vec(),
             contain: std::sync::OnceLock::new(),
             step_up: None,
+            require_contain: false,
         })
+    }
+
+    /// The same rules (the same resolved `[sandbox]` entries, the same held
+    /// image), without a containment and unable to gain one: the `host`
+    /// mode's shell and the node's helpers (N.10a). Made before the
+    /// containment is probed, so it never shares the probe's outcome.
+    fn uncontained(&self) -> Self {
+        Self {
+            exe: self.exe.clone(),
+            read: self.read.clone(),
+            extra_read: self.extra_read.clone(),
+            extra_write: self.extra_write.clone(),
+            network: self.network,
+            best_effort: self.best_effort,
+            tmp_root: self.tmp_root.clone(),
+            protected: self.protected.clone(),
+            contain: std::sync::OnceLock::new(),
+            step_up: None,
+            require_contain: false,
+            image: self.image,
+            image_err: self.image_err.clone(),
+        }
     }
 
     /// This sandbox with the agent's shell contained by `c` (bubblewrap).
@@ -525,10 +553,8 @@ impl Sandbox {
             .is_some_and(|c| self.network == Network::On || self.network_namespace(c))
     }
 
-    /// When a shell command is started on a node below where it could be
-    /// (re-check R-1: Landlock alone after a failed start, or contained in
-    /// the network-off gap) and the last probe is at least the interval
-    /// old: run the start's probes again on a thread of their own, bounded
+    /// When a shell command is started on a node contained in the
+    /// network-off gap and the last probe is at least the interval old: run the start's probes again on a thread of their own, bounded
     /// ([`LATER_PROBE_BOUND`]), one at a time. The command that noticed does
     /// not wait (re-check R-2): it starts in the mode the node is in, and
     /// the commands started after a probe passed get the step up. Only the
@@ -562,74 +588,31 @@ impl Sandbox {
         }
     }
 
-    /// One later probe ([`Self::step_up_if_due`]).
+    /// One later probe ([`Self::step_up_if_due`]): a node contained in the
+    /// network-off gap tries the namespace again. A node that could not
+    /// contain at start does not try again: it does not offer the `sandbox`
+    /// mode until it is restarted (N.10a), so nothing would use it.
     fn step_up_now(&self) {
-        use crate::contain::{Contain, Form};
+        use crate::contain::Contain;
         let Some(st) = &self.step_up else {
             return;
         };
-        let net_off = self.network == Network::Off;
         let scratch = |what: &str| st.scratch.join(format!("probe-{what}-{}", st.now_ms()));
-        let bound = Some(LATER_PROBE_BOUND);
-        if let Some(c) = self.contain.get() {
-            // Contained in the network gap: only the namespace is missing.
-            let with = Contain::new(c.bwrap().to_path_buf(), c.form());
-            if self
-                .probe_containment_within(&with, &scratch("net"), bound)
-                .is_ok()
-            {
-                st.net.store(true, std::sync::atomic::Ordering::SeqCst);
-                network_log(
-                    "shell containment: bubblewrap makes a network namespace now; with \
-                     [sandbox] network = \"off\" commands started from now on run in one of \
-                     their own (no UDP or DNS out; a command already running stays as it \
-                     started)",
-                );
-            }
+        let Some(c) = self.contain.get() else {
             return;
-        }
-        // Landlock alone since the start: the start's probes, in its order.
-        let mut net_err = None;
-        for net in if net_off {
-            &[true, false][..]
-        } else {
-            &[true][..]
-        } {
-            for form in [Form::Full, Form::SharedProc] {
-                let c = Contain::new(st.bwrap.clone(), form);
-                let c = if *net {
-                    c
-                } else {
-                    c.without_network_namespace()
-                };
-                match self.probe_containment_within(&c, &scratch("contain"), bound) {
-                    Ok(()) => {
-                        let _ = self.contain.set(c);
-                        let net_line = match (net_off, *net) {
-                            (false, _) => String::new(),
-                            (true, true) => {
-                                ", each in a network namespace of its own (no UDP or DNS out)"
-                                    .into()
-                            }
-                            (true, false) => format!(
-                                ", but network off WITH A GAP: the probe with --unshare-net \
-                                 failed ({}), so UDP and DNS still go out; probed again later",
-                                net_err.unwrap_or_default()
-                            ),
-                        };
-                        network_log(&format!(
-                            "shell containment: bubblewrap works now; commands started from \
-                             now on run contained ({}: a PID namespace per command, the guard, \
-                             Landlock inside){net_line}; a command already running stays as it \
-                             started",
-                            st.bwrap.display()
-                        ));
-                        return;
-                    }
-                    Err(e) if *net && net_err.is_none() => net_err = Some(e),
-                    Err(_) => {}
-                }
-            }
+        };
+        let with = Contain::new(c.bwrap().to_path_buf(), c.form());
+        if self
+            .probe_containment_within(&with, &scratch("net"), Some(LATER_PROBE_BOUND))
+            .is_ok()
+        {
+            st.net.store(true, std::sync::atomic::Ordering::SeqCst);
+            network_log(
+                "shell containment: bubblewrap makes a network namespace now; with \
+                 [sandbox] network = \"off\" commands started from now on run in one of \
+                 their own (no UDP or DNS out; a command already running stays as it \
+                 started)",
+            );
         }
     }
 
@@ -987,6 +970,12 @@ impl Sandbox {
     }
 }
 
+/// What a `sandbox` session's shell command is told where its sandbox has
+/// no containment (never the case on a node that offers the mode; the
+/// check stands in case it ever is).
+pub const NO_CONTAINMENT: &str = "this chat runs in the sandbox mode and the node has no \
+     working bubblewrap containment for it: nothing was started";
+
 /// How a tool's child processes are started.
 #[derive(Debug, Clone, Default)]
 pub enum Confinement {
@@ -1217,6 +1206,11 @@ impl Confinement {
                     sandbox.step_up_if_due();
                 }
                 let contain = sandbox.contain.get().filter(|_| shell);
+                // The `sandbox` mode never falls back to Landlock alone
+                // (N.10a): its node offers it only with a containment.
+                if shell && contain.is_none() && sandbox.require_contain {
+                    return Err(NO_CONTAINMENT.into());
+                }
                 contained = contain.is_some();
                 let session = tmp
                     .as_ref()
@@ -1265,9 +1259,10 @@ fn make_private_dir(dir: &Path) -> Result<(), String> {
 pub enum ContainLevel {
     /// Contained, and the claim holds in full.
     Ok,
-    /// Contained with a named gap, or not contained (`auto`, `off`).
+    /// Contained with a named gap.
     Warn,
-    /// Agentic sessions are refused for it (`contain = "required"`).
+    /// The `sandbox` mode is not offered (N.10a): the containment does not
+    /// work, `[execution] sandbox` is `"off"`, or `"strict"` and a gap.
     Refused,
 }
 
@@ -1341,10 +1336,18 @@ pub fn contained_line(
 /// The outcome of [`start`].
 #[derive(Debug)]
 pub struct Started {
+    /// The `sandbox` mode's (N.10a): `Confined`, its shell contained, where
+    /// this node offers that mode; else `Refused`, saying why not (the
+    /// probe failed, `[execution] sandbox = "off"`, or `"strict"` and a gap).
     pub confinement: Confinement,
-    /// Set when agentic sessions must be refused (mode `required`, sandbox
-    /// not enforced; or `contain = "required"` and no containment); the
-    /// text names the node.toml setting.
+    /// The same rules without the containment, for the `host` mode's shell
+    /// and the node's own helpers (its checkpoint git, graphify):
+    /// `Confined` (Landlock), `Unconfined` with `[sandbox] mode = "off"`,
+    /// `Refused` where the Landlock sandbox is required and does not work.
+    pub uncontained: Confinement,
+    /// Set when no agentic session may run here in any mode (`[sandbox]
+    /// mode = "required"` and Landlock not enforced); the text names the
+    /// node.toml setting. Whether `sandbox` is offered is [`Self::confinement`].
     pub refusal: Option<String>,
     /// One line for the log and `doctor`.
     pub summary: String,
@@ -1358,6 +1361,9 @@ pub struct Started {
     pub view_summary: String,
     /// Where per-session temp directories live.
     pub tmp_root: Option<PathBuf>,
+    /// The Landlock ABI the start's probe found enforced; 0 where it is not
+    /// (`[sandbox] mode = "off"`, or best-effort on a kernel without it).
+    pub landlock_abi: u32,
 }
 
 /// Set up the node's sandbox once at start: resolve the wrapper binary
@@ -1368,8 +1374,8 @@ pub struct Started {
 /// the rules and run the self-test; then find bubblewrap and probe the
 /// shell's containment (T.8a). `Err` is a configuration error (a
 /// `[sandbox]` entry that would expose the data directory or a protected
-/// folder, or that holds a workspace root; `contain = "required"` with
-/// `mode = "off"`).
+/// folder, or that holds a workspace root; `[execution] sandbox =
+/// "strict"` with `mode = "off"`).
 pub fn start(
     settings: &Settings,
     data_dir: &Path,
@@ -1385,27 +1391,32 @@ pub fn start(
         ));
     }
     if settings.mode == Mode::Off {
-        if settings.contain == ContainMode::Required {
+        if settings.contain == ContainMode::Strict {
             return Err(format!(
-                "{}: [sandbox] contain = \"required\" needs the sandbox; it is \
-                 mode = \"off\" (the containment wraps the sandbox's wrapper)",
+                "{}: [execution] sandbox = \"strict\" needs the shell sandbox; it is \
+                 [sandbox] mode = \"off\" (the containment wraps the sandbox's wrapper)",
                 node_toml.display()
             ));
         }
+        let why = format!(
+            "the sandbox mode is not offered: [sandbox] mode = \"off\" in {} (the containment \
+             wraps the sandbox's wrapper)",
+            node_toml.display()
+        );
         return Ok(Started {
-            confinement: Confinement::Unconfined,
+            confinement: Confinement::Refused(why.clone().into()),
+            uncontained: Confinement::Unconfined,
             refusal: None,
             summary: format!(
-                "OFF ([sandbox] mode = \"off\" in {}): the agent's shell runs with every right \
-                 of this OS user",
+                "OFF ([sandbox] mode = \"off\" in {}): a host session's shell runs with every \
+                 right of this OS user",
                 node_toml.display()
             ),
-            contain_summary: "OFF ([sandbox] mode = \"off\"): processes a command leaves \
-                              behind can outlive it"
-                .into(),
-            contain_level: ContainLevel::Warn,
+            contain_summary: format!("NOT OFFERED: {why}"),
+            contain_level: ContainLevel::Refused,
             view_summary: String::new(),
             tmp_root: None,
+            landlock_abi: 0,
         });
     }
     check_extras_against_roots(settings, workspace_roots)?;
@@ -1422,17 +1433,67 @@ pub fn start(
             check_binary_reach(&mut s, &exe, settings, workspace_roots, node_toml);
             Ok(s)
         }
-        Err(e) => Ok(not_enforced(settings, e, node_toml, None)),
+        Err(e) => Ok(not_enforced(settings, e, node_toml, None, None)),
+    }
+}
+
+/// The `sandbox` mode is not offered (N.10a), for `msg`: the rest (the
+/// `host` mode, the helpers) is as it was.
+fn refuse_sandbox(s: &mut Started, msg: String) {
+    s.contain_level = ContainLevel::Refused;
+    s.contain_summary = format!("NOT OFFERED: {msg}");
+    s.confinement = Confinement::Refused(msg.into());
+}
+
+impl Started {
+    /// Why this node does not offer the `sandbox` mode, or `None` when it
+    /// does.
+    pub fn sandbox_refusal(&self) -> Option<&str> {
+        match &self.confinement {
+            Confinement::Refused(why) => Some(why),
+            _ => None,
+        }
+    }
+
+    /// Whether the `sandbox` mode, offered with `[sandbox] network = "off"`,
+    /// runs its commands without a network namespace of their own (the
+    /// gap of T.8b; review T8B-3: the chat says so). As at start: a later
+    /// probe may close it ([`StepUp`]).
+    /// The form the sandbox mode contains in, where it is offered.
+    pub fn sandbox_form(&self) -> Option<crate::contain::Form> {
+        match &self.confinement {
+            Confinement::Confined { sandbox, .. } => sandbox.containment().map(|c| c.form()),
+            _ => None,
+        }
+    }
+
+    /// Whether `[sandbox] network = "off"` stops a `host` chat's TCP: its
+    /// confinement is Landlock and Landlock enforces the TCP rule (ABI 4).
+    pub fn host_tcp_stopped(&self) -> bool {
+        matches!(self.uncontained, Confinement::Confined { .. }) && self.landlock_abi >= 4
+    }
+
+    pub fn sandbox_netns_gap(&self) -> bool {
+        match &self.confinement {
+            Confinement::Confined { sandbox, .. } => {
+                sandbox.network == Network::Off
+                    && sandbox
+                        .containment()
+                        .is_some_and(|c| !sandbox.network_namespace(c))
+            }
+            _ => false,
+        }
     }
 }
 
 /// Re-check R-1: a node that holds no descriptor of its own image (or
 /// could not hold `/proc/self/exe`, `held`) starts its guards, helpers and
 /// wrappers from the binary's path, so a file put there runs in their
-/// place. Said in the log and `doctor` (the containment line); `contain =
-/// "required"` refuses.
+/// place. Said in the log and `doctor` (the containment line); `[execution]
+/// sandbox = "strict"` does not offer the sandbox mode.
 fn check_image(s: &mut Started, held: Option<String>, settings: &Settings, node_toml: &Path) {
-    let Confinement::Confined { sandbox, .. } = &s.confinement else {
+    // The twin holds the same image: what it says holds for both modes.
+    let Confinement::Confined { sandbox, .. } = &s.uncontained else {
         return;
     };
     let why = match (&held, &sandbox.image_err) {
@@ -1449,15 +1510,12 @@ fn check_image(s: &mut Started, held: Option<String>, settings: &Settings, node_
         ),
         (None, None) => return,
     };
-    if settings.contain == crate::contain::ContainMode::Required {
+    if settings.contain == crate::contain::ContainMode::Strict {
         let msg = format!(
-            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {}, and {why}",
+            "the sandbox mode is not offered: [execution] sandbox = \"strict\" in {}, and {why}",
             node_toml.display()
         );
-        s.contain_level = ContainLevel::Refused;
-        s.contain_summary = format!("REFUSING agentic sessions: {msg}");
-        s.confinement = Confinement::Refused(msg.clone().into());
-        s.refusal = Some(msg);
+        refuse_sandbox(s, msg);
     } else {
         s.contain_summary.push_str(&format!("; WARNING: {why}"));
         s.contain_level = ContainLevel::Warn;
@@ -1480,8 +1538,8 @@ pub fn binary_reach(exe: &Path, settings: &Settings, roots: &[PathBuf]) -> Optio
 /// and the helpers are the node's own image, through descriptors (T.8e,
 /// T.8f, re-check R-4). What is left is the mode: a session that keeps a
 /// name of the image can change it and stop them all, and the node's
-/// restart (review T8F-5). Warned in the log and `doctor`; `contain =
-/// "required"` refuses.
+/// restart (review T8F-5). Warned in the log and `doctor`; `[execution]
+/// sandbox = "strict"` does not offer the sandbox mode.
 fn check_binary_reach(
     s: &mut Started,
     exe: &Path,
@@ -1489,9 +1547,8 @@ fn check_binary_reach(
     roots: &[PathBuf],
     node_toml: &Path,
 ) {
-    // Contained now, or able to contain later (re-check R-1).
     let contained = matches!(&s.confinement, Confinement::Confined { sandbox, .. }
-        if sandbox.containment().is_some() || sandbox.step_up.is_some());
+        if sandbox.containment().is_some());
     let Some(dir) = binary_reach(exe, settings, roots).filter(|_| contained) else {
         return;
     };
@@ -1509,15 +1566,12 @@ fn check_binary_reach(
         exe.display(),
         dir.display()
     );
-    if settings.contain == crate::contain::ContainMode::Required {
+    if settings.contain == crate::contain::ContainMode::Strict {
         let msg = format!(
-            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {}, and {why}",
+            "the sandbox mode is not offered: [execution] sandbox = \"strict\" in {}, and {why}",
             node_toml.display()
         );
-        s.contain_level = ContainLevel::Refused;
-        s.contain_summary = format!("REFUSING agentic sessions: {msg}");
-        s.confinement = Confinement::Refused(msg.clone().into());
-        s.refusal = Some(msg);
+        refuse_sandbox(s, msg);
     } else {
         s.contain_summary.push_str(&format!("; WARNING: {why}"));
         s.contain_level = ContainLevel::Warn;
@@ -1539,15 +1593,12 @@ pub fn start_with_exe_retrying(
     start_inner(exe, settings, data_dir, protected, node_toml, retry)
 }
 
-/// The way up of an `auto` node that found a bubblewrap at start and could
-/// not use it in full (review T8B-1, re-check R-1): from Landlock alone to
-/// contained, and from the network-off gap to the namespace. When the last
-/// probe was, whether one is running, and whether the namespace was taken
-/// later. One per node, in its `Sandbox`; only its start makes one.
+/// The way up of an `auto` node contained in the network-off gap (review
+/// T8B-1): to the network namespace. When the last probe was, whether one
+/// is running, and whether the namespace was taken later. One per node, in
+/// the `sandbox` mode's `Sandbox`; only its start makes one.
 #[derive(Debug)]
 struct StepUp {
-    /// The bubblewrap the start found (and could not use).
-    bwrap: PathBuf,
     retry: std::time::Duration,
     since: std::time::Instant,
     /// Milliseconds after `since` of the last probe.
@@ -1562,9 +1613,8 @@ struct StepUp {
 }
 
 impl StepUp {
-    fn new(bwrap: PathBuf, retry: std::time::Duration, scratch: PathBuf) -> Self {
+    fn new(retry: std::time::Duration, scratch: PathBuf) -> Self {
         Self {
-            bwrap,
             retry,
             since: std::time::Instant::now(),
             last_ms: 0.into(),
@@ -1595,6 +1645,12 @@ impl StepUp {
                 .is_ok()
     }
 }
+
+/// How often the start probes bubblewrap before it decides the sandbox
+/// mode is not offered, and the pause between two tries (review L-b): at
+/// most two pauses, so a start that fails for good costs about 2 s more.
+pub const START_PROBE_TRIES: u32 = 3;
+pub const START_PROBE_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a later probe ([`StepUp`]) may take before it is killed and
 /// counted as failed (re-check R-2). The start's own probes have no bound:
@@ -1707,7 +1763,11 @@ fn start_inner(
     retry: std::time::Duration,
 ) -> Result<Started, String> {
     let tmp_root = data_dir.join("sandbox-tmp");
-    let sandbox = Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?;
+    let mut sandbox = Sandbox::new(exe, settings, Some(tmp_root.clone()), protected)?;
+    // The `host` mode's and the helpers' (N.10a): never contained.
+    let plain = Arc::new(sandbox.uncontained());
+    // The `sandbox` mode's: never Landlock alone.
+    sandbox.require_contain = true;
     let scratch = tmp_root.join(format!("probe-{}", std::process::id()));
     let canary_dir = protected.first().map_or(data_dir, |p| p.as_path());
     let landlock = sandbox.probe(&scratch, canary_dir);
@@ -1717,6 +1777,7 @@ fn start_inner(
             e.clone(),
             node_toml,
             Some(Arc::new(sandbox)),
+            Some(plain),
         ));
     }
     let abi = landlock.as_deref().map_or(0, effective_abi);
@@ -1735,16 +1796,25 @@ fn start_inner(
                 sandbox: sandbox.clone(),
                 tmp: None,
             },
+            uncontained: Confinement::Confined {
+                sandbox: plain.clone(),
+                tmp: None,
+            },
             refusal: None,
             summary: format!("enforced ({status})"),
             contain_summary: String::new(),
             contain_level: ContainLevel::Ok,
             view_summary: String::new(),
             tmp_root: Some(tmp_root),
+            landlock_abi: 0,
         },
         Ok(status) => Started {
             confinement: Confinement::Confined {
                 sandbox: sandbox.clone(),
+                tmp: None,
+            },
+            uncontained: Confinement::Confined {
+                sandbox: plain.clone(),
                 tmp: None,
             },
             refusal: None,
@@ -1753,8 +1823,15 @@ fn start_inner(
             contain_level: ContainLevel::Ok,
             view_summary: String::new(),
             tmp_root: Some(tmp_root),
+            landlock_abi: 0,
         },
-        Err(e) => not_enforced(settings, e, node_toml, Some(sandbox.clone())),
+        Err(e) => not_enforced(
+            settings,
+            e,
+            node_toml,
+            Some(sandbox.clone()),
+            Some(plain.clone()),
+        ),
     };
     match contain {
         Contained::Yes(s, level) => {
@@ -1789,10 +1866,45 @@ fn start_inner(
                 ));
                 started.contain_level = ContainLevel::Warn;
             }
+            // Review L-c: `strict` promises no named gap; these two are
+            // gaps the line names, so `strict` does not offer the mode.
+            if settings.contain == crate::contain::ContainMode::Strict {
+                let path =
+                    path_write_entries(settings, &std::env::var_os("PATH").unwrap_or_default());
+                let why = match (risky.is_empty(), path.is_empty()) {
+                    (false, _) => Some(format!(
+                        "a [sandbox] write entry ({}) holds other programs' sockets (/tmp or \
+                         /run/user/<uid>)",
+                        risky
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    (true, false) => Some(format!(
+                        "a [sandbox] write entry holds a folder on this node's PATH ({})",
+                        path.iter()
+                            .map(|(_, d)| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    (true, true) => None,
+                };
+                if let Some(why) = why {
+                    let msg = format!(
+                        "the sandbox mode is not offered: [execution] sandbox = \"strict\" in {}, \
+                         and {why}: a command could reach past the containment there. Set \
+                         sandbox = \"auto\" to offer it with that gap named",
+                        node_toml.display()
+                    );
+                    refuse_sandbox(&mut started, msg);
+                }
+            }
         }
-        Contained::No(s) => {
-            started.contain_summary = s;
-            started.contain_level = ContainLevel::Warn;
+        Contained::No(msg) => {
+            // Not offered (N.10a): never a quiet fall back to Landlock
+            // alone. A host session's shell is uncontained by its mode.
+            refuse_sandbox(&mut started, msg);
             if settings.network == Network::Off {
                 started
                     .contain_summary
@@ -1800,14 +1912,10 @@ fn start_inner(
             }
             path_write_warning(settings, &mut started);
         }
-        Contained::Refuse(msg) => {
-            started.contain_level = ContainLevel::Refused;
-            started.contain_summary = format!("REFUSING agentic sessions: {msg}");
-            started.confinement = Confinement::Refused(msg.clone().into());
-            started.refusal = Some(msg);
-        }
+        Contained::Refuse(msg) => refuse_sandbox(&mut started, msg),
     }
     started.view_summary = sandbox.view_line();
+    started.landlock_abi = abi;
     Ok(started)
 }
 
@@ -1853,9 +1961,9 @@ fn path_write_warning(settings: &Settings, started: &mut Started) {
 }
 
 /// A working containment of `form` under `mode` on a kernel with
-/// Landlock ABI `abi`: its line, or the refusal. `required` means the
-/// guarantee holds; below ABI 9 it does not (T8A-1), so `required` refuses
-/// there, and `auto` contains anyway and warns.
+/// Landlock ABI `abi`: its line, or why the sandbox mode is not offered.
+/// `strict` means the guarantee holds; below ABI 9 it does not (T8A-1), so
+/// `strict` does not offer the mode there, and `auto` offers it and warns.
 fn decide(
     form: crate::contain::Form,
     abi: u32,
@@ -1864,11 +1972,14 @@ fn decide(
     node_toml: &Path,
 ) -> Result<(String, ContainLevel), String> {
     let (line, level) = contained_line(form, abi, bwrap);
-    if level != ContainLevel::Ok && mode == crate::contain::ContainMode::Required {
+    // Review L-c: the shared-/proc form is a named gap at every ABI (its
+    // `/proc` lists this machine's processes), so `strict` refuses it too.
+    let gap = level != ContainLevel::Ok || form == crate::contain::Form::SharedProc;
+    if gap && mode == crate::contain::ContainMode::Strict {
         return Err(format!(
-            "this node refuses agentic sessions: [sandbox] contain = \"required\" in {} \
-             promises that nothing a command starts outlives it, and here it does not hold: \
-             {line}. Set contain = \"auto\" to run contained with that gap",
+            "the sandbox mode is not offered: [execution] sandbox = \"strict\" in {} promises \
+             that nothing a command starts outlives it, and here it does not hold: {line}. Set \
+             sandbox = \"auto\" to offer it with that gap",
             node_toml.display()
         ));
     }
@@ -1899,7 +2010,8 @@ fn socket_write_entries(settings: &Settings) -> Vec<PathBuf> {
 
 /// What the containment line adds where the shell is contained but
 /// bubblewrap could not make a network namespace (`why`) and the network
-/// is off (T.8b, `contain = "auto"`): a gap, as below Landlock ABI 9.
+/// is off (T.8b, `[execution] sandbox = "auto"`): a gap, as below Landlock
+/// ABI 9.
 fn network_gap_line(why: &str, abi: u32, retry: std::time::Duration) -> String {
     let abstract_sockets = if abi >= ABI_ABSTRACT_SOCKETS {
         "abstract Unix sockets outside are closed by Landlock (ABI 6 or newer)"
@@ -1911,17 +2023,18 @@ fn network_gap_line(why: &str, abi: u32, retry: std::time::Duration) -> String {
          the one without it passed ({why}), so commands run contained without a network \
          namespace: TCP is stopped by Landlock, but UDP and DNS still go out, and \
          {abstract_sockets}. The node probes again beside a shell command at most every {} s, \
-         and commands started after a probe passed get the namespace (logged). contain = \
-         \"required\" refuses this",
+         and commands started after a probe passed get the namespace (logged). [execution] \
+         sandbox = \"strict\" does not offer the sandbox mode with this gap",
         retry.as_secs()
     )
 }
 
-/// What the containment line adds where the shell is not contained and the
-/// network is off (T.8b): Landlock alone covers only TCP.
-const NETWORK_OFF_UNCONTAINED: &str = "WARNING: [sandbox] network = \"off\" without the \
-     containment stops TCP only: UDP and DNS still go out (Landlock does not cover them; the \
-     network namespace needs bubblewrap)";
+/// What the containment line adds where the sandbox mode is not offered
+/// and the network is off (T.8b): a `host` session's shell is never
+/// contained, and Landlock alone covers only TCP.
+pub const NETWORK_OFF_UNCONTAINED: &str = "WARNING: [sandbox] network = \"off\" without the \
+     containment (a host session's commands) stops TCP only: UDP and DNS still go out (Landlock \
+     does not cover them; the network namespace needs bubblewrap)";
 
 enum Contained {
     Yes(String, ContainLevel),
@@ -1931,7 +2044,7 @@ enum Contained {
 
 /// Find bubblewrap and probe its two forms, the full one first (T.8a).
 fn containment(
-    mut sandbox: Sandbox,
+    sandbox: Sandbox,
     settings: &Settings,
     abi: u32,
     scratch: &Path,
@@ -1943,8 +2056,7 @@ fn containment(
         return (
             sandbox,
             Contained::No(format!(
-                "OFF ([sandbox] contain = \"off\" in {}): processes a command leaves behind \
-                 can outlive it, and it sees every process of this machine in /proc",
+                "the sandbox mode is not offered: [execution] sandbox = \"off\" in {}",
                 node_toml.display()
             )),
         );
@@ -1960,8 +2072,8 @@ fn containment(
     };
     // The temp root, where the start's own probes and the later ones go.
     let temp_root = scratch.parent().unwrap_or(scratch).to_path_buf();
-    let (why, found_bwrap) = match found {
-        Err(e) => (e, None),
+    let why = match found {
+        Err(e) => e,
         Ok(bwrap) => {
             let probe = |net_ns: bool| {
                 let mk = |form| {
@@ -1981,37 +2093,64 @@ fn containment(
                     },
                 }
             };
-            let mut found = probe(true);
-            // T.8b: bubblewrap works but not with `--unshare-net`. Tried once
-            // more first (review T8B-1: a failure of the moment is not a
-            // failure of the namespace). Then `required` refuses; `auto`
-            // still contains (more than Landlock alone), with the gap named,
-            // and probes again later ([`StepUp`]). Decided by the node's own
-            // probes, never per call.
-            let mut net_err = None;
-            if settings.network == Network::Off
-                && let Err(e) = &found
-                && let Ok(without) = probe(false)
-            {
-                match probe(true) {
-                    Ok(again) => found = Ok(again),
-                    Err(again) => {
-                        net_err = Some(format!("{e}; once more: {again}"));
-                        found = Ok(without);
+            // The start is the only moment a node decides whether it offers
+            // the sandbox mode (N.10a): a probe that fails for a moment (a
+            // full process table, no memory) is tried again, a few times,
+            // a pause apart (review L-b), each failure logged.
+            let mut tries = 0;
+            let (found, net_err) = loop {
+                tries += 1;
+                let mut found = probe(true);
+                // T.8b: bubblewrap works but not with `--unshare-net`. Tried
+                // once more first (review T8B-1: a failure of the moment is
+                // not a failure of the namespace). Then `strict` does not
+                // offer the mode; `auto` still contains (more than Landlock
+                // alone), with the gap named, and probes the namespace again
+                // later ([`StepUp`]). Decided by the node's own probes,
+                // never per call.
+                let mut net_err = None;
+                if settings.network == Network::Off
+                    && let Err(e) = &found
+                    && let Ok(without) = probe(false)
+                {
+                    match probe(true) {
+                        Ok(again) => found = Ok(again),
+                        Err(again) => {
+                            net_err = Some(format!("{e}; once more: {again}"));
+                            found = Ok(without);
+                        }
                     }
                 }
-            }
+                match &found {
+                    Err(e) if tries < START_PROBE_TRIES => {
+                        network_log(&format!(
+                            "shell containment: the start's probe {tries} of \
+                             {START_PROBE_TRIES} failed ({e}); trying again in {} s",
+                            START_PROBE_PAUSE.as_secs()
+                        ));
+                        std::thread::sleep(START_PROBE_PAUSE);
+                    }
+                    _ => break (found, net_err),
+                }
+            };
+            let found = found.map_err(|e| {
+                if tries > 1 {
+                    format!("{tries} tries at start, the last: {e}")
+                } else {
+                    e
+                }
+            });
             match (found, net_err) {
-                (Ok(_), Some(e)) if settings.contain == ContainMode::Required => {
+                (Ok(_), Some(e)) if settings.contain == ContainMode::Strict => {
                     return (
                         sandbox,
                         Contained::Refuse(format!(
-                            "this node refuses agentic sessions: [sandbox] network = \"off\" and \
-                             contain = \"required\" in {}, and the probe with --unshare-net \
-                             failed, twice, though the one without it passed ({e}); a command \
-                             without the network namespace would send UDP and DNS out. Restart \
-                             the node to probe again, or set contain = \"auto\" to run contained \
-                             with that gap until a later probe passes",
+                            "the sandbox mode is not offered: [sandbox] network = \"off\" and \
+                             [execution] sandbox = \"strict\" in {}, and the probe with \
+                             --unshare-net failed, twice, though the one without it passed \
+                             ({e}); a command without the network namespace would send UDP and \
+                             DNS out. Restart the node to probe again, or set sandbox = \"auto\" \
+                             to offer it with that gap until a later probe passes",
                             node_toml.display()
                         )),
                     );
@@ -2027,54 +2166,31 @@ fn containment(
                             if let Some(e) = net_err {
                                 line.push_str(&network_gap_line(&e, abi, retry));
                                 level = ContainLevel::Warn;
-                                sandbox.step_up =
-                                    Some(StepUp::new(bwrap.clone(), retry, temp_root));
+                                sandbox.step_up = Some(StepUp::new(retry, temp_root));
                             }
                             (sandbox, Contained::Yes(line, level))
                         }
                         Err(msg) => (sandbox, Contained::Refuse(msg)),
                     };
                 }
-                (Err(e), _) => (e, Some(bwrap)),
+                (Err(e), _) => e,
             }
         }
     };
     let advice = "install bubblewrap and allow unprivileged user namespaces (README, \
-                  \"The shell sandbox\")";
-    match settings.contain {
-        ContainMode::Required => (
-            sandbox,
-            Contained::Refuse(format!(
-                "this node refuses agentic sessions: [sandbox] contain = \"required\" in {} and \
-                 the shell cannot be contained here ({why}); {advice}, or set contain = \"auto\"",
-                node_toml.display()
-            )),
-        ),
-        _ => {
-            // Re-check R-1: a bubblewrap was found and failed every probe,
-            // perhaps only for a moment: probe again later, step up once
-            // one passes. Never with none found.
-            let later = match found_bwrap {
-                Some(bwrap) => {
-                    sandbox.step_up = Some(StepUp::new(bwrap, retry, temp_root));
-                    format!(
-                        "; the node probes bubblewrap again beside a shell command at most \
-                         every {} s, and commands started after a probe passed run contained \
-                         (logged)",
-                        retry.as_secs()
-                    )
-                }
-                None => String::new(),
-            };
-            (
-                sandbox,
-                Contained::No(format!(
-                    "NOT CONTAINED, running with Landlock alone ([sandbox] contain = \"auto\"): \
-                     {why}. Processes a command leaves behind can outlive it; {advice}{later}"
-                )),
-            )
-        }
-    }
+                  \"The shell sandbox\"), then restart the node: it probes only at start (up to three tries)";
+    let setting = match settings.contain {
+        ContainMode::Strict => "strict",
+        _ => "auto",
+    };
+    (
+        sandbox,
+        Contained::No(format!(
+            "the sandbox mode is not offered ([execution] sandbox = \"{setting}\" in {}): the \
+             shell cannot be contained here ({why}); {advice}",
+            node_toml.display()
+        )),
+    )
 }
 
 fn not_enforced(
@@ -2082,11 +2198,16 @@ fn not_enforced(
     why: String,
     node_toml: &Path,
     sandbox: Option<Arc<Sandbox>>,
+    plain: Option<Arc<Sandbox>>,
 ) -> Started {
     let tmp_root = sandbox.as_ref().and_then(|s| s.tmp_root.clone());
-    match (settings.mode, sandbox) {
-        (Mode::BestEffort, Some(sandbox)) => Started {
+    match (settings.mode, sandbox, plain) {
+        (Mode::BestEffort, Some(sandbox), Some(plain)) => Started {
             confinement: Confinement::Confined { sandbox, tmp: None },
+            uncontained: Confinement::Confined {
+                sandbox: plain,
+                tmp: None,
+            },
             refusal: None,
             summary: format!(
                 "NOT ENFORCED, running anyway ([sandbox] mode = \"best-effort\"): {why}"
@@ -2095,6 +2216,7 @@ fn not_enforced(
             contain_level: ContainLevel::Ok,
             view_summary: String::new(),
             tmp_root,
+            landlock_abi: 0,
         },
         _ => {
             let network = if settings.network == Network::Off {
@@ -2111,12 +2233,14 @@ fn not_enforced(
             );
             Started {
                 confinement: Confinement::Refused(msg.clone().into()),
+                uncontained: Confinement::Refused(msg.clone().into()),
                 refusal: Some(msg.clone()),
                 summary: format!("REFUSING agentic sessions: {msg}"),
                 contain_summary: "not probed: the sandbox does not work".into(),
-                contain_level: ContainLevel::Warn,
+                contain_level: ContainLevel::Refused,
                 view_summary: String::new(),
                 tmp_root,
+                landlock_abi: 0,
             }
         }
     }
@@ -2609,15 +2733,16 @@ mod tests {
     }
 
     /// Re-check R-1: a node with no descriptor of its own binary says so,
-    /// with the reason, on its containment line (`auto`), and `required`
-    /// refuses; with one it says nothing.
+    /// with the reason, on its containment line (`auto`), and `strict`
+    /// does not offer the sandbox mode (the node itself is not refused);
+    /// with one it says nothing.
     #[test]
     fn a_node_without_a_descriptor_of_its_image_says_so() {
         let d = tempfile::tempdir().unwrap();
         let missing = d.path().join("no-such-binary");
         for (contain, refused) in [
             (crate::contain::ContainMode::Auto, false),
-            (crate::contain::ContainMode::Required, true),
+            (crate::contain::ContainMode::Strict, true),
         ] {
             let settings = Settings {
                 contain,
@@ -2625,6 +2750,7 @@ mod tests {
             };
             let sb = Sandbox::new(missing.clone(), &settings, None, &[]).unwrap();
             assert!(sb.image.is_none());
+            let plain = Arc::new(sb.uncontained());
             let mut s = not_enforced(
                 &Settings {
                     mode: Mode::BestEffort,
@@ -2633,6 +2759,7 @@ mod tests {
                 "test".into(),
                 Path::new("node.toml"),
                 Some(Arc::new(sb)),
+                Some(plain),
             );
             check_image(&mut s, None, &settings, Path::new("node.toml"));
             assert!(
@@ -2642,11 +2769,17 @@ mod tests {
                 "{}",
                 s.contain_summary
             );
-            assert_eq!(s.refusal.is_some(), refused, "{contain:?}");
+            assert!(s.refusal.is_none(), "{contain:?}");
+            assert_eq!(s.sandbox_refusal().is_some(), refused, "{contain:?}");
+            assert!(
+                matches!(s.uncontained, Confinement::Confined { .. }),
+                "{contain:?}"
+            );
         }
         let exe = PathBuf::from("/bin/true");
         let sb = Sandbox::new(exe, &Settings::default(), None, &[]).unwrap();
         assert!(sb.image.is_some());
+        let plain = Arc::new(sb.uncontained());
         let mut s = not_enforced(
             &Settings {
                 mode: Mode::BestEffort,
@@ -2655,6 +2788,7 @@ mod tests {
             "test".into(),
             Path::new("node.toml"),
             Some(Arc::new(sb)),
+            Some(plain),
         );
         let before = s.contain_summary.clone();
         check_image(&mut s, None, &Settings::default(), Path::new("node.toml"));
@@ -2857,12 +2991,15 @@ mod tests {
         }
     }
 
-    /// `contain = "required"` where bubblewrap is missing: agentic sessions
-    /// are refused, naming the setting, and no shell command is built.
-    /// `auto` runs as before (Landlock alone) and says so. Simulated with a
-    /// bubblewrap path that does not exist (tests cannot change `PATH`).
+    /// N.10a: where bubblewrap is missing the node does not offer the
+    /// sandbox mode, `auto` and `strict` alike, and says why: the sandbox
+    /// mode's shell is refused, never run with Landlock alone (before, `auto`
+    /// ran it uncontained and only warned). The node itself is not refused:
+    /// the uncontained twin (the `host` mode's, the helpers') still builds
+    /// its command, uncontained. Simulated with a bubblewrap path that does
+    /// not exist (tests cannot change `PATH`).
     #[test]
-    fn contain_required_without_bubblewrap_refuses_and_auto_falls_back() {
+    fn without_bubblewrap_the_sandbox_mode_is_not_offered() {
         use crate::contain::ContainMode;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -2881,10 +3018,6 @@ mod tests {
         };
         let toml = data.join("node.toml");
         let prot = std::slice::from_ref(&data);
-        let s = start(&settings(ContainMode::Required), &data, prot, &[], &toml).unwrap();
-        let why = s.refusal.expect("required without bubblewrap must refuse");
-        assert!(why.contains("contain = \"required\""), "{why}");
-        assert!(why.contains("bubblewrap not found"), "{why}");
         let shell = |c: &Confinement| {
             c.shell(
                 OsStr::new("bash"),
@@ -2896,35 +3029,86 @@ mod tests {
                 Grants::default(),
             )
         };
-        assert_eq!(shell(&s.confinement).unwrap_err(), why);
+        for (contain, word) in [(ContainMode::Auto, "auto"), (ContainMode::Strict, "strict")] {
+            let s = start(&settings(contain), &data, prot, &[], &toml).unwrap();
+            assert!(s.refusal.is_none(), "{contain:?}: {:?}", s.refusal);
+            let why = s
+                .sandbox_refusal()
+                .expect("no sandbox mode without bubblewrap");
+            assert!(
+                why.contains(&format!("[execution] sandbox = \"{word}\"")),
+                "{why}"
+            );
+            assert!(why.contains("bubblewrap not found"), "{why}");
+            assert!(why.contains("install bubblewrap"), "{why}");
+            assert_eq!(s.contain_level, ContainLevel::Refused);
+            assert!(
+                s.contain_summary.contains("NOT OFFERED"),
+                "{}",
+                s.contain_summary
+            );
+            assert_eq!(shell(&s.confinement).unwrap_err(), why);
+            let (_, contained) = shell(&s.uncontained).unwrap();
+            assert!(!contained);
+        }
 
-        let s = start(&settings(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
-        assert!(s.refusal.is_none(), "{:?}", s.refusal);
-        assert_eq!(s.contain_level, ContainLevel::Warn);
-        assert!(
-            s.contain_summary.contains("NOT CONTAINED"),
-            "{}",
-            s.contain_summary
-        );
-        let (_, contained) = shell(&s.confinement).unwrap();
-        assert!(!contained);
-
-        // `off` with the sandbox off is fine; `required` with it is a
-        // configuration error.
+        // `off` with the sandbox off: the mode is not offered; `strict`
+        // with it is a configuration error.
         let off = |contain| Settings {
             mode: Mode::Off,
             contain,
             ..Default::default()
         };
-        assert!(start(&off(ContainMode::Auto), &data, prot, &[], &toml).is_ok());
-        let e = start(&off(ContainMode::Required), &data, prot, &[], &toml).unwrap_err();
-        assert!(e.contains("contain = \"required\""), "{e}");
+        let s = start(&off(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
+        assert!(s.sandbox_refusal().is_some());
+        assert!(matches!(s.uncontained, Confinement::Unconfined));
+        let e = start(&off(ContainMode::Strict), &data, prot, &[], &toml).unwrap_err();
+        assert!(e.contains("[execution] sandbox = \"strict\""), "{e}");
+    }
+
+    /// A sandbox made for the `sandbox` mode refuses a shell command when
+    /// it has no containment, rather than run it with Landlock alone; its
+    /// uncontained twin never contains, whatever the original holds.
+    #[test]
+    fn the_sandbox_modes_shell_is_never_landlock_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().canonicalize().unwrap();
+        let mut sb = Sandbox::new("/bin/true".into(), &Settings::default(), None, &[]).unwrap();
+        let twin = sb.uncontained();
+        sb.require_contain = true;
+        let build = |sb: Sandbox| {
+            Confinement::Confined {
+                sandbox: Arc::new(sb),
+                tmp: None,
+            }
+            .shell(
+                OsStr::new("bash"),
+                &[],
+                &ws,
+                None,
+                &Default::default(),
+                &[],
+                Grants::default(),
+            )
+        };
+        assert_eq!(build(sb).unwrap_err(), NO_CONTAINMENT);
+        let contained = Sandbox::new("/bin/true".into(), &Settings::default(), None, &[])
+            .unwrap()
+            .with_containment(crate::contain::Contain::new(
+                "/usr/bin/bwrap".into(),
+                crate::contain::Form::Full,
+            ));
+        let twin_of_contained = contained.uncontained();
+        assert!(twin_of_contained.containment().is_none());
+        assert!(!build(twin).unwrap().1);
+        assert!(!build(twin_of_contained).unwrap().1);
     }
 
     /// T8A-1: the line depends on the effective Landlock ABI. From ABI 9
     /// the claim is made in full; below, it is a warning that names the
-    /// session bus (and below ABI 6 abstract sockets), and `required`
-    /// refuses. The shared-`/proc` form says so in every case.
+    /// session bus (and below ABI 6 abstract sockets), and `strict` does
+    /// not offer the sandbox mode. The shared-`/proc` form says so in every
+    /// case.
     #[test]
     fn the_containment_line_depends_on_the_landlock_abi() {
         use crate::contain::{ContainMode, Form};
@@ -2949,9 +3133,9 @@ mod tests {
                 "{line}"
             );
             assert_eq!(line.contains("abstract socket"), abi < 6, "{abi}: {line}");
-            let e = decide(Form::Full, abi, b, ContainMode::Required, toml).unwrap_err();
+            let e = decide(Form::Full, abi, b, ContainMode::Strict, toml).unwrap_err();
             assert!(
-                e.contains("contain = \"required\"") && e.contains("auto"),
+                e.contains("[execution] sandbox = \"strict\"") && e.contains("auto"),
                 "{e}"
             );
             assert!(decide(Form::Full, abi, b, ContainMode::Auto, toml).is_ok());
@@ -2961,7 +3145,12 @@ mod tests {
         assert!(line.contains("without a /proc of its own"), "{line}");
         let (_, level) = contained_line(Form::SharedProc, 4, b);
         assert_eq!(level, ContainLevel::Warn);
-        assert!(decide(Form::Full, 9, b, ContainMode::Required, toml).is_ok());
+        assert!(decide(Form::Full, 9, b, ContainMode::Strict, toml).is_ok());
+        // Review L-c: the shared-/proc form is a gap `strict` names, at
+        // every ABI.
+        let e = decide(Form::SharedProc, 9, b, ContainMode::Strict, toml).unwrap_err();
+        assert!(e.contains("without a /proc of its own"), "{e}");
+        assert!(decide(Form::SharedProc, 9, b, ContainMode::Auto, toml).is_ok());
         assert_eq!(
             effective_abi("landlock Available { effective_abi: V9, kernel_abi: Some(10) }"),
             9
@@ -2973,7 +3162,7 @@ mod tests {
             for abi in [0, 4, 6, 8, 9, 10] {
                 let (line, _) = contained_line(form, abi, b);
                 assert!(!line.contains("  "), "{form:?} {abi}: {line}");
-                if let Err(e) = decide(form, abi, b, ContainMode::Required, toml) {
+                if let Err(e) = decide(form, abi, b, ContainMode::Strict, toml) {
                     assert!(!e.contains("  "), "{form:?} {abi}: {e}");
                 }
             }

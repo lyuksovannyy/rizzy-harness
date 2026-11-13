@@ -470,6 +470,14 @@ async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<se
         .nodes()
         .into_iter()
         .filter(|n| local_ok || !m.is_local_node(&n.node_id))
+        // What a node can contain says how to get out of it: only for those
+        // who may run agentic chats (N.10a).
+        .map(|mut n| {
+            if !who.can_agentic {
+                (n.exec_modes, n.exec_gaps) = Default::default();
+            }
+            n
+        })
         .collect();
     Ok(Json(json!({ "nodes": nodes })))
 }
@@ -1037,14 +1045,37 @@ struct CreateBody {
     /// Start the chat in this project (docs/projects.md).
     #[serde(default)]
     project_id: Option<String>,
+    /// How its commands run (N.10a): a request, checked by
+    /// `ws::exec_mode_for` and then by the node.
+    #[serde(default)]
+    exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
 async fn create_session(
     State(m): State<Master>,
     headers: HeaderMap,
-    Json(mut b): Json<CreateBody>,
+    Json(b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
+    // Every request for the host shell is audited, whatever refuses it.
+    let host = b.exec_mode == Some(harness_core::policy::ExecMode::Host);
+    let mut seen = ws::HostAudit::default();
+    let out = create_checked(&m, &who, b, &mut seen).await;
+    if host {
+        let res = out.as_ref().map(|s| *s).map_err(|e| e.1.as_str());
+        ws::audit_host_create(&m, &who, &seen, res).await;
+    }
+    Ok(Json(json!({ "session_id": out? })))
+}
+
+async fn create_checked(
+    m: &Master,
+    who: &crate::auth::Principal,
+    mut b: CreateBody,
+    seen: &mut ws::HostAudit,
+) -> ApiResult<SessionId> {
+    let (m, who) = (m.clone(), who.clone());
+    seen.node = b.node_id.clone();
     if b.incognito && b.profile != Some(harness_core::event::Profile::Chat) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -1052,6 +1083,7 @@ async fn create_session(
         ));
     }
     let scope = ws::scope(&m, &who, b.workspace_id.as_deref()).await?;
+    seen.workspace = scope.as_ref().map(|a| a.id().to_string());
     // Agentic sessions run shell commands on a worker node: they need the
     // account's grant and the workspace's permission.
     if b.profile.unwrap_or(harness_core::event::Profile::Agentic)
@@ -1084,6 +1116,18 @@ async fn create_session(
         {
             return Err(ApiError(StatusCode::FORBIDDEN, why));
         }
+        // The node as `create_session` will pick it, for the audit line.
+        b.node_id = b
+            .node_id
+            .or_else(|| m.default_node(harness_core::event::Profile::Agentic));
+        seen.node = b.node_id.clone();
+        let mode = ws::exec_mode_for(&who, b.exec_mode);
+        b.exec_mode = Some(mode.map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?);
+    } else if b.exec_mode.is_some() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "a chat runs no commands and has no execution mode".into(),
+        ));
     }
     let title = b
         .title
@@ -1105,9 +1149,10 @@ async fn create_session(
             workspace_id: scope.map(|a| a.workspace.workspace_id),
             project_id: project,
             no_callbacks: false,
+            exec_mode: b.exec_mode,
         })
         .await?;
-    Ok(Json(json!({ "session_id": sid })))
+    Ok(sid)
 }
 
 #[derive(Deserialize)]

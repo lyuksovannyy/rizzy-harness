@@ -93,10 +93,17 @@ Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
-operating system; Light and Dark stay put) and the accent colour. A pick shows
+operating system; Light and Dark stay put) and the accent colour, one of eight:
+Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
+(Graphite leaves the interface grey apart from status colours). A pick shows
 at once and is kept with Save; leaving without saving goes back. The browser
 remembers the saved choice, so a reload paints it straight away, before the
-preferences arrive from the server.
+preferences arrive from the server. The earlier names Violet and Gray are
+gone: a saved preference with one of them shows as Blue until you pick again,
+and an agent look in `config.toml` that says `violet` or `gray` must be
+changed to `purple` or `graphite`. The interface follows the Rizzy Glass
+design system ([docs/rizzy-glass.md](docs/rizzy-glass.md)); with the
+system's "reduce transparency" setting its glass surfaces turn solid.
 
 The home screen shows a faint background for the mode in the bar: Search, a
 magnifier that drops in from above; Ask, a wall of commonly asked questions
@@ -385,7 +392,7 @@ fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
 [agent_avatars.coder]                # how the agent looks; unset: derived from its id
 shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
 eyes = "wide"                        # round | long | short | wide | sleepy
-accent = "green"                     # blue | violet | green | orange | pink | gray
+accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
@@ -701,9 +708,75 @@ mode = "required"                    # required | best-effort | off
 network = "on"                       # on | off (off: no network for the shell, see "Network off")
 read = []                            # more read-only folders, e.g. "~/.cargo"
 write = []                           # more read-write folders, e.g. "~/.cache"
-contain = "auto"                     # auto | required | off: run the shell in bubblewrap (see below)
 # bwrap = "/usr/bin/bwrap"           # which bubblewrap; default: the first root-owned one on PATH
+
+[execution]
+sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
+host = false                         # offer the host shell: commands as this OS user, no sandbox. Read "Execution modes" first
 ```
+
+**Execution modes.** Each agentic chat runs its commands in one mode,
+chosen when the chat is created and never changed (the chat's header
+names it):
+
+- **`sandbox`**: each shell command in bubblewrap, as "The shell sandbox"
+  below describes (its own processes, its own file view, the guard,
+  Landlock inside; background commands). Not every program a sandbox chat
+  starts is contained: `graph_query` starts graphify, and the node runs
+  its own git for checkpoints, outside bubblewrap under Landlock alone.
+  Offered where bubblewrap works at the node's start (`[execution] sandbox
+  = "auto"`, the default, with its gaps named; `"strict"` only where none
+  is left; `"off"` never). The start probes up to three times, a second
+  apart, and logs each failure; after that the start is the only moment
+  that counts: restart the node once bubblewrap works.
+- **`host`**: each command as the node's own OS user, **without
+  bubblewrap**. Offered only with `[execution] host = true`. What still
+  applies is the Landlock part of `[sandbox] mode` (which files a command
+  can open; TCP with `network = "off"`), and nothing else: what a command
+  starts can keep running after the call, the chat and the node; `/proc`
+  shows every process; with the network off UDP and DNS still go out; no
+  background commands; and below Linux 7.1 (Landlock ABI 9) a command can
+  ask any service of this user over a socket (the session bus:
+  `systemd-run --user`) to run anything with every right of the user, its
+  keys and other projects included. Treat it as a shell on this machine
+  that a web page the agent reads can steer: the approval card is then the
+  only check, so a `host` chat always asks (it never runs in approval mode
+  `auto`, whatever is asked or `max_approval_mode` allows), and its card
+  says the command runs in the host shell. Run such a node as a dedicated
+  OS user that holds nothing else.
+
+A new chat is in the sandbox mode unless `host` is asked for by name: a
+node that offers only `host` refuses a chat that does not name it. Until
+per-member levels exist (N.10, part 2), only a server admin may choose
+`host`, on every node (owning a workspace is no reason: every account owns
+its Personal one), and choosing it shows that warning first; the rule is
+checked again on every later action, so the `host` chats of someone who is
+no longer a server admin do no more work. Every request for `host`,
+granted or refused by any check, is written to the audit log (who, the
+workspace, the node, the outcome; never chat content). A routine's chat always
+asks for `sandbox`. A connected node must have announced the mode it is sent: one
+from before modes gets no agent chat, and the refusal says what to do on
+the node; a node that is away is "not connected", as before. The chat's header names its mode and
+the gaps its node announced at connect (network off without a namespace,
+or not applied at all; the socket gap below Linux 7.1; no `/proc` of its
+own); which modes a node offers is shown only to accounts that may run
+agent chats.
+A node that offers neither mode runs no agent chats and says so at start,
+in `doctor` and when a chat is created ("this node offers no way to run
+commands: install bubblewrap, or set `[execution] host = true`"); `node
+run` refuses to start. **A data directory made by an earlier build does
+not open with this one** (`serve` exits with "no such column:
+s.exec_mode": the session table changed in place, with no migration
+before the first release): remove it, or start with a new one. **This
+changed:** a node where bubblewrap did not
+work used to run the shell with Landlock alone and only warn; it now
+offers no `sandbox`, and without `host = true` nothing. A chat whose mode
+the node no longer offers after a restart (bubblewrap gone, `host` turned
+off) runs nothing and says why; it is never moved to another mode. Files
+are shared between modes: what a `sandbox` chat writes in a folder (a
+script, a `Makefile`, `.git/hooks`), a `host` chat in that folder may run
+with every right of the node's user. See
+[docs/execution-modes.md](docs/execution-modes.md).
 
 **The shell sandbox.** `bash` (and graphify) run through `rizzy-harness
 sandbox-exec`, which locks itself into a Linux Landlock sandbox and then
@@ -753,8 +826,9 @@ opens each folder itself and bubblewrap mounts that very folder; with an
 older one (Ubuntu 24.04 has 0.9) it mounts by path and the wrapper checks
 the mounted folder before the command runs. `rizzy-harness doctor` lists
 what is mounted on its "file view" line, and says which of the two ways.
-Where the shell is not contained, the command sees your whole file system
-and Landlock alone decides what it can open, as the list above says.
+In a `host` chat the shell is not contained: the command sees your whole
+file system and Landlock alone decides what it can open, as the list above
+says.
 
 The node's own git, which takes the checkpoints and fills a sub-agent's
 folder, runs in the same sandbox: it may read the chat's folder (and your
@@ -798,7 +872,8 @@ folder, a `[sandbox] read` or `write` entry), and below Linux 6.12 (ABI 6)
 with the network on, a service on an abstract socket (an X11 display,
 some D-Bus and IDE sockets: not files, so no file view hides them;
 `network = "off"` does). `doctor` then marks the line `warn` and names
-what is left, and `contain = "required"` still refuses there. Running the
+what is left, and `[execution] sandbox = "strict"` does not offer the
+sandbox mode there. Running the
 node as its own OS user without a login session (no session bus, no
 `docker` group, as "Limits" below advises) removes the usual services. On
 every kernel, a `[sandbox] write` entry that holds another program's
@@ -868,28 +943,27 @@ command cannot use one, on any kernel.
 The node checks at start that a command really gets a namespace of its
 own (its `/proc/self/ns/net` is not the node's). Where the probe with
 `--unshare-net` fails and the one without it passes, the node tries once
-more; if it fails again, `contain = "required"` refuses, and `"auto"` still
-contains every command (its own processes, the guard, Landlock inside)
+more; if it fails again, `[execution] sandbox = "strict"` does not offer the
+sandbox mode, and `"auto"` still contains every command (its own processes, the guard, Landlock inside)
 without the namespace: TCP is stopped by Landlock, but UDP and DNS go out,
 and abstract sockets are closed only from Linux 6.12 (Landlock ABI 6).
 `doctor` and the start-up log mark the line `warn` ("network off WITH A
 GAP") and say what failed: bubblewrap itself (its message), or the
 probe's own check (the command's namespace was the node's or could not be
-read). An `"auto"` node below where it could be, in that gap or on
-Landlock alone because bubblewrap failed every probe at start, probes
-again beside a shell command, at most once a minute and at most 2 s each
-(the command that noticed does not wait for it); from the first probe that
-passes, commands started from then on run contained, or in a namespace of
-their own, and the node logs one line saying so. It only ever steps up: a
-command already running stays as it started, and a node that contains, or
-has the namespace, never goes back (if bubblewrap fails later, the command
-fails). A node with no bubblewrap found, or with `contain = "off"`, does
-not probe; `"required"` refused at start (restart it to probe again). After the start-up line
-nothing in the chat says a node is in that gap (planned: the chat shows
-the node's gaps). **Without the containment** (`"auto"`'s fallback,
-`contain = "off"`) and for graphify and the node's own git, `network =
-"off"` stops TCP only: **UDP and DNS still go out**, and `doctor` and the
-log say so on the containment line.
+read). An `"auto"` node in that gap probes the namespace again beside a
+shell command, at most once a minute and at most 2 s each (the command
+that noticed does not wait for it); from the first probe that passes,
+commands started from then on run in a namespace of their own, and the
+node logs one line saying so. It only ever steps up: a command already
+running stays as it started, and a node that has the namespace never goes
+back (if bubblewrap fails later, the command fails). A node where
+bubblewrap failed every probe at start does not offer the sandbox mode
+and does not probe again: restart it once bubblewrap works. A chat in the
+sandbox mode on a node in that gap says so in its header ("UDP and DNS
+still go out"), as does every `host` chat with the network off. **Without
+the containment** (a `host` chat) and for graphify and the node's own
+git, `network = "off"` stops TCP only: **UDP and DNS still go out**, and
+`doctor` and the log say so on the containment line.
 
 It needs the `bubblewrap` package and unprivileged user namespaces. The
 node takes the first `bwrap` on its `PATH` that its own user cannot replace
@@ -906,29 +980,30 @@ programs without an AppArmor profile: allow them with `sudo sysctl -w
 kernel.apparmor_restrict_unprivileged_userns=0` (and a file in
 `/etc/sysctl.d/` to keep it), or give `bwrap` an AppArmor profile that
 permits `userns`. `rizzy-harness doctor` shows the result next to the
-Landlock line ("shell containment"). `contain` decides what happens where
-it does not work:
+Landlock line ("shell containment"), and which execution modes the node
+offers ("execution modes"). `[execution] sandbox` decides when the
+sandbox mode is offered:
 
-- `"auto"` (default): run the shell as before, in the Landlock sandbox
-  alone, with no guard (nothing confirms that a cancelled command has
-  ended), and say so once in the log and in `doctor`. Processes a command
-  detaches then **can** outlive it and the node, `/proc` shows every
-  process of the machine, and with `network = "off"` UDP and DNS still go
-  out. Where a bubblewrap was found but failed every probe at start, the
-  node probes again later and steps up ("Network off" above).
-- `"required"`: refuse agentic sessions unless the guarantee above holds
-  in full, as `mode = "required"` does without Landlock (`node run`
-  refuses to start). It therefore refuses where bubblewrap does not run
-  **and** on kernels below Linux 7.1 (the condition above). On such a
+- `"auto"` (default): where the probe passes at start, with any gap
+  above named in the log and in `doctor`, and in the chat's header as its
+  node announced it at connect (the network, socket and `/proc` gaps). Where bubblewrap
+  does not work, the sandbox mode is not offered (no command runs with
+  Landlock alone in it): the node offers `host` if `[execution] host =
+  true`, else nothing.
+- `"strict"`: only where the guarantee above holds in full. It is
+  therefore not offered where bubblewrap does not run, on kernels below
+  Linux 7.1 (the condition above), in the form without a `/proc` of its
+  own, with the network off and no namespace, and where a `[sandbox] write`
+  entry holds `/tmp` or `/run/user/<uid>` (sockets elsewhere in a write
+  entry are not looked for) or a folder on the node's `PATH`. On such a
   kernel set `"auto"`: the shell is contained, with that gap named.
-- `"off"`: never use it (logged on every start); as with `"auto"`'s
-  fallback, there is no guard and no confirmed end.
+- `"off"`: never (bubblewrap is not probed).
 
 **Keep the harness binary out of every session's reach.** Once started,
 the node runs its binary only through a descriptor of its own running
 image, never through the binary's path: a contained command's guard and
 wrapper, the wrapper of its own helpers (its checkpoint git, graphify) and
-of a shell left to Landlock alone. Replacing, deleting or upgrading the file
+of a `host` chat's shell. Replacing, deleting or upgrading the file
 at that path changes nothing for them, wherever the binary and the data
 directory are and whatever its mode lets the node do (execute permission is
 enough). **After a rebuild or an upgrade, a running node keeps running the
@@ -936,7 +1011,8 @@ build it started with, silently, until you restart it**; nothing in the
 log or in `doctor` says that the binary on disk is newer. If the node could
 not get that descriptor, it says so on the `shell containment` line of its
 log and of `doctor` ("the node holds no descriptor of its own binary"), it
-then starts them by the path, and `contain = "required"` refuses to start.
+then starts them by the path, and `[execution] sandbox = "strict"` does not
+offer the sandbox mode.
 If a workspace root or a `[sandbox] write` entry holds the binary (a node
 run from its own build tree, with a session on that tree), a command that
 keeps a name of the file the node runs (`ln`, before a rebuild) can change
@@ -944,22 +1020,29 @@ its mode (`chmod 000`), after which no contained command and no checkpoint
 of any session starts, the agent is told that the node's own binary could
 not be executed, and the node cannot be restarted until you restore the
 mode. `doctor` and the log warn ("a session can replace the harness
-binary"), and `contain = "required"` refuses to start. Install the
+binary"), and `[execution] sandbox = "strict"` does not offer the sandbox
+mode. Install the
 binary in a folder outside every workspace root and write entry (for
 example `/usr/local/bin`; `~/.cargo/bin` is inside a workspace root of
 `$HOME`).
 
-`mode = "required"` promises the Landlock file sandbox only; it does not
-require bubblewrap, so a node where bubblewrap cannot run keeps its shell.
+`mode = "required"` promises the Landlock file sandbox only, in both
+modes; it does not require bubblewrap (whether the sandbox mode is offered
+is `[execution] sandbox`), and where Landlock does not work it refuses
+every agent chat, `host` too.
 Where bubblewrap runs but cannot mount a fresh `/proc` (inside some
 containers), it is used without one: every process still ends with the
 command, but `/proc` then lists the outer processes, under numbers that
 are not the command's own (`/proc/$$` is another process); the log and
-`doctor` say "contained without a /proc of its own". With `mode = "off"`
-there is no sandbox and no containment, and `contain = "required"` is
-refused at start. Nothing in a request, a chat or an agent definition can
-turn the containment off. Only the agent's shell is contained; graphify
-and the node's own git and PDF reader keep the Landlock sandbox alone.
+`doctor` say "contained without a /proc of its own"; it is still the
+sandbox mode. With `mode = "off"` there is no sandbox and no containment:
+the sandbox mode is not offered (`[execution] sandbox = "strict"` is
+refused at start), and a `host` chat's shell runs with every right of this
+OS user. Nothing in a request, a chat or an agent definition can turn the
+containment off: a chat's mode is chosen when it is created, from what
+the node offers. Only the agent's shell is contained; graphify
+and the node's own git and PDF reader keep the Landlock sandbox alone, in
+a sandbox chat too.
 
 What breaks by default, and the fix: toolchains and caches under your home
 folder. A command that fails with `Permission denied` (or, contained, `No
@@ -1109,8 +1192,8 @@ limits are node.toml's only: at most `background_per_session` per chat and
 `background_per_node` per node (a start over either is refused, naming the
 chat's running ids, never another chat's; nothing is stopped to make room;
 one user's chats can take every slot of the node). Background commands are
-refused in a sub-agent's session and on a node that does not contain the
-shell (`[sandbox] contain = "off"`, or bubblewrap does not work there).
+refused in a sub-agent's session and in a `host` chat (no containment,
+see "Execution modes").
 **With `[sandbox] network = "off"` a server started in the background cannot
 be reached** by a later command: each command has a network namespace of its
 own; the start's result says so. A command stops at its timeout, with
@@ -1394,13 +1477,16 @@ or the WireGuard address). Notes:
 - Building yourself and hitting Docker Hub rate limits:
   `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
 - Published images are linux/amd64 only.
-- The image has no bubblewrap, and bubblewrap does not run inside a
-  default rootless container ("Can't mount proc"), so the embedded node's
-  shell there runs in the Landlock sandbox alone (`contain = "auto"`'s
-  fallback; `doctor` says so). Which outer-container flags would let it
-  run is in [docs/container-experiment.md](docs/container-experiment.md)
-  §7; they loosen the outer container and were not tested with the
-  harness's image.
+- The image has no bubblewrap, so its embedded node offers no sandbox
+  mode: **agent chats there need `[execution] host = true`** in the data
+  directory's `node.toml` (Landlock alone counts as the host shell; read
+  "Execution modes" first: the container is then the only wall around the
+  agent's commands), else the node runs none and `doctor` says so. Inside
+  a default rootless container bubblewrap cannot mount a fresh `/proc`
+  ("Can't mount proc"), but it runs without one
+  ([docs/container-experiment.md](docs/container-experiment.md) §7), so an
+  image that adds bubblewrap would get the sandbox mode in its form
+  without a `/proc` of its own (not tested with the harness's image).
 
 ## Remote worker nodes
 
@@ -1483,8 +1569,8 @@ end.
 
 What can outlive a stop: a command stuck in a read the kernel cannot
 interrupt (a network folder whose server went away) keeps its guard until
-the read returns, and with `[sandbox] contain = "off"` a command that
-detached from its shell is not ended at all. A tool of the node's own
+the read returns, and a `host` chat's command that detached from its shell
+is not ended at all. A tool of the node's own
 stuck that way does not hold the process up: 2 s after its work is done
 the process calls its exit. But the kernel cannot let it go while that
 thread waits in the read: until the read returns (or the mount is forced

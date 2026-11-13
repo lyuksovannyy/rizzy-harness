@@ -1266,9 +1266,8 @@ pub const SUB_AGENT: &str = "background commands are not available to a sub-agen
 
 /// The refusal where the shell is not contained (R16).
 pub const NOT_CONTAINED: &str = "background commands need the shell's containment (bubblewrap \
-     and its guard), and this node runs commands without it ([sandbox] contain = \"off\", or \
-     bubblewrap does not work here): nothing could confirm the command's end or stop what it \
-     starts. Run it in the foreground with a timeout";
+     and its guard), and this chat runs its commands without it (the host mode): nothing could \
+     confirm the command's end or stop what it starts. Run it in the foreground with a timeout";
 
 /// `bash_output { id? }`: read a background command's output, or list them.
 pub struct BashOutput;

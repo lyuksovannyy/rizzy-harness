@@ -1,3 +1,4 @@
+import { normalizeAccent } from "./lib/appearance";
 import type {
   Agent,
   Notice,
@@ -10,6 +11,7 @@ import type {
   NodeInfo,
   Prefs,
   Profile,
+  ExecMode,
   RawEvent,
   FormReply,
   SearchKind,
@@ -139,6 +141,7 @@ export const api = {
     incognito?: boolean;
     workspace_id?: string;
     project_id?: string;
+    exec_mode?: ExecMode;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<AttentionResponse>("GET", "/api/attention"),
   markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),
@@ -209,7 +212,8 @@ export const api = {
   },
   classifier: () => call<unknown>("GET", "/api/me/classifier"),
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
-  settings: () => call<Prefs>("GET", "/api/me/settings"),
+  /** An accent the server holds that is not one of the presets comes back as null (the default), so the next save passes the server's list. */
+  settings: () => call<Prefs>("GET", "/api/me/settings").then((p) => ({ ...p, accent: normalizeAccent(p.accent) })),
   memories: () => call<{ memories: MemoryFact[]; backend: string }>("GET", "/api/memory"),
   workspaces: () => call<WorkspaceList>("GET", "/api/workspaces"),
   /** Makes it the active workspace (lists, defaults and new chats follow it). */

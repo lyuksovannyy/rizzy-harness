@@ -124,6 +124,9 @@ pub struct SessionRow {
     /// The effective workspace (see `EFFECTIVE_WS`); `None` only for a chat
     /// without an owner and without a mapping. Master only.
     pub workspace_id: Option<String>,
+    /// The execution mode `session_created` recorded (`sandbox`, `host`);
+    /// `None` for a chat, and until it has been mirrored.
+    pub exec_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -269,6 +272,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_id   TEXT,
     profile    TEXT,
     parent_id  TEXT,
+    -- The execution mode `session_created` recorded (N.10a): the master
+    -- re-checks who may drive a `host` chat on every action.
+    exec_mode  TEXT,
     -- Attention: approvals waiting, or the last turn ended with a question.
     pending_approvals INTEGER NOT NULL DEFAULT 0,
     last_asks  INTEGER NOT NULL DEFAULT 0,
@@ -422,7 +428,7 @@ const EFFECTIVE_WS: &str = "COALESCE(
 const WS_JOINS: &str = "LEFT JOIN session_workspaces sw ON sw.session_id = s.session_id
      LEFT JOIN workspaces pw ON pw.personal_owner = s.owner_id";
 
-const SESSION_COLS: &str = "s.session_id, s.node_id, s.title, s.cwd, s.model, s.created_ms, s.updated_ms, s.head_seq, s.running, s.owner_id, s.agent_id, s.profile, s.incognito, s.parent_id";
+const SESSION_COLS: &str = "s.session_id, s.node_id, s.title, s.cwd, s.model, s.created_ms, s.updated_ms, s.head_seq, s.running, s.owner_id, s.agent_id, s.profile, s.incognito, s.parent_id, s.exec_mode";
 
 /// The one role the store knows: the master defines the roles and their
 /// permissions; the store needs owners for the last-owner rule.
@@ -787,8 +793,8 @@ impl Store {
                 // free text; the event keeps the whole of it).
                 let title = row_title(&s("title"));
                 tx.execute(
-                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8 WHERE session_id = ?1",
-                    params![sid, title, s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent],
+                    "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8, exec_mode = ?9 WHERE session_id = ?1",
+                    params![sid, title, s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent, opt("exec_mode")],
                 )?;
                 // A sub-agent's session belongs to whoever owns its parent,
                 // so the two have the same owner by construction; only into
@@ -1673,7 +1679,8 @@ impl Store {
                 profile: r.get(11)?,
                 incognito: r.get::<_, i64>(12)? != 0,
                 parent_id: r.get(13)?,
-                workspace_id: r.get(14)?,
+                exec_mode: r.get(14)?,
+                workspace_id: r.get(15)?,
             },
         ))
     }
@@ -1799,6 +1806,17 @@ impl Store {
             params![harness_core::now_ms(), kind, detail],
         )?;
         Ok(())
+    }
+
+    /// Audit lines whose kind starts with `prefix`, oldest first, as
+    /// `(kind, detail)`.
+    pub fn audit_lines(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT kind, detail FROM audit WHERE substr(kind, 1, length(?1)) = ?1 ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map(params![prefix], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn audit_count(&self) -> Result<u64> {

@@ -191,7 +191,7 @@ layer, over 20 s, no Landlock on the server), 503 (two PDFs already being read a
 within 10 s), 429 (20 unsent files or 8 MiB of unsent text for this account). Unsent uploads
 expire with the incognito TTL.
 
-**What the model is sent (T39).** The person's text as they wrote it, then each file under one
+**What the model is sent (T40).** The person's text as they wrote it, then each file under one
 line the harness wrote, every line of the file's text behind `| `:
 
 ```

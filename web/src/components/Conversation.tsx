@@ -37,6 +37,7 @@ import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
+import { ExecBadge } from "./ExecBadge";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
@@ -308,6 +309,7 @@ export default function Conversation(props: {
             </span>
             <span className="muted">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
+            {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
             {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
             {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
               <span

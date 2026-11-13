@@ -1,42 +1,105 @@
-/* Colour tokens. Dark is the default; light comes from the OS unless the
-   user forced dark, or from the user forcing light (data-theme on <html>,
-   set before the first paint by public/theme.js and later by
-   lib/appearance.ts). theme.test.ts reads this first :root block as the dark
-   theme and checks every pair that carries text, so it must stay first. */
+/* Colour tokens: the Rizzy Glass design system (docs/rizzy-glass.md), with
+   the values of its tokens.json. Dark is the default; light comes from the
+   OS unless the user forced dark, or from the user forcing light
+   (data-theme on <html>, set before the first paint by public/theme.js and
+   later by lib/appearance.ts). theme.test.ts reads this first :root block
+   as the dark theme and checks every pair that carries text, composited
+   over the grounds it sits on, so it must stay first. */
 :root {
-  /* Layers: canvas, sidebar, in-flow cards, raised or selected. */
-  --bg: #111113;
-  --bg-side: #161618;
-  --bg-2: #1b1b1e;
-  --bg-3: #26262a;
-  --bg-3-hover: #2d2d32;
-  --bg-hover: #212124;
-  --surface: #1b1b1e;
-  --surface-pop: #222226;
-  --thumb: #36363c;
-  --bubble: #26262a;
-  --line: #2a2a2e;
-  --line-strong: #3a3a3f;
-  /* Text: two levels only, both at least 4.5:1 on every surface. */
-  --fg: #ededef;
-  --fg-2: #a4a4ab;
-  /* Accent ramp: data-accent picks which one --accent points at. */
-  --accent-blue: #8ab4ff;
-  --accent-violet: #b8a2fb;
-  --accent-green: #5fca8c;
-  --accent-orange: #f2a766;
-  --accent-pink: #f491bd;
-  --accent-gray: #b4b4bb;
-  --accent: var(--accent-blue);
-  --accent-fg: #111113;
-  /* Derived once here; they follow --accent and --bg in either theme. */
-  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --accent-line: color-mix(in srgb, var(--accent) 45%, transparent);
-  --accent-hover: color-mix(in srgb, var(--accent) 86%, var(--fg));
-  --focus: var(--accent);
-  --ok: #4fc07a;
-  --warn: #e3b341;
-  --bad: #f06a6a;
+  /* The flat backdrop; nothing (no gradient, no wallpaper) behind glass. */
+  --bg: #1c1c1c;
+  /* Raw tints. Components read the materials below, never these. */
+  --sidebar-tint: #2a2a2acc;
+  --sidebar-solid: #2a2a2a;
+  --glass-tint: #26262680;
+  --glass-thick-tint: #282828d6;
+  --glass-thin-tint: #2e2e2e57;
+  --solid: #282828;
+  --solid-2: #323232;
+  /* The selected segment of a segmented control. */
+  --raised: #5e5e5e;
+  /* Every glass edge: the specular top line, then the hairline. */
+  --edge-hi: #ffffff29;
+  --hairline: #ffffff1a;
+  --sep: #ffffff1a;
+  /* Inputs, select triggers, search fields, code blocks. */
+  --field: #0000003d;
+  /* Neutral fills, for controls only: rest, hover or active, switch off. */
+  --fill: #8c8c8c2e;
+  --fill-2: #8c8c8c45;
+  --fill-3: #8c8c8c5c;
+  /* Text: content, descriptions and meta, placeholders. */
+  --fg: #f2f2f2;
+  --fg-2: #b0b0b0;
+  --fg-3: #9c9c9c;
+  /* The harness's own layers, pointed at the materials: the sidebar, an
+     in-flow card (never blurred), menus and popovers, the user's bubble,
+     the composer (opaque: the home backgrounds move behind it), and the
+     row and button fills. */
+  --bg-side: var(--sidebar);
+  --bg-2: var(--glass-thick);
+  --surface: var(--solid);
+  --surface-pop: var(--glass-thick);
+  --bubble: var(--fill);
+  --bg-3: var(--fill);
+  --bg-3-hover: var(--fill-2);
+  --bg-hover: var(--fill);
+  --thumb: var(--raised);
+  --line: var(--hairline);
+  /* Accent presets: a fill, a graphics tone and a text tone each. */
+  --ac-blue: #0a68dc;
+  --ac-blue-2: #3d8fff;
+  --ac-blue-fg: #80baff;
+  --ac-purple: #9a3f9d;
+  --ac-purple-2: #c670c9;
+  --ac-purple-fg: #eba2ec;
+  --ac-pink: #cd1c77;
+  --ac-pink-2: #f5559f;
+  --ac-pink-fg: #ff9cc4;
+  --ac-red: #d1252e;
+  --ac-red-2: #f85552;
+  --ac-red-fg: #ffa099;
+  --ac-orange: #ff9f0a;
+  --ac-orange-2: #ff9f0a;
+  --ac-orange-fg: #fec396;
+  --ac-yellow: #ffd60a;
+  --ac-yellow-2: #ffd60a;
+  --ac-yellow-fg: #ffd95a;
+  --ac-green: #2a7d0a;
+  --ac-green-2: #4dab2c;
+  --ac-green-fg: #86d470;
+  --ac-graphite: #6b6b6b;
+  --ac-graphite-2: #999999;
+  --ac-graphite-fg: #c6c6c6;
+  --on-light-accent: #ffffff;
+  --on-dark-accent: #1d1d1d;
+  /* The active accent (data-accent picks the preset; none is Blue): the
+     fill, graphics on neutral grounds, text on neutral grounds, and text
+     on the fill. */
+  --accent: var(--ac-blue);
+  --accent-2: var(--ac-blue-2);
+  --accent-fg: var(--ac-blue-fg);
+  --on-accent: var(--on-light-accent);
+  /* Derived from the preset in either theme (22% dark, 14% light). */
+  --accent-soft: color-mix(in srgb, var(--accent-2) 22%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent-fg) 45%, transparent);
+  --accent-hover: color-mix(in srgb, var(--accent-fg) 86%, var(--fg));
+  --focus: var(--accent-fg);
+  --focus-glow: color-mix(in srgb, var(--accent-2) 28%, transparent);
+  --selection: color-mix(in srgb, var(--accent-2) 32%, transparent);
+  /* Status: text and icons, the tint behind that text, solid marks. */
+  --ok: #5ad884;
+  --ok-soft: #30d1582e;
+  --ok-fill: #30c35c;
+  --warn: #ffbb52;
+  --warn-soft: #ff9f0a2e;
+  --warn-fill: #ff9f0a;
+  --bad: #ff7b73;
+  --bad-soft: #ff453a2e;
+  --bad-fill: #ff453a;
+  --danger-bg: #c8261c;
+  --on-danger: #ffffff;
+  --switch-thumb: #ffffff;
   --add-bg: #12301f;
   --del-bg: #3a1618;
   /* Syntax highlighting (Prism token classes). */
@@ -61,11 +124,11 @@
   /* Background art: ink is --fg at an alpha up to --art-max, which reads
      as texture and keeps --fg-2 at 4.5:1 even drawn over it. */
   --art-ink: var(--fg);
-  --art-max: 0.12;
+  --art-max: 0.1;
   --art-peak: 0.28;
-  --glow: color-mix(in srgb, var(--accent) 9%, transparent);
-  --mag-hi: color-mix(in srgb, var(--accent) 22%, var(--bg));
-  --mag-lo: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  --glow: color-mix(in srgb, var(--accent-2) 9%, transparent);
+  --mag-hi: color-mix(in srgb, var(--accent-2) 22%, var(--bg));
+  --mag-lo: color-mix(in srgb, var(--accent-2) 10%, var(--bg));
   --mag-side: color-mix(in srgb, var(--fg) 9%, var(--bg));
   --mag-glint: rgb(255 255 255 / 0.22);
   --mag-shadow: rgb(0 0 0 / 0.45);
@@ -75,47 +138,77 @@
   --av-shade: rgb(0 0 0 / 0.3);
   --av-depth: rgb(0 0 0);
   --av-ground: rgb(0 0 0 / 0.5);
-  /* Elevation: the composer, then popovers; the thumb of a switch. */
-  --shadow-1: inset 0 1px 0 rgb(255 255 255 / 0.03), 0 6px 20px -8px rgb(0 0 0 / 0.55);
-  --shadow-2: 0 16px 40px -12px rgb(0 0 0 / 0.6), 0 2px 6px rgb(0 0 0 / 0.3);
-  --shadow-thumb: 0 1px 2px rgb(0 0 0 / 0.4);
-  --scrim: rgb(0 0 0 / 0.5);
-  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a4a4ab' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  /* Elevation: resting (cards, the composer), then floating (menus,
+     dialogs, toasts); always after the edge-hi and hairline insets. */
+  --shadow-1: 0 1px 2px #0000004d, 0 10px 30px -10px #0000008c;
+  --shadow-2: 0 2px 8px #0000004d, 0 22px 56px -14px #000000b3;
+  /* Dialog backdrop (and the mobile drawer's), then the palette's. */
+  --scrim-tint: #0000006b;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23b0b0b0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --col: 760px;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, "Segoe UI", Roboto, sans-serif;
   color-scheme: dark;
 }
 
 /* Light from the OS, unless the user forced dark. The block after it is the
-   same for a forced light theme; theme.test.ts checks they stay equal. The
-   status colours are this dark so they reach 4.5:1 as text. */
+   same for a forced light theme; theme.test.ts checks they stay equal. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg: #fcfcfc;
-    --bg-side: #f5f5f4;
-    --bg-2: #f4f4f3;
-    --bg-3: #e9e9e8;
-    --bg-3-hover: #e5e5e3;
-    --bg-hover: #efefee;
-    --surface: #ffffff;
-    --surface-pop: #ffffff;
-    --thumb: #ffffff;
-    --bubble: #f0f0ef;
-    --line: #e5e5e3;
-    --line-strong: #d2d2cf;
-    --fg: #111113;
-    --fg-2: #5b5b61;
-    --accent-blue: #1d58c9;
-    --accent-violet: #6b3fd4;
-    --accent-green: #136c37;
-    --accent-orange: #a14a08;
-    --accent-pink: #b02565;
-    --accent-gray: #5c5c63;
-    --accent-fg: #ffffff;
-    --ok: #177535;
-    --warn: #8a5d00;
-    --bad: #c4202b;
+    --bg: #ececec;
+    --sidebar-tint: #e4e4e4cc;
+    --sidebar-solid: #e4e4e4;
+    --glass-tint: #ffffff85;
+    --glass-thick-tint: #fbfbfbd6;
+    --glass-thin-tint: #ffffff57;
+    --solid: #fbfbfb;
+    --solid-2: #f2f2f2;
+    --raised: #ffffff;
+    --edge-hi: #ffffffd9;
+    --hairline: #0000001a;
+    --sep: #0000001a;
+    --field: #ffffffb8;
+    --fill: #7878781f;
+    --fill-2: #78787833;
+    --fill-3: #78787847;
+    --fg: #1d1d1d;
+    --fg-2: #5a5a5a;
+    --fg-3: #6b6b6b;
+    --ac-blue: #0064d2;
+    --ac-blue-2: #1a76ee;
+    --ac-blue-fg: #0057b8;
+    --ac-purple: #9a3f9d;
+    --ac-purple-2: #b25cb5;
+    --ac-purple-fg: #86318a;
+    --ac-pink: #cd1c77;
+    --ac-pink-2: #e33b8d;
+    --ac-pink-fg: #a80060;
+    --ac-red: #d1252e;
+    --ac-red-2: #e63e43;
+    --ac-red-fg: #ab0b1f;
+    --ac-orange: #f7821b;
+    --ac-orange-2: #c66605;
+    --ac-orange-fg: #8a4300;
+    --ac-yellow: #ffc600;
+    --ac-yellow-2: #a07a00;
+    --ac-yellow-fg: #6b5100;
+    --ac-green: #2a7d0a;
+    --ac-green-2: #399213;
+    --ac-green-fg: #216303;
+    --ac-graphite: #6b6b6b;
+    --ac-graphite-2: #7a7a7a;
+    --ac-graphite-fg: #555555;
+    --accent-soft: color-mix(in srgb, var(--accent-2) 14%, transparent);
+    --ok: #126f39;
+    --ok-soft: #34c7592b;
+    --ok-fill: #2fb457;
+    --warn: #8a4e00;
+    --warn-soft: #ff9f0a30;
+    --warn-fill: #f29400;
+    --bad: #b8201a;
+    --bad-soft: #ff3b3024;
+    --bad-fill: #f0392f;
     --add-bg: #e6f6ec;
     --del-bg: #fbe9e9;
     --syn-kw: #cf222e;
@@ -142,40 +235,68 @@
     --av-shade: rgb(17 17 19 / 0.22);
     --av-depth: rgb(70 70 78);
     --av-ground: rgb(17 17 19 / 0.16);
-    --shadow-1: 0 1px 2px rgb(17 17 19 / 0.04), 0 6px 20px -8px rgb(17 17 19 / 0.1);
-    --shadow-2: 0 16px 40px -12px rgb(17 17 19 / 0.18), 0 2px 6px rgb(17 17 19 / 0.04);
-    --shadow-thumb: 0 1px 2px rgb(17 17 19 / 0.1), 0 0 0 1px rgb(17 17 19 / 0.04);
-    --scrim: rgb(17 17 19 / 0.32);
-    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235b5b61' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    --shadow-1: 0 1px 2px #0000000f, 0 8px 28px -10px #0000002e;
+    --shadow-2: 0 2px 6px #00000012, 0 18px 48px -14px #00000042;
+    --scrim-tint: #00000038;
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235a5a5a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     color-scheme: light;
   }
 }
 
 :root[data-theme="light"] {
-  --bg: #fcfcfc;
-  --bg-side: #f5f5f4;
-  --bg-2: #f4f4f3;
-  --bg-3: #e9e9e8;
-  --bg-3-hover: #e5e5e3;
-  --bg-hover: #efefee;
-  --surface: #ffffff;
-  --surface-pop: #ffffff;
-  --thumb: #ffffff;
-  --bubble: #f0f0ef;
-  --line: #e5e5e3;
-  --line-strong: #d2d2cf;
-  --fg: #111113;
-  --fg-2: #5b5b61;
-  --accent-blue: #1d58c9;
-  --accent-violet: #6b3fd4;
-  --accent-green: #136c37;
-  --accent-orange: #a14a08;
-  --accent-pink: #b02565;
-  --accent-gray: #5c5c63;
-  --accent-fg: #ffffff;
-  --ok: #177535;
-  --warn: #8a5d00;
-  --bad: #c4202b;
+  --bg: #ececec;
+  --sidebar-tint: #e4e4e4cc;
+  --sidebar-solid: #e4e4e4;
+  --glass-tint: #ffffff85;
+  --glass-thick-tint: #fbfbfbd6;
+  --glass-thin-tint: #ffffff57;
+  --solid: #fbfbfb;
+  --solid-2: #f2f2f2;
+  --raised: #ffffff;
+  --edge-hi: #ffffffd9;
+  --hairline: #0000001a;
+  --sep: #0000001a;
+  --field: #ffffffb8;
+  --fill: #7878781f;
+  --fill-2: #78787833;
+  --fill-3: #78787847;
+  --fg: #1d1d1d;
+  --fg-2: #5a5a5a;
+  --fg-3: #6b6b6b;
+  --ac-blue: #0064d2;
+  --ac-blue-2: #1a76ee;
+  --ac-blue-fg: #0057b8;
+  --ac-purple: #9a3f9d;
+  --ac-purple-2: #b25cb5;
+  --ac-purple-fg: #86318a;
+  --ac-pink: #cd1c77;
+  --ac-pink-2: #e33b8d;
+  --ac-pink-fg: #a80060;
+  --ac-red: #d1252e;
+  --ac-red-2: #e63e43;
+  --ac-red-fg: #ab0b1f;
+  --ac-orange: #f7821b;
+  --ac-orange-2: #c66605;
+  --ac-orange-fg: #8a4300;
+  --ac-yellow: #ffc600;
+  --ac-yellow-2: #a07a00;
+  --ac-yellow-fg: #6b5100;
+  --ac-green: #2a7d0a;
+  --ac-green-2: #399213;
+  --ac-green-fg: #216303;
+  --ac-graphite: #6b6b6b;
+  --ac-graphite-2: #7a7a7a;
+  --ac-graphite-fg: #555555;
+  --accent-soft: color-mix(in srgb, var(--accent-2) 14%, transparent);
+  --ok: #126f39;
+  --ok-soft: #34c7592b;
+  --ok-fill: #2fb457;
+  --warn: #8a4e00;
+  --warn-soft: #ff9f0a30;
+  --warn-fill: #f29400;
+  --bad: #b8201a;
+  --bad-soft: #ff3b3024;
+  --bad-fill: #f0392f;
   --add-bg: #e6f6ec;
   --del-bg: #fbe9e9;
   --syn-kw: #cf222e;
@@ -202,32 +323,80 @@
   --av-shade: rgb(17 17 19 / 0.22);
   --av-depth: rgb(70 70 78);
   --av-ground: rgb(17 17 19 / 0.16);
-  --shadow-1: 0 1px 2px rgb(17 17 19 / 0.04), 0 6px 20px -8px rgb(17 17 19 / 0.1);
-  --shadow-2: 0 16px 40px -12px rgb(17 17 19 / 0.18), 0 2px 6px rgb(17 17 19 / 0.04);
-  --shadow-thumb: 0 1px 2px rgb(17 17 19 / 0.1), 0 0 0 1px rgb(17 17 19 / 0.04);
-  --scrim: rgb(17 17 19 / 0.32);
-  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235b5b61' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --shadow-1: 0 1px 2px #0000000f, 0 8px 28px -10px #0000002e;
+  --shadow-2: 0 2px 6px #00000012, 0 18px 48px -14px #00000042;
+  --scrim-tint: #00000038;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235a5a5a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   color-scheme: light;
+}
+
+/* Materials: the tints, until transparency is reduced or backdrop-filter
+   is missing; then the solids and no blur. Blur only where the design
+   system puts it: the sidebar, menus, dialogs and the palette (see
+   docs/rizzy-glass.md); never on the transcript, cards or tables. */
+:root {
+  --sidebar: var(--sidebar-tint);
+  --glass: var(--glass-tint);
+  --glass-thick: var(--glass-thick-tint);
+  --glass-thin: var(--glass-thin-tint);
+  --scrim: var(--scrim-tint);
+  --blur: blur(22px) saturate(180%);
+  --blur-thick: blur(30px) saturate(190%);
+  /* Every glass surface's edge, then its elevation. */
+  --edge: inset 0 1px 0 0 var(--edge-hi), inset 0 0 0 1px var(--hairline);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --sidebar: var(--sidebar-solid);
+    --glass: var(--solid);
+    --glass-thick: var(--solid);
+    --glass-thin: var(--solid-2);
+    --blur: none;
+    --blur-thick: none;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --sidebar: var(--sidebar-solid);
+    --glass: var(--solid);
+    --glass-thick: var(--solid);
+    --glass-thin: var(--solid-2);
+    --scrim: #0000008c;
+    --blur: none;
+    --blur-thick: none;
+  }
 }
 
 /* Scales that do not change with the theme: type, space, radii, motion. */
 :root {
   --text-2xs: 11px;
   --text-xs: 12px;
+  /* Hints, captions, small controls and chips; mono. */
+  --text-small: 12.5px;
   --text-sm: 13px;
+  /* Button, field and menu labels. */
+  --text-ctl: 13.5px;
   --text-md: 14px;
   --text-base: 15px;
+  --text-sheet: 16px;
   --text-lg: 17px;
   --text-xl: 20px;
-  --text-2xl: 24px;
+  --text-2xl: 26px;
   --text-3xl: 30px;
   --lh-tight: 1.2;
   --lh-snug: 1.4;
-  --lh-body: 1.55;
+  --lh-body: 1.5;
   --lh-prose: 1.65;
+  --tracking: -0.006em;
+  /* The in-between weights are the design's; do not round them. */
   --w-regular: 400;
-  --w-medium: 500;
+  --w-book: 520;
+  --w-medium: 560;
   --w-semibold: 600;
+  --w-heading: 620;
+  --w-strong: 650;
+  --w-title: 680;
+  --w-bold: 700;
   --space-0-5: 2px;
   --space-1: 4px;
   --space-1-5: 6px;
@@ -240,28 +409,34 @@
   --space-10: 40px;
   --space-12: 48px;
   --space-16: 64px;
-  /* Inline marks; rows inside a popover (its 12 less its 4 of padding);
-     controls; cards and popovers; large cards; the composer. */
+  /* Inline marks; inputs and select triggers; menus, notices, toasts, code;
+     cards; dialogs and the composer; every control is a capsule. */
   --r-xs: 4px;
-  --r-sm: 8px;
-  --r-md: 10px;
-  --r-lg: 12px;
-  --r-xl: 18px;
-  --r-2xl: 24px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 18px;
+  --r-xl: 24px;
   --r-full: 999px;
-  /* Anything that moves uses --dur-3 or longer, so reduced motion makes it
-     instant; colour and opacity use --dur-1 or --dur-2 and still fade. The
-     home backgrounds take the long end: a layer leaves in --dur-3, wall
-     lines come and go in --dur-6, the magnifier drops and a new line
-     settles in --dur-bg. Their scripts wait the same times (bg/*.tsx). */
-  --dur-1: 100ms;
+  /* One curve for the interface. Hover and press take --dur-1, the switch
+     thumb --dur-thumb, dialogs, menus and toasts rising in --dur-sheet,
+     meters --dur-fill. The home backgrounds and avatars keep their own
+     timing: a layer leaves in --dur-3, wall lines come and go in --dur-6,
+     the magnifier drops and a new line settles in --dur-bg; their scripts
+     wait the same times (bg/*.tsx). Anything that moves uses --dur-thumb or
+     longer, so reduced motion makes it instant; colour and opacity still
+     fade. */
+  --dur-1: 150ms;
   --dur-2: 160ms;
+  --dur-thumb: 220ms;
   --dur-3: 240ms;
+  --dur-sheet: 280ms;
   --dur-4: 360ms;
   --dur-5: 520ms;
+  --dur-fill: 600ms;
   --dur-6: 720ms;
   --dur-bg: 1000ms;
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
+  /* The backgrounds' and avatars' own curves. */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   /* Leaving for good: slow to start, then gone. */
@@ -272,21 +447,27 @@
 }
 @media (prefers-reduced-motion: reduce) {
   :root {
+    --dur-thumb: 1ms;
     --dur-3: 1ms;
+    --dur-sheet: 1ms;
     --dur-4: 1ms;
     --dur-5: 1ms;
+    --dur-fill: 1ms;
     --dur-6: 1ms;
     --dur-bg: 1ms;
   }
 }
 
-/* Which ramp entry the accent is; never a colour of its own, so it follows
-   the theme. Blue is the default (no attribute). */
-:root[data-accent="violet"] { --accent: var(--accent-violet); }
-:root[data-accent="green"] { --accent: var(--accent-green); }
-:root[data-accent="orange"] { --accent: var(--accent-orange); }
-:root[data-accent="pink"] { --accent: var(--accent-pink); }
-:root[data-accent="gray"] { --accent: var(--accent-gray); }
+/* Which preset the accent is; never a colour of its own, so it follows the
+   theme. Blue is the default (no attribute). Only on <html>: an agent's
+   avatar carries its own data-accent. */
+:root[data-accent="purple"] { --accent: var(--ac-purple); --accent-2: var(--ac-purple-2); --accent-fg: var(--ac-purple-fg); }
+:root[data-accent="pink"] { --accent: var(--ac-pink); --accent-2: var(--ac-pink-2); --accent-fg: var(--ac-pink-fg); }
+:root[data-accent="red"] { --accent: var(--ac-red); --accent-2: var(--ac-red-2); --accent-fg: var(--ac-red-fg); }
+:root[data-accent="orange"] { --accent: var(--ac-orange); --accent-2: var(--ac-orange-2); --accent-fg: var(--ac-orange-fg); --on-accent: var(--on-dark-accent); }
+:root[data-accent="yellow"] { --accent: var(--ac-yellow); --accent-2: var(--ac-yellow-2); --accent-fg: var(--ac-yellow-fg); --on-accent: var(--on-dark-accent); }
+:root[data-accent="green"] { --accent: var(--ac-green); --accent-2: var(--ac-green-2); --accent-fg: var(--ac-green-fg); }
+:root[data-accent="graphite"] { --accent: var(--ac-graphite); --accent-2: var(--ac-graphite-2); --accent-fg: var(--ac-graphite-fg); }
 
 /* ---------- Base ---------- */
 * {
@@ -301,8 +482,13 @@ body,
 body {
   background: var(--bg);
   color: var(--fg);
-  font: var(--text-base) / var(--lh-body) var(--sans);
+  font: var(--text-md) / var(--lh-body) var(--sans);
+  letter-spacing: var(--tracking);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+::selection {
+  background: var(--selection);
 }
 /* A theme switch cross-fades the page (lib/appearance.ts). */
 ::view-transition-old(root),
@@ -313,7 +499,8 @@ code,
 pre,
 .mono {
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-small);
+  letter-spacing: 0;
 }
 @keyframes fade-in {
   from {
@@ -322,24 +509,28 @@ pre,
 }
 
 /* ---------- Controls ---------- */
-/* One height and one radius for every standalone button keeps the
-   controls quiet; buttons that sit in text or in a track opt out below. */
+/* Every standalone button is a capsule on the neutral fill, one height;
+   buttons that sit in text or in a track opt out below. The transparent
+   border keeps the size when a kind of button draws one. */
 button {
   font: inherit;
-  font-size: var(--text-md);
+  font-size: var(--text-ctl);
   font-weight: var(--w-medium);
-  line-height: var(--lh-snug);
+  line-height: 20px;
+  letter-spacing: var(--tracking);
   color: var(--fg);
   background: var(--bg-3);
   border: 1px solid transparent;
-  border-radius: var(--r-md);
-  min-height: 34px;
-  padding: 6px 14px;
+  border-radius: var(--r-full);
+  min-height: 32px;
+  padding: 5px 14px;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
   transition:
-    background-color var(--dur-2) var(--ease-standard),
-    color var(--dur-2) var(--ease-standard),
-    border-color var(--dur-2) var(--ease-standard),
+    background-color var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard),
+    border-color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard),
     transform var(--dur-1) var(--ease-standard);
 }
 /* Zero specificity, so each kind of button can set its own hover. */
@@ -347,33 +538,62 @@ button:where(:hover:not(:disabled)) {
   background: var(--bg-3-hover);
 }
 button:where(:active:not(:disabled)) {
-  transform: scale(0.98);
+  transform: scale(0.97);
 }
 button:disabled,
 button[aria-disabled="true"] {
   opacity: 0.45;
-  cursor: default;
+  cursor: not-allowed;
 }
+/* One primary per view, on the accent. */
 button.primary {
-  background: var(--fg);
-  color: var(--bg);
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: inset 0 1px 0 #ffffff2e, inset 0 0 0 1px #00000014, 0 1px 2px #0000001f;
 }
 button.primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--fg) 88%, var(--bg));
+  background: var(--accent);
+  filter: brightness(1.08);
 }
+/* Removes or deletes something: red text on the fill. */
 button.danger {
   color: var(--bad);
-  background: transparent;
-  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
 }
 button.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--bad) 10%, transparent);
+  background: var(--bad-soft);
+}
+/* The confirming action of a destructive dialog. */
+button.danger-fill {
+  background: var(--danger-bg);
+  color: var(--on-danger);
+  box-shadow: inset 0 1px 0 #ffffff40;
+}
+button.danger-fill:hover:not(:disabled) {
+  background: var(--danger-bg);
+  filter: brightness(1.08);
+}
+/* Quiet actions in rows and toolbars. */
+button.ghost {
+  background: transparent;
+  color: var(--fg-2);
+  padding-inline: 10px;
+}
+button.ghost:hover:not(:disabled) {
+  background: var(--fill);
+  color: var(--fg);
+}
+button.sm {
+  min-height: 28px;
+  padding: 4px 11px;
+  font-size: var(--text-small);
+  line-height: 18px;
 }
 button.link {
   background: none;
   border: none;
   padding: 0;
   min-height: 0;
+  border-radius: var(--r-xs);
   color: var(--fg-2);
 }
 /* A link-styled button reads as part of its text; .small and the like
@@ -387,17 +607,21 @@ button.link:hover:not(:disabled) {
   background: none;
   color: var(--fg);
 }
+/* An icon-only ghost capsule: the label is its name. */
 button.icon {
+  display: inline-grid;
+  place-items: center;
   background: transparent;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
   padding: 0;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-full);
   color: var(--fg-2);
   font-size: 16px;
 }
 button.icon:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--fill);
   color: var(--fg);
 }
 /* Rows and links do not shrink when pressed: on a wide row it reads as a
@@ -409,35 +633,36 @@ button.icon:hover:not(:disabled) {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+/* Fields: the field ground with a hairline ring, square-ish corners (only
+   pills and searches are capsules). */
 input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"])),
 textarea,
 select {
   font: inherit;
+  font-size: var(--text-ctl);
   color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
-  min-height: 36px;
-  padding: 8px 12px;
+  background: var(--field);
+  border: 1px solid transparent;
+  box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 2px #0000000a;
+  border-radius: var(--r-sm);
+  min-height: 34px;
+  padding: 6px 11px;
   width: 100%;
   transition:
-    border-color var(--dur-2) var(--ease-standard),
-    box-shadow var(--dur-2) var(--ease-standard);
+    border-color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
 }
 /* Fields only (checkboxes keep the outline); zero specificity, so a
-   borderless field (a pill, the sidebar search) stays borderless. */
-:where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), textarea, select):where(:hover:not(:disabled, :focus-visible)) {
-  border-color: color-mix(in srgb, var(--fg) 25%, var(--line-strong));
-}
-/* The accent border is at least 3:1 against the page, so it is the focus
-   indicator; the soft ring only adds presence. */
+   borderless field (a pill, the sidebar search) stays borderless. The
+   outline at 0 offset is the focus indicator (3:1, theme.test.ts); the
+   glow only adds presence. */
 :where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), textarea, select):focus-visible {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-  outline: none;
+  outline: 2px solid var(--focus);
+  outline-offset: 0;
+  box-shadow: 0 0 0 5px var(--focus-glow);
 }
 ::placeholder {
-  color: var(--fg-2);
+  color: var(--fg-3);
   opacity: 1;
 }
 input[type="checkbox"],
@@ -453,8 +678,30 @@ input[type="range"] {
 }
 select {
   appearance: none;
-  background: var(--bg) var(--chevron) no-repeat right 10px center / 12px;
+  background: var(--field) var(--chevron) no-repeat right 10px center / 12px;
+  box-shadow: inset 0 0 0 1px var(--hairline), 0 1px 1px #0000000a;
   padding-right: 30px;
+  cursor: pointer;
+}
+select:where(:hover:not(:disabled, :focus-visible)) {
+  box-shadow: inset 0 0 0 1px var(--sep), 0 1px 2px #0000000f;
+}
+@media (pointer: coarse) {
+  /* Only plain buttons: any rule with a class still sizes its own. */
+  button {
+    min-height: 40px;
+  }
+  button.sm {
+    min-height: 36px;
+  }
+  button.icon {
+    width: 40px;
+    height: 40px;
+  }
+  input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"])),
+  select {
+    min-height: 40px;
+  }
 }
 .muted {
   color: var(--fg-2);
@@ -496,11 +743,13 @@ select {
   place-items: center;
   padding: var(--space-4);
 }
+/* A card is thick glass on the flat backdrop: the tint, the specular edge
+   and hairline, the resting shadow. Never blurred: nothing moves behind it. */
 .card {
   background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xl);
-  padding: var(--space-6);
+  box-shadow: var(--edge), var(--shadow-1);
+  border-radius: var(--r-lg);
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -511,6 +760,7 @@ select {
 .login .card {
   width: min(400px, 100%);
   padding: var(--space-8);
+  border-radius: var(--r-xl);
 }
 /* First-run claim: a titled header, then numbered steps; the account step
    appears once the claim code is whole. */
@@ -556,8 +806,8 @@ select {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  background: var(--bg);
-  border: 1px solid var(--line);
+  background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--hairline);
   border-radius: var(--r-md);
   padding: 6px 6px 6px 12px;
 }
@@ -629,7 +879,7 @@ select {
 .pw-bars span {
   height: 4px;
   border-radius: var(--r-full);
-  background: var(--line-strong);
+  background: var(--fill-2);
   transition: background-color var(--dur-2) var(--ease-standard);
 }
 .pw-bars span.on {
@@ -649,20 +899,19 @@ select {
   margin: 0;
 }
 .card h1 {
-  font-size: var(--text-2xl);
-  font-weight: var(--w-semibold);
-  line-height: var(--lh-tight);
-  letter-spacing: -0.01em;
+  font: var(--w-bold) 22px / var(--lh-tight) var(--display);
+  letter-spacing: -0.022em;
 }
 .card h2 {
-  font-size: var(--text-lg);
-  font-weight: var(--w-semibold);
+  font-size: var(--text-base);
+  font-weight: var(--w-strong);
   letter-spacing: -0.01em;
 }
 .card h3 {
   margin-top: var(--space-2);
   font-size: var(--text-base);
-  font-weight: var(--w-semibold);
+  font-weight: var(--w-heading);
+  letter-spacing: -0.01em;
 }
 .card > h3:first-child {
   margin-top: 0;
@@ -675,18 +924,22 @@ select {
 /* ---------- Shell ---------- */
 .shell {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 240px minmax(0, 1fr);
   height: 100%;
 }
 .shell.collapsed {
   grid-template-columns: 56px 1fr;
 }
-/* Tone alone separates the sidebar from the page. */
+/* The source list: attached to the left edge, its own blurred material
+   and a hairline right border; no radius, no gap. */
 .sidebar {
   background: var(--bg-side);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border-right: 1px solid var(--hairline);
   display: flex;
   flex-direction: column;
-  padding: 10px;
+  padding: 14px 10px 10px;
   gap: var(--space-0-5);
   min-height: 0;
 }
@@ -698,7 +951,7 @@ select {
 }
 .brand {
   font-size: var(--text-base);
-  font-weight: var(--w-semibold);
+  font-weight: var(--w-bold);
   letter-spacing: -0.01em;
 }
 .conn-icon {
@@ -718,13 +971,27 @@ select {
   min-height: 0;
   text-align: left;
   background: transparent;
-  border-radius: var(--r-sm);
-  font-weight: var(--w-regular);
+  border-radius: 7px;
+  font-size: var(--text-md);
+  font-weight: var(--w-book);
+  line-height: var(--lh-body);
   transition: background-color var(--dur-1) var(--ease-standard);
 }
 .nav-item {
-  gap: var(--space-2);
-  padding: 8px 10px;
+  gap: 9px;
+  padding: 4px 10px;
+  min-height: 30px;
+}
+/* Page icons take the accent's graphics tone; on a hovered or active row
+   its text tone, which keeps 3:1 on the darker fill (theme.test.ts). */
+.sidebar-nav .nav-item > svg {
+  color: var(--accent-2);
+}
+.sidebar-nav .nav-item:is(:hover, .active) > svg {
+  color: var(--accent-fg);
+}
+.sidebar-nav .nav-item.later > svg {
+  color: inherit;
 }
 .nav-item:hover:not(:disabled),
 .session-item:hover:not(:disabled) {
@@ -732,18 +999,24 @@ select {
 }
 .section-label {
   font-size: var(--text-xs);
-  font-weight: var(--w-medium);
+  font-weight: var(--w-semibold);
   color: var(--fg-2);
   padding: 16px 10px 6px;
 }
 .session-item {
   gap: var(--space-2);
-  padding: 7px 10px;
+  padding: 4px 10px;
+  min-height: 30px;
 }
+/* The active row is the darker fill, never the accent; secondary text on
+   it switches to the text colour (--fg-2 there is 4.47:1 in light). */
 .session-item.active,
 .session-item.active:hover:not(:disabled) {
-  background: var(--bg-3);
-  font-weight: var(--w-medium);
+  background: var(--fill-2);
+  font-weight: var(--w-heading);
+}
+:is(.session-item, .nav-item).active .muted {
+  color: var(--fg);
 }
 .sidebar-foot {
   margin-top: var(--space-2);
@@ -758,7 +1031,7 @@ select {
   display: grid;
   place-items: center;
   background: var(--accent);
-  color: var(--accent-fg);
+  color: var(--on-accent);
   font-size: var(--text-sm);
   font-weight: var(--w-semibold);
   flex: none;
@@ -770,12 +1043,12 @@ select {
   flex: none;
 }
 .dot.running {
-  background: var(--accent);
+  background: var(--accent-2);
   animation: pulse 1.2s var(--ease-in-out) infinite;
 }
 /* A background command runs in the chat (no turn): a ring, not the pulse. */
 .dot.background {
-  border: 2px solid var(--accent);
+  border: 2px solid var(--accent-2);
 }
 @keyframes pulse {
   50% {
@@ -790,14 +1063,15 @@ select {
 .badge {
   font-size: var(--text-2xs);
   font-family: var(--mono);
-  padding: 0 6px;
-  border-radius: var(--r-xs);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  font-weight: var(--w-semibold);
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  background: var(--accent-soft);
+  color: var(--accent-fg);
   flex: none;
 }
 .badge-offline {
-  background: color-mix(in srgb, var(--bad) 16%, transparent);
+  background: var(--bad-soft);
   color: var(--bad);
 }
 .main {
@@ -919,25 +1193,29 @@ select {
 .composer-wrap {
   position: relative;
 }
-/* Opaque on purpose: the backgrounds rely on it. */
+/* Opaque on purpose: the home backgrounds move behind it, and text over
+   moving art through glass would not hold its contrast. It looks like
+   thick glass: the solid that is glass's own fallback, its edge and the
+   resting shadow. */
 .composer {
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2xl);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
   padding: 12px 12px 8px 18px;
-  box-shadow: var(--shadow-1);
-  transition: border-color var(--dur-2) var(--ease-standard);
+  box-shadow: inset 0 1px 0 0 var(--edge-hi), var(--shadow-1);
+  transition: border-color var(--dur-1) var(--ease-standard);
 }
 /* The full accent is at least 3:1 against the page and the composer
    (theme.test.ts), so the border is the focus indicator, as on fields. */
 .composer:focus-within {
-  border-color: var(--accent);
+  border-color: var(--focus);
 }
 .composer textarea,
 .composer textarea:focus-visible {
   border: none;
   background: transparent;
   box-shadow: none;
+  font-size: var(--text-base);
   resize: none;
   min-height: 0;
   padding: 6px 0;
@@ -954,20 +1232,21 @@ select {
   width: auto;
   min-height: 0;
   border-radius: var(--r-full);
-  padding: 4px 10px;
-  font-size: var(--text-sm);
-  font-weight: var(--w-regular);
-  line-height: var(--lh-body);
+  padding: 4px 11px;
+  font-size: var(--text-small);
+  font-weight: var(--w-medium);
+  line-height: 18px;
   background-color: transparent;
   border: 1px solid transparent;
+  box-shadow: none;
   color: var(--fg-2);
 }
 .pill:hover:not(:disabled) {
-  background-color: var(--bg-hover);
+  background-color: var(--fill);
   color: var(--fg);
 }
 .pill:focus-visible {
-  border-color: var(--accent);
+  border-color: var(--focus);
 }
 /* As wide as the chosen option, not the longest one. */
 select.pill {
@@ -976,7 +1255,7 @@ select.pill {
   field-sizing: content;
 }
 .pill.override {
-  color: var(--accent);
+  color: var(--accent-fg);
   border-color: var(--accent-line);
 }
 /* A track with a thumb that slides to the chosen mode (Composer measures
@@ -986,35 +1265,37 @@ select.pill {
   position: relative;
   isolation: isolate;
   display: inline-flex;
-  background: var(--bg-3);
+  gap: 2px;
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px var(--hairline);
   border-radius: var(--r-full);
-  padding: 2px;
+  padding: 3px;
 }
 .mode-thumb {
   position: absolute;
-  top: 2px;
-  bottom: 2px;
+  top: 3px;
+  bottom: 3px;
   left: 0;
   width: var(--w, 0px);
   transform: translateX(var(--x, 0px));
   border-radius: var(--r-full);
   background: var(--thumb);
-  box-shadow: var(--shadow-thumb);
+  box-shadow: 0 1px 3px #0000001f, 0 0 0 0.5px var(--hairline);
   z-index: -1;
 }
 .mode-switch.ready .mode-thumb {
   transition:
-    transform var(--dur-3) var(--ease-spring),
-    width var(--dur-3) var(--ease-spring);
+    transform var(--dur-thumb) var(--ease-standard),
+    width var(--dur-thumb) var(--ease-standard);
 }
 .mode-switch button {
   background: transparent;
   border-radius: var(--r-full);
   min-height: 0;
   padding: 3px 12px;
-  font-size: var(--text-sm);
-  font-weight: var(--w-regular);
-  line-height: var(--lh-body);
+  font-size: var(--text-small);
+  font-weight: var(--w-medium);
+  line-height: 20px;
   color: var(--fg-2);
 }
 .mode-switch button:hover:not(:disabled) {
@@ -1023,11 +1304,10 @@ select.pill {
 }
 .mode-switch button.on {
   color: var(--fg);
-  font-weight: var(--w-medium);
 }
 .mode-switch:not(.ready) button.on {
   background: var(--thumb);
-  box-shadow: var(--shadow-thumb);
+  box-shadow: 0 1px 3px #0000001f, 0 0 0 0.5px var(--hairline);
 }
 .mode-switch.auto button.on::after {
   content: " · auto";
@@ -1036,25 +1316,29 @@ select.pill {
   font-weight: var(--w-regular);
   animation: fade-in var(--dur-2) var(--ease-standard);
 }
+/* The composer's one primary action, on the accent. */
 .send {
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   min-height: 0;
   padding: 0;
   border-radius: var(--r-full);
-  background: var(--fg);
-  color: var(--bg);
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: inset 0 1px 0 #ffffff2e, inset 0 0 0 1px #00000014, 0 1px 2px #0000001f;
 }
 .send:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--fg) 88%, var(--bg));
+  background: var(--accent);
+  filter: brightness(1.08);
 }
 .send:active:not(:disabled) {
-  transform: scale(0.94);
+  transform: scale(0.97);
 }
 .send:disabled {
-  background: var(--bg-3);
+  background: var(--fill);
+  box-shadow: none;
   color: var(--fg-2);
   opacity: 1;
 }
@@ -1063,7 +1347,7 @@ select.pill {
 }
 /* Two groups of controls: the hairline is what tells them apart. */
 .agentic-row {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--sep);
   margin-top: var(--space-2);
   padding-top: var(--space-2);
 }
@@ -1091,24 +1375,30 @@ select.pill {
 }
 
 /* ---------- Popovers ---------- */
-/* Menus and popovers float: their own surface, a hairline, the deeper
-   shadow. They rise in a little; under reduced motion only the fade is
-   left (--dur-3 goes instant). */
+/* Menus and popovers float: thick glass, blurred (they are open briefly,
+   so the blur costs nothing while a chat streams), the glass edge and the
+   floating shadow. They rise in a little; under reduced motion only the
+   fade is left (--dur-sheet goes instant). */
 .mention-popup,
 .select-list,
 .combo-list,
 .cite-card,
 .link-confirm,
-.agent-menu {
+.agent-menu,
+.account-menu,
+.var-menu,
+.artifact-menu-items {
   background: var(--surface-pop);
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-2);
-  padding: 4px;
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  border: 0;
+  border-radius: var(--r-md);
+  box-shadow: var(--edge), var(--shadow-2);
+  padding: 5px;
   color: var(--fg);
   transition:
     opacity var(--dur-2) var(--ease-standard),
-    transform var(--dur-3) var(--ease-spring);
+    transform var(--dur-sheet) var(--ease-standard);
 }
 @starting-style {
   .mention-popup,
@@ -1116,10 +1406,25 @@ select.pill {
   .combo-list,
   .cite-card,
   .link-confirm,
-  .agent-menu {
+  .agent-menu,
+  .account-menu {
     opacity: 0;
     transform: translateY(4px) scale(0.98);
   }
+}
+/* The highlighted row of a menu is the accent fill; the chosen one only
+   carries its check. Secondary text and icons on it take the fill's text
+   colour. */
+:is(.mention-popup li, .select-list li, .combo-list li, .agent-menu button, .menu-item, .var-menu button, .artifact-menu-items button) {
+  border-radius: 8px;
+}
+:is(.mention-popup li.active, .select-list li.on, .combo-list li.on, .agent-menu > button:hover:not(:disabled), .agent-menu > button:focus-visible, .menu-item:hover, .menu-item:focus-visible, .menu-item[aria-expanded="true"], .var-menu button:hover:not(:disabled), .var-menu button:focus-visible, .artifact-menu-items button:hover:not(:disabled)) {
+  background: var(--accent);
+  color: var(--on-accent);
+  outline: none;
+}
+:is(.mention-popup li.active, .select-list li.on, .combo-list li.on, .agent-menu > button:hover, .agent-menu > button:focus-visible, .menu-item:hover, .menu-item:focus-visible, .menu-item[aria-expanded="true"], .var-menu button:hover, .var-menu button:focus-visible, .artifact-menu-items button:hover) :is(.muted, .option-hint, .menu-check, svg, .small) {
+  color: var(--on-accent);
 }
 .mention-popup {
   position: absolute;
@@ -1136,9 +1441,7 @@ select.pill {
   cursor: pointer;
   font-size: var(--text-md);
 }
-.mention-popup li.active {
-  background: var(--bg-hover);
-}
+
 
 /* ---------- Conversation ---------- */
 .conversation {
@@ -1176,6 +1479,11 @@ select.pill {
   overflow-y: auto;
   padding: 24px 0 12px;
 }
+/* Messages are read, not scanned: they keep 15px while the interface
+   around them is the design system's 14px. */
+.msg {
+  font-size: var(--text-base);
+}
 .timeline .column {
   display: flex;
   flex-direction: column;
@@ -1191,14 +1499,14 @@ select.pill {
 .msg.user .bubble {
   background: var(--bubble);
   padding: 10px 16px;
-  border-radius: var(--r-xl);
+  border-radius: var(--r-lg);
   white-space: pre-wrap;
   max-width: 80%;
 }
 .author {
   font-size: var(--text-xs);
   font-weight: var(--w-medium);
-  color: var(--accent);
+  color: var(--accent-fg);
   margin-bottom: var(--space-1);
 }
 .md {
@@ -1258,7 +1566,7 @@ select.pill {
 .md blockquote {
   margin: 8px 0;
   padding-left: 12px;
-  border-left: 2px solid var(--line-strong);
+  border-left: 2px solid var(--sep);
   color: var(--fg-2);
 }
 
@@ -1277,7 +1585,7 @@ select.pill {
   white-space: normal;
 }
 .md a {
-  color: var(--accent);
+  color: var(--accent-fg);
   text-decoration-color: var(--accent-line);
   text-underline-offset: 2px;
 }
@@ -1435,7 +1743,7 @@ select.pill {
 .callout-title {
   color: var(--fg);
 }
-.callout-note { --tone: var(--accent); }
+.callout-note { --tone: var(--accent-fg); }
 .callout-tip { --tone: var(--ok); }
 .callout-important { --tone: var(--tone-important); }
 .callout-warning { --tone: var(--warn); }
@@ -1451,10 +1759,11 @@ select.pill {
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
 }
+/* Opaque: rows scroll under a sticky header. */
 .md .table-scroll thead th {
   position: sticky;
   top: 0;
-  background: var(--bg-2);
+  background: var(--bg);
   padding: 0;
 }
 .th-sort {
@@ -1590,14 +1899,14 @@ th:not([aria-sort="none"]) .th-sort-icon {
 
 .msg.assistant.streaming .md > :last-child::after {
   content: "▍";
-  color: var(--accent);
+  color: var(--accent-fg);
   animation: pulse 1s steps(2) infinite;
 }
 .codeblock {
   margin: 8px 0;
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  background: var(--bg-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--field);
   overflow: hidden;
 }
 .codeblock .code-head {
@@ -1644,9 +1953,9 @@ pre.code,
 pre.term,
 pre.diff {
   margin: 0;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  background: var(--field);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
   padding: 12px 14px;
   overflow: auto;
   max-height: 420px;
@@ -1690,10 +1999,14 @@ pre.diff .del {
 }
 
 /* ---------- Tool cards ---------- */
+/* Cards in the transcript are thick glass without blur: a chat that streams
+   for minutes must not repaint through a backdrop filter. The hairline is
+   a border, so a waiting call can colour it. */
 .tool {
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-2);
+  box-shadow: inset 0 1px 0 0 var(--edge-hi), var(--shadow-1);
   overflow: hidden;
 }
 .tool-waiting {
@@ -1712,10 +2025,10 @@ pre.diff .del {
 }
 .tool-head:hover:not(:disabled),
 .tool-group-head:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--fill);
 }
 .tool-name {
-  font-weight: var(--w-semibold);
+  font-weight: var(--w-medium);
   font-family: var(--mono);
   font-size: var(--text-sm);
 }
@@ -1737,7 +2050,7 @@ pre.diff .del {
   color: var(--bad);
 }
 .s-running {
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 .s-waiting {
   color: var(--warn);
@@ -1753,8 +2066,8 @@ pre.diff .del {
 }
 .approval {
   padding: 10px 14px 14px;
-  border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-top: 1px solid var(--sep);
+  background: var(--warn-soft);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -1810,7 +2123,7 @@ pre.term.call-add {
 }
 .hidden-mark {
   color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  background: var(--warn-soft);
   border-radius: 3px;
 }
 .call-cut {
@@ -1858,7 +2171,7 @@ pre.term.call-add {
 .memory-icon {
   flex: none;
   margin-top: 3px;
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 .memory-body {
   min-width: 0;
@@ -1920,9 +2233,10 @@ pre.term.web-output {
   margin-top: 6px;
 }
 .tool-group {
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-2);
+  box-shadow: inset 0 1px 0 0 var(--edge-hi), var(--shadow-1);
   overflow: hidden;
 }
 .tool-group-head {
@@ -1972,9 +2286,10 @@ pre.term.web-output {
 .ui-card {
   margin: 10px 0;
   padding: 12px 16px 14px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-2);
+  box-shadow: inset 0 1px 0 0 var(--edge-hi), var(--shadow-1);
 }
 .ui-from {
   margin-bottom: 6px;
@@ -2044,7 +2359,7 @@ pre.term.web-output {
 .ui-bar-fill {
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
+  background: var(--accent-2);
   transition: width var(--dur-4) var(--ease-standard);
 }
 .ui-progress-done .ui-bar-fill { background: var(--ok); }
@@ -2076,7 +2391,7 @@ pre.term.web-output {
   color: var(--fg-2);
   font-size: var(--text-xs);
 }
-.ui-step-active .ui-icon { color: var(--accent); }
+.ui-step-active .ui-icon { color: var(--accent-fg); }
 .ui-step-done .ui-icon { color: var(--ok); }
 .ui-step-stopped .ui-icon { color: var(--warn); }
 /* A snapshot keeps its "from" label, inline, and a rule instead of the
@@ -2259,7 +2574,7 @@ pre.term.web-output {
   padding: 6px 10px;
   border-left: 2px solid var(--warn);
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
-  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  background: var(--warn-soft);
   color: var(--fg);
   font-size: var(--text-sm);
 }
@@ -2310,8 +2625,8 @@ pre.term.web-output {
 .ui-option:disabled:not(.ui-option-chosen),
 .ui-option:has(input:disabled):not(.ui-option-chosen) { color: var(--fg-2); }
 .ui-option-chosen {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  border-color: var(--focus);
+  box-shadow: inset 0 0 0 1px var(--focus);
   font-weight: var(--w-medium);
 }
 .ui-option-text {
@@ -2521,7 +2836,9 @@ table.users select {
 }
 
 /* ---------- Mobile ---------- */
-@media (max-width: 760px) {
+/* Under 820px (the design system's narrow width) the sidebar is a drawer:
+   the system's top bar of page capsules has no room for the chat list. */
+@media (max-width: 820px) {
   .shell,
   .shell.collapsed {
     grid-template-columns: 1fr;
@@ -2532,7 +2849,8 @@ table.users select {
     width: min(300px, 85vw);
     z-index: 30;
     transform: translateX(-100%);
-    transition: transform var(--dur-3) var(--ease-out);
+    transition: transform var(--dur-sheet) var(--ease-standard);
+    box-shadow: var(--shadow-2);
   }
   .shell.drawer-open .sidebar {
     transform: none;
@@ -2713,13 +3031,13 @@ mark {
   background: color-mix(in srgb, var(--tag) 12%, var(--bg));
   white-space: nowrap;
 }
-.model-tag.tag-ctx { --tag: var(--accent-blue); }
-.model-tag.tag-out { --tag: var(--accent-orange); }
-.model-tag.tag-effort { --tag: var(--accent-violet); }
-.model-tag.tag-vision { --tag: var(--accent-green); }
-.model-tag.tag-tools { --tag: var(--accent-pink); }
+.model-tag.tag-ctx { --tag: var(--ac-blue-fg); }
+.model-tag.tag-out { --tag: var(--ac-orange-fg); }
+.model-tag.tag-effort { --tag: var(--ac-purple-fg); }
+.model-tag.tag-vision { --tag: var(--ac-green-fg); }
+.model-tag.tag-tools { --tag: var(--ac-pink-fg); }
 .model-tag.tag-custom {
-  --tag: var(--accent);
+  --tag: var(--accent-fg);
   background: var(--bg);
   box-shadow: inset 0 0 0 1px var(--accent-line);
 }
@@ -2772,7 +3090,7 @@ button.agent-pick:active:not(:disabled) {
 /* A chosen model no agent uses yet: saving waits for it. */
 button.agent-pick.loose {
   border-style: dashed;
-  border-color: var(--line-strong);
+  border-color: var(--sep);
   color: var(--fg-2);
 }
 /* A menu in the top layer; md/anchored.ts places it under its button. */
@@ -2798,15 +3116,11 @@ button.agent-pick.loose {
   font-weight: var(--w-regular);
   text-align: left;
 }
-.agent-menu button:hover:not(:disabled),
-.agent-menu button:focus-visible {
-  background: var(--bg-hover);
-}
 .agent-menu button[aria-checked="true"] {
   font-weight: var(--w-semibold);
 }
 .agent-menu button svg {
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 /* One agent per row: its name, then Main and Fallback. */
 .agent-menu-row {
@@ -2925,13 +3239,13 @@ button.agent-pick.loose {
   align-items: flex-start;
 }
 .form input[readonly] {
-  background: var(--bg-2);
+  background: var(--fill);
   color: var(--fg-2);
 }
 /* A URL the preset fixes: disabled, so it never takes focus or a caret,
    yet readable like a read-only field. */
 .form input.fixed:disabled {
-  background: var(--bg-2);
+  background: var(--fill);
   color: var(--fg-2);
   -webkit-text-fill-color: var(--fg-2);
   opacity: 1;
@@ -2950,7 +3264,7 @@ button.agent-pick.loose {
   flex: none;
   width: 36px;
   height: 36px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--sep);
   border-radius: var(--r-md);
   color: var(--fg);
 }
@@ -2982,32 +3296,56 @@ button.agent-pick.loose {
 }
 .swatches {
   margin-top: 6px;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
-/* Each swatch is the current theme's ramp entry, so it shows the colour
-   the accent will be. The chosen one gets a ring with a gap. */
+/* Each swatch is its preset's fill in the current theme, so it shows the
+   colour the accent will be. The chosen one gets a gap ring, a ring in
+   its own colour and a dot in the colour text takes on it. */
 .swatch {
-  width: 28px;
-  height: 28px;
+  --sw-on: var(--on-light-accent);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
   min-height: 0;
   padding: 0;
   border: 0;
   border-radius: var(--r-full);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 12%, transparent);
-  transition: box-shadow var(--dur-2) var(--ease-standard), transform var(--dur-1) var(--ease-standard);
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px #0000001f;
+  transition: box-shadow var(--dur-1) var(--ease-standard), filter var(--dur-1) var(--ease-standard);
+}
+button.swatch:hover:not(:disabled) {
+  background: var(--sw);
+  filter: brightness(1.08);
 }
 .swatch.on {
-  box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 4px var(--fg);
+  box-shadow: inset 0 0 0 1px #0000001f, 0 0 0 2px var(--solid), 0 0 0 4px var(--sw);
+}
+.swatch.on::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--sw-on);
 }
 .swatch:focus-visible {
-  outline-offset: 6px;
+  outline-offset: 5px;
 }
-.sw-blue { background: var(--accent-blue); }
-.sw-violet { background: var(--accent-violet); }
-.sw-green { background: var(--accent-green); }
-.sw-orange { background: var(--accent-orange); }
-.sw-pink { background: var(--accent-pink); }
-.sw-gray { background: var(--accent-gray); }
+@media (pointer: coarse) {
+  .swatch {
+    width: 36px;
+    height: 36px;
+  }
+}
+.sw-blue { --sw: var(--ac-blue); }
+.sw-purple { --sw: var(--ac-purple); }
+.sw-pink { --sw: var(--ac-pink); }
+.sw-red { --sw: var(--ac-red); }
+.sw-orange { --sw: var(--ac-orange); --sw-on: var(--on-dark-accent); }
+.sw-yellow { --sw: var(--ac-yellow); --sw-on: var(--on-dark-accent); }
+.sw-green { --sw: var(--ac-green); }
+.sw-graphite { --sw: var(--ac-graphite); }
 
 /* Phase 6: attachments, incognito, token meter, summaries */
 .chips {
@@ -3029,11 +3367,13 @@ button.agent-pick.loose {
   align-items: center;
   gap: var(--space-1-5);
   max-width: 260px;
-  padding: 3px 10px;
-  border: 1px solid var(--line);
+  padding: 4px 11px;
+  border: 0;
   border-radius: var(--r-full);
-  font-size: var(--text-xs);
-  background: var(--bg);
+  font-size: var(--text-small);
+  font-weight: var(--w-medium);
+  line-height: 18px;
+  background: var(--fill);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3143,9 +3483,10 @@ details.summary p {
   margin: 8px 0;
 }
 .msg.variant {
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-2);
+  box-shadow: inset 0 1px 0 0 var(--edge-hi);
   padding: 10px 14px;
   min-width: 0;
 }
@@ -3204,8 +3545,7 @@ ul.savings input[type=number] { width: 5.5em; }
 }
 .combo-list ul { margin: 0; padding: 0; list-style: none; overflow-y: auto; min-height: 0; }
 .combo-list li { color: var(--fg); font-size: var(--text-md); display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; }
-.combo-list li.on { background: var(--bg-hover); }
-.combo-foot { flex: none; margin-top: 4px; padding: 6px 10px 2px; border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--fg-2); }
+.combo-foot { flex: none; margin-top: 4px; padding: 6px 10px 2px; border-top: 1px solid var(--sep); font-size: var(--text-xs); color: var(--fg-2); }
 .combo-foot a { color: inherit; }
 /* An option's icon (a flag, a favicon) and its label. */
 .option-label { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; }
@@ -3228,17 +3568,18 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .select { position: relative; display: inline-block; min-width: 0; }
 /* Select.tsx's button looks like an input; compact, like a pill. */
 .select-button {
-  display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-height: 36px;
-  padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-md);
-  background: var(--bg); color: var(--fg); font: inherit; font-size: var(--text-md); cursor: pointer;
+  display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-height: 34px;
+  padding: 6px 10px 6px 12px; border: 1px solid transparent; border-radius: var(--r-sm);
+  background: var(--field); box-shadow: inset 0 0 0 1px var(--hairline), 0 1px 1px #0000000a;
+  color: var(--fg); font: inherit; font-size: var(--text-ctl); font-weight: var(--w-regular); cursor: pointer;
 }
-.select-button:hover:not(:disabled) { background: var(--bg); border-color: color-mix(in srgb, var(--fg) 25%, var(--line-strong)); }
+.select-button:hover:not(:disabled) { background: var(--field); box-shadow: inset 0 0 0 1px var(--sep), 0 1px 2px #0000000f; }
 .select-button:active:not(:disabled) { transform: none; }
 .select.compact .select-button {
   min-height: 0; padding: 4px 10px; border-color: transparent; border-radius: var(--r-full);
-  background: transparent; color: var(--fg-2); font-size: var(--text-sm);
+  background: transparent; box-shadow: none; color: var(--fg-2); font-size: var(--text-sm);
 }
-.select.compact .select-button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.select.compact .select-button:hover:not(:disabled) { background: var(--fill); box-shadow: none; color: var(--fg); }
 .select-list {
   position: absolute; z-index: 30; left: 0; top: calc(100% + 4px); min-width: 240px;
   margin: 0; list-style: none; max-height: 320px; overflow-y: auto;
@@ -3248,16 +3589,16 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   display: flex; justify-content: space-between; align-items: center; gap: var(--space-4);
   padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; color: var(--fg); font-size: var(--text-md);
 }
-.select-list li.on { background: var(--bg-hover); }
 .select-list li.chosen > span:first-child { font-weight: var(--w-semibold); }
 .select-list { font-weight: var(--w-regular); }
 /* A segmented control looks like the mode switch: a track, a raised thumb. */
-.seg { display: inline-flex; background: var(--bg-3); border-radius: var(--r-full); padding: 2px; }
+/* One choice from a few: a capsule track, the chosen segment raised. */
+.seg { display: inline-flex; gap: 2px; background: var(--fill); box-shadow: inset 0 0 0 1px var(--hairline); border-radius: var(--r-full); padding: 3px; }
 /* Many options wrap onto more lines; a pill would not hold them. */
 .seg.wrap { flex-wrap: wrap; max-width: 100%; border-radius: var(--r-lg); }
 .seg button {
-  border: 0; background: none; color: var(--fg-2); min-height: 0; padding: 3px 12px; border-radius: var(--r-full);
-  font: inherit; font-size: var(--text-sm); font-weight: var(--w-regular); cursor: pointer;
+  border: 0; background: none; color: var(--fg-2); min-height: 26px; padding: 3px 12px; border-radius: var(--r-full);
+  font: inherit; font-size: var(--text-small); font-weight: var(--w-medium); line-height: 20px; cursor: pointer;
   display: inline-flex; align-items: center; gap: var(--space-1-5);
 }
 .field > .seg,
@@ -3269,10 +3610,14 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .form .field-label { display: block; }
 .optional { font-weight: var(--w-regular); }
 .check:has(input:disabled) { opacity: 0.45; }
-.seg button:hover:not(:disabled) { background: none; color: var(--fg); }
-.seg button.on { background: var(--thumb); box-shadow: var(--shadow-thumb); color: var(--fg); font-weight: var(--w-medium); }
+.seg button:hover:not(:disabled) { background: var(--fill); color: var(--fg); }
+.seg button.on,
+.seg button.on:hover:not(:disabled) { background: var(--thumb); box-shadow: 0 1px 3px #0000001f, 0 0 0 0.5px var(--hairline); color: var(--fg); }
+@media (pointer: coarse) {
+  .seg button { min-height: 36px; }
+}
 .row.wrap { flex-wrap: wrap; }
-.custom-engine { padding: 12px; border: 1px solid var(--line); border-radius: var(--r-lg); }
+.custom-engine { padding: 14px 16px; border-radius: var(--r-md); background: var(--glass-thin); box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 0 var(--edge-hi); }
 .custom-engine .row input:not([type]) { flex: 1; }
 
 /* Agent avatars (AgentAvatar.tsx): the face is the agent's accent, lit and
@@ -3284,6 +3629,8 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .agent-avatar .av-face,
 .agent-avatar .av-side,
 .agent-avatar .av-layer { stroke-width: 2.5; stroke-linejoin: round; }
+/* Orange and Yellow are too light for white marks. */
+.agent-avatar:is([data-accent="orange"], [data-accent="yellow"]) { --av-on: var(--on-dark-accent); }
 .agent-avatar .av-face { fill: var(--av-c); stroke: var(--av-c); }
 .agent-avatar .av-side {
   fill: color-mix(in srgb, var(--av-c) 62%, var(--av-depth));
@@ -3294,9 +3641,9 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .agent-avatar .av-shade-0 { stop-color: var(--av-shade); stop-opacity: 0; }
 .agent-avatar .av-shade-1 { stop-color: var(--av-shade); }
 .agent-avatar .av-ground { fill: var(--av-ground); transform-origin: 20px 36px; }
-.agent-avatar .av-pupil { fill: var(--accent-fg); }
+.agent-avatar .av-pupil { fill: var(--av-on, var(--on-light-accent)); }
 .agent-avatar .av-happy,
-.agent-avatar .av-brow { fill: none; stroke: var(--accent-fg); stroke-width: 1.5; stroke-linecap: round; opacity: 0; }
+.agent-avatar .av-brow { fill: none; stroke: var(--av-on, var(--on-light-accent)); stroke-width: 1.5; stroke-linecap: round; opacity: 0; }
 .agent-avatar .av-pupil,
 .agent-avatar .av-happy,
 .agent-avatar .av-brow { transition: opacity var(--dur-2) var(--ease-standard); }
@@ -3381,9 +3728,12 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
    replaced by them. The tint is mixed into the page, so it stays opaque. */
 .notices { margin-top: var(--space-4); }
 .notices ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+/* A notice is the status tint, r-md, the text in the text colour and the
+   icon in the status colour; the tint over the flat backdrop stays the
+   same colour whatever it scrolls past. */
 .notice {
-  display: flex; gap: var(--space-2); align-items: flex-start; padding: 10px 12px; border-radius: var(--r-lg);
-  background: color-mix(in srgb, var(--bad) 10%, var(--bg)); border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--bg));
+  display: flex; gap: 9px; align-items: flex-start; padding: 10px 13px; border-radius: var(--r-md);
+  background: var(--bad-soft);
   font-size: var(--text-sm); color: var(--fg);
 }
 .notice > svg { flex: none; margin-top: 2px; color: var(--bad); }
@@ -3405,12 +3755,12 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   display: inline-flex; align-items: center; justify-content: center; min-height: 0; padding: 4px;
   border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg);
 }
-.avatar-picks button.on { border-color: var(--accent); background: var(--accent-soft); }
+.avatar-picks button.on { border-color: var(--focus); background: var(--accent-soft); }
 
 /* ---------- Workspaces ---------- */
 .workspace-badge {
   width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: var(--r-sm);
-  background: var(--accent); color: var(--accent-fg); font-size: var(--text-xs); font-weight: var(--w-semibold);
+  background: var(--accent); color: var(--on-accent); font-size: var(--text-xs); font-weight: var(--w-semibold);
 }
 .workspace-new { display: flex; flex-direction: column; gap: var(--space-1-5); padding: 0 6px; }
 .workspace-new .row button { min-height: 0; padding: 4px 12px; font-size: var(--text-sm); }
@@ -3450,8 +3800,8 @@ table.users.ws-roles svg { color: var(--ok); vertical-align: middle; }
 /* ---------- Agents (sidebar → Agents, and one agent's page) ---------- */
 .nav-item.active,
 .nav-item.active:hover:not(:disabled) {
-  background: var(--bg-3);
-  font-weight: var(--w-medium);
+  background: var(--fill-2);
+  font-weight: var(--w-heading);
 }
 .agents-page {
   flex: 1;
@@ -3579,8 +3929,8 @@ button.icon.danger-icon { color: var(--bad); }
   font-weight: var(--w-regular);
   line-height: var(--lh-body);
   color: var(--fg);
-  background: var(--bg-2);
-  border: 1px solid var(--line);
+  background: var(--field);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
 }
 textarea.agent-prompt-input {
@@ -3589,7 +3939,7 @@ textarea.agent-prompt-input {
   resize: vertical;
 }
 .form textarea[readonly] {
-  background: var(--bg-2);
+  background: var(--fill);
   color: var(--fg);
 }
 .agent-save { margin-top: var(--space-2); }
@@ -3644,49 +3994,49 @@ textarea.agent-prompt-input {
 }
 .feature.planned .feature-label { color: var(--fg-2); }
 .tag {
-  padding: 0 6px;
+  padding: 0 7px;
   font-size: var(--text-2xs);
-  font-weight: var(--w-medium);
+  font-weight: var(--w-semibold);
   line-height: 16px;
   color: var(--fg-2);
-  border: 1px solid var(--line-strong);
+  box-shadow: inset 0 0 0 1px var(--sep);
   border-radius: var(--r-full);
 }
-/* A checkbox drawn as a switch: a track with a thumb that slides. */
+/* A checkbox drawn as a switch: off is the third fill, on is the success
+   fill (never the accent), the white thumb slides 16px. */
 input.switch[type="checkbox"] {
   appearance: none;
   position: relative;
   flex: none;
-  width: 30px;
-  height: 18px;
-  margin: 1px 0 0;
-  background: var(--bg-3);
-  border: 1px solid var(--line-strong);
+  width: 40px;
+  height: 24px;
+  margin: 0;
+  background: var(--fill-3);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--hairline);
   border-radius: var(--r-full);
   cursor: pointer;
-  transition: background-color var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard);
+  transition: background-color var(--dur-1) var(--ease-standard);
 }
 input.switch[type="checkbox"]::before {
   content: "";
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 12px;
-  height: 12px;
-  background: var(--fg-2);
+  width: 20px;
+  height: 20px;
+  background: var(--switch-thumb);
   border-radius: var(--r-full);
-  box-shadow: var(--shadow-thumb);
-  transition: transform var(--dur-3) var(--ease-standard), background-color var(--dur-1) var(--ease-standard);
+  box-shadow: 0 2px 4px #00000038, 0 0 0 0.5px #0000000f;
+  transition: transform var(--dur-thumb) var(--ease-standard);
 }
 input.switch[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--ok-fill);
 }
 input.switch[type="checkbox"]:checked::before {
-  background: var(--accent-fg);
-  transform: translateX(12px);
+  transform: translateX(16px);
 }
-input.switch[type="checkbox"]:disabled { cursor: default; }
+input.switch[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.45; }
 .feature.planned input.switch { opacity: 0.5; }
 /* ---------- Projects (docs/projects.md) ---------- */
 /* Sidebar: a section's header row, its disclosure and its + button. */
@@ -3823,7 +4173,7 @@ button.icon.small {
   gap: var(--space-2);
   padding: 8px;
   background: var(--bg-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
 }
 .board-col.add {
@@ -3960,8 +4310,8 @@ input.add-line {
   gap: 1px;
 }
 .nav-item.active {
-  background: var(--bg-3);
-  font-weight: var(--w-medium);
+  background: var(--fill-2);
+  font-weight: var(--w-heading);
 }
 .nav-item.later {
   color: var(--fg-2);
@@ -3982,7 +4332,7 @@ input.add-line {
   width: 7px;
   height: 7px;
   border-radius: var(--r-full);
-  background: var(--accent);
+  background: var(--accent-2);
   flex: none;
 }
 .sidebar-scroll {
@@ -4057,16 +4407,16 @@ a.icon.rail-item {
   place-items: center;
   width: 36px;
   height: 36px;
-  border-radius: var(--r-sm);
-  color: var(--fg-2);
+  border-radius: 10px;
+  color: var(--accent-2);
 }
 a.icon.rail-item:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
+  background: var(--fill);
+  color: var(--accent-fg);
 }
 a.icon.rail-item.active {
-  background: var(--bg-3);
-  color: var(--fg);
+  background: var(--fill-2);
+  color: var(--accent-fg);
 }
 .rail-item .nav-dot {
   position: absolute;
@@ -4088,7 +4438,7 @@ a.icon.rail-item.active {
   width: 15px;
   height: 15px;
   font-size: 9px;
-  box-shadow: 0 0 0 2px var(--bg-side);
+  box-shadow: 0 0 0 2px var(--sidebar-solid);
 }
 .small-avatar {
   width: 20px;
@@ -4107,12 +4457,6 @@ a.icon.rail-item.active {
   max-width: min(320px, calc(100vw - 16px));
   max-height: min(480px, calc(100vh - 16px));
   overflow-y: auto;
-  background: var(--surface-pop);
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-2);
-  padding: 4px;
-  color: var(--fg);
 }
 .menu-item {
   display: flex;
@@ -4129,34 +4473,44 @@ a.icon.rail-item.active {
   text-decoration: none;
   cursor: pointer;
 }
-.menu-item:hover,
-.menu-item:focus-visible,
-.menu-item[aria-expanded="true"] {
-  background: var(--bg-hover);
-}
 .menu-item[aria-checked="true"] {
   font-weight: var(--w-semibold);
 }
 .menu-check {
   width: 14px;
   display: inline-flex;
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 .menu-sep {
   height: 1px;
   margin: 4px 6px;
-  background: var(--line);
+  background: var(--sep);
 }
 .menu-error {
   padding: 4px 10px;
 }
+/* Dialogs: thick glass, blurred, the glass edge, the floating shadow. */
 .workspace-dialog,
-.search-panel {
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+.search-panel,
+.delete-chat,
+.media-preview,
+.host-warning {
+  border: 0;
+  border-radius: var(--r-xl);
   background: var(--surface-pop);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
   color: var(--fg);
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--edge), var(--shadow-2);
+}
+:is(.workspace-dialog, .search-panel, .delete-chat, .media-preview, .host-warning)[open] {
+  animation: sheet-in var(--dur-sheet) var(--ease-standard);
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
 }
 .workspace-dialog {
   width: min(360px, calc(100vw - 32px));
@@ -4189,16 +4543,22 @@ a.icon.rail-item.active {
   width: 100%;
   min-height: 0;
 }
+/* The palette's search line: no field of its own, the panel is the
+   field; the caret in the dialog's only input is the focus. */
 .search-top {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  padding: 8px 8px 0;
+  padding: 6px 8px 0 4px;
 }
-input.search-input {
+input.search-input,
+input.search-input:focus-visible {
   border-color: transparent;
   background: transparent;
-  font-size: var(--text-md);
+  box-shadow: none;
+  outline: none;
+  font-size: var(--text-lg);
+  padding: 8px 12px;
 }
 .search-close {
   display: none;
@@ -4206,8 +4566,8 @@ input.search-input {
 .search-tabs {
   display: flex;
   gap: var(--space-1);
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--line);
+  padding: 6px 12px 10px;
+  border-bottom: 1px solid var(--sep);
   overflow-x: auto;
 }
 .search-tabs button {
@@ -4219,14 +4579,13 @@ input.search-input {
   font-size: var(--text-sm);
 }
 .search-tabs button.on {
-  background: var(--bg-3);
+  background: var(--fill-2);
   color: var(--fg);
-  font-weight: var(--w-medium);
 }
 .search-list {
   list-style: none;
   margin: 0;
-  padding: 4px;
+  padding: 6px 8px 8px;
   overflow-y: auto;
   min-height: 0;
 }
@@ -4234,12 +4593,21 @@ input.search-input {
   display: flex;
   gap: var(--space-2);
   align-items: flex-start;
-  padding: 8px 10px;
-  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  border-radius: 10px;
   cursor: pointer;
 }
+/* The highlighted result is the accent fill, everything on it its text. */
 .search-row.on {
-  background: var(--bg-hover);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.search-row.on :is(.muted, .search-icon, .small) {
+  color: var(--on-accent);
+}
+.search-row.on mark {
+  background: color-mix(in srgb, var(--on-accent) 22%, transparent);
+  color: inherit;
 }
 .search-icon {
   flex: none;
@@ -4302,7 +4670,7 @@ input.search-input {
 /* ── feature pages (I4) ── */
 /* Routine results under the bar: a failed or paused routine reads red. */
 .routine-results button.bad .similar-title { color: var(--bad); }
-.dot.unseen { display: inline-block; margin-left: var(--space-1-5); vertical-align: middle; background: var(--accent); }
+.dot.unseen { display: inline-block; margin-left: var(--space-1-5); vertical-align: middle; background: var(--accent-2); }
 /* Routines: the list reuses the agents index; a row's second line wraps. */
 .routine-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .routine-bad { color: var(--bad); }
@@ -4346,14 +4714,12 @@ textarea.routine-prompt { font-family: var(--mono); font-size: var(--text-sm); r
 .var-picker { position: relative; }
 .var-menu {
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; width: min(340px, 80vw); max-height: 320px; overflow-y: auto;
-  padding: 6px; background: var(--surface-pop); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-2);
 }
 .var-group { padding: 6px 8px 2px; }
 .var-menu button {
   width: 100%; display: flex; justify-content: space-between; gap: var(--space-3); min-height: 0; padding: 5px 8px;
   background: transparent; text-align: left; font-weight: var(--w-regular); border-radius: var(--r-sm);
 }
-.var-menu button:hover:not(:disabled), .var-menu button:focus-visible { background: var(--bg-hover); outline: none; }
 .runs-table td { vertical-align: top; }
 .runs-table tr.unseen > td { font-weight: var(--w-semibold); }
 .runs-result { max-width: 280px; overflow-wrap: anywhere; }
@@ -4379,10 +4745,10 @@ textarea.routine-prompt { font-family: var(--mono); font-size: var(--text-sm); r
 }
 .media-tile:active { transform: none; }
 .media-tile img { width: 100%; height: 100%; object-fit: cover; }
-.media-tile.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+.media-tile.selected { outline: 2px solid var(--focus); outline-offset: -2px; }
 .media-tile.selected::after {
   content: "✓"; position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: var(--r-full);
-  background: var(--accent); color: var(--accent-fg); font-size: var(--text-xs); line-height: 20px;
+  background: var(--accent); color: var(--on-accent); font-size: var(--text-xs); line-height: 20px;
 }
 .media-icon { display: flex; flex-direction: column; align-items: center; gap: var(--space-1); padding: 8px; max-width: 100%; color: var(--fg-2); }
 .media-name { max-width: 100%; color: var(--fg); }
@@ -4393,7 +4759,6 @@ textarea.routine-prompt { font-family: var(--mono); font-size: var(--text-sm); r
 .media-preview {
   width: min(1200px, calc(100vw - 32px)); height: min(820px, calc(100vh - 32px)); max-width: none; max-height: none; padding: 0;
   display: grid; grid-template-columns: minmax(0, 1fr) 300px; overflow: hidden;
-  background: var(--bg-2); color: var(--fg); border: 1px solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-2);
 }
 .media-preview:not([open]) { display: none; }
 .media-preview::backdrop { background: var(--scrim); }
@@ -4439,15 +4804,13 @@ a.button-like:hover { background: var(--bg-3-hover); }
 .artifact-actions a.button-like { min-height: 30px; padding: 4px 12px; font-size: var(--text-sm); }
 .artifact-rename input { width: 14em; }
 .artifact-menu { position: relative; }
-.artifact-menu > summary { list-style: none; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: var(--r-sm); color: var(--fg-2); cursor: pointer; font-size: 18px; line-height: 1; }
+.artifact-menu > summary { list-style: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: var(--r-full); color: var(--fg-2); cursor: pointer; font-size: 18px; line-height: 1; }
 .artifact-menu > summary::-webkit-details-marker { display: none; }
 .artifact-menu > summary:hover { background: var(--bg-hover); }
 .artifact-menu-items {
-  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px; display: flex; flex-direction: column; padding: 6px;
-  background: var(--surface-pop); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-2);
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px; display: flex; flex-direction: column;
 }
 .artifact-menu-items button { justify-content: flex-start; background: transparent; border: 0; text-align: left; font-weight: var(--w-regular); }
-.artifact-menu-items button:hover:not(:disabled) { background: var(--bg-hover); }
 .artifact-versions ul { list-style: none; margin: 0; padding: 0; }
 .artifact-row .artifact-versions { padding-left: 48px; }
 .artifact-version { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-top: 1px solid var(--line); font-size: var(--text-sm); }
@@ -4514,13 +4877,29 @@ button.danger-text { color: var(--bad); }
 /* ── end feature pages ── */
 /* The "Delete chat" confirm. */
 .delete-chat {
-  width: min(420px, calc(100vw - 32px));
+  width: min(380px, calc(100vw - 24px));
   padding: 0;
-  border: none;
-  border-radius: var(--r-lg);
-  background: var(--surface-pop);
-  color: var(--fg);
-  box-shadow: var(--shadow-2);
 }
 .delete-chat::backdrop { background: var(--scrim); }
 .delete-chat .media-confirm { margin: 0; }
+/* Execution modes (N.10a): the chat's mode, and the host shell's warning
+   (a dialog of the group above: thick glass, blurred). Its risks sit on the
+   warning tint in content text (theme.test.ts checks both themes). */
+.badge-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.host-warning {
+  width: min(480px, calc(100vw - 32px));
+  padding: var(--space-4);
+}
+.host-warning::backdrop { background: var(--scrim); }
+.host-warning h2 { font-size: var(--text-lg); font-weight: var(--w-semibold); margin: 0; }
+.host-warning p { margin: 0; color: var(--fg); }
+.host-risks {
+  margin: 0;
+  padding: var(--space-3) var(--space-3) var(--space-3) calc(var(--space-3) + 16px);
+  border-radius: var(--r-lg);
+  background: var(--warn-soft);
+  color: var(--fg);
+}

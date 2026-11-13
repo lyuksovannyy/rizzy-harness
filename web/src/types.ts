@@ -15,6 +15,10 @@ export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" 
 
 export type Profile = "chat" | "agentic";
 
+/** How an agentic chat's commands run (N.10a, docs/execution-modes.md):
+ * chosen when it is created, never changed. */
+export type ExecMode = "sandbox" | "host";
+
 export interface SessionCreated {
   title: string;
   cwd: string;
@@ -29,6 +33,8 @@ export interface SessionCreated {
   parent_session?: string;
   /** Never resumed by a background command's end (a routine's chat). */
   no_callbacks?: boolean;
+  /** How its commands run; absent for a chat (no commands). */
+  exec_mode?: ExecMode;
 }
 
 export interface AgentRef {
@@ -372,7 +378,7 @@ export interface NewAgent {
 
 export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";
 export type AvatarEyes = "round" | "long" | "short" | "wide" | "sleepy";
-export type AvatarAccent = "blue" | "violet" | "green" | "orange" | "pink" | "gray";
+export type AvatarAccent = "blue" | "purple" | "pink" | "red" | "orange" | "yellow" | "green" | "graphite";
 
 /** How an agent looks: a shape with eyes, in one of the accents. */
 export interface AgentAvatar {
@@ -627,6 +633,10 @@ export interface NodeInfo {
   connected: boolean;
   embedded: boolean;
   profile: Profile;
+  /** The execution modes the node announced it offers, most confined first. */
+  exec_modes?: ExecMode[];
+  /** Their gaps (`gap:sandbox:netns`, `gap:host:netns`), for the chat to say. */
+  exec_gaps?: string[];
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

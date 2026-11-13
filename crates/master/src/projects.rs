@@ -649,7 +649,8 @@ mod tests {
         assert!(check_icon(DEFAULT_ICON).is_ok());
         assert!(check_icon("skull").is_err());
         assert!(check_accent(DEFAULT_ACCENT).is_ok());
-        assert!(check_accent("red").is_err());
+        assert!(check_accent("red").is_ok());
+        assert!(check_accent("teal").is_err());
         assert_eq!(memory_owner("p1"), "project:p1");
     }
 }

@@ -155,6 +155,7 @@ impl Harness {
     async fn create(&mut self) -> SessionId {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
+            exec_mode: None,
             no_callbacks: false,
             profile: None,
             incognito: false,
@@ -391,6 +392,7 @@ async fn cwd_outside_roots_is_refused() {
     })
     .await;
     h.send(MasterToNode::Create {
+        exec_mode: None,
         no_callbacks: false,
         profile: None,
         incognito: false,
@@ -417,16 +419,19 @@ async fn cwd_outside_roots_is_refused() {
 }
 
 /// `[sandbox] mode = "required"` on a node where the sandbox does not work:
-/// no agentic session is created, with the setting named (FIX_PLAN 2.7).
+/// it offers no execution mode, and no agentic session is created, with the
+/// setting named (FIX_PLAN 2.7, N.10a).
 #[tokio::test]
 async fn a_node_without_its_required_sandbox_refuses_sessions() {
     let mut h = Harness::new(|root| {
         let mut p = default_policy(root);
-        p.sandbox_refusal = Some("set [sandbox] mode in node.toml".into());
+        let why = || Err("set [sandbox] mode in node.toml".into());
+        p.exec = harness_node::exec::ExecOffers::new(why(), why(), vec![]);
         p
     })
     .await;
     h.send(MasterToNode::Create {
+        exec_mode: None,
         no_callbacks: false,
         profile: None,
         incognito: false,
@@ -494,6 +499,7 @@ async fn cwd_containing_the_data_dir_is_refused() {
     .await;
     for cwd in [h.ws.clone(), h.ws.join(".data")] {
         h.send(MasterToNode::Create {
+            exec_mode: None,
             no_callbacks: false,
             profile: None,
             incognito: false,
@@ -537,6 +543,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
         let link = node.attach().await;
         link.to_node
             .try_send(MasterToNode::Create {
+                exec_mode: None,
                 no_callbacks: false,
                 profile: None,
                 incognito: false,
@@ -702,6 +709,7 @@ async fn recovers_interrupted_turn_on_start() {
         let store = Store::open(&path, Durability::Full).unwrap();
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
+                exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
                 no_callbacks: false,
                 profile: harness_core::event::Profile::Agentic,
                 agent_id: None,
@@ -808,6 +816,7 @@ async fn sub_task_sessions_ask_no_questions() {
     let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
     let sid = SessionId::new();
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
         no_callbacks: false,
         profile: harness_core::event::Profile::Agentic,
         agent_id: None,
@@ -1771,6 +1780,7 @@ async fn ack_time_on_a_long_session() {
         {
             let store = Store::open(&path, Durability::Normal).unwrap();
             let created = EventKind::SessionCreated(SessionCreated {
+                exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
                 no_callbacks: false,
                 profile: harness_core::event::Profile::Agentic,
                 agent_id: None,
@@ -2617,6 +2627,7 @@ const BUSY: &str = "another chat is working in this folder right now";
 async fn create_in(h: &mut Harness, cwd: &std::path::Path) -> SessionId {
     let sid = SessionId::new();
     h.send(MasterToNode::Create {
+        exec_mode: None,
         no_callbacks: false,
         profile: None,
         incognito: false,
@@ -3327,6 +3338,7 @@ fn asked_in(h: &Harness, sid: SessionId) -> Vec<(String, String)> {
 async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalMode) -> SessionId {
     let sid = SessionId::new();
     h.send(MasterToNode::Create {
+        exec_mode: None,
         no_callbacks: false,
         req_id: "c".into(),
         session_id: sid,
@@ -3569,6 +3581,7 @@ async fn a_stop_closes_the_running_turn_and_refuses_new_work() {
 
     h.send(prompt_msg("p2", idle, "hello"));
     h.send(MasterToNode::Create {
+        exec_mode: None,
         no_callbacks: false,
         profile: None,
         incognito: false,
