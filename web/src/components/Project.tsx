@@ -800,7 +800,7 @@ function ProjectSettings(props: {
     setError(null);
     try {
       const { name, description, icon, accent, instructions, settings } = draft;
-      // A retired accent name (violet, gray) is saved as its successor.
+      // An accent that is not a preset is saved as the default.
       const look = normalizeAccent(accent) ?? "blue";
       props.onSaved(await projectsApi.update(p.project_id, { name, description, icon, accent: look, instructions, settings }));
       setSaved(true);

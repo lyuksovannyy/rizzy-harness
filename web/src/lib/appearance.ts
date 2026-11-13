@@ -16,13 +16,9 @@ export const BACKDROP_KEY = "harness.backdrop";
 export const ACCENTS = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "graphite"] as const;
 export type Accent = (typeof ACCENTS)[number];
 
-/** Names an earlier palette used, and the preset each became. */
-const RETIRED: Record<string, Accent> = { violet: "purple", gray: "graphite" };
-
 /** A saved accent as one of `ACCENTS`, or null for anything else (the default). */
 export function normalizeAccent(accent: string | null | undefined): Accent | null {
   if (!accent) return null;
-  if (Object.hasOwn(RETIRED, accent)) return RETIRED[accent]!;
   return (ACCENTS as readonly string[]).includes(accent) ? (accent as Accent) : null;
 }
 
@@ -37,7 +33,7 @@ function remember(key: string, value: string | null) {
 
 /**
  * Shows `theme` (anything but light or dark follows the OS) and `accent`
- * (null or blue is the default; a retired name shows as its successor). A preview passes `mirror: false`, so a
+ * (null, blue or anything that is not a preset is the default). A preview passes `mirror: false`, so a
  * reload before Save comes back to what is saved.
  */
 export function applyAppearance(theme: string | null | undefined, accent: string | null | undefined, mirror = true): void {

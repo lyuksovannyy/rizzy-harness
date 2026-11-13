@@ -62,26 +62,24 @@ describe("accent presets", () => {
     expect(ACCENTS).toEqual(["blue", "purple", "pink", "red", "orange", "yellow", "green", "graphite"]);
   });
 
-  test("the retired names map to their successors; anything unknown is the default", () => {
-    expect(normalizeAccent("violet")).toBe("purple");
-    expect(normalizeAccent("gray")).toBe("graphite");
+  test("a preset is itself; anything else is the default", () => {
     for (const a of ACCENTS) expect(normalizeAccent(a)).toBe(a);
-    for (const a of [null, undefined, "", "teal", "Blue", "blue;x"]) expect(normalizeAccent(a)).toBeNull();
+    for (const a of [null, undefined, "", "teal", "violet", "gray", "Blue", "blue;x"]) expect(normalizeAccent(a)).toBeNull();
   });
 
-  test("a saved old name is shown, and mirrored, as the new one", () => {
-    applyAppearance(null, "violet");
+  test("a preset is shown and mirrored; anything else clears both", () => {
+    applyAppearance(null, "purple");
     expect(root().dataset.accent).toBe("purple");
     expect(localStorage.getItem(ACCENT_KEY)).toBe("purple");
-    applyAppearance(null, "teal");
+    applyAppearance(null, "violet");
     expect(root().dataset.accent).toBeUndefined();
     expect(localStorage.getItem(ACCENT_KEY)).toBeNull();
   });
 
-  // public/theme.js runs before the bundle: the same mapping, by hand.
-  test("theme.js applies the same mapping before the first paint", () => {
+  // public/theme.js runs before the bundle: the same list, by hand.
+  test("theme.js applies only a preset before the first paint", () => {
         const run = () => new Function(script)();
-    for (const [saved, shown] of [["violet", "purple"], ["gray", "graphite"], ["yellow", "yellow"], ["graphite", "graphite"], ["blue", undefined], ["teal", undefined], ['x" onload="', undefined]] as const) {
+    for (const [saved, shown] of [["violet", undefined], ["gray", undefined], ["purple", "purple"], ["yellow", "yellow"], ["graphite", "graphite"], ["blue", undefined], ["teal", undefined], ['x" onload="', undefined]] as const) {
       delete root().dataset.accent;
       localStorage.setItem(ACCENT_KEY, saved);
       run();

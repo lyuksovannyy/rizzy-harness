@@ -31,17 +31,12 @@ pub enum Eyes {
 #[serde(rename_all = "snake_case")]
 pub enum Accent {
     Blue,
-    // `violet` and `gray` were this palette's names before Rizzy Glass;
-    // an admin's config.toml may still say them, and a config that no
-    // longer parses would take every agent's look with it.
-    #[serde(alias = "violet")]
     Purple,
     Pink,
     Red,
     Orange,
     Yellow,
     Green,
-    #[serde(alias = "gray")]
     Graphite,
 }
 
@@ -123,11 +118,12 @@ mod tests {
     #[test]
     fn serde_names() {
         let a: AgentAvatar =
-            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"gray"}"#).unwrap();
+            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"graphite"}"#)
+                .unwrap();
         assert_eq!(a.shape, Shape::Drop);
         assert_eq!(a.accent, Accent::Graphite);
         let v: AgentAvatar =
-            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"violet"}"#).unwrap();
+            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"purple"}"#).unwrap();
         assert_eq!(v.accent, Accent::Purple);
         assert_eq!(
             serde_json::to_string(&v).unwrap(),
@@ -136,6 +132,12 @@ mod tests {
         for a in ["red", "yellow", "graphite"] {
             let s = format!(r#"{{"shape":"drop","eyes":"sleepy","accent":"{a}"}}"#);
             assert!(serde_json::from_str::<AgentAvatar>(&s).is_ok(), "{a}");
+        }
+        // The palette's earlier names are gone, not aliased (no
+        // compatibility code before the first tagged release).
+        for a in ["violet", "gray"] {
+            let s = format!(r#"{{"shape":"drop","eyes":"sleepy","accent":"{a}"}}"#);
+            assert!(serde_json::from_str::<AgentAvatar>(&s).is_err(), "{a}");
         }
         assert!(
             serde_json::from_str::<AgentAvatar>(

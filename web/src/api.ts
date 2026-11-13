@@ -210,7 +210,7 @@ export const api = {
   },
   classifier: () => call<unknown>("GET", "/api/me/classifier"),
   saveClassifier: (state: unknown) => call<{ ok: boolean }>("PUT", "/api/me/classifier", state),
-  /** A retired accent name (violet, gray) comes back as its successor, so the next save passes the server's list. */
+  /** An accent the server holds that is not one of the presets comes back as null (the default), so the next save passes the server's list. */
   settings: () => call<Prefs>("GET", "/api/me/settings").then((p) => ({ ...p, accent: normalizeAccent(p.accent) })),
   memories: () => call<{ memories: MemoryFact[]; backend: string }>("GET", "/api/memory"),
   workspaces: () => call<WorkspaceList>("GET", "/api/workspaces"),

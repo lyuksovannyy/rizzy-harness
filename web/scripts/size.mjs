@@ -85,7 +85,7 @@ const SPLIT_KB = 1.7;
 const T8D_KB = 2.3;
 
 // Rizzy Glass stage 1, measured 370.6 (initial 99.7): the accent presets'
-// one list and the mapping of retired names, in the first load (+0.1).
+// one list, in the first load (+0.1).
 const GLASS_KB = 0.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.

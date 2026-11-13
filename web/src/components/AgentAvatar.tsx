@@ -55,7 +55,7 @@ export function AgentAvatar(props: {
   title?: string;
 }) {
   const { shape, eyes } = props.avatar;
-  // A name an earlier palette used (violet, gray) shows as its successor.
+  // Anything that is not a preset draws in the default.
   const accent = normalizeAccent(props.avatar.accent) ?? "blue";
   const state = props.state ?? "idle";
   const size = props.size ?? 24;

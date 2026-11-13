@@ -98,9 +98,10 @@ Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
 (Graphite leaves the interface grey apart from status colours). A pick shows
 at once and is kept with Save; leaving without saving goes back. The browser
 remembers the saved choice, so a reload paints it straight away, before the
-preferences arrive from the server. An accent saved under an earlier name
-shows as its successor (Violet as Purple, Gray as Graphite) and is saved
-under the new name the next time. The interface follows the Rizzy Glass
+preferences arrive from the server. The earlier names Violet and Gray are
+gone: a saved preference with one of them shows as Blue until you pick again,
+and an agent look in `config.toml` that says `violet` or `gray` must be
+changed to `purple` or `graphite`. The interface follows the Rizzy Glass
 design system ([docs/rizzy-glass.md](docs/rizzy-glass.md)); with the
 system's "reduce transparency" setting its glass surfaces turn solid.
 

@@ -299,7 +299,7 @@ mod context_tests {
         for a in ["red", "yellow", "graphite"] {
             assert_eq!(one_of("accent", &Some(a.into()), ACCENTS), Ok(()));
         }
-        // Retired names: the web maps them before it saves.
+        // The earlier palette's names are refused like any unknown one.
         assert!(one_of("accent", &Some("violet".into()), ACCENTS).is_err());
     }
 
