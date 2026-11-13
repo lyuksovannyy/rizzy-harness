@@ -1576,65 +1576,94 @@ async fn n4_a_still_alive_end_keeps_its_slot_until_the_process_is_gone() {
 // Off by default; sub-agents; scope
 // ---------------------------------------------------------------------
 
-/// T8D-4 as decided: step 1 ships the feature off. On a node with the
-/// defaults nothing starts, nothing is listed, nothing is left, and the
-/// master's stop is a no-op.
+/// T8D-4 closed by step 2 (default ON, `background_per_session = 8`): the
+/// node's defaults now take a background start, it is listed and holds a
+/// slot, and the person's stop (relayed as `session.stop_background { by:
+/// User }`, what the HTTP route of step 2 sends) ends it with
+/// `stopped_by_user` and its process is gone. A node explicitly set to 0
+/// still refuses the start: the off path the operator can choose survives.
+/// (The HTTP route, its authorisation and the strip are proved in the
+/// step 2 record: `docs/security-review/2026-11-T8d-step2-stop.md`,
+/// `step2_authz.py`, `step2_stop.py`, `backgroundstrip.test.tsx`.)
 #[tokio::test(flavor = "multi_thread")]
-async fn t8d4_with_the_defaults_nothing_starts_lists_or_stays() {
+async fn t8d4_step2_the_defaults_take_a_start_the_person_stops_it_and_0_still_refuses() {
+    // 1. The node's defaults: the feature is on (8 a chat).
     let Some(mut n) = node(vec![], |_| {}).await else {
         return;
     };
-    let _reaper = Reaper(vec![978_160]);
+    let _reaper = Reaper(vec![978_160, 978_161]);
     let sid = n.session().await;
     n.turn(
         sid,
         json!([
             bg("sleep 978160", 60),
             tool("bash_output", json!({})),
-            tool("bash_output", json!({"id": "bg-1"})),
-            tool("bash_stop", json!({"id": "bg-1"})),
         ]),
     )
     .await;
-    for (i, by) in [StopBackgroundBy::AccessRevoked, StopBackgroundBy::User]
-        .into_iter()
-        .enumerate()
-    {
-        n.send(MasterToNode::StopBackground {
-            req_id: format!("off{i}"),
-            session_id: sid,
-            bg_id: None,
-            by,
-        });
+    let res = n.results(sid);
+    eprintln!("--- T8D-4 (step 2): the defaults take a start ---");
+    for r in &res {
+        eprintln!("    {}", r.chars().take(130).collect::<String>());
     }
-    let (a0, a1) = (n.ack("off0").await, n.ack("off1").await);
+    assert_eq!(n.starts(sid), vec!["bg-1"], "the default node runs it");
+    assert!(res[1].contains("bg-1"), "bash_output lists it: {}", res[1]);
+    assert!(!sleeps(978_160).is_empty(), "its process runs");
+    assert!(n.ends(sid).is_empty(), "it has not ended");
+
+    // 2. The person's stop, exactly as the step 2 route relays it.
+    let from = n.seen.len();
     n.send(MasterToNode::StopBackground {
-        req_id: "off2".into(),
+        req_id: "stop-one".into(),
         session_id: sid,
         bg_id: Some("bg-1".into()),
         by: StopBackgroundBy::User,
     });
-    let a2 = n.ack("off2").await;
-    // After the revocation's stop closed the (empty) table, and without a
-    // new message: still only the refusal.
-    n.turn(sid, json!([bg("sleep 978160", 60)])).await;
+    let ack = n.ack("stop-one").await;
+    n.until_from(from, sid, |k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    let end = n.ends(sid).pop().unwrap();
+    eprintln!("the person's stop: ack {ack:?}; end reason {:?}", end.reason);
+    assert!(ack.0 && ack.1.is_none(), "the node took the stop: {ack:?}");
+    assert_eq!(end.reason, BackgroundReason::StoppedByUser);
+    assert!(
+        sleeps(978_160).is_empty(),
+        "the stopped command's process is gone"
+    );
+    let _ = n.rt.stop(Duration::from_secs(10)).await;
+
+    // 3. The off path the operator can still choose: 0 refuses the start,
+    //    lists nothing, and the master's stop is a no-op.
+    let Some(mut n) = node(vec![], |p| p.limits.background_per_session = 0).await else {
+        return;
+    };
+    let sid = n.session().await;
+    n.turn(
+        sid,
+        json!([
+            bg("sleep 978161", 60),
+            tool("bash_output", json!({})),
+            tool("bash_stop", json!({"id": "bg-1"})),
+        ]),
+    )
+    .await;
+    n.send(MasterToNode::StopBackground {
+        req_id: "off".into(),
+        session_id: sid,
+        bg_id: Some("bg-1".into()),
+        by: StopBackgroundBy::User,
+    });
+    let off = n.ack("off").await;
     let res = n.results(sid);
-    eprintln!("--- T8D-4: the defaults ---");
+    eprintln!("--- T8D-4 (step 2): background_per_session = 0 still refuses ---");
     for r in &res {
         eprintln!("    {}", r.chars().take(130).collect::<String>());
     }
-    eprintln!("session.stop_background, all (revoked), all (user), bg-1: {a0:?} {a1:?} {a2:?}");
-    assert!(
-        res[0].contains("background_per_session = 0")
-            && res[4].contains("background_per_session = 0")
-    );
+    assert!(res[0].contains("background_per_session = 0"), "{}", res[0]);
     assert!(res[1].contains("No background commands"));
-    assert!(
-        res[2].contains("no background command bg-1")
-            && res[3].contains("no background command bg-1")
-    );
-    assert!(a0.0 && a1.0 && !a2.0);
-    assert!(sleeps(978_160).is_empty());
+    assert!(res[2].contains("no background command bg-1"));
+    assert!(!off.0, "the stop of a chat with no table is refused: {off:?}");
+    assert!(sleeps(978_161).is_empty());
     assert!(n.starts(sid).is_empty() && n.ends(sid).is_empty());
     assert_eq!(n.rt.background_held(), 0);
     let _ = n.rt.stop(Duration::from_secs(10)).await;
