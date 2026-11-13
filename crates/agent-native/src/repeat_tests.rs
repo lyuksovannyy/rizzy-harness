@@ -969,9 +969,45 @@ async fn a_failing_build_that_moves_after_each_edit_runs() {
     let fin = host.noted();
     assert_eq!(lines_of(dir.path(), "runs"), 7, "{fin:?}");
     assert_eq!((r.probes, r.changes), (6, 6), "{fin:?}");
-    assert!(
-        fin.iter().all(|f| f.2.is_none()),
-        "nothing is warned: {fin:?}"
-    );
+    assert!(fin.iter().all(|f| f.2.is_none()), "nothing is warned: {fin:?}");
     assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+}
+
+/// Review T1-D2: the same call twice in one message. The second ask in the
+/// message that made the first refusal is refused again, but the model has
+/// not been sent that refusal, so the turn goes on; asking again in the
+/// next message ends it.
+#[tokio::test]
+async fn a_second_ask_in_the_refusing_message_does_not_end_the_turn() {
+    let host = Host::new(Decision::Allow);
+    let a = probe(json!({"path": "a"}));
+    let mut steps = vec![vec![a.clone(), a.clone()]; 3];
+    steps.push(vec![a.clone(), ("change", json!({"n": 1}))]);
+    let o = Opts {
+        steps: Some(steps),
+        ..Default::default()
+    };
+    let r = run_opts(&host, vec![], o).await;
+    let fin = host.noted();
+    assert_eq!(r.probes, 4, "{fin:?}");
+    assert_eq!(fin.len(), 8, "{fin:?}");
+    for f in &fin[4..6] {
+        assert!(f.1.contains("Not run"), "{fin:?}");
+        let note = f.2.as_deref().unwrap_or("");
+        assert!(note.contains("Asking for it again ends the turn"), "{fin:?}");
+    }
+    assert_eq!(r.rec.seen.lock().unwrap().len(), 4, "{fin:?}");
+    let told = sent_results(&r);
+    assert!(
+        harness_lines(&told[4])
+            .iter()
+            .any(|l| l.contains("was not run")),
+        "the model was sent the refusal: {told:?}"
+    );
+    assert!(
+        fin[6].2.as_deref().unwrap_or("").contains("turn ends"),
+        "{fin:?}"
+    );
+    assert!(fin[7].1.contains("Not run") && r.changes == 0, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
 }
