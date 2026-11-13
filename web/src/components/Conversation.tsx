@@ -43,6 +43,8 @@ import type { ProjectSummary } from "../lib/projects";
 
 // Opt-in, and only its own small chunk: most people never load it.
 const ChatGutter = lazy(() => import("../bg/ChatGutter"));
+// Loaded on the chat's first running background command (T.8d step 2).
+const BackgroundStrip = lazy(() => import("./BackgroundStrip"));
 
 function Undo(props: {
   sessionId: string;
@@ -283,6 +285,10 @@ export default function Conversation(props: {
   // Deleting asks in a dialog that also offers the chat's Media files.
   const [deleting, setDeleting] = useState(false);
   const remove = () => setDeleting(true);
+  // The background strip: once a command of this chat runs, it stays
+  // mounted (it hides itself) so an end this tab asked for can show.
+  const stripFor = useRef<string | null>(null);
+  if (view?.background && Object.values(view.background).some((b) => !b.ended)) stripFor.current = sessionId;
 
   const page = (
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
@@ -581,6 +587,17 @@ export default function Conversation(props: {
 
       <div className="bottom">
         <div className="column">
+          {stripFor.current === sessionId && (
+            <Suspense fallback={null}>
+              <BackgroundStrip
+                key={sessionId}
+                sessionId={sessionId}
+                view={view ?? null}
+                away={!!node && !node.connected}
+                nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
+              />
+            </Suspense>
+          )}
           <Composer
             where="session"
             agents={props.agents}

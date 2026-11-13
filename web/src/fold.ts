@@ -260,7 +260,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     }
     case "background_started":
-      (v.background ??= {})[p.bg_id] = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, ended: false };
+      (v.background ??= {})[p.bg_id] = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, timeout_s: p.timeout_s, ended: false };
       break;
     case "background_ended": {
       const b = v.background?.[p.bg_id];

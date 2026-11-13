@@ -1,0 +1,131 @@
+//! The person's stop of a chat's background commands (T.8d step 2,
+//! docs/background-commands.md §4.7, §4.9): one command (`bg_id`) or all
+//! of them. Owner only, as every per-chat route: anyone else, admins and
+//! workspace admins included, gets the 404 a chat that does not exist gets
+//! (T10). Like the turn's cancel it needs no settled password and no
+//! agentic grant: stopping work is always allowed (Gate 3 review P-7).
+//!
+//! The master runs nothing and reads no log for this: it relays
+//! `session.stop_background { by: user }` to the owning node, which alone
+//! decides. The node stops the command and records
+//! `background_ended { reason: stopped_by_user }`, takes a stop of a
+//! command that has just ended without a second end, or refuses with its
+//! reason (an id it does not have), which is passed on. Stop all is always
+//! sent: what the master's log shows may be behind what the node runs, and
+//! Stop all must not be something a command can hide from. The end itself
+//! arrives as the event, as every end does.
+
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::post;
+use axum::{Json, Router};
+use harness_protocol::{CAP_BACKGROUND, StopBackgroundBy};
+use serde_json::{Value, json};
+
+use super::{ApiError, ApiResult, require_any, visible_session};
+use crate::{CommandError, Master};
+
+pub(super) fn routes() -> Router<Master> {
+    Router::new()
+        .route("/api/sessions/{id}/background/stop", post(stop_all))
+        .route("/api/sessions/{id}/background/{bg}/stop", post(stop_one))
+}
+
+async fn stop_all(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    stop(&m, &headers, &id, None).await
+}
+
+async fn stop_one(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path((id, bg)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    stop(&m, &headers, &id, Some(bg)).await
+}
+
+/// `bg-<n>` as the node numbers them (at most nine digits).
+fn is_bg_id(s: &str) -> bool {
+    s.strip_prefix("bg-")
+        .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The node is not connected: the stop cannot reach it. Said plainly, with
+/// what happens to the commands instead.
+fn away(node: &str) -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!(
+            "the node {node} that runs this chat is away, so the stop cannot reach it; its \
+             background commands end with that node or at their timeout, and the chat shows \
+             the end when the node is back"
+        ),
+    )
+}
+
+async fn stop(
+    m: &Master,
+    headers: &HeaderMap,
+    id: &str,
+    bg: Option<String>,
+) -> ApiResult<Json<Value>> {
+    let who = require_any(m, headers).await?;
+    let row = visible_session(m, &who, id).await?;
+    if let Some(b) = &bg
+        && !is_bg_id(b)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "bad background command id (bg-<number>)".into(),
+        ));
+    }
+    let sid = row.session_id;
+    let node = row.node_id.clone();
+    if !m.is_connected(&node) {
+        return Err(away(&node));
+    }
+    if !m.node_has(&node, CAP_BACKGROUND) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this chat's node does not run background commands (a chat node, or one older \
+             than this server)"
+                .into(),
+        ));
+    }
+    tracing::info!(session = %sid, bg = bg.as_deref().unwrap_or("all"), "the owner stops background commands");
+    match m.stop_background(sid, bg, StopBackgroundBy::User).await {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        // The link went between the check and the send.
+        Err(CommandError::NodeOffline(_)) => Err(away(&node)),
+        // The node's refusal (409, its words), no answer in time (504), a
+        // node that is stopping (503: it stops them itself).
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_the_nodes_shape_only() {
+        for ok in ["bg-1", "bg-42", "bg-999999999"] {
+            assert!(is_bg_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "bg-",
+            "bg-1x",
+            "bg--1",
+            "BG-1",
+            "bg-1234567890",
+            "../bg-1",
+            "bg-1 ",
+        ] {
+            assert!(!is_bg_id(bad), "{bad:?}");
+        }
+    }
+}

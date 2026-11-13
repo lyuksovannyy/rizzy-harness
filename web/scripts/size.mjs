@@ -76,7 +76,13 @@ const SPLIT_KB = 1.7;
 // T.8d step 1, measured 368.4 (initial 99.5): the fold knows the two
 // background events and the conversation shows a background command's end
 // as a plain line with its tail as text (+0.2).
-const T8D_KB = 0.2;
+// T.8d step 2, measured 370.5 (initial 99.5, unchanged): the chat's
+// background strip (Stop, Stop all, time left, a node away), its own lazy
+// chunk loaded on a chat's first running background command (+1.9, its
+// stylesheet 0.4 beside it), and the conversation's lazy import of it and
+// the fold's timeout (+0.1); the strip's hidden-character marks on a
+// refusal took it from 370.4 to 370.5 (+0.1).
+const T8D_KB = 2.3;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB) * 100) / 10) / 10;
@@ -150,6 +156,9 @@ lazyChunk(/\/SearchBg-/, "Search background");
 lazyChunk(/\/WallBg-/, "Ask background");
 lazyChunk(/\/BinaryBg-/, "Agentic background");
 lazyChunk(/\/ChatGutter-/, "chat gutter");
+// T.8d step 2: the chat's background strip loads only while a chat has a
+// background command running.
+lazyChunk(/\/BackgroundStrip-/, "background strip");
 
 // I3: its lazy chunks (the search panel, the account menu, and the login
 // form, which signed-in visits never draw).
