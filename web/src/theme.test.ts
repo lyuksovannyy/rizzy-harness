@@ -206,6 +206,13 @@ describe("theme", () => {
       for (const tone of ["--ok", "--warn", "--bad"]) {
         expect(color(t, `var(${tone}-fill)`)[3], `${tone}-fill`).toBe(1);
       }
+      // The approval's body and a notice: neutral text on the soft tint.
+      for (const layers of [["--warn-soft", "--glass-thick"], ["--bad-soft"], ["--bad-soft", "--glass-thick"]]) {
+        const g = ground(t, ...layers);
+        for (const tone of ["--fg", "--fg-2"]) {
+          expect(contrast(ink(t, tone, g), g), `${tone} on ${name(layers)} ${g}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
     }
   });
 
@@ -330,6 +337,7 @@ describe("theme", () => {
   // transcript, its messages, tool cards, code blocks or tables.
   test("backdrop-filter is used only where the design system puts it", () => {
     const rules = [...css.matchAll(/([^{}]+)\{[^{}]*backdrop-filter[^{}]*\}/g)].map((m) => m[1]!.trim());
+    expect(rules.length).toBeGreaterThan(0);
     for (const sel of rules) {
       expect(sel, sel).not.toMatch(/\.(msg|bubble|tool|codeblock|md|conversation|transcript|table|ui-card|card)\b/);
     }
