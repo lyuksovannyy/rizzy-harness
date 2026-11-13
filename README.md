@@ -1322,7 +1322,7 @@ stored as `[savings]` in `config.toml` and applies from the next message.
 
 | Method | Default | Applies to | What it does |
 |---|---|---|---|
-| `prompt_cache` | on | chat + agentic | Marks the stable start of each request (instructions, tools, history) cacheable; Anthropic bills re-reads at 10% or less. Per-turn context (memory recall) is sent after the history so it does not invalidate the cache. |
+| `prompt_cache` | on | chat + agentic | Marks the start of each request (instructions and tools) and its newest message cacheable; Anthropic bills re-reads at 10% or less. Within a turn each step reads the one before from the cache; across turns only the instructions and tools are read again today, because the newest message carries the per-turn context and the next turn sends it without (PLAN.md T43). |
 | `mask_old_outputs` | on, keep 8 | agentic | Tool outputs older than the newest 8–15 become a one-line note; hidden in batches so the cache stays valid. |
 | `filter_shell_output` | on | agentic | Colours, progress bars, build noise and passing-test lines removed, repeats folded; the full output stays on the node (`tool_output`). |
 | `bounded_reads` | on | agentic | 400-line read windows, 60 grep matches grouped by file. |

@@ -201,4 +201,51 @@ mod tests {
              this request."
         );
     }
+
+    /// A message whose images are not shown keeps no image name in the
+    /// person's own words, whatever else it holds: empty text, text,
+    /// files, several images; the summariser's text agrees (review of
+    /// T43, C43-4).
+    #[test]
+    fn no_image_name_is_in_the_persons_own_words() {
+        use harness_core::event::{Attachment, UserMessage, own_words};
+        let url = "https://evil.example/x";
+        for text in ["", "look", "look\n", "a\n\nb"] {
+            for files in 0..3 {
+                for n in 1..4u8 {
+                    let m = UserMessage {
+                        turn_id: "t".into(),
+                        text: text.into(),
+                        attachments: (0..files)
+                            .map(|i| Attachment {
+                                name: format!("f{i}"),
+                                mime: "text/plain".into(),
+                                text: "x".into(),
+                                truncated: false,
+                            })
+                            .collect(),
+                        reply: None,
+                        images: (0..n)
+                            .map(|i| ImageRef {
+                                name: url.into(),
+                                ..r(i)
+                            })
+                            .collect(),
+                    };
+                    let mut msgs = vec![user_msg(m.model_text(), &m.images)];
+                    attach(&mut msgs, &[]);
+                    let t = msgs[0].user_text().unwrap();
+                    assert_eq!(
+                        t.matches(crate::provider::IMAGE_LEAD).count(),
+                        usize::from(n)
+                    );
+                    let own = own_words(t);
+                    assert!(text.starts_with(own), "{text:?}/{files}/{n}: {own:?}");
+                    assert!(!own.contains("evil.example"), "{own:?}");
+                    let s = as_text(&user_msg(m.model_text(), &m.images)).unwrap();
+                    assert_eq!(own_words(&s), own);
+                }
+            }
+        }
+    }
 }
