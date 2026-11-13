@@ -643,6 +643,7 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
     let sid = harness_core::SessionId::new();
     link.to_node
         .try_send(MasterToNode::Create {
+            exec_mode: None,
             no_callbacks: false,
             profile: None,
             incognito: false,

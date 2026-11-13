@@ -102,6 +102,7 @@ impl Rig {
             n: 0,
         };
         rig.send(MasterToNode::Create {
+            exec_mode: None,
             no_callbacks: false,
             profile: None,
             incognito: false,

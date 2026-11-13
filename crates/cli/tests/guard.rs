@@ -1479,7 +1479,8 @@ async fn a_replaced_binary_does_not_run_as_the_guard() {
 }
 
 /// `doctor` warns when the harness binary lies where a session can write
-/// (a `[sandbox] write` entry here), and `contain = "required"` refuses.
+/// (a `[sandbox] write` entry here), and `[execution] sandbox = "strict"`
+/// does not offer the sandbox mode (the node then offers none: FAIL).
 #[test]
 fn doctor_warns_when_a_session_can_replace_the_binary() {
     let f = fixture();
@@ -1503,10 +1504,13 @@ fn doctor_warns_when_a_session_can_replace_the_binary() {
     assert!(line.starts_with("warn "), "{line}");
     assert!(line.contains("can replace the harness binary"), "{line}");
     let line = doctor(format!(
-        "[sandbox]\ncontain = \"required\"\nwrite = [\"{}\"]\n",
+        "[execution]\nsandbox = \"strict\"\n[sandbox]\nwrite = [\"{}\"]\n",
         dir.display()
     ));
-    assert!(line.starts_with("FAIL "), "{line}");
+    assert!(
+        line.starts_with("FAIL ") && line.contains("NOT OFFERED"),
+        "{line}"
+    );
 }
 
 // ---- review N-4: the sweep through the node's own start ----

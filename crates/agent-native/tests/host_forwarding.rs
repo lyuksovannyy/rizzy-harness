@@ -26,6 +26,7 @@ struct Host {
     events: Mutex<Vec<EventKind>>,
     pin: Option<FolderPin>,
     owned: Option<OwnedFolder>,
+    exec: Option<harness_core::policy::ExecMode>,
 }
 
 #[async_trait::async_trait]
@@ -42,6 +43,9 @@ impl TurnHost for Host {
     }
     fn owned_folder(&self) -> Option<OwnedFolder> {
         self.owned.clone()
+    }
+    fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
+        self.exec
     }
 }
 
@@ -176,6 +180,7 @@ async fn the_hosts_pin_and_owned_folder_reach_the_tool_through_the_loop() {
         events: Mutex::default(),
         pin: Some(pin.clone()),
         owned: Some(own.clone()),
+        exec: None,
     };
     let probe = Arc::new(Probe::default());
     let backend = NativeBackend::new(
@@ -217,6 +222,7 @@ async fn a_folder_replaced_during_the_turn_refuses_read_write_and_bash() {
             events: Mutex::default(),
             pin: Some(FolderPin::at(&ws).unwrap()),
             owned: None,
+            exec: None,
         };
         let swap = {
             let (ws, other) = (ws.clone(), other.clone());
@@ -261,5 +267,60 @@ async fn a_folder_replaced_during_the_turn_refuses_read_write_and_bash() {
         let target = if link { &other } else { &ws };
         assert!(!target.join("authorized_keys").exists(), "link={link}");
         assert!(!target.join("planted").exists(), "link={link}");
+    }
+}
+
+/// N.10a: the session's recorded mode reaches the shell through the loop's
+/// wrapper and picks that mode's confinement; nothing in the call does. A
+/// wrapper that forgets it (the trait's default, `None`) would start a
+/// `host` session in the `sandbox` mode's confinement, or the other way
+/// round if the default ever changed: both directions fail here.
+#[tokio::test]
+async fn the_sessions_mode_picks_its_confinement_through_the_loop() {
+    use harness_core::policy::ExecMode;
+    use harness_tools::sandbox::Confinement;
+    let dir = tempfile::tempdir().unwrap();
+    let ws: PathBuf = dir.path().canonicalize().unwrap().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    for (mode, want, not) in [
+        (
+            Some(ExecMode::Host),
+            "HOST-CONFINEMENT",
+            "SANDBOX-CONFINEMENT",
+        ),
+        (
+            Some(ExecMode::Sandbox),
+            "SANDBOX-CONFINEMENT",
+            "HOST-CONFINEMENT",
+        ),
+        (None, "SANDBOX-CONFINEMENT", "HOST-CONFINEMENT"),
+    ] {
+        let host = Host {
+            events: Mutex::default(),
+            pin: None,
+            owned: None,
+            exec: mode,
+        };
+        let backend = NativeBackend::new(
+            Arc::new(Script {
+                // The input asks for the other mode: nothing reads it.
+                calls: vec![("bash", json!({"command": "true", "mode": "host"}))],
+                before: Mutex::default(),
+            }),
+            harness_tools::builtin(),
+            NativeConfig {
+                sandbox: Confinement::Refused("SANDBOX-CONFINEMENT".into()),
+                host_shell: Confinement::Refused("HOST-CONFINEMENT".into()),
+                ..Default::default()
+            },
+        );
+        backend.run_turn(turn(&host, &ws)).await;
+        let results = host.results();
+        assert_eq!(results.len(), 1, "{mode:?}: {results:?}");
+        let (ok, out) = &results[0];
+        assert!(
+            !ok && out.contains(want) && !out.contains(not),
+            "{mode:?}: {out}"
+        );
     }
 }

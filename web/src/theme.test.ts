@@ -216,6 +216,32 @@ describe("theme", () => {
     }
   });
 
+  // The host shell's warning (N.10a) is security text: its heading, body
+  // and risks read at 4.5:1 or better, on the dialog's thick glass over the
+  // scrim, and the risks on their warning tint; the "host shell" badge on
+  // the page and on a card; its confirming button as the destructive one.
+  test.each(THEMES)("%s: the host shell's warning and badge read", (_, theme) => {
+    for (const t of both(theme)) {
+      for (const layers of [
+        ["--glass-thick", "--scrim"],
+        ["--warn-soft", "--glass-thick", "--scrim"],
+        ["--glass-thick"],
+        ["--warn-soft", "--glass-thick"],
+      ]) {
+        const g = ground(t, ...layers);
+        for (const tone of ["--fg", "--fg-2"]) {
+          expect(contrast(ink(t, tone, g), g), `host warning: ${tone} on ${name(layers)} ${g}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+      for (const layers of [["--warn-soft"], ["--warn-soft", "--glass-thick"], ["--warn-soft", "--sidebar"]]) {
+        const g = ground(t, ...layers);
+        expect(contrast(ink(t, "--warn", g), g), `host badge: --warn on ${name(layers)} ${g}`).toBeGreaterThanOrEqual(4.5);
+      }
+      const fill = ink(t, "--danger-bg", ground(t, "--glass-thick", "--scrim"));
+      expect(contrast(ink(t, "--on-danger", fill), fill), "host warning: --on-danger on --danger-bg").toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   test.each(THEMES)("%s: the destructive button and the switch", (_, theme) => {
     expect(contrast(ink(theme, "--on-danger", "#000000"), ink(theme, "--danger-bg", "#000000"))).toBeGreaterThanOrEqual(4.5);
     // The white thumb on the on track and on the off track (a mark: 3:1 on).

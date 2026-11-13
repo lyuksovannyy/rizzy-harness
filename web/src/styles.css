@@ -4493,7 +4493,8 @@ a.icon.rail-item.active {
 .workspace-dialog,
 .search-panel,
 .delete-chat,
-.media-preview {
+.media-preview,
+.host-warning {
   border: 0;
   border-radius: var(--r-xl);
   background: var(--surface-pop);
@@ -4502,7 +4503,7 @@ a.icon.rail-item.active {
   color: var(--fg);
   box-shadow: var(--edge), var(--shadow-2);
 }
-:is(.workspace-dialog, .search-panel, .delete-chat, .media-preview)[open] {
+:is(.workspace-dialog, .search-panel, .delete-chat, .media-preview, .host-warning)[open] {
   animation: sheet-in var(--dur-sheet) var(--ease-standard);
 }
 @keyframes sheet-in {
@@ -4881,3 +4882,24 @@ button.danger-text { color: var(--bad); }
 }
 .delete-chat::backdrop { background: var(--scrim); }
 .delete-chat .media-confirm { margin: 0; }
+/* Execution modes (N.10a): the chat's mode, and the host shell's warning
+   (a dialog of the group above: thick glass, blurred). Its risks sit on the
+   warning tint in content text (theme.test.ts checks both themes). */
+.badge-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.host-warning {
+  width: min(480px, calc(100vw - 32px));
+  padding: var(--space-4);
+}
+.host-warning::backdrop { background: var(--scrim); }
+.host-warning h2 { font-size: var(--text-lg); font-weight: var(--w-semibold); margin: 0; }
+.host-warning p { margin: 0; color: var(--fg); }
+.host-risks {
+  margin: 0;
+  padding: var(--space-3) var(--space-3) var(--space-3) calc(var(--space-3) + 16px);
+  border-radius: var(--r-lg);
+  background: var(--warn-soft);
+  color: var(--fg);
+}
