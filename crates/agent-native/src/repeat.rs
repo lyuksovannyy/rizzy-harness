@@ -7,7 +7,9 @@
 //!   nothing else changed; `write` and `edit` by the real path). One more
 //!   space is another call: the guard stops a stuck model, not a determined
 //!   one (`max_steps` is the bound for that).
-//! - **The same result** is a digest of `ok` and the output as logged. A poll
+//! - **The same result** is a digest of `ok` and the output as logged, less
+//!   the harness's own tokens that differ on every run ([`stable`]: the
+//!   kept output's random id, a stop's measured time). A poll
 //!   whose answer changes (a running background command, a file that
 //!   changed) is a new result and starts the count again, so it is never
 //!   refused.
@@ -107,7 +109,7 @@ impl RepeatGuard {
         output: &str,
     ) -> Option<String> {
         let mut h = std::hash::DefaultHasher::new();
-        (ok, output).hash(&mut h);
+        (ok, stable(output).as_ref()).hash(&mut h);
         let outcome = h.finish();
         let runs = match self.calls.get_mut(&key) {
             Some(s) if s.outcome == outcome => {
@@ -132,6 +134,61 @@ impl RepeatGuard {
             )
         })
     }
+}
+
+/// Tokens the harness itself writes into a result that differ on every
+/// run of the same command (`harness_tools::bash`): the random id of the
+/// kept full output after filtering, and a stop's measured time. Each is
+/// masked from the lead to the end of its digits (or before the tail).
+const VOLATILE_AFTER: [&str; 2] = ["tool_output id=", "its guard confirmed the end ("];
+const VOLATILE_BEFORE: [&str; 1] = ["s after the stop was ordered"];
+
+/// The result as the guard compares it: without [`VOLATILE_AFTER`] and
+/// [`VOLATILE_BEFORE`]'s values. Only the harness's own tokens: a
+/// program's changing text (a poll's "running for 30 s") is the result.
+/// A program that prints the same words is masked the same; that can only
+/// make two results of the same call alike, never run a refused one.
+fn stable(output: &str) -> std::borrow::Cow<'_, str> {
+    let volatile = VOLATILE_AFTER
+        .iter()
+        .chain(VOLATILE_BEFORE.iter())
+        .any(|l| output.contains(l));
+    if !volatile {
+        return output.into();
+    }
+    let mut s = output.to_string();
+    for lead in VOLATILE_AFTER {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s.as_str();
+        while let Some(i) = rest.find(lead) {
+            let (head, tail) = rest.split_at(i + lead.len());
+            out.push_str(head);
+            out.push('#');
+            let n = tail.bytes().take_while(u8::is_ascii_alphanumeric).count();
+            rest = &tail[n..];
+        }
+        out.push_str(rest);
+        s = out;
+    }
+    for tail_lit in VOLATILE_BEFORE {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s.as_str();
+        while let Some(i) = rest.find(tail_lit) {
+            let head = &rest[..i];
+            let n = head
+                .bytes()
+                .rev()
+                .take_while(|b| b.is_ascii_digit() || *b == b'.')
+                .count();
+            out.push_str(&head[..head.len() - n]);
+            out.push('#');
+            out.push_str(tail_lit);
+            rest = &rest[i + tail_lit.len()..];
+        }
+        out.push_str(rest);
+        s = out;
+    }
+    s.into()
 }
 
 #[cfg(test)]
