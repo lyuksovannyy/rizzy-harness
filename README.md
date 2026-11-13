@@ -578,8 +578,10 @@ the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 
 The model is sent your message as you wrote it and, after it, each file as a
 quoted document under a line that names it. Nothing in a file, its name
-included, counts as something you wrote: a file cannot add to your message,
-and a link that is only inside a file is not fetched on the file's say-so.
+included, is ever taken as your words: the model is told it is the file's
+content, not your request (though a model may still be swayed by what it
+reads), and a link that is only inside a file is not fetched on the file's
+say-so.
 To have such a link read, paste it into your message.
 
 Every agentic turn is checkpointed and its file changes can be undone

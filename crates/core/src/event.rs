@@ -551,18 +551,35 @@ pub const ATTACHMENT_LEAD: &str = "[harness] Attached file \"";
 const ATTACHMENT_NAME_CHARS: usize = 120;
 const ATTACHMENT_TYPE_BYTES: usize = 80;
 
+/// A character a reader may take for a quotation mark: Unicode's
+/// `Quotation_Mark` set, and the primes and marks that look like one. A
+/// file's name holds none of them in the harness's line (review R76-2).
+fn is_quotation_mark(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\u{00AB}' | '\u{00BB}' | '\u{02BA}' | '\u{02DD}' | '\u{02EE}' | '\u{05F4}'
+            | '\u{2018}'..='\u{201F}' | '\u{2032}'..='\u{2037}' | '\u{2039}' | '\u{203A}'
+            | '\u{2E42}' | '\u{3003}' | '\u{300C}'..='\u{300F}' | '\u{301D}'..='\u{301F}'
+            | '\u{FE41}'..='\u{FE44}' | '\u{FF02}' | '\u{FF07}' | '\u{FF62}' | '\u{FF63}'
+    )
+}
+
 impl Attachment {
     /// The file as the model is sent it: one line the harness wrote, then
     /// every line of the file's text behind [`OUTPUT_QUOTE`]. Nothing of
     /// the file starts a line or ends the quote: its text is quoted as a
     /// background command's output is ([`quoted_line`]; `\r\n` is one line
-    /// break), its name is made one line ([`crate::text::clean_line`], `"`
-    /// read as `'`, so it cannot close the quotes it stands in), and a
+    /// break), its name is made one line ([`crate::text::clean_line`],
+    /// every quotation mark read as `'` ([`is_quotation_mark`]), so it
+    /// cannot seem to close the quotes it stands in, review R76-2), and a
     /// type that is not a plain media type is not shown. The name, the
     /// type and the text come from the master and, before it, from the
     /// file: none is trusted here.
     fn model_block(&self) -> String {
-        let name = crate::text::clean_line(&self.name, ATTACHMENT_NAME_CHARS).replace('"', "'");
+        let name: String = crate::text::clean_line(&self.name, ATTACHMENT_NAME_CHARS)
+            .chars()
+            .map(|c| if is_quotation_mark(c) { '\'' } else { c })
+            .collect();
         let name = if name.is_empty() { "unnamed" } else { &name };
         // RFC 6838's characters for a type and a subtype, and the slash.
         let plain = !self.mime.is_empty()
