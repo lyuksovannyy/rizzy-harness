@@ -1045,14 +1045,21 @@ range stops the node at start.
 
 **Repeated calls.** Within one turn, a call the agent makes again with the same
 arguments that gives the same result is answered with a warning from the
-second time on. The fifth such call in a row is not run (nor offered for
-approval): its result reads "Not run: this exact call gave the same result
-several times in a row in this turn", and if the agent asks for it once more
-the turn ends with "stopped: the model asked again for a call the
-repeated-call guard had refused". A result that changes (a poll of a running
-command, a file that changed) starts the count again, and so does a change
-that did something new in between (an edit, then the test run again). A new
-turn starts from zero. The guard is not configurable.
+second time on. The fifth such call is not run (nor offered for approval):
+its result reads "Not run: this exact call gave the same result several
+times in this turn, with nothing changing in between", and if the agent asks
+for it once more the turn ends there with "stopped: the model asked again for
+a call the repeated-call guard had refused" (other calls of that same message
+are not run either). Something changing starts every count again: a call
+whose result is new (a poll of a running command, a file that changed, so a
+wait between polls is never refused), a change that did something new (an
+edit, then the test run again), a sub-agent that finished, a background
+command that ended. Calls in between that change nothing do not. The
+harness's own changing tokens (the id of a kept full output, a stop's
+measured time) do not make a result new; a program's own do, so a test
+runner that prints its run time is not caught. A new turn starts from zero.
+The warnings are for the agent and are not shown in the chat. The guard is
+not configurable.
 
 **Background commands** are on by default (8 a chat, 64 a node); a node owner
 turns them off with `background_per_session = 0` in `[limits]`. While they
