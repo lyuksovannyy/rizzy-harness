@@ -1679,6 +1679,15 @@ impl Session {
             }
             return Err(e);
         }
+        // Claimed after a stop began (its folder took a while): refused, as
+        // `prompt` does, so no child turn starts after the stop (R-7).
+        if self.node.is_stopping() {
+            child.release(&turn_id);
+            if let Some(i) = iso {
+                crate::git::remove_folder(&i.child).await;
+            }
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
         // A sub-agent gets its task as text only, never the images.
         let msg = UserMessage {
             turn_id,

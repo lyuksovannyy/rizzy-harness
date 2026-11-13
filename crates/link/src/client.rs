@@ -58,7 +58,7 @@ where
     while !stop.is_cancelled() {
         match session(&remote, &key, &stop, timing, &attach).await {
             Ok(()) => backoff = Duration::from_millis(250),
-            Err(LinkError::Rejected(r)) => return Err(LinkError::Rejected(r)),
+            Err(e @ (LinkError::Rejected(_) | LinkError::Untrusted(_))) => return Err(e),
             Err(e) => tracing::warn!(error = %e, "link to master failed"),
         }
         tokio::select! {
@@ -78,14 +78,21 @@ pub async fn connect_node(
     key: &NodeKey,
     timing: Timing,
 ) -> Result<(ClientStream, String), LinkError> {
-    open(&remote.url, &remote.fingerprint, key, timing, |signature| {
+    let (ws, id) = open(&remote.url, &remote.fingerprint, key, timing, |signature| {
         Hello::Auth {
             node_id: remote.node_id.clone(),
             signature,
             protocol_version: harness_protocol::PROTOCOL_VERSION,
         }
     })
-    .await
+    .await?;
+    // `auth` names this node: the master confirms that id, no other.
+    if id != remote.node_id {
+        return Err(LinkError::Untrusted(
+            "it accepted this node under another id".into(),
+        ));
+    }
+    Ok((ws, id))
 }
 
 async fn open(
@@ -117,8 +124,6 @@ where
     Fut: Future<Output = (mpsc::Sender<MasterToNode>, mpsc::Receiver<NodeToMaster>)>,
 {
     let (ws, id) = connect_node(remote, key, timing).await?;
-    // The id is the master's text: printed as the refusal is (A19-6).
-    let id = crate::wire::printable(&id, 64);
     tracing::info!(node = %id, url = %remote.url, "connected to master");
     let (to_node, mut from_node) = attach().await;
     crate::pump::pump(ws, timing, stop, &mut from_node, &to_node, |_| Ok(())).await

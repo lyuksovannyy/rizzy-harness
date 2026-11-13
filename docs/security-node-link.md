@@ -155,7 +155,14 @@ so only the master's own nodes learn its protocol and crate version. Every
 that is down, TLS and network errors are retried. `add_link` keeps its
 check for a `node.hello` that contradicts the `auth`. Tests:
 `crates/master/tests/version_refusal.rs`; the node's exit in
-`crates/cli/tests/stop_signal.rs`.
+`crates/cli/tests/stop_signal.rs`. Since the re-check (R-5, R-6): only
+printable ASCII, runs of spaces folded, and the node accepts from its
+master only an id in the master's own shape (`wire::is_node_id`, the rule
+the master holds node ids to), at `node join` and at every `accepted`;
+anything else is a refusal of that master. A join of another protocol with
+a valid token is told why without spending it, so it also tells its holder
+that the token is valid (R-11); tokens are 128 random bits, so this helps
+no guesser, and only the holder learns it.
 
 ## Left open
 

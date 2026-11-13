@@ -27,10 +27,8 @@ const AUTH_FAILURE_WINDOW_MS: i64 = 15 * 60 * 1000;
 /// Node ids the master assigns: `[a-z0-9-]`, at most 64 characters. Others
 /// are refused before any lookup or audit row.
 fn plausible_node_id(id: &str) -> bool {
-    (1..=64).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    // The same rule the node holds its master to (review R-5).
+    harness_link::wire::is_node_id(id)
 }
 
 /// The limiter of audit rows for failed handshakes ([`AUTH_FAILURE_AUDITS`]

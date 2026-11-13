@@ -49,11 +49,16 @@ const _: () = assert!(
 /// `HARNESS_STOP_WAIT_S` (the tests' seam to reach the bound in seconds).
 pub fn stop_wait() -> Duration {
     #[cfg(debug_assertions)]
-    if let Some(s) = std::env::var("HARNESS_STOP_WAIT_S")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        return Duration::from_secs(s);
+    if let Ok(v) = std::env::var("HARNESS_STOP_WAIT_S") {
+        // Up to a day; anything else (unparsable, or so large a deadline
+        // overflows: review R-10) is refused and the real wait used.
+        match v.parse::<u64>() {
+            Ok(s) if s <= 86_400 => return Duration::from_secs(s),
+            _ => tracing::warn!(
+                "HARNESS_STOP_WAIT_S={v:?} is not 0 to 86400 seconds; using {} s",
+                STOP_WAIT.as_secs()
+            ),
+        }
     }
     STOP_WAIT
 }
