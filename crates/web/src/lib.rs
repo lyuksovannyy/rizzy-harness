@@ -7,8 +7,9 @@
 //!   checked the same way. Environment proxies are ignored so the check
 //!   cannot be bypassed by one.
 //! * **URL provenance.** A URL is fetched only if it appears in text the
-//!   user or a tool supplied (`ToolCtx::observed`). A prompt-injected page
-//!   cannot make the model build `https://evil/?q=<your data>`.
+//!   user typed or a tool supplied (`ToolCtx::observed`; not in a file the
+//!   user attached). A prompt-injected page cannot make the model build
+//!   `https://evil/?q=<your data>`.
 //!
 //! Every page in a result gets a session-stable citation label (`[S4]`, see
 //! `sources`), recorded with its URL on the tool result so the UI resolves
@@ -392,7 +393,8 @@ impl Tool for WebFetch {
         }
         if !provenance_ok(&u, &ctx.observed) {
             return ToolOutcome::err(
-                "this URL did not come from the user or a search result, so it is not fetched. \
+                "this URL did not come from the user's own message or a search result (a link \
+                 that is only inside a file they attached does not count), so it is not fetched. \
                  Search for it first or ask the user for the link.",
             );
         }

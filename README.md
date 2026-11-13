@@ -584,6 +584,14 @@ read PDFs safely", and text files still work. Each account can hold 20
 uploaded files not yet sent (8 MiB of text); unsent files are deleted after
 the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 
+The model is sent your message as you wrote it and, after it, each file as a
+quoted document under a line that names it. Nothing in a file, its name
+included, is ever taken as your words: the model is told it is the file's
+content, not your request (though a model may still be swayed by what it
+reads), and a link that is only inside a file is not fetched on the file's
+say-so.
+To have such a link read, paste it into your message.
+
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is

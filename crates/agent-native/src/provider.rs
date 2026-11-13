@@ -52,7 +52,10 @@ pub struct ImagePart {
 }
 
 impl ChatMsg {
-    /// What the user wrote, for user messages with or without images.
+    /// The text of a user message, with or without images: what the user
+    /// wrote and, after it, any file they attached, each under a line of
+    /// the harness's and quoted (`UserMessage::model_text`). The user's
+    /// own words of it are `harness_core::event::own_words`.
     pub fn user_text(&self) -> Option<&str> {
         match self {
             ChatMsg::User(t) | ChatMsg::UserImages { text: t, .. } => Some(t),
