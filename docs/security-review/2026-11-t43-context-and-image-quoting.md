@@ -115,3 +115,33 @@ As in the table above.
   `provider.rs` `nothing_in_the_context_ends_its_frame` and `images.rs`
   `no_image_name_is_in_the_persons_own_words`.
 - **C43-5.** T43's list of tests is complete.
+
+## 6. C43-1 fixed in its own change (2026-11-14)
+
+`llm::to_genai` now marks up to 4 places: the system prompt, the end of the history
+before this turn's user message (the message before it, which the next turn rebuilds
+byte-identical from the log), the end of the history before the previous user message
+(where the previous turn put that marker, so it is read exactly where it ends and the
+20-block lookback is not relied on), and the newest message. Places that coincide are
+marked once.
+
+- **Failing first.** `llm.rs` `the_history_before_this_turn_and_the_last_are_marked`
+  and `short_requests_mark_each_place_once`, and `lib.rs`
+  `the_next_turn_marks_a_prefix_this_turn_marked`, failed on their assertions on the
+  old code. The last runs two turns through the loop with a per-turn context and a tool
+  call; on the old code the only marked prefix the two turns share is the system prompt.
+  `no_request_has_more_than_four_breakpoints` holds the limit for every prefix of a
+  mixed conversation.
+- **Masking.** The hidden set is a pure function of all tool outputs, the same at a
+  turn's last step and the next turn's first. A batch change writes the history once
+  more; Anthropic bills writes only past the highest hit, so the extra markers cost no
+  write tokens. A turn that ends at the step cap with outputs it never sent can mask
+  differently in the next turn, which then misses once.
+- **Summary.** A new summary changes the system prompt, and every entry misses once.
+- **Notes.** Notes waiting for the person go into this turn's message, after the history
+  marker; a note after a tool result joins it the same way in every rebuild.
+- **Not checked.** `cache_read_tokens` against a real provider. Also unchecked: whether
+  genai's string form for an unmarked text-only message caches the same as the array
+  form it sends when marked. Anthropic says moved markers do not invalidate. The OpenAI
+  explicit-cache models (gpt-5.6 and later) get the same per-message markers through
+  genai, with no documented limit read.

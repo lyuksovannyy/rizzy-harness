@@ -108,7 +108,16 @@ fn user_parts(text: &str, images: &[ImagePart]) -> Vec<ContentPart> {
 pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
     let mut msgs = Vec::new();
     let mut system_seen = false;
+    // Where each user message (the person's, or a callback turn's
+    // opening) went in `msgs`.
+    let mut users = Vec::new();
     for m in &req.messages {
+        if matches!(
+            m,
+            ChatMsg::User(_) | ChatMsg::UserImages { .. } | ChatMsg::Opening(_)
+        ) {
+            users.push(msgs.len());
+        }
         match m {
             ChatMsg::System(t) => {
                 let mut m = ChatMessage::system(t.clone());
@@ -164,13 +173,36 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
             ))),
         }
     }
-    // Breakpoint 2: the newest message, so the next call (same history plus
-    // one more step) reads everything up to here from the cache.
-    if req.cache
-        && msgs.len() > 1
-        && let Some(last) = msgs.last_mut()
-    {
-        *last = last.clone().with_options(CacheControl::Ephemeral);
+    if req.cache && msgs.len() > 1 {
+        // This turn's user message starts with the per-turn context, which
+        // the next turn rebuilds it without (review C43-1), so no entry
+        // that ends at it or after it is read in a later turn.
+        // Breakpoint 2: the end of the history before it, which the next
+        // turn rebuilds byte-identical from the log.
+        // Breakpoint 3: the end of the history before the previous user
+        // message: where the previous turn put breakpoint 2, so this
+        // request reads that entry where it ends, however long the
+        // previous turn was (a breakpoint looks back only 20 blocks for
+        // an entry to read).
+        // Breakpoint 4: the newest message, so the next step of this turn
+        // reads everything up to here.
+        // A user message first in the request has no history before it.
+        // Places that coincide (the history end is the system prompt in a
+        // second turn) are marked once, so with breakpoint 1 there are
+        // never more than 4: Anthropic refuses a request with more.
+        let at = users
+            .iter()
+            .rev()
+            .take(2)
+            .filter(|&&u| u > 0)
+            .map(|u| u - 1)
+            .chain([msgs.len() - 1]);
+        for i in at {
+            let m = &mut msgs[i];
+            if m.options.as_ref().is_none_or(|o| o.cache_control.is_none()) {
+                *m = m.clone().with_options(CacheControl::Ephemeral);
+            }
+        }
     }
     let mut r = GChatRequest::new(msgs);
     if !req.tools.is_empty() {
