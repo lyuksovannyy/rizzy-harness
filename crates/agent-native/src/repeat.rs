@@ -15,8 +15,8 @@
 //!   refused.
 //! - **Progress** is a successful call to a tool that changes things whose
 //!   result is new for that call (an edit, then the test run again): it
-//!   starts every other call's count again. A change that only repeats
-//!   itself is no progress.
+//!   starts every other call's count again; each keeps its last result,
+//!   so a change that only repeats itself is no progress.
 //! - **The window** is one turn: a new guard for every turn, every callback
 //!   turn and every sub-agent's turn. A restart ends the turn.
 //!
@@ -99,6 +99,15 @@ impl RepeatGuard {
         Admission::Refuse { note, stop }
     }
 
+    /// Something changed: every call's count starts again. Each keeps its
+    /// last result, so a call that then only repeats it is judged against
+    /// it (and is no progress itself).
+    pub fn restart(&mut self) {
+        for s in self.calls.values_mut() {
+            s.runs = 0;
+        }
+    }
+
     /// After a call ran: its result as logged. Returns the model's warning
     /// line when this result repeats the last one.
     pub fn record(
@@ -118,7 +127,7 @@ impl RepeatGuard {
             }
             _ => {
                 if changes && ok {
-                    self.calls.clear();
+                    self.restart();
                 }
                 self.calls.insert(key, Streak { outcome, runs: 1 });
                 1
