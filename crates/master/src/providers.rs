@@ -102,9 +102,16 @@ pub fn build(cfg: &Config, data_dir: &Path) -> anyhow::Result<Built> {
     let (mut keys, mut env_remove, mut routes) = (Vec::new(), Vec::new(), Vec::new());
     for p in &cfg.providers {
         let provider: Arc<dyn Provider> = match api_kind(p.kind) {
-            None => Arc::new(Mock {
-                delay: Duration::from_millis(p.mock_delay_ms.unwrap_or(40)),
-            }),
+            None => {
+                let mock = Mock {
+                    delay: Duration::from_millis(p.mock_delay_ms.unwrap_or(40)),
+                };
+                if p.mock_obeys_output {
+                    Arc::new(harness_agent_native::mock::Obedient(mock))
+                } else {
+                    Arc::new(mock)
+                }
+            }
             Some(kind) => {
                 let (key, env) =
                     resolve_key(p, data_dir).with_context(|| format!("provider {:?}", p.id))?;

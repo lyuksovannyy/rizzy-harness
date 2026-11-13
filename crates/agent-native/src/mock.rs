@@ -25,9 +25,10 @@
 //! * `script: [{"tool": .., "input": ..}, ..]` -> one call per step, in order
 //!   (step k = the k-th tool result since the message), then a summary of
 //!   the last result
-//! * a callback turn's opening -> the first quoted line of program output in
-//!   it, as if it were the message (an obedient model), else `Noted: the
-//!   command ended.`
+//! * a callback turn's opening -> `Noted: the command ended.` (it never acts
+//!   on program output; wrapped in [`Obedient`], `mock_obeys_output = true`
+//!   in config.toml, tests only, it takes the opening's first quoted line of
+//!   output as the message instead: a model the output steers)
 //! * a message with images -> `I see N image(s).` (the images it was shown)
 //! * anything else   -> echoes the message back, streamed word by word; an
 //!   answer to a question or form echoes its canonical text
@@ -150,6 +151,39 @@ pub struct Mock {
     pub delay: Duration,
 }
 
+/// The mock steered by program output (config.toml `mock_obeys_output`,
+/// for tests only, never the default): in a callback turn's opening it
+/// reads the first quoted line of program output as if the person had
+/// written it, and runs it through the mock's command language. It stands
+/// for a model that obeys what a command printed: the attacker the step 3
+/// tests need.
+pub struct Obedient(pub Mock);
+
+#[async_trait::async_trait]
+impl Provider for Obedient {
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        req: &ChatRequest,
+        deltas: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        let mut req = req.clone();
+        if let Some(ChatMsg::User(t)) = req.messages.iter_mut().rfind(|m| m.user_text().is_some())
+            && let Some(rest) = t.strip_prefix(harness_core::event::CALLBACK_LEAD)
+            && let Some(line) = rest.lines().find_map(|l| {
+                l.strip_prefix(harness_core::event::OUTPUT_QUOTE)
+                    .filter(|c| !c.trim().is_empty())
+            })
+        {
+            *t = line.trim().to_string();
+        }
+        self.0.complete(&req, deltas).await
+    }
+}
+
 impl Default for Mock {
     fn default() -> Self {
         Self {
@@ -229,35 +263,20 @@ impl Provider for Mock {
             });
         }
         // A callback turn's opening (the harness's frame, then the ended
-        // commands' quoted output): the mock obeys the first quoted line as
-        // if it were the person's message, as a model steered by program
-        // output would. With none, it says it saw the end and stops.
-        let raw_user = match raw_user.strip_prefix(harness_core::event::CALLBACK_LEAD) {
-            Some(rest) => {
-                let quoted = rest.lines().find_map(|l| {
-                    l.strip_prefix(harness_core::event::OUTPUT_QUOTE)
-                        .filter(|c| !c.trim().is_empty())
-                });
-                match quoted {
-                    Some(c) => c.trim().to_string(),
-                    None => {
-                        let text = self
-                            .stream_words(
-                                vec!["Noted: ".into(), "the command ended.".into()],
-                                &deltas,
-                            )
-                            .await;
-                        return Ok(Completion {
-                            text,
-                            tool_calls: vec![],
-                            usage,
-                            stop: Default::default(),
-                        });
-                    }
-                }
-            }
-            None => raw_user,
-        };
+        // commands' quoted output): the demo provider says it saw the end
+        // and stops. It never acts on program output (`Obedient` does, for
+        // the tests that need a steered model).
+        if raw_user.starts_with(harness_core::event::CALLBACK_LEAD) {
+            let text = self
+                .stream_words(vec!["Noted: ".into(), "the command ended.".into()], &deltas)
+                .await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+                stop: Default::default(),
+            });
+        }
         // Per-turn context comes first in the user message; commands follow it.
         let (context, user) = match raw_user
             .strip_prefix("<context>\n")

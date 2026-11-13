@@ -519,6 +519,11 @@ pub struct ProviderConfig {
     /// Delay between mock chunks, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mock_delay_ms: Option<u64>,
+    /// Tests only: the mock acts on the first quoted line of program output
+    /// in a callback turn's opening, as a steered model would (T.8d step
+    /// 3). Off by default: the demo provider never obeys program output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mock_obeys_output: bool,
     #[serde(default)]
     pub models: Vec<ModelConfig>,
 }
@@ -535,6 +540,7 @@ impl ProviderConfig {
             api_key_secret: None,
             effort: None,
             mock_delay_ms: Some(delay_ms),
+            mock_obeys_output: false,
             models: vec![ModelConfig {
                 id: "mock".into(),
                 ..Default::default()

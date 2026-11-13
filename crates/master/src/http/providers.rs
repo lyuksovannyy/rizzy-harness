@@ -388,6 +388,7 @@ pub(super) async fn put_provider(
         api_key_secret,
         effort: old.as_ref().and_then(|o| o.effort),
         mock_delay_ms: None,
+        mock_obeys_output: false,
         models,
     };
     match cfg.providers.iter_mut().find(|x| x.id == id) {
