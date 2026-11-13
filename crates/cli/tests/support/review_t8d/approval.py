@@ -7,8 +7,11 @@
    accept connections (the network is on).
 2. A denied background start runs nothing.
 3. `bash_output` and `bash_stop` ask for nothing in `ask` (read-only risk).
-4. What "for this turn" on a background start covers: the identical start
-   again in that turn, without a second card.
+4. One click, one command (the first review's N-2: one "for this turn"
+   covered every identical start of the turn). Fixed means: the card of a
+   background start does not offer "for this turn", and an answer that
+   says `allow_session` anyway covers that one call: the identical start
+   asks again.
 """
 import os, signal, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -61,17 +64,23 @@ def main():
         print("denied: background_started %s; processes %d; cards in the turn: %d; bash_output asked: %s"
               % (bg_account(evs)[0], len(sleeps(N)), len(of(evs, "approval_requested")),
                  any(p["tool"] != "bash" for p in of(evs, "approval_requested"))))
-        # 4. "for this turn" on a background start
+        # 4. one click, one command
         sid2 = s.session(ws, mode="ask")
         seen = set()
         start = bg("sleep %d" % (N + 1), 600)
-        s.post("/api/sessions/%s/prompt" % sid2, script([start, start, {"tool": "bash_stop", "input": {"id": "bg-1"}},
-                                                         {"tool": "bash_stop", "input": {"id": "bg-2"}}]))
-        p = pending(s, sid2, seen)
-        answer(s, sid2, p, "allow_session")
+        s.post("/api/sessions/%s/prompt" % sid2, script([start, start, {"tool": "bash_stop", "input": {"id": "bg-1"}}]))
+        p1 = pending(s, sid2, seen)
+        answer(s, sid2, p1, "allow_session")
+        p2 = pending(s, sid2, seen)
+        running = len(sleeps(N + 1))
+        answer(s, sid2, p2, "deny")
         evs = s.wait_event(sid2, "turn_ended", secs=60)
-        print("one \"for this turn\" on a background start, the identical start twice: cards %d, started %s, ends %s"
-              % (len(of(evs, "approval_requested")), bg_account(evs)[0], bg_account(evs)[1]))
+        print("two identical background starts, the first answered allow_session: cards %d (\"for this turn\" offered: %s); "
+              "running when the second card came: %d; started %s, ends %s"
+              % (len(of(evs, "approval_requested")), [p1.get("turn_allow"), p2.get("turn_allow")], running,
+                 bg_account(evs)[0], bg_account(evs)[1]))
+        print("N-2 fixed: %s" % (len(of(evs, "approval_requested")) == 2 and bg_account(evs)[0] == ["bg-1"]
+                                 and not p1.get("turn_allow") and not p2.get("turn_allow")))
         s.signal(signal.SIGTERM)
         s.exited(40)
     finally:

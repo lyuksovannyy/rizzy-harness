@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """T.8d review: what the person can do about a background command in step 1.
 
-An `auto` chat's agent starts a listener in the background (127.0.0.1, a
-free port, an empty folder; reached only from this script). The person
-presses Stop (`POST …/cancel`): what happens to the listener, and which of
-the server's routes ends it?
+First review (T8D-4): on by default, and a person could neither see nor
+stop one. Decided since: step 1 ships the feature off
+(`background_per_session = 0`) until step 2 has the strip and the stop.
+
+1. With the defaults: a start is refused with the reason, nothing listens.
+2. Where an operator turns it on (`background_per_session = 8`), it is as
+   the first review found it, and the README has to say so: an `auto`
+   chat's agent starts a listener (127.0.0.1, a free port, an empty folder;
+   reached only from this script), the person presses Stop
+   (`POST …/cancel`): the listener stays, and only deleting the chat ends
+   it.
 """
 import os, signal, socket, sys, time, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +36,22 @@ def main():
         port = k.getsockname()[1]
     procs = []
     try:
+        # 1. the defaults
+        d0 = os.path.join(root, "data-default")
+        write_config(d0, ws, extra_node="")
+        s0 = Server(d0)
+        procs.append(s0)
+        sid = s0.session(ws)
+        s0.post("/api/sessions/%s/prompt" % sid, script([
+            bg("cd empty && exec python3 -m http.server %d --bind 127.0.0.1" % port, 3600),
+            {"tool": "bash_output", "input": {}}]))
+        evs = s0.wait_event(sid, "turn_ended")
+        print("with the defaults: %s" % results(evs)[0][:120])
+        print("    the list: %s; started %s; the listener answers: %s"
+              % (results(evs)[1][:50], bg_account(evs)[0], answers(port)))
+        s0.signal(signal.SIGTERM)
+        s0.exited(40)
+        # 2. turned on by the operator
         s = Server(data)
         procs.append(s)
         sid = s.session(ws)

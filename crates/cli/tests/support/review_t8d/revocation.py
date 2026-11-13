@@ -87,10 +87,45 @@ def main():
                 started, ended = "?", "the chat is gone (%s)" % str(e)[:60]
             print("%s (%s): processes left %d after %.1f s; started %s, ends %s"
                   % (name, c, len(left), took, started, ended))
+        # Re-check: the two moments the first review's N-1 was about. No
+        # count decides any more: the stop goes to every chat of a blocked
+        # owner, and closes its table.
+        for k, (name, wait_for_turn) in enumerate([
+                ("disable 1 s into a start's first wait", False),
+                ("disable while a foreground step runs after a start", True)], start=3):
+            n = BASE + 10 * k
+            marks.append(n)
+            who = "bob%d" % k
+            bob = admin.member(who)
+            c, users = admin.call("GET", "/api/users")
+            ulist = users["users"] if isinstance(users, dict) else users
+            uid = [u for u in ulist if u["username"] == who][0]["user_id"]
+            c, v = admin.call("PATCH", "/api/users/%s" % uid, {"role": "admin"})
+            assert c == 200, (c, v)
+            c, v = bob.call("POST", "/api/sessions", {"cwd": ws, "approval_mode": "auto"})
+            assert c == 200, (c, v)
+            sid = v["session_id"]
+            c, v = bob.call("POST", "/api/sessions/%s/prompt" % sid,
+                            script([bg(escapers(n), 3600), fg("sleep %d" % (n + 5), 300), bg("sleep %d" % (n + 6), 3600)]))
+            assert c == 200, (c, v)
+            assert wait_for(lambda: len(alive_of(n)) == 5), "never started"
+            if wait_for_turn:
+                assert wait_for(lambda: sleeps(n + 5), 20), "the foreground step never started"
+                time.sleep(0.3)
+            else:
+                time.sleep(0.7)
+            c, v = admin.call("PATCH", "/api/users/%s" % uid, {"disabled": True})
+            left = gone_within(lambda: alive_of(n) + sleeps(n + 5) + sleeps(n + 6), 8.0)
+            time.sleep(4.0)  # were the turn to go on, its next start would be running by now
+            late = alive_of(n) + sleeps(n + 5) + sleeps(n + 6)
+            evs = s.events(sid)
+            started, ended = bg_account(evs)
+            print("%s (%s): processes left %d, 4 s later %d; started %s, ends %s, turn %s"
+                  % (name, c, len(left), len(late), started, ended, ends(evs)))
         s.signal(signal.SIGTERM)
         s.exited(40)
     finally:
-        secs = [m + i for m in marks for i in range(5)]
+        secs = [m + i for m in marks for i in range(7)]
         k = cleanup(procs, needle=root, secs=secs)
         print("cleanup killed: %s" % (k or "nothing"))
 

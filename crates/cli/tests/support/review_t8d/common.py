@@ -30,7 +30,12 @@ def scratch(*parts):
     return os.path.realpath(p)
 
 
-def write_config(data, ws, extra_node="", delay_ms=1):
+# Step 1 ships background commands off (`background_per_session = 0`, the
+# first review's T8D-4): the proofs turn them on, as an operator would.
+ON = "\n[limits]\nbackground_per_session = 8\n"
+
+
+def write_config(data, ws, extra_node=ON, delay_ms=1):
     os.makedirs(data, exist_ok=True)
     with open(os.path.join(data, "node.toml"), "w") as f:
         f.write('workspace_roots = ["%s"]\nmax_approval_mode = "auto"\n%s' % (ws, extra_node))
