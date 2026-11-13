@@ -178,10 +178,12 @@ const FK_V1: Migration = &["CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT);
          owner TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE);"];
 /// `users.name` becomes NOT NULL the way SQLite documents a table change:
 /// a new table, a copy, the old one dropped, the new one renamed.
-const FK_REBUILD: Migration = &["CREATE TABLE users_new (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+const FK_REBUILD: Migration = &[
+    "CREATE TABLE users_new (id TEXT PRIMARY KEY, name TEXT NOT NULL);
      INSERT INTO users_new SELECT id, name FROM users;
      DROP TABLE users;
-     ALTER TABLE users_new RENAME TO users;"];
+     ALTER TABLE users_new RENAME TO users;",
+];
 /// Leaves every `blobs` row pointing at a user that is gone.
 const FK_DANGLING: Migration = &["DELETE FROM users;"];
 
@@ -258,13 +260,20 @@ fn a_store_whose_schema_is_not_its_versions_is_refused_and_left_byte_identical()
     ] {
         let path = dir.path().join(format!("{case}-master.db"));
         drop(Store::open(&path, Durability::Normal).unwrap());
-        Connection::open(&path).unwrap().execute_batch(edit).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(edit)
+            .unwrap();
         let before = std::fs::read(&path).unwrap();
         let err = match Store::open(&path, Durability::Normal) {
             Ok(_) => panic!("{case}: a file that is not schema version 1 was opened"),
             Err(e) => e.to_string(),
         };
-        for part in ["master.db", "does not match schema version 1", "not changed"] {
+        for part in [
+            "master.db",
+            "does not match schema version 1",
+            "not changed",
+        ] {
             assert!(err.contains(part), "{case}: {part:?} missing from: {err}");
         }
         assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
@@ -324,7 +333,10 @@ fn the_recorded_schema_leaves_out_what_sqlite_makes() {
     migrate::migrate(&mut c, ":memory:", MIGRATIONS).unwrap();
     let text = migrate::schema_text(&c).unwrap();
     for made_by_sqlite in ["artifact_fts_config", "chat_fts_data", "sqlite_autoindex"] {
-        assert!(!text.contains(made_by_sqlite), "{made_by_sqlite} in:\n{text}");
+        assert!(
+            !text.contains(made_by_sqlite),
+            "{made_by_sqlite} in:\n{text}"
+        );
     }
     assert!(text.contains("CREATE VIRTUAL TABLE artifact_fts"), "{text}");
 }
@@ -433,7 +445,10 @@ fn write_mode_creates_missing_files_and_never_rewrites_a_recorded_one() {
         std::fs::read_to_string(dir.path().join("1.sql")).unwrap(),
         "-- a released version 1\n"
     );
-    assert!(!dir.path().join("2.sql").exists(), "nothing is written after a mismatch");
+    assert!(
+        !dir.path().join("2.sql").exists(),
+        "nothing is written after a mismatch"
+    );
 }
 
 /// Every version's schema as recorded in `crates/store/schema/<k>.sql`. A

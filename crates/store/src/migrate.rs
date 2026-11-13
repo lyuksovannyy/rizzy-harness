@@ -123,7 +123,12 @@ fn refuse(db: &str, found: i64, known: i64) -> Result<i64, MigrateError> {
 }
 
 /// The schema of `conn` is `expected`, or the refusal for `version`.
-fn same_schema(conn: &Connection, db: &str, version: i64, expected: &str) -> Result<(), MigrateError> {
+fn same_schema(
+    conn: &Connection,
+    db: &str,
+    version: i64,
+    expected: &str,
+) -> Result<(), MigrateError> {
     let now = schema_text(conn).map_err(|source| MigrateError::Sqlite {
         db: db.to_string(),
         source,
