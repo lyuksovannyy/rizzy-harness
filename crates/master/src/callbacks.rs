@@ -578,7 +578,11 @@ pub(crate) fn start(m: &Master) {
                     }
                 }
             }
-            trigger(&m, sid);
+            // Only a chat whose log has an end in the window can have one
+            // waiting (S3-3).
+            if events.iter().any(|e| e.kind == "background_ended") {
+                trigger(&m, sid);
+            }
         }
     });
 }

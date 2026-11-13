@@ -1456,8 +1456,38 @@ impl Store {
                 |r| r.get(0),
             )?
         };
-        let mut out = self.events_after(sid, floor as u64, usize::MAX >> 1)?;
-        out.retain(|e| kinds.contains(&e.kind.as_str()));
+        // The kinds in the SQL: a long last turn's deltas are never read
+        // or parsed (review S3-3).
+        let conn = self.lock();
+        let marks = vec!["?"; kinds.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, ts_ms, kind, payload FROM events
+             WHERE session_id = ?1 AND seq > ?2 AND kind IN ({marks}) ORDER BY seq"
+        ))?;
+        let id = sid.to_string();
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&id, &floor];
+        for k in kinds {
+            args.push(k);
+        }
+        let rows = stmt.query_map(args.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
         Ok(out)
     }
 
