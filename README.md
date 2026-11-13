@@ -7,11 +7,14 @@
 > **Pre-release.** There is no tagged release and no upgrade path yet: until
 > the first tag the data directory's format still changes in place, so an
 > update can require wiping it. Each database records its schema version, and
-> a build refuses to start on a database a newer build wrote, or one whose
-> tables are not those of its version (a data directory from an earlier
-> pre-release commit): it names the file and leaves it unchanged rather than
-> misread it. Until the first tag, such a refusal means: wipe the data
-> directory. Do not keep anything in it you cannot lose. A security
+> a build refuses to start on one it would misread, naming the file and
+> leaving it unchanged. A database a newer build wrote (a downgrade, a rolled
+> back update) means: run that build or a newer one; the data is intact. A
+> database whose tables are not those of its version, including one from
+> before schema versions whose tables are not exactly version 1's (a data
+> directory from an earlier pre-release commit), means, until the first tag:
+> remove the data directory (or move it aside) and start again. Do not keep
+> anything in it you cannot lose. A security
 > review ([`AUDIT.md`](AUDIT.md)) is being worked through in
 > [`FIX_PLAN.md`](FIX_PLAN.md); until its Phase 2 is done, run it on
 > `127.0.0.1` for yourself only.
