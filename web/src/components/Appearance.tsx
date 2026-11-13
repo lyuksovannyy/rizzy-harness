@@ -6,7 +6,7 @@
 import "../lib/i18nPages";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { applyAppearance, withThemeTransition } from "../lib/appearance";
+import { applyAppearance, normalizeAccent, withThemeTransition } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Prefs } from "../types";
@@ -37,7 +37,7 @@ export function AppearanceFields(props: { prefs: Prefs; saved: Prefs; onChange: 
     props.onChange(next);
   };
   const theme = p.theme ?? "system";
-  const accent = p.accent ?? "blue";
+  const accent = normalizeAccent(p.accent) ?? "blue";
   const backdrop = p.backdrop ?? "animated";
 
   return (

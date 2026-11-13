@@ -72,7 +72,7 @@ describe("AgentAvatar", () => {
   test("the colour is an accent token, never a literal", () => {
     for (const accent of AVATAR_ACCENTS) {
       render(<AgentAvatar avatar={{ shape: "circle", eyes: "round", accent }} />);
-      expect(svg().getAttribute("style")).toContain(`--av-c: var(--accent-${accent})`);
+      expect(svg().getAttribute("style")).toContain(`--av-c: var(--ac-${accent}-2)`);
       expect(host.innerHTML).not.toMatch(/#[0-9a-f]{3,6}\b|rgb\(/i);
     }
   });

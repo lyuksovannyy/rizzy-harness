@@ -31,11 +31,13 @@ pub enum Eyes {
 #[serde(rename_all = "snake_case")]
 pub enum Accent {
     Blue,
-    Violet,
-    Green,
-    Orange,
+    Purple,
     Pink,
-    Gray,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Graphite,
 }
 
 const SHAPES: [Shape; 6] = [
@@ -53,13 +55,15 @@ const EYES: [Eyes; 5] = [
     Eyes::Wide,
     Eyes::Sleepy,
 ];
+/// The accents a default look is drawn from: the six of the palette before
+/// Rizzy Glass, renamed, so no unconfigured agent changes colour.
 const ACCENTS: [Accent; 6] = [
     Accent::Blue,
-    Accent::Violet,
+    Accent::Purple,
     Accent::Green,
     Accent::Orange,
     Accent::Pink,
-    Accent::Gray,
+    Accent::Graphite,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,8 +118,27 @@ mod tests {
     #[test]
     fn serde_names() {
         let a: AgentAvatar =
-            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"gray"}"#).unwrap();
+            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"graphite"}"#)
+                .unwrap();
         assert_eq!(a.shape, Shape::Drop);
+        assert_eq!(a.accent, Accent::Graphite);
+        let v: AgentAvatar =
+            serde_json::from_str(r#"{"shape":"drop","eyes":"sleepy","accent":"purple"}"#).unwrap();
+        assert_eq!(v.accent, Accent::Purple);
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"shape":"drop","eyes":"sleepy","accent":"purple"}"#
+        );
+        for a in ["red", "yellow", "graphite"] {
+            let s = format!(r#"{{"shape":"drop","eyes":"sleepy","accent":"{a}"}}"#);
+            assert!(serde_json::from_str::<AgentAvatar>(&s).is_ok(), "{a}");
+        }
+        // The palette's earlier names are gone, not aliased (no
+        // compatibility code before the first tagged release).
+        for a in ["violet", "gray"] {
+            let s = format!(r#"{{"shape":"drop","eyes":"sleepy","accent":"{a}"}}"#);
+            assert!(serde_json::from_str::<AgentAvatar>(&s).is_err(), "{a}");
+        }
         assert!(
             serde_json::from_str::<AgentAvatar>(
                 r#"{"shape":"star","eyes":"round","accent":"blue"}"#
