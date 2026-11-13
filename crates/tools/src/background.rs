@@ -890,6 +890,12 @@ impl SessionBg {
         self.stop_all(reason)
     }
 
+    /// Closed by [`Self::close`] and not reopened: its owner lost access
+    /// and has not prompted the chat since.
+    pub fn is_closed(&self) -> bool {
+        self.lock().closed.is_some()
+    }
+
     /// Admit starts again (its owner prompts the chat).
     pub fn reopen(&self) {
         self.lock().closed = None;

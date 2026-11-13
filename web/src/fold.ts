@@ -43,6 +43,7 @@ const KNOWN = new Set([
   "artifact_stage_failed",
   "background_started",
   "background_ended",
+  "callback_refused",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -114,13 +115,19 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (p.agent_id != null) meta!.agent_id = p.agent_id;
       if (p.incognito) meta!.incognito = true;
       if (p.parent_session != null) meta!.parent_session = p.parent_session;
+      if (p.no_callbacks) meta!.no_callbacks = true;
       v.meta = meta;
       v.active_agent = p.agent_id ?? null;
       break;
     }
     case "turn_started":
+      // A callback turn stands where a person's message would.
+      if (p.cause?.callback) v.items.push({ type: "callback", turn_id: p.turn_id, bg_ids: p.cause.callback });
       v.running_turn = p.turn_id;
       v.running_agent = p.agent ?? null;
+      break;
+    case "callback_refused":
+      v.items.push({ type: "callback_refused", bg_ids: p.bg_ids, reason: p.reason });
       break;
     case "user_message": {
       const item: Extract<Item, { type: "user" }> = { type: "user", turn_id: p.turn_id, text: p.text };

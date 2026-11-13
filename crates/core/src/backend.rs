@@ -167,6 +167,13 @@ pub struct TurnExtra {
     /// The images sent with this turn's message (their bytes come from
     /// `TurnHost::images`).
     pub images: Vec<crate::event::ImageRef>,
+    /// Why a turn with no person's message runs (a callback turn, T.8d
+    /// step 3): it opens with the harness's frame instead of `user_text`,
+    /// which is then empty. Set only by the node, after its own checks.
+    pub cause: Option<crate::event::TurnCause>,
+    /// A lower step cap for this turn than the backend's own `max_steps`
+    /// (a callback turn's `callback_max_steps`). Set only by the node.
+    pub max_steps: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

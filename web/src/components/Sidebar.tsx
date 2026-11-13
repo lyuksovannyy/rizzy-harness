@@ -364,6 +364,9 @@ export function Sidebar(props: SidebarProps) {
               title={shownName(s.title)}
             >
               {s.running && <span className="dot running" title="running" />}
+              {!s.running && !!s.background && (
+                <span className="dot background" title={`${s.background} background command(s) running`} />
+              )}
               <span className="ellipsis grow">{shownName(s.title) || t("session.untitled")}</span>
               <ChatProjectMark id={s.project_id} projects={props.projects} />
               {s.profile === "agentic" && <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />}

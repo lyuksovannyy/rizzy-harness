@@ -23,6 +23,7 @@ fn created(sid: SessionId) -> RawEvent {
         sid,
         1,
         EventKind::SessionCreated(SessionCreated {
+            no_callbacks: false,
             profile: Profile::Agentic,
             agent_id: None,
             incognito: false,
@@ -44,6 +45,7 @@ fn script(sid: SessionId, n: u64) -> Vec<RawEvent> {
         sid,
         2,
         EventKind::TurnStarted(TurnStarted {
+            cause: None,
             agent: None,
             turn_id: "t1".into(),
         }),
@@ -318,6 +320,7 @@ fn expired_incognito_only_selects_idle_incognito() {
             inc,
             2,
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: "t".into(),
             }),
@@ -338,6 +341,7 @@ fn a_shown_input_block_needs_attention() {
         let blocks = harness_core::ui::extract(text, harness_core::agent::UiLevel::Rich);
         let kinds = [
             EventKind::TurnStarted(TurnStarted {
+                cause: None,
                 agent: None,
                 turn_id: "t1".into(),
             }),
@@ -852,4 +856,75 @@ fn a_listing_of_one_owner_reads_only_their_rows() {
     assert_eq!(ids(s.sessions_of(Some("bob")).unwrap()), vec![bob]);
     assert!(s.sessions_of(Some("carol")).unwrap().is_empty());
     assert_eq!(s.sessions_of(None).unwrap().len(), 3);
+}
+
+/// Review S3-3: the callback watcher's read of a chat's last turn takes
+/// only the kinds it asks for, in the SQL: the rest of a long turn is never
+/// read or parsed. A turn's other events here include one whose payload is
+/// not JSON at all; a read that parses every event of the turn fails on it.
+#[test]
+fn the_watchers_read_of_a_long_last_turn_is_its_ends_only() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let path = dir.path().join("m.db");
+    let s = Store::open(&path, Durability::Full).unwrap();
+    let sid = SessionId::new();
+    assert_eq!(
+        s.append("n", &created(sid)).unwrap(),
+        AppendOutcome::Applied
+    );
+    let started = ev(
+        sid,
+        2,
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t".into(),
+            agent: None,
+            cause: None,
+        }),
+    );
+    assert_eq!(s.append("n", &started).unwrap(), AppendOutcome::Applied);
+    for seq in 3..503 {
+        let d = ev(
+            sid,
+            seq,
+            EventKind::AssistantDelta(AssistantDelta {
+                turn_id: "t".into(),
+                message_id: "m".into(),
+                text: "x".repeat(1000),
+                author: None,
+                variant: None,
+            }),
+        );
+        assert_eq!(s.append("n", &d).unwrap(), AppendOutcome::Applied);
+    }
+    let end = ev(
+        sid,
+        503,
+        EventKind::BackgroundEnded(BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(0),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 1,
+            output_bytes: 0,
+            tail: String::new(),
+            tail_cut: false,
+            delivered: false,
+        }),
+    );
+    assert_eq!(s.append("n", &end).unwrap(), AppendOutcome::Applied);
+    drop(s);
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute(
+        "UPDATE events SET payload = 'not json' WHERE session_id = ?1 AND seq = 3",
+        [sid.to_string()],
+    )
+    .unwrap();
+    drop(raw);
+    let s = Store::open(&path, Durability::Full).unwrap();
+    let got = s
+        .events_since_last_turn(sid, &["background_ended"])
+        .unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].seq, 503);
 }

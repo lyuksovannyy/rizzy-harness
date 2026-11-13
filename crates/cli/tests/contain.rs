@@ -668,7 +668,7 @@ async fn below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside() {
     let secret = f.root.join("home/secret");
     std::fs::write(&secret, "outside the session folder").unwrap();
     let stand_in = f.ws.join("landlock_abi4.py");
-    std::fs::copy(ABI4, &stand_in).unwrap();
+    copy_exe(ABI4, &stand_in);
     let reaper = Reaper(vec![975_111, 975_112, 975_113, 975_114]);
     service(&bus, &name, 975_111, 975_112);
     let script = format!(
@@ -1021,3 +1021,19 @@ fn doctor_marks_each_containment_state() {
 // `a_kill_just_after_the_inits_setsid_ends_the_namespace` above drops it at
 // the review's worst instant, and `cli/tests/guard.rs` kills the whole
 // node 0 to 1 ms after the spawn.
+
+/// A copy of the executable `from` at `to`, made by `cp` in a child
+/// process. This test binary then never holds a write descriptor of the
+/// copy, so a child that another test's thread forks in the meantime cannot
+/// inherit one, and the kernel does not refuse to start the copy with
+/// "Text file busy" (seen in CI and under load: `std::fs::copy` here, a
+/// fork there).
+fn copy_exe(from: impl AsRef<std::path::Path>, to: &std::path::Path) {
+    let st = std::process::Command::new("cp")
+        .arg("--")
+        .arg(from.as_ref())
+        .arg(to)
+        .status()
+        .expect("cp");
+    assert!(st.success(), "cp to {}", to.display());
+}

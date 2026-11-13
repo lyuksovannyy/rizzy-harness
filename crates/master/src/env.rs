@@ -303,6 +303,7 @@ impl EnvSettings {
             api_key_secret: None,
             effort: None,
             mock_delay_ms: None,
+            mock_obeys_output: false,
             models,
         }))
     }

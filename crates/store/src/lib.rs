@@ -1442,6 +1442,135 @@ impl Store {
             .optional()?)
     }
 
+    /// The events of `sid` after its last `turn_started` and its last
+    /// `callback_refused` (T.8d step 3: what a callback turn could still
+    /// take), of the kinds in `kinds`. One range read of the chat's events
+    /// for the floor, one for the rest; no index beyond the primary key.
+    pub fn events_since_last_turn(&self, sid: SessionId, kinds: &[&str]) -> Result<Vec<RawEvent>> {
+        let floor: i64 = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events
+                 WHERE session_id = ?1 AND kind IN ('turn_started', 'callback_refused')",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )?
+        };
+        // The kinds in the SQL: a long last turn's deltas are never read
+        // or parsed (review S3-3).
+        let conn = self.lock();
+        let marks = vec!["?"; kinds.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, ts_ms, kind, payload FROM events
+             WHERE session_id = ?1 AND seq > ?2 AND kind IN ({marks}) ORDER BY seq"
+        ))?;
+        let id = sid.to_string();
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&id, &floor];
+        for k in kinds {
+            args.push(k);
+        }
+        let rows = stmt.query_map(args.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `background_started` and `background_ended` of `sid` recorded at or
+    /// after `since_ms` (node clock), oldest first: which commands the
+    /// mirror shows running, rebuilt at the master's start.
+    pub fn background_events_since(&self, sid: SessionId, since_ms: i64) -> Result<Vec<RawEvent>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1 AND ts_ms >= ?2
+             AND kind IN ('background_started', 'background_ended') ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(params![sid.to_string(), since_ms], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Whether turn `turn_id` of `sid` was started with a `cause` (a
+    /// callback turn): `Some(true)` or `Some(false)` from its
+    /// `turn_started`, `None` when the mirror has none.
+    pub fn turn_cause(&self, sid: SessionId, turn_id: &str) -> Result<Option<bool>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'turn_started' ORDER BY seq DESC",
+        )?;
+        let mut rows = stmt.query(params![sid.to_string()])?;
+        while let Some(row) = rows.next()? {
+            let v: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            if v.get("turn_id").and_then(|t| t.as_str()) == Some(turn_id) {
+                return Ok(Some(v.get("cause").is_some_and(|c| !c.is_null())));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The seq up to which `user` has seen chat `sid` (0 when never).
+    pub fn seen_seq(&self, user: &str, sid: SessionId) -> Result<u64> {
+        let conn = self.lock();
+        let v: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM seen WHERE user_id = ?1 AND session_id = ?2",
+                params![user, sid.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.unwrap_or(0).max(0) as u64)
+    }
+
+    /// Chats whose newest event is at or after `since_ms` (on their node's
+    /// clock), for the callback watcher's start.
+    pub fn sessions_updated_since(&self, since_ms: i64) -> Result<Vec<SessionId>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare_cached("SELECT session_id FROM sessions WHERE updated_ms >= ?1")?;
+        let rows = stmt.query_map(params![since_ms], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let id = r?;
+            out.push(
+                id.parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {id}")))?,
+            );
+        }
+        Ok(out)
+    }
+
     /// Events with `seq > after`, ascending, at most `limit`.
     pub fn events_after(&self, sid: SessionId, after: u64, limit: usize) -> Result<Vec<RawEvent>> {
         let conn = self.lock();

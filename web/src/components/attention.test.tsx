@@ -60,6 +60,23 @@ const row = (over: Partial<RoutineAttention> = {}): RoutineAttention => ({
 const labels = (host: HTMLElement) => [...host.querySelectorAll(".routine-results button")].map((b) => b.textContent);
 
 describe("Attention", () => {
+  test("what ran while the owner was away reads as itself, not as a question", () => {
+    const m = mount(
+      <Attention
+        items={[
+          { session_id: "s1", title: "Build", reason: "resumed", detail: "bg-3 ended: the agent was resumed without you", seq: 4, parent_id: null, updated_ms: 0 },
+          { session_id: "s2", title: "Tests", reason: "not_resumed", detail: "bg-1 ended; the agent was not resumed: the owner's account is disabled", seq: 9, parent_id: null, updated_ms: 0 },
+        ]}
+        onOpen={() => {}}
+      />,
+    );
+    expect([...m.host.querySelectorAll(".attention .similar-snippet")].map((s) => s.textContent)).toEqual([
+      "bg-3 ended: the agent was resumed without you",
+      "bg-1 ended; the agent was not resumed: the owner's account is disabled",
+    ]);
+    m.unmount();
+  });
+
   test("routine rows say what happened and when, below the waiting chats", () => {
     const m = mount(
       <Attention

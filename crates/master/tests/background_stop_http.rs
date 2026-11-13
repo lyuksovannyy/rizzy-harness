@@ -109,38 +109,39 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
         };
         loop {
             tokio::select! {
-                msg = commands.recv() => {
-                    let Some(msg) = msg else { return };
-                    keep.lock().unwrap().push(msg.clone());
-                    if let MasterToNode::Create { session_id, .. } = &msg {
-                        let created = EventKind::SessionCreated(SessionCreated {
-                            title: "t".into(),
-                            cwd: "/w".into(),
-                            model: "demo::mock".into(),
-                            backend: "native".into(),
-                            node_id: node.clone(),
-                            approval_mode: ApprovalMode::Ask,
-                            profile: Profile::Agentic,
-                            agent_id: None,
-                            incognito: false,
-                            parent_session: None,
-                        });
-                        send(&mut seqs, *session_id, created);
-                    }
-                    let refused = matches!(&msg, MasterToNode::StopBackground { bg_id: Some(b), .. } if b == "bg-9");
-                    if let Some(req_id) = msg.req_id() {
-                        let _ = tx.try_send(NodeToMaster::Ack {
-                            req_id: req_id.into(),
-                            ok: !refused,
-                            error: refused.then(|| "no background command bg-9 in this chat (it has bg-1)".into()),
-                        });
-                    }
-                }
-                d = do_rx.recv() => match d {
-                    Some(Do::Append(sid, k)) => send(&mut seqs, sid, *k),
-                    Some(Do::Leave) | None => return,
-                },
-            }
+                            msg = commands.recv() => {
+                                let Some(msg) = msg else { return };
+                                keep.lock().unwrap().push(msg.clone());
+                                if let MasterToNode::Create { session_id, .. } = &msg {
+                                    let created = EventKind::SessionCreated(SessionCreated {
+            no_callbacks: false,
+                                        title: "t".into(),
+                                        cwd: "/w".into(),
+                                        model: "demo::mock".into(),
+                                        backend: "native".into(),
+                                        node_id: node.clone(),
+                                        approval_mode: ApprovalMode::Ask,
+                                        profile: Profile::Agentic,
+                                        agent_id: None,
+                                        incognito: false,
+                                        parent_session: None,
+                                    });
+                                    send(&mut seqs, *session_id, created);
+                                }
+                                let refused = matches!(&msg, MasterToNode::StopBackground { bg_id: Some(b), .. } if b == "bg-9");
+                                if let Some(req_id) = msg.req_id() {
+                                    let _ = tx.try_send(NodeToMaster::Ack {
+                                        req_id: req_id.into(),
+                                        ok: !refused,
+                                        error: refused.then(|| "no background command bg-9 in this chat (it has bg-1)".into()),
+                                    });
+                                }
+                            }
+                            d = do_rx.recv() => match d {
+                                Some(Do::Append(sid, k)) => send(&mut seqs, sid, *k),
+                                Some(Do::Leave) | None => return,
+                            },
+                        }
         }
     });
     (NodeLink { to_node, from_node }, Fake { seen, tx: do_tx })

@@ -5,6 +5,7 @@ import { FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
+import { endWords, turnStart } from "../lib/callback";
 import { dropDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
@@ -133,7 +134,7 @@ function fallbackNotes(items: Item[]): { byReply: Map<number, Extract<Item, { ty
   let pending: number | null = null;
   items.forEach((it, i) => {
     if (it.type === "fallback") pending = i;
-    else if (it.type === "user" || it.type === "turn_end") pending = null;
+    else if (turnStart(it) || it.type === "turn_end") pending = null;
     else if (it.type === "assistant" && pending !== null) {
       byReply.set(i, items[pending] as Extract<Item, { type: "fallback" }>);
       attached.add(pending);
@@ -249,7 +250,7 @@ export default function Conversation(props: {
   // Items before the running turn's user message are final even if their
   // stream was cut off (a cancelled, failed or interrupted turn leaves
   // done=false); such a message is shown as cut off.
-  const liveFrom = running ? items.findLastIndex((x) => x.type === "user") : Infinity;
+  const liveFrom = running ? items.findLastIndex(turnStart) : Infinity;
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
   const agentic = (meta?.profile ?? props.row?.profile) === "agentic";
@@ -514,6 +515,19 @@ export default function Conversation(props: {
                     return (
                       <div key={i} className="msg error">
                         {showHidden(it.message)}
+                      </div>
+                    );
+                  case "callback":
+                    // Where the person's message would be: nobody wrote one.
+                    return (
+                      <div key={i} className="divider callback" role="note">
+                        Started by {endWords(view.items.slice(0, i), it.bg_ids)}, not by you
+                      </div>
+                    );
+                  case "callback_refused":
+                    return (
+                      <div key={i} className="msg error">
+                        {endWords(view.items.slice(0, i), it.bg_ids)}; the agent was not resumed: {showHidden(it.reason)}
                       </div>
                     );
                   case "background_ended":

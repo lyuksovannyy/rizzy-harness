@@ -1,6 +1,7 @@
 // Pure derivations over the folded timeline for ui blocks (rich_plan §6.2).
 // Nothing here is stored: a reload folds the same log and gets the same
 // answer.
+import { turnStart } from "../lib/callback";
 import type { FormValue, Item, ProgressSpec, SessionView, TurnEndReason } from "../types";
 
 /** Where one progress block stands in its turn. */
@@ -41,7 +42,7 @@ export function progressSlots(
   view: Pick<SessionView, "running_turn" | "variant_selection">,
 ): Map<string, ProgressSlot> {
   const slots = new Map<string, ProgressSlot>();
-  const starts = items.flatMap((it, i) => (it.type === "user" ? [i] : []));
+  const starts = items.flatMap((it, i) => (turnStart(it) ? [i] : []));
   const spans = [0, ...starts].map((from, s, all) => [from, all[s + 1] ?? items.length] as const);
   spans.forEach(([from, to], s) => {
     if (from === to) return;

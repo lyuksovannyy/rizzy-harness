@@ -293,6 +293,7 @@ impl Node {
     async fn session_in(&mut self, mode: ApprovalMode) -> SessionId {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
+no_callbacks: false,
             profile: None,
             incognito: false,
             agent: None,

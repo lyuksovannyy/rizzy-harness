@@ -362,7 +362,8 @@ export function Shell(props: {
   // Looking at a chat that asked a question counts as seeing it.
   const viewing = route.kind === "session" ? route.id : null;
   useEffect(() => {
-    const a = attention.find((x) => x.session_id === viewing && x.reason === "question");
+    // So does looking at what ran in it while the owner was away.
+    const a = attention.find((x) => x.session_id === viewing && x.reason !== "approval");
     if (!a) return;
     const mark = () => {
       if (document.visibilityState === "visible") void api.markSeen(a.session_id, a.seq).catch(() => {});
