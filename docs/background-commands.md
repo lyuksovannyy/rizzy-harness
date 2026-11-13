@@ -2,11 +2,12 @@
 
 Status: **the six open questions were answered by the owner on 2026-11-13 (§0)**; where §0
 differs from a recommendation further down, §0 holds, and the affected rows are corrected. The
-rest of the decisions table (§3) stands as recommended. **Step 1 of §8 is built** (branch
-`feat/T.8d-background-commands`), reviewed (`docs/security-review/2026-11-T8d-background-commands.md`)
-and fixed, and ships **off by default** until step 2; what the code does differently from this
-note is in §11.
-Steps 2 and 3 are not built. Task C.15 of `ADOPTION_PLAN.md`; the feature is task T.8d.
+rest of the decisions table (§3) stands as recommended. **Step 1 of §8 is built** (merged in pull
+request 71), reviewed (`docs/security-review/2026-11-T8d-background-commands.md`) and fixed; what
+the code does differently from this note is in §11. **Step 2 is built** on branch
+`feat/T.8d-step2-stop` (not merged, not yet reviewed): the person's strip and stop, and the
+feature **on by default** (§12). Step 3 is not built. Task C.15 of `ADOPTION_PLAN.md`; the
+feature is task T.8d.
 
 **Summary.** `bash` gains `background: true`. The node starts the command in its own contained
 sandbox (T.8a to T.8c) under its own guard (T.8e), exactly as a foreground command, but holds it
@@ -34,7 +35,7 @@ Claims about code were read on `main` at `6e99313` (T.8c merged; pull request 63
 | Q3 | The timeout and its ceiling | **The agent may set it from 5 s up to the node's existing ceiling** (`bash_timeout_max_s`); 60 s for a foreground command that states none. No second ceiling. | R3 and §4.2: a floor of 5 s is new (it was 1). |
 | Q4 | The foreground default | **The range and the clamp are shared by both kinds; the 60 s default is foreground's only** (Q5). | R3 and §4.2: the foreground default drops from 600 s to 60 s, as recommended. |
 | Q5 | Must a background command name its timeout? | **Yes: it must name its timeout, and is refused without** (decided by the owner on 2026-11-13, after a first reading of Q3 and Q4 as one 60 s default for both kinds). | R3 and §4.2: a background call without `timeout_secs` is refused before anything starts, with the range in words. |
-| Q6 | On by default, and the default bounds | On. **`background_per_session = 8`, `background_per_node = 64`.** **Step 1 ships it off** (`background_per_session = 0`, the coordinator's decision after review T8D-4): until step 2 a person can neither see a running command nor stop it with a control; step 2 sets the default to the owner's 8. | R8 and §4.5. Kept output in the node's memory is at most `background_per_node × (background_output_kb + 32 KiB)`, 16.3 MiB at the defaults (64 running rings of 256 KiB, and at most 64 ended ones cut to 32 KiB: §11), and 64 running commands are about 300 processes beside the node (measured, §11). The node's idle size does not change. |
+| Q6 | On by default, and the default bounds | On. **`background_per_session = 8`, `background_per_node = 64`.** Step 1 shipped it off (`background_per_session = 0`, the coordinator's decision after review T8D-4: a person could neither see a running command nor stop it with a control); **step 2 gives the person the strip and its stop and sets the default to the owner's 8** (§12). | R8 and §4.5. Kept output in the node's memory is at most `background_per_node × (background_output_kb + 32 KiB)`, 16.3 MiB at the defaults (64 running rings of 256 KiB, and at most 64 ended ones cut to 32 KiB: §11), and 64 running commands are about 300 processes beside the node (measured, §11). The node's idle size does not change. |
 
 ## Terms
 
@@ -314,7 +315,7 @@ New keys in `[limits]` (`crates/node/src/policy.rs:154-173`), checked at start l
 
 | Key | Default | Range | Why this default |
 |---|---|---|---|
-| `background_per_session` | 8 (the owner, §0); **0 in step 1** (§0 Q6) | 0 to 32 | 0 turns the feature off on this node. |
+| `background_per_session` | 8 (the owner, §0; it was 0 in step 1, §0 Q6) | 0 to 32 | 0 turns the feature off on this node. |
 | `background_per_node` | 64 (the owner, §0) | 0 to 256 | Each costs about five processes (measured, §11) and its ring; with the ended rings the node holds at most `per_node × (output_kb + 32 KiB)`, 16.3 MiB at the defaults. |
 | `callback_turns` | 3 | 0 to 20 | Build, then tests, then one fix, then stop and wait. 0: ends are recorded and never start a turn. |
 | `callback_max_steps` | 20 | 1 to `max_steps` | A callback turn should report or take one step forward, not run a whole task unwatched. |
@@ -618,15 +619,15 @@ the foreground).
 | Step | What | Tests (fail before, pass after) | User-visible documentation | Size |
 |---|---|---|---|---|
 | 1 | **Background commands without callbacks.** `background` and the required timeout; the per-session table; `bash_output`, `bash_stop`; `background_started`/`background_ended`; the note at the next step and at the next person's message; the restart end; delete, revocation (`session.stop_background`, the mirror count) and drain stops; refusals for sub-agents, uncontained nodes and full tables; the approval reason; foreground default 60 s; `[limits]` keys except the callback ones. | §7 tests 1 to 4, 7 to 10; a dev server started in one step answers `curl` in the next with the network on; a foreground call without a timeout ends at 60 s (600 s on `main`); a one-hour background command's guard still confirms its end (`cli/tests/guard.rs` style). | README: the tool, the keys, network off; `PLAN.md` §2 kinds, T9 wording, T36. | **L** |
-| 2 | **The person's controls.** The strip, Stop and Stop all, card states, the HTTP endpoint (owner only); the bundle line in `size.mjs`. | A stop from the UI ends the command with `stopped_by_user`; another user's stop is 404; the first load stays under 104 KB; an e2e flow in `web/e2e/`. | README: what the strip shows. | **M** |
+| 2 | **The person's controls** (built, §12). The strip, Stop and Stop all, card states, the HTTP endpoint (owner only); the bundle line in `size.mjs`; the default of 8. | A stop from the UI ends the command with `stopped_by_user`; another user's stop is 404; the first load stays under 104 KB; an e2e flow in `web/e2e/`. | README: what the strip shows. | **M** |
 | 3 | **Callback turns.** The master's watcher and admission, `cause`, the node's budget check, `callback_turns`, `callback_max_steps`, the attention items, untrusted chats. | §7 tests 5 and 6; a fourth callback in a row is refused and the chat says why; a person's message refills the budget; a callback turn's steps stop at 20; an end seen after 60 min starts no turn. | README: unattended turns, their bounds and how to turn them off; `docs/routines.md`: the third caller of `Master::prompt`. | **M** |
 | 4 | Later, each its own decision: a live tail for the person; a person's "move to background"; a per-session network namespace for network-off dev servers; a lower CPU priority. | | | |
 
 Step 1 is useful alone (servers and long builds work; the agent learns of ends at its next step
-or the person's next message), but it is not safe to turn on alone: the person can neither see a
-running command nor stop it with a control until step 2, so step 1 ships with the feature off
-(review T8D-4, §0 Q6). Step 2 before step 3, so the person can see and stop what runs before
-anything acts unwatched.
+or the person's next message), but it was not safe to turn on alone: the person could neither see
+a running command nor stop it with a control until step 2, so step 1 shipped with the feature off
+(review T8D-4, §0 Q6) and step 2 turns it on. Step 2 before step 3, so the person can see and stop
+what runs before anything acts unwatched.
 
 ## 9. What I am least sure of
 
@@ -729,7 +730,7 @@ Where the code differs from the sections above, the code is described here.
   such a node, after its cancel, whatever the mirror shows: no count decides (review N-1, N-8),
   and the mirror's count and its `sessions.background` column were removed again (so this branch
   changes no table). A revoked chat's table then refuses starts and stops a start handed over
-  during its first wait, until its owner prompts the chat. No HTTP endpoint (step 2's).
+  during its first wait, until its owner prompts the chat. The HTTP endpoint is step 2's (§12).
 - **The node's stop** orders every command to stop on each pass of its wait, retries ends the
   log did not take, and waits until every end is recorded or, once the commands are gone, a
   retry has failed; those chats are in its result and the process exits 1 (review T8D-6). It
@@ -744,12 +745,13 @@ Where the code differs from the sections above, the code is described here.
   node_restarted, confirmed: unknown, ran_ms: 0 }`.
 - **An undo** is refused while **that session's** commands run; another session in the same
   folder is not checked.
-- **Off by default** in step 1 (`background_per_session = 0`, review T8D-4). While it is off
+- **Off by default** in step 1 (`background_per_session = 0`, review T8D-4; on since step 2,
+  §12). While it is off
   (or in a sub-agent's turn) the model is not offered `bash_output` or `bash_stop`, and `bash`'s
   description and schema say nothing of `background`; a start that asks anyway is refused with
-  the node's reason. With it on, a
-  person can end a command only by deleting the chat, stopping the node, or the agent's
-  `bash_stop`. Routine chats and untrusted chats may start background commands behind their
+  the node's reason. In step 1, with it on, a
+  person could end a command only by deleting the chat, stopping the node, or the agent's
+  `bash_stop` (step 2 adds the strip's Stop, §12). Routine chats and untrusted chats may start background commands behind their
   click like any chat (§4.10); nothing on the node treats them differently in step 1.
 - **Not said elsewhere:** one user's chats can hold every slot of the node, and a chat refused
   at the node's cap learns that other chats fill it (N-5); a delete whose log removal fails has
@@ -772,5 +774,76 @@ test process's RSS still grew by about 50 to 60 MiB in that test: its own copy o
 the twelve calls' live streams of up to 1 MiB each and the allocator; the tables' own count is
 the measure the test asserts.
 
-**Not built of step 1:** the person's stop and its HTTP endpoint (step 2), `turn_started.cause`
+**Not built of step 1:** the person's stop and its HTTP endpoint (step 2, §12), `turn_started.cause`
 and `callback_turns`/`callback_max_steps` (step 3), a live view of the output.
+
+## 12. Step 2 as built (2026-11-13)
+
+Built on `feat/T.8d-step2-stop`: §4.11's strip and the person's stop of §4.7 and §4.9, and the
+owner's default of 8 (§0 Q6). Not built of §4.11: the start call's card states ("running in the
+background" until the end; the card shows the start's result, the chat a line for the end, as in
+step 1), the callback turn's mark and the attention items (step 3).
+
+- **The route** (`crates/master/src/http/background.rs`): `POST
+  /api/sessions/{id}/background/{bg_id}/stop` for one, `POST /api/sessions/{id}/background/stop`
+  for all. Authorisation is the per-chat routes' own (`visible_session`): the owner, or the API
+  token; anyone else, server admins and workspace admins included, gets the 404 of a chat that
+  does not exist. Like the turn's cancel it needs no settled password and no agentic grant
+  (stopping is always allowed, Gate 3 P-7), and it is exempt from the diverged-session refusal
+  (`session.stop_background` writes nothing the master must accept first). The login key and the
+  page's Origin are required by the guard every cookie write passes (Gate 3 P-1, AUDIT L6); no
+  scheme of its own. A `bg_id` that is not `bg-<1 to 9 digits>` is 400.
+- **What the master answers itself, from the log** (`Store::background_events`, the newest 4096
+  `background_started`/`background_ended` events of the chat, one bounded read): a command the
+  log shows ended is a 200 with `ended: [{bg_id, reason}]` and a message ("bg-1 had already
+  ended: it exited"), the same every time and the node is not asked; Stop all with nothing the
+  log shows running is a 200 with `stopping: []`. Everything else is the node's to decide: an id
+  the log does not show running is still relayed (a start whose event is on its way), and the
+  node's refusal ("no background command bg-9 in this chat (it has bg-1)") is passed on as 409.
+- **Relayed** as `session.stop_background { bg_id?, by: user }`; the node stops it and records
+  `stopped_by_user` (step 1's code, unchanged). The answer, 200 `stopping: [ids]`, says what the
+  node was asked; the end arrives as the event. The master waits for the node's ack only, not for
+  the end.
+- **A node that is away** (not connected): 503, "the node … is away, so the stop cannot reach it;
+  its background commands end with that node or at their timeout, and the chat shows the end when
+  the node is back". Nothing is queued for later: a node that comes back after a crash records
+  `node_restarted` for each, and one whose link only dropped still has them running, with the
+  strip's Stop working again. **A node without `CAP_BACKGROUND`**: 409, sent nothing. A node that
+  is stopping: 503 (it stops them itself, `node_stopping`). No ack in time: 504.
+- **The strip** (`web/src/components/BackgroundStrip.tsx`, rows from `web/src/lib/background.ts`):
+  above the reply box while a command of the open chat runs, one row per command in start order:
+  the id, the first non-empty line of the command cut at 80 characters (the start call's input,
+  the model's text: React text, hidden characters marked by `showHidden`, never HTML; `title` is
+  the same text), the time left, Stop; "Stop all" with two or more (one request). A click shows
+  "stopping…" and disables that Stop for 10 s (then "Stop again"); a refusal shows the server's
+  reason on the row and Stop works again; the log's end turns the row into "ended: stopped" for
+  6 s, the timeline keeps its `background_ended` line. Its header says the commands keep running
+  when the turn stops, so the chat's Stop (which does not stop them, R11) leaves the strip on
+  screen beside the composer's Stop.
+- **State of record.** Every row is the fold's (`SessionView.background`, which gained
+  `timeout_s` in both folds and the shared fixture): a reload and a second tab show the same
+  rows. The tab's own state is only its clicks ("stopping…", a failure, the brief "ended"); a
+  second tab sees the end, not the other tab's click.
+- **The clock.** `ends_by_ms` is the node's clock, the browser counts with its own. The time left
+  is `min(max(ends_by_ms − now, 0), timeout_s)`: a browser behind the node shows at most the
+  command's own timeout, one ahead shows less, down to "at its timeout", never negative; it is in
+  whole seconds, minutes or hours, and nothing acts on it: only the log's end removes a row. No
+  server time is fetched: the node's and the master's clocks can differ as well, and a second
+  correction would claim an exactness the deadline does not have.
+- **A node that is away** (the node list says `connected: false`; a node the list does not name
+  is not taken as away, and the server's 503 says it if it is): the strip says so in words, each
+  row shows "node away" instead of the time left, and no Stop is offered.
+- **The chunk.** The strip is its own lazy chunk (`BackgroundStrip-*.js`), imported by the
+  conversation on the first running command of the open chat and then kept mounted for that
+  chat (it hides itself) so an end the tab asked for can show; a chat with none never loads it.
+  `size.mjs` checks it stays out of the first load. Measured: 1.9 KB gzipped (its stylesheet
+  0.4 KB), the conversation +0.1 KB; the first load unchanged at 99.5 KB of the 104 KB ceiling;
+  the total 370.4 KB, its soft line raised by 2.0 KB to 370.5.
+- **On by default.** `background_per_session` defaults to 8 (`DEFAULT_PER_SESSION`). The step 1
+  tests that meant "off" now set 0 explicitly (`a_node_with_the_feature_off_offers_no_background_tools`,
+  `the_default_node_takes_a_background_start_and_0_refuses_it`), and the latter also shows that a
+  node with the defaults takes a start.
+- **Not done:** the start card's states (above); a person's stop is not recorded as who stopped
+  it beyond the reason (`stopped_by_user`: the chat has one owner); the review proofs in
+  `crates/cli/tests/support/review_t8d/` still assert step 1's default (T8D-4's proof expects a
+  refusal with the defaults) and are the reviewer's to update.

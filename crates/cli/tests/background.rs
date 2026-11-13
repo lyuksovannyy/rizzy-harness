@@ -98,8 +98,8 @@ fn table(limits: Limits) -> (Arc<SessionBg>, mpsc::UnboundedReceiver<Ended>) {
     (Registry::new(limits, Default::default()).session(1, tx), rx)
 }
 
-/// The feature on, at the owner's step-2 defaults (step 1 ships it off,
-/// T8D-4): every test that needs it says so.
+/// The feature on at the owner's defaults (8 a chat; a table made here
+/// states it, the node's default is `DEFAULT_PER_SESSION`).
 fn on() -> Limits {
     Limits {
         per_session: 8,
@@ -1352,15 +1352,37 @@ fn assert_shapes(sent: &[Vec<harness_agent_native::ChatMsg>]) {
     }
 }
 
-/// T8D-4: step 1 ships the feature off: a node with the defaults refuses
-/// a background start, with the reason, and starts nothing.
+/// §0 Q6: on by default since step 2 (the owner's 8 a chat): a node with
+/// the defaults takes a background start. `background_per_session = 0`
+/// still turns it off: refused with the reason, nothing started.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_default_node_refuses_a_background_start() {
+async fn the_default_node_takes_a_background_start_and_0_refuses_it() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
-    let _r = Reaper(vec![975_931]);
+    let _r = Reaper(vec![976_131, 976_132]);
     let mut n = node_opts(f, sb, vec![], |_| {}, "auto").await;
-    n.turn(json!([bg("sleep 975931", 60)])).await;
+    n.turn(json!([bg("sleep 976131", 60)])).await;
+    let r = n.results();
+    assert!(
+        r[0].contains("running in the background as bg-1"),
+        "{}",
+        r[0]
+    );
+    assert_eq!(sleeps(976_131).len(), 1);
+    n.turn(json!([{"tool": "bash_stop", "input": {"id": "bg-1"}}]))
+        .await;
+    // Off.
+    let f = fixture();
+    let sb = f.sandbox().unwrap();
+    let mut n = node_opts(
+        f,
+        sb,
+        vec![],
+        |p| p.limits.background_per_session = 0,
+        "auto",
+    )
+    .await;
+    n.turn(json!([bg("sleep 976132", 60)])).await;
     let r = n.results();
     assert!(
         r[0].contains("background commands are off on this node")
@@ -1368,7 +1390,7 @@ async fn the_default_node_refuses_a_background_start() {
         "{}",
         r[0]
     );
-    assert!(sleeps(975_931).is_empty());
+    assert!(sleeps(976_132).is_empty());
     assert!(
         !n.kinds()
             .iter()
@@ -2403,14 +2425,22 @@ impl Drop for Stall {
     }
 }
 
-/// With the feature off, the model is not offered `bash_output` or
-/// `bash_stop`, and `bash` does not describe `background`; a start that
-/// asks anyway gets the same refusal.
+/// With the feature off (`background_per_session = 0`, explicit: it is on
+/// by default), the model is not offered `bash_output` or `bash_stop`, and
+/// `bash` does not describe `background`; a start that asks anyway gets
+/// the same refusal. With the defaults they are offered.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_with_the_feature_off_offers_no_background_tools() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
-    let mut n = node_opts(f, sb, vec![], |_| {}, "auto").await;
+    let mut n = node_opts(
+        f,
+        sb,
+        vec![],
+        |p| p.limits.background_per_session = 0,
+        "auto",
+    )
+    .await;
     n.turn(json!([bg("true", 60)])).await;
     let reqs = n.requests.lock().unwrap().clone();
     let names: Vec<String> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
@@ -2440,10 +2470,10 @@ async fn a_node_with_the_feature_off_offers_no_background_tools() {
         "{}",
         n.results()[0]
     );
-    // On: offered.
+    // The defaults: offered.
     let f = fixture();
     let sb = f.sandbox().unwrap();
-    let mut on = node_with(f, sb, vec![]).await;
+    let mut on = node_opts(f, sb, vec![], |_| {}, "auto").await;
     on.turn(json!([fg("true")])).await;
     let reqs = on.requests.lock().unwrap().clone();
     let names: Vec<String> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();

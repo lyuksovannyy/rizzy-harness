@@ -556,12 +556,12 @@ mod tests {
     }
 
     /// T.8d: the background bounds are node.toml's, with the owner's
-    /// defaults (0 a chat in step 1, 64 a node, 256 KiB each), and checked.
+    /// defaults (8 a chat, 64 a node, 256 KiB each; on since step 2 gave
+    /// the person the strip and its stop), and checked; 0 turns it off.
     #[test]
     fn background_limits_default_and_range() {
         let l = NodePolicy::default().limits.background();
-        // Off in step 1 (T8D-4): the person cannot see or stop one yet.
-        assert_eq!((l.per_session, l.per_node, l.output_kb), (0, 64, 256));
+        assert_eq!((l.per_session, l.per_node, l.output_kb), (8, 64, 256));
         let p: NodePolicy = toml::from_str(
             "[limits]\nbackground_per_session = 0\nbackground_per_node = 3\nbackground_output_kb = 16\n",
         )

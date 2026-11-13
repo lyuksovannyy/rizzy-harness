@@ -67,10 +67,10 @@ pub fn kept_bound(l: Limits) -> usize {
     l.per_node * (l.output_kb * 1024 + ENDED_MAX)
 }
 
-/// `[limits]` defaults and ranges (node.toml). Off by default in step 1
-/// (T8D-4): a person can neither see nor stop a background command until
-/// step 2 ships the strip and its stop; then the default becomes 8.
-pub const DEFAULT_PER_SESSION: usize = 0;
+/// `[limits]` defaults and ranges (node.toml). On by default (the owner's
+/// 8, docs/background-commands.md §0 Q6) since step 2 gave the person the
+/// chat's strip and its Stop (review T8D-4); 0 turns it off.
+pub const DEFAULT_PER_SESSION: usize = 8;
 pub const MAX_PER_SESSION: usize = 32;
 pub const DEFAULT_PER_NODE: usize = 64;
 pub const MAX_PER_NODE: usize = 256;

@@ -672,7 +672,7 @@ max_steps = 50                       # model calls one turn may make (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
-background_per_session = 0           # background commands one chat may run at once; 0 (the default for now): off (0 .. 32)
+background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
 background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
 
@@ -1029,17 +1029,37 @@ The tool description the model sees states the ceiling. Neither an agent
 definition, a prompt nor the master can raise either; a value outside its
 range stops the node at start.
 
-**Background commands. Off by default in this version:** you cannot yet
-see a running background command in the chat or stop it with a button (that
-comes next, with a strip above the composer and a Stop per command), so a
-node runs none unless its owner sets `background_per_session` above 0 in
-`[limits]`. A node owner who turns them on now can stop one only by deleting
-the chat, by stopping the node, or by asking the agent to call `bash_stop`;
-the chat's **Stop** button does not stop them. While they are off the agent
-is not offered `bash_output` or `bash_stop` and `bash` does not describe
-`background` (a call that asks for it anyway is refused with the reason).
+**Background commands** are on by default (8 a chat, 64 a node); a node owner
+turns them off with `background_per_session = 0` in `[limits]`. While they
+are off the agent is not offered `bash_output` or `bash_stop` and `bash` does
+not describe `background` (a call that asks for it anyway is refused with the
+reason).
 
-With the feature on, `bash` with `background: true` and a `timeout_secs`
+**What you see and how you stop one.** While a background command of the open
+chat runs, a strip above the reply box lists each one: its id (`bg-1`), the
+first line of its command (as plain text), the time left before its timeout
+stops it, and **Stop**; with two or more, **Stop all**. A click shows
+"stopping…" until the node has ended the command; the strip then shows
+"ended: stopped" for a moment, the chat keeps the line "bg-1 ended (stopped by
+user)", and the strip goes when nothing runs. A refused stop shows the reason
+on its row (Stop can be pressed again). The strip is drawn from the chat's
+log, so a reload or a second tab shows the same commands; only "stopping…" is
+the tab's own. **The chat's Stop does not stop them**: it ends the turn, and
+the strip stays, saying they keep running. When the chat's node is away, the
+strip says so and offers no Stop: a stop cannot reach it, and the commands
+end with that node or at their timeout (the chat shows the end when the node
+is back). The time left is the node's deadline counted on your computer's
+clock; if the two clocks differ it is off by that much, but it never shows
+more than the command's own timeout or less than zero, and only the node's
+end removes a row. Only the chat's owner can stop its commands (an admin
+cannot, as they cannot read the chat). For scripts: `POST
+/api/sessions/{id}/background/{bg_id}/stop` stops one, `POST
+/api/sessions/{id}/background/stop` all; the answer lists what the node was
+asked to stop (`stopping`) or, for a command that had already ended, how it
+ended (`ended`), and the end itself arrives as the chat's
+`background_ended` event.
+
+`bash` with `background: true` and a `timeout_secs`
 (required: a background call without one is refused before anything starts)
 is for a dev server, a watcher or a long build. The call waits 3 s: a command
 that ended by then is an ordinary result; one still running is kept by the
@@ -1074,8 +1094,9 @@ shell (`[sandbox] contain = "off"`, or bubblewrap does not work there).
 be reached** by a later command: each command has a network namespace of its
 own; the start's result says so. A command stops at its timeout, with
 `bash_stop`, when the chat is deleted, when its owner loses access to it
-(the chat then starts none until its owner writes to it again), and when the
-node stops or dies; a turn's Stop leaves it running. An undo in a chat is
+(the chat then starts none until its owner writes to it again), with the
+strip's Stop, and when the node stops or dies; a turn's Stop leaves it
+running. An undo in a chat is
 refused while that chat's own background commands run; a background command
 of another chat in the same folder is not checked and can write over what an
 undo puts back.
@@ -1669,6 +1690,13 @@ Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):
 
 ```bash
 node web/e2e/rich.cjs target/debug/rizzy-harness
+```
+
+A chat's background command in the strip, the turn's Stop leaving it, the
+strip's Stop ending it (needs bubblewrap; port 7786):
+
+```bash
+node web/e2e/background.cjs target/debug/rizzy-harness
 ```
 
 Token savings page (the graphify card is read-only; nothing installs it):
