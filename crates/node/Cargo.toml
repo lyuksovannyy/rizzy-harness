@@ -33,6 +33,8 @@ walkdir.workspace = true
 
 [dev-dependencies]
 harness-agent-native.workspace = true
+# The real link under the node in `tests/control_over_link.rs` (A.21).
+harness-link.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 

@@ -1604,6 +1604,7 @@ dependencies = [
  "flate2",
  "harness-agent-native",
  "harness-core",
+ "harness-link",
  "harness-protocol",
  "harness-store",
  "harness-tools",

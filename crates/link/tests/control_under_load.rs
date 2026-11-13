@@ -81,6 +81,13 @@
 //! whatever size, plus what the kernel holds, so its delay is those bytes
 //! divided by the uplink's rate. The control in both tests is the same
 //! run's own other direction.
+//!
+//! The model above is B.7's node, before A.21. The node-to-master half is
+//! now measured on the real node, its command loop and its lane for those
+//! acks, over this same link and proxy:
+//! `crates/node/tests/control_over_link.rs` (A.21; it replaces this file's
+//! `control_frames_from_the_node_arrive_within_the_grace`). What is left
+//! here measures the link's master-to-node direction only.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -108,9 +115,6 @@ const IN_QUEUE: usize = 64;
 /// `chunk = [0u8; 8192]`). The agent loop coalesces reads into events of
 /// `FLUSH_BYTES` (2 KiB) or more, so real events vary (review B7-R3).
 const DELTA: usize = 8192;
-/// `harness_agent_native::TOOL_CANCEL_GRACE` (not a dependency here): the
-/// plan's "grace" a control frame may not wait past.
-const GRACE: Duration = Duration::from_secs(5);
 /// The uplink: 1 MiB/s, about a 10 Mbit/s home or office uplink.
 /// `B7_RATE_KIB` sets another rate for a measurement by hand.
 const RATE: usize = 1 << 20;
@@ -425,26 +429,4 @@ async fn the_first_control_frame_reaches_the_node_while_its_uplink_is_full() {
     m.print();
     assert!(m.behind >= OUT_QUEUE - 2, "the uplink was not full: {m:?}");
     assert!(m.cancel_at_node < Duration::from_secs(1), "{m:?}");
-}
-
-/// Node to master: the ack of a cancel (and anything else the node sends,
-/// an approval request among them) reaches the master within the grace.
-///
-/// Fails (B.7, 2026-11-13): at 1 MiB/s the cancel's ack reached the master
-/// after 6.6 s and the approval answer's after 7.2 s, with 781 frames
-/// (6.1 MiB) read ahead of the cancel's ack: the node's 256 messages
-/// (2 MiB of 8 KiB frames) and 4.1 MiB the kernel's loopback send buffer
-/// held (see the caveats above). At 256 KiB/s: 26.2 s and 28.2 s, past the
-/// master's 15 s `ACK_TIMEOUT` (by reading the master, Stop then answers
-/// 504; the route was not driven). The command loop here is a model: when a
-/// lane is built, this test must drive the real node's loop, or it cannot
-/// go green from a fix in `crates/node` (ADOPTION_PLAN B.7).
-#[tokio::test]
-#[ignore = "B.7: fails, control frames from the node wait 6.6 s behind a full uplink at 1 MiB/s"]
-async fn control_frames_from_the_node_arrive_within_the_grace() {
-    let m = scenario().await;
-    m.print();
-    assert!(m.behind >= OUT_QUEUE - 2, "the uplink was not full: {m:?}");
-    assert!(m.cancel_ack_at_master < GRACE, "{m:?}");
-    assert!(m.approval_ack_at_master < GRACE, "{m:?}");
 }
