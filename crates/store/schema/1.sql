@@ -386,6 +386,9 @@ CREATE TABLE sessions (
     agent_id   TEXT,
     profile    TEXT,
     parent_id  TEXT,
+    -- The execution mode `session_created` recorded (N.10a): the master
+    -- re-checks who may drive a `host` chat on every action.
+    exec_mode  TEXT,
     -- Attention: approvals waiting, or the last turn ended with a question.
     pending_approvals INTEGER NOT NULL DEFAULT 0,
     last_asks  INTEGER NOT NULL DEFAULT 0,
