@@ -484,8 +484,9 @@ pub fn built(steps: &[Migration]) -> String {
 /// migrations `1..=k`, equals `dir/<k>.sql` for every `k`, and no file
 /// exists for a version the code does not have. With
 /// `HARNESS_WRITE_SCHEMA=1` a version without a file gets one; a recorded
-/// file is never rewritten (before the first tag, delete `1.sql` to record
-/// migration 1 again). What this guards is the schema a released
+/// file is never rewritten. An empty file counts as not recorded: before
+/// the first tag, empty `1.sql` (it cannot be deleted, `include_str!`
+/// needs it) to record migration 1 again. What this guards is the schema a released
 /// migration makes, not its data statements: a backfill `UPDATE` or
 /// `INSERT` changed after release leaves the schema as it was and passes
 /// (review R43-6); only review catches that.
@@ -501,7 +502,11 @@ pub fn check_recorded_with(dir: &Path, steps: &[Migration], write: bool) {
     for k in 1..=steps.len() {
         let file = dir.join(format!("{k}.sql"));
         let now = built(&steps[..k]);
-        if write && !file.exists() {
+        // Empty is "not recorded yet": the file cannot be deleted to record
+        // a version again, since `include_str!` needs it to build, and no
+        // released version is empty.
+        let unrecorded = std::fs::metadata(&file).map_or(true, |m| m.len() == 0);
+        if write && unrecorded {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(&file, &now).unwrap();
             continue;

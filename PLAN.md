@@ -47,8 +47,9 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   (`master.db`, `chat.db`, `node.db` through `Store`, `memory.db` through `SqliteMemory`)
   carries `PRAGMA user_version` and is opened through numbered migrations; migration 1 is the
   whole schema. Until the first tag migration 1 is edited in place and its recorded schema
-  (`crates/store/schema/1.sql`, `crates/memory/schema/1.sql`) deleted and recorded again with
-  `HARNESS_WRITE_SCHEMA=1`, which only creates files that do not exist; the recorded text is
+  (`crates/store/schema/1.sql`, `crates/memory/schema/1.sql`) emptied and recorded again with
+  `HARNESS_WRITE_SCHEMA=1`, which only fills files that are missing or empty (not deleted:
+  `include_str!` needs the file to build); the recorded text is
   what the migrations make (SQLite's own `sqlite_*` objects and FTS5's shadow tables are left
   out, so a SQLite update does not change it). **The version is trusted only with the schema:**
   a file at a known version must have exactly that version's recorded schema, and a migrated

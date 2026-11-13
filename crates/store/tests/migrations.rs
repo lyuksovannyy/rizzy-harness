@@ -788,9 +788,12 @@ fn write_mode_fills_an_emptied_file() {
 /// with it would no longer match what the next one expects. Change the
 /// schema with a new migration and record its file
 /// (`HARNESS_WRITE_SCHEMA=1 cargo test -p harness-store --test migrations`,
-/// which only creates files that do not exist). Before the first tag,
-/// migration 1 is still edited in place (PLAN.md §0): delete `1.sql` and
-/// record it again, and wipe dev data directories.
+/// which only fills files that are missing or empty). Before the first
+/// tag, migration 1 is still edited in place (PLAN.md §0): empty `1.sql`
+/// (`: > crates/store/schema/1.sql`; deleting it breaks the build), record
+/// it again with that command (that run's other tests fail: the crate was
+/// built with the empty file), run the tests once more without it, and
+/// wipe dev data directories.
 #[test]
 fn every_version_matches_its_recorded_schema() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema");
