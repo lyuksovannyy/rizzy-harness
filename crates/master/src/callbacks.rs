@@ -62,30 +62,6 @@ fn key(sid: SessionId) -> String {
     format!("{KEY}{sid}")
 }
 
-/// The kv key of the workspace a chat's newest background command started
-/// in (as the mirror saw the chat then).
-fn ws_key(sid: SessionId) -> String {
-    format!("callback-workspace:{sid}")
-}
-
-/// Record where `sid`'s newest background command started.
-async fn started_in(m: &Master, sid: SessionId) {
-    let res = m
-        .inner
-        .mirror
-        .call(move |s| {
-            let k = ws_key(sid);
-            match s.session(sid)?.and_then(|r| r.workspace_id) {
-                Some(ws) => s.kv_set(&k, &ws),
-                None => s.kv_delete(&k).map(|_| ()),
-            }
-        })
-        .await;
-    if let Err(e) = res {
-        tracing::warn!(session = %sid, error = %e, "callbacks: could not record a start's workspace");
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct Callbacks {
     chats: Mutex<HashMap<SessionId, Chat>>,
@@ -177,15 +153,8 @@ pub(crate) fn on_applied(m: &Master, e: &RawEvent) {
 /// The chat was deleted from the mirror.
 pub(crate) async fn forget(m: &Master, sid: SessionId) {
     lock(&m.inner.callbacks.chats).remove(&sid);
-    let (k, w) = (key(sid), ws_key(sid));
-    let _ = m
-        .inner
-        .mirror
-        .call(move |s| {
-            s.kv_delete(&k)?;
-            s.kv_delete(&w)
-        })
-        .await;
+    let k = key(sid);
+    let _ = m.inner.mirror.call(move |s| s.kv_delete(&k)).await;
 }
 
 /// Check `sid` now, or once more after the check that runs.
@@ -365,23 +334,9 @@ async fn admission(m: &Master, row: &SessionRow) -> Result<(), String> {
     }
     let who = crate::auth::Principal::from_user(user);
     let sid = row.session_id;
-    // An owner who left the chat's team workspace still reads the chat (it
-    // falls back to their Personal one) and may go on in it themselves;
-    // nothing goes on there without them. The workspace the chat's newest
-    // background command started in is kept for this (`started_in`): a
-    // chat that is not there any more is not resumed until its owner
-    // starts something again (stricter than the owner's own prompt).
-    let k = ws_key(sid);
-    match m.inner.mirror.call(move |s| s.kv_get(&k)).await {
-        Ok(Some(ws)) if row.workspace_id.as_deref() != Some(ws.as_str()) => {
-            return Err(
-                "the chat is no longer in the workspace its command started in (its owner left it)"
-                    .into(),
-            );
-        }
-        Ok(_) => {}
-        Err(_) => return Err("the owner's access could not be checked".into()),
-    }
+    // Exactly what the owner could do themselves now: the chat's effective
+    // workspace (a team chat whose owner left it falls back to their
+    // Personal one, where they may go on in it themselves).
     if let Some(why) = crate::workspaces::agentic_blocked(m, &who, row).await {
         return Err(why);
     }
