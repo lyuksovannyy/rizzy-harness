@@ -264,14 +264,25 @@ delegates' chats behind; they take the mark over in the same transaction.
 
 **Every way a chat goes on keeps it.** The mark belongs to the chat, not to the run, the routine,
 the agent, the project or the workspace, and every turn the owner starts passes through
-`on_owner_prompt` (the runner and the HTTP prompt handler are the only callers of
-`Master::prompt`). So
+`on_owner_prompt` (the runner and the HTTP prompt handler are the callers of `Master::prompt` that
+send a person's text; the third, the callback watcher of background commands, sends none and
+resumes no untrusted chat, below). So
 undoing a turn (`/turns/{turn}/restore`), choosing a parallel answer (`/variants`), switching the
 chat's agent (`/agent`), moving the chat into a project (its brief and board, never its facts) or
 out of it, turning the routine off or deleting it, and the owner leaving the routine's workspace
 (the chat falls back to their Personal workspace, where their memory is on) all leave it
 untrusted. `hooks_http.rs` tests each of these over HTTP. Code that acts on a chat outside a
 prompt (filing a `remember` call, say) asks `routines::chat_untrusted`, which fails closed.
+
+**Callback turns (T.8d step 3, `crates/master/src/callbacks.rs`).** The third caller of
+`Master::prompt` resumes an idle chat when one of its background commands ends
+(`docs/background-commands.md` §13). It never resumes a routine's run chat (the master asks the
+routine marks; and every run chat is created with `no_callbacks`, which the node records in
+`session_created` and keeps to for good, also once the routine and its runs are gone) and never an
+untrusted chat (it reads the mark as `on_owner_prompt` does, through `Store::chat_untrusted`, which
+fails closed, without marking a run's chat continued: nobody continued it). A refusal is an
+attention row for the chat's owner, not a paused routine. Its admission is a fire's without the
+`routines` permission.
 
 ## Results, Recent and attention (`results.rs`)
 
