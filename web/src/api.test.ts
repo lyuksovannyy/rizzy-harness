@@ -84,3 +84,18 @@ describe("the login key", () => {
     for (const [path] of fetchFn.mock.calls) expect(String(path)).not.toContain(KEY);
   });
 });
+
+describe("settings", () => {
+  // The server only takes the presets' names, so a saved value that is not
+  // one of them must not come back to be saved again.
+  test("an accent that is not a preset comes back as the default", async () => {
+    answers = [
+      { status: 200, body: { search_url: "https://e.com/?q={q}", accent: "violet" } },
+      { status: 200, body: { search_url: "https://e.com/?q={q}", accent: "gray" } },
+      { status: 200, body: { search_url: "https://e.com/?q={q}", accent: "orange" } },
+    ];
+    expect((await api.settings()).accent).toBeNull();
+    expect((await api.settings()).accent).toBeNull();
+    expect((await api.settings()).accent).toBe("orange");
+  });
+});
