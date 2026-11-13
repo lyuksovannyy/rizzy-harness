@@ -590,6 +590,7 @@ mod tests {
                     exit_code: None,
                     truncated: false,
                     sources: vec![source.clone()],
+                    note: None,
                 }),
             ),
         ];

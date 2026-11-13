@@ -12,6 +12,17 @@ use tokio::sync::mpsc;
 
 use crate::{Tool, ToolCtx, ToolOutcome, cap, str_arg};
 
+/// The words before the kept full output's random id in a filtered
+/// result, the time a stop took and the time a process was still alive:
+/// they differ on every run of the same command, and the repeated-call
+/// guard masks what follows (or precedes) them (`agent-native`, T.1). One
+/// text for both, so a rewording cannot blind the guard.
+pub const KEPT_OUTPUT_LEAD: &str = "tool_output id=";
+/// See [`KEPT_OUTPUT_LEAD`]: the milliseconds follow.
+pub const ENDED_MS_LEAD: &str = "its guard confirmed the end (";
+/// See [`KEPT_OUTPUT_LEAD`]: the seconds precede.
+pub const STILL_ALIVE_TAIL: &str = "s after the stop was ordered";
+
 pub struct Bash;
 
 /// The `bash` timeout ceiling when node.toml does not set one (a call may
@@ -589,7 +600,7 @@ impl Tool for Bash {
                 if f.removed_lines > 0 || cut {
                     let total = combined.lines().count();
                     let note = match store.put(combined) {
-                        Some(id) => format!("full output: tool_output id={id}"),
+                        Some(id) => format!("full output: {KEPT_OUTPUT_LEAD}{id}"),
                         None => "the full output could not be kept".to_string(),
                     };
                     (
@@ -643,7 +654,7 @@ impl Tool for Bash {
                 let note = match stopped {
                     Some(crate::contain::Stopped::StillAlive(d)) => format!(
                         "[{} and killed, but NOT ended: a process of this command is still alive \
-                         {:.1}s after the stop was ordered; the kernel cannot end it yet (it \
+                         {:.1}{STILL_ALIVE_TAIL}; the kernel cannot end it yet (it \
                          waits on I/O that does not return, as on a stalled network or FUSE \
                          file system). Its guard keeps killing it; it ends when that I/O \
                          returns]",
@@ -664,8 +675,8 @@ impl Tool for Bash {
                     ),
                     // Contained: a namespace, killed, and its end confirmed.
                     Some(crate::contain::Stopped::Ended(d)) => format!(
-                        "[{how}: the command and everything it started were killed; its guard \
-                         confirmed the end ({} ms)]",
+                        "[{how}: the command and everything it started were killed; \
+                         {ENDED_MS_LEAD}{} ms)]",
                         d.as_millis()
                     ),
                     // Not contained: a process group, unconfirmed.

@@ -56,14 +56,24 @@ impl Provider for Forever {
         req: &ChatRequest,
         _: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
-        *self.calls.lock().unwrap() += 1;
+        let n = {
+            let mut c = self.calls.lock().unwrap();
+            *c += 1;
+            *c
+        };
         *self.offered.lock().unwrap() = req.tools.iter().map(|t| t.schema.clone()).collect();
+        // `true` is asked for as `true <n>`: each step another call, so the
+        // step cap is what ends the turn, not the repeated-call guard (T.1).
+        let mut input = self.input.clone();
+        if input["command"] == "true" {
+            input["command"] = json!(format!("true {n}"));
+        }
         Ok(Completion {
             text: String::new(),
             tool_calls: vec![ToolCallRef {
                 call_id: harness_core::new_id(),
                 tool: "bash".into(),
-                input: self.input.clone(),
+                input,
             }],
             usage: None,
             stop: Default::default(),
