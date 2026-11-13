@@ -2,6 +2,8 @@
 //! host's approval gate), feed results back, repeat until the model stops.
 
 #[cfg(test)]
+mod attachment_tests;
+#[cfg(test)]
 mod callback_tests;
 pub mod compact;
 #[cfg(test)]
