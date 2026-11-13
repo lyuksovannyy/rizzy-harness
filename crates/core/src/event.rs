@@ -1520,6 +1520,24 @@ mod attachment_frame_tests {
         assert_eq!(own_words(&typed.model_text()), "see https://a.example");
     }
 
+    /// Any line the harness wrote after the person's text ends their own
+    /// words, not only a file's: an image's note too (R76-3). A message
+    /// that starts with one has no own words.
+    #[test]
+    fn own_words_end_at_the_first_line_the_harness_wrote() {
+        let note = "[harness] Image \"https://b.example\": sent by the person with this \
+                    message, not shown in this request.";
+        assert_eq!(
+            own_words(&format!("see https://a.example\n\n{note}")),
+            "see https://a.example"
+        );
+        assert_eq!(own_words(note), "");
+        assert_eq!(
+            own_words("a [harness] b\n[harness] c"),
+            "a [harness] b\n[harness] c"
+        );
+    }
+
     /// Whatever a file, its name or its type holds, no line of them starts
     /// a line of the message: after the person's text every line is empty,
     /// the harness's, or behind the quote. A line starts after any break a
