@@ -1599,6 +1599,7 @@ impl NativeBackend {
                         repeat_stop |= stop;
                         (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
                     }
+                    repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
                     repeat::Admission::Run => {
                         let mut observed =
                             observed_text(&messages, &trusted, Some((user_idx, &own_words)));

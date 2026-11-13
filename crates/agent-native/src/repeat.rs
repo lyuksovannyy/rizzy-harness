@@ -47,6 +47,11 @@ pub const REFUSE_AT: u32 = 5;
 pub const REFUSED_OUTPUT: &str = "Not run: this exact call gave the same result several \
      times in this turn, with nothing changing in between (the harness's repeated-call guard).";
 
+/// The result of a call after the refusal that ended the turn, in the same
+/// message: not run, and the person is not asked about it.
+pub const ENDED_OUTPUT: &str = "Not run: the turn was ended by the harness's repeated-call guard \
+     at an earlier call of this message.";
+
 /// Why the turn ended, for the person.
 pub const STOP_ERROR: &str = "stopped: the model asked again for a call the repeated-call guard \
      had refused (the same call with the same result, again and again, in one turn)";
@@ -61,12 +66,17 @@ struct Streak {
 #[derive(Default)]
 pub struct RepeatGuard {
     calls: HashMap<CallKey, Streak>,
+    /// A refusal ended the turn: nothing more runs in it.
+    ended: bool,
 }
 
 /// The guard's answer before a call runs.
 #[derive(Debug, PartialEq)]
 pub enum Admission {
     Run,
+    /// Not run: a refusal earlier in this step ended the turn;
+    /// [`ENDED_OUTPUT`] is its result.
+    Ended,
     /// Not run: [`REFUSED_OUTPUT`] is its result, `note` the model's line;
     /// `stop` when it was refused before and the turn ends after this step.
     Refuse {
@@ -78,6 +88,9 @@ pub enum Admission {
 impl RepeatGuard {
     /// Before approval and dispatch.
     pub fn admit(&mut self, key: CallKey) -> Admission {
+        if self.ended {
+            return Admission::Ended;
+        }
         let Some(s) = self.calls.get_mut(&key) else {
             return Admission::Run;
         };
@@ -86,10 +99,11 @@ impl RepeatGuard {
         }
         s.runs += 1;
         let stop = s.runs > REFUSE_AT;
+        self.ended = stop;
         let note = if stop {
             format!(
-                "{NOTE_LEAD} This call was not run, and the turn ends here: it was refused \
-                 before and you asked for it again."
+                "{NOTE_LEAD} This call and the calls after it in this message were not run, \
+                 and the turn ends here: it was refused before and you asked for it again."
             )
         } else {
             format!(
@@ -121,6 +135,9 @@ impl RepeatGuard {
         ok: bool,
         output: &str,
     ) -> Option<String> {
+        if self.ended {
+            return None;
+        }
         let mut h = std::hash::DefaultHasher::new();
         (ok, stable(output).as_ref()).hash(&mut h);
         let outcome = h.finish();
