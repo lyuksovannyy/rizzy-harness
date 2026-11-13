@@ -167,6 +167,7 @@ impl Rig {
         let req = format!("create-{name}");
         self.to_node
             .try_send(MasterToNode::Create {
+                exec_mode: None,
                 no_callbacks: false,
                 profile: None,
                 incognito: false,

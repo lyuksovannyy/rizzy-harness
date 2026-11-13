@@ -174,6 +174,7 @@ impl Node {
         let sid = SessionId::new();
         let req = format!("create-{name}");
         self.send(MasterToNode::Create {
+            exec_mode: None,
             no_callbacks: false,
             profile: None,
             incognito: false,
