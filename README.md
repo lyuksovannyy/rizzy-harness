@@ -44,6 +44,18 @@ cargo build --release
 ./target/release/rizzy-harness serve
 ```
 
+It listens on `127.0.0.1:7777` and `[::1]:7777`, the two addresses a browser
+tries for `http://localhost:7777`, and stops with an error if another program
+already holds either: that program would otherwise answer for an address this
+server calls its own, and could be handed your login. (On a machine without
+IPv6 it listens on `127.0.0.1` only and accepts no `[::1]` address.) While
+the server is stopped it holds nothing: a command of a second node on the
+same machine keeps running then and can take the port, an open tab keeps
+calling that address, and the next start is refused until the command ends.
+If an agent's node shares the machine with the server, serve with `--tls`
+(the other program has no certificate the browser trusts) or set
+`[sandbox] network = "off"` on that node.
+
 Open http://127.0.0.1:7777. On first run it asks for a one-time claim code
 (so nobody else can take over a fresh server), creates your **admin**
 account, and walks you through connecting an AI provider, your name and time
@@ -199,8 +211,8 @@ status, duration, tokens and the first sentence of its answer.
 - **Webhooks**: `POST /api/hooks/<trigger id>` with
   `Authorization: Bearer <secret>` and a JSON or plain-text body of at most
   64 KiB (`Idempotency-Key` is honoured for 24 hours). The secret is shown once
-  when you save (Rotate makes a new one). The server binds 127.0.0.1 by
-  default, so a webhook reaches it only from this machine, over
+  when you save (Rotate makes a new one). The server binds loopback
+  (`127.0.0.1` and `[::1]`) by default, so a webhook reaches it only from this machine, over
   [WireGuard](#using-it-from-other-devices-wireguard), or through a TLS proxy
   whose Host is allowed (`--allowed-host`).
 - **What a webhook sends is untrusted.** Its data only fills the prompt; that
@@ -1283,6 +1295,11 @@ or the WireGuard address). Notes:
   `0.0.0.0` (`HARNESS_CONTAINER=1`); **never publish on `0.0.0.0`**: Docker's
   published ports bypass ufw/iptables rules on the host. A different host
   port needs `HARNESS_ALLOWED_HOSTS=127.0.0.1:8080` (the Host header check).
+  The server accepts `localhost:7777`, and a browser on the host tries
+  `[::1]:7777` first for it, which Docker does not hold for you: publish it
+  too (`-p '[::1]:7777:7777'`, needs IPv6 in Docker), or open only
+  `http://127.0.0.1:7777` and never `localhost`, or another program of yours
+  that binds `[::1]:7777` gets that page and your login.
 - For remote nodes add `--node-listen <host VPN address>:7443` to the command.
 - `docker stop` waits 10 s by default; a server closing its chat turns
   may need up to 80 s and then HTTP's 30 s grace, so give it
