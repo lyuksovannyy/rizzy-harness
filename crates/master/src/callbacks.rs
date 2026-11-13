@@ -96,6 +96,11 @@ struct Chat {
     /// Background commands the mirror shows running: id to its deadline
     /// (node clock).
     running: BTreeMap<String, i64>,
+    /// When this master first saw each end that may call back (its seq),
+    /// on its own clock: the 60-minute rule ages ends by it, never by the
+    /// node's clock (review S3-5). An end first seen by a check after a
+    /// restart takes its own `ts_ms`, or now when that is in the future.
+    seen_at: HashMap<u64, i64>,
     /// A check of this chat runs; `again`: an end came meanwhile.
     busy: bool,
     again: bool,
@@ -130,12 +135,15 @@ pub(crate) fn on_applied(m: &Master, e: &RawEvent) {
                 .running
                 .insert(b.bg_id, b.ends_by_ms);
             let _ = m.inner.live.send(Live::SessionsChanged);
-            let m = m.clone();
-            tokio::spawn(async move { started_in(&m, sid).await });
         }
         Ok(EventKind::BackgroundEnded(b)) => {
-            if let Some(c) = lock(&m.inner.callbacks.chats).get_mut(&sid) {
+            {
+                let mut chats = lock(&m.inner.callbacks.chats);
+                let c = chats.entry(sid).or_default();
                 c.running.remove(&b.bg_id);
+                if b.calls_back() {
+                    c.seen_at.insert(e.seq, harness_core::now_ms());
+                }
             }
             let _ = m.inner.live.send(Live::SessionsChanged);
             if b.calls_back() {
@@ -263,10 +271,24 @@ async fn check(m: &Master, sid: SessionId) -> Next {
     };
     let all: Vec<String> = waiting.iter().map(|w| w.2.bg_id.clone()).collect();
     let now = harness_core::now_ms();
+    // Each end's age on this master's clock (S3-5); kept only for ends that
+    // still wait, so the map stays small.
+    let seen: Vec<i64> = {
+        let mut chats = lock(&m.inner.callbacks.chats);
+        let c = chats.entry(sid).or_default();
+        let seen = waiting
+            .iter()
+            .map(|w| *c.seen_at.entry(w.0).or_insert(w.1.min(now)))
+            .collect();
+        c.seen_at
+            .retain(|seq, _| waiting.iter().any(|w| w.0 == *seq));
+        seen
+    };
     let fresh: Vec<String> = waiting
         .iter()
-        .filter(|w| now - w.1 <= MAX_AGE_MS)
-        .map(|w| w.2.bg_id.clone())
+        .zip(&seen)
+        .filter(|(_, at)| now - **at <= MAX_AGE_MS)
+        .map(|(w, _)| w.2.bg_id.clone())
         .collect();
     let ts = waiting.iter().map(|w| w.1).max().unwrap_or(now);
     if fresh.is_empty() {
