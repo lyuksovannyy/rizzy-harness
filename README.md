@@ -706,11 +706,16 @@ host = false                         # offer the host shell: commands as this OS
 chosen when the chat is created and never changed (the chat's header
 names it):
 
-- **`sandbox`**: each command in bubblewrap, as "The shell sandbox" below
-  describes (its own processes, its own file view, the guard, Landlock
-  inside; background commands). Offered where bubblewrap works at the
-  node's start (`[execution] sandbox = "auto"`, the default, with its gaps
-  named; `"strict"` only where none is left; `"off"` never).
+- **`sandbox`**: each shell command in bubblewrap, as "The shell sandbox"
+  below describes (its own processes, its own file view, the guard,
+  Landlock inside; background commands). Not every program a sandbox chat
+  starts is contained: `graph_query` starts graphify, and the node runs
+  its own git for checkpoints, outside bubblewrap under Landlock alone.
+  Offered where bubblewrap works at the node's start (`[execution] sandbox
+  = "auto"`, the default, with its gaps named; `"strict"` only where none
+  is left; `"off"` never). The start probes up to three times, a second
+  apart, and logs each failure; after that the start is the only moment
+  that counts: restart the node once bubblewrap works.
 - **`host`**: each command as the node's own OS user, **without
   bubblewrap**. Offered only with `[execution] host = true`. What still
   applies is the Landlock part of `[sandbox] mode` (which files a command
@@ -722,13 +727,25 @@ names it):
   `systemd-run --user`) to run anything with every right of the user, its
   keys and other projects included. Treat it as a shell on this machine
   that a web page the agent reads can steer: the approval card is then the
-  only check. Run such a node as a dedicated OS user that holds nothing
-  else.
+  only check, so a `host` chat always asks (it never runs in approval mode
+  `auto`, whatever is asked or `max_approval_mode` allows), and its card
+  says the command runs in the host shell. Run such a node as a dedicated
+  OS user that holds nothing else.
 
-A new chat takes the most confined mode the node offers. Until per-member
-levels exist (N.10, part 2), only a workspace's owner or a server admin may
-choose `host` (on the server's own node, only a server admin), and choosing
-it shows that warning first; a routine's chat always asks for `sandbox`.
+A new chat is in the sandbox mode unless `host` is asked for by name: a
+node that offers only `host` refuses a chat that does not name it. Until
+per-member levels exist (N.10, part 2), only a server admin may choose
+`host`, on every node (owning a workspace is no reason: every account owns
+its Personal one), and choosing it shows that warning first; the rule is
+checked again on every later action, so the `host` chats of someone who is
+no longer a server admin do no more work. Every request for `host`,
+granted or refused, is written to the audit log. A routine's chat always
+asks for `sandbox`. A node must have announced the mode it is sent: one
+from before modes gets no agent chat. The chat's header names its mode and
+the gaps its node announced at connect (network off without a namespace,
+or not applied at all; the socket gap below Linux 7.1; no `/proc` of its
+own); which modes a node offers is shown only to accounts that may run
+agent chats.
 A node that offers neither mode runs no agent chats and says so at start,
 in `doctor` and when a chat is created ("this node offers no way to run
 commands: install bubblewrap, or set `[execution] host = true`"); `node
@@ -949,14 +966,18 @@ offers ("execution modes"). `[execution] sandbox` decides when the
 sandbox mode is offered:
 
 - `"auto"` (default): where the probe passes at start, with any gap
-  above named in the log, in `doctor` and in the chat. Where bubblewrap
+  above named in the log and in `doctor`, and in the chat's header as its
+  node announced it at connect (the network, socket and `/proc` gaps). Where bubblewrap
   does not work, the sandbox mode is not offered (no command runs with
   Landlock alone in it): the node offers `host` if `[execution] host =
   true`, else nothing.
 - `"strict"`: only where the guarantee above holds in full. It is
-  therefore not offered where bubblewrap does not run **and** on kernels
-  below Linux 7.1 (the condition above). On such a kernel set `"auto"`:
-  the shell is contained, with that gap named.
+  therefore not offered where bubblewrap does not run, on kernels below
+  Linux 7.1 (the condition above), in the form without a `/proc` of its
+  own, with the network off and no namespace, and where a `[sandbox] write`
+  entry holds `/tmp` or `/run/user/<uid>` (sockets elsewhere in a write
+  entry are not looked for) or a folder on the node's `PATH`. On such a
+  kernel set `"auto"`: the shell is contained, with that gap named.
 - `"off"`: never (bubblewrap is not probed).
 
 **Keep the harness binary out of every session's reach.** Once started,
@@ -1001,7 +1022,8 @@ refused at start), and a `host` chat's shell runs with every right of this
 OS user. Nothing in a request, a chat or an agent definition can turn the
 containment off: a chat's mode is chosen when it is created, from what
 the node offers. Only the agent's shell is contained; graphify
-and the node's own git and PDF reader keep the Landlock sandbox alone.
+and the node's own git and PDF reader keep the Landlock sandbox alone, in
+a sandbox chat too.
 
 What breaks by default, and the fix: toolchains and caches under your home
 folder. A command that fails with `Permission denied` (or, contained, `No
@@ -1436,16 +1458,16 @@ or the WireGuard address). Notes:
 - Building yourself and hitting Docker Hub rate limits:
   `docker build --build-arg REGISTRY=mirror.gcr.io/library .`
 - Published images are linux/amd64 only.
-- The image has no bubblewrap, and bubblewrap does not run inside a
-  default rootless container ("Can't mount proc"), so its embedded node
-  offers no sandbox mode: **agent chats there need `[execution] host =
-  true`** in the data directory's `node.toml` (Landlock alone counts as
-  the host shell; read "Execution modes" first: the container is then the
-  only wall around the agent's commands), else the node runs none and
-  `doctor` says so. Which outer-container flags would let bubblewrap run
-  is in [docs/container-experiment.md](docs/container-experiment.md) §7;
-  they loosen the outer container and were not tested with the harness's
-  image.
+- The image has no bubblewrap, so its embedded node offers no sandbox
+  mode: **agent chats there need `[execution] host = true`** in the data
+  directory's `node.toml` (Landlock alone counts as the host shell; read
+  "Execution modes" first: the container is then the only wall around the
+  agent's commands), else the node runs none and `doctor` says so. Inside
+  a default rootless container bubblewrap cannot mount a fresh `/proc`
+  ("Can't mount proc"), but it runs without one
+  ([docs/container-experiment.md](docs/container-experiment.md) §7), so an
+  image that adds bubblewrap would get the sandbox mode in its form
+  without a `/proc` of its own (not tested with the harness's image).
 
 ## Remote worker nodes
 

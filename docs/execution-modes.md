@@ -15,8 +15,8 @@ comes.
 
 | Mode | How a command runs | What still holds |
 |---|---|---|
-| `sandbox` | `sandbox-guard` → `bwrap` (its own PID namespace, its own file view built from the grants, `/proc` of its own where it can be mounted) → `sandbox-exec` (Landlock) → `bash` (T.8a to T.8f) | Nothing a command starts outlives it (from Landlock ABI 9; below, the socket gap `doctor` names); the file view; with `network = "off"`, a network namespace of its own; background commands |
-| `host` | `sandbox-exec` (Landlock, as `[sandbox] mode` says) → `bash`, as the node's OS user, no bubblewrap; with `[sandbox] mode = "off"` bash directly | Landlock's file rules where `[sandbox] mode` is `required` or `best-effort`: the session folder, its temp folder, the system folders and the `[sandbox] read`/`write` entries; TCP denied with `network = "off"`. **Not** held: no PID namespace (what a command starts can keep running after the call, the chat and the node), no file view (`/proc` lists every process, metadata of every path is visible), UDP and DNS go out with the network off, and below Landlock ABI 9 any service of the node's user reachable over a Unix socket (the session bus: `systemd-run --user`) runs anything with every right of that user. No background commands |
+| `sandbox` | `sandbox-guard` → `bwrap` (its own PID namespace, its own file view built from the grants, `/proc` of its own where it can be mounted) → `sandbox-exec` (Landlock) → `bash` (T.8a to T.8f) | For the shell: nothing a command starts outlives it (from Landlock ABI 9; below, the socket gap `doctor` names); the file view; with `network = "off"`, a network namespace of its own; background commands. **Not** contained: what the node itself starts for the chat, under Landlock alone: `graph_query`'s graphify (review N-a, unchanged here: it runs `graphify update .` over the files the chat wrote, as the node's user), the node's checkpoint git and PDF reader |
+| `host` | `sandbox-exec` (Landlock, as `[sandbox] mode` says) → `bash`, as the node's OS user, no bubblewrap; with `[sandbox] mode = "off"` bash directly | Landlock's file rules where `[sandbox] mode` is `required` or `best-effort`: the session folder, its temp folder, the system folders and the `[sandbox] read`/`write` entries; TCP denied with `network = "off"`. **Not** held: no PID namespace (what a command starts can keep running after the call, the chat and the node), no file view (`/proc` lists every process, metadata of every path is visible), UDP and DNS go out with the network off, and below Landlock ABI 9 any service of the node's user reachable over a Unix socket (the session bus: `systemd-run --user`) runs anything with every right of that user. No background commands (the session has no background table, so they are not offered: review N-c). Never approval mode `auto`: clamped to `ask` at create and at load, whatever is asked or `max_approval_mode` allows, and its approval card says it runs in the host shell (review N-e) |
 
 Landlock alone counts as `host`, not `sandbox` (the owner, 2026-11-13): it
 gives no PID namespace and no confirmed kill, which the rest of the sandbox
@@ -41,14 +41,23 @@ self-test, never from anything received (`cli/src/main.rs` `exec_offers`,
 
 * `sandbox` is offered only where the containment probe passes at start.
   `auto` offers it with its gaps named (below Landlock ABI 9, the
-  network-off gap, an image not held, the binary in a session's reach);
-  `strict` only where none is left (what `[sandbox] contain = "required"`
-  promised); `off` never (bubblewrap is not probed). The shared-`/proc`
-  form counts: every process still dies with the namespace and the file
-  view is the same; what it loses is that `/proc` lists the outer processes
-  (said in the log and `doctor` as before). It is the form inside a
-  default rootless container, where the alternative would be no `sandbox`
-  at all.
+  network-off gap, the shared-`/proc` form, an image not held, the binary
+  in a session's reach, a `[sandbox] write` entry holding other programs'
+  sockets or a folder on `PATH`); `strict` only where none of these is
+  left (review L-c; of the socket folders only `/tmp` and
+  `/run/user/<uid>` are looked for: a socket elsewhere in a write entry is
+  not detected, so `strict` does not promise that one); `off` never
+  (bubblewrap is not probed). The shared-`/proc` form counts under `auto`:
+  every process still dies with the namespace and the file view is the
+  same; what it loses is that `/proc` lists the outer processes. It is the
+  form bubblewrap takes inside a default rootless container
+  (`docs/container-experiment.md` §7), where the alternative would be no
+  `sandbox` at all.
+* **The start is the only moment that counts.** The probes run up to
+  `START_PROBE_TRIES` (3) times, `START_PROBE_PAUSE` (1 s) apart, each
+  failure logged (review L-b: one failure of the moment used to remove the
+  mode until a restart); a node that fails all of them offers no `sandbox`
+  until it is restarted. No later probe adds the mode.
 * `host` is offered only with `host = true`, and not where the Landlock
   sandbox is required and does not work (`[sandbox] mode = "required"`
   refuses the node in every mode, as before).
@@ -73,20 +82,33 @@ namespace stays.
 ## The hello
 
 The node announces `exec:sandbox` and `exec:host` for what it offers, and
-the gaps of those modes: `gap:sandbox:netns` (network off, bubblewrap could
-not make a namespace at start) and `gap:host:netns` (network off; `host`
-never has one). The master keeps the known ones in its node list
-(`exec_modes`, `exec_gaps`) for the UI; the chat header names the chat's
-mode and says its gaps in plain words (review T8B-3: before, only the
-start-up log and `doctor` said them). A gap closed later by the step up is
+the gaps of those modes (`harness_protocol::GAPS`):
+
+* `gap:sandbox:netns`: network off, bubblewrap could not make a namespace
+  at start (UDP and DNS go out; Landlock stops TCP);
+* `gap:sandbox:sockets`: below Landlock ABI 9 (a socket in a granted
+  folder reaches a service that starts processes outside);
+* `gap:sandbox:proc`: the shared-`/proc` form;
+* `gap:host:netns`: network off, a `host` chat, Landlock stops TCP (UDP and
+  DNS go out);
+* `gap:host:net-open`: network off, a `host` chat where nothing applies it
+  (`[sandbox] mode = "off"`, or Landlock not enforcing the TCP rule):
+  everything goes out (review L-d).
+
+The master keeps the known ones in its node list (`exec_modes`,
+`exec_gaps`) and shows them only to accounts with the agentic grant
+(review L-i); the chat header names the chat's mode and says its gaps in
+plain words (reviews T8B-3, L-e). **The hello is a snapshot** of the node
+at connect: a gap closed later by the step up (the network namespace) is
 still shown until the node's next hello.
 
 ## The session's mode
 
 * `session.create` carries `exec_mode` as a request (`Option`). The node
   chooses (`ExecOffers::choose`): a mode it offers as asked; without one,
-  the most confined it offers; a mode it does not offer is refused
-  whatever the master sends. Recorded in `session_created.exec_mode`; no
+  `sandbox`, or a refusal on a node that offers only `host`: that mode is
+  only ever given when asked for by name (review L-a); a mode it does not
+  offer is refused whatever the master sends. Recorded in `session_created.exec_mode`; no
   later command carries it.
 * At load the recorded mode is taken as it is. Before every turn, callback,
   restore and delegation (`Session::checked_folder`) it is checked against
@@ -100,19 +122,43 @@ still shown until the node's next hello.
   refuses a shell command when it has no containment rather than run it
   with Landlock alone (`Sandbox::require_contain`); `host` sessions get its
   uncontained twin (`Sandbox::uncontained`: the same resolved rules and
-  held image, no containment, and it can never gain one). The node's own
-  helpers (checkpoint git, graphify) use the twin, as before.
+  held image, no containment, and it can never gain one). The backend is
+  given each mode's confinement only where the node offers that mode; the
+  other refuses every command (`ExecOffers::confinement_for`, review L-f),
+  so a log that names a mode the node does not offer starts nothing even
+  if a check before the turn were missed. The node's checkpoint git uses
+  the twin; graphify uses the session's own confinement through its
+  non-shell path, which is Landlock alone in both modes (review N-a).
+* The node's `session.create` audit line names the mode asked for (review
+  N-d).
 
 ## The master, until part 2
 
 `POST /api/sessions` takes `exec_mode` (`workspaces::exec_mode_for`):
 
-* `host` only for the workspace's owner or a server admin (the API token
-  counts as admin); on the embedded `local` node only for a server admin:
-  it runs as the server's user, next to its keys and every account's chats.
-* Without a request, a caller who may ask for `host` gets the node's
-  default; anyone else is sent `sandbox` explicitly, so a node whose only
-  mode is `host` refuses them instead of handing it over by default.
+* `host` only for a server admin (the API token counts as admin), on every
+  node (review H1: the earlier "workspace's owner" arm admitted everyone,
+  since every account owns its Personal workspace and may own a team it
+  made itself).
+* Every agentic create carries a mode: `sandbox` unless `host` is asked
+  for by name (`Master::create_session`), so a node whose only mode is
+  `host` refuses rather than hand it over by default.
+* A node is sent a mode only if its hello named it (`exec:<mode>`); one
+  that names none (a node from before modes) gets no agentic chat, refused
+  by the master naming the node (review L-g).
+* The recorded mode is mirrored onto the chat's row (`sessions.exec_mode`)
+  and the create's rule is applied again in `agentic_blocked`, on every
+  prompt, allowing approval, restore and callback admission; an agentic
+  row without a readable mode is refused (fails closed). A server admin
+  who is demoted loses their `host` chats at the next action, and the
+  revocation sweep stops a running turn as for a lost grant (review L-h).
+* Every create that asks for `host` writes `session.create.host` to the
+  audit log, granted or refused: user, workspace, node; no content (review
+  N-d).
+* The UI offers `host` only to a server admin, binds a confirmed choice to
+  the node it was confirmed for (review L-j), and never offers `auto`
+  (the composer sends no approval mode; the warning says a host chat
+  always asks).
 * A routine's run chat always asks for `sandbox` (unattended, often on
   input from outside); a node without `sandbox` refuses the run.
 * Callbacks and the actions on an existing chat act on its recorded mode.
@@ -129,9 +175,8 @@ change 2).
   list (C.12, built in N.1): the node refuses `host` at start, and in its
   hello, when that list has more than one entry.
 * **The level per member** (part 2): replaces `Perm::Agentic`, is checked
-  where `agentic_blocked` checks today (create and every action), and makes
-  a demoted member's `host` chats stop at their next action. Until then a
-  workspace owner keeps their `host` chats after losing the role.
+  where `agentic_blocked` checks today (create and every action). Until
+  then `host` is for server admins only.
 * **Files one mode writes and another executes.** A `sandbox` session can
   write what a `host` session in the same folder later runs (a script, a
   `Makefile`, `.git/hooks`, `.git/config`): the `host` session then runs it
@@ -158,3 +203,17 @@ change 2).
 * `master/tests/exec_mode_http.rs`: the interim rule and the node list.
 * `web/src/components/execchoice.test.tsx`; `web/e2e/exec-modes.cjs`
   against the real binary.
+* The security review's fixes (2026-11): `master/tests/exec_mode_http.rs`
+  `host_is_for_server_admins_only`, `a_node_that_did_not_announce_the_mode_gets_no_chat`,
+  `a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work`,
+  `the_mode_check_on_a_row_fails_closed_and_refuses_host_to_a_member`,
+  `the_modes_are_not_shown_to_an_account_without_the_grant`;
+  `master/tests/routines_http.rs` `a_routines_chat_is_always_in_the_sandbox`;
+  `node/tests/exec_modes.rs` `host_is_never_the_default`,
+  `a_host_session_is_never_in_auto`, `a_host_session_is_not_offered_background_commands`,
+  `an_agentic_session_without_a_recorded_mode_runs_nothing`; `node/src/exec.rs`
+  `a_mode_not_offered_gets_a_confinement_that_runs_nothing`; `node/src/session.rs`
+  `a_host_chats_card_says_the_host_shell`; `cli/tests/network_off.rs`
+  `a_probe_that_fails_for_a_moment_at_start_is_tried_again`; `cli/tests/contain.rs`
+  `strict_does_not_offer_the_sandbox_with_a_write_entry_gap`; `store/tests/event_log.rs`
+  `the_recorded_execution_mode_is_on_the_row`.
