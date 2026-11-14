@@ -1586,3 +1586,13 @@ fn the_coding_summary_keeps_a_sub_agents_report_as_its_own_account() {
         "the chat prompt stays as it was"
     );
 }
+
+/// A skill's body is a tool result, which a summary replaces: the coding
+/// summary names each skill the work still follows, so the agent loads it
+/// again, without copying its text (X.2; Hermes keeps reload pointers).
+#[test]
+fn the_coding_summary_names_loaded_skills_to_load_again() {
+    let p = harness_agent_native::CODING_SUMMARY_PROMPT;
+    assert!(p.contains("loaded with the skill tool"), "{p}");
+    assert!(p.contains("so you can load it again"), "{p}");
+}

@@ -1503,13 +1503,20 @@ impl Session {
     /// [`crate::instructions::READ_TIMEOUT`] and not past `cancel`. A
     /// folder that fails its check adds nothing here (the turn's own checks
     /// refuse it).
+    ///
+    /// When the agent may use the `skill` tool here, the skills found in
+    /// the same read (`harness_tools::skills`, node.toml `[skills]`) go to
+    /// `skills`, and their catalogue after the files; `user_text` starting
+    /// with `/name` invokes the skill of that name for this turn.
     async fn with_instructions(
         &self,
         mut extra: TurnExtra,
         agent: Option<&AgentSpec>,
+        user_text: &str,
         cancel: &CancellationToken,
     ) -> TurnExtra {
         use crate::instructions::{self as ins, Bounded};
+        use harness_tools::skills;
         if self.profile != Profile::Agentic {
             return extra;
         }
@@ -1526,28 +1533,74 @@ impl Session {
         let model = agent
             .and_then(|a| a.model.clone())
             .unwrap_or_else(|| self.model.clone());
-        let cap = ins::cap_for(agent.and_then(|a| a.context_windows.get(&model).copied()));
-        let protected = self.node.cfg.policy.protected_dirs.clone();
+        let window = agent.and_then(|a| a.context_windows.get(&model).copied());
+        let cap = ins::cap_for(window);
+        let policy = &self.node.cfg.policy;
+        let mut roots = Vec::new();
+        if agent.is_none_or(|a| a.allows_tool(skills::NAME))
+            && !policy.denies(skills::NAME)
+            && self.node.cfg.backend.has_tool(skills::NAME)
+        {
+            // Checked when node.toml was loaded; a policy built in code
+            // with a bad entry reads none of them.
+            roots.extend(
+                policy
+                    .skills
+                    .roots()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|path| skills::Root {
+                        path,
+                        origin: harness_core::skills::SkillOrigin::Node,
+                        bound: None,
+                    }),
+            );
+            if policy.skills.repository {
+                roots.extend(skills::repo_roots(&dir, &granted));
+            }
+        }
+        let protected = policy.protected_dirs.clone();
         let read = ins::bounded(
-            move || ins::read(&dir, &granted, &protected, cap),
+            move || {
+                let files = ins::read(&dir, &granted, &protected, cap);
+                let found = (!roots.is_empty()).then(|| skills::discover(&roots, &protected));
+                (files, found)
+            },
             cancel,
             ins::READ_TIMEOUT,
         )
         .await;
-        let problems = match read {
-            Bounded::Done(r) => {
+        let (problems, skill_problems) = match read {
+            Bounded::Done((r, found)) => {
                 extra.instructions = r.text;
-                r.problems
+                let mut skill_problems = Vec::new();
+                if let Some(mut f) = found {
+                    f.catalogue.invoked = skills::invoked(user_text, &f.catalogue);
+                    if let Some(c) = skills::render(&f.catalogue, skills::cap_for(window)) {
+                        extra.instructions = Some(match extra.instructions.take() {
+                            Some(t) => format!("{t}\n\n{c}"),
+                            None => c,
+                        });
+                    }
+                    if !f.catalogue.skills.is_empty() {
+                        extra.skills = Some(Arc::new(f.catalogue));
+                    }
+                    skill_problems = f.problems;
+                }
+                (r.problems, skill_problems)
             }
             Bounded::TimedOut => {
                 extra.instructions = Some(ins::timed_out());
-                vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
+                (
+                    vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())],
+                    vec![],
+                )
             }
             // The turn is stopping; the backend sees the cancel itself.
-            Bounded::Cancelled => vec![],
+            Bounded::Cancelled => (vec![], vec![]),
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
-                vec![]
+                (vec![], vec![])
             }
         };
         if !problems.is_empty() {
@@ -1556,6 +1609,14 @@ impl Session {
                 folder = %self.cwd.display(),
                 problems = ?problems,
                 "instruction files: some were not read in full"
+            );
+        }
+        if !skill_problems.is_empty() {
+            tracing::info!(
+                session = %self.id,
+                folder = %self.cwd.display(),
+                problems = ?skill_problems,
+                "skills: some were not used"
             );
         }
         extra
@@ -1583,7 +1644,9 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
-        let extra = self.with_instructions(extra, agent.as_ref(), &cancel).await;
+        let extra = self
+            .with_instructions(extra, agent.as_ref(), &user_text, &cancel)
+            .await;
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();

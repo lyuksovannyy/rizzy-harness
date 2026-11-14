@@ -780,6 +780,10 @@ write = []                           # more read-write folders, e.g. "~/.cache"
 [execution]
 sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
 host = false                         # offer the host shell: commands as this OS user, no sandbox. Read "Execution modes" first
+
+[skills]
+repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
+roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
 ```
 
 **Execution modes.** Each agentic chat runs its commands in one mode,
@@ -1541,6 +1545,81 @@ request the provider caches: about 1k tokens a message for a typical
 `AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
 the next (the steps within one message do reuse it). Moving them to a cached
 place is for later (with X.1).
+
+## Skills
+
+A skill is a folder with a `SKILL.md` that the agent loads only when a task
+calls for it: the format Claude Code, Codex, OpenCode, Pi, Cursor and others
+read (the Agent Skills format), so folders you already have work as they are.
+
+```markdown
+---
+name: release
+description: Cut a release of this project: bump the version, tag, write the notes.
+---
+1. Run `scripts/bump.sh <version>` from this folder.
+2. ...
+```
+
+`name` (letters, digits, `.`, `_`, `-`, at most 64; the folder's name when
+left out) and `description` (what it is for and when to use it; the first
+paragraph of text when left out) are what the agent sees; the rest of the file
+is what it reads when it loads the skill. `disable-model-invocation: true`
+keeps a skill out of the agent's list: it is loaded only when you ask for it
+(below). Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
+ignored: a skill never widens what the agent may do. Files beside `SKILL.md`
+(scripts, references, templates) are read when the skill says so.
+
+**Where the node looks**, at the start of every message of an agentic chat:
+`.agents/skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` in each
+folder from the top of the chat folder's git repository down to the chat's
+folder (as for `AGENTS.md`), and in the folders `[skills] roots` names in
+`node.toml` (by default `~/.agents/skills` and `~/.claude/skills`). When two
+skills have one name, this machine's folders win over the repository (a
+repository cannot stand in for your own `deploy`), and within the repository
+the folder nearest the chat's folder wins; the node logs what it left out.
+`[skills] repository = false` reads only this machine's folders;
+`denied_tools = ["skill"]` turns skills off.
+
+**What the agent gets.** After the instruction files, in the same block, a
+list of the skills: one line each, `- name: description`, sorted by name, at
+most 150 skills and 8,000 characters (or about 2% of the model's context
+window when that is smaller and known). When they do not fit, descriptions
+are shortened to 120 characters, then skills are left out, with a note saying
+how many; the `skill` tool lists every name when asked for one it does not
+know. Like the instruction files, the list is read again every message and
+survives compacting. The agent loads a skill with the `skill` tool: it gets the
+`SKILL.md` without its front matter (cut at 24 KiB with a note), the skill
+folder's path, and the names of the files beside it, which it reads with the
+same tool (`file`) or, inside the chat's folder, with its usual tools. When a
+long chat is summarised, the summary names the skills the work still follows
+so the agent can load them again. The Software Developer, Senior Teamlead,
+Writer, Reviewer and Scout have the tool, as do custom agents that read or edit
+files or run commands; the Assistant and the Researcher do not. A sub-agent
+with the tool gets the list too.
+
+**Asking for one.** A message that starts with `/name` (a skill's name, then
+your text) asks the agent to load that skill first, a manual one included.
+There is no menu for it yet.
+
+**What a skill can do: nothing by itself.** Nothing in a skill runs when it is
+found or loaded (no `` !`command` `` expansion); a script it names runs only
+when the agent runs it with `bash`, under the chat's execution mode and its
+approval like any other command (to run scripts from this machine's skill
+folders inside the sandbox, add the folder to `[sandbox] read`). Its text is
+the repository's or this machine's, quoted to the model like `AGENTS.md`: it
+changes no setting, permission or tool, and a link only in it is not fetched.
+Only regular files are read: a repository's skill folder must lie inside the
+repository (the chat folder's own skills inside the chat folder), and a
+skill's files inside the skill's folder; links out of them, into the node's
+data directory, FIFOs and devices are refused and logged. This machine's skill
+folders may be links anywhere outside the data directory. On a node other
+people's chats use, they can read the skills in `[skills] roots`: keep secrets
+out of them, or set `roots = []`.
+
+**Cost:** about 25 tokens per listed skill with every message, up to the cap
+(about 2k tokens), sent fresh like the instruction files; a body costs only
+when it is loaded.
 
 ## Rich messages
 

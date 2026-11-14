@@ -18,7 +18,6 @@
 //! most [`READ_TIMEOUT`]. A file that is refused or cannot be read is named
 //! with the reason; the turn goes on.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// The most text all the files give together (Codex's cap).
@@ -210,53 +209,16 @@ fn pick(
     None
 }
 
-/// Why a file is not read.
-const OUTSIDE: &str = "it leads outside the folder";
-
 /// At most `cap + 1` bytes of the regular file `path` leads to, when its
-/// real path is inside `bound` and in no `protected` folder (one that holds
-/// `bound` itself does not count: a sub-agent's own folder). The real path
-/// is opened without following a link at its end or waiting on a FIFO, and
-/// the descriptor is checked again, so a folder swapped for a link after
-/// the first check is refused.
+/// real path is inside `bound` and in no `protected` folder
+/// ([`harness_tools::inside::read_inside`], which skills read through too).
 fn read_one(
     path: &Path,
     bound: &Path,
     protected: &[PathBuf],
     cap: usize,
 ) -> Result<Vec<u8>, String> {
-    use nix::fcntl::OFlag;
-    use std::os::unix::fs::OpenOptionsExt;
-    let inside = |p: &Path| {
-        p.starts_with(bound)
-            && !protected
-                .iter()
-                .any(|x| p.starts_with(x) && !bound.starts_with(x))
-    };
-    let unreadable = |e: std::io::Error| format!("it could not be read: {e}");
-    let real = path.canonicalize().map_err(unreadable)?;
-    if !inside(&real) {
-        return Err(OUTSIDE.into());
-    }
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
-        .open(&real)
-        .map_err(|e| match e.raw_os_error() {
-            Some(code) if code == nix::libc::ELOOP => OUTSIDE.to_string(),
-            _ => unreadable(e),
-        })?;
-    if !f.metadata().map_err(unreadable)?.is_file() {
-        return Err("it is not a regular file".into());
-    }
-    if !inside(&crate::artifacts::real_path(&f, &real).map_err(unreadable)?) {
-        return Err(OUTSIDE.into());
-    }
-    let mut out = Vec::new();
-    f.take(cap as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(unreadable)?;
-    Ok(out)
+    harness_tools::inside::read_inside(path, bound, protected, cap)
 }
 
 #[cfg(test)]

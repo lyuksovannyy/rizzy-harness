@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 
 pub use git::SNAPSHOT_TIMEOUT;
 pub use outbox::Backlog;
-pub use policy::NodePolicy;
+pub use policy::{NodePolicy, SkillsPolicy};
 use session::Session;
 
 /// Commands that start new work, refused while the node stops: a session,
