@@ -50,8 +50,8 @@ Rules:
 A project may name a default node and folder. Starting an agentic chat from the project page
 prefills them in the bar; creating one through the API with a project and no `cwd`/`node_id`
 uses them too. They are only defaults: the node's `node.toml` still decides what is allowed
-(T5), and agentic access is still the account grant plus the workspace's `agentic`
-permission (the same gate as any agentic chat).
+(T5), and agentic access is still the member's execution level there (the lower of the
+account's ceiling and their level in the workspace: the same gate as any agentic chat).
 
 ## Memory
 

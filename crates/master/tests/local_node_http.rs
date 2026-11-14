@@ -160,7 +160,7 @@ async fn member(s: &Server, name: &str) -> (String, String) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "can_agentic": true})),
+        Some(json!({"username": name, "exec_ceiling": "host"})),
         &s.admin,
     )
     .await;

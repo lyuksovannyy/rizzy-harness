@@ -166,7 +166,7 @@ async fn user(s: &Server, name: &str, can_agentic: bool) -> (String, String) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "can_agentic": can_agentic})),
+        Some(json!({"username": name, "exec_ceiling": if can_agentic { "host" } else { "none" }})),
         &s.admin,
     )
     .await;
@@ -207,15 +207,29 @@ async fn team(s: &Server, owner: &str, name: &str) -> String {
     v["workspace_id"].as_str().unwrap().to_string()
 }
 
+/// Adds `username` with `role`. A new member starts at level `none` (N.10a
+/// part 2): `by` then gives them `sandbox` where `by`'s own level allows
+/// it (refused otherwise, which tests that need it would show at the chat).
 async fn add(s: &Server, by: &str, ws: &str, username: &str, role: &str) -> (StatusCode, Value) {
-    call(
+    let (st, v) = call(
         s,
         Method::POST,
         &format!("/api/workspaces/{ws}/members"),
         Some(json!({ "username": username, "role": role })),
         by,
     )
-    .await
+    .await;
+    if let (StatusCode::OK, Some(id)) = (st, v["user_id"].as_str()) {
+        call(
+            s,
+            Method::PUT,
+            &format!("/api/workspaces/{ws}/members/{id}/exec-level"),
+            Some(json!({ "level": "sandbox" })),
+            by,
+        )
+        .await;
+    }
+    (st, v)
 }
 
 async fn personal_id(s: &Server, who: &str) -> String {
@@ -266,10 +280,9 @@ async fn personal_workspace_for_every_account() {
     let p = &list[0];
     assert_eq!(p["personal"], true);
     assert_eq!(p["role"], "owner");
-    assert_eq!(
-        p["permissions"],
-        json!(["agentic", "settings", "members", "routines"])
-    );
+    assert_eq!(p["permissions"], json!(["settings", "members", "routines"]));
+    // In Personal the level is the account's: a server admin's is host.
+    assert_eq!(p["exec_level"], "host");
     assert_eq!(p["members"], 1);
     assert_eq!(v["active"], p["workspace_id"]);
     assert_eq!(v["can_create"], true);
@@ -504,7 +517,7 @@ async fn adding_members_by_username() {
         (d["members"].as_u64(), d["role"].as_str()),
         (Some(2), Some("member"))
     );
-    assert_eq!(d["permissions"], json!(["agentic", "routines"]));
+    assert_eq!(d["permissions"], json!(["routines"]));
 
     // A non-member gets 404 on every workspace route.
     let p = format!("/api/workspaces/{acme}");
@@ -892,7 +905,7 @@ async fn chats_follow_membership_and_stay_private() {
 }
 
 #[tokio::test]
-async fn agentic_needs_the_grant_and_the_role() {
+async fn agentic_needs_the_level_not_the_role() {
     let s = start().await;
     let (bob, _) = user(&s, "bob", true).await;
     let (carol, carol_id) = user(&s, "carol", true).await;
@@ -906,27 +919,39 @@ async fn agentic_needs_the_grant_and_the_role() {
         add(&s, &bob, &acme, "dave", "member").await.0,
         StatusCode::OK
     );
+    // Back to none for Carol, where every new member starts.
+    call(
+        &s,
+        Method::PUT,
+        &format!("/api/workspaces/{acme}/members/{carol_id}/exec-level"),
+        Some(json!({"level": "none"})),
+        &bob,
+    )
+    .await;
 
-    // A guest with the server grant: not in Acme, fine in Personal.
+    // At none in Acme (every new member, guest or not): not in Acme, fine
+    // in Personal, where her account's level applies.
+    let none = "your level in Acme is none, so no agent chats; ask one of its admins";
     let (st, v) = chat(&s, &carol, Some(&acme), "x").await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
-    assert_eq!(v["error"], "your role in Acme cannot run agentic sessions");
+    assert_eq!(v["error"], none);
     new_chat(&s, &carol, None, "home").await;
-    // A member without the grant: nowhere.
+    // An account at none: nowhere.
     let (st, v) = chat(&s, &dave, Some(&acme), "x").await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     assert_eq!(
         v["error"],
-        "agentic sessions are not enabled for this account; ask an admin"
+        "your account's level is none, so no agent chats; a server admin sets it"
     );
 
-    // Promoted, Carol starts one; demoted again, it shows as blocked.
-    let member = format!("/api/workspaces/{acme}/members/{carol_id}");
+    // Given sandbox, Carol (still a guest) starts one; back at none, it
+    // shows as blocked.
+    let member = format!("/api/workspaces/{acme}/members/{carol_id}/exec-level");
     call(
         &s,
-        Method::PATCH,
+        Method::PUT,
         &member,
-        Some(json!({"role": "member"})),
+        Some(json!({"level": "sandbox"})),
         &bob,
     )
     .await;
@@ -942,9 +967,9 @@ async fn agentic_needs_the_grant_and_the_role() {
     assert_eq!(v["sessions"][0]["blocked"], Value::Null, "{v}");
     call(
         &s,
-        Method::PATCH,
+        Method::PUT,
         &member,
-        Some(json!({"role": "guest"})),
+        Some(json!({"level": "none"})),
         &bob,
     )
     .await;
@@ -956,10 +981,7 @@ async fn agentic_needs_the_grant_and_the_role() {
         &carol,
     )
     .await;
-    assert_eq!(
-        v["sessions"][0]["blocked"],
-        "your role in Acme cannot run agentic sessions"
-    );
+    assert_eq!(v["sessions"][0]["blocked"], none);
     let (_, row) = call(
         &s,
         Method::GET,
@@ -968,10 +990,7 @@ async fn agentic_needs_the_grant_and_the_role() {
         &carol,
     )
     .await;
-    assert_eq!(
-        row["blocked"],
-        "your role in Acme cannot run agentic sessions"
-    );
+    assert_eq!(row["blocked"], none);
     // A guest's plain chat there is hers to drive: never blocked, even
     // listed next to her blocked agentic one.
     let (st, v) = call(
@@ -1005,10 +1024,7 @@ async fn agentic_needs_the_grant_and_the_role() {
         (&listed(&plain)["profile"], &listed(&plain)["blocked"]),
         (&json!("chat"), &Value::Null)
     );
-    assert_eq!(
-        listed(&sid)["blocked"],
-        "your role in Acme cannot run agentic sessions"
-    );
+    assert_eq!(listed(&sid)["blocked"], none);
     let (_, row) = call(
         &s,
         Method::GET,

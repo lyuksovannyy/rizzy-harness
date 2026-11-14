@@ -1,15 +1,25 @@
-// Settings → Workspace admin → Members: who is in the workspace and their
-// roles, adding someone by username, changing a role, removing someone, and
-// what each role may do. Choices the server's guards would refuse are off
-// (only owners make or touch owners, nobody acts above their own role or on
-// their own row); the server still checks, and its refusals show here.
+// Settings → Workspace admin → Members: who is in the workspace, their roles
+// and levels, adding someone by username, changing a role or a level,
+// removing someone, and what each role may do. Choices the server's guards
+// would refuse are off (only owners make or touch owners, nobody acts above
+// their own role or on their own row, nobody grants a level above their own,
+// only owners grant host); the server still checks, and its refusals show
+// here.
 import { Check } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { pageApi } from "../../apiPages";
 import { t } from "../../lib/i18n";
 import { canGive, canManage, PERM_LABEL, PERMS, ROLES, rolePerms } from "../../lib/workspaceAdmin";
-import type { WorkspaceMember, WorkspaceRole } from "../../types";
+import type { ExecLevel, WorkspaceMember, WorkspaceRole } from "../../types";
+import { atMost, LEVEL_LABEL, LevelSelect } from "../LevelSelect";
 import { message, type WorkspacePanelProps } from "./panel";
+
+/** The highest level someone may grant here: their own effective level,
+ * and below host unless they are an owner (N.10a part 2). */
+function grantable(actor: WorkspaceRole, mine: ExecLevel): ExecLevel {
+  if (actor === "owner") return mine;
+  return atMost(mine, "sandbox") ? mine : "sandbox";
+}
 
 /** The roles as options, each off unless `actor` may give it. */
 function RoleOptions({ actor }: { actor: WorkspaceRole }) {
@@ -28,6 +38,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
   const { workspace: ws, me } = props;
   const id = ws.workspace_id;
   const actor = ws.role;
+  const maxLevel = grantable(actor, ws.exec_level);
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [username, setUsername] = useState("");
@@ -86,6 +97,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
             <tr>
               <th>Member</th>
               <th>Role</th>
+              <th>Level</th>
               <th />
             </tr>
           </thead>
@@ -104,12 +116,37 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
                   <td>
                     <select
                       aria-label={`Role of ${who}`}
+                      title="A role says what they may administer here, not what they may run: that is their level"
                       value={m.role}
                       disabled={!may || busy}
                       onChange={(e) => void run(() => pageApi.setWorkspaceMemberRole(id, m.user_id, e.target.value as WorkspaceRole))}
                     >
                       <RoleOptions actor={actor} />
                     </select>
+                  </td>
+                  <td>
+                    {m.exec_level === undefined ? (
+                      <span className="muted" aria-label={`Level of ${who} not shown`}>
+                        —
+                      </span>
+                    ) : m.role === "owner" || !may ? (
+                      <span title={m.role === "owner" ? "An owner's level here is always host" : undefined}>
+                        {LEVEL_LABEL[m.exec_level]}
+                      </span>
+                    ) : (
+                      <LevelSelect
+                        label={`Level of ${who}`}
+                        value={m.exec_level}
+                        max={maxLevel}
+                        // Nobody changes a level above their own.
+                        disabled={busy || !atMost(m.exec_level, ws.exec_level)}
+                        grant={{ who, where: `in ${ws.name}` }}
+                        onSave={(level) => void run(() => pageApi.setWorkspaceMemberLevel(id, m.user_id, level))}
+                      />
+                    )}
+                    {m.effective_level && m.effective_level !== m.exec_level && (
+                      <span className="muted small"> counts as {LEVEL_LABEL[m.effective_level]} (their account's level)</span>
+                    )}
                   </td>
                   <td>
                     {may && (
@@ -180,8 +217,10 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
         <span className="field-hint">
           Only owners delete the workspace and make or change owners. Admins manage members up to their own role.
           Nobody changes their own role, and the last owner cannot leave or step down while others remain (a server
-          admin can name a new owner if every owner's account is gone). Guests chat but start no agentic
-          sessions here; a member also needs agentic access from a server admin for those.
+          admin can name a new owner if every owner's account is gone). Changing someone's role does not change
+          what they may run: which agent chats a member may start is their level, not their role: none (every new member), container (not offered yet), sandbox, or
+          host, a shell on the node with no sandbox, which only owners grant. Nobody grants above their own
+          level or changes their own, and an account's level, set by a server admin, still caps it.
         </span>
       </div>
     </section>

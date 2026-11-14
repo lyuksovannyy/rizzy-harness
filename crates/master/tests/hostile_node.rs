@@ -740,7 +740,7 @@ fn user(t: &T, name: &str) -> String {
             username: name.into(),
             password_hash: "x".into(),
             role: harness_store::Role::Member,
-            can_agentic: true,
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         })
         .unwrap();

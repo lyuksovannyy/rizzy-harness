@@ -64,7 +64,7 @@ const item = (n: number, over: Partial<MediaItem> = {}): MediaItem => ({
   ...over,
 });
 const page = (items: MediaItem[], next: string | null = null): MediaPage => ({ items, next, usage: { used: 0, quota: 0 }, limits: { max_file: 200 * 1024 * 1024 } });
-const me: Me = { user_id: "u1", username: "alex", role: "member", can_agentic: true, must_change_password: false };
+const me: Me = { user_id: "u1", username: "alex", role: "member", exec_ceiling: "host" as const, must_change_password: false };
 const features: Features = {
   voice: false,
   memory: false,

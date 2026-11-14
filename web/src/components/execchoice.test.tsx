@@ -8,7 +8,7 @@ import { createRoot } from "react-dom/client";
 import { describe, expect, test } from "vitest";
 import { mayPickHost } from "../lib/execModes";
 import { modeGaps } from "../lib/execWords";
-import type { NodeInfo } from "../types";
+import type { ExecLevel, NodeInfo } from "../types";
 import { Composer, type Submission } from "./Composer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -25,7 +25,7 @@ const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
   ...over,
 });
 
-function mount(workers: NodeInfo[], hostRight = { admin: true }) {
+function mount(workers: NodeInfo[], hostRight: { level: ExecLevel } = { level: "host" }) {
   const sent: Submission[] = [];
   const host = document.createElement("div");
   document.body.append(host);
@@ -120,20 +120,21 @@ describe("the host shell for a new chat", () => {
     c.unmount();
   });
 
-  test("offered to server admins only, and only where the node has a host shell", async () => {
-    // Review H1: not to a plain account, workspace owner or not (every
-    // account owns its Personal workspace).
+  test("offered only at the host level, and only where the node has a host shell", async () => {
+    // N.10a part 2: the choice offers only modes at or below the effective
+    // level in the chat's workspace (server admin or not, owner or not).
     for (const [workers, right] of [
-      [[node()], { admin: false }],
-      [[node({ embedded: true })], { admin: false }],
-      [[node({ exec_modes: ["sandbox"] })], { admin: true }],
+      [[node()], { level: "sandbox" }],
+      [[node({ embedded: true })], { level: "sandbox" }],
+      [[node()], { level: "none" }],
+      [[node({ exec_modes: ["sandbox"] })], { level: "host" }],
     ] as const) {
       const c = mount([...workers], right);
       expect(await c.loaded()).toBeNull();
       c.unmount();
     }
-    expect(mayPickHost(node({ embedded: true }), { admin: true })).toBe(true);
-    expect(mayPickHost(node(), { admin: false })).toBe(false);
+    expect(mayPickHost(node({ embedded: true }), { level: "host" })).toBe(true);
+    expect(mayPickHost(node(), { level: "sandbox" })).toBe(false);
   });
 
   test("a confirmed choice stays with its node when the selection moves on its own", async () => {

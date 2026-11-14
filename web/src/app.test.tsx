@@ -47,11 +47,12 @@ const ws = (id: string, more: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
   name: id,
   personal: false,
   role: "member",
-  permissions: ["agentic", "routines"],
+  permissions: ["routines"],
   members: 2,
+  exec_level: "host",
   ...more,
 });
-const user = { user_id: "u", username: "alex", role: "member" as const, can_agentic: true, must_change_password: false };
+const user = { user_id: "u", username: "alex", role: "member" as const, exec_ceiling: "host" as const, must_change_password: false };
 // What GET /api/me answers: the active workspace sits beside the user, not in it.
 const answer = (workspace: WorkspaceSummary | null) => ({ ok: true, app: "rizzy-harness", user, workspace });
 const shell = () => shells.at(-1)!;

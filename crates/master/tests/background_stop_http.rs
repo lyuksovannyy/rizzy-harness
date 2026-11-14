@@ -227,7 +227,7 @@ async fn account(t: &T, name: &str, role: &str) -> String {
         t,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "role": role, "can_agentic": true})),
+        Some(json!({"username": name, "role": role, "exec_ceiling": "host"})),
         &t.alex,
     )
     .await;
@@ -583,6 +583,17 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
             );
             running(&t, sid).await;
         }
+        // What applies once she is no longer a server admin (N.10a part
+        // 2): her stored ceiling, `sandbox`.
+        let (st, v) = req(
+            &t,
+            Method::PUT,
+            &format!("/api/users/{carol_id}/exec-ceiling"),
+            Some(json!({"level": "sandbox"})),
+            &t.alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
         let (st, v) = req(
             &t,
             Method::PATCH,

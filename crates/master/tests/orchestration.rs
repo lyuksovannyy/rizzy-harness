@@ -56,6 +56,20 @@ async fn setup_with(
         Auth::new(Secret::new("tok".into()), vec![], false),
     );
     master.set_agents(harness_agents::AgentSet::load(&dir.path().join("none")).0);
+    // The chats' owner, "alex", a server admin (ceiling `host`; the
+    // embedded node is for admins): a session works only within its
+    // owner's level and node rule (N.10a part 2).
+    master
+        .inner_mirror()
+        .create_user(&harness_store::NewUser {
+            user_id: "alex".into(),
+            username: "alex".into(),
+            password_hash: "$argon2id$x".into(),
+            role: harness_store::Role::Admin,
+            exec_ceiling: harness_core::policy::ExecLevel::None,
+            must_change_password: false,
+        })
+        .unwrap();
     let node = NodeRuntime::start(NodeConfig {
         node_id: "local".into(),
         hostname: "h".into(),

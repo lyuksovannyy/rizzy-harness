@@ -385,7 +385,9 @@ pub(crate) async fn why_blocked(
         return Err(Some("its settings cannot be read; edit the routine".into()));
     };
     if spec.agentic()
-        && let Some(why) = ws::agentic_refusal(&who, Some(&access)).or_else(|| {
+        // At its owner's level on the day it fires: a routine's chat is
+        // always `sandbox` (N.10a part 2), so that is what the level needs.
+        && let Some(why) = crate::levels::no_work(&who, Some(&access)).or_else(|| {
             spec.node_id
                 .as_deref()
                 .and_then(|n| ws::node_refusal(m, &who, n))
@@ -620,8 +622,8 @@ async fn launch(m: Master, a: Admitted) {
                 // end (T.8d step 3); the node holds it to that for good.
                 no_callbacks: true,
                 // Unattended, often on input from outside: never the host
-                // shell, whoever owns the routine (N.10a, until the levels
-                // of part 2). A node that offers no sandbox refuses the run.
+                // shell, whatever its owner's level (N.10a). A node that
+                // offers no sandbox refuses the run.
                 exec_mode: (a.spec.profile == harness_core::event::Profile::Agentic)
                     .then_some(harness_core::policy::ExecMode::Sandbox),
                 ..Default::default()

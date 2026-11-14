@@ -110,7 +110,7 @@ pub async fn features(m: &Master, who: &Principal, scope: Option<&Access>) -> Va
     if !on {
         return json!({ "enabled": false, "show": false, "why": null });
     }
-    let refusal = ws::agentic_refusal(who, scope);
+    let refusal = crate::levels::no_work(who, scope);
     let visible = match &refusal {
         None => true,
         Some(_) => {

@@ -23,6 +23,7 @@ const ws = (id: string, more: Partial<WorkspaceSummary>): WorkspaceSummary => ({
   role: "member",
   permissions: [],
   members: 2,
+  exec_level: "host",
   ...more,
 });
 const personal = ws("w-personal", { name: "stored", personal: true, role: "owner" });
@@ -33,7 +34,7 @@ const me = (workspace: WorkspaceSummary = personal): Me => ({
   user_id: "u1",
   username: "alex",
   role: "member",
-  can_agentic: false,
+  exec_ceiling: "none" as const,
   must_change_password: false,
   workspace,
 });

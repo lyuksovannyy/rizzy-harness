@@ -1174,13 +1174,30 @@ impl NativeBackend {
         // no per-turn context (it would not rebuild from the log), no
         // images. Anything the node passed in them is ignored.
         let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
+        let instructions = ctx.extra.instructions.as_deref().filter(|i| !i.is_empty());
         match &callback {
-            Some(ids) => provider::open_callback(&mut messages, ids),
+            Some(ids) => {
+                provider::open_callback(&mut messages, ids);
+                // The repository's instruction files, which the node read
+                // for this turn (review RI-1), after the opening: this
+                // turn's only, like a person's turn's context, so a later
+                // request rebuilds the opening without them.
+                if let (Some(i), Some(ChatMsg::Opening(t))) = (instructions, messages.last_mut()) {
+                    *t = provider::with_instructions_after(t, i);
+                }
+            }
             None => {
                 // Quoted under a line of the harness's (R76-1): project
-                // text, board cards and recalled facts are written by
-                // other people and cannot pose as the person's message.
-                let user_text = match &ctx.extra.context {
+                // text, board cards, recalled facts and the repository's
+                // instruction files are written by other people and cannot
+                // pose as the person's message. The files come first, so
+                // the master's last line (a routine's note) stays last.
+                let context = match (instructions, ctx.extra.context.as_deref()) {
+                    (Some(i), Some(c)) if !c.is_empty() => Some(format!("{i}\n\n{c}")),
+                    (Some(i), _) => Some(i.to_string()),
+                    (None, c) => c.map(str::to_string),
+                };
+                let user_text = match &context {
                     Some(c) => provider::with_context(c, &ctx.user_text),
                     None => ctx.user_text.clone(),
                 };

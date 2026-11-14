@@ -6,6 +6,7 @@ mod audit;
 pub mod exec;
 mod git;
 mod images;
+mod instructions;
 mod outbox;
 pub mod policy;
 mod session;

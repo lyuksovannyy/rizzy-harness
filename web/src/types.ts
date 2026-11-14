@@ -18,6 +18,9 @@ export type Profile = "chat" | "agentic";
 /** How an agentic chat's commands run (N.10a, docs/execution-modes.md):
  * chosen when it is created, never changed. */
 export type ExecMode = "sandbox" | "host";
+/** What a person may run (N.10a part 2), lowest first: an account's ceiling
+ * and a member's level in a workspace; the lower of the two counts. */
+export type ExecLevel = "none" | "container" | "sandbox" | "host";
 
 export interface SessionCreated {
   title: string;
@@ -646,14 +649,15 @@ export interface Me {
   user_id: string | null;
   username: string;
   role: Role;
-  can_agentic: boolean;
+  /** The account's ceiling as it counts (a server admin's is `host`). */
+  exec_ceiling: ExecLevel;
   must_change_password: boolean;
   /** The active workspace; null for the API token. */
   workspace?: WorkspaceSummary | null;
 }
 
 /** What a workspace role allows, in this order on the wire. */
-export type Perm = "agentic" | "settings" | "members" | "routines";
+export type Perm = "settings" | "members" | "routines";
 export type WorkspaceRole = "owner" | "admin" | "member" | "guest";
 
 export interface WorkspaceSummary {
@@ -664,6 +668,9 @@ export interface WorkspaceSummary {
   role: WorkspaceRole;
   permissions: Perm[];
   members: number;
+  /** The caller's effective level here: the lower of their ceiling and
+   * their level in it (in a Personal workspace, the ceiling). */
+  exec_level: ExecLevel;
 }
 
 export interface WorkspaceList {
@@ -693,6 +700,11 @@ export interface WorkspaceMember {
   display_name: string | null;
   role: WorkspaceRole;
   joined_ms: number;
+  /** Their level here as set (an owner's is always `host`). Only to those
+   * who manage members here, and on one's own row. */
+  exec_level?: ExecLevel;
+  /** As it counts: the lower of that and their account's level. */
+  effective_level?: ExecLevel;
 }
 
 /** Settings → Server → Workspaces: one row per workspace. */
@@ -718,7 +730,10 @@ export interface User {
   username: string;
   role: Role;
   disabled: boolean;
-  can_agentic: boolean;
+  /** As it counts: a server admin's is `host`. */
+  exec_ceiling: ExecLevel;
+  /** As stored: what applies once they are no longer a server admin. */
+  exec_ceiling_stored: ExecLevel;
   must_change_password: boolean;
   created_ms: number;
 }

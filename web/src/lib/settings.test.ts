@@ -9,12 +9,13 @@ const ws = (role: WorkspaceRole, permissions: Perm[], personal = false): Workspa
   role,
   permissions,
   members: personal ? 1 : 3,
+  exec_level: "host",
 });
-const ALL: Perm[] = ["agentic", "settings", "members", "routines"];
+const ALL: Perm[] = ["settings", "members", "routines"];
 const viewer = (over: Partial<Me>): Pick<Me, "user_id" | "role" | "workspace"> => ({
   user_id: "u1",
   role: "member",
-  workspace: ws("member", ["agentic", "routines"]),
+  workspace: ws("member", ["routines"]),
   ...over,
 });
 const shape = (v: Pick<Me, "user_id" | "role" | "workspace">) =>

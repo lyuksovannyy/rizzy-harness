@@ -171,9 +171,11 @@ Settings has four sections:
 
 A new chat's model: what you pick in the bar, else the agent's own model,
 else your default from Preferences, else the workspace's default, else the
-server's. Agentic sessions need both the server admin's agentic grant on your
-account and a role with agentic permission in the workspace; losing either
-stops your running agentic work there and leaves its approvals deny-only.
+server's. Which agent chats you may start is your **level** (see "Execution
+levels" below): the lower of your account's level, set by a server admin, and
+your level in the workspace, set by its admins (in Personal, your account's
+level). Lowering either stops your running chats that are above the new level
+and leaves their approvals deny-only; your other chats go on.
 
 ## The sidebar, search and the account menu
 
@@ -233,8 +235,9 @@ status, duration, tokens and the first sentence of its answer.
 - **What a webhook sends is untrusted.** Its data only fills the prompt; that
   chat, and every later turn in it, gets no memory (no recall, no
   `remember`), no `web_fetch` or `web_search`, and a banner saying so.
-- Guests cannot own routines. A routine runs as its owner: losing the
-  workspace permission or the agentic grant pauses it at the next fire.
+- Guests cannot own routines. A routine runs as its owner, at their level on
+  the day it fires (its chat is always `sandbox`): losing the workspace
+  permission, or a level below `sandbox`, blocks it at the next fire.
 
 The newest 30 seen run chats per routine are kept (older ones are deleted
 hourly, unless you continued them); runs keep their status and usage. Limits,
@@ -548,11 +551,11 @@ before Linux 7.1 it can still reach Unix sockets such as the session bus,
 which can start programs outside the sandbox (contained in bubblewrap, only
 those inside the folders it is granted, and abstract ones below Linux 6.12
 with the network on). So by default only
-server admins (and the API token) may use it; other accounts with the
-agentic grant run their agentic sessions on a remote node (`node join`), and
-get "use a remote node, or ask the server admin" on the built-in one, also
-for chats they started there earlier. `"granted"` lets every account with
-the grant use it: choose it only if you trust each of them like an admin.
+server admins (and the API token) may use it; other accounts run their
+agentic sessions on a remote node (`node join`), and get "use a remote node,
+or ask the server admin" on the built-in one, also for chats they started
+there earlier. `"granted"` lets every account use it within its level:
+choose it only if you trust each of them like an admin.
 
 Dictation (the mic button) needs a transcription service, for example a local
 Whisper server with an OpenAI-compatible API:
@@ -757,15 +760,11 @@ names it):
   OS user that holds nothing else.
 
 A new chat is in the sandbox mode unless `host` is asked for by name: a
-node that offers only `host` refuses a chat that does not name it. Until
-per-member levels exist (N.10, part 2), only a server admin may choose
-`host`, on every node (owning a workspace is no reason: every account owns
-its Personal one), and choosing it shows that warning first; the rule is
-checked again on every later action, so the `host` chats of someone who is
-no longer a server admin do no more work. Every request for `host`,
-granted or refused by any check, is written to the audit log (who, the
-workspace, the node, the outcome; never chat content). A routine's chat always
-asks for `sandbox`. A connected node must have announced the mode it is sent: one
+node that offers only `host` refuses a chat that does not name it. Who may
+ask for which mode is their execution level (below); choosing `host` shows
+that warning first. Every request for `host`, granted or refused by any
+check, is written to the audit log (who, the workspace, the node, the
+outcome; never chat content). A routine's chat always asks for `sandbox`. A connected node must have announced the mode it is sent: one
 from before modes gets no agent chat, and the refusal says what to do on
 the node; a node that is away is "not connected", as before. The chat's header names its mode and
 the gaps its node announced at connect (network off without a namespace,
@@ -776,9 +775,10 @@ A node that offers neither mode runs no agent chats and says so at start,
 in `doctor` and when a chat is created ("this node offers no way to run
 commands: install bubblewrap, or set `[execution] host = true`"); `node
 run` refuses to start. **A data directory made by an earlier build does
-not open with this one** (`serve` exits with "no such column:
-s.exec_mode": the session table changed in place, with no migration
-before the first release): remove it, or start with a new one. **This
+not open with this one**: the schema changed in place, with no migration
+before the first release (first the session table's mode, then the levels
+below); `serve` refuses it at start as a schema mismatch. Remove it, or
+start with a new one. **This
 changed:** a node where bubblewrap did not
 work used to run the shell with Landlock alone and only warn; it now
 offers no `sandbox`, and without `host = true` nothing. A chat whose mode
@@ -788,6 +788,63 @@ are shared between modes: what a `sandbox` chat writes in a folder (a
 script, a `Makefile`, `.git/hooks`), a `host` chat in that folder may run
 with every right of the node's user. See
 [docs/execution-modes.md](docs/execution-modes.md).
+
+**Execution levels.** Who may run which mode is one ordered level, `none` <
+`container` < `sandbox` < `host`; each includes the ones before it.
+
+- **An account's level** (its ceiling) is set by server admins in Settings →
+  Users, never their own. Every new account starts at `none`, also one a
+  server admin creates (the form does not ask: set it in the list). A server
+  admin's is always `host` while they are one; what is set for them (the
+  list shows it for server admins too) applies once they are not, and making
+  a server admin a user says which level they will then have. A disabled
+  account's is `none`.
+- **A member's level in a team workspace** is set by its admins in Workspace
+  admin → Members. Every new member starts at `none`. Nobody changes their
+  own, nobody grants above their own level there or changes a member whose
+  level is above it, and only an owner grants `host`. Admins of the workspace
+  see every member's level, as set and as it counts; anyone else sees only
+  their own. A role says what someone may administer, the level what they
+  may run: changing one never changes the other. An owner's level there is always `host`, so their account's level
+  decides. Making someone an owner therefore gives them `host` there,
+  whatever the granting owner's own level (decided: a role carries its
+  level). A Personal workspace has no level of its own: your account's
+  level applies.
+- **Your level** in a workspace is the lower of the two, and a chat's mode
+  must be at most it: at create and on every later action that makes it
+  work (a message, allowing an approval, restore, changing its agent,
+  picking a parallel answer, saving a file as an artifact, a callback, a
+  routine's run). The new-chat choice offers only modes within it. Reading a
+  chat stays allowed whatever the level.
+- `container` exists as a level, but no node offers containers yet, so an
+  account or member at `container` runs no agent chats, and the composer
+  says so.
+- Granting `host`, as an account's level or a member's, shows the same
+  warning as choosing it for a chat, before anything is saved; cancelling
+  saves nothing.
+- Lowering a level stops the chats above the new level at once (their
+  running turn and background commands), and only those, also a turn whose
+  message was on its way when the level changed.
+- Removing a member, or deleting the workspace, stops every running chat
+  they had in that workspace, whatever its mode. Those chats return to their
+  owners' Personal workspaces, where each account's level applies; leaving a
+  team therefore also unblocks a chat its level blocked (nodes are not yet
+  tied to workspaces, below).
+- Every change is one line in the audit log (who, whose, which workspace or
+  account, from, to); none carries chat content. Two admins changing the
+  same level at once, or an admin whose own role or level changed while
+  they decided: refused and asked to reload.
+- The API token, the machine owner's key, is `host` everywhere; on a
+  member's chat it gets the member's answer.
+
+**What a level in a team does not do yet:** a node is not tied to a
+workspace (that comes with the node's list of workspaces, N.1), so a member
+whose account's level is `sandbox` can run a `sandbox` chat on a team's node
+from their Personal workspace even at `none` in that team. Today the
+account's level is the boundary between people; a workspace's levels are
+that team's own rule within it. The levels protect against members, not
+against a stolen master, which can ask a node for anything up to the node's
+own `[execution]` ceiling.
 
 **The shell sandbox.** `bash` (and graphify) run through `rizzy-harness
 sandbox-exec`, which locks itself into a Linux Landlock sandbox and then
@@ -1270,8 +1327,8 @@ chat or to "Waiting for you", and ends reach the agent with your next message,
 as before.
 
 *Who and where.* The chat's owner must still be allowed to run it: their
-account exists, is enabled and needs no password change; they still have the
-agentic grant and permission in the chat's workspace and may use its node:
+account exists, is enabled and needs no password change; their level in the
+chat's workspace still allows the chat's mode and they may use its node:
 exactly what you could do yourself at that moment. (A team chat whose owner
 left the workspace falls back to their Personal workspace, where they may go
 on in it, so it is resumed there if agentic chats are theirs to run.) A
@@ -1383,6 +1440,46 @@ it. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).
+
+## Repository instructions (AGENTS.md)
+
+In an agentic chat the node reads the repository's own instruction files and
+sends them to the model with every message, the way Codex does: the
+`AGENTS.md` in each folder from the top of the git repository holding the
+chat's folder down to the chat's folder itself (only that folder when it is in
+no repository), and `CLAUDE.md` in a folder that has no `AGENTS.md` (an empty
+or whitespace-only `AGENTS.md` counts as none). The top folder's file comes
+first, the deepest last, each named by its path from the chat's folder
+(`../../AGENTS.md`), so the agent's own `read` of that path opens the same
+file. Together they are cut at 32 KiB, or at about a tenth of the model's
+context window when that is smaller and known, with a note saying where the
+text stops, which files were left out and why. They are read again at the
+start of every message, so an edit (yours or the agent's) counts from the next
+message on, and they are sent after the history like a project's
+instructions, so compacting a long chat does not lose them. A sub-agent gets
+them too, and so does the turn that resumes a chat after a background command
+ends (a callback turn), the one nobody watches.
+
+Not read: files in folders below the chat's folder, files above the
+repository's top (or above the folder `node.toml` grants), `.claude/CLAUDE.md`,
+`CLAUDE.local.md`, other names, and `@path` imports inside a file (the line is
+sent as written; the file it names is not read).
+
+They are text for the model and nothing more: they change no setting in
+`node.toml`, no approval mode, tool or limit, and a link that is only in them is
+not fetched on their say-so. Only regular files inside the folder the node
+grants are read: a link is followed only to a file inside the repository (the
+chat folder's own file only to one inside the chat folder), never out of it or
+into the node's data directory, and a file that cannot be read is named with
+the reason while the message goes on. A read that takes more than 5 seconds
+(a hung network disk) is given up with a note; the node logs each refused,
+cut or timed-out read (paths and reasons, never the text).
+
+**Cost:** the files are sent fresh with every message, after the part of the
+request the provider caches: about 1k tokens a message for a typical
+`AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
+the next (the steps within one message do reuse it). Moving them to a cached
+place is for later (with X.1).
 
 ## Rich messages
 

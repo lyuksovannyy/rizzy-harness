@@ -1,8 +1,9 @@
-//! Who may have which execution mode (N.10a part 1, the interim rule until
-//! the levels per member of part 2): `host` only for a server admin, on
-//! every node, at create and again on every later action; asked for only
-//! by name, `sandbox` sent otherwise. A node must have announced the mode
-//! it is sent. The node decides last (`crates/node/tests/exec_modes.rs`).
+//! Who may have which execution mode (N.10a): `host` only at the `host`
+//! level (part 2, `exec_levels_http.rs` for the levels themselves), at
+//! create and again on every later action; asked for only by name,
+//! `sandbox` sent otherwise. Owning a workspace is no reason (review H1). A
+//! node must have announced the mode it is sent. The node decides last
+//! (`crates/node/tests/exec_modes.rs`).
 
 mod common;
 use common::{Login as _, SameOrigin as _};
@@ -234,7 +235,7 @@ async fn call(
     (st, v)
 }
 
-/// A non-admin account with the agentic grant, logged in.
+/// A non-admin account whose ceiling is `sandbox`, logged in.
 async fn account(s: &Server, name: &str) -> String {
     account_with(s, name, true).await.0
 }
@@ -245,7 +246,7 @@ async fn account_with(s: &Server, name: &str, agentic: bool) -> (String, String)
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "can_agentic": agentic})),
+        Some(json!({"username": name, "exec_ceiling": if agentic { "sandbox" } else { "none" }})),
         &s.admin,
     )
     .await;
@@ -329,11 +330,13 @@ async fn personal(s: &Server, who: &str) -> String {
     first["workspace_id"].as_str().unwrap().to_string()
 }
 
-/// Review H1: `host` is for server admins only. Every account owns its
-/// Personal workspace and may own a team it made itself, so neither is a
-/// reason; refused with the reason, and the node never hears of it.
+/// Review H1, kept by the levels: owning a workspace is no reason for
+/// `host`. Every account owns its Personal workspace and may own a team it
+/// made itself; at the `sandbox` ceiling both refuse `host`, with the
+/// reason, and the node never hears of it. A server admin (ceiling `host`)
+/// may, by name.
 #[tokio::test]
-async fn host_is_for_server_admins_only() {
+async fn host_needs_the_host_level_not_ownership() {
     let s = start().await;
     let bob = account(&s, "bob").await;
     let carol = account(&s, "carol").await;
@@ -342,7 +345,10 @@ async fn host_is_for_server_admins_only() {
     for ws in [None, Some(carol_ws.as_str())] {
         let (st, v) = create_in(&s, &carol, ws, BOTH, Some("host")).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{ws:?}: {v}");
-        assert!(v.to_string().contains("for server admins"), "{v}");
+        assert!(
+            v.to_string().contains("your account's level is sandbox"),
+            "{v}"
+        );
     }
     // A plain account in a team it made itself: owner, and still refused.
     let (st, v) = call(
@@ -414,8 +420,7 @@ async fn host_is_for_server_admins_only() {
 }
 
 /// Re-check RN-4: every create that asks for `host` writes one audit line,
-/// whichever check refuses it (no agentic grant, the admins-only rule, the
-/// node), with the user (or "api token"), the workspace, the node as
+/// whichever check refuses it (the level, the node), with the user (or "api token"), the workspace, the node as
 /// resolved, and the outcome: a refusal's first words, or "granted" with
 /// the session id once the chat exists.
 #[tokio::test]
@@ -423,7 +428,7 @@ async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
     let s = start().await;
     let lines = |s: &Server| s.mirror.audit_lines("session.create.host").unwrap();
     let last = |s: &Server| -> Value { serde_json::from_str(&lines(s).last().unwrap().1).unwrap() };
-    // No agentic grant: refused before the mode rule.
+    // At `none`: refused by the level.
     let (grace, grace_id) = account_with(&s, "grace", false).await;
     let (st, _) = create_in(&s, &grace, None, BOTH, Some("host")).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -435,7 +440,7 @@ async fn every_request_for_host_is_audited_once_whatever_refuses_it() {
         l["outcome"]
             .as_str()
             .unwrap()
-            .starts_with("refused: agentic sessions"),
+            .starts_with("refused: your account's level is none"),
         "{l}"
     );
     // The API token, no node named: the node as the master resolves it
@@ -534,9 +539,9 @@ async fn a_node_that_never_said_hello_is_not_connected() {
 }
 
 /// L-h: the rule holds on every later action, not only at create. A
-/// server admin's `host` chat, once they are no longer an admin, takes no
-/// prompt, no allowing approval and no restore, with the reason; their
-/// sandbox chat goes on.
+/// server admin's `host` chat, once they are no longer an admin (their
+/// stored ceiling, `sandbox`, applies), takes no prompt, no allowing
+/// approval and no restore, with the reason; their sandbox chat goes on.
 #[tokio::test]
 async fn a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work() {
     let s = start().await;
@@ -579,7 +584,10 @@ async fn a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work() {
     ] {
         let (st, v) = call(&s, Method::POST, &path, Some(body), &dana).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{path}: {v}");
-        assert!(v.to_string().contains("for server admins"), "{path}: {v}");
+        assert!(
+            v.to_string().contains("your account's level is sandbox"),
+            "{path}: {v}"
+        );
     }
     let (_, v) = call(
         &s,
@@ -592,7 +600,7 @@ async fn a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work() {
     assert!(
         v["blocked"]
             .as_str()
-            .is_some_and(|b| b.contains("for server admins")),
+            .is_some_and(|b| b.contains("your account's level is sandbox")),
         "{v}"
     );
     let (st, v) = call(
@@ -607,7 +615,7 @@ async fn a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work() {
 }
 
 /// L-h, the callback's admission: `agentic_blocked` is what it asks, and
-/// for a `host` row it applies the create's rule; a row without a readable
+/// for a `host` row it applies the owner's level; a row without a readable
 /// mode is refused (fails closed).
 #[tokio::test]
 async fn the_mode_check_on_a_row_fails_closed_and_refuses_host_to_a_member() {
@@ -642,7 +650,7 @@ async fn the_mode_check_on_a_row_fails_closed_and_refuses_host_to_a_member() {
     let why = harness_master::workspaces::agentic_blocked(&m, &eve, &row)
         .await
         .unwrap();
-    assert!(why.contains("for server admins"), "{why}");
+    assert!(why.contains("your account's level is sandbox"), "{why}");
     for mode in [None, Some("container".to_string())] {
         row.exec_mode = mode;
         let why = harness_master::workspaces::agentic_blocked(&m, &eve, &row)
@@ -652,8 +660,8 @@ async fn the_mode_check_on_a_row_fails_closed_and_refuses_host_to_a_member() {
     }
 }
 
-/// L-i: what each node can contain is shown only to those who may run
-/// agentic chats.
+/// L-i: what each node can contain is shown only to accounts whose level
+/// runs agent chats.
 #[tokio::test]
 async fn the_modes_are_not_shown_to_an_account_without_the_grant() {
     let s = start().await;

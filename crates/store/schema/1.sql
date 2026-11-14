@@ -426,7 +426,10 @@ CREATE TABLE users (
     role          TEXT NOT NULL,
     created_ms    INTEGER NOT NULL,
     disabled      INTEGER NOT NULL DEFAULT 0,
-    can_agentic   INTEGER NOT NULL DEFAULT 0,
+    -- The account's ceiling (O13, N.10a part 2): the most a member's level in
+    -- any workspace can give them, and their level in their Personal one.
+    exec_ceiling  TEXT NOT NULL DEFAULT 'none'
+                  CHECK (exec_ceiling IN ('none', 'container', 'sandbox', 'host')),
     must_change_password INTEGER NOT NULL DEFAULT 0
 );
 
@@ -441,6 +444,10 @@ CREATE TABLE workspace_members (
     -- Personal, 0 elsewhere); the default only covers an insert that forgets,
     -- and then it shares nothing.
     use_memory   INTEGER NOT NULL DEFAULT 0,
+    -- The member's level here, set by the workspace's admins; every new
+    -- member starts at none. An owner's counts as host (the master).
+    exec_level   TEXT NOT NULL DEFAULT 'none'
+                 CHECK (exec_level IN ('none', 'container', 'sandbox', 'host')),
     PRIMARY KEY (workspace_id, user_id)
 );
 
