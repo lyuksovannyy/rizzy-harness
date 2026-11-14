@@ -246,7 +246,7 @@ impl Node {
 
 /// The request the provider gets carries the files in the turn's context
 /// block, quoted under the harness's line, root first, each under its path
-/// from the repository top, before the master's own context; an edit to a
+/// from the session folder, before the master's own context; an edit to a
 /// file is in the next turn's request.
 #[tokio::test]
 async fn the_provider_gets_the_files_in_the_context_block_and_edits_next_turn() {
@@ -259,10 +259,10 @@ async fn the_provider_gets_the_files_in_the_context_block_and_edits_next_turn() 
     let (context, rest) = harness_agent_native::provider::split_context(&first).unwrap();
     assert_eq!(rest, "hello");
     let root = context
-        .find("==> AGENTS.md <==\nRun cargo fmt.")
+        .find("==> ../AGENTS.md <==\nRun cargo fmt.")
         .expect(&context);
     let sub = context
-        .find("==> sub/CLAUDE.md <==\nKeep sub small.")
+        .find("==> CLAUDE.md <==\nKeep sub small.")
         .expect(&context);
     let master = context.find("Person: Ann").expect(&context);
     assert!(root < sub && sub < master, "{context}");
@@ -312,11 +312,11 @@ async fn a_sub_agent_gets_the_files_too() {
         .unwrap_or_else(|| panic!("no request for the sub-agent: {:?}", n.requests()));
     let (context, _) = harness_agent_native::provider::split_context(&child).unwrap();
     assert!(
-        context.contains("==> AGENTS.md <==\nRun cargo fmt."),
+        context.contains("==> ../AGENTS.md <==\nRun cargo fmt."),
         "{context}"
     );
     assert!(
-        context.contains("==> sub/CLAUDE.md <==\nKeep sub small."),
+        context.contains("==> CLAUDE.md <==\nKeep sub small."),
         "{context}"
     );
     // The master's context is the parent's, not the sub-agent's.

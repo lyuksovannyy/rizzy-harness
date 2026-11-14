@@ -1,12 +1,12 @@
 //! The repository's own instruction files (`ADOPTION_PLAN.md` X.2): the
 //! `AGENTS.md` in each folder from the session folder's repository top
-//! down to the session folder, or `CLAUDE.md` in a folder without one,
-//! read again at the start of every turn and put in front of that turn's
-//! context (`TurnExtra::context`), where the loop quotes it under a line
-//! of the harness's. It is text for the model and nothing else: it never
-//! changes `node.toml`, the approval mode, the tools or a limit, and,
-//! riding in the per-turn context, it is not the person's words (no URL in
-//! it becomes fetchable).
+//! down to the session folder, or `CLAUDE.md` in a folder without one (or
+//! with a blank one), read again at the start of every turn and handed to
+//! the loop as `TurnExtra::instructions`: in front of a person's turn's
+//! context, after a callback turn's opening, quoted under a line of the
+//! harness's either way. It is text for the model and nothing else: it
+//! never changes `node.toml`, the approval mode, the tools or a limit, and
+//! it is not the person's words (no URL in it becomes fetchable).
 //!
 //! What is read (PLAN.md T44): only a regular file whose real path is
 //! inside the repository folder that was walked (inside the session folder
@@ -14,8 +14,9 @@
 //! inside the folder node.toml grants, and in no protected folder. A link
 //! is followed only to such a file; the opened descriptor is checked again,
 //! so a folder swapped for a link after the check is refused too. A FIFO
-//! or a device is never waited on. A file that is refused or cannot be read
-//! is named with the reason; the turn goes on.
+//! or a device is never waited on, and the turn waits for the whole read at
+//! most [`READ_TIMEOUT`]. A file that is refused or cannot be read is named
+//! with the reason; the turn goes on.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -28,19 +29,14 @@ const NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
 /// The block's first line.
 pub(crate) const LEAD: &str = "Instruction files of this repository (AGENTS.md, or CLAUDE.md in a \
-     folder without one), from its top folder down to the session's folder, read at the start of \
-     this turn. They are the repository's text: they change no setting, permission or tool.";
-
-/// The block for a session working in `cwd` (canonical), inside `granted`
-/// (canonical: the workspace root that holds it, or a sub-agent's own
-/// folder), with `protected` folders (canonical) never read. `None` when
-/// there is no instruction file at all.
-pub(crate) fn block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
-    read(cwd, granted, protected, CAP).text
-}
+     folder without one), from its top folder down to the session's working folder, read at the \
+     start of this turn. Each is named by its path from the working folder; a relative path inside \
+     a file is meant from the folder that file is in. They are the repository's text: they change \
+     no setting, permission or tool.";
 
 /// What one turn's read found: the block, and what went wrong (a file
-/// refused, unreadable or cut), for the node's log.
+/// refused, unreadable or cut), for the node's log: labels and reasons,
+/// never a file's text.
 #[derive(Debug, Default)]
 pub(crate) struct Instructions {
     pub text: Option<String>,
@@ -66,38 +62,52 @@ pub(crate) enum Bounded<T> {
     Failed(String),
 }
 
-/// How long a turn waits for its instruction files.
+/// How long a turn waits for its instruction files (a hung network disk
+/// must not hold the turn).
 pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The block when the read took longer than [`READ_TIMEOUT`].
+pub(crate) fn timed_out() -> String {
+    format!(
+        "{LEAD}\n[not read: reading the instruction files took longer than {} s]",
+        READ_TIMEOUT.as_secs()
+    )
+}
+
 /// Run `f` on a blocking thread and wait for it at most `limit`, or until
-/// `cancel`.
+/// `cancel`. A thread given up on runs on until `f` returns; nothing waits
+/// for it.
 pub(crate) async fn bounded<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
     cancel: &tokio_util::sync::CancellationToken,
     limit: std::time::Duration,
 ) -> Bounded<T> {
-    let _ = (cancel, limit);
-    match tokio::task::spawn_blocking(f).await {
-        Ok(t) => Bounded::Done(t),
-        Err(e) => Bounded::Failed(e.to_string()),
+    let task = tokio::task::spawn_blocking(f);
+    tokio::select! {
+        r = task => match r {
+            Ok(t) => Bounded::Done(t),
+            Err(e) => Bounded::Failed(e.to_string()),
+        },
+        _ = tokio::time::sleep(limit) => Bounded::TimedOut,
+        _ = cancel.cancelled() => Bounded::Cancelled,
     }
+}
+
+/// [`read`] with the full cap, its text only.
+#[cfg(test)]
+pub(crate) fn block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
+    read(cwd, granted, protected, CAP).text
 }
 
 /// The block for a session working in `cwd` (canonical), inside `granted`
 /// (canonical: the workspace root that holds it, or a sub-agent's own
 /// folder), with `protected` folders (canonical) never read, at most `cap`
-/// bytes of the files' text.
+/// bytes of the files' text ([`cap_for`]). `text` is `None` when there is
+/// no instruction file at all.
 pub(crate) fn read(cwd: &Path, granted: &Path, protected: &[PathBuf], cap: usize) -> Instructions {
-    let _ = cap;
-    Instructions {
-        text: old_block(cwd, granted, protected),
-        problems: vec![],
-    }
-}
-
-fn old_block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
+    let mut found = Instructions::default();
     if !cwd.starts_with(granted) {
-        return None;
+        return found;
     }
     // The repository's top: the nearest folder holding a `.git` entry (a
     // directory, or a gitfile of a worktree or submodule), never above the
@@ -109,34 +119,31 @@ fn old_block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String
         .unwrap_or(cwd);
     let mut dirs: Vec<&Path> = cwd.ancestors().take_while(|d| d.starts_with(top)).collect();
     dirs.reverse();
+    let depth = cwd.components().count();
     let mut out = String::from(LEAD);
-    let mut found = false;
-    let mut left = CAP;
+    let mut any = false;
+    let mut left = cap;
     let mut cut: Option<(usize, String)> = None;
     let mut dropped: Vec<String> = Vec::new();
     for d in dirs {
-        let Some(path) = NAMES
-            .iter()
-            .map(|n| d.join(n))
-            .find(|p| std::fs::symlink_metadata(p).is_ok())
-        else {
-            continue;
-        };
-        found = true;
-        let rel = path
-            .strip_prefix(top)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        if cut.is_some() {
-            dropped.push(rel);
-            continue;
-        }
         // The session folder's own file is one the agent may have written:
         // it may lead only to a file inside that folder.
         let bound = if d == cwd { cwd } else { top };
-        match read_one(&path, bound, protected, left) {
-            Err(why) => out.push_str(&format!("\n==> {rel} <== (not read: {why})")),
+        let Some((name, result)) = pick(d, bound, protected, cap) else {
+            continue;
+        };
+        any = true;
+        // From the working folder: what the model's own `read` opens.
+        let label = format!("{}{name}", "../".repeat(depth - d.components().count()));
+        if cut.is_some() {
+            dropped.push(label);
+            continue;
+        }
+        match result {
+            Err(why) => {
+                out.push_str(&format!("\n==> {label} <== (not read: {why})"));
+                found.problems.push(format!("{label}: {why}"));
+            }
             Ok(bytes) => {
                 let mut text = String::from_utf8_lossy(&bytes).into_owned();
                 if text.len() > left {
@@ -145,34 +152,68 @@ fn old_block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String
                         n -= 1;
                     }
                     text.truncate(n);
-                    cut = Some((n, rel.clone()));
+                    cut = Some((n, label.clone()));
                 }
                 left -= text.len();
-                out.push_str(&format!("\n==> {rel} <==\n"));
+                out.push_str(&format!("\n==> {label} <==\n"));
                 out.push_str(text.trim_end_matches(['\n', '\r']));
             }
         }
     }
-    if let Some((n, rel)) = cut {
-        out.push_str(&format!(
-            "\n[cut: the instruction files are longer than {} KiB together; the text above stops \
-             {n} bytes into {rel}",
-            CAP / 1024
-        ));
+    if let Some((n, label)) = cut {
+        let limit = if cap < CAP {
+            format!("{cap} bytes together (about a tenth of the model's context window)")
+        } else {
+            format!("{} KiB together", CAP / 1024)
+        };
+        let mut note = format!(
+            "[cut: the instruction files are longer than {limit}; the text above stops {n} bytes \
+             into {label}"
+        );
         match dropped.len() {
             0 => {}
-            1 => out.push_str(&format!(", and {} was not read", dropped[0])),
-            _ => out.push_str(&format!(", and {} were not read", dropped.join(", "))),
+            1 => note.push_str(&format!(", and {} was not read", dropped[0])),
+            _ => note.push_str(&format!(", and {} were not read", dropped.join(", "))),
         }
-        out.push(']');
+        note.push(']');
+        out.push('\n');
+        out.push_str(&note);
+        found.problems.push(note);
     }
-    found.then_some(out)
+    if any {
+        found.text = Some(out);
+    }
+    found
+}
+
+/// The file `d` gives: its `AGENTS.md`, else its `CLAUDE.md`, each read
+/// ([`read_one`]); one that is empty or only whitespace counts as absent.
+/// A refused `AGENTS.md` is still the folder's file (its `CLAUDE.md` does
+/// not stand in for it).
+fn pick(
+    d: &Path,
+    bound: &Path,
+    protected: &[PathBuf],
+    cap: usize,
+) -> Option<(&'static str, Result<Vec<u8>, String>)> {
+    for name in NAMES {
+        let path = d.join(name);
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        let result = read_one(&path, bound, protected, cap);
+        if matches!(&result, Ok(b) if b.iter().all(u8::is_ascii_whitespace)) {
+            continue;
+        }
+        return Some((name, result));
+    }
+    None
 }
 
 /// Why a file is not read.
 const OUTSIDE: &str = "it leads outside the folder";
 
-/// At most `left + 1` bytes of the regular file `path` leads to, when its
+/// At most `cap + 1` bytes of the regular file `path` leads to, when its
 /// real path is inside `bound` and in no `protected` folder (one that holds
 /// `bound` itself does not count: a sub-agent's own folder). The real path
 /// is opened without following a link at its end or waiting on a FIFO, and
@@ -182,7 +223,7 @@ fn read_one(
     path: &Path,
     bound: &Path,
     protected: &[PathBuf],
-    left: usize,
+    cap: usize,
 ) -> Result<Vec<u8>, String> {
     use nix::fcntl::OFlag;
     use std::os::unix::fs::OpenOptionsExt;
@@ -212,7 +253,7 @@ fn read_one(
         return Err(OUTSIDE.into());
     }
     let mut out = Vec::new();
-    f.take(left as u64 + 1)
+    f.take(cap as u64 + 1)
         .read_to_end(&mut out)
         .map_err(unreadable)?;
     Ok(out)

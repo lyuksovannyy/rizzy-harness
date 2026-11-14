@@ -1158,14 +1158,22 @@ impl Session {
     }
 
     /// `extra` with the repository's instruction files
-    /// ([`crate::instructions`]), read now from this session's checked
-    /// folder, in front of the master's context: an agentic turn the person
-    /// or a parent started (a sub-agent reads its own folder: its parent's,
-    /// or the copy of it the child works in). A callback turn takes no
-    /// per-turn context; a folder that fails its check adds nothing here
-    /// (the turn's own checks refuse it).
-    async fn with_instructions(&self, mut extra: TurnExtra) -> TurnExtra {
-        if self.profile != Profile::Agentic || extra.cause.is_some() {
+    /// ([`crate::instructions`]) in `instructions`, read now from this
+    /// session's checked folder, for every agentic turn: the person's, a
+    /// parent's task (a sub-agent reads its own folder: its parent's, or
+    /// the copy of it the child works in) and a callback turn. Capped for
+    /// the answering model's known window; waited for at most
+    /// [`crate::instructions::READ_TIMEOUT`] and not past `cancel`. A
+    /// folder that fails its check adds nothing here (the turn's own checks
+    /// refuse it).
+    async fn with_instructions(
+        &self,
+        mut extra: TurnExtra,
+        agent: Option<&AgentSpec>,
+        cancel: &CancellationToken,
+    ) -> TurnExtra {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic {
             return extra;
         }
         let Ok(dir) = self.checked_folder() else {
@@ -1178,16 +1186,40 @@ impl Session {
                 Err(_) => return extra,
             },
         };
+        let model = agent
+            .and_then(|a| a.model.clone())
+            .unwrap_or_else(|| self.model.clone());
+        let cap = ins::cap_for(agent.and_then(|a| a.context_windows.get(&model).copied()));
         let protected = self.node.cfg.policy.protected_dirs.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            crate::instructions::block(&dir, &granted, &protected)
-        })
+        let read = ins::bounded(
+            move || ins::read(&dir, &granted, &protected, cap),
+            cancel,
+            ins::READ_TIMEOUT,
+        )
         .await;
-        if let Ok(Some(b)) = read {
-            extra.context = Some(match extra.context.take() {
-                Some(c) if !c.is_empty() => format!("{b}\n\n{c}"),
-                _ => b,
-            });
+        let problems = match read {
+            Bounded::Done(r) => {
+                extra.instructions = r.text;
+                r.problems
+            }
+            Bounded::TimedOut => {
+                extra.instructions = Some(ins::timed_out());
+                vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
+            }
+            // The turn is stopping; the backend sees the cancel itself.
+            Bounded::Cancelled => vec![],
+            Bounded::Failed(e) => {
+                tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
+                vec![]
+            }
+        };
+        if !problems.is_empty() {
+            tracing::info!(
+                session = %self.id,
+                folder = %self.cwd.display(),
+                problems = ?problems,
+                "instruction files: some were not read in full"
+            );
         }
         extra
     }
@@ -1214,7 +1246,7 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
-        let extra = self.with_instructions(extra).await;
+        let extra = self.with_instructions(extra, agent.as_ref(), &cancel).await;
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();
