@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use harness_agent_native::{
-    ChatMsg, ChatRequest, Completion, NativeBackend, NativeConfig, Provider, ProviderError,
-    RetryHint, SUMMARY_PROMPT, estimate_tokens,
+    CODING_SUMMARY_PROMPT, ChatMsg, ChatRequest, Completion, NativeBackend, NativeConfig, Provider,
+    ProviderError, RetryHint, SUMMARY_PROMPT, estimate_tokens,
 };
 use harness_core::agent::{AgentSpec, ToolSelection};
 use harness_core::backend::{AgentBackend, TurnCtx, TurnHost, TurnOutcome};
@@ -69,6 +69,8 @@ enum Reply {
     /// More text than the request held.
     Pad,
     Fail,
+    /// A short summary under the coding headings.
+    Sections,
 }
 
 /// Rejects a request estimated above its window like OpenAI does (400,
@@ -130,8 +132,8 @@ impl Provider for Windowed {
         req: &ChatRequest,
         _deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
-        let summary =
-            matches!(req.messages.first(), Some(ChatMsg::System(s)) if s == SUMMARY_PROMPT);
+        let prompts = [SUMMARY_PROMPT, CODING_SUMMARY_PROMPT];
+        let summary = matches!(req.messages.first(), Some(ChatMsg::System(s)) if prompts.contains(&s.as_str()));
         let tokens = estimate_tokens(&req.messages);
         let text = req
             .messages
@@ -195,6 +197,13 @@ impl Provider for Windowed {
                 }),
                 Reply::Pad => Ok(Completion {
                     text: format!("PADDED{n} {}", "x".repeat(400_000)),
+                    ..Default::default()
+                }),
+                Reply::Sections => Ok(Completion {
+                    text: format!(
+                        "Goal:\nSUMMARY{n} goal\nDecisions:\nnone\nFiles:\nsrc/lib.rs: SUMMARY{n} edit\n\
+                         Commands and results:\nnone\nOpen:\nnone\nNext step:\nnone"
+                    ),
                     ..Default::default()
                 }),
                 Reply::Fail => Err(ProviderError::Status {
@@ -287,6 +296,19 @@ fn backend(p: Arc<dyn Provider>, configured: Option<usize>) -> NativeBackend {
         Vec::new(),
         NativeConfig {
             summarize_after_tokens: configured,
+            ..Default::default()
+        },
+    )
+}
+
+/// A node's backend: agentic chats, summarised under the coding headings.
+fn coding_backend(p: Arc<dyn Provider>, configured: Option<usize>) -> NativeBackend {
+    NativeBackend::new(
+        p,
+        Vec::new(),
+        NativeConfig {
+            summarize_after_tokens: configured,
+            coding_summary: true,
             ..Default::default()
         },
     )
@@ -1405,4 +1427,144 @@ async fn no_list_note_without_the_todo_tool() {
         "{}",
         main.system
     );
+}
+
+/// The headings of an agentic chat's summary, each on a line of its own.
+const HEADINGS: [&str; 6] = [
+    "Goal:",
+    "Decisions:",
+    "Files:",
+    "Commands and results:",
+    "Open:",
+    "Next step:",
+];
+
+fn summary_requests(p: &Windowed) -> Vec<Call> {
+    p.calls().into_iter().filter(|c| c.summary).collect()
+}
+
+/// The requests' sizes (their text is too long for a failure message).
+fn tokens(calls: &[Call]) -> Vec<u64> {
+    calls.iter().map(|c| c.tokens).collect()
+}
+
+/// An agentic chat is summarised for coding work: the summariser is asked
+/// for every heading, on a line of its own, within about 1,000 words, and
+/// to point at the task list rather than copy it.
+#[tokio::test]
+async fn an_agentic_chat_is_summarised_under_the_coding_headings() {
+    let p = Windowed::new(BIG, BIG);
+    let b = coding_backend(p.clone(), Some(1_000));
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 1_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let sums = summary_requests(&p);
+    assert_eq!(sums.len(), 1, "{:?}", tokens(&sums));
+    let prompt = &sums[0].system;
+    for h in HEADINGS {
+        assert!(
+            prompt.lines().any(|l| l == h),
+            "no {h:?} line in:\n{prompt}"
+        );
+    }
+    // The size bound, and not the generic one.
+    assert!(prompt.contains("about 1,000 words"), "{prompt}");
+    assert!(!prompt.contains("300 words"), "{prompt}");
+    // The task list goes back separately: referred to, not copied.
+    assert!(prompt.contains("refer to it"), "{prompt}");
+    // The transcript's rules are the same as the generic prompt's.
+    let rules = SUMMARY_PROMPT
+        .split_once("How the conversation is written:")
+        .unwrap()
+        .1
+        .split_once("The text under \"Earlier summary:\"")
+        .unwrap()
+        .0;
+    assert!(prompt.contains(rules), "{prompt}");
+    let tail = SUMMARY_PROMPT
+        .split_once("The text under \"Tool result:\"")
+        .unwrap()
+        .1;
+    assert!(prompt.ends_with(tail), "{prompt}");
+}
+
+/// A chat-profile chat (the master's runtime) keeps the generic prompt.
+#[tokio::test]
+async fn a_chat_profile_chat_keeps_the_generic_summary() {
+    let p = Windowed::new(BIG, BIG);
+    let b = backend(p.clone(), Some(1_000));
+    let out = run(
+        &b,
+        &Host::default(),
+        history(4, 1_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let sums = summary_requests(&p);
+    assert_eq!(sums.len(), 1, "{:?}", tokens(&sums));
+    assert_eq!(sums[0].system, SUMMARY_PROMPT);
+    assert!(!sums[0].system.contains("Commands and results:"));
+    assert!(SUMMARY_PROMPT.contains("at most 300 words"));
+}
+
+/// The second and third summaries read the one before under "Earlier
+/// summary:", headings and all, and are asked to update its sections, not
+/// nest it. Their pieces leave room for a reply of about 1,000 words: with
+/// the generic prompt's reserve (2,048 tokens) this window would take two
+/// turns a piece, and a long reply would not fit.
+#[tokio::test]
+async fn later_summaries_update_the_sections_of_the_one_before() {
+    // Old part: turns 1-3 of 2k tokens each; a piece holds one turn.
+    let window = 7_096;
+    let p = Arc::new(Windowed {
+        window: BIG,
+        summary_window: window,
+        hold: None,
+        replies: vec![Reply::Sections; 3],
+        calls: Mutex::default(),
+    });
+    let b = coding_backend(p.clone(), Some(1_000));
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(5, 2_000),
+        agent(Some(window)),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let sums = summary_requests(&p);
+    assert_eq!(sums.len(), 3, "one turn a piece: {:?}", tokens(&sums));
+    for c in &sums {
+        assert!(
+            c.tokens + 1_400 <= window,
+            "no room for a 1,000-word reply: {} of {window}",
+            c.tokens
+        );
+        assert_eq!(c.system, CODING_SUMMARY_PROMPT);
+    }
+    assert!(!sums[0].text.contains("Earlier summary:"));
+    for (i, c) in sums.iter().enumerate().skip(1) {
+        // The earlier summary, quoted, with its headings inside the quote.
+        let earlier = format!("Earlier summary:\n| Goal:\n| SUMMARY{i} goal\n| Decisions:\n");
+        let head: String = c.text.chars().take(300).collect();
+        assert!(c.text.starts_with(&earlier), "piece {i}:\n{head}");
+        assert!(c.text.contains(&format!("| src/lib.rs: SUMMARY{i} edit\n")));
+    }
+    let prompt = CODING_SUMMARY_PROMPT;
+    assert!(prompt.contains("update it"), "{prompt}");
+    assert!(prompt.contains("do not nest"), "{prompt}");
+    let s = host.summaries();
+    assert_eq!(s.len(), 3);
+    assert!(s.last().unwrap().text.starts_with("Goal:\nSUMMARY3"));
 }
