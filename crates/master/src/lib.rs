@@ -725,10 +725,22 @@ impl Master {
         // What the turn that made the call may write (`Master::prompt`
         // decided it). A project fact goes to the chat's project, if it has
         // one and project memory is on; otherwise it is the owner's to
-        // review, if personal memory is.
+        // review, if personal memory is. A call that names no scope where
+        // the agent's own memory is off (the Software Developer) and only
+        // project memory is on is filed as a project proposal, not dropped
+        // while the chat says it was proposed (review MC-1); the owner reads
+        // it before any other member's agent does. Not where the member
+        // keeps their memory out of the workspace: a personal fact must not
+        // head for a shared project because they did.
         let allowed = projects::turn_memory(self, &row).await;
         let project = match e.payload.pointer("/input/scope").and_then(|v| v.as_str()) {
             Some("project") if allowed.project => projects::proposal_owner(self, &row).await,
+            None if allowed.project
+                && !allowed.personal
+                && workspaces::uses_memory(self, &row).await =>
+            {
+                projects::proposal_owner(self, &row).await
+            }
             _ => None,
         };
         if project.is_none() && !allowed.personal {

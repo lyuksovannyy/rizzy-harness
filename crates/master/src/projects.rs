@@ -600,11 +600,11 @@ async fn facts_block(
             s.push_str(&f.text);
         }
     }
-    match older.len() - recalled.len() {
+    match older.len().saturating_sub(recalled.len()) {
         0 => {}
-        1 => s.push_str("\n(1 older fact not shown; the project's Memory tab has them all.)"),
+        1 => s.push_str("\n(1 older fact not shown; ask the person if one may matter.)"),
         n => s.push_str(&format!(
-            "\n({n} older facts not shown; the project's Memory tab has them all.)"
+            "\n({n} older facts not shown; ask the person if one may matter.)"
         )),
     }
     Some(s)

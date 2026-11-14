@@ -89,7 +89,11 @@ personal recall is keyed by the chat's owner, and only the owner can read their 
 board belong to the project, not to the member, so a project chat keeps them when its owner
 keeps their personal memory out of the workspace. `remember` then stays available in that
 chat for project facts only: the project block says "use no other scope", and a personal
-proposal from it is dropped (`Master::file_proposal`). Outside projects the switch works as
+proposal from it is dropped, with or without `scope: "user"` (`Master::file_proposal`): the
+member chose to keep their facts out, so none heads for a shared project. Where personal
+memory is off because of the *agent* (the Software Developer's `memory: false`), a call with
+no scope is filed as a project proposal instead of being dropped while the chat says it was
+proposed (review MC-1); the owner still reads it before anyone else's agent does. Outside projects the switch works as
 on `main` (no personal recall, no `remember`).
 
 **"Share the current workspace's memory"** = the project's chats also recall the workspace's
@@ -153,7 +157,7 @@ What this project has established (confirmed, newest first; may be outdated):
 - <every active fact, newest first, up to 4,000 characters>
 Older ones that match this message:
 - <up to 6, only when not all fit>
-(<n> older facts not shown; the project's Memory tab has them all.)
+(<n> older facts not shown; ask the person if one may matter.)
 
 Board: In progress: <title>; <title>. To do: <title>; <title> (+3 more).
 
@@ -169,9 +173,11 @@ proposals from that node, whatever its model sends.
 
 Budget: the block is rebuilt and sent on every turn, uncached, so it is capped: instructions
 ≤ 4,000 characters (the editor shows the count and says it goes into every message), facts
-≤ 4,000 characters plus at most 6 recalled ones (each ≤ 500), ≤ 8 open cards (titles cut at
-80 characters, done columns left out). Worst case ≈ 3,000 tokens a turn (the facts are about
-a third of it); a typical project a few hundred.
+≤ 4,000 characters plus at most 6 recalled ones (each ≤ 500), so ≈ 7,000 characters of facts
+at worst, ≤ 8 open cards (titles cut at 80 characters, done columns left out). Worst case
+≈ 12,000 characters (≈ 3,000 tokens) a turn, more than half of it facts; a typical project a
+few hundred tokens. The repository's instruction files (pull request 87) go into the same
+per-turn message of an Agentic chat, with their own cap, on top of this.
 
 Not in phase 1, proposed:
 - **Project files**: documents uploaded once (extracted text, like attachments), with FTS5
