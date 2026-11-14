@@ -301,6 +301,35 @@ async fn a_coding_chat_on_a_node_proposes_project_facts() {
     );
 }
 
+/// A `remember` without a scope, in a project chat whose agent has no
+/// personal memory (the Software Developer): it can only be a project
+/// fact, so it is filed as a project proposal, not dropped while the model
+/// and the chat say it was proposed. Still only a proposal: the person
+/// reads it before anyone else's agent does.
+#[tokio::test]
+async fn a_remember_without_a_scope_in_a_project_coding_chat_is_a_project_proposal() {
+    let s = start(Offer::Yes).await;
+    let pid = project(&s).await;
+    let sid = coding_chat(&s, Some(&pid)).await;
+    say(&s, &sid, "remember: CI runs the slow suites on Fridays").await;
+    let mut facts = vec![];
+    for _ in 0..200 {
+        facts = project_facts(&s, &pid).await;
+        if !facts.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(facts[0]["status"], "proposed");
+    assert_eq!(facts[0]["text"], "CI runs the slow suites on Fridays");
+    let (_, personal) = call(&s, Method::GET, "/api/memory", None).await;
+    assert!(
+        personal["memories"].as_array().unwrap().is_empty(),
+        "{personal}"
+    );
+}
+
 #[tokio::test]
 async fn all_active_project_facts_reach_a_turn_that_shares_no_words_with_them() {
     let s = start(Offer::Yes).await;
@@ -361,7 +390,11 @@ async fn above_the_cap_the_newest_that_fit_and_recalled_ones() {
         "{ctx}"
     );
     // The model is told the list is not complete.
-    assert!(ctx.contains("3 older facts not shown"), "{ctx}");
+    assert!(
+        ctx.contains("(3 older facts not shown; ask the person if one may matter.)"),
+        "{ctx}"
+    );
+    assert!(!ctx.contains("Memory tab"), "{ctx}");
 }
 
 #[tokio::test]
