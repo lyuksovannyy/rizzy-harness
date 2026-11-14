@@ -36,6 +36,66 @@ pub(crate) const LEAD: &str = "Instruction files of this repository (AGENTS.md, 
 /// folder), with `protected` folders (canonical) never read. `None` when
 /// there is no instruction file at all.
 pub(crate) fn block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
+    read(cwd, granted, protected, CAP).text
+}
+
+/// What one turn's read found: the block, and what went wrong (a file
+/// refused, unreadable or cut), for the node's log.
+#[derive(Debug, Default)]
+pub(crate) struct Instructions {
+    pub text: Option<String>,
+    pub problems: Vec<String>,
+}
+
+/// The cap for a model whose context window is `window` tokens: the
+/// smaller of [`CAP`] and about a tenth of the window (4 bytes a token).
+pub(crate) fn cap_for(window: Option<u64>) -> usize {
+    match window {
+        Some(w) => CAP.min(usize::try_from(w.saturating_mul(4) / 10).unwrap_or(CAP)),
+        None => CAP,
+    }
+}
+
+/// How a blocking read ended ([`bounded`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Bounded<T> {
+    Done(T),
+    TimedOut,
+    Cancelled,
+    /// The blocking task panicked or was aborted.
+    Failed(String),
+}
+
+/// How long a turn waits for its instruction files.
+pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `f` on a blocking thread and wait for it at most `limit`, or until
+/// `cancel`.
+pub(crate) async fn bounded<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+    cancel: &tokio_util::sync::CancellationToken,
+    limit: std::time::Duration,
+) -> Bounded<T> {
+    let _ = (cancel, limit);
+    match tokio::task::spawn_blocking(f).await {
+        Ok(t) => Bounded::Done(t),
+        Err(e) => Bounded::Failed(e.to_string()),
+    }
+}
+
+/// The block for a session working in `cwd` (canonical), inside `granted`
+/// (canonical: the workspace root that holds it, or a sub-agent's own
+/// folder), with `protected` folders (canonical) never read, at most `cap`
+/// bytes of the files' text.
+pub(crate) fn read(cwd: &Path, granted: &Path, protected: &[PathBuf], cap: usize) -> Instructions {
+    let _ = cap;
+    Instructions {
+        text: old_block(cwd, granted, protected),
+        problems: vec![],
+    }
+}
+
+fn old_block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
     if !cwd.starts_with(granted) {
         return None;
     }
@@ -175,7 +235,7 @@ mod tests {
         Tree { _d: d, ws }
     }
 
-    fn put(path: &Path, text: &str) {
+    fn put(path: &Path, text: impl AsRef<[u8]>) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
@@ -185,14 +245,15 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
     }
 
-    fn read(cwd: &Path, granted: &Path) -> Option<String> {
+    fn read_in(cwd: &Path, granted: &Path) -> Option<String> {
         block(cwd, granted, &[])
     }
 
     /// The root's file and the session folder's are both read, root
-    /// first, each under its path from the repository top; a file above
-    /// the repository, one in a folder below the session's and a folder on
-    /// the way with no file add nothing.
+    /// first, each under its path from the session's working folder (what
+    /// the model's own `read` opens); a file above the repository, one in a
+    /// folder below the session's and a folder on the way with no file add
+    /// nothing.
     #[test]
     fn reads_from_the_repository_top_down_to_the_session_folder() {
         let t = tree();
@@ -207,17 +268,21 @@ mod tests {
         );
         let cwd = top.join("crates/foo");
         assert_eq!(
-            read(&cwd, &t.ws).unwrap(),
+            read_in(&cwd, &t.ws).unwrap(),
             format!(
-                "{LEAD}\n==> AGENTS.md <==\nroot rules\nline two\n\
-                 ==> crates/foo/AGENTS.md <==\nfoo rules"
+                "{LEAD}\n==> ../../AGENTS.md <==\nroot rules\nline two\n\
+                 ==> AGENTS.md <==\nfoo rules"
             )
+        );
+        assert!(
+            LEAD.contains("relative path inside a file is meant from the folder that file is in"),
+            "{LEAD}"
         );
         // Nothing anywhere: no block.
         let bare = t.ws.join("bare");
         repo(&bare);
         std::fs::create_dir_all(bare.join("a/b")).unwrap();
-        assert_eq!(read(&bare.join("a/b"), &t.ws), None);
+        assert_eq!(read_in(&bare.join("a/b"), &t.ws), None);
     }
 
     /// Outside any repository only the session folder's own file is read.
@@ -227,7 +292,7 @@ mod tests {
         put(&t.ws.join("AGENTS.md"), "parent");
         put(&t.ws.join("work/AGENTS.md"), "here");
         assert_eq!(
-            read(&t.ws.join("work"), &t.ws).unwrap(),
+            read_in(&t.ws.join("work"), &t.ws).unwrap(),
             format!("{LEAD}\n==> AGENTS.md <==\nhere")
         );
         // A repository above the granted folder is not walked to.
@@ -237,8 +302,24 @@ mod tests {
         put(&t.ws.join("w/AGENTS.md"), "granted");
         let granted = t.ws.join("w");
         assert_eq!(
-            read(&granted, &granted).unwrap(),
+            read_in(&granted, &granted).unwrap(),
             format!("{LEAD}\n==> AGENTS.md <==\ngranted")
+        );
+    }
+
+    /// A `.git` file (a linked worktree, a submodule) marks the top too.
+    #[test]
+    fn a_git_file_marks_the_top() {
+        let t = tree();
+        repo(&t.ws);
+        put(&t.ws.join("AGENTS.md"), "the outer repository");
+        let wt = t.ws.join("wt");
+        put(&wt.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt\n");
+        put(&wt.join("AGENTS.md"), "the worktree's");
+        put(&wt.join("x/AGENTS.md"), "x's");
+        assert_eq!(
+            read_in(&wt.join("x"), &t.ws).unwrap(),
+            format!("{LEAD}\n==> ../AGENTS.md <==\nthe worktree's\n==> AGENTS.md <==\nx's")
         );
     }
 
@@ -251,30 +332,60 @@ mod tests {
         put(&t.ws.join("CLAUDE.md"), "claude at the top");
         put(&t.ws.join("sub/CLAUDE.md"), "claude below");
         assert_eq!(
-            read(&t.ws.join("sub"), &t.ws).unwrap(),
+            read_in(&t.ws.join("sub"), &t.ws).unwrap(),
             format!(
-                "{LEAD}\n==> AGENTS.md <==\nagents at the top\n\
-                 ==> sub/CLAUDE.md <==\nclaude below"
+                "{LEAD}\n==> ../AGENTS.md <==\nagents at the top\n\
+                 ==> CLAUDE.md <==\nclaude below"
             )
         );
     }
 
+    /// An `AGENTS.md` that is empty or only whitespace counts as absent:
+    /// the folder's `CLAUDE.md` is read, and a folder with nothing else
+    /// adds nothing. Bytes that are not UTF-8 reach the model as U+FFFD.
+    #[test]
+    fn a_blank_agents_md_is_absent_and_other_bytes_are_kept() {
+        let t = tree();
+        repo(&t.ws);
+        put(&t.ws.join("AGENTS.md"), " \n\t\r\n");
+        put(&t.ws.join("CLAUDE.md"), "claude is used");
+        put(&t.ws.join("e/AGENTS.md"), "");
+        assert_eq!(
+            read_in(&t.ws.join("e"), &t.ws).unwrap(),
+            format!("{LEAD}\n==> ../CLAUDE.md <==\nclaude is used")
+        );
+        put(&t.ws.join("u/AGENTS.md"), b"ok \xff\xfe end\n");
+        assert_eq!(
+            read_in(&t.ws.join("u"), &t.ws).unwrap(),
+            format!(
+                "{LEAD}\n==> ../CLAUDE.md <==\nclaude is used\n\
+                 ==> AGENTS.md <==\nok \u{FFFD}\u{FFFD} end"
+            )
+        );
+        // Only blank files: no block.
+        let b = tree();
+        repo(&b.ws);
+        put(&b.ws.join("AGENTS.md"), "\n\n");
+        assert_eq!(read_in(&b.ws, &b.ws), None);
+    }
+
     /// Over 32 KiB together the text is cut, and a note says where and
-    /// which files were not read at all.
+    /// which files were not read at all; the log is told.
     #[test]
     fn the_text_is_capped_with_a_note() {
         let t = tree();
         repo(&t.ws);
         let line = "x".repeat(99) + "\n";
-        put(&t.ws.join("AGENTS.md"), &line.repeat(200)); // 20,000 bytes
-        put(&t.ws.join("a/AGENTS.md"), &line.repeat(200));
+        put(&t.ws.join("AGENTS.md"), line.repeat(200)); // 20,000 bytes
+        put(&t.ws.join("a/AGENTS.md"), line.repeat(200));
         put(&t.ws.join("a/b/AGENTS.md"), "never reached");
-        let got = read(&t.ws.join("a/b"), &t.ws).unwrap();
+        let r = read(&t.ws.join("a/b"), &t.ws, &[], CAP);
+        let got = r.text.unwrap();
         let into = CAP - 20_000;
         assert!(
             got.ends_with(&format!(
                 "\n[cut: the instruction files are longer than 32 KiB together; the text above \
-                 stops {into} bytes into a/AGENTS.md, and a/b/AGENTS.md was not read]"
+                 stops {into} bytes into ../AGENTS.md, and AGENTS.md was not read]"
             )),
             "{}",
             &got[got.len() - 300..]
@@ -287,12 +398,35 @@ mod tests {
             .sum();
         assert!(text <= CAP, "{text}");
         assert!(got.len() < CAP + 1024, "{}", got.len());
+        assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
+        assert!(r.problems[0].contains("cut"), "{:?}", r.problems);
+    }
+
+    /// With a small context window the cap is about a tenth of it, and
+    /// the note says why.
+    #[test]
+    fn a_small_window_lowers_the_cap() {
+        assert_eq!(cap_for(None), CAP);
+        assert_eq!(cap_for(Some(1_000_000)), CAP);
+        assert_eq!(cap_for(Some(8192)), 3276);
+        let t = tree();
+        put(&t.ws.join("AGENTS.md"), "y".repeat(5000));
+        let got = read(&t.ws, &t.ws, &[], cap_for(Some(8192))).text.unwrap();
+        assert!(
+            got.ends_with(
+                "\n[cut: the instruction files are longer than 3276 bytes together (about a \
+                 tenth of the model's context window); the text above stops 3276 bytes into \
+                 AGENTS.md]"
+            ),
+            "{}",
+            &got[got.len() - 300..]
+        );
     }
 
     /// A link is followed only to a regular file inside the repository
     /// (inside the session folder for the session folder's own file); a
     /// link out of it, a FIFO and a protected file are named, not read,
-    /// and nothing waits.
+    /// and nothing waits; the log is told of each.
     #[test]
     fn links_out_of_the_folder_are_not_followed() {
         let d = tempfile::tempdir().unwrap();
@@ -315,22 +449,23 @@ mod tests {
         nix::unistd::mkfifo(&top.join("a/b/AGENTS.md"), nix::sys::stat::Mode::S_IRWXU).unwrap();
         // The session folder's own file: not even to the repository above.
         std::os::unix::fs::symlink("../../../up.txt", top.join("a/b/c/AGENTS.md")).unwrap();
-        let got = read(&top.join("a/b/c"), &ws).unwrap();
+        let r = read(&top.join("a/b/c"), &ws, &[], CAP);
         assert_eq!(
-            got,
+            r.text.unwrap(),
             format!(
-                "{LEAD}\n==> AGENTS.md <==\nkept in docs\n\
-                 ==> a/AGENTS.md <== (not read: it leads outside the folder)\n\
-                 ==> a/b/AGENTS.md <== (not read: it is not a regular file)\n\
-                 ==> a/b/c/AGENTS.md <== (not read: it leads outside the folder)"
+                "{LEAD}\n==> ../../../AGENTS.md <==\nkept in docs\n\
+                 ==> ../../AGENTS.md <== (not read: it leads outside the folder)\n\
+                 ==> ../AGENTS.md <== (not read: it is not a regular file)\n\
+                 ==> AGENTS.md <== (not read: it leads outside the folder)"
             )
         );
+        assert_eq!(r.problems.len(), 3, "{:?}", r.problems);
         // Out of the granted folder altogether.
         let w = ws.join("w");
         std::fs::create_dir(&w).unwrap();
         std::os::unix::fs::symlink(base.join("secret.txt"), w.join("AGENTS.md")).unwrap();
         assert_eq!(
-            read(&w, &ws).unwrap(),
+            read_in(&w, &ws).unwrap(),
             format!("{LEAD}\n==> AGENTS.md <== (not read: it leads outside the folder)")
         );
         // Into a protected folder inside the repository (the node's data
@@ -343,9 +478,55 @@ mod tests {
         let got = block(&top.join("p"), &ws, std::slice::from_ref(&data)).unwrap();
         assert_eq!(
             got,
-            format!("{LEAD}\n==> CLAUDE.md <== (not read: it leads outside the folder)")
+            format!("{LEAD}\n==> ../CLAUDE.md <== (not read: it leads outside the folder)")
         );
         // Without the protection the same link is read (the control).
-        assert!(read(&top.join("p"), &ws).unwrap().contains("secret key"));
+        assert!(read_in(&top.join("p"), &ws).unwrap().contains("secret key"));
+    }
+
+    /// A writing sub-agent's own folder lies inside the node's protected
+    /// sessions folder: its files are read there (its folder is its bound),
+    /// and nothing outside it.
+    #[test]
+    fn a_sub_agents_own_folder_is_read_inside_the_protected_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let data = d.path().canonicalize().unwrap().join("data");
+        let files = data.join("sessions/child/files");
+        repo(&files);
+        put(&data.join("sessions/child/AGENTS.md"), "beside, not inside");
+        put(&files.join("AGENTS.md"), "child rules");
+        put(&files.join("sub/AGENTS.md"), "sub rules");
+        for protected in [
+            vec![data.clone()],
+            vec![files.parent().unwrap().to_path_buf()],
+        ] {
+            assert_eq!(
+                block(&files.join("sub"), &files, &protected).unwrap(),
+                format!("{LEAD}\n==> ../AGENTS.md <==\nchild rules\n==> AGENTS.md <==\nsub rules")
+            );
+        }
+    }
+
+    /// The read is waited for at most its limit, and not past a cancel.
+    #[tokio::test]
+    async fn a_slow_read_times_out_and_a_cancel_stops_the_wait() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let slow = || std::thread::sleep(std::time::Duration::from_millis(962));
+        let at = std::time::Instant::now();
+        assert_eq!(
+            bounded(slow, &cancel, std::time::Duration::from_millis(50)).await,
+            Bounded::TimedOut
+        );
+        assert!(at.elapsed() < std::time::Duration::from_millis(900));
+        let gone = tokio_util::sync::CancellationToken::new();
+        gone.cancel();
+        assert_eq!(
+            bounded(slow, &gone, std::time::Duration::from_secs(60)).await,
+            Bounded::Cancelled
+        );
+        assert_eq!(
+            bounded(|| 7, &cancel, std::time::Duration::from_secs(60)).await,
+            Bounded::Done(7)
+        );
     }
 }

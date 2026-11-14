@@ -97,6 +97,10 @@ struct Node {
 }
 
 async fn start() -> Node {
+    start_as(harness_core::event::Profile::Agentic).await
+}
+
+async fn start_as(profile: harness_core::event::Profile) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().canonicalize().unwrap().join("ws/repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
@@ -133,7 +137,7 @@ async fn start() -> Node {
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
-        profile: harness_core::event::Profile::Agentic,
+        profile,
         incognito_ttl: None,
         checkpoints_dir: None,
         git_sandbox: None,
@@ -171,11 +175,19 @@ impl Node {
     }
 
     async fn create(&mut self, cwd: &std::path::Path) -> SessionId {
+        self.create_as(cwd, None).await
+    }
+
+    async fn create_as(
+        &mut self,
+        cwd: &std::path::Path,
+        profile: Option<harness_core::event::Profile>,
+    ) -> SessionId {
         let sid = SessionId::new();
         self.send(MasterToNode::Create {
             exec_mode: None,
             no_callbacks: false,
-            profile: None,
+            profile,
             incognito: false,
             agent: None,
             req_id: "c".into(),
@@ -336,4 +348,20 @@ async fn a_url_only_in_agents_md_is_not_fetchable() {
         })
         .expect("the probe ran");
     assert_eq!(out, "seen=false");
+}
+
+/// A chat session (no folder of its own) gets no instruction files, even
+/// when the folder it was asked for holds some.
+#[tokio::test]
+async fn a_chat_session_gets_none() {
+    let mut n = start_as(harness_core::event::Profile::Chat).await;
+    let repo = n.repo.clone();
+    let sid = n
+        .create_as(&repo, Some(harness_core::event::Profile::Chat))
+        .await;
+    n.turn(sid, "hello", None).await;
+    let sent = n.requests().pop().expect("a request");
+    assert!(sent.contains("Person: Ann"), "{sent}");
+    assert!(!sent.contains("AGENTS.md"), "{sent}");
+    assert!(!sent.contains("Run cargo fmt"), "{sent}");
 }

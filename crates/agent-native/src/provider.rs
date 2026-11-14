@@ -220,6 +220,10 @@ pub fn image_note(name: &str) -> String {
     )
 }
 
+/// How the harness's line over the repository's instruction files in a
+/// callback turn begins ([`with_instructions_after`]).
+pub const INSTRUCTIONS_LEAD: &str = "[harness] The repository's instruction files for this turn";
+
 /// How the harness's line over a turn's per-turn context begins.
 pub const CONTEXT_LEAD: &str = "[harness] Context for this turn";
 

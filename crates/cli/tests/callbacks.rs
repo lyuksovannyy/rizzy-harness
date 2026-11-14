@@ -540,6 +540,44 @@ async fn the_opening_at_the_provider_quotes_every_line_and_rebuilds_the_same() {
     );
 }
 
+/// The node reads the repository's instruction files for a callback turn
+/// too (the unattended turn, where they matter most): the opening at the
+/// provider still starts with the harness's frame and ends with the files,
+/// quoted under the harness's line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_turn_gets_the_repositorys_instruction_files() {
+    let Some(mut n) = node().await else { return };
+    std::fs::write(n.ws.join("AGENTS.md"), "Run cargo fmt before you stop.\n").unwrap();
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    std::fs::write(n.ws.join("out.txt"), "built\n").unwrap();
+    n.prompt(
+        sid,
+        &format!("script: {}", json!([bg(&held("out.txt"), 120)])),
+    );
+    n.started(sid, "bg-1").await;
+    n.turn_ended(sid).await;
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    let before = n.requests.lock().unwrap().len();
+    n.callback(sid, &["bg-1"]).await.unwrap();
+    n.turn_ended(sid).await;
+    let reqs = n.requests.lock().unwrap().clone();
+    let Some(harness_agent_native::ChatMsg::User(opening)) = reqs[before].messages.last() else {
+        panic!("{:?}", reqs[before].messages);
+    };
+    assert!(opening.starts_with(CALLBACK_LEAD), "{opening}");
+    let files = opening
+        .find(harness_agent_native::provider::INSTRUCTIONS_LEAD)
+        .unwrap_or_else(|| panic!("no instruction files: {opening}"));
+    assert!(
+        opening[files..].contains(&format!("\n{OUTPUT_QUOTE}==> AGENTS.md <==\n"))
+            && opening[files..]
+                .contains(&format!("\n{OUTPUT_QUOTE}Run cargo fmt before you stop.")),
+        "{opening}"
+    );
+}
+
 /// More than `MAX_CALLBACK_IDS` ids are refused before anything is read,
 /// and a node that is stopping starts no callback turn.
 #[tokio::test(flavor = "multi_thread")]
