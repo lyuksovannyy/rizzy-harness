@@ -82,8 +82,11 @@ would mean "run no sessions", which not running `node run` already does.
 The sentence was removed instead of adding the setting.
 
 A Stop and an approval answer on a full, slow uplink: `crates/node/tests/control_under_load.rs`
-(in process) and `control_over_link.rs` (over the real link at 256 KiB/s),
-ADOPTION_PLAN A.21.
+(in process) and `control_over_link.rs` (over the real link at 256 KiB/s,
+acks under 3 s), ADOPTION_PLAN A.21; the socket's cap read back from the
+node's socket: `crates/link/tests/unsent_limit.rs`. The command loop on a
+slow store (audit lines, unknown sessions, the lane cap):
+`crates/node/tests/slow_store.rs`.
 
 Tests: `crates/link/tests/backpressure.rs` (a flooding node, a flooding
 master, a busy link that is not dead, a silent node, an oversized frame,
