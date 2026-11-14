@@ -690,6 +690,9 @@ export interface WorkspaceSummary {
   /** The caller's effective level here: the lower of their ceiling and
    * their level in it (in a Personal workspace, the ceiling). */
   exec_level: ExecLevel;
+  /** Whether the caller answered the join question: may this workspace's
+   * agents use their own facts? Always true for Personal. */
+  memory_answered?: boolean;
 }
 
 export interface WorkspaceList {
@@ -710,6 +713,7 @@ export interface WorkspaceDetail extends WorkspaceSummary {
   settings: WorkspaceSettings;
   /** The caller's own "use my memory here" switch (always true for Personal). */
   use_memory: boolean;
+  memory_answered?: boolean;
   created_ms: number;
 }
 
@@ -764,10 +768,47 @@ export interface MemoryFact {
   owner_id: string | null;
   text: string;
   kind: FactKind;
-  status: "proposed" | "active";
+  /** `retired`: replaced or forgotten by the assistant; never used, restorable. */
+  status: "proposed" | "active" | "retired";
   source_session: string | null;
   created_ms: number;
   updated_ms: number;
+  /** `user`: your own facts, which follow you into a team workspace once you
+   * say yes there. `workspace`: kept in one workspace only. */
+  place?: "user" | "workspace";
+  workspace_id?: string;
+  workspace_name?: string | null;
+  workspace_personal?: boolean;
+}
+
+/** What one `remember` call of a chat did (`GET /api/sessions/{id}/memory/{call}`). */
+export interface MemoryCallState {
+  /** `pending`: waits for the person's Keep or Dismiss in the chat.
+   * `waiting`: the server has not filed the call yet; ask again. */
+  state:
+    | "saved"
+    | "pending"
+    | "kept"
+    | "dismissed"
+    | "refused"
+    | "forgot"
+    | "undone"
+    | "gone"
+    | "waiting"
+    | "project";
+  place?: "user" | "workspace" | "project";
+  /** False: the person may not change this project fact; it waits for a
+   * project manager (Dismiss only). */
+  keep?: boolean;
+  /** The text the call asked for (shown when nothing was filed). */
+  text?: string | null;
+  /** The fact the call added. */
+  fact?: MemoryFact | null;
+  /** The fact it replaces or forgets. */
+  target?: MemoryFact | null;
+  /** The call only drops `target`. */
+  forget?: boolean;
+  reason?: string | null;
 }
 
 export type Preset = "fast" | "balanced" | "best";
