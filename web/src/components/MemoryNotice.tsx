@@ -1,10 +1,10 @@
 // What a `remember` call did, in the harness's words, read back from the
-// server (the node only reports that it sent the call): saved at once in
-// the Personal workspace, with Undo, so "without a click" is never "without
-// knowing"; proposed elsewhere, waiting on the Memory page (rich_plan §13: no
-// inline Keep/Discard for proposals); refused, with the reason. The fact is
-// the model's text and is stored as written, so hidden characters show as
-// codes here: the person should see what goes into future chats.
+// server (the node only reports that it sent the call). In a Personal chat
+// that read nothing from outside it was saved at once: the line says so,
+// with Undo, so "without a click" is never "without knowing". Anywhere else
+// it waits for the person: the line asks, with Keep and Dismiss, right here
+// (review M1: one click, in the chat). A refusal says why. The fact is the
+// model's text and is shown as stored: hidden characters as codes.
 import { BookmarkPlus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
@@ -15,50 +15,77 @@ import type { MemoryCallState } from "../types";
 
 const quote = (t: string) => <span className="memory-fact">“{showHidden(t.trim())}”</span>;
 
-/** `sessionId`/`callId` absent (a project chat's personal fallback, tests):
- * the line only says what the assistant suggested. */
+/** How often, and how many times, to ask again while the server has not
+ * filed the call yet (`waiting`: the node reported the call before the
+ * master filed it, or a reload raced it). */
+const RETRY_MS = 700;
+const RETRIES = 8;
+
+/** `sessionId`/`callId` absent (a project chat's personal fallback): the
+ * line only says what the assistant suggested. */
 export function MemoryNotice({
   text,
   sessionId,
   callId,
   forget,
+  done,
 }: {
   text: string;
   sessionId?: string;
   callId?: string;
   /** The call only drops a fact (`forget` alone). */
   forget?: boolean;
+  /** The node answered the call: ask the server again (it has filed it). */
+  done?: boolean;
 }) {
   const [st, setSt] = useState<MemoryCallState | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [tries, setTries] = useState(0);
   useEffect(() => {
     if (!sessionId || !callId) return;
     let live = true;
-    pageApi
-      .memoryCall(sessionId, callId)
-      .then((v) => live && setSt(v))
-      .catch(() => live && setSt(null));
+    const timer = setTimeout(
+      () =>
+        void pageApi
+          .memoryCall(sessionId, callId)
+          .then((v) => {
+            if (!live) return;
+            setSt(v);
+            if (v.state === "waiting" && tries < RETRIES) setTries((n) => n + 1);
+          })
+          .catch(() => {
+            if (live && tries < RETRIES) setTries((n) => n + 1);
+          }),
+      tries === 0 ? 0 : RETRY_MS,
+    );
     return () => {
       live = false;
+      clearTimeout(timer);
     };
-  }, [sessionId, callId]);
+  }, [sessionId, callId, tries, done]);
 
-  const undo = async () => {
+  const act = async (what: "keep" | "dismiss" | "undo") => {
     if (!sessionId || !callId) return;
     setBusy(true);
     setErr(null);
     try {
-      setSt(await pageApi.undoMemoryCall(sessionId, callId));
+      const f = what === "keep" ? pageApi.keepMemoryCall : what === "dismiss" ? pageApi.dismissMemoryCall : pageApi.undoMemoryCall;
+      setSt(await f(sessionId, callId));
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
       setBusy(false);
     }
   };
-  const undoButton = (
-    <button type="button" className="link memory-undo" disabled={busy} onClick={() => void undo()}>
-      {rt("memory.undo")}
+  const button = (what: "keep" | "dismiss" | "undo", primary = false) => (
+    <button
+      type="button"
+      className={`link memory-${what}${primary ? " primary-link" : ""}`}
+      disabled={busy}
+      onClick={() => void act(what)}
+    >
+      {rt(`memory.${what}`)}
     </button>
   );
   const review = (
@@ -67,20 +94,25 @@ export function MemoryNotice({
     </a>
   );
 
+  const fact = st?.fact?.text ?? text;
+  const old = st?.target?.text;
+  const isForget = st ? !!st.forget : !!forget;
   let head: React.ReactNode;
-  let foot: React.ReactNode;
-  const old = st?.retired?.text;
+  let foot: React.ReactNode = null;
   switch (st?.state) {
     case "saved":
-      head = (
+      head = old ? (
         <>
-          {rt(st.place === "workspace" ? "memory.savedHere" : "memory.saved")} {quote(st.fact?.text ?? text)}
-          {old && <> {rt("memory.replacing")} {quote(old)}</>}
+          {rt(st.place === "workspace" ? "memory.replacedHere" : "memory.replaced")} {quote(old)} → {quote(fact)}
+        </>
+      ) : (
+        <>
+          {rt(st.place === "workspace" ? "memory.savedHere" : "memory.saved")} {quote(fact)}
         </>
       );
       foot = (
         <>
-          {undoButton} · {review}
+          {button("undo")} · {review}
         </>
       );
       break;
@@ -90,7 +122,42 @@ export function MemoryNotice({
           {rt("memory.forgot")} {quote(old ?? "")}
         </>
       );
-      foot = undoButton;
+      foot = button("undo");
+      break;
+    case "pending":
+      head = isForget ? (
+        <>
+          {rt("memory.wantsForget")} {quote(old ?? "")}
+        </>
+      ) : old ? (
+        <>
+          {rt("memory.wantsReplace")} {quote(old)} → {quote(fact)}
+        </>
+      ) : (
+        <>
+          {rt(st.place === "workspace" ? "memory.wantsHere" : "memory.wants")} {quote(fact)}
+        </>
+      );
+      foot = (
+        <>
+          {rt("memory.waitingHint")} {button("keep", true)} · {button("dismiss")}
+        </>
+      );
+      break;
+    case "kept":
+      head = (
+        <>
+          {rt("memory.kept")} {isForget ? quote(old ?? "") : quote(fact)}
+        </>
+      );
+      foot = button("undo");
+      break;
+    case "dismissed":
+      head = (
+        <>
+          {rt("memory.dismissed")} {isForget ? quote(old ?? "") : quote(fact)}
+        </>
+      );
       break;
     case "refused":
       head = (
@@ -101,31 +168,31 @@ export function MemoryNotice({
       foot = st.reason ?? "";
       break;
     case "undone":
-      head = (
+      // What Undo did: a save removed (and, for a replacement, the old
+      // fact back), or a forgotten fact back.
+      head = isForget ? (
         <>
-          {rt("memory.undone")} {quote(forget ? (old ?? "") : text)}
+          {rt("memory.undone")} {quote(old ?? "")} {rt("memory.undoneBack")}
+        </>
+      ) : old ? (
+        <>
+          {rt("memory.undone")} {quote(old)} {rt("memory.undoneBack")}
+        </>
+      ) : (
+        <>
+          {rt("memory.undone")} {quote(fact)} {rt("memory.undoneSave")}
         </>
       );
       break;
-    case "none":
-    case "retired":
+    case "gone":
       head = (
         <>
-          {rt("memory.gone")} {text && quote(text)}
+          {rt("memory.gone")} {quote(fact)}
         </>
       );
       foot = review;
       break;
-    case "proposed":
-    default:
-      if (!st && sessionId && callId) {
-        head = (
-          <>
-            {rt("memory.sent")} {forget ? null : quote(text)}
-          </>
-        );
-        break;
-      }
+    case "project":
       head = (
         <>
           {rt("memory.proposed")} {quote(text)}
@@ -134,6 +201,14 @@ export function MemoryNotice({
       foot = (
         <>
           {rt("memory.pending")} {review}
+        </>
+      );
+      break;
+    default:
+      // Not answered yet, or nothing filed (memory off for this turn).
+      head = (
+        <>
+          {rt("memory.sent")} {isForget ? null : quote(text)}
         </>
       );
   }

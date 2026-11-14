@@ -1305,6 +1305,7 @@ async fn prompt(
                 untrusted: flags.untrusted,
                 images,
                 callback: vec![],
+                by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
             },
         )
         .await;

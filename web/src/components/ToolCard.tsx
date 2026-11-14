@@ -202,7 +202,9 @@ export function ToolCard({
 
   // A proposal the tool accepted: the notice says where it waits. A
   // rejected one stays an ordinary card with the tool's error.
-  if (item.tool === "remember" && status === "ok")
+  // A memory block, not a tool card, from the moment the call is made:
+  // the server says what it did (saved, waiting, refused) and offers Undo.
+  if (item.tool === "remember" && (status === "ok" || status === "running"))
     return item.input?.scope === "project" ? (
       <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
     ) : (
@@ -211,6 +213,7 @@ export function ToolCard({
         sessionId={sessionId}
         callId={item.call_id}
         forget={!!item.input?.forget && item.input?.text == null}
+        done={status === "ok"}
       />
     );
   // A file the agent published: its card says where the upload stands. A

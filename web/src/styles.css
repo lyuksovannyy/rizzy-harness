@@ -2176,6 +2176,9 @@ pre.term.call-add {
 .memory-body {
   min-width: 0;
 }
+.tool-memory .primary-link {
+  font-weight: 600;
+}
 .memory-fact {
   color: var(--fg);
   white-space: pre-wrap;

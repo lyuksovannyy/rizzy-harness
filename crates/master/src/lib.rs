@@ -221,9 +221,9 @@ pub struct MasterInner {
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
-    /// `remember` calls the master refused, for the chat line and the next
-    /// turn (`memory::Refusals`).
-    refusals: memory::Refusals,
+    /// Lines for a chat's next turn about its `remember` calls (refused,
+    /// waiting for the person: `memory::Notes`).
+    notes: memory::Notes,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -303,6 +303,10 @@ pub struct PromptOpts {
     /// every other field must be empty, and the turn gets no context and no
     /// memory (no recall, no project facts, no `remember`).
     pub callback: Vec<String>,
+    /// The chat's owner sent this message, signed in as themselves (the
+    /// HTTP prompt route decides it): only then may the turn's `remember`
+    /// apply without a click (PLAN.md T49).
+    pub by_owner: bool,
 }
 
 /// The model a turn runs on: the agent's (resolved), else the one chosen
@@ -564,7 +568,7 @@ impl Master {
                 voice_usage: Default::default(),
                 pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
-                refusals: Default::default(),
+                notes: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -1730,6 +1734,7 @@ impl Master {
             untrusted,
             images,
             callback,
+            by_owner,
         } = opts;
         let resume = !callback.is_empty();
         if resume
@@ -1842,6 +1847,7 @@ impl Master {
         // Nor does a callback turn: nobody wrote anything to recall by, and
         // program output must not steer what is remembered.
         let allowed = projects::TurnMemory {
+            by_owner: by_owner && !untrusted && !resume,
             personal: personal && !untrusted && !resume,
             project: project.is_some()
                 && features.is_none_or(|f| f.project_memory)
@@ -1854,8 +1860,11 @@ impl Master {
         }
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
+        let mut noted = Vec::new();
         if allowed.personal {
-            turn_context.extend(memory::turn_block(self, &row, &text).await);
+            let (block, calls) = memory::turn_block(self, &row, &text, allowed).await;
+            turn_context.extend(block);
+            noted = calls;
         }
         // A callback turn's opening is rebuilt from the log alone on every
         // later request: no per-turn context joins it.
@@ -1950,6 +1959,8 @@ impl Master {
             };
         }
         sent?;
+        // The notes rode on this turn: do not repeat them (review M5).
+        self.inner.notes.mark_told(sid, &noted);
         media::prompted(self, &row, &sent_images).await;
         Ok(())
     }

@@ -340,6 +340,10 @@ pub async fn project_of(m: &Master, row: &SessionRow) -> Option<ProjectRow> {
 pub struct TurnMemory {
     pub personal: bool,
     pub project: bool,
+    /// The turn was sent by the chat's owner, signed in as themselves (not
+    /// the API token, a routine or a callback): the only turns whose
+    /// `remember` may apply without a click (`memory::saves_without_a_click`).
+    pub by_owner: bool,
 }
 
 /// Withhold `remember` from an agent whose turn may write no memory, and
@@ -379,6 +383,9 @@ pub async fn turn_memory(m: &Master, row: &SessionRow) -> TurnMemory {
         None => TurnMemory {
             personal: ws::uses_memory(m, row).await,
             project: true,
+            // Not recorded (a restart): who sent it is unknown, so no
+            // `remember` of it applies without a click.
+            by_owner: false,
         },
     };
     if row.parent_id.is_some() || recorded.is_none() {

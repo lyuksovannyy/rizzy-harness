@@ -176,53 +176,84 @@ const KEY_PREFIXES: &[&str] = &[
     "eyj",
 ];
 
-/// Does `t` look like it holds a secret value? A guess that errs towards
-/// refusing (a fact is one sentence; losing one is cheap, keeping a key in
-/// every later prompt is not):
-/// * a word that starts like a well-known key or token (`ghp_`, `sk-`,
-///   `AKIA`, a JWT's `eyJ`, a PEM header), at least 16 characters long;
-/// * a long random-looking word: 20+ characters of letters and digits
-///   mixed (no `://`, so links pass);
+/// The word with the punctuation around it taken off (keys keep `-_./+=`).
+fn bare_word(raw: &str) -> &str {
+    raw.trim_matches(|c: char| !c.is_alphanumeric() && !"-_./+=".contains(c))
+        .trim_end_matches(['.', ','])
+}
+
+/// Does `w`, one word, read like a key or token by itself: a well-known
+/// prefix (`ghp_`, `sk-`, `AKIA`, a JWT's `eyJ`) at 16+ characters, or 20+
+/// characters mixing upper case, lower case and digits (a branch name, a
+/// commit hash or a UUID has no upper case, so passes)?
+fn key_shaped(w: &str) -> bool {
+    if w.contains("://") {
+        return false;
+    }
+    let n = w.chars().count();
+    let lower = w.to_ascii_lowercase();
+    if n >= 16 && KEY_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+        return true;
+    }
+    let symbols_ok = w.chars().all(|c| c.is_ascii_alphanumeric() || "-_/+=".contains(c));
+    n >= 20
+        && symbols_ok
+        && w.chars().any(|c| c.is_ascii_uppercase())
+        && w.chars().any(|c| c.is_ascii_lowercase())
+        && w.chars().filter(|c| c.is_ascii_digit()).count() >= 2
+}
+
+/// Does `v`, the value given for a named secret, look like one: a key
+/// shape, 6+ characters mixing letters with digits or symbols, or 4+
+/// digits with no letters (a PIN, a code)? "tulip" or "kept" does not.
+fn value_shaped(v: &str) -> bool {
+    let n = v.chars().count();
+    let letters = v.chars().filter(|c| c.is_alphabetic()).count();
+    let digits = v.chars().filter(|c| c.is_ascii_digit()).count();
+    let other = n - letters - digits;
+    key_shaped(v)
+        || (n >= 6 && letters > 0 && (digits > 0 || other > 0))
+        || (letters == 0 && digits >= 4)
+}
+
+/// Does `t` look like it holds a secret value? A guess, tuned against
+/// refusing ordinary facts (review M3):
+/// * a PEM header, or a word that is key-shaped by itself;
 /// * a sentence that names a secret (`secret_like`: password, PIN, API
-///   key, recovery code...) and gives a value (`is`, `:` or `=` after it).
+///   key, recovery code...) and gives a value that looks like one, after
+///   `is`, `are`, `was`, a colon or an equals sign.
+///
+/// "Their passwords are kept in 1Password" and "Has 2FA on: uses a
+/// YubiKey" name a secret but give no value; a commit hash or a UUID gives
+/// no secret word.
 pub fn looks_secret(t: &str) -> bool {
     if t.contains("-----BEGIN") {
         return true;
     }
-    for raw in t.split_whitespace() {
-        let w = raw.trim_matches(|c: char| !c.is_alphanumeric() && !"-_./+=".contains(c));
-        let w = w.trim_end_matches(['.', ',']);
-        if w.contains("://") {
-            continue;
-        }
-        let lower = w.to_ascii_lowercase();
-        let n = w.chars().count();
-        if n >= 16 && KEY_PREFIXES.iter().any(|p| lower.starts_with(p)) {
-            return true;
-        }
-        let letters = w.chars().filter(|c| c.is_ascii_alphabetic()).count();
-        let digits = w.chars().filter(|c| c.is_ascii_digit()).count();
-        let upper = w.chars().any(|c| c.is_ascii_uppercase());
-        let lower_c = w.chars().any(|c| c.is_ascii_lowercase());
-        let symbols_ok = w
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_/+=".contains(c));
-        if n >= 20 && symbols_ok && digits >= 2 && letters >= 4 && (upper && lower_c || n >= 28) {
-            return true;
-        }
-        if n >= 32 && w.chars().all(|c| c.is_ascii_hexdigit()) {
-            return true;
-        }
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.iter().any(|w| key_shaped(bare_word(w))) {
+        return true;
     }
-    if harness_core::ui::secret_like(t) {
-        let words: Vec<String> = t
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(str::to_lowercase)
-            .collect();
-        return t.contains(':')
-            || t.contains('=')
-            || words.iter().any(|w| w == "is" || w == "are" || w == "was");
+    if !harness_core::ui::secret_like(t) {
+        return false;
+    }
+    for (i, raw) in words.iter().enumerate() {
+        let w = raw.to_lowercase();
+        let after = |j: usize| words.get(j).map(|v| bare_word(v)).filter(|v| !v.is_empty());
+        let value = if matches!(bare_word(&w), "is" | "are" | "was") {
+            after(i + 1)
+        } else if let Some((_, v)) = raw.split_once('=') {
+            Some(bare_word(v)).filter(|v| !v.is_empty()).or_else(|| after(i + 1))
+        } else if raw.ends_with(':') {
+            after(i + 1)
+        } else if let Some((_, v)) = raw.split_once(':') {
+            Some(bare_word(v)).filter(|v| !v.is_empty())
+        } else {
+            None
+        };
+        if value.is_some_and(value_shaped) {
+            return true;
+        }
     }
     false
 }
@@ -237,17 +268,19 @@ mod clean_tests {
             "Alex's GitHub token is ghp_abcdefghijklmnopqrstuvwxyz0123456789",
             "OpenAI key sk-proj-AbCdEf0123456789xyzXYZ",
             "AWS: AKIAIOSFODNN7EXAMPLE",
-            "uses the key 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-            "Alex's password is tulip",
-            "wifi password: correct horse",
+            "Their API key is 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "Alex's password is Tulip2024!",
+            "wifi password: correct-horse-77",
             "Alex's PIN is 4521",
             "recovery code = 7781-2231",
+            "password=hunter22",
             "deploy token Zq8LmN2pR7sT4vW9xY3bC6dF",
             "-----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXk",
         ] {
             assert!(looks_secret(t), "{t}");
             assert!(clean_text(t).is_err(), "{t}");
         }
+        // Ordinary facts, the review's (M3) among them.
         for t in [
             "Alex rides the number 7 tram to work",
             "Alex uses 2FA everywhere",
@@ -257,6 +290,13 @@ mod clean_tests {
             "Lives at Brivibas iela 21, Riga",
             "Their daughter Mia was born on 2019-04-12",
             "Keeps the API keys for work in 1Password",
+            "Their passwords are kept in 1Password",
+            "Their car key is in the blue bowl by the door",
+            "Has 2FA on: uses a YubiKey",
+            "Works on the branch feat/memory-by-default-2026-11-14",
+            "The last good commit is 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b",
+            "The project's id is 0b6e1f3e-1b8a-4f3e-9d61-2a1f0c9e7d10",
+            "The wifi password is on the fridge",
         ] {
             assert!(!looks_secret(t), "{t}");
         }

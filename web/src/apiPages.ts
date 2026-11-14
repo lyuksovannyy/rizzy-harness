@@ -128,6 +128,10 @@ export const pageApi = {
   ) => call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
   memoryCall: (sessionId: string, callId: string) =>
     call<MemoryCallState>("GET", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}`),
+  keepMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/keep`),
+  dismissMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/dismiss`),
   undoMemoryCall: (sessionId: string, callId: string) =>
     call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/undo`),
   deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),

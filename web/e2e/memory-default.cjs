@@ -1,7 +1,10 @@
 // Memory by default against the real binary (README, Memory): in the
-// Personal workspace a `remember` is saved at once and the chat says so in
-// one line with Undo; Undo removes it; a private (`sensitive`) fact says it
-// stays in this workspace. Then a team workspace the owner creates asks the
+// Personal workspace a `remember` is saved at once and the chat shows a
+// memory block saying so, with Undo (owner, 2026-11-14); Undo removes it,
+// the block then says it was undone (also after a reload: its state is the
+// server's), and the fact is gone from Settings → Memory and from the next
+// chat's prompt. A private (`sensitive`) fact says it stays in this
+// workspace. Then a team workspace the owner creates asks the
 // join question at the top of the page until it is answered; "Keep it out"
 // answers no and the question goes; Settings → Workspace shows the switch off.
 // Usage: node web/e2e/memory-default.cjs <path-to-harness-binary> [work-dir]
@@ -73,17 +76,34 @@ async function chat(p, text) {
 
     // 1. Saved at once, with one quiet line and Undo.
     await chat(p, `remember: ${TRAM}`);
-    await p.waitForFunction(() => document.querySelector('.tool-memory')?.textContent?.includes('Remembered:'));
+    await p.waitForFunction(() => document.querySelector('.tool-memory')?.textContent?.includes('Saved to your facts:'));
     const line = await p.innerText('.tool-memory');
-    log('chat line:', line.replace(/\s+/g, ' '));
-    check(line.includes(TRAM), 'the line names the fact');
-    check(await p.$('.tool-memory .memory-undo'), 'the line has Undo');
+    log('memory block:', line.replace(/\s+/g, ' '));
+    check(line.includes(TRAM), 'the block names the fact');
+    check(await p.$('.tool-memory .memory-undo'), 'the block has Undo');
+    check(!(await p.$('.tool:not(.tool-memory) .tool-head')), 'no tool card beside it');
     let mine = await facts(p);
     check(mine.length === 1 && mine[0].status === 'active', `saved at once: ${JSON.stringify(mine)}`);
     await p.screenshot({ path: `${S}/shots/memory-saved-light.png` });
     await p.click('.tool-memory .memory-undo');
     await p.waitForFunction(() => document.querySelector('.tool-memory')?.textContent?.includes('Undone:'));
     check((await facts(p)).length === 0, 'Undo removed it');
+    // The block stays undone after a reload.
+    await p.reload();
+    await p.waitForFunction(() => document.querySelector('.tool-memory')?.textContent?.includes('is no longer remembered'));
+    await p.screenshot({ path: `${S}/shots/memory-undone-light.png` });
+    // Gone from Settings → Memory and from the next chat's prompt.
+    await p.goto(`${URL_}#/settings/account/memory`);
+    await p.waitForSelector('text=Remembered');
+    check(!(await p.innerText('main')).includes(TRAM), 'not on the Memory page');
+    await p.goto(URL_);
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'memory?');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('.conversation');
+    await p.waitForFunction(() => /Memory:/.test(document.querySelector('.conversation')?.textContent ?? ''));
+    const recalled = await p.innerText('.conversation');
+    check(!recalled.includes(TRAM), `not in the next chat's prompt: ${recalled.slice(0, 300)}`);
 
     // 2. A private detail says where it stays.
     const script = JSON.stringify([{ tool: 'remember', input: { text: 'Alex has asthma', sensitive: true } }]);

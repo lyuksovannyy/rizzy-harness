@@ -29,6 +29,11 @@ pub(super) fn routes() -> Router<Master> {
         )
         .route("/api/sessions/{id}/memory/{call_id}", get(call_state))
         .route("/api/sessions/{id}/memory/{call_id}/undo", post(undo))
+        .route("/api/sessions/{id}/memory/{call_id}/keep", post(keep))
+        .route(
+            "/api/sessions/{id}/memory/{call_id}/dismiss",
+            post(dismiss),
+        )
 }
 
 pub(super) fn memory_store(m: &Master) -> ApiResult<Store> {
@@ -247,25 +252,16 @@ async fn remove(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// What one `remember` call did, read from the log and the store.
-struct CallFacts {
-    input: Value,
-    /// The fact it added, while it is still there.
-    added: Option<Fact>,
-    /// The fact it replaced or forgot, while it is still retired.
-    retired: Option<Fact>,
-}
-
-/// The call `call_id` of the caller's own chat `sid` (404 for anyone
-/// else's chat, admins included, and for any other tool's call).
-async fn call_facts(
+/// The caller's own chat `sid` and its `remember` call `call_id` (404 for
+/// anyone else's chat, admins and the API token included, and for any
+/// other tool's call). Returns the chat and the call's input.
+async fn own_call(
     m: &Master,
     who: &Principal,
     sid: &str,
     call_id: &str,
-) -> ApiResult<(Store, SessionRow, CallFacts)> {
+) -> ApiResult<(SessionRow, Value)> {
     let row = visible_session(m, who, sid).await?;
-    let mem = memory_store(m)?;
     let none = || ApiError(StatusCode::NOT_FOUND, "no such call".into());
     if who.user_id.is_none() || row.owner_id != who.user_id {
         return Err(none());
@@ -280,72 +276,57 @@ async fn call_facts(
     if tool != "remember" {
         return Err(none());
     }
-    let key = format!("{}:{call_id}", row.session_id);
-    let uid = who.user_id.as_deref().unwrap_or_default();
-    let mut owners = vec![uid.to_string()];
-    if let Some(ws) = &row.workspace_id {
-        owners.push(member_owner(ws, uid));
-    }
-    let mut added = None;
-    for o in &owners {
-        if let Some(f) = mem.by_key(Some(o), &key).await.map_err(memory_err)? {
-            added = Some(f);
-            break;
-        }
-    }
-    let target = input
-        .get("replaces")
-        .or_else(|| input.get("forget"))
-        .and_then(|v| v.as_str());
-    let retired = match target {
-        Some(id) => mem
-            .get(id)
-            .await
-            .map_err(memory_err)?
-            .filter(|f| f.status == Status::Retired && is_own(Some(uid), f)),
-        None => None,
-    };
-    Ok((
-        mem,
-        row,
-        CallFacts {
-            input,
-            added,
-            retired,
-        },
-    ))
+    Ok((row, input))
 }
 
-fn state_json(m: &Master, row: &SessionRow, call_id: &str, c: &CallFacts) -> Value {
-    if c.input.get("scope").and_then(|v| v.as_str()) == Some("project") {
-        return json!({ "state": "project" });
+/// What the chat line shows for a call: its recorded state and the facts
+/// it names as they are now. `waiting` when nothing is recorded yet (the
+/// master files a call when the node reports it; the line asks again).
+async fn state_json(m: &Master, who: &Principal, row: &SessionRow, call_id: &str, input: &Value) -> ApiResult<Value> {
+    if input.get("scope").and_then(|v| v.as_str()) == Some("project") {
+        return Ok(json!({ "state": "project" }));
     }
-    let refusal = m.inner.refusals.get(row.session_id, call_id);
-    let forget = c.input.get("forget").is_some() && c.input.get("text").is_none();
-    let state = match (&c.added, &refusal) {
-        (Some(f), _) => match f.status {
-            Status::Active => "saved",
-            Status::Proposed => "proposed",
-            Status::Retired => "retired",
+    let Some(r) = crate::memory::call_record(m, row.session_id, call_id).await else {
+        return Ok(json!({ "state": "waiting" }));
+    };
+    let mem = memory_store(m)?;
+    let uid = who.user_id.as_deref();
+    let get = async |id: &Option<String>| -> ApiResult<Option<Fact>> {
+        Ok(match id {
+            Some(id) => mem.get(id).await.map_err(memory_err)?.filter(|f| is_own(uid, f)),
+            None => None,
+        })
+    };
+    let fact = get(&r.added).await?;
+    let target = get(&r.target).await?;
+    use crate::memory::CallState as S;
+    let state = match r.state {
+        S::Saved | S::Kept if r.added.is_some() && fact.is_none() => "gone",
+        S::Saved if r.added.is_none() => "forgot",
+        S::Saved => "saved",
+        S::Kept => "kept",
+        // Kept or discarded on the Memory page meanwhile.
+        S::Pending if r.added.is_some() => match fact.as_ref().map(|f| f.status) {
+            Some(Status::Proposed) => "pending",
+            Some(_) => "kept",
+            None => "dismissed",
         },
-        (None, Some(_)) => "refused",
-        (None, None) if forget && c.retired.is_some() => "forgot",
-        (None, None) => "none",
+        S::Pending => "pending",
+        S::Dismissed => "dismissed",
+        S::Undone => "undone",
+        S::Refused => "refused",
     };
     let mut v = json!({
         "state": state,
-        "fact": c.added,
-        "retired": c.retired,
-        "reason": refusal.map(|r| r.why),
+        "fact": fact,
+        "target": target,
+        "forget": r.added.is_none() && r.target.is_some(),
+        "reason": r.why,
     });
-    if let Some(f) = &c.added {
-        v["place"] = json!(if kept_in(f).is_some() {
-            "workspace"
-        } else {
-            "user"
-        });
+    if let Some(f) = &fact {
+        v["place"] = json!(if kept_in(f).is_some() { "workspace" } else { "user" });
     }
-    v
+    Ok(v)
 }
 
 async fn call_state(
@@ -354,29 +335,50 @@ async fn call_state(
     Path((id, call_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let (_, row, c) = call_facts(&m, &who, &id, &call_id).await?;
-    Ok(Json(state_json(&m, &row, &call_id, &c)))
+    let (row, input) = own_call(&m, &who, &id, &call_id).await?;
+    Ok(Json(state_json(&m, &who, &row, &call_id, &input).await?))
 }
 
-/// Undo what the call did: delete the fact it saved, restore the one it
-/// replaced or forgot.
+async fn decide(
+    m: Master,
+    headers: HeaderMap,
+    id: String,
+    call_id: String,
+    d: crate::memory::Decision,
+) -> ApiResult<Json<Value>> {
+    let who = require(&m, &headers).await?;
+    let (row, input) = own_call(&m, &who, &id, &call_id).await?;
+    let uid = who.user_id.clone().unwrap_or_default();
+    crate::memory::decide(&m, &uid, row.session_id, &call_id, d)
+        .await
+        .map_err(|why| ApiError(StatusCode::CONFLICT, why.into()))?;
+    Ok(Json(state_json(&m, &who, &row, &call_id, &input).await?))
+}
+
+/// The person keeps what the call asked for (a save, a replacement, a
+/// forgetting).
+async fn keep(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path((id, call_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    decide(m, headers, id, call_id, crate::memory::Decision::Keep).await
+}
+
+async fn dismiss(
+    State(m): State<Master>,
+    headers: HeaderMap,
+    Path((id, call_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    decide(m, headers, id, call_id, crate::memory::Decision::Dismiss).await
+}
+
+/// Undo what the call did, as recorded: delete the fact it saved, restore
+/// the one it retired; nothing else.
 async fn undo(
     State(m): State<Master>,
     headers: HeaderMap,
     Path((id, call_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
-    let (mem, row, mut c) = call_facts(&m, &who, &id, &call_id).await?;
-    if let Some(f) = c.added.take() {
-        mem.delete(&f.id).await.map_err(memory_err)?;
-    }
-    if let Some(f) = c.retired.take() {
-        mem.update(&f.id, None, Some(Status::Active))
-            .await
-            .map_err(memory_err)?;
-    }
-    let _ = m.inner.live.send(Live::MemoryChanged);
-    let mut v = state_json(&m, &row, &call_id, &c);
-    v["state"] = json!("undone");
-    Ok(Json(v))
+    decide(m, headers, id, call_id, crate::memory::Decision::Undo).await
 }

@@ -783,10 +783,26 @@ export interface MemoryFact {
 
 /** What one `remember` call of a chat did (`GET /api/sessions/{id}/memory/{call}`). */
 export interface MemoryCallState {
-  state: "saved" | "proposed" | "refused" | "forgot" | "retired" | "none" | "undone" | "project";
+  /** `pending`: waits for the person's Keep or Dismiss in the chat.
+   * `waiting`: the server has not filed the call yet; ask again. */
+  state:
+    | "saved"
+    | "pending"
+    | "kept"
+    | "dismissed"
+    | "refused"
+    | "forgot"
+    | "undone"
+    | "gone"
+    | "waiting"
+    | "project";
   place?: "user" | "workspace";
+  /** The fact the call added. */
   fact?: MemoryFact | null;
-  retired?: MemoryFact | null;
+  /** The fact it replaces or forgets. */
+  target?: MemoryFact | null;
+  /** The call only drops `target`. */
+  forget?: boolean;
   reason?: string | null;
 }
 

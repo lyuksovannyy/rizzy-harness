@@ -187,15 +187,16 @@ describe("memory saves and proposals", () => {
 
   test("a save in Personal shows what was kept, with Undo", async () => {
     const asked = vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "saved", place: "user", fact: fact("likes tea") });
-    const undo = vi.spyOn(pageApi, "undoMemoryCall").mockResolvedValue({ state: "undone" });
+    const undo = vi.spyOn(pageApi, "undoMemoryCall").mockResolvedValue({ state: "undone", fact: null });
     const { host, done } = await live(remember("likes tea", proposed));
     expect(asked).toHaveBeenCalledWith("s", 'c-remember-{"text":"likes tea","kind":"fact"}');
-    expect(host.textContent).toContain("Remembered: “likes tea”");
+    expect(host.textContent).toContain("Saved to your facts: “likes tea”");
     const btn = host.querySelector<HTMLButtonElement>(".memory-undo")!;
     expect(btn.textContent).toBe("Undo");
     await act(async () => btn.click());
     expect(undo).toHaveBeenCalledOnce();
-    expect(host.textContent).toContain("Undone: “likes tea”");
+    // The block stays and says what Undo did.
+    expect(host.textContent).toContain("Undone: “likes tea” is no longer remembered.");
     expect(host.querySelector(".memory-undo")).toBeNull();
     await done();
   });
@@ -203,24 +204,54 @@ describe("memory saves and proposals", () => {
   test("a private detail says it stays in this workspace; a refusal says why", async () => {
     vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "saved", place: "workspace", fact: fact("has asthma") });
     let r = await live(remember("has asthma", proposed));
-    expect(r.host.textContent).toContain("Remembered, in this workspace only: “has asthma”");
+    expect(r.host.textContent).toContain("Saved, in this workspace only: “has asthma”");
     await r.done();
     vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "refused", reason: "memory is full (2990 of 3000 characters)" });
     r = await live(remember("likes plums", proposed));
-    expect(r.host.textContent).toContain("Not remembered: “likes plums”");
+    expect(r.host.textContent).toContain("Not saved: “likes plums”");
     expect(r.host.textContent).toContain("memory is full");
     expect(r.host.querySelector(".memory-undo")).toBeNull();
     await r.done();
   });
 
-  test("a proposal in a team workspace links to the Memory page and has no buttons", async () => {
-    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "proposed", place: "user", fact: { ...fact("likes tea"), status: "proposed" } });
+  test("a save that waits for the person asks in the block, with Keep and Dismiss", async () => {
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", place: "user", fact: { ...fact("likes tea"), status: "proposed" } });
+    const keep = vi.spyOn(pageApi, "keepMemoryCall").mockResolvedValue({ state: "kept", place: "user", fact: fact("likes tea") });
     const { host, done } = await live(remember("likes tea", proposed));
-    expect(host.textContent).toContain("Suggested a memory: “likes tea”");
-    expect(host.textContent).toContain("Not used until you keep it.");
-    expect(host.querySelector("a.memory-review")?.getAttribute("href")).toBe("#/settings/account/memory");
-    // Keeping or discarding happens on the Memory page only.
-    expect(host.querySelector("button")).toBeNull();
+    expect(host.textContent).toContain("Wants to remember: “likes tea”");
+    expect([...host.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Keep", "Dismiss"]);
+    await act(async () => host.querySelector<HTMLButtonElement>(".memory-keep")!.click());
+    expect(keep).toHaveBeenCalledOnce();
+    expect(host.textContent).toContain("Kept: “likes tea”");
+    expect(host.querySelector(".memory-undo")).not.toBeNull();
+    await done();
+  });
+
+  test("a replacement and a forgetting that wait say what they would change", async () => {
+    const old = { ...fact("rides tram 7"), id: "f0" };
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", fact: { ...fact("rides tram 9"), status: "proposed" }, target: old });
+    let r = await live(remember("rides tram 9", proposed));
+    expect(r.host.textContent).toContain("Wants to replace: “rides tram 7” → “rides tram 9”");
+    await r.done();
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", target: old, forget: true });
+    r = await live(web("remember", { forget: "f0" }, proposed));
+    expect(r.host.textContent).toContain("Wants to forget: “rides tram 7”");
+    await r.done();
+  });
+
+  test("asks again while the server has not filed the call", async () => {
+    vi.useFakeTimers();
+    const asked = vi
+      .spyOn(pageApi, "memoryCall")
+      .mockResolvedValueOnce({ state: "waiting" })
+      .mockResolvedValue({ state: "saved", place: "user", fact: fact("likes tea") });
+    const { host, done } = await live(remember("likes tea", proposed));
+    expect(host.textContent).toContain("Memory: “likes tea”");
+    await act(async () => vi.advanceTimersByTime(1000));
+    await act(async () => {});
+    expect(asked).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain("Saved to your facts: “likes tea”");
+    vi.useRealTimers();
     await done();
   });
 
@@ -229,8 +260,33 @@ describe("memory saves and proposals", () => {
     expect(html).toContain("“likes &lt;b&gt;tea&lt;/b&gt;&lt;U+202E&gt; and&lt;U+E0041&gt; more”");
   });
 
-  test("a running or rejected call stays an ordinary tool card", () => {
-    expect(card(remember("likes tea", null))).not.toContain("tool-memory");
+  test("a replacement shows old → new; its Undo says the old fact is back", async () => {
+    const old = { ...fact("rides tram 7"), id: "f0" };
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "saved", place: "user", fact: fact("rides tram 9"), target: { ...old, status: "retired" } });
+    vi.spyOn(pageApi, "undoMemoryCall").mockResolvedValue({ state: "undone", target: old });
+    const { host, done } = await live(remember("rides tram 9", proposed));
+    expect(host.textContent).toContain("Replaced: “rides tram 7” → “rides tram 9”");
+    await act(async () => host.querySelector<HTMLButtonElement>(".memory-undo")!.click());
+    expect(host.textContent).toContain("Undone: “rides tram 7” is remembered again.");
+    await done();
+  });
+
+  test("a forgotten fact has Undo too", async () => {
+    const old = { ...fact("rides tram 7"), id: "f0", status: "retired" as const };
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "forgot", target: old, forget: true });
+    vi.spyOn(pageApi, "undoMemoryCall").mockResolvedValue({ state: "undone", target: { ...old, status: "active" }, forget: true });
+    const { host, done } = await live(web("remember", { forget: "f0" }, proposed));
+    expect(host.textContent).toContain("Forgot: “rides tram 7”");
+    await act(async () => host.querySelector<HTMLButtonElement>(".memory-undo")!.click());
+    expect(host.textContent).toContain("Undone: “rides tram 7” is remembered again.");
+    await done();
+  });
+
+  test("while the call runs it is already a memory block, not a tool card", () => {
+    expect(card(remember("likes tea", null))).toContain("tool-memory");
+  });
+
+  test("a rejected call stays an ordinary tool card", () => {
     const rejected = card(remember("", { ok: false, output: "`text` must be a non-empty sentence", exit_code: null }));
     expect(rejected).not.toContain("tool-memory");
     expect(rejected).toContain("must be a non-empty sentence");

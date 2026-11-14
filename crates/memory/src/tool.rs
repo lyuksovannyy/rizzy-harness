@@ -13,6 +13,14 @@ use serde_json::{Value, json};
 
 pub struct Remember;
 
+/// The reply to every accepted call. The node cannot know what the master
+/// will do with it, so it says what holds (review M4): a call from the
+/// person's own message in their Personal workspace is kept at once; any
+/// other waits for them; a refusal is told next turn.
+const SENT: &str = "Sent to memory. From the person's own message in their Personal workspace it \
+     is kept at once (they see it in the chat, with Undo); anywhere else it waits for their \
+     confirmation. You will be told next turn if it was not saved.";
+
 /// Whether `input` names a fact to retire with no new text.
 fn forget_only(input: &Value) -> bool {
     input.get("forget").and_then(|v| v.as_str()).is_some()
@@ -33,7 +41,8 @@ impl Tool for Remember {
          or accounts, family, relationships, beliefs, legal matters; a sensitive fact stays in this \
          workspace only. Never keep a password, key or token. To correct a fact you were shown, \
          pass its id as `replaces` with the new text; to drop one, pass its id as `forget` alone. \
-         The person sees every saved fact in the chat and can undo it."
+         The person sees every call in the chat: some save at once (with undo), others wait for \
+         their Keep."
     }
     fn schema(&self) -> Value {
         json!({
@@ -60,9 +69,7 @@ impl Tool for Remember {
     }
     async fn run(&self, _ctx: &ToolCtx, input: Value) -> ToolOutcome {
         if forget_only(&input) {
-            return ToolOutcome::ok(
-                "Sent. In the person's Personal workspace the fact is dropped at once.",
-            );
+            return ToolOutcome::ok(SENT);
         }
         match input.get("text").and_then(|v| v.as_str()) {
             Some(t) => match crate::clean_text(t) {
@@ -71,10 +78,7 @@ impl Tool for Remember {
                         "Proposed for the project. The person will confirm or discard it.",
                     )
                 }
-                Ok(_) => ToolOutcome::ok(
-                    "Sent to memory. In the person's Personal workspace it is kept at once (they \
-                     see it in the chat and can undo it); elsewhere they confirm it first.",
-                ),
+                Ok(_) => ToolOutcome::ok(SENT),
                 Err(crate::MemoryError::Invalid(why)) => ToolOutcome::err(why),
                 Err(e) => ToolOutcome::err(e.to_string()),
             },

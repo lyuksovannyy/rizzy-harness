@@ -585,10 +585,20 @@ workspace's, else the Software Developer), not the chat default.
 **Memory.** The assistant keeps short facts about you for later chats (Settings → Account
 → Memory lists every one of them).
 
-- **In your Personal workspace it saves them as you talk**, without asking:
-  each save shows as one line in the chat ("Remembered: …") with **Undo**, and
-  the next chat already knows it. It can also correct a fact it was shown
-  (the old one is kept under "Replaced or forgotten", restorable) or drop one.
+- **In your Personal workspace it saves them as you talk**, without asking,
+  in every chat (also one that read web pages or files: the owner's decision
+  of 2026-11-14 was "No, always save"). Each change shows as its own
+  **memory block** in the chat, where the assistant made it: "Saved to your
+  facts: …", "Saved, in this workspace only: …", "Replaced: old → new" or
+  "Forgot: …", each with **Undo**. Undo removes a save, brings back the fact
+  a replacement or forgetting retired, and the block then says it was undone
+  (after a reload too). The next chat already knows a saved fact. Replaced
+  and forgotten facts are kept under "Replaced or forgotten", restorable.
+- **Elsewhere it asks, in the chat.** In a team workspace, from a
+  sub-agent, from a message not sent by you signed in (the API token, a
+  routine's run), and for any fact you wrote yourself, the block says what
+  the assistant wants to remember, replace or forget, with **Keep** and
+  **Dismiss**: nothing changes until you click Keep.
 - **Two places.** Ordinary things about you (your preferences, people, how you
   work) go to **your facts**, which can follow you into team workspaces.
   Private details (health, money, identity documents, family, anything you
@@ -607,15 +617,16 @@ workspace's, else the Software Developer), not the chat default.
 - **Nobody else sees your memory**: not the workspace's members, not its
   admins, not the server's admins. Deleting an account deletes its memory.
 - What the assistant reads: your facts, newest first, up to 3,000 characters
-  each turn (older ones only when your message matches them). It may save
-  facts until they reach that size; past it, a save is refused and the next
-  turn asks it to merge or drop facts first. Facts you add yourself are not
-  limited.
-- **Not saved without a click:** in a turn that read something from outside
-  first (a web page, a file, a command's output) or a sub-agent's turn, a
-  fact is only suggested. Temporary chats, turns started by an external
-  event and turns that report a finished background command read and write
-  no memory. Anything that looks like a password, key or token is refused.
+  each turn (older ones only when your message matches them). The facts it
+  saved itself may take up to 3,000 characters; past that, a save is
+  refused and the next turn asks it to merge or drop facts first. Facts you
+  add yourself do not count. A save that waits for you, or was refused, is
+  named to the assistant in the next turn. Only you see these blocks and
+  can use their buttons.
+- Temporary chats, turns started by an external event and turns that
+  report a finished background command read and write no memory. Anything
+  that looks like a password, key or token is refused ("my passwords are in
+  1Password" is fine; the password itself is not).
 
 Project memory works as before: facts proposed for a project wait on the
 project's Memory tab (docs/projects.md).
