@@ -47,6 +47,8 @@ fn request() -> ChatRequest {
         }],
         effort: None,
         cache: false,
+        limits: None,
+        no_tool_calls: false,
     }
 }
 

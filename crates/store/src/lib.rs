@@ -930,7 +930,9 @@ impl Store {
             }
             "turn_ended" => {
                 let reason = e.payload.get("reason").and_then(|v| v.as_str());
-                let completed = reason == Some("completed");
+                // A turn that used its step budget ends with its account,
+                // which may ask the person (`limit`, as `completed`).
+                let completed = matches!(reason, Some("completed" | "limit"));
                 // A cancel is the person's own doing; a stop or an
                 // interruption is the node's, recorded at its next start.
                 let tells = completed || reason == Some("error");

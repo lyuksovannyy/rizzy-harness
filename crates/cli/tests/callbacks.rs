@@ -544,7 +544,15 @@ async fn the_opening_at_the_provider_quotes_every_line_and_rebuilds_the_same() {
         }
     }
     assert!(!opening.contains("script:"), "{opening}");
-    // The person's next message: the history holds the same opening.
+    // The person's next message: the history holds the same opening, the
+    // node's environment line last (recorded on `turn_started`).
+    let (_, env) = opening
+        .rsplit_once("\n\n")
+        .expect("the environment line ends the opening");
+    assert!(
+        env.starts_with(harness_core::backend::ENVIRONMENT_LEAD),
+        "{opening}"
+    );
     n.prompt(sid, "thanks");
     n.turn_ended(sid).await;
     let reqs = n.requests.lock().unwrap().clone();

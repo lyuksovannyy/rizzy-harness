@@ -290,6 +290,7 @@ async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &st
         cause: None,
         turn_id: "t1".into(),
         agent: None,
+        environment: None,
     })
     .into_parts();
     send(
@@ -414,6 +415,7 @@ async fn a_turn_known_only_from_the_replay_is_cancelled_when_it_lands() {
         cause: None,
         turn_id: "t1".into(),
         agent: None,
+        environment: None,
     })
     .into_parts();
     tx2.send(NodeToMaster::Snapshot {
@@ -1332,6 +1334,7 @@ async fn a_prompt_checked_before_a_lowering_is_cancelled_once_acked() {
         cause: None,
         turn_id: "t1".into(),
         agent: None,
+        environment: None,
     })
     .into_parts();
     send(

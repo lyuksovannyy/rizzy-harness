@@ -234,6 +234,20 @@ pub const DEFAULT_MAX_STEPS: usize = 50;
 pub const MIN_MAX_STEPS: usize = 1;
 pub const MAX_MAX_STEPS: usize = 1000;
 
+/// Seconds a model call may wait for the provider's first answer (its
+/// response headers, then its first event), when node.toml does not say
+/// (`[limits] model_first_byte_timeout_s`): longer than the gap between
+/// events, since a reasoning model may send nothing while it thinks and a
+/// local server may hold its headers while it reads the prompt.
+pub const DEFAULT_MODEL_FIRST_BYTE_S: u64 = 600;
+/// Seconds the stream may then go without an event (keep-alive pings
+/// count), when node.toml does not say (`[limits] model_idle_timeout_s`):
+/// Codex's stream idle timeout; OpenClaw's for self-hosted models.
+pub const DEFAULT_MODEL_IDLE_S: u64 = 300;
+/// The range node.toml may set either in.
+pub const MIN_MODEL_IDLE_S: u64 = 10;
+pub const MAX_MODEL_IDLE_S: u64 = 3600;
+
 #[cfg(test)]
 mod tests {
     use super::*;

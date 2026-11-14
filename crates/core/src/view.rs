@@ -623,6 +623,7 @@ mod tests {
                     cause: None,
                     agent: None,
                     turn_id: "t".into(),
+                    environment: None,
                 }),
             ),
             ev(
@@ -828,6 +829,7 @@ mod tests {
                 cause: None,
                 agent: None,
                 turn_id: "t".into(),
+                environment: None,
             }),
             EventKind::ModelRetry(retry.clone()),
         ];
@@ -888,6 +890,7 @@ mod tests {
                 cause: None,
                 agent: None,
                 turn_id: "t".into(),
+                environment: None,
             }),
         );
         let mut v = SessionView::default();

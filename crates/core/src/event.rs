@@ -440,6 +440,12 @@ pub struct TurnStarted {
     /// for a person's turn, which has a `user_message` right after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<TurnCause>,
+    /// The node's line about where the turn ran (its clock, OS, shell, git
+    /// branch; `TurnExtra::environment`), which opened the turn's message:
+    /// recorded so every later request rebuilds that message byte for byte
+    /// (the provider's prompt cache). Written by the node only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// What started a turn that no person's message started.
@@ -1034,6 +1040,10 @@ pub enum TurnEndReason {
     /// The node was stopped (SIGTERM or SIGINT, A.19): the turn was
     /// cancelled through the normal cancel path and closed before exit.
     Stopped,
+    /// The turn used its step budget (`[limits] max_steps`): its last
+    /// request asked the model to say what is done and what is left, and
+    /// the person's next message carries on. Not a failure.
+    Limit,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1258,6 +1268,7 @@ mod tests {
                 cause: None,
                 turn_id: "t".into(),
                 agent: Some(agent.clone()),
+                environment: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t".into(),
@@ -1429,7 +1440,8 @@ mod tests {
             EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: None,
-                turn_id: "t1".into()
+                turn_id: "t1".into(),
+                environment: None,
             })
         );
     }
@@ -1542,6 +1554,7 @@ mod background_note_tests {
             turn_id: "t".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into(), "bg-3".into()])),
+            environment: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(

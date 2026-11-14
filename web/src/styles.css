@@ -2008,6 +2008,10 @@ pre.diff .del {
 .divider.r-error {
   color: var(--warn);
 }
+/* A turn that used its step budget and gave its account: not a failure. */
+.divider.r-limit {
+  color: var(--fg);
+}
 .thinking {
   color: var(--fg-2);
   font-size: var(--text-sm);

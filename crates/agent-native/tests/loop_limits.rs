@@ -102,8 +102,10 @@ fn backend(p: Arc<Forever>, cfg: NativeConfig) -> NativeBackend {
     NativeBackend::new(p, harness_tools::builtin(), cfg)
 }
 
+/// The cap ends a person's turn at a limit, not with an error: its last
+/// request runs no tool (tests/staying_power.rs has the rest).
 #[tokio::test]
-async fn max_steps_ends_the_turn_and_names_the_key() {
+async fn max_steps_ends_the_turn_at_a_limit() {
     let dir = tempfile::tempdir().unwrap();
     let host = Host::default();
     let p = Forever::new(json!({"command": "true"}));
@@ -115,11 +117,24 @@ async fn max_steps_ends_the_turn_and_names_the_key() {
         },
     );
     let out = b.run_turn(turn(&host, dir.path())).await;
-    assert_eq!(*p.calls.lock().unwrap(), 2, "exactly two steps");
-    assert_eq!(out.reason, TurnEndReason::Error);
+    assert_eq!(*p.calls.lock().unwrap(), 3, "two steps, then the wrap-up");
+    assert_eq!(out.reason, TurnEndReason::Limit);
+    assert_eq!(out.error, None);
+    let outputs: Vec<String> = host
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outputs.len(), 3);
     assert_eq!(
-        out.error.unwrap(),
-        "stopped after 2 steps (`max_steps` in node.toml)"
+        outputs[2],
+        harness_agent_native::NOT_RUN_AT_STEP_LIMIT,
+        "the last step's call did not run"
     );
 }
 
@@ -136,11 +151,8 @@ async fn the_defaults_are_todays_values() {
     let out = backend(p.clone(), NativeConfig::default())
         .run_turn(turn(&host, dir.path()))
         .await;
-    assert_eq!(*p.calls.lock().unwrap(), 50);
-    assert_eq!(
-        out.error.unwrap(),
-        "stopped after 50 steps (`max_steps` in node.toml)"
-    );
+    assert_eq!(*p.calls.lock().unwrap(), 51, "50 steps and the wrap-up");
+    assert_eq!((out.reason, out.error), (TurnEndReason::Limit, None));
 }
 
 #[tokio::test]
@@ -181,7 +193,7 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
     let mut t = turn(&host, dir.path());
     t.agent = Some(agent);
     b.run_turn(t).await;
-    assert_eq!(*p.calls.lock().unwrap(), 3);
+    assert_eq!(*p.calls.lock().unwrap(), 4, "three steps and the wrap-up");
 }
 
 #[tokio::test]

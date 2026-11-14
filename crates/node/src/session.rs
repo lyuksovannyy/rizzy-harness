@@ -134,6 +134,9 @@ pub(crate) struct Session {
     /// the turn's next model request, or by the next turn (X.5). Rebuilt
     /// from the log at load.
     pending: Mutex<Vec<(u64, UserMessage)>>,
+    /// The environment line the last `turn_started` recorded, by turn id,
+    /// for that turn's run to send (`TurnExtra::environment`).
+    turn_env: Mutex<Option<(String, String)>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -333,6 +336,7 @@ impl Session {
             bg_gate: tokio::sync::Mutex::new(()),
             queue: tokio::sync::Mutex::new(()),
             pending: Mutex::new(Vec::new()),
+            turn_env: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -430,6 +434,7 @@ impl Session {
             // Sent while a turn ran that a restart cut: the next turn reads
             // them (X.5).
             pending: Mutex::new(unread(&events)),
+            turn_env: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1212,7 +1217,8 @@ impl Session {
         Ok(())
     }
 
-    /// After a turn that ended `completed` or with an error, with messages
+    /// After a turn that ended `completed`, at its step limit or with an
+    /// error, with messages
     /// it never read (they came after its last step, or it failed: the
     /// message is often the fix, review ST-3; or it was a callback turn,
     /// which reads none, ST-2): a turn of the person's starts with them,
@@ -1226,7 +1232,10 @@ impl Session {
         agent: Option<AgentSpec>,
         after: TurnExtra,
     ) {
-        while matches!(reason, TurnEndReason::Completed | TurnEndReason::Error) {
+        while matches!(
+            reason,
+            TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
+        ) {
             let Some((turn_id, user_text, history, extra, cancel, by_stop)) =
                 self.start_queued(agent.as_ref(), after.clone()).await
             else {
@@ -1458,11 +1467,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(&turn_id).await;
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
                 agent: agent.as_ref().map(AgentSpec::agent_ref),
                 cause: Some(cause.clone()),
+                environment,
             }))
             .await
         {
@@ -1542,11 +1553,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(turn_id).await;
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: turn_id.into(),
+                environment,
             }))
             .await;
         drop(gate);
@@ -1645,6 +1658,40 @@ impl Session {
             // Ends queued while it ran are recorded after it.
             self.bg_flush.notify_one();
         }
+    }
+
+    /// The environment line for turn `turn_id` (`crate::environment`),
+    /// composed now, before its `turn_started` records it, and kept for
+    /// the turn's run: the node's clock, OS, shell and the repository's
+    /// `HEAD`, read in the instruction files' bound. `None` for a chat or
+    /// a folder that fails its check.
+    async fn environment_line(&self, turn_id: &str) -> Option<String> {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic {
+            return None;
+        }
+        let dir = self.checked_folder().ok()?;
+        let granted = match &self.owned {
+            Some(o) => o.top.clone(),
+            None => self.node.cfg.policy.root_of(&dir).ok()?,
+        };
+        let protected = self.node.cfg.policy.protected_dirs.clone();
+        let now = jiff::Zoned::now();
+        let read = ins::bounded(
+            move || crate::environment::repo(&dir, &granted, &protected),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await;
+        let repo = match read {
+            Bounded::Done(r) => crate::environment::Looked::Read(r),
+            Bounded::TimedOut => crate::environment::Looked::TimedOut,
+            Bounded::Cancelled | Bounded::Failed(_) => crate::environment::Looked::Failed,
+        };
+        let line = crate::environment::line(&now, &repo);
+        *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((turn_id.to_string(), line.clone()));
+        Some(line)
     }
 
     /// `extra` with the repository's instruction files
@@ -1792,7 +1839,7 @@ impl Session {
         }
 
         let extra_cause_none = extra.cause.is_none();
-        let extra = self
+        let mut extra = self
             .with_instructions(
                 extra,
                 agent.as_ref(),
@@ -1801,6 +1848,15 @@ impl Session {
                 &cancel,
             )
             .await;
+        // The environment line this turn's `turn_started` recorded: the
+        // message is sent with exactly what the log rebuilds it with.
+        extra.environment = self
+            .turn_env
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .filter(|(t, _)| *t == turn_id)
+            .map(|(_, l)| l);
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();
