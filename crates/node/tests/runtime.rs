@@ -1423,6 +1423,22 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         "{}",
         result.output
     );
+    // The harness's note, not a quoted line of the child's report.
+    let lines: Vec<&str> = result.output.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("[the sub-agent stopped because its session log")),
+        "{}",
+        result.output
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.starts_with("| ") && l.contains("log could not")),
+        "{}",
+        result.output
+    );
 }
 
 /// `git -C dir args...`, with an identity; panics unless it succeeds.

@@ -200,7 +200,7 @@ describe("sub-agent status", () => {
       expect(html).toContain(`<a class="child-link" href="#/s/${id}">Open @scout session</a>`);
       expect(shown(html)).toEqual([cls, status]);
     }
-    const ended = report("failed (its turn ended: cancelled without a `finish` call)", "(It wrote no report.)");
+    const ended = report("failed (its turn ended without a `finish` call: cancelled)", "(It wrote no report.)");
     expect(shown(card(delegate({ ok: false, output: ended, exit_code: null })))).toEqual(["failed", "failed"]);
   });
 

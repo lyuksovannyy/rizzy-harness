@@ -325,6 +325,17 @@ async fn a_sub_agent_gets_the_files_too() {
     let master = context.find("Person: Ann").expect(&context);
     assert!(files < master, "{context}");
     assert!(child.contains("\n| Person: Ann\n"), "{child}");
+    // The frame says a task follows, not the person's message (SB-4).
+    assert!(
+        child.contains("The task from the agent that delegated to you follows the empty line."),
+        "{child}"
+    );
+    assert!(!child.contains("the person's message"), "{child}");
+    let parent = n.requests()[0].clone();
+    assert!(
+        parent.contains("Their message follows the empty line."),
+        "{parent}"
+    );
 }
 
 /// A URL that is only in `AGENTS.md` is not URL provenance: `web_fetch`
