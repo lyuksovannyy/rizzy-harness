@@ -165,6 +165,12 @@ pub struct TurnExtra {
     /// sent after the history, not in the system prompt, so the cached
     /// prefix stays the same from turn to turn. Never stored.
     pub context: Option<String>,
+    /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), read
+    /// by the node at the start of this turn. Set only by the node, never
+    /// from the protocol. Sent after the history like `context`, in front
+    /// of it; a callback turn, which takes no `context`, gets them after
+    /// its opening. Never stored.
+    pub instructions: Option<String>,
     /// A delegated sub-task's parent book: its labels continue the parent's
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
     /// `None` means the book comes from this session's own log.
