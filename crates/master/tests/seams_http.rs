@@ -108,8 +108,7 @@ async fn start() -> T {
         }),
     );
     master.set_memory(Arc::new(SqliteMemory::open_in_memory().unwrap()));
-    let (link, chat_node) =
-        fake_node("master", &["profile:chat", harness_protocol::CAP_REMEMBER]);
+    let (link, chat_node) = fake_node("master", &["profile:chat", harness_protocol::CAP_REMEMBER]);
     master.add_link(link, true).await.unwrap();
     let (bare, _) = fake_node("bare", &[]);
     master.add_link(bare, false).await.unwrap();
