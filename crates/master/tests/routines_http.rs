@@ -1867,3 +1867,79 @@ async fn a_run_whose_turn_never_started_is_interrupted_uncounted() {
     assert!(!evs.iter().any(|e| e["kind"] == "turn_started"), "{evs:?}");
     drop(t);
 }
+
+/// N.10a part 2: a routine fires at its owner's level on the day it fires,
+/// not the day it was made. Bob makes an agentic routine while his
+/// account's ceiling is `sandbox` (a routine's chat is always `sandbox`);
+/// his ceiling is lowered to `none`; the next run is blocked with the
+/// reason and makes no chat. Raised again, it runs.
+#[tokio::test]
+async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
+    use harness_node::exec::ExecOffers;
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path()).await;
+    let (alex, _) = alex(&t).await;
+    let node = NodeRuntime::start(NodeConfig {
+        node_id: "node-both1".into(),
+        hostname: "node-both1".into(),
+        policy: NodePolicy {
+            workspace_roots: vec![t.root.clone().into()],
+            exec: ExecOffers::new(Ok(()), Ok(()), vec![]),
+            ..Default::default()
+        },
+        store: Store::open_in_memory().unwrap(),
+        backend: Arc::new(NativeBackend::new(
+            Arc::new(Mock {
+                delay: Duration::from_millis(5),
+            }),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        )),
+        default_model: "mock".into(),
+        secrets: Default::default(),
+        profile: Profile::Agentic,
+        incognito_ttl: None,
+        checkpoints_dir: None,
+        git_sandbox: None,
+        artifacts: None,
+    })
+    .await
+    .unwrap();
+    t.master.add_link(node.attach().await, false).await.unwrap();
+    let (bob, bob_id) = account(&t, &alex, "bob", true).await;
+    let ceiling = |level: &'static str| {
+        let (t, alex, path) = (&t, alex.clone(), format!("/api/users/{bob_id}/exec-ceiling"));
+        async move {
+            let (st, v) =
+                req(t, Method::PUT, &path, Some(json!({ "level": level })), &alex).await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+        }
+    };
+    ceiling("sandbox").await;
+    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "hello",
+                      "node_id": "node-both1", "cwd": t.root});
+    let id = routine(&t, &bob, None, "Nightly", spec, every(60)).await;
+    ceiling("none").await;
+    let run = started(&t, &bob, &id).await;
+    let v = wait_status(&t, &bob, &id, &run, "blocked").await;
+    assert!(
+        v["reason"]
+            .as_str()
+            .unwrap()
+            .contains("your account's level is none"),
+        "{v}"
+    );
+    assert_eq!(v["session_id"], Value::Null, "{v}");
+    ceiling("sandbox").await;
+    let (st, v) = req(
+        &t,
+        Method::PATCH,
+        &format!("/api/routines/{id}"),
+        Some(json!({"enabled": true})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let run = started(&t, &bob, &id).await;
+    wait_status(&t, &bob, &id, &run, "completed").await;
+}
