@@ -116,6 +116,7 @@ fn earlier(sid: SessionId, m: UserMessage) -> Vec<RawEvent> {
                 turn_id: m.turn_id.clone(),
                 agent: None,
                 cause: None,
+                environment: None,
             }),
         ),
         ev(sid, 2, EventKind::UserMessage(m.clone())),

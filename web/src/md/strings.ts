@@ -140,6 +140,7 @@ const en = {
   "ui.turn.error": "turn failed",
   "ui.turn.interrupted": "turn interrupted",
   "ui.turn.stopped": "node stopped",
+  "ui.turn.limit": "step limit reached: reply to carry on",
 } as const;
 
 export type RichKey = keyof typeof en;

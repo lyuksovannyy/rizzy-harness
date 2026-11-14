@@ -1216,6 +1216,12 @@ async fn finalize(m: &Master, b: &Bound, end: &Value) {
         Some("completed") => ("completed", None),
         Some("cancelled") => ("cancelled", Some("the turn was cancelled".to_string())),
         Some("interrupted") => ("interrupted", Some("the turn was interrupted".to_string())),
+        // A run is unattended: a turn cut by its step budget did not
+        // finish its work, whatever it said at the end.
+        Some("limit") => (
+            "error",
+            Some("the turn used all its steps (`max_steps` in node.toml)".to_string()),
+        ),
         // A stop, not the run's failure (review A19-2): recorded, not
         // counted, not run again by itself (R-1 to R-4).
         Some("stopped") => {

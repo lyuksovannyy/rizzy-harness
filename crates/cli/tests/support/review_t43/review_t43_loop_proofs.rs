@@ -278,6 +278,7 @@ fn history(sid: SessionId, image_name: &str) -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: t.clone(),
+            environment: None,
         }));
         push(EventKind::UserMessage(UserMessage {
             turn_id: t.clone(),

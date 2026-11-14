@@ -240,7 +240,15 @@ impl Node {
             .count()
     }
 
+    /// Each request's last user text after the node's environment line.
     fn requests(&self) -> Vec<String> {
+        self.raw_requests()
+            .iter()
+            .map(|t| harness_agent_native::provider::without_environment(t).to_string())
+            .collect()
+    }
+
+    fn raw_requests(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
     }
 }
@@ -380,4 +388,25 @@ async fn a_chat_session_gets_none() {
     assert!(sent.contains("Person: Ann"), "{sent}");
     assert!(!sent.contains("AGENTS.md"), "{sent}");
     assert!(!sent.contains("Run cargo fmt"), "{sent}");
+}
+
+/// Every agentic turn opens with the node's environment line: the node's
+/// clock and the branch from the repository's `HEAD`, read by the node (no
+/// `git` started), ahead of the context block. A sub-agent's task too.
+#[tokio::test]
+async fn every_turn_opens_with_the_node_s_environment_line() {
+    let mut n = start().await;
+    std::fs::write(n.repo.join(".git/HEAD"), "ref: refs/heads/feat/x\n").unwrap();
+    let sid = n.create(&n.repo.join("sub")).await;
+    n.turn(sid, "hello", None).await;
+    let raw = n.raw_requests().pop().expect("a request");
+    let (env, rest) = raw.split_once("\n\n").unwrap();
+    assert!(
+        env.starts_with(harness_core::backend::ENVIRONMENT_LEAD),
+        "{raw}"
+    );
+    assert_eq!(env.lines().count(), 1, "{env}");
+    assert!(env.contains("the node's clock reads "), "{env}");
+    assert!(env.contains("on branch \"feat/x\""), "{env}");
+    assert!(rest.starts_with(CONTEXT_LEAD), "{rest}");
 }

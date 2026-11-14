@@ -45,6 +45,17 @@ impl RetryPolicy {
         }
     }
 
+    /// How many retries a failure like `e` gets: the policy's, except that
+    /// a provider that went silent has already cost a whole timeout, so it
+    /// gets one more try and then the fallbacks or the error (review M4).
+    /// The `model_retry` event's "of" is this number.
+    pub fn retries_for(&self, e: &ProviderError) -> u32 {
+        match e {
+            ProviderError::Silent(_) => self.retries.min(1),
+            _ => self.retries,
+        }
+    }
+
     /// The wait before retry number `n` (from 0) after `e`; `None` when `e`
     /// is not worth retrying or the retries are used up. The provider's
     /// `Retry-After` wins over the backoff. When it is longer than `max`
@@ -52,7 +63,7 @@ impl RetryPolicy {
     /// again and count against the provider's limit, so the caller falls
     /// back to another model or ends the turn (`explain`).
     pub fn delay(&self, e: &ProviderError, n: u32) -> Option<Duration> {
-        if n >= self.retries || !e.is_retryable() {
+        if n >= self.retries_for(e) || !e.is_retryable() {
             return None;
         }
         Some(match e.retry_after() {
@@ -125,9 +136,12 @@ pub fn reason(e: &ProviderError) -> RetryReason {
             status: 503 | 529, ..
         } => RetryReason::Overloaded,
         ProviderError::Status { .. } => RetryReason::ServerError,
-        ProviderError::Http(_) | ProviderError::Stream(_) | ProviderError::UnknownModel(_) => {
-            RetryReason::Network
-        }
+        // A provider that went silent (the idle timeout) reads as the
+        // network to a person: nothing arrived.
+        ProviderError::Http(_)
+        | ProviderError::Stream(_)
+        | ProviderError::Silent(_)
+        | ProviderError::UnknownModel(_) => RetryReason::Network,
     }
 }
 
@@ -185,6 +199,10 @@ mod tests {
         }
         assert!(p.delay(&ProviderError::Http("refused".into()), 0).is_some());
         assert!(p.delay(&ProviderError::Stream("cut".into()), 0).is_some());
+        // Silence: once, not three times.
+        let silent = ProviderError::Silent("quiet".into());
+        assert!(p.delay(&silent, 0).is_some());
+        assert!(p.delay(&silent, 1).is_none());
         assert!(
             p.delay(&ProviderError::UnknownModel("x".into()), 0)
                 .is_none()

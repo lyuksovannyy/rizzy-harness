@@ -25,6 +25,7 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
+import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
 import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
@@ -631,7 +632,9 @@ export default function Conversation(props: {
                       undo
                     ) : (
                       <div key={i}>
-                        <div className={`divider r-${it.reason}`}>turn {it.reason}</div>
+                        <div className={`divider r-${it.reason}`}>
+                          {it.reason === "limit" ? rt("ui.turn.limit") : `turn ${it.reason}`}
+                        </div>
                         {undo}
                       </div>
                     );
