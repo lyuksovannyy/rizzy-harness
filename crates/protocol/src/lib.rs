@@ -46,6 +46,13 @@ pub const CAP_BACKGROUND: &str = "background";
 /// The master resumes chats only on nodes whose hello listed it.
 pub const CAP_CALLBACK: &str = "callback";
 
+/// The node capability that says it offers `remember` to its sessions
+/// (registered there and not in its `denied_tools`). The tool runs nothing
+/// on the node; the master files a mirrored call as a proposal only from a
+/// node whose hello listed this, and tells the model about the tool only
+/// in chats on such a node.
+pub const CAP_REMEMBER: &str = "remember";
+
 /// The node capability that says it runs sessions of an execution mode
 /// (N.10a): `exec:sandbox`, `exec:host`. Announced from the node's own
 /// self-test and `[execution]` at start; what the UI offers and names. The

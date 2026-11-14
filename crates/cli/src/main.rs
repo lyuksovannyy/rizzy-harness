@@ -660,14 +660,16 @@ async fn agentic_node(
     Ok((rt, graphify))
 }
 
-/// The tools an agentic node registers: the built-in ones and
-/// `graph_query`. Each turn offers those its agent allows; node policy
-/// still gates every call.
+/// The tools an agentic node registers: the built-in ones, `graph_query`
+/// and `remember` (it runs nothing here: the master files the mirrored call
+/// as a proposal the person confirms; `denied_tools` turns it off). Each
+/// turn offers those its agent allows; node policy still gates every call.
 fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harness_tools::ToolSet {
     let mut tools = harness_tools::builtin();
     tools.push(Arc::new(harness_tools::graphify::GraphQuery::new(
         graphify.clone(),
     )));
+    tools.push(Arc::new(harness_memory::Remember));
     tools
 }
 
