@@ -38,6 +38,8 @@ pub struct NodePolicy {
     /// ceiling. What it offers is decided at start, from this and its own
     /// self-test ([`Self::exec`]).
     pub execution: ExecutionPolicy,
+    /// Skills (`[skills]`, ADOPTION_PLAN X.2).
+    pub skills: SkillsPolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -75,6 +77,62 @@ pub struct SandboxPolicy {
     /// Where bubblewrap is, absolute; taken as given. Without it, the first
     /// `bwrap` on `PATH` that this user cannot replace (owned by root).
     pub bwrap: Option<PathBuf>,
+}
+
+/// `[skills]` in node.toml (ADOPTION_PLAN X.2, PLAN.md T46): where the
+/// node looks for skill folders. `denied_tools = ["skill"]` turns skills
+/// off altogether. Nothing the master sends can change it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsPolicy {
+    /// Read the skills of the session's repository (`.agents/skills` and
+    /// `.claude/skills` from its top down to the session folder).
+    pub repository: bool,
+    /// The node owner's skill folders, absolute or under `~/` (the node
+    /// user's home). By default `~/.agents/skills` and `~/.claude/skills`,
+    /// where other harnesses keep personal skills. Every session on this
+    /// node can read the skills in them.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Default for SkillsPolicy {
+    fn default() -> Self {
+        Self {
+            repository: true,
+            roots: vec!["~/.agents/skills".into(), "~/.claude/skills".into()],
+        }
+    }
+}
+
+impl SkillsPolicy {
+    /// [`Self::roots`] with `~/` expanded; an entry that is neither
+    /// absolute nor under `~/` (or `~/` without a home) is an error.
+    pub fn roots(&self) -> Result<Vec<PathBuf>, String> {
+        let home = dirs::home_dir();
+        self.roots
+            .iter()
+            .map(|p| {
+                let p = match (p.strip_prefix("~"), &home) {
+                    (Ok(rest), Some(h)) => h.join(rest),
+                    (Ok(_), None) => {
+                        return Err(format!(
+                            "[skills] roots: {} uses ~ but there is no home directory",
+                            p.display()
+                        ));
+                    }
+                    (Err(_), _) => p.clone(),
+                };
+                if p.is_absolute() {
+                    Ok(p)
+                } else {
+                    Err(format!(
+                        "[skills] roots: {} must be absolute (or start with ~/)",
+                        p.display()
+                    ))
+                }
+            })
+            .collect()
+    }
 }
 
 /// `[execution]` in node.toml (N.10a; README "Execution modes"): which
@@ -212,10 +270,11 @@ pub struct LimitsPolicy {
     pub callback_max_steps: usize,
 }
 
-/// `max_approval_mode` when node.toml does not say: the shipped ceiling,
-/// one line to change (README "Approval modes"). With `ask`, no chat on a
-/// node whose admin did not raise it runs an edit or a command unasked.
-pub const DEFAULT_MAX_APPROVAL: ApprovalMode = ApprovalMode::Ask;
+/// `max_approval_mode` when node.toml does not say: `auto`, so the owner's
+/// default for new chats (`DEFAULT_CHAT_APPROVAL`, 2026-11-14) holds on a
+/// fresh node. The node's owner lowers it in node.toml (README "Approval
+/// modes"); the node enforces it whatever the master sends.
+pub const DEFAULT_MAX_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 
 /// `[limits] callback_turns` by default, and the most it may say.
 pub const DEFAULT_CALLBACK_TURNS: usize = 3;
@@ -300,6 +359,7 @@ impl Default for NodePolicy {
             limits: LimitsPolicy::default(),
             sandbox: SandboxPolicy::default(),
             execution: ExecutionPolicy::default(),
+            skills: SkillsPolicy::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -338,6 +398,7 @@ impl NodePolicy {
     /// Values serde cannot check: `env_pass` globs, `[limits]` ranges.
     pub fn validate(&self) -> Result<(), String> {
         harness_tools::env::compile_pass(&self.env_pass)?;
+        self.skills.roots()?;
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,
@@ -539,32 +600,15 @@ impl NodePolicy {
         Ok(())
     }
 
-    /// The mode a session gets for `requested` (a create's, or a change's):
-    /// [`harness_core::policy::DEFAULT_CHAT_APPROVAL`] without one, never
-    /// above [`Self::max_approval_mode`] nor above what the chat's
-    /// execution mode allows ([`Self::allowed_mode`]).
+    /// The mode a session gets for `requested` (a create's, a change's, a
+    /// load's): [`harness_core::policy::DEFAULT_CHAT_APPROVAL`] without
+    /// one, never above [`Self::max_approval_mode`]. Nothing else limits it:
+    /// not the chat's kind, not its execution mode (the owner, 2026-11-14).
     pub fn effective_mode(&self, requested: Option<ApprovalMode>) -> ApprovalMode {
         ApprovalMode::clamp(
             requested.unwrap_or(harness_core::policy::DEFAULT_CHAT_APPROVAL),
             self.max_approval_mode,
         )
-    }
-
-    /// The loosest mode a session of `exec` may have here: node.toml's
-    /// ceiling, and a `host` chat's own limit (review N-e).
-    pub fn allowed_mode(&self, exec: Option<harness_core::policy::ExecMode>) -> ApprovalMode {
-        exec.map_or(self.max_approval_mode, |e| {
-            self.max_approval_mode.min(e.max_approval())
-        })
-    }
-
-    /// [`Self::effective_mode`] within [`Self::allowed_mode`].
-    pub fn session_mode(
-        &self,
-        requested: Option<ApprovalMode>,
-        exec: Option<harness_core::policy::ExecMode>,
-    ) -> ApprovalMode {
-        self.effective_mode(requested).min(self.allowed_mode(exec))
     }
 }
 
@@ -700,23 +744,26 @@ mod tests {
         }
     }
 
+    /// The node's ceiling is enforced whatever the master asks; a fresh
+    /// node allows `auto` and a new chat starts in it (the owner,
+    /// 2026-11-14).
     #[test]
     fn master_cannot_loosen() {
         let p = NodePolicy::default();
-        assert_eq!(
-            p.effective_mode(Some(ApprovalMode::Auto)),
-            ApprovalMode::Ask
-        );
-        assert_eq!(p.effective_mode(None), ApprovalMode::Ask);
-        let loose = NodePolicy {
-            max_approval_mode: ApprovalMode::Auto,
+        assert_eq!(p.max_approval_mode, ApprovalMode::Auto);
+        assert_eq!(p.effective_mode(None), ApprovalMode::Auto);
+        let strict = NodePolicy {
+            max_approval_mode: ApprovalMode::Ask,
             ..Default::default()
         };
-        // Even a permissive node defaults to asking.
-        assert_eq!(loose.effective_mode(None), ApprovalMode::Ask);
         assert_eq!(
-            loose.effective_mode(Some(ApprovalMode::Auto)),
-            ApprovalMode::Auto
+            strict.effective_mode(Some(ApprovalMode::Auto)),
+            ApprovalMode::Ask
+        );
+        assert_eq!(strict.effective_mode(None), ApprovalMode::Ask);
+        assert_eq!(
+            strict.effective_mode(Some(ApprovalMode::AskAll)),
+            ApprovalMode::AskAll
         );
     }
 

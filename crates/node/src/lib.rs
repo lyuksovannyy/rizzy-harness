@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 
 pub use git::SNAPSHOT_TIMEOUT;
 pub use outbox::Backlog;
-pub use policy::NodePolicy;
+pub use policy::{NodePolicy, SkillsPolicy};
 use session::Session;
 
 /// Commands that start new work, refused while the node stops: a session,
@@ -1163,9 +1163,8 @@ impl NodeRuntime {
             Profile::Agentic => policy.check_cwd(&cwd)?,
             Profile::Chat => std::path::PathBuf::new(),
         };
-        // Within node.toml's ceiling, and a `host` session never in `auto`,
-        // whatever was asked (review N-e, T48).
-        let mode = policy.session_mode(approval_mode, exec_mode);
+        // Within node.toml's ceiling, whatever was asked (T48).
+        let mode = policy.effective_mode(approval_mode);
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())
@@ -1340,6 +1339,8 @@ impl NodeRuntime {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&sid);
+        // What the backend keeps for it in memory (the file tools' record).
+        self.inner.cfg.backend.forget_session(sid);
         // The session's sandbox temp folder (TMPDIR) goes with it.
         if let Some(root) = &self.inner.cfg.policy.sandbox_tmp {
             let _ = std::fs::remove_dir_all(root.join(sid.to_string()));

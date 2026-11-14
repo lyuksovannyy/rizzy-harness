@@ -126,6 +126,17 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+A chat is titled from its first message. The pencil next to the title in the
+chat's header renames it (Enter saves, Escape cancels; at most 200
+characters, control and hidden characters dropped); only you can rename your
+chats, and the new title is what the list and search show. The download
+button next to it saves the chat as a Markdown file: your messages, the
+answers, and each tool call as one line (tick **Include tool outputs** for
+their full output). The file is made in your browser from what the chat
+shows; nothing is fetched for it. It holds the model's text as the model
+wrote it, so a Markdown viewer that renders raw HTML or loads remote images
+will do so for that text.
+
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:
 Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
@@ -719,43 +730,42 @@ moment, or cancel the other chat, and try again.
 without a click. The picker in the composer shows it and offers three, each
 with one line saying what runs unasked:
 
-- **Ask** (the default): every command, write, edit and publish waits on a
-  card. Reads, searches and the task list never ask.
+- **Auto** (the default for every new chat, sandbox and host alike, and for
+  routines that set none): nothing asks. In a sandbox chat the sandbox is
+  the boundary (its own processes, its own file view). **In a host chat on
+  Auto every command runs as the node's own user, with no sandbox and no
+  question asked**: nothing stands between an agent that a web page or a
+  file has steered and the machine. The picker says so on that line.
 - **Accept edits**: `write` and `edit` of a file inside the chat's own folder
   run without a card; they are checkpointed and the turn's Undo takes them
   back. A path out of the folder (`../x`, an absolute path elsewhere, a link
   that leads out or dangles), anything in `.git`, every command, every
   publish and every other tool still ask. The node judges the path, from
   the call itself, as the file tool resolves it.
-- **Auto**: nothing asks. Only in a sandbox chat: safety then rests on the
-  sandbox (its own processes, its own file view), as with Codex's default.
-  A host chat never runs in Auto (see "Execution modes"); it may use Accept
-  edits, since edits go through the node's own file tools in both modes and
-  every command still asks.
+- **Ask**: every command, write, edit and publish waits on a card. Reads,
+  searches and the task list never ask.
 
-Pick it for a new chat beside its folder, or change it in the open chat at
-any time; the chat shows each change. A lower mode applies from the agent's
-next call; a card already waiting stays waiting until you answer it. Only the
-chat's owner can change it (nobody else, admins included, can see the chat),
-with the execution level the chat needs. The node decides: it clamps every
-request to its own `max_approval_mode` and the chat's execution mode, records
-the result in the chat's log (so a restart and every open tab show it), and
-clamps it again after a restart if node.toml was tightened meanwhile. A choice
-the node does not allow is shown disabled with the reason. Nothing the agent
-writes, no tool output and no sub-agent can change it: a sub-agent never runs
-above the chat that started it, as that chat's mode is now, so lowering the
-chat also lowers a sub-agent that is working. A sub-agent's chat and a
-routine's chat cannot be switched (a routine keeps its own setting, which is
-Ask or ask every call).
+These defaults are the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc...". Pick another mode for a new chat beside its
+folder, or change it in the open chat at any time; the chat shows each change.
+A lower mode applies from the agent's next call; a card already waiting stays
+waiting until you answer it. Only the chat's owner can change it (nobody else,
+admins included, can see the chat), with the execution level the chat needs.
+Nothing the agent writes, no tool output and no sub-agent can change it: a
+sub-agent never runs above the chat that started it, as that chat's mode is
+now, so lowering the chat also lowers a sub-agent that is working. A
+sub-agent's chat and a routine's chat cannot be switched (a routine sets its
+own mode in its editor). A routine run that holds a webhook's data always
+asks, whatever the routine's mode: whoever can send the webhook writes into
+its prompt.
 
-**What allows it today.** The shipped `node.toml` default is
-`max_approval_mode = "ask"`, so out of the box no chat runs an edit or a
-command unasked, and the picker shows Accept edits and Auto disabled. The
-node's admin allows them with one line in that node's `node.toml`:
-`max_approval_mode = "accept_edits"` (Accept edits) or
-`max_approval_mode = "auto"` (both; host chats still stop at Accept edits),
-then restarts the node. A new chat starts in Ask unless the person picks
-another mode.
+**The node decides.** Each node clamps every mode it is sent to its own
+`max_approval_mode` in `node.toml`, records the result in the chat's log (so a
+restart and every open tab show it), and clamps it again after a restart if
+node.toml was tightened meanwhile. A fresh `node.toml` allows `auto`. A node's
+owner lowers it with one line, `max_approval_mode = "ask"` (or
+`"accept_edits"`), then restarts the node: from then on every chat there,
+sandbox and host, runs at most at that mode whatever anyone picks, and the
+picker shows the higher modes disabled with the reason.
 
 **Approving a call.** In `ask` mode a command, a write, an edit or a publish
 waits on a card that shows the whole call: every argument, the full path (and
@@ -793,7 +803,7 @@ Every turn also checks the folder against `workspace_roots` again, so
 narrowing node.toml applies to existing chats.
 
 ```toml
-max_approval_mode = "ask"            # ask_all | ask | accept_edits | auto (see "Approval modes")
+max_approval_mode = "auto"           # ask_all | ask | accept_edits | auto: the most any chat here may use (see "Approval modes")
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
@@ -822,6 +832,10 @@ write = []                           # more read-write folders, e.g. "~/.cache"
 [execution]
 sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
 host = false                         # offer the host shell: commands as this OS user, no sandbox. Read "Execution modes" first
+
+[skills]
+repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
+roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
 ```
 
 **Execution modes.** Each agentic chat runs its commands in one mode,
@@ -849,10 +863,13 @@ names it):
   `systemd-run --user`) to run anything with every right of the user, its
   keys and other projects included. Treat it as a shell on this machine
   that a web page the agent reads can steer: the approval card is then the
-  only check, so a `host` chat always asks for commands (it never runs in
-  approval mode `auto`, whatever is asked or `max_approval_mode` allows;
-  `accept_edits` at most), and its card
-  says the command runs in the host shell. Run such a node as a dedicated
+  only check, and only in Ask. **A host chat may run in Auto, and new chats
+  start in Auto** (the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc..."): then every command runs as this node's
+  user with no question asked, and nothing stands between a steered agent
+  and the machine. The warning shown when you choose the host shell says
+  so. A node's owner who does not want that sets `max_approval_mode = "ask"`
+  in its `node.toml`. A card in a host chat says the command runs in the
+  host shell. Run such a node as a dedicated
   OS user that holds nothing else.
 
 A new chat is in the sandbox mode unless `host` is asked for by name: a
@@ -1469,6 +1486,39 @@ Cancelling a turn stops any tool: one that does not return by itself
 within 2 seconds is abandoned. A slow undo or delete in one chat never
 delays Stop or an approval answer, in that chat or any other.
 
+**Editing files.** The agent changes only files it has seen in this chat:
+
+- `edit`, and `write` over an existing file, need the file to have been
+  read with `read` in this chat (any part of it). A new file needs
+  nothing. The agent's own edits and writes count as seen. Viewing a file
+  with `cat` in `bash` does not count.
+- If the file changed on disk since then (you edited it, a command or a
+  formatter did, another chat did), `write` is refused, and `edit` goes
+  ahead only when the text it replaces lies outside the lines that
+  changed; the result then shows those lines as they are now. Otherwise it
+  is refused and shows the changed lines, and the agent reads again. This
+  is decided against the text the agent was shown, kept in memory on the
+  node (files up to 512 KiB, 8 MiB in all; at most 4,096 files remembered
+  per node); after a node restart, or for a larger file, any change means
+  "read it again". What the agent has read is stored with each call in the
+  chat's log, so a restart does not make it read everything again. A
+  sub-agent has its own record; deleting a chat drops it.
+- `edit` takes one replacement (`old_string`, `new_string`, `replace_all`)
+  or several in `edits`, matched against the file as it was before the
+  call, all made or none. Text that does not match exactly is still found
+  when, on whole lines, it differs only in trailing whitespace or in
+  typographic quotes, dashes and spaces, and the result says so (the
+  file's own quotes and dashes are kept where the agent did not change
+  them); indentation must match. A line-number prefix copied from `read` output
+  is taken off. When nothing matches, the agent is shown the nearest lines
+  of the file, or told the change seems to be made already.
+- The result lists the changed lines, numbered as `read` numbers them,
+  with two lines around each. Line endings (CRLF), a byte-order mark and a
+  missing final newline are kept.
+- `read` returns up to 2,000 lines (400 with bounded reads) and about
+  29,000 characters; a longer window ends early at a whole line and names
+  the offset to go on from.
+
 ### Token savings
 
 Settings → Server → Token savings switches each method on or off; it is
@@ -1584,6 +1634,92 @@ request the provider caches: about 1k tokens a message for a typical
 `AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
 the next (the steps within one message do reuse it). Moving them to a cached
 place is for later (with X.1).
+
+## Skills
+
+A skill is a folder with a `SKILL.md` that the agent loads only when a task
+calls for it: the format Claude Code, Codex, OpenCode, Pi, Cursor and others
+read (the Agent Skills format), so folders you already have work as they are.
+
+```markdown
+---
+name: release
+description: Cut a release of this project: bump the version, tag, write the notes.
+---
+1. Run `scripts/bump.sh <version>` from this folder.
+2. ...
+```
+
+`name` (letters, digits, `.`, `_`, `-`, at most 64; the folder's name when
+left out, or when the given one is not such a name) and `description` (what
+it is for and when to use it; the first paragraph of text when left out) are
+what the agent sees. Front matter that is not strict YAML, such as an
+unquoted `description: Use when: ...`, is read line by line, as other harnesses
+accept it; the rest of the file
+is what it reads when it loads the skill. `disable-model-invocation: true`
+keeps a skill out of the agent's list: it is loaded only when you ask for it
+(below). Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
+ignored: a skill never widens what the agent may do. Files beside `SKILL.md`
+(scripts, references, templates) are read when the skill says so.
+
+**Where the node looks**, at the start of every message of an agentic chat:
+`.agents/skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` in each
+folder from the top of the chat folder's git repository down to the chat's
+folder (as for `AGENTS.md`), and in the folders `[skills] roots` names in
+`node.toml` (by default `~/.agents/skills` and `~/.claude/skills`). When two
+skills have one name, this machine's folders win over the repository (a
+repository cannot stand in for your own `deploy`), and within the repository
+the folder nearest the chat's folder wins; the node logs what it left out.
+`[skills] repository = false` reads only this machine's folders;
+`denied_tools = ["skill"]` turns skills off.
+
+**What the agent gets.** After the instruction files, in the same block, a
+list of the skills: one line each, `- name: description`, sorted by name, at
+most 150 skills and 8,000 characters (or about 2% of the model's context
+window when that is smaller and known). When they do not fit, descriptions
+are shortened to 120 characters, then skills are left out, with a note saying
+how many; the `skill` tool lists every name when asked for one it does not
+know. The cap never goes below room for about ten skills. A skill folder whose
+`SKILL.md` could not be used (no description, a link out of its folder, ...) is
+named in a line under the list; the node's log says why. Looking for skills
+has its own 5-second limit, after the instruction files, so a slow skill
+folder costs only the list. Like the instruction files, the list is read again every message and
+survives compacting. The agent loads a skill with the `skill` tool: it gets the
+`SKILL.md` without its front matter (cut at 24 KiB with a note), the skill
+folder's path, and the names of the files beside it, which it reads with the
+same tool (`file`) or, inside the chat's folder, with its usual tools. When a
+long chat is summarised, the summary names the skills the work still follows
+so the agent can load them again. The Software Developer, Senior Teamlead,
+Writer, Reviewer and Scout have the tool, as do custom agents that read or edit
+files or run commands; the Assistant and the Researcher do not. A sub-agent
+with the tool gets the list too.
+
+**Asking for one.** A message of yours that starts with `/name` (a skill's
+name, then your text; `/name:` works too) asks the agent to load that skill
+first, a manual one included. A task one agent hands another never does.
+There is no menu for it yet.
+
+**What a skill can do: nothing by itself.** Nothing in a skill runs when it is
+found or loaded (no `` !`command` `` expansion); a script it names runs only
+when the agent runs it with `bash`, under the chat's execution mode and its
+approval like any other command. The folders in `[skills] roots` (their real
+paths, a root that is a link resolved) are readable, never writable, in the
+shell of a chat whose agent has the `skill` tool, so a script beside a skill
+from this machine runs in the sandbox too; chats whose agent lacks the tool do
+not see them. The list is quoted to the model like `AGENTS.md`; a loaded body
+is a tool result, like a file the agent reads. Neither changes a setting,
+permission or tool, and a link only in them is not fetched.
+Only regular files are read: a repository's skill folder must lie inside the
+repository (the chat folder's own skills inside the chat folder), and a
+skill's files inside the skill's folder; links out of them, into the node's
+data directory, FIFOs and devices are refused and logged. This machine's skill
+folders may be links anywhere outside the data directory. On a node other
+people's chats use, they can read the skills in `[skills] roots`: keep secrets
+out of them, or set `roots = []`.
+
+**Cost:** about 25 tokens per listed skill with every message, up to the cap
+(about 2k tokens), sent fresh like the instruction files; a body costs only
+when it is loaded.
 
 ## Rich messages
 
@@ -1860,7 +1996,7 @@ install -m 0755 rizzy-harness /usr/local/bin/rizzy-harness    # the same binary 
 
 ```toml
 # This node decides what the master may do here.
-max_approval_mode = "ask"
+max_approval_mode = "auto"   # the default; "ask" makes every chat here ask
 workspace_roots = ["/home/rizzy-harness/work"]
 ```
 

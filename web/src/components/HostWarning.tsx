@@ -68,13 +68,14 @@ export function HostWarning(props: {
         </ul>
         {g ? (
           <p>
-            The approval card is then the only check: such a chat always asks before a command that can change things.
-            Lowering the level later stops their host chats at once.
+            The approval card is then the only check, and only in Ask: in Auto (the default for new chats) every command
+            runs as the node's user with no question asked. Lowering the level later stops their host chats at once.
           </p>
         ) : (
           <p>
-            The approval card is then the only check, so this chat always asks before a command that can change things:
-            it never runs in auto. The mode cannot be changed once the chat exists.
+            The approval card is then the only check, and only in Ask: in Auto (the default for new chats) every command
+            runs as the node's user with no question asked. Choose Ask beside the folder, or switch the chat to it at any
+            time. The host shell itself cannot be changed once the chat exists.
           </p>
         )}
         <div className="row end">

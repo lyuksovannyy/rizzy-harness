@@ -285,15 +285,18 @@ export function RoutineEditor(props: {
                 Approvals
                 <Seg
                   label="Approvals"
-                  value={spec.approval_mode ?? "ask"}
+                  value={spec.approval_mode ?? "auto"}
                   options={[
+                    { value: "auto", label: "Auto" },
+                    { value: "accept_edits", label: "Accept edits" },
                     { value: "ask", label: "Ask before changes" },
                     { value: "ask_all", label: "Ask before every tool" },
                   ]}
                   onChange={(v) => setSpec({ approval_mode: v })}
                 />
                 <span className="field-hint">
-                  Asks before changing files or running commands. A run waiting for you is cancelled after 24 hours.
+                  Auto runs edits and commands without asking (in a host-shell node: as the node's user, unasked); a run
+                  started by a webhook always asks. A run waiting for you is cancelled after 24 hours.
                 </span>
               </div>
             </>

@@ -50,6 +50,7 @@ async fn node(dir: &std::path::Path, id: &str) -> NodeRuntime {
         node_id: id.into(),
         hostname: "box".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![dir.join("ws")],
             ..Default::default()
         },

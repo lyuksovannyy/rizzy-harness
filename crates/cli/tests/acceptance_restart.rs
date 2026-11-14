@@ -157,7 +157,7 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     std::fs::write(
         data.join("node.toml"),
         format!(
-            "workspace_roots = [{:?}]\n",
+            "workspace_roots = [{:?}]\nmax_approval_mode = \"ask\"\n",
             dir.path().display().to_string()
         ),
     )

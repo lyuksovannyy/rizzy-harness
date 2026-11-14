@@ -15,6 +15,7 @@ async fn node(dir: &std::path::Path) -> NodeRuntime {
         node_id: "local".into(),
         hostname: "h".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![dir.into()],
             ..Default::default()
         },

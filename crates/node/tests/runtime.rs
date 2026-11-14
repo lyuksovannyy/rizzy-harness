@@ -175,6 +175,7 @@ impl Harness {
 
 fn default_policy(root: &std::path::Path) -> NodePolicy {
     NodePolicy {
+        max_approval_mode: harness_core::policy::ApprovalMode::Ask,
         workspace_roots: vec![root.into()],
         ..Default::default()
     }
@@ -361,6 +362,7 @@ async fn cancel_right_after_prompt_stops_that_turn() {
 #[tokio::test]
 async fn policy_denied_tool_never_runs() {
     let mut h = Harness::new(|root| NodePolicy {
+        max_approval_mode: harness_core::policy::ApprovalMode::Ask,
         workspace_roots: vec![root.into()],
         denied_tools: vec!["bash".into()],
         ..Default::default()
@@ -394,6 +396,7 @@ async fn policy_denied_tool_never_runs() {
 #[tokio::test]
 async fn cwd_outside_roots_is_refused() {
     let mut h = Harness::new(|root| NodePolicy {
+        max_approval_mode: harness_core::policy::ApprovalMode::Ask,
         workspace_roots: vec![root.join("ws").join("sub")],
         ..Default::default()
     })
@@ -774,6 +777,7 @@ async fn recovers_interrupted_turn_on_start() {
     let node = NodeRuntime::start(config(
         store.clone(),
         NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![dir.path().into()],
             ..Default::default()
         },
@@ -851,6 +855,7 @@ async fn sub_task_sessions_ask_no_questions() {
     };
     store.append("local", &created).unwrap();
     let policy = NodePolicy {
+        max_approval_mode: harness_core::policy::ApprovalMode::Ask,
         workspace_roots: vec![dir.path().into()],
         ..Default::default()
     };
@@ -2281,6 +2286,7 @@ async fn allow_for_this_turn_covers_the_same_command_until_the_turn_ends() {
 async fn a_policy_denied_call_cannot_be_allowed_for_the_turn() {
     let mut h = Harness::with_provider(
         |root| NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![root.into()],
             denied_tools: vec!["bash".into()],
             ..Default::default()
@@ -3482,6 +3488,7 @@ async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalM
 #[tokio::test]
 async fn a_node_that_denies_delegate_refuses_it_before_any_child_exists() {
     let mut h = Harness::new(|root| NodePolicy {
+        max_approval_mode: harness_core::policy::ApprovalMode::Ask,
         workspace_roots: vec![root.into()],
         denied_tools: vec!["delegate".into()],
         ..Default::default()

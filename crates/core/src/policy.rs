@@ -20,11 +20,11 @@ pub enum ApprovalMode {
     Auto,
 }
 
-/// The mode a new chat gets when its create names none, before the node
-/// clamps it to its ceiling and the chat's execution mode. The shipped
-/// default: one line to change (the owner's open question, README
-/// "Approval modes").
-pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Ask;
+/// The mode a new chat of every kind gets when its create names none, before
+/// the node clamps it to its own ceiling: `auto`, the owner's decision of
+/// 2026-11-14 ("default accept mode is Auto for every chat type", PLAN.md
+/// T48). No mode is limited by the chat's kind or its execution mode.
+pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 
 /// The file tools `AcceptEdits` covers, by their registered names.
 pub const EDIT_TOOLS: [&str; 2] = ["write", "edit"];
@@ -105,20 +105,6 @@ impl ExecMode {
 
     pub fn parse(s: &str) -> Option<ExecMode> {
         Self::ALL.into_iter().find(|m| m.id() == s)
-    }
-
-    /// The loosest approval mode a session of this mode may have (review
-    /// N-e): a `host` session never runs in `auto`, because its approval
-    /// card is the only check between a steered agent and the node's user
-    /// for every command. `accept_edits` is allowed there (T48): it lets
-    /// only `write` and `edit` inside the folder through, which run in the
-    /// node's own file tools (the same confinement in both modes, never a
-    /// shell) and are undone with the turn; every command still asks.
-    pub fn max_approval(self) -> ApprovalMode {
-        match self {
-            ExecMode::Sandbox => ApprovalMode::Auto,
-            ExecMode::Host => ApprovalMode::AcceptEdits,
-        }
     }
 }
 
@@ -287,10 +273,10 @@ mod tests {
         assert!(!AcceptEdits.needs_approval(ToolRisk::ReadOnly));
         assert!(AcceptEdits.accepts_edits() && Auto.accepts_edits());
         assert!(!Ask.accepts_edits() && !AskAll.accepts_edits());
-        // A host chat: never auto, at most accept edits.
-        assert_eq!(ExecMode::Host.max_approval(), AcceptEdits);
-        assert_eq!(ExecMode::Sandbox.max_approval(), Auto);
-        assert_eq!(DEFAULT_CHAT_APPROVAL, Ask, "the shipped default");
+        assert_eq!(
+            DEFAULT_CHAT_APPROVAL, Auto,
+            "the owner's default (2026-11-14)"
+        );
     }
 
     #[test]

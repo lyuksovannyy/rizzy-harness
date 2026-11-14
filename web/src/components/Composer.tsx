@@ -851,7 +851,7 @@ export function Composer(props: {
             {worker?.max_approval && (
               <Suspense fallback={null}>
                 <ApprovalModePick
-                  value={approvalPick ?? worker.default_approval ?? "ask"}
+                  value={approvalPick ?? worker.default_approval ?? "auto"}
                   max={worker.max_approval}
                   host={hostPickable && hostFor === nodeId}
                   onChange={(m) => setApprovalFor({ node: nodeId, mode: m })}

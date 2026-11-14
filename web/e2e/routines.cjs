@@ -14,7 +14,7 @@ fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.mkdirSync(`${S}/ws`, { recursive: true });
 // A slow mock, so the run is still going when the page leaves its chat.
 fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 400\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\n`);
+fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\nmax_approval_mode = "ask"\n`);
 const URL_ = 'http://127.0.0.1:7794/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);

@@ -626,6 +626,7 @@ async fn a_new_turn_starts_a_new_count() {
             sid,
             3 + 2 * i,
             EventKind::ToolCallFinished(ToolCallFinished {
+                seen: None,
                 call_id: id,
                 ok: true,
                 output: "same".into(),
