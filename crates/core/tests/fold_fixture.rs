@@ -82,6 +82,7 @@ fn events() -> Vec<RawEvent> {
             attachments: vec![],
             reply: None,
             images: vec![],
+            queued: false,
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -278,6 +279,7 @@ fn events() -> Vec<RawEvent> {
                 width: 1280,
                 height: 720,
             }],
+            queued: false,
         }),
         EventKind::HistorySummarized(HistorySummarized {
             turn_id: "t2".into(),
@@ -328,6 +330,28 @@ fn events() -> Vec<RawEvent> {
             input: json!({"path": "CHANGELOG.md"}),
             author: Some("writer".into()),
         }),
+        // Sent while turn t2 ran (X.5): both shown where they were sent;
+        // the first read at the next step (seq 32), the second not yet.
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t2".into(),
+            text: "also bump the version".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: true,
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t2".into(),
+            text: "and tag it".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: true,
+        }),
+        EventKind::QueuedDelivered(QueuedDelivered {
+            turn_id: "t2".into(),
+            seqs: vec![32],
+        }),
         EventKind::VariantSelected(VariantSelected {
             group: "g1".into(),
             message_id: "m4".into(),
@@ -343,6 +367,7 @@ fn events() -> Vec<RawEvent> {
                 values: json!({"selected": ["o1"]}).as_object().unwrap().clone(),
             }),
             images: vec![],
+            queued: false,
         }),
         // A `publish` call and the file the node staged for it, then a
         // file the user saved, and one that could not be saved.
@@ -508,7 +533,17 @@ fn a_streamed_message_gets_its_final_blocks() {
         .filter(|i| i["type"] == "user")
         .collect();
     assert!(users[0].get("reply").is_none());
-    assert_eq!(users[2]["reply"]["block_id"], "next");
+    assert_eq!(users[4]["reply"]["block_id"], "next");
+    // Sent while a turn ran: where it was sent, read once delivered.
+    assert_eq!(
+        users[2]["queued"],
+        serde_json::json!({"seq": 32, "read": true})
+    );
+    assert_eq!(
+        users[3]["queued"],
+        serde_json::json!({"seq": 33, "read": false})
+    );
+    assert!(users[0].get("queued").is_none());
     // Images are copied as references, and left out when there are none.
     assert!(users[0].get("images").is_none());
     assert_eq!(users[1]["images"][0]["name"], "screenshot.png");

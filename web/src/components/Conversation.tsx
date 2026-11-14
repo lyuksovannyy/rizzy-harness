@@ -137,7 +137,7 @@ function fallbackNotes(items: Item[]): { byReply: Map<number, Extract<Item, { ty
   let pending: number | null = null;
   items.forEach((it, i) => {
     if (it.type === "fallback") pending = i;
-    else if (turnStart(it) || it.type === "turn_end") pending = null;
+    else if (turnStart(items, i) || it.type === "turn_end") pending = null;
     else if (it.type === "assistant" && pending !== null) {
       byReply.set(i, items[pending] as Extract<Item, { type: "fallback" }>);
       attached.add(pending);
@@ -253,7 +253,7 @@ export default function Conversation(props: {
   // Items before the running turn's user message are final even if their
   // stream was cut off (a cancelled, failed or interrupted turn leaves
   // done=false); such a message is shown as cut off.
-  const liveFrom = running ? items.findLastIndex(turnStart) : Infinity;
+  const liveFrom = running ? items.findLastIndex((_, i) => turnStart(items, i)) : Infinity;
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
   const agentic = (meta?.profile ?? props.row?.profile) === "agentic";
@@ -458,7 +458,7 @@ export default function Conversation(props: {
                 switch (it.type) {
                   case "user":
                     return (
-                      <div key={i} className="msg user">
+                      <div key={i} className={it.queued && !it.queued.read ? "msg user waiting" : "msg user"}>
                         {it.reply ? (
                           <ReplyBubble text={it.text} reply={it.reply} block={repliedBlock(view.items, it.reply)} />
                         ) : (
@@ -474,6 +474,11 @@ export default function Conversation(props: {
                           </ul>
                         )}
                         {!!it.images?.length && <BubbleImages images={it.images} />}
+                        {it.queued && !it.queued.read && (
+                          <div className="queued-mark muted" title={t("conv.queuedHint")}>
+                            {running ? t("conv.queued") : t("conv.queuedLater")}
+                          </div>
+                        )}
                       </div>
                     );
                   case "assistant": {

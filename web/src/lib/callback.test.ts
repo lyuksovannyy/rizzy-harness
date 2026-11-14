@@ -18,8 +18,8 @@ describe("callback turns", () => {
   });
 
   test("a callback starts a turn like a person's message does", () => {
-    expect(turnStart({ type: "callback", turn_id: "t", bg_ids: ["bg-1"] })).toBe(true);
-    expect(turnStart({ type: "user", turn_id: "t", text: "hi" })).toBe(true);
-    expect(turnStart({ type: "callback_refused", bg_ids: ["bg-1"], reason: "r" })).toBe(false);
+    expect(turnStart([{ type: "callback", turn_id: "t", bg_ids: ["bg-1"] }], 0)).toBe(true);
+    expect(turnStart([{ type: "user", turn_id: "t", text: "hi" }], 0)).toBe(true);
+    expect(turnStart([{ type: "callback_refused", bg_ids: ["bg-1"], reason: "r" }], 0)).toBe(false);
   });
 });

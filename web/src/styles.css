@@ -3362,6 +3362,14 @@ button.swatch:hover:not(:disabled) {
 .msg.user .chips {
   justify-content: flex-end;
 }
+/* A message sent while the turn ran, not read yet (X.5). */
+.msg.user.waiting { flex-wrap: wrap; }
+.msg.user .queued-mark {
+  flex-basis: 100%;
+  text-align: right;
+  font-size: var(--text-xs);
+  margin-top: var(--space-1);
+}
 .chip {
   display: inline-flex;
   align-items: center;

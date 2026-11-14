@@ -231,6 +231,7 @@ mod tests {
                                 ..r(i)
                             })
                             .collect(),
+                        queued: false,
                     };
                     let mut msgs = vec![user_msg(m.model_text(), &m.images)];
                     attach(&mut msgs, &[]);

@@ -132,6 +132,7 @@ fn message(turn: &str, text: &str, attachments: Vec<Attachment>) -> UserMessage 
         attachments,
         reply: None,
         images: vec![],
+        queued: false,
     }
 }
 

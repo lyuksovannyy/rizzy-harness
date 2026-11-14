@@ -216,3 +216,52 @@ describe("a chat the viewer cannot drive here", () => {
     act(() => root.unmount());
   });
 });
+
+describe("writing while the agent works", () => {
+  test("the box stays open: Enter and Send send, Stop stays", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const sent: string[] = [];
+    act(() =>
+      root.render(
+        <Composer
+          where="session"
+          agents={[]}
+          models={[]}
+          workers={[]}
+          agentId="general"
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          running
+          onStop={() => {}}
+          onSubmit={async (s) => {
+            sent.push(s.text);
+          }}
+        />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    expect(textarea.disabled).toBe(false);
+    expect(textarea.placeholder).toContain("write to add to the task");
+    // Said in words too, not only in the placeholder (review ST-10).
+    expect(host.querySelector(".composer-hint")!.textContent).toBe("Read after the current step. Stop interrupts.");
+    // Nothing typed: Stop alone.
+    expect(host.querySelector("button.stop")).not.toBeNull();
+    expect(host.querySelector('button.send:not(.stop)')).toBeNull();
+    const type = (value: string) =>
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    type("also update the README");
+    expect(host.querySelector("button.stop")).not.toBeNull();
+    expect(host.querySelector<HTMLButtonElement>('button.send:not(.stop)')!.disabled).toBe(false);
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(sent).toEqual(["also update the README"]);
+    type("and the changelog");
+    await act(async () => host.querySelector<HTMLButtonElement>('button.send:not(.stop)')!.click());
+    expect(sent).toEqual(["also update the README", "and the changelog"]);
+    act(() => root.unmount());
+  });
+});

@@ -42,7 +42,7 @@ export function progressSlots(
   view: Pick<SessionView, "running_turn" | "variant_selection">,
 ): Map<string, ProgressSlot> {
   const slots = new Map<string, ProgressSlot>();
-  const starts = items.flatMap((it, i) => (turnStart(it) ? [i] : []));
+  const starts = items.flatMap((_, i) => (turnStart(items, i) ? [i] : []));
   const spans = [0, ...starts].map((from, s, all) => [from, all[s + 1] ?? items.length] as const);
   spans.forEach(([from, to], s) => {
     if (from === to) return;

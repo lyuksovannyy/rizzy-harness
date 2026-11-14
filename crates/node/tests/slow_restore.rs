@@ -157,6 +157,7 @@ impl Link {
             session_id: sid,
             text: text.into(),
             images: vec![],
+            agent_named: false,
         });
     }
 }

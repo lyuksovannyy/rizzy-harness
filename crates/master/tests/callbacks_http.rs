@@ -204,6 +204,7 @@ fn fake_with(
                                 attachments: vec![],
                                 reply: None,
                                 images: vec![],
+                                queued: false,
                             }), now);
                             if !*held.lock().unwrap() {
                                 send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {

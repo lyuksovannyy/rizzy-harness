@@ -213,7 +213,16 @@ export interface StagedArtifact {
 }
 
 export type Item =
-  | { type: "user"; turn_id: string; text: string; attachments?: string[]; reply?: FormReply; images?: ImageRef[] }
+  | {
+      type: "user";
+      turn_id: string;
+      text: string;
+      attachments?: string[];
+      reply?: FormReply;
+      images?: ImageRef[];
+      /** Sent while a turn ran (X.5): its seq, and whether the agent has read it. */
+      queued?: { seq: number; read: boolean };
+    }
   | {
       type: "assistant";
       message_id: string;

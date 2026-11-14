@@ -357,3 +357,45 @@ describe("callback turns (T.8d step 3)", () => {
   });
 });
 
+
+describe("messages sent while the agent works (X.5)", () => {
+  test("shown where they were sent, marked until the agent reads them; the streaming reply before one is not cut", async () => {
+    const items: Item[] = [
+      { type: "user", turn_id: "t1", text: "fix the bug" },
+      { type: "assistant", message_id: "m1", text: "Looking", done: false, author: null, variant: null },
+      { type: "user", turn_id: "t1", text: "also the docs", queued: { seq: 4, read: false } },
+    ];
+    current = { ...view(items), running_turn: "t1" };
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={[]} models={[]} />));
+    const users = [...host.querySelectorAll(".msg.user")];
+    expect(users.map((u) => u.querySelector(".bubble")!.textContent)).toEqual(["fix the bug", "also the docs"]);
+    expect(users[0]!.querySelector(".queued-mark")).toBeNull();
+    expect(users[1]!.querySelector(".queued-mark")!.textContent).toBe("sent while working");
+    // Still the running turn's reply, streaming, not a cut-off one (a
+    // final message gets its copy action).
+    expect(host.querySelector(".msg.assistant")!.className).toContain("streaming");
+    expect(host.querySelector(".msg.assistant .msg-actions")).toBeNull();
+    // The composer stays open for more.
+    expect(host.querySelector("textarea")!.disabled).toBe(false);
+    // Read: the mark goes.
+    await show(
+      [items[0]!, { ...items[1]!, done: true } as Item, { type: "user", turn_id: "t1", text: "also the docs", queued: { seq: 4, read: true } }],
+      sessionRow(),
+    );
+    expect(host.querySelector(".queued-mark")).toBeNull();
+  });
+});
+
+describe("an unread message when no turn runs (review ST-3)", () => {
+  test("says it goes with the next message", async () => {
+    await show(
+      [
+        { type: "user", turn_id: "t1", text: "fix it" },
+        { type: "user", turn_id: "t1", text: "also the docs", queued: { seq: 4, read: false } },
+        { type: "turn_end", turn_id: "t1", reason: "cancelled" },
+      ],
+      sessionRow(),
+    );
+    expect(host.querySelector(".queued-mark")!.textContent).toBe("not read yet: goes with your next message");
+  });
+});

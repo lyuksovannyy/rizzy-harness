@@ -203,6 +203,7 @@ impl Node {
             session_id: sid,
             text: text.into(),
             images: vec![],
+            agent_named: false,
         });
         (sid, cwd)
     }

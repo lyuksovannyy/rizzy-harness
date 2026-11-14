@@ -173,6 +173,7 @@ fn plain(turn: &str, text: &str) -> UserMessage {
         attachments: vec![],
         reply: None,
         images: vec![],
+        queued: false,
     }
 }
 

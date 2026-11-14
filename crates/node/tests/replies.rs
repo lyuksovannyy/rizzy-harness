@@ -89,6 +89,7 @@ impl Chat {
             context: None,
             reply,
             images: vec![],
+            agent_named: false,
         });
     }
 
@@ -213,7 +214,8 @@ async fn an_answer_waits_for_the_running_turn() {
     c.prompt("slow", "slow: 200", None);
     assert_eq!(c.ack("slow").await, Ok(()));
     c.prompt("r", "", Some(reply(&asked, json!({"selected": ["red"]}))));
-    assert_eq!(c.ack("r").await, Err("a turn is already running".into()));
+    let err = c.ack("r").await.unwrap_err();
+    assert!(err.starts_with("a turn is already running"), "{err}");
 }
 
 #[tokio::test]

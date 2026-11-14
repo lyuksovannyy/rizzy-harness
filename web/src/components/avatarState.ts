@@ -13,7 +13,7 @@ export const DONE_MS = 2400;
 function asking(items: Item[]): boolean {
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]!;
-    if (turnStart(it)) return false;
+    if (turnStart(items, i)) return false;
     if (it.type === "assistant") return !!it.blocks?.some((b) => (b.type === "choices" || b.type === "form") && b.spec);
   }
   return false;
@@ -28,14 +28,14 @@ export function sessionFace(view: SessionView | undefined | null): Exclude<Avata
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i]!;
       if (it.type === "tool") return it.result ? "thinking" : "working";
-      if (it.type === "assistant" || turnStart(it)) return "thinking";
+      if (it.type === "assistant" || turnStart(items, i)) return "thinking";
     }
     return "thinking";
   }
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]!;
     if (it.type === "error" || (it.type === "turn_end" && it.reason === "error")) return "error";
-    if (it.type === "turn_end" || turnStart(it) || it.type === "assistant" || it.type === "tool") break;
+    if (it.type === "turn_end" || turnStart(items, i) || it.type === "assistant" || it.type === "tool") break;
   }
   return asking(items) ? "unsure" : "idle";
 }
