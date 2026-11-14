@@ -17,7 +17,7 @@ export interface RoutineSpec {
   effort: Effort | null;
   node_id?: string | null;
   cwd?: string | null;
-  approval_mode?: "ask" | "ask_all" | null;
+  approval_mode?: "ask" | "ask_all" | "accept_edits" | "auto" | null;
   prompt: string;
   project_id: string | null;
   catch_up: "skip" | "once";
@@ -470,7 +470,7 @@ export function draftTriggers(d: Draft): TriggerInput[] {
 
 /** The spec a draft saves: chat routines carry no node, folder or approval mode. */
 export function draftSpec(d: Draft): RoutineSpec {
-  if (d.spec.profile === "agentic") return { ...d.spec, approval_mode: d.spec.approval_mode ?? "ask" };
+  if (d.spec.profile === "agentic") return { ...d.spec, approval_mode: d.spec.approval_mode ?? "auto" };
   const { node_id: _n, cwd: _c, approval_mode: _a, ...rest } = d.spec;
   return rest;
 }

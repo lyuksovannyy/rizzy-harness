@@ -40,7 +40,7 @@ const whisper = http.createServer((req, res) => {
     'models = [{ id = "mock" }, { id = "mock-big" }]', '',
     '[voice]', `url = "http://127.0.0.1:${whisper.address().port}/v1"`, 'model = "tiny"', '',
   ].join('\n'));
-  fs.writeFileSync(`${D}/node.toml`, `workspace_roots = ["${R}"]\n`);
+  fs.writeFileSync(`${D}/node.toml`, `workspace_roots = ["${R}"]\nmax_approval_mode = "ask"\n`);
   const git = (...a) => execFileSync('git', ['-C', R, ...a], { env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   git('init', '-q');
   fs.writeFileSync(`${R}/a.txt`, 'original\n');

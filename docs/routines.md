@@ -148,8 +148,11 @@ turn") covers only that call, until the run's turn ends (each run is a new chat)
 ### The approval seam (`runner::approval_for`)
 
 **The one place a run's approval mode is chosen** is `runner::approval_for(spec, untrusted,
-node)`. In v1 it returns the spec's `ask` or `ask_all` and ignores the other two arguments; they
-are there for trusted routines (Later), which plug in here and nowhere else on the master. It is
+node)`. It returns the spec's mode: `auto` unless the routine sets its own (the owner's decision of
+2026-11-14: "default accept mode is Auto for every chat type"), except that an `untrusted` run
+(webhook data in its prompt) gets at most `ask`: whoever can send the webhook writes into its
+prompt, and in `auto` they would steer its commands with no card (PLAN.md T48; the owner is asked
+to confirm this exception). `node` is there for a trusted tool list (Later). It is
 called once per run, when the run's chat is created; the owner's later turns in that chat never go
 through it.
 
@@ -174,8 +177,9 @@ What must stay:
   uses its event, and Run now with a sample event) is untrusted, gets no allowlist, and its chat is
   marked for good: every later turn there, a delegate's chat under it, and those chats after the
   routine, its runs or the parent chat are gone. Trust is never a property of a webhook.
-- `auto` stays refused at save; `approval_mode` stays `ask`/`ask_all`, and the node still clamps it
-  (T5): the node, not the master, decides whether anything runs unattended.
+- The node still clamps the mode (T5): its `max_approval_mode` decides whether anything runs
+  unattended. Since 2026-11-14 a routine may be saved in any mode and runs in `auto` by default; an
+  untrusted run still asks.
 - Everything not on the list still parks the run in "Waiting for you" and times out after 24 hours.
 - Access is re-checked at every fire (account, membership, `routines`, and for agentic routines the
   grant and `agentic`); a refusal blocks and pauses the routine as today.

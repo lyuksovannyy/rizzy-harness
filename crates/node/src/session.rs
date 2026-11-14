@@ -371,12 +371,8 @@ impl Session {
             .clone()
             .ok_or_else(|| StoreError::Corrupt(format!("session {id} has no session_created")))?;
         // The log's latest mode (the fold applies `approval_mode_changed`),
-        // clamped again: the node policy may have been tightened since, and
-        // a `host` session never runs above its limit (review N-e).
-        let mode = node
-            .cfg
-            .policy
-            .session_mode(Some(meta.approval_mode), meta.exec_mode);
+        // clamped again: node.toml may have been tightened since.
+        let mode = node.cfg.policy.effective_mode(Some(meta.approval_mode));
         let last_state = events.iter().rev().find_map(|e| match e.typed() {
             Ok(EventKind::Checkpoint(c))
                 if !matches!(
@@ -879,7 +875,7 @@ impl Session {
             .iter()
             .map(read_mode)
             .fold(read_mode(&self.mode), ApprovalMode::min);
-        own.min(self.node.cfg.policy.allowed_mode(self.exec_mode))
+        own.min(self.node.cfg.policy.max_approval_mode)
     }
 
     /// The owner's change of the chat's approval mode (T48): clamped by
@@ -899,11 +895,7 @@ impl Session {
             return Err(MODE_ROUTINE.into());
         }
         let _change = self.mode_change.lock().await;
-        let mode = self
-            .node
-            .cfg
-            .policy
-            .session_mode(Some(requested), self.exec_mode);
+        let mode = self.node.cfg.policy.effective_mode(Some(requested));
         if mode == read_mode(&self.mode) {
             return Ok(mode);
         }

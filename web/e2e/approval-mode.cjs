@@ -1,9 +1,9 @@
-// A chat's approval mode against the real binary (T48): node.toml allows
-// `auto`; a new Agentic chat picked "Accept edits" in the composer writes a
-// file without a card and asks for a command; switched to "Ask" in the open
-// chat, the next edit asks; switched to "Auto" (a sandbox chat) a command
-// runs unasked, or, in a host chat, Auto is shown disabled with the reason;
-// a reload shows the mode from the log.
+// A chat's approval mode against the real binary (T48): a fresh node.toml
+// (no ceiling set: `auto`); a new Agentic chat starts in Auto (the owner's
+// default, 2026-11-14); picked "Accept edits" it writes a file without a
+// card and asks for a command; switched to "Ask" in the open chat, the next
+// edit asks; switched back to "Auto" a command runs unasked (sandbox or
+// host chat alike); a reload shows the mode from the log.
 // Usage: node web/e2e/approval-mode.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -17,7 +17,7 @@ fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.mkdirSync(`${S}/ws`, { recursive: true });
 fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 50\nmodels = [{ id = "mock" }]\n');
 // The host shell is a fallback only where bubblewrap does not work here.
-fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\nmax_approval_mode = "auto"\n\n[execution]\nhost = true\n`);
+fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\n\n[execution]\nhost = true\n`);
 const PORT = 7966;
 const URL_ = `http://127.0.0.1:${PORT}/`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -81,7 +81,7 @@ async function turnsEnded(p, sid, n) {
     await p.fill('.composer input.mono', `${S}/ws`);
     const local = await p.evaluate(async () => (await (await fetch('/api/nodes')).json()).nodes.find((n) => n.node_id === 'local'));
     log('node allows', local.max_approval, 'default', local.default_approval);
-    check(local.max_approval === 'auto' && local.default_approval === 'ask', 'the node announces its modes');
+    check(local.max_approval === 'auto' && local.default_approval === 'auto', 'a fresh node allows auto and starts there');
     const host = !local.exec_modes.includes('sandbox');
     if (host) {
       log('bubblewrap does not work here: the chat uses the host shell');
@@ -90,7 +90,7 @@ async function turnsEnded(p, sid, n) {
     }
     // The new chat's picker: the node's default, three choices, one line each.
     await p.waitForSelector(PICK);
-    check((await p.innerText(PICK)).includes('Ask'), 'a new chat starts at the default');
+    check((await p.innerText(PICK)).includes('Auto'), 'a new chat starts in Auto');
     await p.click(PICK);
     const box = await p.$eval('.approval-pick .select-list', (l) => l.getBoundingClientRect().toJSON());
     check(box.right <= 1280 && box.left >= 0, `the menu stays on screen: ${JSON.stringify(box)}`);
@@ -137,28 +137,25 @@ async function turnsEnded(p, sid, n) {
     await sleep(400);
     await p.screenshot({ path: `${S}/shots/approval-open-chat-menu.png` });
     await p.keyboard.press('Escape');
-    if (host) {
-      check(auto.off && auto.text.includes('host chat'), `a host chat never offers auto: ${auto.text}`);
-    } else {
-      check(!auto.off, 'a sandbox chat on this node may run in auto');
-      await choose(p, 'Auto');
-      await p.waitForSelector('.divider:has-text("Approval mode: auto")');
-      await p.fill('.composer textarea', script([['bash', { command: 'touch d.txt' }]]));
-      await p.keyboard.press('Enter');
-      await turnsEnded(p, sid, 3);
-      check(exists('d.txt'), 'under Auto the command ran unasked');
-      check((await p.$$('.approval button.danger')).length === 0, 'no card');
-    }
+    check(!auto.off, 'Auto may be chosen in every chat');
+    if (host) check(auto.text.includes("node's own user"), `a host chat's Auto says what it does: ${auto.text}`);
+    await choose(p, 'Auto');
+    await p.waitForSelector('.divider:has-text("Approval mode: auto")');
+    await p.fill('.composer textarea', script([['bash', { command: 'touch d.txt' }]]));
+    await p.keyboard.press('Enter');
+    await turnsEnded(p, sid, 3);
+    check(exists('d.txt'), 'under Auto the command ran unasked');
+    check((await p.$$('.approval button.danger')).length === 0, 'no card');
 
     // A reload folds the log: the same mode.
     await p.emulateMedia({ colorScheme: 'dark' });
     await p.reload();
     // Once the whole log is folded (its last change is on screen).
-    await p.waitForSelector(`.divider:has-text("Approval mode: ${host ? 'ask' : 'auto'}")`);
+    await p.waitForSelector('.divider:has-text("Approval mode: auto")');
     await p.waitForSelector(PICK);
     const after = await p.innerText(PICK);
     log('after a reload:', after);
-    check(after.includes(host ? 'Ask' : 'Auto'), 'the mode from the log');
+    check(after.includes('Auto'), 'the mode from the log');
     await sleep(300);
     await p.screenshot({ path: `${S}/shots/approval-after-reload-dark.png` });
 

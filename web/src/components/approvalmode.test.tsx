@@ -21,8 +21,8 @@ const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
   profile: "agentic",
   exec_modes: ["sandbox"],
   exec_gaps: [],
-  max_approval: "accept_edits",
-  default_approval: "ask",
+  max_approval: "auto",
+  default_approval: "auto",
   ...over,
 });
 
@@ -76,8 +76,8 @@ function mountHome(workers: NodeInfo[]) {
 }
 
 describe("the approval mode of a new chat", () => {
-  test("shows the node's default; a choice above its ceiling is disabled with the reason", async () => {
-    const c = mountHome([node()]);
+  test("a node whose node.toml lowers the ceiling: its default, the rest disabled with the reason", async () => {
+    const c = mountHome([node({ max_approval: "ask", default_approval: "ask" })]);
     const b = (await picker(c.host))!;
     expect(b.textContent).toContain("Ask");
     act(() => b.click());
@@ -86,6 +86,7 @@ describe("the approval mode of a new chat", () => {
     const auto = opts.find((o) => o.text.startsWith("Auto"))!;
     expect(auto.disabled).toBe(true);
     expect(auto.text).toContain("max_approval_mode");
+    expect(opts.find((o) => o.text.startsWith("Accept edits"))!.disabled).toBe(true);
     // A disabled choice picks nothing.
     act(() => auto.li.click());
     await c.send();
@@ -93,9 +94,10 @@ describe("the approval mode of a new chat", () => {
     c.unmount();
   });
 
-  test("the person's pick goes with the message, then the next chat starts at the default", async () => {
+  test("a new chat starts in Auto; the person's pick goes with the message, then the next starts in Auto", async () => {
     const c = mountHome([node()]);
     const b = (await picker(c.host))!;
+    expect(b.textContent).toContain("Auto");
     act(() => b.click());
     const edits = options(c.host).find((o) => o.text.startsWith("Accept edits"))!;
     expect(edits.disabled).toBe(false);
@@ -104,7 +106,7 @@ describe("the approval mode of a new chat", () => {
     expect((await picker(c.host))!.textContent).toContain("Accept edits");
     await c.send();
     expect(c.sent.map((s) => s.approvalMode)).toEqual(["accept_edits"]);
-    expect((await picker(c.host))!.textContent).toContain("Ask");
+    expect((await picker(c.host))!.textContent).toContain("Auto");
     c.unmount();
   });
 
@@ -145,14 +147,14 @@ function mountSession(approval: { value: ApprovalMode; max: ApprovalMode; host: 
 }
 
 describe("the approval mode of an open chat", () => {
-  test("a change asks the server; a host chat never offers auto", async () => {
-    const c = mountSession({ value: "accept_edits", max: "auto", host: true });
+  test("a change asks the server; in a host chat Auto says plainly what it does", async () => {
+    const c = mountSession({ value: "auto", max: "auto", host: true });
     const b = (await picker(c.host))!;
-    expect(b.textContent).toContain("Accept edits");
+    expect(b.textContent).toContain("Auto");
     act(() => b.click());
     const auto = options(c.host).find((o) => o.text.startsWith("Auto"))!;
-    expect(auto.disabled).toBe(true);
-    expect(auto.text).toContain("host chat");
+    expect(auto.disabled).toBe(false);
+    expect(auto.text).toContain("as the node's own user, no sandbox, with no question asked");
     act(() => options(c.host).find((o) => o.text.startsWith("Ask"))!.li.click());
     expect(c.asked).toEqual(["ask"]);
     c.unmount();

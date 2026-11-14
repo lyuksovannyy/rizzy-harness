@@ -254,7 +254,11 @@ async fn the_hello_announces_the_ceiling_and_the_default() {
         "{:?}",
         n.capabilities
     );
-    assert!(n.capabilities.contains(&"approval-default:ask".to_string()));
+    // The default is `auto`, clamped to this node's ceiling.
+    assert!(
+        n.capabilities
+            .contains(&"approval-default:accept_edits".to_string())
+    );
     // The shipped ceiling, when node.toml says nothing.
     assert_eq!(
         NodePolicy::default().max_approval_mode,
@@ -262,13 +266,15 @@ async fn the_hello_announces_the_ceiling_and_the_default() {
     );
     assert_eq!(
         harness_node::policy::DEFAULT_MAX_APPROVAL,
-        ApprovalMode::Ask
+        ApprovalMode::Auto,
+        "the owner's default (2026-11-14)"
     );
 }
 
 /// A mode above node.toml's ceiling is clamped by the node, whatever the
-/// master sends; the event says what was asked. The default ceiling
-/// (`ask`) lets nothing run unasked: an `auto` request changes nothing.
+/// master sends; the event says what was asked. A node.toml ceiling of
+/// `ask` lets nothing run unasked in any chat: an `auto` request changes
+/// nothing.
 #[tokio::test]
 async fn a_mode_above_the_ceiling_is_clamped_by_the_node() {
     let dir = tempfile::tempdir().unwrap();
@@ -308,38 +314,71 @@ async fn a_mode_above_the_ceiling_is_clamped_by_the_node() {
     assert_eq!(about(&asked), ["bash touch b.txt"]);
     assert!(!ws.join("b.txt").exists());
 
-    // The shipped ceiling: `ask`.
+    // A node whose node.toml sets `ask` clamps every chat, sandbox and
+    // host, at create and on a change, whatever the master sends.
     let dir = tempfile::tempdir().unwrap();
     let mut n = start(
         &dir.path().join("node.db"),
-        NodePolicy {
-            workspace_roots: vec![dir.path().into()],
-            exec: offers(false),
-            ..Default::default()
-        },
+        policy(dir.path(), ApprovalMode::Ask),
     )
     .await;
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
-    let sid = n.create(&ws, None, None, false).await;
-    assert_eq!(n.mode(sid), ApprovalMode::Ask);
-    n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
-    assert!(n.changes(sid).is_empty(), "nothing changed");
-    let asked = n
-        .turn(
-            sid,
-            &script(&[("write", json!({"path": "a.txt", "content": "x"}))]),
-            None,
-            deny,
-        )
-        .await;
-    assert_eq!(about(&asked), ["write a.txt"], "an edit asks under ask");
+    for exec in [ExecMode::Sandbox, ExecMode::Host] {
+        let sid = n.create(&ws, None, Some(exec), false).await;
+        assert_eq!(n.mode(sid), ApprovalMode::Ask, "{exec:?}");
+        let sid = n
+            .create(&ws, Some(ApprovalMode::Auto), Some(exec), false)
+            .await;
+        assert_eq!(n.mode(sid), ApprovalMode::Ask, "{exec:?}");
+        n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
+        assert!(n.changes(sid).is_empty(), "{exec:?}: nothing changed");
+        let asked = n
+            .turn(
+                sid,
+                &script(&[("write", json!({"path": "a.txt", "content": "x"}))]),
+                None,
+                deny,
+            )
+            .await;
+        assert_eq!(about(&asked), ["write a.txt"], "{exec:?}: an edit asks");
+    }
 }
 
-/// A host chat never runs in `auto`: refused at create and on a change,
-/// whatever node.toml allows. It may have `accept_edits`.
+/// A new chat of every kind starts in `auto` on a node that allows it (the
+/// owner's default, 2026-11-14): sandbox, host, and a create naming no
+/// execution mode. (A chat without tools records it too; it runs nothing.)
 #[tokio::test]
-async fn a_host_chat_refuses_auto() {
+async fn a_new_chat_of_every_kind_starts_in_auto() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        NodePolicy {
+            workspace_roots: vec![dir.path().into()],
+            exec: offers(true),
+            ..Default::default()
+        },
+    )
+    .await;
+    for exec in [Some(ExecMode::Sandbox), Some(ExecMode::Host), None] {
+        let sid = n.create(&ws, None, exec, false).await;
+        assert_eq!(n.mode(sid), ApprovalMode::Auto, "{exec:?}");
+    }
+    // A routine's chat too, unless the routine sets its own (the master
+    // sends it; the node takes it as any create's).
+    let sid = n.create(&ws, None, None, true).await;
+    assert_eq!(n.mode(sid), ApprovalMode::Auto);
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, true).await;
+    assert_eq!(n.mode(sid), ApprovalMode::Ask);
+}
+
+/// A host chat may run in `auto`, as every chat may (the owner,
+/// 2026-11-14): no mode is refused for the chat's execution mode; a command
+/// then runs as the node's user with no card.
+#[tokio::test]
+async fn a_host_chat_accepts_auto() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
@@ -349,16 +388,12 @@ async fn a_host_chat_refuses_auto() {
     )
     .await;
     let sid = n
-        .create(&ws, Some(ApprovalMode::Auto), Some(ExecMode::Host), false)
+        .create(&ws, Some(ApprovalMode::Ask), Some(ExecMode::Host), false)
         .await;
-    assert_eq!(n.mode(sid), ApprovalMode::AcceptEdits);
-    n.set_mode(sid, ApprovalMode::Ask).await.unwrap();
+    assert_eq!(n.mode(sid), ApprovalMode::Ask);
     n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
-    assert_eq!(n.mode(sid), ApprovalMode::AcceptEdits);
-    assert_eq!(
-        n.changes(sid).last().unwrap().requested,
-        Some(ApprovalMode::Auto)
-    );
+    assert_eq!(n.mode(sid), ApprovalMode::Auto);
+    assert_eq!(n.changes(sid).last().unwrap().requested, None);
     let asked = n
         .turn(
             sid,
@@ -370,8 +405,17 @@ async fn a_host_chat_refuses_auto() {
             deny,
         )
         .await;
-    assert_eq!(about(&asked), ["bash touch b.txt"]);
-    assert!(ws.join("a.txt").exists() && !ws.join("b.txt").exists());
+    // Nothing asked: the write ran, and the command was run with no card
+    // (whether it could run here depends on this machine's Landlock).
+    assert!(asked.is_empty(), "{:?}", about(&asked));
+    assert!(ws.join("a.txt").exists());
+    let events = n.node.store().events_after(sid, 0, 10_000).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "bash"))
+    );
+    assert!(!events.iter().any(|e| e.kind == "approval_requested"));
 }
 
 /// Accept edits covers `write` and `edit` of a file inside the chat's

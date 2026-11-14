@@ -486,15 +486,15 @@ async fn host_is_never_the_default() {
     assert!(created(&n, sid).is_none());
 }
 
-/// Review N-e: a `host` session never runs in `auto`, whatever the master
-/// asks and whatever node.toml allows: recorded as `accept_edits` at most
-/// at create (T48: every command still asks), and a log that says `auto`
-/// loads clamped (its next command waits for a card).
+/// The owner's decision of 2026-11-14 replaces review N-e's clamp: a
+/// `host` session runs in the mode asked for, `auto` included, within
+/// node.toml's ceiling, at create and after a restart (PLAN.md T48). Its
+/// card, when it has one, still says the host shell.
 #[tokio::test]
-async fn a_host_session_is_never_in_auto() {
+async fn a_host_session_takes_auto_within_the_nodes_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("node.db");
-    let (made, on_disk) = (SessionId::new(), SessionId::new());
+    let made = SessionId::new();
     {
         let mut n = start(
             &db,
@@ -510,68 +510,23 @@ async fn a_host_session_is_never_in_auto() {
         ack(&mut n).await.unwrap();
         assert_eq!(
             created(&n, made).unwrap().approval_mode,
-            harness_core::policy::ApprovalMode::AcceptEdits
-        );
-        // A sandbox session keeps `auto`.
-        let sb = SessionId::new();
-        n.link
-            .to_node
-            .try_send(create(sb, dir.path(), Some(ExecMode::Sandbox)))
-            .unwrap();
-        ack(&mut n).await.unwrap();
-        assert_eq!(
-            created(&n, sb).unwrap().approval_mode,
             harness_core::policy::ApprovalMode::Auto
         );
     }
-    {
-        let store = Store::open(&db, Durability::Full).unwrap();
-        let (kind, payload) = EventKind::SessionCreated(SessionCreated {
-            exec_mode: Some(ExecMode::Host),
-            no_callbacks: false,
-            profile: Profile::Agentic,
-            agent_id: None,
-            incognito: false,
-            parent_session: None,
-            title: "t".into(),
-            cwd: dir.path().display().to_string(),
-            model: "mock".into(),
-            backend: "native".into(),
-            node_id: "n".into(),
-            approval_mode: harness_core::policy::ApprovalMode::Auto,
-        })
-        .into_parts();
-        store
-            .append(
-                "n",
-                &harness_core::RawEvent {
-                    session_id: on_disk,
-                    seq: 1,
-                    ts_ms: 0,
-                    kind,
-                    payload,
-                },
-            )
-            .unwrap();
-    }
-    let mut n = start(
-        &db,
-        policy(dir.path(), offers(true, true)),
-        Profile::Agentic,
-    )
-    .await;
-    let marker = dir.path().join("ran-auto.txt");
+    // node.toml lowered to `ask`: after the restart the same chat asks, and
+    // its card says the host shell.
+    let mut p = policy(dir.path(), offers(true, true));
+    p.max_approval_mode = harness_core::policy::ApprovalMode::Ask;
+    let mut n = start(&db, p, Profile::Agentic).await;
+    let marker = dir.path().join("ran.txt");
     n.link
         .to_node
-        .try_send(prompt(
-            on_disk,
-            &format!("run: echo x > {}", marker.display()),
-        ))
+        .try_send(prompt(made, &format!("run: echo x > {}", marker.display())))
         .unwrap();
     ack(&mut n).await.unwrap();
     let by = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let log = n.node.store().events_after(on_disk, 0, 1000).unwrap();
+        let log = n.node.store().events_after(made, 0, 1000).unwrap();
         if let Some(a) = log.iter().find_map(|e| match e.typed() {
             Ok(EventKind::ApprovalRequested(a)) => Some(a),
             _ => None,

@@ -21,6 +21,7 @@ async fn rt(root: &std::path::Path, id: &str, profile: Profile) -> NodeRuntime {
         node_id: id.into(),
         hostname: "h".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![root.into()],
             ..Default::default()
         },

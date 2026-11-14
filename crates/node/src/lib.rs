@@ -1149,9 +1149,8 @@ impl NodeRuntime {
             Profile::Agentic => policy.check_cwd(&cwd)?,
             Profile::Chat => std::path::PathBuf::new(),
         };
-        // Within node.toml's ceiling, and a `host` session never in `auto`,
-        // whatever was asked (review N-e, T48).
-        let mode = policy.session_mode(approval_mode, exec_mode);
+        // Within node.toml's ceiling, whatever was asked (T48).
+        let mode = policy.effective_mode(approval_mode);
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())

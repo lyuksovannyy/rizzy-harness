@@ -134,7 +134,10 @@ const X5_KB = 0.3;
 // chat, the session prop, the Select's disabled and stacked options and the
 // fold's case (+0.3); the picker in its own lazy chunk, the mode-change line
 // in the conversation chunk and its API call in the page-only chunk (+0.8).
-const T48_KB = 1.1;
+// The owner's defaults (2026-11-14), measured 377.2 after merging main: the
+// host chat's Auto line, the host warning's words and the notification's
+// fixed words (+0.1).
+const T48_KB = 1.2;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + T48_KB) * 100) / 10) / 10;

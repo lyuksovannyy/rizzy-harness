@@ -82,20 +82,25 @@ pub(crate) struct Retry {
     event: Option<Arc<Event>>,
 }
 
-/// The one place a run's approval mode is chosen: the spec's `ask` or
-/// `ask_all`, never `auto` (a node clamps it further, T5).
+/// The one place a run's approval mode is chosen: the spec's (`auto` by
+/// default, the owner's decision of 2026-11-14), except that a run holding
+/// webhook data (`untrusted`) asks: whoever can send the webhook writes
+/// into its prompt, and in `auto` they would steer its commands with no
+/// card (PLAN.md T48; the owner is asked to confirm this exception). A
+/// node clamps it further (T5).
 ///
 /// This is the seam for trusted routines (docs/routines.md, "The approval
 /// seam"), which is why it takes what v1 ignores. A trusted mode would
 /// return the mode plus the spec's tool allowlist, and only when the run is
 /// not `untrusted` (no `event.*` in its prompt, so a webhook run never
 /// qualifies) and `node` announces `preapproved_tools`. Nothing else on the
-/// master chooses: `auto` stays refused at save, and an untrusted chat's
-/// later turns never come through here.
-pub fn approval_for(spec: &RoutineSpec, _untrusted: bool, _node: Option<&str>) -> ApprovalMode {
-    match spec.approval_mode {
-        ApprovalMode::AskAll => ApprovalMode::AskAll,
-        ApprovalMode::Ask | ApprovalMode::AcceptEdits | ApprovalMode::Auto => ApprovalMode::Ask,
+/// master chooses, and an untrusted chat's later turns never come through
+/// here (they run in the chat's own mode, which its owner may change).
+pub fn approval_for(spec: &RoutineSpec, untrusted: bool, _node: Option<&str>) -> ApprovalMode {
+    if untrusted {
+        spec.approval_mode.min(ApprovalMode::Ask)
+    } else {
+        spec.approval_mode
     }
 }
 
@@ -1461,6 +1466,26 @@ pub(super) async fn sweep_timeouts(h: &RoutinesHandle, m: &Master) {
         // No turn started, so none will end: stop following it.
         if no_turn {
             lock(&h.bound).remove(&sid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    /// The spec's mode (`auto` by default), except a run holding webhook
+    /// data, which asks (T48).
+    #[test]
+    fn a_run_takes_the_specs_mode_and_a_webhook_run_asks() {
+        let spec = |m| RoutineSpec {
+            approval_mode: m,
+            ..RoutineSpec::default()
+        };
+        assert_eq!(RoutineSpec::default().approval_mode, ApprovalMode::Auto);
+        for m in ApprovalMode::ALL {
+            assert_eq!(approval_for(&spec(m), false, None), m);
+            assert_eq!(approval_for(&spec(m), true, None), m.min(ApprovalMode::Ask));
         }
     }
 }
