@@ -59,6 +59,15 @@ pub const PING_EVERY: Duration = Duration::from_secs(20);
 /// gives up). Time spent not reading because our own consumer is behind
 /// does not count: a busy link is not a dead one.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(60);
+/// Node side: the most bytes the kernel holds unsent for the master's
+/// socket (`TCP_NOTSENT_LOWAT`, A.21). Without it the send buffer
+/// autotunes up to `tcp_wmem`'s maximum (4 MiB on the machine B.7 ran on),
+/// and every byte in it is ahead of a Stop's ack: up to 16 s at 256 KiB/s
+/// (measured over loopback with the node's lane for acks: 8.9 s without
+/// this cap, 1.0 s with it, `node/tests/control_over_link.rs`). Bytes
+/// in flight are not limited (the congestion window decides), so a fast
+/// link keeps its rate; the node's own queue holds the rest.
+pub const UNSENT_LIMIT: u32 = 128 * 1024;
 /// Node side: the TCP connect to the master...
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// ...then TLS plus the WebSocket upgrade, and separately the challenge

@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod exec;
 mod git;
 mod images;
+mod outbox;
 pub mod policy;
 mod session;
 
@@ -20,6 +21,7 @@ use harness_store::Store;
 use tokio::sync::mpsc;
 
 pub use git::SNAPSHOT_TIMEOUT;
+pub use outbox::Backlog;
 pub use policy::NodePolicy;
 use session::Session;
 
@@ -57,17 +59,22 @@ const BACKGROUND_STOP_WAIT: Duration =
 
 /// Max events per `session.snapshot` batch.
 const SNAPSHOT_BATCH: usize = 500;
-/// ...and at most this many bytes of serialized events, a quarter of the
-/// link's frame limit, so a batch always fits in a frame. A single event
-/// larger than this still goes, alone in its batch.
-pub const SNAPSHOT_BYTES: usize = harness_protocol::MAX_FRAME / 4;
+/// ...and at most this many bytes of serialized events, a sixteenth of the
+/// link's frame limit, so a batch always fits in a frame, and a batch the
+/// link is writing holds a Stop's ack back by at most 2 s at 256 KiB/s
+/// (A.21; it was a quarter, 2 MiB). A single event larger than this still
+/// goes, alone in its batch.
+pub const SNAPSHOT_BYTES: usize = harness_protocol::MAX_FRAME / 16;
 
-/// Messages to the master waiting for the link to send them. Past this,
-/// event publishers wait (see `Inner::publish_wait`).
-const OUT_QUEUE: usize = 256;
 /// Commands from the master waiting for the command loop. Past this, the
 /// link stops reading the master's socket.
 const IN_QUEUE: usize = 64;
+
+/// Audit lines of inline commands being written by tasks of their own.
+/// Past this the command loop writes the next one itself, at the store's
+/// pace: a master that floods cancels makes the node do work bounded by
+/// its disk, not tasks without bound (A.21).
+const AUDITS_PENDING: usize = 64;
 
 /// Commands that may wait for one session while its lane is busy; past
 /// this the master gets a refusal at once.
@@ -149,7 +156,9 @@ pub(crate) struct Inner {
     /// overlapping folder meanwhile, and no second restore (`session.rs`).
     pub(crate) restoring: Mutex<Vec<std::path::PathBuf>>,
     /// The current link to the master, if connected.
-    link: Mutex<Option<mpsc::Sender<NodeToMaster>>>,
+    link: Mutex<Option<Arc<outbox::Outbox>>>,
+    /// Room for audit lines written in the background (`AUDITS_PENDING`).
+    audits: Arc<tokio::sync::Semaphore>,
     /// Where published files are staged; `None` when this runtime does not
     /// publish (the chat runtime, or `[artifacts] enabled = false`).
     pub(crate) stages: Option<Arc<artifacts::Stages>>,
@@ -173,42 +182,51 @@ impl Inner {
             .cloned()
     }
 
-    /// Send without waiting, for replies that are not part of the log
-    /// (artifact chunks). When the queue is full the reply is dropped and
-    /// the master's transfer times out and asks again; events never go
-    /// this way.
-    pub(crate) fn publish(&self, msg: NodeToMaster) {
+    /// The current link's outbox, if it is still open.
+    fn outbox(&self) -> Option<Arc<outbox::Outbox>> {
         let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(tx) = link.as_ref() else { return };
-        match tx.try_send(msg) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("link to the master is full; dropped a reply");
+        match link.as_ref() {
+            Some(o) if !o.is_closed() => Some(o.clone()),
+            Some(_) => {
+                *link = None;
+                None
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => *link = None,
+            None => None,
         }
     }
 
-    /// Send, waiting while the link's queue is full: the caller (a
-    /// session appending an event, the command loop) pauses until the
-    /// master reads, which is the back-pressure. Waiting ends when the link
-    /// closes (the link gives up on a peer that reads nothing for
-    /// `IDLE_LIMIT`); then the message is dropped and, for events, the next
-    /// connection's hello and `resume` replay it from the store.
+    /// Send in order without waiting, for replies that are not part of the
+    /// log (artifact chunks, a full lane's refusal). When the queue is full
+    /// the reply is dropped and the master's transfer times out and asks
+    /// again; events never go this way.
+    pub(crate) fn publish(&self, msg: NodeToMaster) {
+        if let Some(o) = self.outbox()
+            && !o.try_send(msg)
+        {
+            tracing::warn!("link to the master is full; dropped a reply");
+        }
+    }
+
+    /// Send in order, waiting while the link's queue is full: the caller
+    /// (a session appending an event, a lane acking its command) pauses
+    /// until the master reads, which is the back-pressure. Waiting ends
+    /// when the link closes (the link gives up on a peer that reads nothing
+    /// for `IDLE_LIMIT`); then the message is dropped and, for events, the
+    /// next connection's hello and `resume` replay it from the store.
     pub(crate) async fn publish_wait(&self, msg: NodeToMaster) {
-        let tx = {
-            let link = self.link.lock().unwrap_or_else(|p| p.into_inner());
-            match link.as_ref() {
-                Some(tx) => tx.clone(),
-                None => return,
-            }
-        };
-        if tx.send(msg).await.is_err() {
-            let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
-            // Only if no newer link replaced it meanwhile.
-            if link.as_ref().is_some_and(|cur| cur.same_channel(&tx)) {
-                *link = None;
-            }
+        if let Some(o) = self.outbox() {
+            o.send(msg).await;
+        }
+    }
+
+    /// Send ahead of the queued output, never waiting: the acks of the
+    /// commands the command loop answers inline (`outbox`). Dropped when
+    /// the master has more than `outbox::URGENT_QUEUE` of them unread.
+    fn publish_urgent(&self, msg: NodeToMaster) {
+        if let Some(o) = self.outbox()
+            && !o.send_urgent(msg)
+        {
+            tracing::warn!("the master has not read the last acks; dropped one");
         }
     }
 }
@@ -416,6 +434,7 @@ impl NodeRuntime {
             sessions: Mutex::new(HashMap::new()),
             restoring: Mutex::new(Vec::new()),
             link: Mutex::new(None),
+            audits: Arc::new(tokio::sync::Semaphore::new(AUDITS_PENDING)),
             stages,
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
@@ -484,10 +503,15 @@ impl NodeRuntime {
         &self.inner.cfg.store
     }
 
+    /// What waits for the master on the current link (diagnostics).
+    pub fn backlog(&self) -> Backlog {
+        self.inner.outbox().map(|o| o.backlog()).unwrap_or_default()
+    }
+
     /// Connect a (new) master link. Any previous link is replaced. `hello` is
     /// queued before any event so the master always sees it first.
     pub async fn attach(&self) -> NodeLink {
-        let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
+        let (out, out_rx) = outbox::Outbox::open();
         let (in_tx, mut in_rx) = mpsc::channel::<MasterToNode>(IN_QUEUE);
         let heads = self
             .inner
@@ -521,7 +545,7 @@ impl NodeRuntime {
                 }
             }
             // A fresh queue: there is room.
-            let _ = out_tx.try_send(NodeToMaster::Hello {
+            let _ = out.try_send(NodeToMaster::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 node_id: self.inner.cfg.node_id.clone(),
                 hostname: self.inner.cfg.hostname.clone(),
@@ -535,7 +559,9 @@ impl NodeRuntime {
                     })
                     .collect(),
             });
-            *link = Some(out_tx);
+            if let Some(old) = link.replace(out) {
+                old.retire();
+            }
         }
         let this = self.clone();
         tokio::spawn(async move {
@@ -553,9 +579,11 @@ impl NodeRuntime {
                         len,
                     } => this.fetch(req_id, session_id, stage_id, offset, len),
                     // Answered here, at once: they must not wait behind a
-                    // slow restore or delete (AUDIT S10). Neither awaits
-                    // anything (their audit line is written from a task of
-                    // its own).
+                    // slow restore or delete (AUDIT S10), nor behind the
+                    // output queued for the master (A.21): their acks go
+                    // ahead of it and never wait for room. Nothing here
+                    // awaits the link (their audit lines are written from
+                    // tasks of their own, up to `AUDITS_PENDING`).
                     //
                     // A cancel stops the running turn now, and also leaves a
                     // marker in the lane so a prompt sent before it, still
@@ -782,15 +810,35 @@ impl NodeRuntime {
     }
 
     /// [`Self::audit`] from a task of its own, for commands that must be
-    /// answered without waiting for the store.
-    fn audit_later(&self, kind: &'static str, sid: SessionId) {
-        let this = self.clone();
-        tokio::spawn(async move { this.audit(kind, sid).await });
+    /// answered without waiting for the store. Past `AUDITS_PENDING` such
+    /// tasks, written here: the work a flood of commands causes is bounded
+    /// by the disk.
+    async fn audit_later(&self, kind: &'static str, sid: SessionId) {
+        match self.inner.audits.clone().try_acquire_owned() {
+            Ok(room) => {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.audit(kind, sid).await;
+                    drop(room);
+                });
+            }
+            Err(_) => self.audit(kind, sid).await,
+        }
     }
 
     /// Handle one message from the master.
     pub async fn handle(&self, msg: MasterToNode) {
         let req_id = msg.req_id().map(str::to_string);
+        // Answered inline by the command loop: their acks go ahead of the
+        // queued output and never wait (A.21). Not a create's ack, nor any
+        // other lane command's: the master relies on those coming after
+        // the events their command appended.
+        let urgent = matches!(
+            msg,
+            MasterToNode::Cancel { .. }
+                | MasterToNode::ApprovalRespond { .. }
+                | MasterToNode::StopBackground { .. }
+        );
         // A stopping node starts nothing new; answers to approvals, cancels,
         // replays, deletes and fetches are still taken.
         if self.inner.is_stopping() && starts_work(&msg) {
@@ -934,7 +982,7 @@ impl NodeRuntime {
                 }
             }
             MasterToNode::Cancel { session_id, .. } => {
-                self.audit_later("session.cancel", session_id);
+                self.audit_later("session.cancel", session_id).await;
                 match self.session(session_id) {
                     Some(s) => {
                         s.cancel();
@@ -949,7 +997,8 @@ impl NodeRuntime {
                 by,
                 ..
             } => {
-                self.audit_later("session.stop_background", session_id);
+                self.audit_later("session.stop_background", session_id)
+                    .await;
                 match self.session(session_id) {
                     Some(s) => s.stop_background(bg_id.as_deref(), by),
                     None => Err("unknown session".into()),
@@ -961,7 +1010,7 @@ impl NodeRuntime {
                 decision,
                 ..
             } => {
-                self.audit_later("approval.respond", session_id);
+                self.audit_later("approval.respond", session_id).await;
                 match self.session(session_id) {
                     Some(s) => s.respond(&approval_id, decision),
                     None => Err("unknown session".into()),
@@ -993,13 +1042,16 @@ impl NodeRuntime {
             } => self.release(session_id, &stage_id),
         };
         if let Some(req_id) = req_id {
-            self.inner
-                .publish_wait(NodeToMaster::Ack {
-                    req_id,
-                    ok: result.is_ok(),
-                    error: result.err(),
-                })
-                .await;
+            let ack = NodeToMaster::Ack {
+                req_id,
+                ok: result.is_ok(),
+                error: result.err(),
+            };
+            if urgent {
+                self.inner.publish_urgent(ack);
+            } else {
+                self.inner.publish_wait(ack).await;
+            }
         }
     }
 
@@ -1174,13 +1226,7 @@ impl NodeRuntime {
     pub async fn flush(&self, bound: Duration) -> bool {
         let by = tokio::time::Instant::now() + bound;
         loop {
-            let empty = self
-                .inner
-                .link
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .as_ref()
-                .is_none_or(|tx| tx.is_closed() || tx.capacity() == tx.max_capacity());
+            let empty = self.inner.outbox().is_none_or(|o| o.is_drained());
             if empty {
                 return true;
             }
