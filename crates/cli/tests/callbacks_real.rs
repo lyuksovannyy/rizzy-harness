@@ -193,7 +193,7 @@ mod real {
             let (st, v) = self
                 .token_post(
                     "/api/users",
-                    json!({"username": name, "role": role, "can_agentic": true}),
+                    json!({"username": name, "role": role, "exec_ceiling": "host"}),
                 )
                 .await;
             assert!(st.is_success(), "{st} {v}");

@@ -322,7 +322,7 @@ async fn account(t: &T, name: &str, role: &str) -> (String, String) {
         &t.base,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "role": role, "can_agentic": true})),
+        Some(json!({"username": name, "role": role, "exec_ceiling": "host"})),
         &t.alex,
     )
     .await;
@@ -673,6 +673,15 @@ async fn admission_is_what_the_owner_could_do_now() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(
+        &t.base,
+        Method::PUT,
+        &format!("/api/workspaces/{team}/members/{bob_id}/exec-level"),
+        Some(json!({"level": "sandbox"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     let sid = chat(&t, &bob, Some(&team)).await;
     t.node.append(sid, started("bg-1"));
     mirrored(&t, sid, 2).await;
@@ -744,9 +753,9 @@ async fn admission_is_what_the_owner_could_do_now() {
     let e = chat(&t, &erin, None).await;
     let (st, _) = req(
         &t.base,
-        Method::PATCH,
-        &format!("/api/users/{erin_id}"),
-        Some(json!({"can_agentic": false})),
+        Method::PUT,
+        &format!("/api/users/{erin_id}/exec-ceiling"),
+        Some(json!({"level": "none"})),
         &t.alex,
     )
     .await;

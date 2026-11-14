@@ -219,7 +219,7 @@ async fn claim_creates_admin_and_logins_work() {
     assert!(!s.claim_path.exists(), "claim file must be deleted");
     let (_, me) = get(&s, "/api/me", Some(&cookie), None).await;
     assert_eq!(me["user"]["role"], "admin");
-    assert_eq!(me["user"]["can_agentic"], true);
+    assert_eq!(me["user"]["exec_ceiling"], "host");
 
     let (st, _, _) = post(
         &s,
@@ -298,7 +298,7 @@ async fn admin_creates_member_who_must_change_password() {
     assert_eq!(st, StatusCode::OK, "{bob}");
     assert_eq!(bob["username"], "bob");
     assert_eq!(bob["role"], "member");
-    assert_eq!(bob["can_agentic"], false);
+    assert_eq!(bob["exec_ceiling"], "none");
     assert_eq!(bob["must_change_password"], true);
     assert!(bob.get("password_hash").is_none());
     let pw = bob["password"].as_str().unwrap().to_string();
@@ -403,14 +403,14 @@ async fn agentic_needs_grant_and_chats_are_private() {
     // Admin grants it.
     let (st, _, v) = req(
         &s,
-        Method::PATCH,
-        &format!("/api/users/{bob_id}"),
-        Some(json!({"can_agentic": true})),
+        Method::PUT,
+        &format!("/api/users/{bob_id}/exec-ceiling"),
+        Some(json!({"level": "sandbox"})),
         Some(&admin),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["can_agentic"], true);
+    assert_eq!(v["exec_ceiling"], "sandbox");
     let (st, _, v) = req(
         &s,
         Method::POST,
@@ -888,7 +888,7 @@ async fn deleting_a_user_deletes_their_chats_on_the_master_and_the_node() {
         &s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": "bob"})),
+        Some(json!({"username": "bob", "exec_ceiling": "sandbox"})),
         Some(&admin),
     )
     .await;

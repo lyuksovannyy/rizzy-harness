@@ -187,7 +187,8 @@ fn agentic_allowed(m: &Master, who: &Principal, a: &Access, spec: &RoutineSpec) 
     match spec
         .agentic()
         .then(|| {
-            ws::agentic_refusal(who, Some(a)).or_else(|| {
+            // A routine's chat is always `sandbox` (N.10a).
+            crate::levels::no_work(who, Some(a)).or_else(|| {
                 spec.node_id
                     .as_deref()
                     .and_then(|n| ws::node_refusal(m, who, n))
@@ -562,7 +563,7 @@ async fn list(
     };
     let can_agentic = scope
         .as_ref()
-        .is_some_and(|a| why.is_none() && ws::agentic_refusal(&who, Some(a)).is_none());
+        .is_some_and(|a| why.is_none() && crate::levels::no_work(&who, Some(a)).is_none());
     let sources: Vec<Value> = if cfg.enabled && cfg.webhooks {
         vec![source_json(&events::Webhook)]
     } else {

@@ -14,6 +14,7 @@ pub mod config;
 pub mod env;
 mod favicon;
 mod http;
+pub mod levels;
 pub mod limits;
 pub mod media;
 pub mod model_cache;
@@ -260,9 +261,9 @@ pub struct CreateSpec {
     /// 3); the node records it and keeps to it.
     pub no_callbacks: bool,
     /// The execution mode asked of the node (N.10a): a request it refuses
-    /// when it does not offer that mode; `None`, the node's most confined.
-    /// Who may ask for which is checked by the caller
-    /// (`workspaces::exec_mode_for`).
+    /// when it does not offer that mode; `None`, the most confined one.
+    /// `create_session` checks it against the owner's level
+    /// (`workspaces::create_mode`).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
@@ -419,6 +420,10 @@ pub enum CommandError {
     NodeStopping,
     #[error("{0}")]
     Rejected(String),
+    /// The session's owner may not have it do work (their level, N.10a
+    /// part 2, or the node rule); the text says why (403).
+    #[error("{0}")]
+    Forbidden(String),
     #[error("store: {0}")]
     Store(#[from] harness_store::StoreError),
     #[error("unknown agent {0:?}: choose one of the agents listed")]
@@ -1485,15 +1490,25 @@ impl Master {
         // A diverged session takes no events, so nothing may make its node
         // write one (a turn would run with nobody seeing it). Cancel and
         // delete still go through.
-        if let Some(sid) = writes_to(&msg)
-            && self
+        if let Some(sid) = writes_to(&msg) {
+            let (diverged, row) = self
                 .inner
                 .mirror
-                .call(move |s| s.diverged_seq(sid))
-                .await?
-                .is_some()
-        {
-            return Err(CommandError::Rejected(DIVERGED.into()));
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            // Whoever asks (a person, a routine, a callback, a future
+            // caller), a session does work only within its owner's level
+            // now (N.10a part 2): this is the one place every such command
+            // passes. A session the mirror does not know does none.
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
@@ -1586,9 +1601,20 @@ impl Master {
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
-        // An agentic chat always carries a mode: `sandbox` unless asked.
+        // An agentic chat always carries a mode: the one asked for, else
+        // the most confined one, and only within the owner's level in the
+        // chat's workspace (N.10a part 2), whoever calls this.
         let exec_mode = match profile {
-            Profile::Agentic => Some(spec.exec_mode.unwrap_or(ExecMode::Sandbox)),
+            Profile::Agentic => Some(
+                workspaces::create_mode(
+                    self,
+                    owner.as_deref(),
+                    workspace.as_deref(),
+                    spec.exec_mode,
+                )
+                .await
+                .map_err(CommandError::Forbidden)?,
+            ),
             Profile::Chat => None,
         };
         // A connected node must have announced the mode it is sent (N.10a):

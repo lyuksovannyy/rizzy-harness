@@ -215,7 +215,7 @@ async fn alex(t: &T) -> (String, String) {
 
 /// A member account `name` made by `admin`, signed in with its own password.
 async fn account(t: &T, admin: &str, name: &str, agentic: bool) -> (String, String) {
-    let body = json!({"username": name, "can_agentic": agentic});
+    let body = json!({"username": name, "exec_ceiling": if agentic { "host" } else { "none" }});
     let (st, v) = req(t, Method::POST, "/api/users", Some(body), admin).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let pw = v["password"].as_str().unwrap().to_string();
@@ -1908,10 +1908,20 @@ async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
     t.master.add_link(node.attach().await, false).await.unwrap();
     let (bob, bob_id) = account(&t, &alex, "bob", true).await;
     let ceiling = |level: &'static str| {
-        let (t, alex, path) = (&t, alex.clone(), format!("/api/users/{bob_id}/exec-ceiling"));
+        let (t, alex, path) = (
+            &t,
+            alex.clone(),
+            format!("/api/users/{bob_id}/exec-ceiling"),
+        );
         async move {
-            let (st, v) =
-                req(t, Method::PUT, &path, Some(json!({ "level": level })), &alex).await;
+            let (st, v) = req(
+                t,
+                Method::PUT,
+                &path,
+                Some(json!({ "level": level })),
+                &alex,
+            )
+            .await;
             assert_eq!(st, StatusCode::OK, "{v}");
         }
     };
@@ -1920,16 +1930,23 @@ async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
                       "node_id": "node-both1", "cwd": t.root});
     let id = routine(&t, &bob, None, "Nightly", spec, every(60)).await;
     ceiling("none").await;
-    let run = started(&t, &bob, &id).await;
-    let v = wait_status(&t, &bob, &id, &run, "blocked").await;
+    // "Run now" is refused at once, with the reason...
+    let (st, v) = run_now(&t, &bob, &id).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     assert!(
-        v["reason"]
-            .as_str()
-            .unwrap()
-            .contains("your account's level is none"),
+        v.to_string().contains("your account's level is none"),
         "{v}"
     );
-    assert_eq!(v["session_id"], Value::Null, "{v}");
+    // ...and the scheduled fire is blocked, making no chat.
+    t.set_clock(t0() + 60 * MIN);
+    t.tick().await;
+    let list = wait_runs(&t, &bob, &id, |r| {
+        r.len() == 1 && r[0]["status"] == "blocked"
+    })
+    .await;
+    let reason = list[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("your account's level is none"), "{reason}");
+    assert_eq!(list[0]["session_id"], Value::Null);
     ceiling("sandbox").await;
     let (st, v) = req(
         &t,

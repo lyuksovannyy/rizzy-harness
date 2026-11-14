@@ -20,9 +20,6 @@ use crate::config::{AgentChain, check_chain};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Perm {
-    /// Start and drive agentic sessions here (on top of the account's
-    /// server grant, never instead of it).
-    Agentic,
     /// Rename the workspace and change its defaults.
     Settings,
     /// Add and remove members and change their roles.
@@ -36,7 +33,6 @@ impl Perm {
     /// What the permission lets a member do, for refusals.
     fn action(self) -> &'static str {
         match self {
-            Perm::Agentic => "run agentic sessions",
             Perm::Settings => "change its settings",
             Perm::Members => "manage its members",
             Perm::Routines => "run routines",
@@ -72,13 +68,12 @@ impl Role {
         }
     }
 
-    /// In the wire order: agentic, settings, members, routines.
+    /// In the wire order: settings, members, routines. Who may run agent
+    /// chats is no role's: it is the member's level (`levels`, N.10a).
     pub fn perms(self) -> &'static [Perm] {
         match self {
-            Role::Owner | Role::Admin => {
-                &[Perm::Agentic, Perm::Settings, Perm::Members, Perm::Routines]
-            }
-            Role::Member => &[Perm::Agentic, Perm::Routines],
+            Role::Owner | Role::Admin => &[Perm::Settings, Perm::Members, Perm::Routines],
+            Role::Member => &[Perm::Routines],
             Role::Guest => &[],
         }
     }
@@ -290,6 +285,10 @@ pub struct Access {
     /// The member's own switch; always on in a Personal workspace (and for
     /// the API token, which is no member).
     pub use_memory: bool,
+    /// Their level here as it counts (`levels::workspace_level`): `host` in
+    /// a Personal workspace, for an owner and for the API token, so there
+    /// the account's ceiling decides.
+    pub exec_level: harness_core::policy::ExecLevel,
 }
 
 impl Access {
@@ -354,18 +353,21 @@ pub async fn access(m: &Master, who: &Principal, ws: &str) -> Result<Access, WsE
         .await?;
     let w = w.ok_or(WsError::NotFound)?;
     let personal = w.personal();
-    let (role_id, use_memory) = match (&who.user_id, member) {
-        (None, _) => (Role::Owner.id().to_string(), true),
-        (Some(_), Some(mr)) => (mr.role_id, mr.use_memory || personal),
+    let none = harness_core::policy::ExecLevel::None;
+    let (role_id, use_memory, stored) = match (&who.user_id, member) {
+        (None, _) => (Role::Owner.id().to_string(), true, none),
+        (Some(_), Some(mr)) => (mr.role_id, mr.use_memory || personal, mr.exec_level),
         // A Personal owner whose membership row went missing is still its
         // owner (the store restores the row at the next start).
         (Some(u), None) if w.personal_owner.as_deref() == Some(u.as_str()) => {
-            (Role::Owner.id().to_string(), true)
+            (Role::Owner.id().to_string(), true, none)
         }
         (Some(_), None) => return Err(WsError::NotFound),
     };
+    let role = Role::parse(&role_id);
     Ok(Access {
-        role: Role::parse(&role_id),
+        exec_level: crate::levels::workspace_level(personal, role == Some(Role::Owner), stored),
+        role,
         role_id,
         workspace: w,
         personal,
@@ -422,28 +424,6 @@ pub async fn scope(
     access(m, who, &ws).await.map(Some)
 }
 
-/// The refusal for an account without the server grant (the security
-/// boundary for agentic work).
-pub const NO_AGENTIC_GRANT: &str =
-    "agentic sessions are not enabled for this account; ask an admin";
-
-/// Why `who` may not run agentic sessions in `ws`, or `None` when they may:
-/// both the account's server grant and the workspace permission `agentic`
-/// are needed. `ws` is `None` only for chats without a workspace (API
-/// token).
-pub fn agentic_refusal(who: &Principal, ws: Option<&Access>) -> Option<String> {
-    if !who.can_agentic {
-        return Some(NO_AGENTIC_GRANT.into());
-    }
-    match ws {
-        Some(a) if !a.can(Perm::Agentic) => Some(format!(
-            "your role in {} cannot run agentic sessions",
-            a.workspace.name
-        )),
-        _ => None,
-    }
-}
-
 /// The refusal for an account that may not use the embedded node
 /// (`[nodes] local_node_users`, FIX_PLAN Q7).
 pub const LOCAL_NODE_ADMINS_ONLY: &str = "agentic sessions on this server's own node are for \
@@ -451,8 +431,8 @@ pub const LOCAL_NODE_ADMINS_ONLY: &str = "agentic sessions on this server's own 
      Use a remote node, or ask the server admin";
 
 /// Whether `who` may run agentic sessions on the embedded node: server
-/// admins and the API token always; everyone with the agentic grant when
-/// `[nodes] local_node_users = "granted"`. Without a provider runtime
+/// admins and the API token always; everyone else (within their level)
+/// when `[nodes] local_node_users = "granted"`. Without a provider runtime
 /// (tests) the default applies: admins only.
 pub fn may_use_local_node(m: &Master, who: &Principal) -> bool {
     who.is_admin()
@@ -462,37 +442,10 @@ pub fn may_use_local_node(m: &Master, who: &Principal) -> bool {
 }
 
 /// Why `who` may not run agentic work on node `node_id`, or `None` when
-/// the node rule allows it (the grant and the workspace are checked by
-/// [`agentic_refusal`]).
+/// the node rule allows it (the level is checked by `levels`).
 pub fn node_refusal(m: &Master, who: &Principal, node_id: &str) -> Option<String> {
     (m.is_local_node(node_id) && !may_use_local_node(m, who))
         .then(|| LOCAL_NODE_ADMINS_ONLY.to_string())
-}
-
-/// The refusal of `host` to anyone but a server admin (N.10a part 1, until
-/// the levels per member of part 2 replace it). Not the workspace's owner:
-/// every account owns its Personal workspace, and by default any account
-/// can make a team and own it, so ownership says nothing about trust.
-pub const HOST_ADMINS_ONLY: &str = "the host mode (commands as the node's own user, without \
-     the sandbox) is for server admins until per-member levels exist; ask a server admin";
-
-/// Whether `who` may have a `host` chat (create and every later action):
-/// server admins only, the API token among them.
-pub fn host_refusal(who: &Principal) -> Option<String> {
-    (!who.is_admin()).then(|| HOST_ADMINS_ONLY.to_string())
-}
-
-/// The execution mode to ask the node for, for `who` creating an agentic
-/// chat (N.10a part 1, the interim rule): `host` only for a server admin,
-/// and only when asked for by name; without a request, `sandbox`, always
-/// sent explicitly, so a node whose only mode is `host` refuses rather than
-/// hand it over by default. The node decides last: it refuses any mode it
-/// does not offer.
-pub fn exec_mode_for(who: &Principal, requested: Option<ExecMode>) -> Result<ExecMode, String> {
-    match requested.unwrap_or(ExecMode::Sandbox) {
-        ExecMode::Host => host_refusal(who).map_or(Ok(ExecMode::Host), Err),
-        m => Ok(m),
-    }
 }
 
 /// What a create had resolved when it ended, for its host-mode audit line.
@@ -539,44 +492,124 @@ pub async fn audit_host_create(
     }
 }
 
-/// Whether `who` may drive the agentic chat `row` in its recorded mode:
-/// the create's rule, again (a demoted admin's `host` chats do no more
-/// work). Fails closed on an agentic row whose mode cannot be read.
-fn mode_refusal(who: &Principal, row: &SessionRow) -> Option<String> {
-    match row.exec_mode.as_deref().map(ExecMode::parse) {
-        Some(Some(ExecMode::Host)) => host_refusal(who),
-        Some(Some(_)) => None,
-        _ => Some(
-            "this chat's execution mode is not known here (its first event has not arrived, or \
-             names none), so it does no work"
-                .into(),
-        ),
-    }
-}
+/// The refusal for an agentic row whose mode cannot be read (fails closed).
+pub const MODE_UNKNOWN: &str = "this chat's execution mode is not known here (its first event \
+     has not arrived, or names none), so it does no work";
 
-/// Why `who` may not make the agentic session `row` do work, or `None`
-/// when they may (always `None` for chats). A row not mirrored far enough
-/// to know its profile counts as agentic, so the check fails closed.
-pub async fn agentic_blocked(m: &Master, who: &Principal, row: &SessionRow) -> Option<String> {
+/// Why `owner` may not have the agentic chat `row` do work in its recorded
+/// mode, given their standing `ws` in its workspace: the mode must be at
+/// most their effective level there (N.10a part 2). Fails closed on a mode
+/// that cannot be read.
+pub fn row_refusal(owner: &Principal, ws: Option<&Access>, row: &SessionRow) -> Option<String> {
     if row.profile.as_deref() == Some("chat") {
         return None;
     }
+    match row.exec_mode.as_deref().map(ExecMode::parse) {
+        Some(Some(mode)) => crate::levels::refusal(owner, ws, mode),
+        _ => Some(MODE_UNKNOWN.into()),
+    }
+}
+
+/// Why the agentic session `row` may not do work now, whoever asks, or
+/// `None` when it may (always `None` for chats): its owner's effective level
+/// in its workspace must allow its recorded mode, and the node rule must
+/// allow its owner. Decided by the owner, never the caller: the API token
+/// acting on a member's chat gets the member's answer. A chat without an
+/// owner is the API token's (`host`). A row not mirrored far enough to know
+/// its profile counts as agentic, so the check fails closed. Asked by
+/// `Master::send_command` before every command that makes a node work on a
+/// session, so no caller can skip it.
+pub async fn work_refusal(m: &Master, row: &SessionRow) -> Option<String> {
+    if row.profile.as_deref() == Some("chat") {
+        return None;
+    }
+    let Some(owner) = row.owner_id.clone() else {
+        return row_refusal(&Principal::api_token(), None, row);
+    };
+    let owner = match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
+        Ok(Some(u)) if !u.disabled => Principal::from_user(u),
+        Ok(_) => return Some("the account is disabled or gone".into()),
+        Err(e) => {
+            tracing::warn!(session = %row.session_id, error = %e, "could not load a chat's owner");
+            return Some("could not check access to this chat; try again".into());
+        }
+    };
+    standing_refusal(m, &owner, row).await
+}
+
+/// `owner`'s answer for `row`: their access to its workspace, the node
+/// rule, and the level.
+async fn standing_refusal(m: &Master, owner: &Principal, row: &SessionRow) -> Option<String> {
     let ws = match &row.workspace_id {
         None => None,
-        Some(id) => match access(m, who, id).await {
+        Some(id) => match access(m, owner, id).await {
             Ok(a) => Some(a),
             Err(WsError::Store(e)) => {
                 tracing::warn!(session = %row.session_id, error = %e, "could not check workspace access");
                 return Some("could not check your access to this workspace; try again".into());
             }
-            // The chat's workspace is one the caller is not in: never
-            // theirs to drive.
+            // The chat's workspace is one its owner is not in: never theirs
+            // to drive.
             Err(_) => return Some("this chat is in a workspace you are not a member of".into()),
         },
     };
-    agentic_refusal(who, ws.as_ref())
-        .or_else(|| node_refusal(m, who, &row.node_id))
-        .or_else(|| mode_refusal(who, row))
+    node_refusal(m, owner, &row.node_id).or_else(|| row_refusal(owner, ws.as_ref(), row))
+}
+
+/// The mode a new agentic chat owned by `owner` (`None`: the API token's)
+/// in workspace `ws` asks its node for (`levels::create_mode`): `Err` with
+/// the reason when the owner's level there does not allow it. What
+/// `Master::create_session` asks, whoever calls it.
+pub async fn create_mode(
+    m: &Master,
+    owner: Option<&str>,
+    ws: Option<&str>,
+    requested: Option<ExecMode>,
+) -> Result<ExecMode, String> {
+    let who = match owner {
+        None => Principal::api_token(),
+        Some(o) => {
+            let o = o.to_string();
+            match m.inner.mirror.call(move |s| s.user_by_id(&o)).await {
+                Ok(Some(u)) if !u.disabled => Principal::from_user(u),
+                Ok(_) => return Err("the account is disabled or gone".into()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not load a new chat's owner");
+                    return Err("could not check your level; try again".into());
+                }
+            }
+        }
+    };
+    let a = match ws {
+        None => None,
+        Some(id) => match access(m, &who, id).await {
+            Ok(a) => Some(a),
+            Err(WsError::Store(e)) => {
+                tracing::warn!(error = %e, "could not check workspace access");
+                return Err("could not check your access to this workspace; try again".into());
+            }
+            Err(_) => return Err("you are not a member of this workspace".into()),
+        },
+    };
+    crate::levels::create_mode(&who, a.as_ref(), requested)
+}
+
+/// Why `who` may not make the agentic session `row` do work, or `None`
+/// when they may (always `None` for chats): the node rule for the caller,
+/// then [`work_refusal`] (the owner's level). For a caller who owns the
+/// chat, the owner's answer is computed from `who` as loaded for this
+/// request.
+pub async fn agentic_blocked(m: &Master, who: &Principal, row: &SessionRow) -> Option<String> {
+    if row.profile.as_deref() == Some("chat") {
+        return None;
+    }
+    if who.user_id.is_some() && row.owner_id == who.user_id {
+        return standing_refusal(m, who, row).await;
+    }
+    match node_refusal(m, who, &row.node_id) {
+        Some(why) => Some(why),
+        None => work_refusal(m, row).await,
+    }
 }
 
 /// Whether chat `row` may use its owner's personal memory (recall, and the
@@ -749,6 +782,38 @@ async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId) {
     }
 }
 
+/// Stop the running turns and background commands of `sids`, in the
+/// background: the chats a member had in a team workspace they were just
+/// removed from (N.10a part 2). They return to the member's Personal
+/// workspace, where their account's ceiling applies from their next action;
+/// what was running for the team stops now, whatever that ceiling is.
+pub fn stop_removed(m: &Master, sids: Vec<harness_core::SessionId>) {
+    if sids.is_empty() {
+        return;
+    }
+    let m = m.clone();
+    tokio::spawn(async move {
+        for sid in sids {
+            let row = m.inner.mirror.call(move |s| s.session(sid)).await;
+            if matches!(&row, Ok(Some(r)) if r.running) {
+                for attempt in 1..=CANCEL_TRIES {
+                    match m.cancel(sid).await {
+                        Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {
+                            tokio::time::sleep(CANCEL_RETRY).await;
+                        }
+                        Err(e) => {
+                            tracing::info!(session = %sid, error = %e, "removal: cancel not delivered");
+                            break;
+                        }
+                        Ok(()) => break,
+                    }
+                }
+            }
+            stop_background_revoked(&m, sid).await;
+        }
+    });
+}
+
 /// Attempts at a revocation cancel the node's queue had no room for (or
 /// did not acknowledge); the first wait, doubled after each.
 const CANCEL_TRIES: u32 = 5;
@@ -808,10 +873,10 @@ mod tests {
     fn roles_and_permissions() {
         assert_eq!(
             Role::Owner.perms(),
-            [Perm::Agentic, Perm::Settings, Perm::Members, Perm::Routines]
+            [Perm::Settings, Perm::Members, Perm::Routines]
         );
         assert_eq!(Role::Admin.perms(), Role::Owner.perms());
-        assert_eq!(Role::Member.perms(), [Perm::Agentic, Perm::Routines]);
+        assert_eq!(Role::Member.perms(), [Perm::Routines]);
         assert!(Role::Guest.perms().is_empty());
         for r in Role::ALL {
             assert_eq!(Role::parse(r.id()), Some(r));

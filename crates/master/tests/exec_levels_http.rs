@@ -178,7 +178,10 @@ async fn account(s: &Server, name: &str, ceiling: &str) -> (String, String) {
     assert_eq!(st, StatusCode::OK, "{v}");
     let pw = v["password"].as_str().unwrap().to_string();
     let id = v["user_id"].as_str().unwrap().to_string();
-    assert_eq!(v["exec_ceiling"], "none", "a new account starts at none: {v}");
+    assert_eq!(
+        v["exec_ceiling"], "none",
+        "a new account starts at none: {v}"
+    );
     if ceiling != "none" {
         let (st, v) = set_ceiling(s, &s.admin, &id, ceiling).await;
         assert_eq!(st, StatusCode::OK, "{v}");
@@ -323,7 +326,10 @@ async fn waiting_turn(s: &Server, who: &str, sid: &str, n: usize) -> String {
     assert_eq!(st, StatusCode::OK, "{v}");
     let asked = nth_event(s, who, sid, "approval_requested", n).await;
     assert_eq!(session(s, who, sid).await["running"], true);
-    asked["payload"]["approval_id"].as_str().unwrap().to_string()
+    asked["payload"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 async fn wait_stopped(s: &Server, who: &str, sid: &str) {
@@ -353,21 +359,32 @@ async fn a_member_at_none_is_refused_every_action_that_starts_work() {
     let (bob, bob_id) = account(&s, "bob", "host").await;
     let acme = team(&s, &s.admin, "Acme").await;
     let added = add(&s, &s.admin, &acme, "bob", "member").await;
-    assert_eq!(added["exec_level"], "none", "a new member starts at none: {added}");
+    assert_eq!(
+        added["exec_level"], "none",
+        "a new member starts at none: {added}"
+    );
     let none = "your level in Acme is none, so no agent chats";
     let (st, v) = create(&s, &bob, &acme, None).await;
     forbidden_with(st, &v, none);
 
     // A chat made while he could, then his level goes back to none.
     let (st, v) = set_level(&s, &s.admin, &acme, &bob_id, "sandbox").await;
-    assert_eq!((st, &v["exec_level"]), (StatusCode::OK, &json!("sandbox")), "{v}");
+    assert_eq!(
+        (st, &v["exec_level"]),
+        (StatusCode::OK, &json!("sandbox")),
+        "{v}"
+    );
     let sid = created(&s, &bob, &acme, None).await;
     let approval = waiting_turn(&s, &bob, &sid, 1).await;
     let (st, v) = set_level(&s, &s.admin, &acme, &bob_id, "none").await;
     assert_eq!(st, StatusCode::OK, "{v}");
     // The running turn stops at once (the revocation sweep).
     wait_stopped(&s, &bob, &sid).await;
-    assert_eq!(session(&s, &bob, &sid).await["blocked"], none);
+    let blocked = session(&s, &bob, &sid).await["blocked"].clone();
+    assert!(
+        blocked.as_str().unwrap_or_default().starts_with(none),
+        "{blocked}"
+    );
     let actions = [
         (format!("/api/sessions/{sid}/prompt"), json!({"text": "hi"})),
         (
@@ -379,7 +396,10 @@ async fn a_member_at_none_is_refused_every_action_that_starts_work() {
             format!("/api/sessions/{sid}/artifacts"),
             json!({"path": "a.txt"}),
         ),
-        (format!("/api/sessions/{sid}/agent"), json!({"agent_id": "coder"})),
+        (
+            format!("/api/sessions/{sid}/agent"),
+            json!({"agent_id": "coder"}),
+        ),
         (
             format!("/api/sessions/{sid}/variants"),
             json!({"group": "g", "message_id": "m"}),
@@ -390,7 +410,14 @@ async fn a_member_at_none_is_refused_every_action_that_starts_work() {
         forbidden_with(st, &v, none);
     }
     // Reading stays allowed, and refusing is still his.
-    let (st, _) = call(&s, Method::GET, &format!("/api/sessions/{sid}/events"), None, &bob).await;
+    let (st, _) = call(
+        &s,
+        Method::GET,
+        &format!("/api/sessions/{sid}/events"),
+        None,
+        &bob,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     let (st, v) = post(
         &s,
@@ -418,7 +445,11 @@ async fn a_member_at_sandbox_is_refused_host_and_container_runs_nothing_yet() {
     set_level(&s, &s.admin, &acme, &bob_id, "sandbox").await;
     let before = s.mirror.sessions_of(Some(&bob_id)).unwrap().len();
     let (st, v) = create(&s, &bob, &acme, Some("host")).await;
-    forbidden_with(st, &v, "your level in Acme is sandbox, which does not include the host mode");
+    forbidden_with(
+        st,
+        &v,
+        "your level in Acme is sandbox, which does not include the host mode",
+    );
     assert!(v["error"].as_str().unwrap().contains("owner"), "{v}");
     assert_eq!(s.mirror.sessions_of(Some(&bob_id)).unwrap().len(), before);
     let sid = created(&s, &bob, &acme, None).await;
@@ -463,13 +494,30 @@ async fn lowering_a_level_stops_only_the_chats_above_it() {
     assert_eq!(st, StatusCode::OK, "{v}");
     wait_stopped(&s, &bob, &host).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(session(&s, &bob, &sandbox).await["running"], true, "the sandbox turn was stopped");
-    let (st, v) = post(&s, &bob, format!("/api/sessions/{host}/prompt"), json!({"text": "hi"})).await;
+    assert_eq!(
+        session(&s, &bob, &sandbox).await["running"],
+        true,
+        "the sandbox turn was stopped"
+    );
+    let (st, v) = post(
+        &s,
+        &bob,
+        format!("/api/sessions/{host}/prompt"),
+        json!({"text": "hi"}),
+    )
+    .await;
     forbidden_with(st, &v, "does not include the host mode");
     // Reading the host chat stays allowed.
-    let (st, _) = call(&s, Method::GET, &format!("/api/sessions/{host}/events"), None, &bob).await;
+    let (st, _) = call(
+        &s,
+        Method::GET,
+        &format!("/api/sessions/{host}/events"),
+        None,
+        &bob,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(events(&s, &bob, &host).await.is_empty(), false);
+    assert!(!events(&s, &bob, &host).await.is_empty());
 
     // His level in Acme back to host; his account's ceiling to none.
     set_level(&s, &s.admin, &acme, &bob_id, "host").await;
@@ -501,7 +549,11 @@ async fn a_demoted_server_admins_host_turn_stops() {
         &s.admin,
     )
     .await;
-    assert_eq!((st, &v["exec_ceiling"]), (StatusCode::OK, &json!("host")), "{v}");
+    assert_eq!(
+        (st, &v["exec_ceiling"]),
+        (StatusCode::OK, &json!("host")),
+        "{v}"
+    );
     let ws = personal(&s, &dana).await;
     let host = created(&s, &dana, &ws, Some("host")).await;
     waiting_turn(&s, &dana, &host, 1).await;
@@ -513,9 +565,19 @@ async fn a_demoted_server_admins_host_turn_stops() {
         &s.admin,
     )
     .await;
-    assert_eq!((st, &v["exec_ceiling"]), (StatusCode::OK, &json!("sandbox")), "{v}");
+    assert_eq!(
+        (st, &v["exec_ceiling"]),
+        (StatusCode::OK, &json!("sandbox")),
+        "{v}"
+    );
     wait_stopped(&s, &dana, &host).await;
-    let (st, v) = post(&s, &dana, format!("/api/sessions/{host}/prompt"), json!({"text": "hi"})).await;
+    let (st, v) = post(
+        &s,
+        &dana,
+        format!("/api/sessions/{host}/prompt"),
+        json!({"text": "hi"}),
+    )
+    .await;
     forbidden_with(st, &v, "your account's level is sandbox");
 }
 
@@ -543,7 +605,11 @@ async fn an_admin_grants_only_up_to_their_own_level_and_host_only_by_an_owner() 
     forbidden_with(st, &v, "only an owner of Acme can grant host");
     // Up to her own.
     let (st, v) = set_level(&s, &carol, &acme, &dave_id, "sandbox").await;
-    assert_eq!((st, &v["exec_level"]), (StatusCode::OK, &json!("sandbox")), "{v}");
+    assert_eq!(
+        (st, &v["exec_level"]),
+        (StatusCode::OK, &json!("sandbox")),
+        "{v}"
+    );
     // Her effective level is the lower one: her ceiling at container
     // makes sandbox above her own.
     set_ceiling(&s, &s.admin, &carol_id, "container").await;
@@ -557,7 +623,11 @@ async fn an_admin_grants_only_up_to_their_own_level_and_host_only_by_an_owner() 
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     // The owner grants host; an unknown level is refused.
     let (st, v) = set_level(&s, &s.admin, &acme, &dave_id, "host").await;
-    assert_eq!((st, &v["exec_level"]), (StatusCode::OK, &json!("host")), "{v}");
+    assert_eq!(
+        (st, &v["exec_level"]),
+        (StatusCode::OK, &json!("host")),
+        "{v}"
+    );
     let (st, _) = set_level(&s, &s.admin, &acme, &dave_id, "root").await;
     assert!(st.is_client_error());
     // Only server admins set ceilings, never their own.
@@ -669,7 +739,12 @@ async fn every_level_change_is_one_audit_line() {
     let l: Value = serde_json::from_str(&account_lines[0].1).unwrap();
     assert_eq!(
         (&l["by"], &l["user"], &l["from"], &l["to"]),
-        (&json!(s.admin_id), &json!(bob_id), &json!("none"), &json!("sandbox")),
+        (
+            &json!(s.admin_id),
+            &json!(bob_id),
+            &json!("none"),
+            &json!("sandbox")
+        ),
         "{l}"
     );
     let ws_lines = s.mirror.audit_lines("level.workspace").unwrap();
@@ -677,7 +752,12 @@ async fn every_level_change_is_one_audit_line() {
     let l: Value = serde_json::from_str(&ws_lines[0].1).unwrap();
     assert_eq!(
         (&l["workspace"], &l["user"], &l["from"], &l["to"]),
-        (&json!(acme), &json!(bob_id), &json!("none"), &json!("sandbox")),
+        (
+            &json!(acme),
+            &json!(bob_id),
+            &json!("none"),
+            &json!("sandbox")
+        ),
         "{l}"
     );
     // Removal is a change too.
@@ -707,6 +787,12 @@ async fn the_api_token_is_host_but_a_members_chat_keeps_the_members_level() {
     set_level(&s, TOKEN, &acme, &bob_id, "sandbox").await;
     let sid = created(&s, &bob, &acme, None).await;
     set_level(&s, TOKEN, &acme, &bob_id, "none").await;
-    let (st, v) = post(&s, TOKEN, format!("/api/sessions/{sid}/prompt"), json!({"text": "hi"})).await;
+    let (st, v) = post(
+        &s,
+        TOKEN,
+        format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "hi"}),
+    )
+    .await;
     forbidden_with(st, &v, "your level in Acme is none");
 }

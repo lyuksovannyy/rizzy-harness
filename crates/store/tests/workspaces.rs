@@ -645,40 +645,91 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
     let s = store();
     let ws = s.create_workspace("Acme", "a1").unwrap().workspace_id;
     assert!(s.add_member(&ws, "b1", "member").unwrap());
-    assert_eq!(s.member(&ws, "b1").unwrap().unwrap().exec_level, ExecLevel::None);
-    assert_eq!(s.user_by_id("b1").unwrap().unwrap().exec_ceiling, ExecLevel::None);
+    assert_eq!(
+        s.member(&ws, "b1").unwrap().unwrap().exec_level,
+        ExecLevel::None
+    );
+    assert_eq!(
+        s.user_by_id("b1").unwrap().unwrap().exec_ceiling,
+        ExecLevel::None
+    );
     let lines = |s: &Store, k: &str| s.audit_lines(k).unwrap().len();
 
     // The first admin's change lands; the second, decided on the same
     // reading, is refused and writes no line.
     assert!(
-        s.set_member_level(&ws, "b1", "member", ExecLevel::None, ExecLevel::Sandbox, "{\"n\":1}")
-            .unwrap()
+        s.set_member_level(
+            &ws,
+            "b1",
+            "member",
+            ExecLevel::None,
+            ExecLevel::Sandbox,
+            "{\"n\":1}"
+        )
+        .unwrap()
     );
-    let second =
-        s.set_member_level(&ws, "b1", "member", ExecLevel::None, ExecLevel::Container, "{\"n\":2}");
+    let second = s.set_member_level(
+        &ws,
+        "b1",
+        "member",
+        ExecLevel::None,
+        ExecLevel::Container,
+        "{\"n\":2}",
+    );
     assert!(matches!(second, Err(StoreError::Refused(m)) if m == harness_store::LEVEL_CHANGED));
-    assert_eq!(s.member(&ws, "b1").unwrap().unwrap().exec_level, ExecLevel::Sandbox);
+    assert_eq!(
+        s.member(&ws, "b1").unwrap().unwrap().exec_level,
+        ExecLevel::Sandbox
+    );
     assert_eq!(lines(&s, "level.workspace"), 1);
     // A role changed meanwhile is refused too.
     assert!(s.set_member_role(&ws, "b1", None, "admin").unwrap());
     assert!(matches!(
-        s.set_member_level(&ws, "b1", "member", ExecLevel::Sandbox, ExecLevel::None, "{}"),
+        s.set_member_level(
+            &ws,
+            "b1",
+            "member",
+            ExecLevel::Sandbox,
+            ExecLevel::None,
+            "{}"
+        ),
         Err(StoreError::Refused(_))
     ));
     // Not a member, and a Personal workspace.
-    assert!(!s.set_member_level(&ws, "c1", "member", ExecLevel::None, ExecLevel::Host, "{}").unwrap());
+    assert!(
+        !s.set_member_level(&ws, "c1", "member", ExecLevel::None, ExecLevel::Host, "{}")
+            .unwrap()
+    );
     let personal = s.personal_workspace("b1").unwrap();
-    assert!(s.set_member_level(&personal, "b1", "owner", ExecLevel::None, ExecLevel::Host, "{}").is_err());
+    assert!(
+        s.set_member_level(
+            &personal,
+            "b1",
+            "owner",
+            ExecLevel::None,
+            ExecLevel::Host,
+            "{}"
+        )
+        .is_err()
+    );
     assert_eq!(lines(&s, "level.workspace"), 1);
 
     // The account ceiling, the same way.
-    assert!(s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Host, "{}").unwrap());
+    assert!(
+        s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Host, "{}")
+            .unwrap()
+    );
     assert!(matches!(
         s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Sandbox, "{}"),
         Err(StoreError::Refused(_))
     ));
-    assert!(!s.set_exec_ceiling("nobody", ExecLevel::None, ExecLevel::Host, "{}").unwrap());
-    assert_eq!(s.user_by_id("b1").unwrap().unwrap().exec_ceiling, ExecLevel::Host);
+    assert!(
+        !s.set_exec_ceiling("nobody", ExecLevel::None, ExecLevel::Host, "{}")
+            .unwrap()
+    );
+    assert_eq!(
+        s.user_by_id("b1").unwrap().unwrap().exec_ceiling,
+        ExecLevel::Host
+    );
     assert_eq!(lines(&s, "level.account"), 1);
 }

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use harness_core::policy::ExecLevel;
 use harness_core::{RawEvent, SessionId};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -183,8 +184,9 @@ pub struct UserRow {
     pub role: Role,
     pub created_ms: i64,
     pub disabled: bool,
-    /// Raw grant; admins are allowed agentic regardless.
-    pub can_agentic: bool,
+    /// The account's ceiling as stored (O13, N.10a part 2). The master
+    /// reads a server admin's as `host` and a disabled account's as `none`.
+    pub exec_ceiling: ExecLevel,
     pub must_change_password: bool,
 }
 
@@ -195,7 +197,8 @@ pub struct NewUser {
     pub username: String,
     pub password_hash: String,
     pub role: Role,
-    pub can_agentic: bool,
+    /// `none` unless a server admin chose otherwise.
+    pub exec_ceiling: ExecLevel,
     pub must_change_password: bool,
 }
 
@@ -204,7 +207,6 @@ pub struct NewUser {
 pub struct UserPatch {
     pub role: Option<Role>,
     pub disabled: Option<bool>,
-    pub can_agentic: Option<bool>,
 }
 
 /// A chat waiting for the user.
@@ -249,6 +251,8 @@ pub struct MemberRow {
     pub joined_ms: i64,
     /// The member's own choice to use their personal memory here.
     pub use_memory: bool,
+    /// Their level here as stored (the master reads an owner's as `host`).
+    pub exec_level: ExecLevel,
 }
 
 /// A workspace a user belongs to, with their role there.
@@ -257,6 +261,8 @@ pub struct Membership {
     pub workspace: WorkspaceRow,
     pub role_id: String,
     pub use_memory: bool,
+    /// Their level there as stored (an owner's counts as `host`).
+    pub exec_level: ExecLevel,
     /// How many members the workspace has.
     pub members: u64,
 }
@@ -374,7 +380,10 @@ CREATE TABLE IF NOT EXISTS users (
     role          TEXT NOT NULL,
     created_ms    INTEGER NOT NULL,
     disabled      INTEGER NOT NULL DEFAULT 0,
-    can_agentic   INTEGER NOT NULL DEFAULT 0,
+    -- The account's ceiling (O13, N.10a part 2): the most a member's level in
+    -- any workspace can give them, and their level in their Personal one.
+    exec_ceiling  TEXT NOT NULL DEFAULT 'none'
+                  CHECK (exec_ceiling IN ('none', 'container', 'sandbox', 'host')),
     must_change_password INTEGER NOT NULL DEFAULT 0
 );
 -- Browser logins. `token_hash` is the SHA-256 of the cookie value and
@@ -419,6 +428,10 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     -- Personal, 0 elsewhere); the default only covers an insert that forgets,
     -- and then it shares nothing.
     use_memory   INTEGER NOT NULL DEFAULT 0,
+    -- The member's level here, set by the workspace's admins; every new
+    -- member starts at none. An owner's counts as host (the master).
+    exec_level   TEXT NOT NULL DEFAULT 'none'
+                 CHECK (exec_level IN ('none', 'container', 'sandbox', 'host')),
     PRIMARY KEY (workspace_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS workspace_members_user ON workspace_members(user_id);
@@ -486,6 +499,16 @@ const ENABLED_OWNER: &str =
 /// Why a member change conditional on the role the caller's guards checked
 /// was refused: someone changed that role in between.
 const ROLE_CHANGED: &str = "this member's role just changed; reload and try again";
+
+/// Why a level change conditional on what the caller's guards read was
+/// refused: someone changed it in between (two admins at once).
+pub const LEVEL_CHANGED: &str = "this level just changed; reload and try again";
+
+/// A stored level. The column's CHECK keeps it one of the four; anything
+/// else reads as `none` (fails closed).
+fn level_col(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<ExecLevel> {
+    Ok(ExecLevel::parse(&r.get::<_, String>(i)?).unwrap_or_default())
+}
 
 fn no_owner_left(workspace: &str) -> StoreError {
     StoreError::Refused(format!(
@@ -1975,7 +1998,7 @@ impl Store {
         let tx = conn.transaction()?;
         let now = harness_core::now_ms();
         let res = tx.execute(
-            "INSERT INTO users (user_id, username, password_hash, role, created_ms, can_agentic, must_change_password)
+            "INSERT INTO users (user_id, username, password_hash, role, created_ms, exec_ceiling, must_change_password)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 u.user_id,
@@ -1983,7 +2006,7 @@ impl Store {
                 u.password_hash,
                 u.role.as_str(),
                 now,
-                u.can_agentic,
+                u.exec_ceiling.id(),
                 u.must_change_password
             ],
         );
@@ -2001,7 +2024,7 @@ impl Store {
         Ok(())
     }
 
-    const USER_COLS: &str = "user_id, username, password_hash, role, created_ms, disabled, can_agentic, must_change_password";
+    const USER_COLS: &str = "user_id, username, password_hash, role, created_ms, disabled, exec_ceiling, must_change_password";
 
     fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(UserRow, String)> {
         Ok((
@@ -2013,7 +2036,7 @@ impl Store {
                 role: Role::Member,
                 created_ms: r.get(4)?,
                 disabled: r.get::<_, i64>(5)? != 0,
-                can_agentic: r.get::<_, i64>(6)? != 0,
+                exec_ceiling: level_col(r, 6)?,
                 must_change_password: r.get::<_, i64>(7)? != 0,
             },
             r.get(3)?,
@@ -2049,10 +2072,9 @@ impl Store {
         let n = conn.execute(
             "UPDATE users SET
                role = COALESCE(?2, role),
-               disabled = COALESCE(?3, disabled),
-               can_agentic = COALESCE(?4, can_agentic)
+               disabled = COALESCE(?3, disabled)
              WHERE user_id = ?1",
-            params![user_id, p.role.map(Role::as_str), p.disabled, p.can_agentic],
+            params![user_id, p.role.map(Role::as_str), p.disabled],
         )?;
         if n == 0 {
             return Err(StoreError::Corrupt(format!("no user {user_id}")));
@@ -2450,7 +2472,7 @@ impl Store {
     pub fn memberships(&self, user_id: &str) -> Result<Vec<Membership>> {
         let conn = self.lock();
         let mut st = conn.prepare_cached(&format!(
-            "SELECT {WORKSPACE_COLS}, m.role_id, m.use_memory,
+            "SELECT {WORKSPACE_COLS}, m.role_id, m.use_memory, m.exec_level,
                     (SELECT COUNT(*) FROM workspace_members c WHERE c.workspace_id = w.workspace_id)
              FROM workspace_members m JOIN workspaces w ON w.workspace_id = m.workspace_id
              WHERE m.user_id = ?1"
@@ -2461,7 +2483,8 @@ impl Store {
                     workspace: Self::workspace_from_row(r)?,
                     role_id: r.get(5)?,
                     use_memory: r.get::<_, i64>(6)? != 0,
-                    members: r.get::<_, i64>(7)? as u64,
+                    exec_level: level_col(r, 7)?,
+                    members: r.get::<_, i64>(8)? as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2476,7 +2499,7 @@ impl Store {
     }
 
     const MEMBER_SELECT: &str =
-        "SELECT m.user_id, u.username, u.disabled, m.role_id, m.joined_ms, m.use_memory
+        "SELECT m.user_id, u.username, u.disabled, m.role_id, m.joined_ms, m.use_memory, m.exec_level
          FROM workspace_members m JOIN users u ON u.user_id = m.user_id";
 
     fn member_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemberRow> {
@@ -2487,6 +2510,7 @@ impl Store {
             role_id: r.get(3)?,
             joined_ms: r.get(4)?,
             use_memory: r.get::<_, i64>(5)? != 0,
+            exec_level: level_col(r, 6)?,
         })
     }
 
@@ -2710,6 +2734,90 @@ impl Store {
             "DELETE FROM session_workspaces WHERE workspace_id = ?1
                AND session_id IN (SELECT session_id FROM sessions WHERE owner_id = ?2)",
             params![ws, user_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Change an account's stored ceiling from `from` to `to`, only while it
+    /// is still `from` (what the caller's guards read; a concurrent change is
+    /// refused with [`LEVEL_CHANGED`]), and write `audit` as one
+    /// `level.account` line in the same transaction. Returns whether the
+    /// account exists.
+    pub fn set_exec_ceiling(
+        &self,
+        user_id: &str,
+        from: ExecLevel,
+        to: ExecLevel,
+        audit: &str,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let n = tx.execute(
+            "UPDATE users SET exec_ceiling = ?3 WHERE user_id = ?1 AND exec_ceiling = ?2",
+            params![user_id, from.id(), to.id()],
+        )?;
+        if n == 0 {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM users WHERE user_id = ?1)",
+                params![user_id],
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
+            )?;
+            if exists {
+                return Err(StoreError::Refused(LEVEL_CHANGED.into()));
+            }
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO audit (ts_ms, kind, detail) VALUES (?1, 'level.account', ?2)",
+            params![harness_core::now_ms(), audit],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Change a member's stored level in team workspace `ws` from `from` to
+    /// `to`, only while they still hold `role` and `from` (what the caller's
+    /// guards checked; otherwise refused with [`ROLE_CHANGED`] or
+    /// [`LEVEL_CHANGED`]), and write `audit` as one `level.workspace` line
+    /// in the same transaction. Returns whether they are a member.
+    pub fn set_member_level(
+        &self,
+        ws: &str,
+        user_id: &str,
+        role: &str,
+        from: ExecLevel,
+        to: ExecLevel,
+        audit: &str,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::team_workspace(&tx, ws)?.is_none() {
+            return Ok(false);
+        }
+        let n = tx.execute(
+            "UPDATE workspace_members SET exec_level = ?5
+             WHERE workspace_id = ?1 AND user_id = ?2 AND role_id = ?3 AND exec_level = ?4",
+            params![ws, user_id, role, from.id(), to.id()],
+        )?;
+        if n == 0 {
+            let now: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT role_id, exec_level FROM workspace_members
+                     WHERE workspace_id = ?1 AND user_id = ?2",
+                    params![ws, user_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            return match now {
+                None => Ok(false),
+                Some((r, _)) if r != role => Err(StoreError::Refused(ROLE_CHANGED.into())),
+                Some(_) => Err(StoreError::Refused(LEVEL_CHANGED.into())),
+            };
+        }
+        tx.execute(
+            "INSERT INTO audit (ts_ms, kind, detail) VALUES (?1, 'level.workspace', ?2)",
+            params![harness_core::now_ms(), audit],
         )?;
         tx.commit()?;
         Ok(true)

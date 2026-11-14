@@ -14,6 +14,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use harness_core::Secret;
+use harness_core::policy::ExecLevel;
 use harness_store::Role;
 use serde::Deserialize;
 use serde_json::json;
@@ -22,13 +23,16 @@ use super::{ApiError, ApiResult, require_admin};
 use crate::workspaces as ws;
 use crate::{Live, Master, auth};
 
-fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
+pub(super) fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
     json!({
         "user_id": u.user_id,
         "username": u.username,
         "role": u.role,
         "disabled": u.disabled,
-        "can_agentic": u.role == Role::Admin || u.can_agentic,
+        // As it counts (a server admin's is `host`), and as stored (what
+        // applies once they are no longer an admin).
+        "exec_ceiling": crate::levels::ceiling_of(u),
+        "exec_ceiling_stored": u.exec_ceiling,
         "must_change_password": u.must_change_password,
         "created_ms": u.created_ms,
     })
@@ -63,8 +67,10 @@ pub(super) struct NewUserBody {
     password: Option<serde_json::Value>,
     #[serde(default = "member")]
     role: Role,
+    /// `none` unless asked (the UI's form does not ask: the ceiling is set
+    /// in the list, behind the host warning). Audited when not `none`.
     #[serde(default)]
-    can_agentic: bool,
+    exec_ceiling: ExecLevel,
 }
 
 fn member() -> Role {
@@ -76,7 +82,7 @@ pub(super) async fn create_user(
     headers: HeaderMap,
     Json(b): Json<NewUserBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
+    let who = require_admin(&m, &headers).await?;
     if b.password.is_some() {
         return Err(ApiError(StatusCode::BAD_REQUEST, CHOSEN.into()));
     }
@@ -87,10 +93,15 @@ pub(super) async fn create_user(
         b.username.trim().to_ascii_lowercase(),
         pw.expose().to_string(),
         b.role,
-        b.can_agentic,
+        b.exec_ceiling,
         true,
     )
     .await?;
+    if b.exec_ceiling != ExecLevel::None {
+        let detail = json!({"by": crate::levels::by(&who), "user": u.user_id,
+            "from": ExecLevel::None, "to": b.exec_ceiling, "reason": "created"});
+        crate::levels::audit(&m, "level.account", detail).await;
+    }
     Ok(Json(with_password(&u, &pw)))
 }
 
@@ -100,8 +111,10 @@ pub(super) struct UserPatchBody {
     role: Option<Role>,
     #[serde(default)]
     disabled: Option<bool>,
+    /// Refused when present: the ceiling has its own request
+    /// (`PUT /api/users/{id}/exec-ceiling`), with its own checks.
     #[serde(default)]
-    can_agentic: Option<bool>,
+    can_agentic: Option<serde_json::Value>,
     /// Refused when present: resets go through `POST …/password`.
     #[serde(default)]
     password: Option<serde_json::Value>,
@@ -151,15 +164,21 @@ pub(super) async fn update_user(
     if b.password.is_some() {
         return Err(ApiError(StatusCode::BAD_REQUEST, CHOSEN.into()));
     }
+    if b.can_agentic.is_some() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "can_agentic is gone: set the account's ceiling with PUT /api/users/{id}/exec-ceiling"
+                .into(),
+        ));
+    }
     let target = load_user(&m, &id).await?;
-    let changes_access = b.role.is_some() || b.disabled.is_some() || b.can_agentic.is_some();
+    let changes_access = b.role.is_some() || b.disabled.is_some();
     if changes_access {
         let removes_admin = b.disabled == Some(true) || b.role == Some(Role::Member);
         guard_admin_change(&m, &who, &target, removes_admin).await?;
         let patch = harness_store::UserPatch {
             role: b.role,
             disabled: b.disabled,
-            can_agentic: b.can_agentic,
         };
         let uid = target.user_id.clone();
         let disable = b.disabled == Some(true);
@@ -175,6 +194,18 @@ pub(super) async fn update_user(
             .await?;
         if disable {
             auth::close_sockets(&m, &target.user_id);
+        }
+        // Becoming or ceasing to be a server admin, or being disabled or
+        // enabled, moves the ceiling as it counts: one audit line.
+        let after = load_user(&m, &id).await?;
+        let (from, to) = (
+            crate::levels::ceiling_of(&target),
+            crate::levels::ceiling_of(&after),
+        );
+        if from != to {
+            let detail = json!({"by": crate::levels::by(&who), "user": target.user_id,
+                "from": from, "to": to, "reason": "role or disabled"});
+            crate::levels::audit(&m, "level.account", detail).await;
         }
         // Disabled owners stop counting as owners, and whether the user may
         // drive their agentic chats (`blocked`) may have changed: running

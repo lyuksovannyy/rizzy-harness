@@ -281,7 +281,7 @@ async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &st
             username: owner.into(),
             password_hash: "$argon2id$x".into(),
             role: harness_store::Role::Member,
-            can_agentic: true,
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         })
         .unwrap();
@@ -310,15 +310,12 @@ async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &st
 }
 
 fn revoke_grant(store: &Store, user: &str) {
-    store
-        .update_user(
-            user,
-            &harness_store::UserPatch {
-                can_agentic: Some(false),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    use harness_core::policy::ExecLevel;
+    assert!(
+        store
+            .set_exec_ceiling(user, ExecLevel::Host, ExecLevel::None, "{}")
+            .unwrap()
+    );
 }
 
 /// The next `Cancel` for `sid` on `c`, within `secs`.
@@ -380,7 +377,7 @@ async fn a_turn_known_only_from_the_replay_is_cancelled_when_it_lands() {
             username: "bob".into(),
             password_hash: "$argon2id$x".into(),
             role: harness_store::Role::Member,
-            can_agentic: true,
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         })
         .unwrap();
@@ -452,6 +449,23 @@ async fn next_create(c: &mut mpsc::Receiver<MasterToNode>) -> (String, SessionId
     }
 }
 
+/// The accounts `create_spec` names, at the `sandbox` ceiling: a create's
+/// owner must exist and have a level (N.10a part 2).
+fn people(store: &Store) {
+    for name in ["bob", "carol"] {
+        store
+            .create_user(&harness_store::NewUser {
+                user_id: name.into(),
+                username: name.into(),
+                password_hash: "$argon2id$x".into(),
+                role: harness_store::Role::Member,
+                exec_ceiling: harness_core::policy::ExecLevel::Sandbox,
+                must_change_password: false,
+            })
+            .unwrap();
+    }
+}
+
 fn create_spec(owner: &str) -> harness_master::CreateSpec {
     harness_master::CreateSpec {
         node_id: Some("n1".into()),
@@ -469,6 +483,7 @@ fn create_spec(owner: &str) -> harness_master::CreateSpec {
 #[tokio::test(start_paused = true)]
 async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
     let store = Store::open_in_memory().unwrap();
+    people(&store);
     let m = master_on(&store);
     m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
     let (l, mut c, tx) = open_link("n1", vec![]);
@@ -517,6 +532,7 @@ async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
 #[tokio::test]
 async fn a_create_intent_that_never_lands_is_removed_and_claims_nothing() {
     let store = Store::open_in_memory().unwrap();
+    people(&store);
     let m = master_on(&store);
     m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
     let (l, mut c, tx) = open_link("n1", vec![]);
@@ -560,6 +576,7 @@ async fn a_create_intent_that_never_lands_is_removed_and_claims_nothing() {
 #[tokio::test]
 async fn an_abandoned_command_leaves_no_ack_and_an_unknown_model_is_refused() {
     let store = Store::open_in_memory().unwrap();
+    people(&store);
     let m = master_on(&store);
     m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
     let (l, mut c, _tx) = open_link("n1", vec![]);

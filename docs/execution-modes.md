@@ -1,15 +1,15 @@
-# Execution modes (N.10a part 1)
+# Execution modes and levels (N.10a)
 
-Decision O13 (the owner, 2026-11-12 and 2026-11-13; `ADOPTION_PLAN.md`,
-"Execution levels"): who may run what on a node is one ordered level per
-member per workspace, `none` < `container` < `sandbox` < `host`, under the
-node's own ceiling, and every check is
-`session mode <= member's level <= node's ceiling`. This note is the node's
-side and the session's mode (part 1). The level per member, which replaces
-the role-derived `agentic` permission, is part 2 and not built yet; until
-then the master applies an interim rule (below). `container` (rootless
-Podman, N.4) does not exist yet; the type orders below `sandbox` when it
-comes.
+Decision O13 (the owner, 2026-11-12 to 2026-11-14; `ADOPTION_PLAN.md`,
+"Execution levels"): who may run what on a node is one ordered level,
+`none` < `container` < `sandbox` < `host`, under the node's own ceiling, and
+every check is `session mode <= effective level`, with the node refusing any
+mode above its own `[execution]` ceiling. Part 1 (below, up to "The master")
+is the node's side and the session's mode; part 2 ("The master: levels") is
+the account's ceiling and the level per member, which replaced the
+account-wide `can_agentic` switch, the role-derived `agentic` permission and
+part 1's interim rule. The `container` mode (rootless Podman, N.4) does not
+exist yet: `container` is a level that allows no mode until it does.
 
 ## The modes
 
@@ -105,7 +105,7 @@ the gaps of those modes (`harness_protocol::GAPS`):
   everything goes out (review L-d).
 
 The master keeps the known ones in its node list (`exec_modes`,
-`exec_gaps`) and shows them only to accounts with the agentic grant
+`exec_gaps`) and shows them only to accounts whose ceiling runs agent chats
 (review L-i); the chat header names the chat's mode and says its gaps in
 plain words (reviews T8B-3, L-e). **The hello is a snapshot** of the node
 at connect: a gap closed later by the step up (the network namespace) is
@@ -141,49 +141,124 @@ still shown until the node's next hello.
 * The node's `session.create` audit line names the mode asked for (review
   N-d).
 
-## The master, until part 2
+## The master: levels (part 2)
 
-`POST /api/sessions` takes `exec_mode` (`workspaces::exec_mode_for`):
+**The levels** (`master/src/levels.rs`, `ExecLevel` in `core/src/policy.rs`):
 
-* `host` only for a server admin (the API token counts as admin), on every
-  node (review H1: the earlier "workspace's owner" arm admitted everyone,
-  since every account owns its Personal workspace and may own a team it
-  made itself).
-* Every agentic create carries a mode: `sandbox` unless `host` is asked
-  for by name (`Master::create_session`), so a node whose only mode is
-  `host` refuses rather than hand it over by default.
-* A connected node is sent a mode only if its hello named it
-  (`exec:<mode>`); one that names none (a node from before modes) gets no
-  agentic chat, refused by the master naming the node, what it offers and
-  what to do on it: install bubblewrap for the sandbox mode, `[execution]
-  host = true` for the host shell (reviews L-g, RN-3). A node not linked to
-  this process now (away, or not yet back after a restart) is "not
-  connected", as before: a routine retries it (review RN-2).
-* The recorded mode is mirrored onto the chat's row (`sessions.exec_mode`)
-  and the create's rule is applied again in `agentic_blocked`, on every
-  prompt, allowing approval, restore and callback admission; an agentic
-  row without a readable mode is refused (fails closed). A server admin
-  who is demoted loses their `host` chats at the next action, and the
-  revocation sweep stops a running turn as for a lost grant (review L-h).
-  The sweep asks once per owner, workspace, node and recorded mode (review
-  RN-1: keyed without the mode it gave a host chat's answer to a sandbox
-  chat of the same owner on the same node, or the other way round).
-* Every create that asks for `host` writes one `session.create.host` line
-  to the audit log, whichever check refused it: the user (or `api token`),
-  the workspace and node as resolved, and the outcome (`granted` with the
-  session id, or `refused: ` and the refusal's first words); no content
-  (reviews N-d, RN-4).
-* The UI offers `host` only to a server admin, binds a confirmed choice to
-  the node it was confirmed for (review L-j), and never offers `auto`
-  (the composer sends no approval mode; the warning says a host chat
-  always asks).
-* A routine's run chat always asks for `sandbox` (unattended, often on
-  input from outside); a node without `sandbox` refuses the run.
-* Callbacks and the actions on an existing chat act on its recorded mode.
+* **An account's ceiling**, `users.exec_ceiling`, set by server admins
+  (`PUT /api/users/{id}/exec-ceiling`), never their own. A new account
+  starts at `none`, also one a server admin creates: the create form does
+  not ask (the API takes `exec_ceiling`, audited), because the level is set
+  in the list, where `host` goes through its warning; with every member
+  also starting at `none`, an account made by mistake runs nothing. The
+  first admin, made by the claim, is a server admin. **A server admin's
+  ceiling counts as `host`** while they are one (`levels::ceiling_of`); what
+  is stored for them applies once they are not (`exec_ceiling_stored` in the
+  users list). A disabled account's counts as `none`.
+* **A member's level in a team workspace**, `workspace_members.exec_level`,
+  set by its admins (`PUT /api/workspaces/{id}/members/{user}/exec-level`):
+  every new member starts at `none`; nobody changes their own; nobody
+  grants above their own effective level there; only an owner grants
+  `host`; an owner's level counts as `host` and cannot be set (so a team
+  owner's effective level is their ceiling). **Open:** making someone an
+  owner gives them that `host`, and the role rule (only owners make owners)
+  does not look at the granting owner's level, so a self-made owner at a
+  `sandbox` ceiling can give a friend whose ceiling is `host` the `host`
+  level in their team by making them co-owner. Requiring the granter to be
+  at `host` was tried and dropped: an owner below `host` could then never
+  name a co-owner, and the last-owner rule would keep them in their team
+  for good. The two ways out (owners' level stored, the creator's set to
+  `host`; or the guard plus a way to hand over ownership) are the owner's
+  decision. Until nodes belong to workspaces (N.1) it gives nothing the
+  friend's own ceiling did not already allow on any node. Members, not only admins, are
+  "in" the workspace at `none`: they read and chat there, nothing more.
+* **A Personal workspace** has no level of its own: the ceiling applies
+  (`levels::workspace_level` counts it as `host`). This is what closes the
+  hole part 1's review found (H1): every account owns its Personal
+  workspace and may own a team it made, so ownership never raises anyone
+  past the ceiling a server admin set.
+* **The effective level** is the lower of the two (`levels::effective`).
+  Roles stay for their other permissions (settings, members, routines);
+  `Perm::Agentic` is gone, and a guest can run agent chats if given a
+  level (a role says what someone may administer, the level what they may
+  run).
+* **The API token** is the machine owner's root key: it acts as an owner of
+  every workspace and is `host`; its own chats have no owner. On a member's
+  chat it gets the member's answer (below).
 
-A stolen master can still ask for any mode up to the node's ceiling, as it
-can today: the modes protect against members, not against the master (O13,
-change 2).
+**Where it is checked:**
+
+* **Create:** `levels::create_mode` in the HTTP handler (the mode asked for,
+  else the most confined one the level allows; never `host` by default),
+  and again in `Master::create_session` for whoever calls it (the owner of
+  the spec, `workspaces::create_mode`): routines, tests, a future caller.
+* **Every later command that makes a node work on a session:**
+  `Master::send_command` asks `workspaces::work_refusal` for every command
+  `writes_to` names (prompt, callback, allowing an approval, restore,
+  `set_agent`, `select_variant`, artifact staging), so no caller skips it.
+  It is decided by the chat's **owner**, not the caller: their effective
+  level in the chat's workspace must allow the chat's recorded mode, and
+  the node rule must allow them. It fails closed: an agentic row without a
+  readable mode, an owner who cannot be loaded, disabled or gone, or a
+  session the mirror does not know does no work. Denying an approval,
+  cancelling, stopping background commands and deleting are never refused.
+  The HTTP gate (`agentic_gate`) asks the same first, so a refused prompt
+  keeps its uploads. Before part 2 `set_agent` and `select_variant` had no
+  gate at all (on `main` `set_agent` answered ok for an account without the
+  grant).
+* **Callbacks** (admission, `agentic_blocked`) and **artifact publishing**
+  (`artifacts::refusal`, the staging check) ask the same; **routines** fire at their owner's
+  level on the day they fire (`runner::why_blocked` needs `sandbox`, since a
+  routine's chat is always `sandbox`; "Run now" is refused at once).
+* **Reading** (a chat's events, its row, the list) is never refused: the
+  row carries `blocked` with the reason.
+
+**Lowering** a ceiling or a workspace level runs the revocation sweep for
+that member: every running turn and every background command of their
+chats whose mode is now above their level stops, and only those (the sweep
+asks once per owner, workspace, node and recorded mode: review RN-1). A
+server admin demoted falls to their stored ceiling, and the sweep runs as
+for any role change. **A removed member's** chats from that workspace
+return to their Personal workspace (as before), where their ceiling applies
+from their next action; what was running in them for the team (turns,
+background commands) is stopped at the removal
+(`workspaces::stop_removed`).
+
+**Changes are conditional and audited.** Each level change is written only
+while the level (and, for a member, their role) is still what the guards
+read: two admins changing one member at once, the second gets 409 "this
+level just changed". Each writes one audit line in the same transaction
+(`level.account`, `level.workspace`: `by` (user id or `api token`), `user`,
+`workspace`, `from`, `to`; no chat content). A role change that makes or
+unmakes an owner or a server admin, disabling an account, an account
+created above `none`, and a removal each write one too, with a `reason`.
+
+**The UI:** Settings → Users shows and sets each account's level (a server
+admin's shows "host"); Workspace admin → Members shows and sets each
+member's level, offering only levels the person setting it may grant;
+granting `host` in either place shows the host warning (`HostWarning`,
+grant variant: the same risks) before anything is saved, and cancelling
+saves nothing. The new-chat choice offers `host` only at the `host` level
+(`mayPickHost`); at `none` or `container` the composer says why agent
+chats are off, naming which level and who sets it.
+
+**What the node knows:** nothing of levels. It knows its own ceiling and
+refuses any mode above it whatever the master sends
+(`node/tests/exec_modes.rs`). A stolen master can still ask for any mode up
+to the node's ceiling: the levels protect against members, not against the
+master (O13, change 2).
+
+**What a level in a team does not do yet:** nodes are not tied to
+workspaces (C.12, N.1), so a member whose ceiling is `sandbox` can run a
+`sandbox` chat on any remote node, a team's included, from their Personal
+workspace, whatever their level in that team. Until N.1, the account's
+ceiling is the boundary between people; a workspace's levels are the
+team's rule within the workspace.
+
+**The schema** changed in place (version 1, no compatibility before the
+first tag): `users.can_agentic` became `users.exec_ceiling`, and
+`workspace_members` gained `exec_level`. A data directory made by an
+earlier build is refused at start as a schema mismatch (fix plan 4.3).
 
 ## Not built, and where it belongs
 
@@ -192,9 +267,11 @@ change 2).
   has no list of its attachments. It belongs with the node's attached
   list (C.12, built in N.1): the node refuses `host` at start, and in its
   hello, when that list has more than one entry.
-* **The level per member** (part 2): replaces `Perm::Agentic`, is checked
-  where `agentic_blocked` checks today (create and every action). Until
-  then `host` is for server admins only.
+* **Levels tied to nodes**: a node attached to a workspace (C.12, N.1), so
+  a workspace's levels bound what its members run on its nodes.
+* **A grant decided while the setter's own level is being lowered** can
+  land: the write is conditional on the target's level and role, not on the
+  setter's (the window between the guard's read and the write).
 * **Files one mode writes and another executes.** A `sandbox` session can
   write what a `host` session in the same folder later runs (a script, a
   `Makefile`, `.git/hooks`, `.git/config`): the `host` session then runs it
@@ -220,6 +297,19 @@ change 2).
   `doctor_marks_each_containment_state`, `cli/tests/network_off.rs`.
 * `master/tests/exec_mode_http.rs`: the interim rule and the node list.
 * `web/src/components/execchoice.test.tsx`; `web/e2e/exec-modes.cjs`
+  against the real binary.
+* Part 2: `master/tests/exec_levels_http.rs` (every action refused at
+  `none`, `set_agent` and `select_variant` included; `sandbox` refused
+  `host`; lowering stops only the chats above the level, ceiling and
+  workspace level; a demoted server admin; who grants what; a self-made
+  owner at a `sandbox` ceiling; Personal; a removed member's turn; audit
+  lines; the API token), `master/tests/routines_http.rs`
+  `a_routine_fires_at_its_owners_level_on_the_day_it_fires`,
+  `store/tests/workspaces.rs`
+  `levels_start_at_none_and_change_only_from_what_was_read` (two admins at
+  once), `core/src/policy.rs` and `master/src/levels.rs` unit tests,
+  `web/src/components/users.test.tsx` and `workspace/workspace.test.tsx`
+  (the warning before a grant, cancel saves nothing), `web/e2e/exec-levels.cjs`
   against the real binary.
 * The security review's fixes (2026-11): `master/tests/exec_mode_http.rs`
   `host_is_for_server_admins_only`, `a_node_that_did_not_announce_the_mode_gets_no_chat`,

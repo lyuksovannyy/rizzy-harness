@@ -15,6 +15,7 @@ mod agent_edits;
 mod artifacts;
 mod background;
 mod hooks;
+mod levels;
 mod links;
 mod media;
 mod projects;
@@ -119,6 +120,10 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             "/api/workspaces/{id}/members/{user_id}",
             axum::routing::patch(workspaces::set_role).delete(workspaces::remove_member),
         )
+        .route(
+            "/api/workspaces/{id}/members/{user_id}/exec-level",
+            axum::routing::put(levels::set_member_level),
+        )
         .route("/api/admin/workspaces", get(workspaces::admin_list))
         .route(
             "/api/admin/workspaces/policy",
@@ -141,6 +146,10 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             axum::routing::patch(users::update_user).delete(users::delete_user),
         )
         .route("/api/users/{id}/password", post(users::reset_password))
+        .route(
+            "/api/users/{id}/exec-ceiling",
+            axum::routing::put(levels::set_ceiling),
+        )
         .route("/api/nodes", get(nodes))
         .route("/api/admin/nodes", get(admin_nodes))
         .route("/api/admin/nodes/join", post(node_join_token))
@@ -250,6 +259,7 @@ impl From<CommandError> for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             CommandError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            CommandError::Forbidden(_) => StatusCode::FORBIDDEN,
             CommandError::Rejected(_)
             | CommandError::AgentGone(_)
             | CommandError::BadDefault(_) => StatusCode::CONFLICT,
@@ -342,9 +352,11 @@ async fn visible_session(
 }
 
 /// Refuse (403) to make an agentic chat do work when its owner may no
-/// longer run agentic sessions there: the account's grant and the
-/// workspace's `agentic` permission, checked on every action that starts
-/// work, since either can be taken away after the chat was created.
+/// longer run its mode there: their effective level (N.10a part 2) and the
+/// node rule, checked on every action that starts work, since either can
+/// be lowered after the chat was created. `Master::send_command` asks the
+/// same again for every such command; this answers first, before a
+/// request takes its uploads.
 async fn agentic_gate(
     m: &Master,
     who: &auth::Principal,
@@ -471,9 +483,9 @@ async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<se
         .into_iter()
         .filter(|n| local_ok || !m.is_local_node(&n.node_id))
         // What a node can contain says how to get out of it: only for those
-        // who may run agentic chats (N.10a).
+        // whose account may run agent chats at all (N.10a).
         .map(|mut n| {
-            if !who.can_agentic {
+            if who.exec_ceiling < harness_core::policy::ExecLevel::Sandbox {
                 (n.exec_modes, n.exec_gaps) = Default::default();
             }
             n
@@ -920,8 +932,8 @@ async fn list_sessions(
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
-    // Every listed chat is in the scope's workspace, so one answer fits all.
-    let blocked = ws::agentic_refusal(&who, scope.as_ref());
+    // Every listed chat is in the scope's workspace: the caller's level
+    // there, against each chat's own mode (reading stays allowed).
     let local_ok = ws::may_use_local_node(&m, &who);
     let in_scope = |r: &&harness_store::SessionRow| match &scope {
         Some(a) => r.workspace_id.as_deref() == Some(a.id()),
@@ -939,9 +951,10 @@ async fn list_sessions(
         .filter(|r| who.can_see(r.owner_id.as_deref()))
         .filter(in_scope)
         .map(|r| {
-            let on_local =
-                (!local_ok && m.is_local_node(&r.node_id)).then_some(ws::LOCAL_NODE_ADMINS_ONLY);
-            let mut v = session_json(r, blocked.as_deref().or(on_local));
+            let on_local = (!local_ok && m.is_local_node(&r.node_id))
+                .then(|| ws::LOCAL_NODE_ADMINS_ONLY.to_string());
+            let blocked = ws::row_refusal(&who, scope.as_ref(), r);
+            let mut v = session_json(r, blocked.or(on_local).as_deref());
             v["project_id"] = json!(crate::projects::effective(&links, r));
             v
         })
@@ -1045,8 +1058,8 @@ struct CreateBody {
     /// Start the chat in this project (docs/projects.md).
     #[serde(default)]
     project_id: Option<String>,
-    /// How its commands run (N.10a): a request, checked by
-    /// `ws::exec_mode_for` and then by the node.
+    /// How its commands run (N.10a): a request, checked against the
+    /// caller's level (`levels::create_mode`) and then by the node.
     #[serde(default)]
     exec_mode: Option<harness_core::policy::ExecMode>,
 }
@@ -1084,13 +1097,14 @@ async fn create_checked(
     }
     let scope = ws::scope(&m, &who, b.workspace_id.as_deref()).await?;
     seen.workspace = scope.as_ref().map(|a| a.id().to_string());
-    // Agentic sessions run shell commands on a worker node: they need the
-    // account's grant and the workspace's permission.
+    // Agentic sessions run shell commands on a worker node: the mode asked
+    // for (or the most confined one) must be within the caller's level
+    // here (N.10a part 2). `Master::create_session` checks it again.
     if b.profile.unwrap_or(harness_core::event::Profile::Agentic)
         == harness_core::event::Profile::Agentic
-        && let Some(why) = ws::agentic_refusal(&who, scope.as_ref())
     {
-        return Err(ApiError(StatusCode::FORBIDDEN, why));
+        let mode = crate::levels::create_mode(&who, scope.as_ref(), b.exec_mode);
+        b.exec_mode = Some(mode.map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?);
     }
     let project = projects::for_new_chat(&m, &who, &mut b, scope.as_ref()).await?;
     // And the node must be one they may use (the embedded node is for
@@ -1121,8 +1135,6 @@ async fn create_checked(
             .node_id
             .or_else(|| m.default_node(harness_core::event::Profile::Agentic));
         seen.node = b.node_id.clone();
-        let mode = ws::exec_mode_for(&who, b.exec_mode);
-        b.exec_mode = Some(mode.map_err(|why| ApiError(StatusCode::FORBIDDEN, why))?);
     } else if b.exec_mode.is_some() {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -1361,8 +1373,9 @@ async fn set_agent(
     Json(b): Json<AgentBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.set_agent(sid, &b.agent_id).await?;
+    let row = visible_session(&m, &who, &id).await?;
+    agentic_gate(&m, &who, &row).await?;
+    m.set_agent(row.session_id, &b.agent_id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1834,8 +1847,10 @@ async fn select_variant(
     Json(b): Json<VariantBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
-    m.select_variant(sid, b.group, b.message_id).await?;
+    let row = visible_session(&m, &who, &id).await?;
+    agentic_gate(&m, &who, &row).await?;
+    m.select_variant(row.session_id, b.group, b.message_id)
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
