@@ -1461,6 +1461,24 @@ select.pill {
   flex: 1;
   min-width: 0;
 }
+/* The title and its Rename button on one line; the title is cut, not wrapped. */
+.chat-title-row {
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.chat-title-row h1 {
+  min-width: 0;
+}
+.chat-rename {
+  flex-wrap: nowrap;
+}
+.chat-rename input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--w-semibold);
+}
 .conv-title h1 {
   font-size: var(--text-lg);
   font-weight: var(--w-semibold);
