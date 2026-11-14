@@ -816,7 +816,7 @@ async fn a_message_during_a_callback_turn_starts_the_persons_turn_after_it() {
     // The callback turn ends, then the person's turn reads the message.
     n.until(move |e, k| e.session_id == sid && matches!(k, EventKind::QueuedDelivered(_)))
         .await;
-    n.turn_ended(sid).await;
+    // The turn that read it ends (the callback turn ended before).
     n.turn_ended(sid).await;
     let evs = n.of(sid);
     let starts: Vec<&TurnStarted> = evs
