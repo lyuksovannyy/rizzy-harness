@@ -111,3 +111,22 @@ describe("the login key (Gate 3 P-1)", () => {
     localStorage.clear();
   });
 });
+
+describe("Live.watch", () => {
+  test("is counted: the subscription ends with the last unwatch", () => {
+    const live = new Live();
+    const ws = FakeSocket.all[0]!;
+    ws.onopen!();
+    const subs = () => ws.sent.map((m) => JSON.parse(m) as { type: string }).filter((m) => m.type !== "login");
+    live.watch("child");
+    live.watch("child");
+    expect(subs().map((m) => m.type)).toEqual(["subscribe"]);
+    live.unwatch("child");
+    expect(live.view("child")).toBeDefined();
+    expect(subs().map((m) => m.type)).toEqual(["subscribe"]);
+    live.unwatch("child");
+    expect(live.view("child")).toBeUndefined();
+    expect(subs().map((m) => m.type)).toEqual(["subscribe", "unsubscribe"]);
+    live.close();
+  });
+});
