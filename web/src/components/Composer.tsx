@@ -22,7 +22,7 @@ import { shownName } from "../md/hiddenChars";
 const LinkedImg = lazy(() => import("./Linked"));
 // The host shell's choice: only those who may pick it load it (N.10a).
 const ExecChoice = lazy(() => import("./ExecChoice"));
-// The approval mode's picker (T48): only for agentic chats on a node that
+// The approval mode's picker (T50): only for agentic chats on a node that
 // announced its modes.
 const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
 
@@ -65,7 +65,7 @@ export interface Submission {
   images?: string[];
   /** Agentic: how its commands run (N.10a); `host` only once its warning was confirmed. */
   execMode?: ExecMode;
-  /** Agentic: the approval mode the person picked (T48); absent: the node's default. */
+  /** Agentic: the approval mode the person picked (T50); absent: the node's default. */
   approvalMode?: ApprovalMode;
 }
 
@@ -119,7 +119,7 @@ export function Composer(props: {
   images?: { workspace: string | null; pending?: boolean; left?: number } | null;
   /** Home: who may pick the host shell (N.10a); absent, nobody here. */
   hostRight?: HostRight;
-  /** Session: the chat's approval mode and how to change it (T48); absent:
+  /** Session: the chat's approval mode and how to change it (T50); absent:
    * not changeable here (a chat, a sub-agent's, a routine's, an old node). */
   approval?: { value: ApprovalMode; max: ApprovalMode; host: boolean; onChange: (m: ApprovalMode) => Promise<unknown> };
 }) {

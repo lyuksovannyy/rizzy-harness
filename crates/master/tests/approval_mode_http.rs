@@ -1,4 +1,4 @@
-//! The owner's change of a chat's approval mode over HTTP (T48, README
+//! The owner's change of a chat's approval mode over HTTP (T50, README
 //! "Approval modes"): owner only, every other account gets 404 (admins and
 //! workspace admins included, T10); through the execution-level check every
 //! command that makes a chat work passes; relayed as
@@ -126,7 +126,7 @@ const TOKEN: &str = "api-secret";
 
 /// A master with the fake nodes `local` (embedded, announcing its approval
 /// modes, ceiling `auto`), `remote` (ceiling `accept_edits`) and `old` (a
-/// node from before T48), and alex, its claimed admin.
+/// node from before T50), and alex, its claimed admin.
 async fn start() -> T {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -157,7 +157,7 @@ turn") covers only that call, until the run's turn ends (each run is a new chat)
 node)`. It returns the spec's mode: `auto` unless the routine sets its own (the owner's decision of
 2026-11-14: "default accept mode is Auto for every chat type"), except that an `untrusted` run
 (webhook data in its prompt) gets at most `ask`: whoever can send the webhook writes into its
-prompt, and in `auto` they would steer its commands with no card (PLAN.md T48; the owner is asked
+prompt, and in `auto` they would steer its commands with no card (PLAN.md T50; the owner is asked
 to confirm this exception). `node` is there for a trusted tool list (Later). It is
 called once per run, when the run's chat is created; the owner's later turns in that chat never go
 through it.

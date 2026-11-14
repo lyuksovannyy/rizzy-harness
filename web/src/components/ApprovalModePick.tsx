@@ -1,4 +1,4 @@
-// A chat's approval mode (T48, README "Approval modes"): how much runs
+// A chat's approval mode (T50, README "Approval modes"): how much runs
 // without a click. One compact control in the composer: the current mode,
 // and the choices with one line each saying what runs unasked. A choice the
 // node does not allow is shown disabled with the reason. The node decides:

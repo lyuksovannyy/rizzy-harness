@@ -1,5 +1,5 @@
 //! A call the node's Accept edits rule let through runs with
-//! `allow_outside_workspace` off (PLAN.md T48, review F4): the tool walks
+//! `allow_outside_workspace` off (PLAN.md T50, review F4): the tool walks
 //! its path the way the rule did, so a path out of the folder is refused
 //! even on a node that lets file tools leave it. A call a person allowed
 //! keeps the node's setting.

@@ -578,7 +578,7 @@ impl NodeRuntime {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
                 capabilities.extend(self.inner.cfg.policy.exec.capabilities());
-                // Its approval modes (T48): the ceiling, and what a new chat
+                // Its approval modes (T50): the ceiling, and what a new chat
                 // gets.
                 let p = &self.inner.cfg.policy;
                 capabilities.push(format!(
@@ -1061,7 +1061,7 @@ impl NodeRuntime {
                 None => Err("unknown session".into()),
             },
             // In the session's lane, which a running turn does not hold: a
-            // change made while a turn runs applies from its next call (T48).
+            // change made while a turn runs applies from its next call (T50).
             MasterToNode::SetApprovalMode {
                 session_id, mode, ..
             } => {
@@ -1175,7 +1175,7 @@ impl NodeRuntime {
             Profile::Agentic => policy.check_cwd(&cwd)?,
             Profile::Chat => std::path::PathBuf::new(),
         };
-        // Within node.toml's ceiling, whatever was asked (T48).
+        // Within node.toml's ceiling, whatever was asked (T50).
         let mode = policy.effective_mode(approval_mode);
         let model = agent
             .as_ref()

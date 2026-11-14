@@ -1,4 +1,4 @@
-//! A chat's approval mode (T48, README "Approval modes"): chosen at create,
+//! A chat's approval mode (T50, README "Approval modes"): chosen at create,
 //! changed by the owner's command, clamped by the node's own `node.toml`
 //! (and by nothing else) whatever the master sends, recorded as
 //! `approval_mode_changed` by the session (one writer), rebuilt from the
@@ -41,6 +41,29 @@ fn policy(root: &std::path::Path, max: ApprovalMode) -> NodePolicy {
     }
 }
 
+/// A tool as the MCP client registers them: `mcp__<server>__<tool>`, every
+/// one `Mutating`, here taking a `path` like `write`.
+struct McpWrite;
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for McpWrite {
+    fn name(&self) -> &str {
+        "mcp__files__write"
+    }
+    fn description(&self) -> &str {
+        "Write a file through an MCP server."
+    }
+    fn schema(&self) -> Value {
+        json!({"type": "object", "properties": {"path": {"type": "string"}}})
+    }
+    fn risk(&self) -> harness_core::policy::ToolRisk {
+        harness_core::policy::ToolRisk::Mutating
+    }
+    async fn run(&self, _: &harness_tools::ToolCtx, _: Value) -> harness_tools::ToolOutcome {
+        harness_tools::ToolOutcome::ok("written".to_string())
+    }
+}
+
 struct N {
     node: NodeRuntime,
     link: NodeLink,
@@ -57,7 +80,11 @@ async fn start(db: &std::path::Path, policy: NodePolicy) -> N {
             Arc::new(Mock {
                 delay: Duration::from_millis(5),
             }),
-            harness_tools::builtin(),
+            {
+                let mut tools = harness_tools::builtin();
+                tools.push(Arc::new(McpWrite));
+                tools
+            },
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
@@ -919,4 +946,27 @@ async fn accept_edits_covers_a_new_folder_and_not_git_in_any_case() {
         ["write .GIT/config", "write .Git/hooks/pre-commit"]
     );
     assert!(ws.join("src/new/mod.rs").exists());
+}
+
+/// Accept edits covers `write` and `edit` only: an MCP tool (every one is
+/// `Mutating`) asks there even with a path inside the folder; Auto runs it.
+#[tokio::test]
+async fn accept_edits_asks_for_mcp_tools_and_auto_runs_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let call = script(&[("mcp__files__write", json!({"path": "a.txt"}))]);
+    let sid = n
+        .create(&ws, Some(ApprovalMode::AcceptEdits), None, false)
+        .await;
+    let asked = n.turn(sid, &call, None, deny).await;
+    assert_eq!(about(&asked), ["mcp__files__write a.txt"]);
+    n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
+    let asked = n.turn(sid, &call, None, deny).await;
+    assert!(asked.is_empty(), "{:?}", about(&asked));
 }

@@ -1,4 +1,4 @@
-// A chat's approval mode against the real binary (T48): a fresh node.toml
+// A chat's approval mode against the real binary (T50): a fresh node.toml
 // (no ceiling set: `auto`); a new Agentic chat starts in Auto (the owner's
 // default, 2026-11-14); picked "Accept edits" it writes a file without a
 // card and asks for a command; switched to "Ask" in the open chat, the next

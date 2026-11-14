@@ -531,7 +531,7 @@ mod tests {
         }
     }
 
-    /// T48: the latest `approval_mode_changed` is the chat's mode, and the
+    /// T50: the latest `approval_mode_changed` is the chat's mode, and the
     /// chat shows where it changed.
     #[test]
     fn the_latest_mode_change_is_the_chats_mode() {

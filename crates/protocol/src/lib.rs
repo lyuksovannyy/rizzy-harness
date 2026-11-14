@@ -65,7 +65,7 @@ pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
 }
 
 /// The node capabilities that announce `session.set_approval_mode` and say
-/// its approval modes (T48): `approval-max:<mode>`, the loosest mode
+/// its approval modes (T50): `approval-max:<mode>`, the loosest mode
 /// node.toml allows any chat there (`max_approval_mode`), and
 /// `approval-default:<mode>`, what a create without a mode gets there. What the UI offers and names; the node
 /// clamps every request whatever the master believes. The master sends
@@ -335,7 +335,7 @@ pub enum MasterToNode {
         session_id: SessionId,
         agent: AgentSpec,
     },
-    /// Change the chat's approval mode (T48). A request only: the node
+    /// Change the chat's approval mode (T50). A request only: the node
     /// clamps it by its own `max_approval_mode` (nothing else), refuses it for a sub-agent's or a routine's chat, and records
     /// the result as `approval_mode_changed`. Only to nodes whose hello
     /// listed `approval-max:*`.

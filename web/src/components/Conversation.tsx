@@ -178,7 +178,7 @@ function useRunSeen(mark: RoutineMark | null | undefined) {
 
 /** A chat takes this many images in all (docs/media.md §6.6). */
 const CHAT_IMAGES = 50;
-/** An approval mode in the chat's own words (T48). */
+/** An approval mode in the chat's own words (T50). */
 const MODE_NAMES: Record<ApprovalMode, string> = { ask_all: "ask every call", ask: "ask", accept_edits: "accept edits", auto: "auto" };
 
 function compact(n: number): string {

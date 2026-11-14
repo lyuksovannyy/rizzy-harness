@@ -76,7 +76,7 @@ export const pageApi = {
   deleteSession: (id: string, opts: { media?: boolean } = {}) =>
     call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
-  /** The node clamps it and records it; the chat shows the result (T48). */
+  /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>

@@ -1023,7 +1023,7 @@ pub struct TurnEnded {
     pub usage: Option<Usage>,
 }
 
-/// The chat's approval mode changed (T48): the owner's change, as the node
+/// The chat's approval mode changed (T50): the owner's change, as the node
 /// clamped it. Appended by the session actor only, on a command from the
 /// master; nothing the model writes, no tool and no sub-agent records one.
 /// The fold takes `mode` as the chat's mode from here on, so a restart and

@@ -90,13 +90,13 @@ pub(crate) struct Retry {
 /// the save rule and a routine's default follow it ([`run_mode`]). A
 /// scheduled routine in `auto` runs commands with nobody present, bounded
 /// by the node's `max_approval_mode`, the routine's own mode, the sandbox
-/// of a sandbox chat, and the `ask` cap for webhook data (PLAN.md T48).
+/// of a sandbox chat, and the `ask` cap for webhook data (PLAN.md T50).
 pub const UNATTENDED_MAX: ApprovalMode = ApprovalMode::Auto;
 
 /// The one rule for a routine run's approval mode: the spec's, at most
 /// `ask` when the prompt holds webhook data (whoever can send the webhook
 /// writes into it, and in `auto` would steer its commands with no card,
-/// PLAN.md T48), and at most [`UNATTENDED_MAX`] unless the owner started it
+/// PLAN.md T50), and at most [`UNATTENDED_MAX`] unless the owner started it
 /// by hand. A node clamps it further (T5).
 pub fn run_mode(spec: ApprovalMode, untrusted: bool, by_hand: bool) -> ApprovalMode {
     let m = if untrusted {
@@ -1505,7 +1505,7 @@ mod approval_tests {
     use super::*;
 
     /// The spec's mode (`auto` by default), except a run holding webhook
-    /// data, which asks (T48).
+    /// data, which asks (T50).
     #[test]
     fn a_run_takes_the_specs_mode_and_a_webhook_run_asks() {
         let spec = |m| RoutineSpec {

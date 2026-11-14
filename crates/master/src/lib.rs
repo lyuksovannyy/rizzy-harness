@@ -133,7 +133,7 @@ pub struct NodeInfo {
     /// the chat to say. Only the known ones.
     pub exec_gaps: Vec<String>,
     /// The loosest approval mode its node.toml allows (`approval-max:*`,
-    /// T48); `None`: a node that cannot change a chat's mode. What the UI
+    /// T50); `None`: a node that cannot change a chat's mode. What the UI
     /// offers; the node clamps whatever it is sent.
     pub max_approval: Option<harness_core::policy::ApprovalMode>,
     /// What a new chat there gets when the person picks none
@@ -141,7 +141,7 @@ pub struct NodeInfo {
     pub default_approval: Option<harness_core::policy::ApprovalMode>,
 }
 
-/// The approval modes in a hello's capabilities (T48): its ceiling and its
+/// The approval modes in a hello's capabilities (T50): its ceiling and its
 /// default, known names only.
 fn approval_of(
     caps: &[String],
@@ -2058,7 +2058,7 @@ impl Master {
         .await
     }
 
-    /// Change a chat's approval mode on its node (T48), which clamps it
+    /// Change a chat's approval mode on its node (T50), which clamps it
     /// and records it. Refused here for a node that announced no
     /// approval modes (it would drop the link on an unknown message).
     /// The chat's approval mode as its log says (`session_created`, then

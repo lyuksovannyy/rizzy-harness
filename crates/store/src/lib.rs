@@ -1625,7 +1625,7 @@ impl Store {
     }
 
     /// The latest `session_created` or `approval_mode_changed` of `sid`: the
-    /// chat's approval mode as its log says (T48), so a lowering is never
+    /// chat's approval mode as its log says (T50), so a lowering is never
     /// gated like a raise. One read on the primary key.
     pub fn last_mode_event(&self, sid: SessionId) -> Result<Option<RawEvent>> {
         let conn = self.lock();

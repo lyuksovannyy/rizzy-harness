@@ -2744,7 +2744,7 @@ impl NativeBackend {
             cancel: ctx.cancel.child_token(),
             output: Some(sink),
             // A call the Accept edits rule allowed walks its path as the
-            // rule did (T48).
+            // rule did (T50).
             allow_outside_workspace: self.config.allow_outside_workspace
                 && !host.confined(&call.call_id),
             protected: self.config.protected_dirs.clone(),

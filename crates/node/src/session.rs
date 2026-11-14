@@ -59,7 +59,7 @@ pub(crate) struct Session {
     head: tokio::sync::Mutex<u64>,
     cwd: PathBuf,
     model: String,
-    /// The chat's approval mode (T48): set at create, changed only by
+    /// The chat's approval mode (T50): set at create, changed only by
     /// [`Self::set_mode`] (the owner's command, recorded as
     /// `approval_mode_changed`), rebuilt from the log at load. Read at
     /// every approval, so a change applies from the next call.
@@ -279,7 +279,7 @@ fn read_mode(c: &ModeCell) -> ApprovalMode {
     *c.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Why a mode change is refused, or what it becomes (T48).
+/// Why a mode change is refused, or what it becomes (T50).
 pub(crate) const MODE_SUB_AGENT: &str =
     "a sub-agent runs in the approval mode of the chat that started it; change that chat's mode";
 pub(crate) const MODE_ROUTINE: &str =
@@ -931,7 +931,7 @@ impl Session {
         }
     }
 
-    /// The owner's change of the chat's approval mode (T48): clamped by
+    /// The owner's change of the chat's approval mode (T50): clamped by
     /// node.toml's `max_approval_mode` (nothing else limits it),
     /// recorded as `approval_mode_changed` by this session (one writer),
     /// then applied: from the next call on. A card waiting now is not
@@ -2553,7 +2553,7 @@ impl Session {
                 cwd,
                 model: agent.model.clone().unwrap_or_else(|| self.model.clone()),
                 // Its parent's mode now; the parent's, as it is then, is its
-                // ceiling at every call after (`current_mode`, T48).
+                // ceiling at every call after (`current_mode`, T50).
                 mode: self.current_mode(),
                 profile: self.profile,
                 agent_id: Some(agent.agent_id.clone()),
@@ -3127,7 +3127,7 @@ impl TurnHost for Session {
         if !mode.needs_approval(risk) {
             return Decision::Allow;
         }
-        // Accept edits (T48): a file change inside the folder runs unasked;
+        // Accept edits (T50): a file change inside the folder runs unasked;
         // it is checkpointed and undone with the turn. The path is judged
         // here, by the node, from the call's own input.
         if mode.accepts_edits() && risk == ToolRisk::Mutating && self.edit_inside(tool, input) {

@@ -23,7 +23,7 @@ pub enum ApprovalMode {
 /// The mode a new chat of every kind gets when its create names none, before
 /// the node clamps it to its own ceiling: `auto`, the owner's decision of
 /// 2026-11-14 ("default accept mode is Auto for every chat type", PLAN.md
-/// T48). No mode is limited by the chat's kind or its execution mode.
+/// T50). No mode is limited by the chat's kind or its execution mode.
 pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 
 /// The file tools `AcceptEdits` covers, by their registered names.

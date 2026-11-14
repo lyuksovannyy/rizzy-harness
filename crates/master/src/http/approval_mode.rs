@@ -1,4 +1,4 @@
-//! The change of a chat's approval mode (T48, README "Approval modes"):
+//! The change of a chat's approval mode (T50, README "Approval modes"):
 //! `ask_all`, `ask`, `accept_edits` or `auto`. Only for whoever may see the
 //! chat: its owner, or the API token (which can already prompt and approve
 //! it); anyone else, admins and workspace admins included, gets the 404 a

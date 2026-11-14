@@ -147,7 +147,7 @@ const EXPORT_KB = 2.7;
 // project facts' wording, the retry while the call is not filed (+0.7).
 const MEMDEF_KB = 2.7;
 
-// T48, a chat's approval mode, measured 377.0 (initial 100.8) against 375.9
+// T50, a chat's approval mode, measured 377.0 (initial 100.8) against 375.9
 // (initial 100.5) on main: in the first load the composer's pick for a new
 // chat, the session prop, the Select's disabled and stacked options and the
 // fold's case (+0.3); the picker in its own lazy chunk, the mode-change line
@@ -155,10 +155,10 @@ const MEMDEF_KB = 2.7;
 // The owner's defaults (2026-11-14), measured 377.2 after merging main: the
 // host chat's Auto line, the host warning's words and the notification's
 // fixed words (+0.1).
-const T48_KB = 1.2;
+const T50_KB = 1.2;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + T48_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + T50_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
