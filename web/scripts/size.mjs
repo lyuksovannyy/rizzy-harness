@@ -166,8 +166,9 @@ const VISIBILITY_KB = 3.7;
 // in the conversation chunk and its API call in the page-only chunk (+0.8).
 // The owner's defaults (2026-11-14), measured 377.2 after merging main: the
 // host chat's Auto line, the host warning's words and the notification's
-// fixed words (+0.1).
-const T50_KB = 1.2;
+// fixed words (+0.1). After the owner's answer on routines and the merge
+// with visibility, measured 386.4: the routine editor's webhook line (+0.1).
+const T50_KB = 1.3;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB) * 100) / 10) / 10;

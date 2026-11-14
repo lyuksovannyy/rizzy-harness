@@ -2001,7 +2001,7 @@ async fn a_routine_defaults_to_auto_and_saves_every_mode_and_the_node_clamps_its
     for mode in ["ask_all", "ask", "accept_edits", "auto"] {
         let mut s = spec.clone();
         s["approval_mode"] = json!(mode);
-        let (st, v) = create(&t, &alex, None, mode, s.clone(), every(60)).await;
+        let (st, v) = create(&t, &alex, None, &format!("m-{mode}"), s.clone(), every(60)).await;
         assert_eq!(st, StatusCode::CREATED, "{mode}: {v}");
         assert_eq!(v["routine"]["spec"]["approval_mode"], mode);
         let made = v["routine"]["routine_id"].as_str().unwrap().to_string();
