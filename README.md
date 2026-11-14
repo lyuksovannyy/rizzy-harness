@@ -525,6 +525,17 @@ away (nothing is logged, the history stays as it was). After two failed or
 useless summaries in one turn, the turn does not try again; if the context
 then does not fit, the error says summarising was tried and did not help.
 
+In agentic chats the agent keeps its own task list with the `todo` tool
+(Software Developer, Senior Teamlead, Writer, custom agents that edit files
+or run commands, and agents with `tools: all`; add `todo` to a file agent's
+`tools` to give it one). Each call replaces the whole list: at most 50 items
+of one line (200 characters), each `pending`, `in_progress` or `done`, at
+most one in progress. The list is stored in the chat's log, so it survives
+summarising, a node restart and a reload; it is pinned above the composer,
+collapsible, and after older turns are summarised the agent is given the list
+again with the summary. It changes nothing outside the chat (read-only, like
+`read`). A sub-agent keeps its own list in its own session.
+
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.
 

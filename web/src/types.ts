@@ -276,6 +276,14 @@ export interface SessionView {
   checkpoints: Record<string, CheckpointState>;
   /** Background commands by id; absent when there are none (as serde writes it). */
   background?: Record<string, BackgroundState>;
+  /** The agent's task list (the latest `todo_updated`); absent when empty. */
+  todo?: TodoItem[];
+}
+
+/** One item of the agent's task list: the model's text, one line. */
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "done";
 }
 
 export interface BackgroundState {

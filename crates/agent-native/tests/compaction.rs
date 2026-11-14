@@ -1189,7 +1189,14 @@ async fn the_task_list_survives_compaction() {
     });
     let p2 = Windowed::new(BIG, BIG);
     let b2 = backend(p2.clone(), Some(0));
-    let out = run(&b2, &Host::default(), later, agent(None), Default::default()).await;
+    let out = run(
+        &b2,
+        &Host::default(),
+        later,
+        agent(None),
+        Default::default(),
+    )
+    .await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     assert_eq!(p2.kinds(), ["main"]);
     assert_eq!(p2.calls().pop().unwrap().system, main.system);

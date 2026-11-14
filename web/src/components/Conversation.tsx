@@ -47,6 +47,8 @@ import type { ProjectSummary } from "../lib/projects";
 const ChatGutter = lazy(() => import("../bg/ChatGutter"));
 // Loaded on the chat's first running background command (T.8d step 2).
 const BackgroundStrip = lazy(() => import("./BackgroundStrip"));
+// Loaded on the chat's first task list (the agent's `todo` tool).
+const TodoPanel = lazy(() => import("./TodoPanel"));
 
 function Undo(props: {
   sessionId: string;
@@ -291,6 +293,8 @@ export default function Conversation(props: {
   // mounted (it hides itself) so an end this tab asked for can show.
   const stripFor = useRef<string | null>(null);
   if (view?.background && Object.values(view.background).some((b) => !b.ended)) stripFor.current = sessionId;
+  const todoFor = useRef<string | null>(null);
+  if (view?.todo?.length) todoFor.current = sessionId;
 
   const page = (
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
@@ -603,6 +607,11 @@ export default function Conversation(props: {
 
       <div className="bottom">
         <div className="column">
+          {todoFor.current === sessionId && (
+            <Suspense fallback={null}>
+              <TodoPanel key={sessionId} items={view?.todo ?? []} />
+            </Suspense>
+          )}
           {stripFor.current === sessionId && (
             <Suspense fallback={null}>
               <BackgroundStrip

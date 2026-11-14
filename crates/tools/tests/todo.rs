@@ -21,7 +21,10 @@ fn it_is_read_only_and_says_when_to_use_it() {
     assert_eq!(Todo.name(), "todo");
     assert_eq!(Todo.risk(), ToolRisk::ReadOnly);
     let d = Todo.description();
-    assert!(d.contains("multi-step") || d.contains("several steps"), "{d}");
+    assert!(
+        d.contains("multi-step") || d.contains("several steps"),
+        "{d}"
+    );
     assert!(d.contains("replaces"), "{d}");
     let s = Todo.schema();
     assert_eq!(s["properties"]["items"]["maxItems"], 50);
@@ -67,7 +70,9 @@ async fn an_empty_list_clears_it() {
 #[tokio::test]
 async fn invalid_lists_are_refused_with_the_reason() {
     let long = "x".repeat(201);
-    let many: Vec<Value> = (0..51).map(|i| item(&format!("step {i}"), "pending")).collect();
+    let many: Vec<Value> = (0..51)
+        .map(|i| item(&format!("step {i}"), "pending"))
+        .collect();
     let cases = [
         (
             json!({"items": [item("a", "in_progress"), item("b", "in_progress")]}),

@@ -97,8 +97,16 @@ const GLASS_KB = 0.1;
 // gaps' words, the choice bound to its node).
 const N10A_KB = 2.4;
 
+// The agent's task list (`todo`), measured 374.1 (initial 100.1, unchanged)
+// against 373.0 on main: the pinned panel, its own lazy chunk loaded on a
+// chat's first list (0.7, its stylesheet 0.5 beside it) and the lucide
+// circle icon it shares (0.2); the conversation's lazy import and the tool
+// card's line (+0.2); the fold's case in the first load (+0.1 before
+// rounding).
+const TODO_KB = 1.1;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + TODO_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
@@ -172,6 +180,8 @@ lazyChunk(/\/ChatGutter-/, "chat gutter");
 // T.8d step 2: the chat's background strip loads only while a chat has a
 // background command running.
 lazyChunk(/\/BackgroundStrip-/, "background strip");
+// The agent's task list loads only once a chat has one.
+lazyChunk(/\/TodoPanel-/, "task list panel");
 
 // I3: its lazy chunks (the search panel, the account menu, and the login
 // form, which signed-in visits never draw).

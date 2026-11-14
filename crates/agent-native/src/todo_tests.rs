@@ -123,7 +123,10 @@ async fn each_call_replaces_the_list_in_the_log() {
             }
         })
         .collect();
-    assert_eq!(harness_core::todo::latest(&raw), Some(lists[1].items.clone()));
+    assert_eq!(
+        harness_core::todo::latest(&raw),
+        Some(lists[1].items.clone())
+    );
 }
 
 #[tokio::test]
