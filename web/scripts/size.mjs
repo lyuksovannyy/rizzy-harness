@@ -101,7 +101,10 @@ const N10A_KB = 2.4;
 // select and its host warning's grant variant, in the lazy Settings chunk
 // (Users, Workspace admin → Members) and the warning's own lazy chunk; the
 // composer's rule now reads the level instead of the admin role (+0.9).
-const N10A2_KB = 0.9;
+// The review's fixes, measured 374.1 (initial 100.2): the member list's
+// levels as they count, the server admin's level select and the demotion's
+// question, all in the lazy Settings chunk (+0.2).
+const N10A2_KB = 1.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB) * 100) / 10) / 10;
