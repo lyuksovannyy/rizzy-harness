@@ -11,7 +11,38 @@ const BOUNDED_LINE_CHARS: usize = 500;
 
 pub struct Read;
 pub struct Write;
-pub struct Edit;
+
+/// What one `read` may return, in characters: below the result cap
+/// ([`crate::MAX_OUTPUT_CHARS`]) with room for the footer, so a long window
+/// ends early at a line, with the offset to go on from, instead of losing
+/// its middle to the cap's head-and-tail cut.
+pub(crate) const READ_BUDGET_CHARS: usize = crate::MAX_OUTPUT_CHARS - 1_000;
+
+/// One line as `read` shows it: its 1-based number, a tab, the text (cut
+/// at `max_chars` with `…`). `edit`'s result uses the same form, so its
+/// numbers can be used as they are.
+pub(crate) fn number_line(n: usize, text: &str, max_chars: usize, compact: bool) -> String {
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    let mut shown: String = text.chars().take(max_chars).collect();
+    if text.chars().count() > max_chars {
+        shown.push('…');
+    }
+    if compact {
+        // No padding: a few tokens per line add up over long files.
+        format!("{n}\t{shown}\n")
+    } else {
+        format!("{n:>6}\t{shown}\n")
+    }
+}
+
+/// The per-line cap and the compact form this call uses.
+pub(crate) fn line_style(ctx: &ToolCtx) -> (usize, bool) {
+    if ctx.savings.bounded_reads {
+        (BOUNDED_LINE_CHARS, true)
+    } else {
+        (MAX_LINE_CHARS, false)
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for Read {
@@ -19,7 +50,10 @@ impl Tool for Read {
         "read"
     }
     fn description(&self) -> &'static str {
-        "Read a text file. Output lines are prefixed with their 1-based line number. Use offset/limit for large files."
+        "Read a text file. Output lines are prefixed with their 1-based line number and a tab \
+         (not part of the file). Use offset/limit for large files; a long read stops early and \
+         says where to go on. Reading a file is what lets `edit` change it, and reading all of \
+         it is what lets `write` replace it."
     }
     fn schema(&self) -> Value {
         json!({
@@ -54,11 +88,7 @@ impl Tool for Read {
             } else {
                 DEFAULT_READ_LINES
             });
-        let (max_chars, compact) = if ctx.savings.bounded_reads {
-            (BOUNDED_LINE_CHARS, true)
-        } else {
-            (MAX_LINE_CHARS, false)
-        };
+        let (max_chars, compact) = line_style(ctx);
         let cancel = ctx.cancel.clone();
         let p = path.clone();
         let window = Window {
@@ -66,6 +96,7 @@ impl Tool for Read {
             limit,
             max_chars,
             compact,
+            budget: READ_BUDGET_CHARS,
         };
         let res = tokio::task::spawn_blocking(move || {
             read_window(&p, &window, crate::MAX_READ_BYTES, &cancel)
@@ -75,6 +106,10 @@ impl Tool for Read {
             mut out,
             total,
             capped,
+            last,
+            cut,
+            sha,
+            bytes,
         } = match res {
             Ok(Ok(l)) => l,
             Ok(Err(e)) => return ToolOutcome::err(e),
@@ -88,11 +123,10 @@ impl Tool for Read {
             ));
         } else if total == 0 {
             out.push_str("(empty file)\n");
-        } else if offset - 1 + limit < total {
+        } else if last < total && last >= offset {
             out.push_str(&format!(
-                "[showing lines {}-{} of {total}; use offset to read more{}]\n",
-                offset,
-                offset - 1 + limit,
+                "[showing lines {offset}-{last} of {total}; use offset {} to read more{}]\n",
+                last + 1,
                 if ctx.savings.outline_tool {
                     ", or `outline` for the file's structure"
                 } else {
@@ -100,7 +134,17 @@ impl Tool for Read {
                 }
             ));
         }
-        ToolOutcome::ok(out)
+        let mut o = ToolOutcome::ok(out);
+        // What the agent now knows of the file, for `edit` and `write`. A
+        // file cut at the byte cap has no hash of all of it: not recorded.
+        if !capped {
+            let full = offset == 1 && last >= total && !cut;
+            o.seen = Some(match bytes {
+                Some(b) => ctx.seen.record(&path, &b, full),
+                None => ctx.seen.record_hash(&path, sha, full),
+            });
+        }
+        o
     }
 }
 
@@ -110,7 +154,9 @@ impl Tool for Write {
         "write"
     }
     fn description(&self) -> &'static str {
-        "Create or overwrite a file with the given content. Parent directories are created."
+        "Create a file, or replace an existing one with the given content. An existing file must \
+         have been read in full in this session and not changed since; to change part of a \
+         file, use `edit`. Parent directories are created."
     }
     fn schema(&self) -> Value {
         json!({
@@ -126,6 +172,7 @@ impl Tool for Write {
         ToolRisk::Mutating
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        let shown = str_arg(&input, "path").unwrap_or_default().to_string();
         let path = match str_arg(&input, "path").and_then(|p| ctx.resolve_for_write(p)) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
@@ -139,90 +186,100 @@ impl Tool for Write {
         {
             return ToolOutcome::err(format!("{}: {e}", parent.display()));
         }
+        let _lock = crate::seen::lock_path(&path).await;
+        if let Err(e) = check_overwrite(ctx, &path, &shown).await {
+            return ToolOutcome::err(e);
+        }
         match write_nofollow(&path, content.as_bytes()).await {
-            Ok(()) => ToolOutcome::ok(format!(
-                "Wrote {} ({} lines)",
-                path.display(),
-                content.lines().count()
-            )),
+            Ok(()) => {
+                let mut o = ToolOutcome::ok(format!(
+                    "Wrote {} ({} lines)",
+                    path.display(),
+                    content.lines().count()
+                ));
+                o.seen = Some(ctx.seen.record(&path, content.as_bytes(), true));
+                o
+            }
             Err(e) => ToolOutcome::err(e),
         }
     }
 }
 
-#[async_trait::async_trait]
-impl Tool for Edit {
-    fn name(&self) -> &'static str {
-        "edit"
+/// `write` over an existing file: only one the agent read in full in this
+/// session and that has not changed since. A new file needs nothing.
+async fn check_overwrite(ctx: &ToolCtx, path: &std::path::Path, shown: &str) -> Result<(), String> {
+    match tokio::fs::symlink_metadata(path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+        // Not a regular file: the write itself refuses it, with its reason.
+        Ok(md) if !md.file_type().is_file() => return Ok(()),
+        Ok(_) => {}
     }
-    fn description(&self) -> &'static str {
-        "Replace an exact string in a file. `old_string` must match exactly once unless `replace_all` is true. Read the file first."
+    let Some(seen) = ctx.seen.get(path) else {
+        return Err(format!(
+            "{shown} already exists and has not been read in this session, so writing it would \
+             replace content you have not seen. Read it first (all of it, with `read`), then \
+             write it; or change only part of it with `edit`."
+        ));
+    };
+    let live = hash_file(path).await?;
+    if live.as_ref().map(|(sha, _)| *sha) != Some(seen.sha) {
+        let now = live.and_then(|(_, b)| b);
+        return Err(crate::edit::stale_refusal(
+            ctx,
+            shown,
+            seen.snapshot.as_deref().map(String::as_str),
+            now.as_deref(),
+            "nothing was written",
+        ));
     }
-    fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-                "replace_all": {"type": "boolean"}
-            },
-            "required": ["path", "old_string", "new_string"]
-        })
+    if !seen.full {
+        return Err(format!(
+            "{shown}: you have read only part of it in this session (or read it before the \
+             conversation was summarised), so writing it would replace lines you have not seen. \
+             Read all of it first (`read` with a `limit` covering every line), or change only \
+             part of it with `edit`; nothing was written."
+        ));
     }
-    fn risk(&self) -> ToolRisk {
-        ToolRisk::Mutating
-    }
-    async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
-        let path = match str_arg(&input, "path").and_then(|p| ctx.resolve_for_write(p)) {
-            Ok(p) => p,
-            Err(e) => return ToolOutcome::err(e),
-        };
-        let (old, new) = match (str_arg(&input, "old_string"), str_arg(&input, "new_string")) {
-            (Ok(o), Ok(n)) => (o, n),
-            (Err(e), _) | (_, Err(e)) => return ToolOutcome::err(e),
-        };
-        if old.is_empty() {
-            return ToolOutcome::err("old_string must not be empty; use `write` to create files");
+    Ok(())
+}
+
+/// The SHA-256 of a regular file as it is now and, when it is small text,
+/// the text; `None` for one larger than `read` would hash (it cannot be the
+/// one the agent read in full).
+async fn hash_file(
+    path: &std::path::Path,
+) -> Result<Option<(crate::seen::Sha, Option<String>)>, String> {
+    let p = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+        let f = crate::open_regular(&p)?;
+        let len = f
+            .metadata()
+            .map_err(|e| format!("{}: {e}", p.display()))?
+            .len();
+        if len > crate::MAX_READ_BYTES {
+            return Ok(None);
         }
-        if old == new {
-            return ToolOutcome::err("old_string and new_string are identical");
+        let mut bytes = Vec::with_capacity(len as usize);
+        f.take(crate::MAX_READ_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        if bytes.len() as u64 > crate::MAX_READ_BYTES {
+            return Ok(None);
         }
-        let replace_all = input
-            .get("replace_all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let text = match read_nofollow(&path).await {
-            Ok(t) => t,
-            Err(e) => return ToolOutcome::err(e),
-        };
-        let count = text.matches(old).count();
-        if count == 0 {
-            return ToolOutcome::err("old_string not found in file");
-        }
-        if count > 1 && !replace_all {
-            return ToolOutcome::err(format!(
-                "old_string matches {count} times; add context to make it unique or set replace_all"
-            ));
-        }
-        let first_line = text[..text.find(old).unwrap_or(0)].lines().count().max(1);
-        let updated = if replace_all {
-            text.replace(old, new)
-        } else {
-            text.replacen(old, new, 1)
-        };
-        match write_nofollow(&path, updated.as_bytes()).await {
-            Ok(()) => ToolOutcome::ok(format!(
-                "Edited {}: {count} replacement(s), first at line {first_line}",
-                path.display()
-            )),
-            Err(e) => ToolOutcome::err(e),
-        }
-    }
+        let sha = crate::seen::sha256(&bytes);
+        let text = (bytes.len() <= crate::seen::SNAPSHOT_MAX_FILE)
+            .then(|| String::from_utf8(bytes).ok())
+            .flatten();
+        Ok(Some((sha, text)))
+    })
+    .await
+    .map_err(|e| format!("write failed: {e}"))?
 }
 
 /// Replace `path` with `bytes` atomically (see [`replace_with`]).
-async fn write_nofollow(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) async fn write_nofollow(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let path = path.to_path_buf();
     let bytes = bytes.to_vec();
     // Blocking I/O; a cancelled turn that drops this future does not stop
@@ -417,7 +474,7 @@ fn umask() -> nix::sys::stat::mode_t {
 /// Read `path` as UTF-8 without following a symlink at the last component.
 /// Regular files of at most [`crate::MAX_GREP_FILE_BYTES`] only: `edit`
 /// holds the file and its edited copy in memory.
-async fn read_nofollow(path: &std::path::Path) -> Result<String, String> {
+pub(crate) async fn read_nofollow(path: &std::path::Path) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     let cap = crate::MAX_GREP_FILE_BYTES;
     let f = crate::open_nofollow(path, tokio::fs::OpenOptions::new().read(true)).await?;
@@ -447,6 +504,9 @@ struct Window {
     limit: usize,
     max_chars: usize,
     compact: bool,
+    /// Characters of output, at most: the window ends at the line before
+    /// the one that would pass it (never before its first line).
+    budget: usize,
 }
 
 struct Lines {
@@ -455,6 +515,14 @@ struct Lines {
     total: usize,
     /// Reading stopped at the byte cap with more of the file left.
     capped: bool,
+    /// The last line shown (`first - 1` when none was).
+    last: usize,
+    /// A shown line was cut at `max_chars`.
+    cut: bool,
+    /// SHA-256 of every byte read (all of the file unless `capped`).
+    sha: crate::seen::Sha,
+    /// The bytes themselves, when the file is small enough to snapshot.
+    bytes: Option<Vec<u8>>,
 }
 
 /// Stream a regular file line by line through a fixed buffer, keeping only
@@ -467,6 +535,7 @@ fn read_window(
     cap: u64,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Lines, String> {
+    use sha2::Digest;
     use std::io::{BufRead, Read as _};
     let cancelled = || Err("[cancelled]".to_string());
     if cancel.is_cancelled() {
@@ -481,32 +550,20 @@ fn read_window(
     }
     // A line's bytes kept for display: enough for `max_chars` characters.
     let keep = w.max_chars * 4 + 4;
-    let mut out = String::new();
+    let mut s = Shown {
+        out: String::new(),
+        chars: 0,
+        last: w.first.saturating_sub(1).saturating_add(w.limit),
+        shown: w.first.saturating_sub(1),
+        cut: false,
+    };
     let mut line: Vec<u8> = Vec::new();
     let mut long = false;
     let mut total = 0usize;
     let mut read = 0u64;
     let mut pending = false;
-    let last = w.first.saturating_sub(1).saturating_add(w.limit);
-    let emit = |n: usize, line: &mut Vec<u8>, long: bool, out: &mut String| {
-        if n >= w.first && n <= last {
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            let text = String::from_utf8_lossy(line);
-            let mut shown: String = text.chars().take(w.max_chars).collect();
-            if long || text.chars().count() > w.max_chars {
-                shown.push('…');
-            }
-            if w.compact {
-                // No padding: a few tokens per line add up over long files.
-                out.push_str(&format!("{n}\t{shown}\n"));
-            } else {
-                out.push_str(&format!("{n:>6}\t{shown}\n"));
-            }
-        }
-        line.clear();
-    };
+    let mut hasher = sha2::Sha256::new();
+    let mut bytes: Option<Vec<u8>> = Some(Vec::new());
     loop {
         if cancel.is_cancelled() {
             return cancelled();
@@ -522,7 +579,7 @@ fn read_window(
             Some(i) => (&buf[..i], true),
             None => (buf, false),
         };
-        let wanted = total + 1 >= w.first && total < last;
+        let wanted = total + 1 >= w.first && total < s.last;
         if wanted {
             let take = keep.saturating_sub(line.len()).min(part.len());
             line.extend_from_slice(&part[..take]);
@@ -530,11 +587,19 @@ fn read_window(
         }
         pending = true;
         let used = part.len() + usize::from(nl);
+        hasher.update(&buf[..used]);
+        if let Some(b) = bytes.as_mut() {
+            if b.len() + used > crate::seen::SNAPSHOT_MAX_FILE {
+                bytes = None;
+            } else {
+                b.extend_from_slice(&buf[..used]);
+            }
+        }
         r.consume(used);
         read += used as u64;
         if nl {
             total += 1;
-            emit(total, &mut line, long, &mut out);
+            s.emit(w, total, &mut line, long);
             long = false;
             pending = false;
         }
@@ -543,14 +608,60 @@ fn read_window(
     let capped = read >= cap && !r.fill_buf().map_err(io)?.is_empty();
     if pending {
         total += 1;
-        emit(total, &mut line, long, &mut out);
+        s.emit(w, total, &mut line, long);
     }
-    Ok(Lines { out, total, capped })
+    Ok(Lines {
+        out: s.out,
+        total,
+        capped,
+        last: s.shown,
+        cut: s.cut,
+        sha: hasher.finalize().into(),
+        bytes: bytes.filter(|_| !capped),
+    })
+}
+
+/// What [`read_window`] has shown so far.
+struct Shown {
+    out: String,
+    /// Characters in `out`.
+    chars: usize,
+    /// The last line the window may show.
+    last: usize,
+    /// The last line shown.
+    shown: usize,
+    cut: bool,
+}
+
+impl Shown {
+    fn emit(&mut self, w: &Window, n: usize, line: &mut Vec<u8>, long: bool) {
+        if n >= w.first && n <= self.last {
+            let text = String::from_utf8_lossy(line);
+            let one = crate::fs::number_line(n, &text, w.max_chars, w.compact);
+            let chars = one.chars().count();
+            if n > w.first && self.chars + chars > w.budget {
+                // The window ends here; the footer gives the next offset.
+                self.last = n - 1;
+            } else {
+                let one = if long && !one.ends_with("…\n") {
+                    format!("{}…\n", one.trim_end_matches('\n'))
+                } else {
+                    one
+                };
+                self.cut |= long || text.chars().count() > w.max_chars;
+                self.chars += chars;
+                self.out.push_str(&one);
+                self.shown = n;
+            }
+        }
+        line.clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Edit;
 
     #[tokio::test]
     async fn write_read_edit() {
@@ -757,6 +868,8 @@ mod tests {
         }
 
         fn edit(ctx: &ToolCtx, path: &str) -> ToolOutcome {
+            // As the agent must: read first (refused where edit is).
+            let _ = futures_block(Read.run(ctx, json!({ "path": path })));
             futures_block(Edit.run(
                 ctx,
                 json!({"path": path, "old_string": "a", "new_string": "b"}),
@@ -964,6 +1077,7 @@ mod tests {
             std::fs::write(&p, "a\n").unwrap();
             chmod(&p, 0o640);
             let ctx = ToolCtx::new(dir.path());
+            assert!(Read.run(&ctx, json!({"path": "f.txt"})).await.ok);
             let e = Edit
                 .run(
                     &ctx,
@@ -1059,6 +1173,7 @@ mod tests {
             std::fs::write(&p, "a\n").unwrap();
             chmod(&p, 0o444);
             let ctx = ToolCtx::new(dir.path());
+            assert!(Read.run(&ctx, json!({"path": "ro.txt"})).await.ok);
             let w = Write
                 .run(&ctx, json!({"path": "ro.txt", "content": "x\n"}))
                 .await;
@@ -1087,6 +1202,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("f.txt"), "one\ntwo\n").unwrap();
             let ctx = ToolCtx::new(dir.path());
+            assert!(Read.run(&ctx, json!({"path": "f.txt"})).await.ok);
             let e = Edit
                 .run(
                     &ctx,
@@ -1115,6 +1231,7 @@ mod tests {
             std::fs::write(&p, "a\n").unwrap();
             chmod(&sub, 0o555);
             let ctx = ToolCtx::new(dir.path());
+            assert!(Read.run(&ctx, json!({"path": "ro/f.txt"})).await.ok);
             let e = Edit
                 .run(
                     &ctx,
