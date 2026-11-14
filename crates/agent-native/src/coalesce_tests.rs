@@ -33,8 +33,9 @@ impl TurnHost for Gate {
 
 /// A source that finishes while the first append waits leaves its rest in
 /// the channel (a model's deltas are not held back: the channel is
-/// unbounded). That rest goes out in batches of the usual size, not as one
-/// event the size of everything that piled up.
+/// unbounded). That rest goes out in batches of at most 32 KiB, not as one
+/// event the size of everything that piled up (review A21-3), nor as one
+/// append per 2 KiB (re-check D-5).
 ///
 /// Failed before the fix: 40 KiB of 8-byte chunks went out as one event.
 #[tokio::test]
@@ -88,9 +89,20 @@ async fn what_piled_up_behind_a_waiting_append_goes_out_in_batches() {
     let got = host.got.lock().unwrap().clone();
     let biggest = got.iter().map(String::len).max().unwrap_or(0);
     assert_eq!(got.concat(), sent, "lost or reordered output");
+    // The rest goes out in batches of at most 32 KiB (`DRAIN_BYTES`), so a
+    // backlog after a Stop is a few appends, each an fsync on a node that
+    // writes `Durability::Full`, not one per 2 KiB (re-check D-5).
+    let drain = 32 * 1024;
     assert!(
-        biggest <= 2 * FLUSH_BYTES,
+        biggest <= drain + 8,
         "{} batches, the largest {biggest} bytes",
         got.len()
+    );
+    let most = 1 + sent.len().div_ceil(drain) + 1;
+    assert!(
+        got.len() <= most,
+        "{} appends for {} bytes: at most {most}",
+        got.len(),
+        sent.len()
     );
 }
