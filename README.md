@@ -795,12 +795,17 @@ with every right of the node's user. See
 - **An account's level** (its ceiling) is set by server admins in Settings →
   Users, never their own. Every new account starts at `none`, also one a
   server admin creates (the form does not ask: set it in the list). A server
-  admin's is always `host` while they are one; what is set for them applies
-  once they are not. A disabled account's is `none`.
+  admin's is always `host` while they are one; what is set for them (the
+  list shows it for server admins too) applies once they are not, and making
+  a server admin a user says which level they will then have. A disabled
+  account's is `none`.
 - **A member's level in a team workspace** is set by its admins in Workspace
   admin → Members. Every new member starts at `none`. Nobody changes their
-  own, nobody grants above their own level there, and only an owner grants
-  `host`. An owner's level there is always `host`, so their account's level
+  own, nobody grants above their own level there or changes a member whose
+  level is above it, and only an owner grants `host`. Admins of the workspace
+  see every member's level, as set and as it counts; anyone else sees only
+  their own. A role says what someone may administer, the level what they
+  may run: changing one never changes the other. An owner's level there is always `host`, so their account's level
   decides. Making someone an owner therefore gives them `host` there,
   whatever the granting owner's own level (an open question, see
   docs/execution-modes.md). A Personal workspace has no level of its own: your account's
@@ -817,13 +822,18 @@ with every right of the node's user. See
 - Granting `host`, as an account's level or a member's, shows the same
   warning as choosing it for a chat, before anything is saved; cancelling
   saves nothing.
-- Lowering a level, or removing a member, stops the chats above the new
-  level at once (their running turn and background commands) and only
-  those. A removed member's chats from that workspace return to their
-  Personal workspace, where their account's level applies.
+- Lowering a level stops the chats above the new level at once (their
+  running turn and background commands), and only those, also a turn whose
+  message was on its way when the level changed.
+- Removing a member, or deleting the workspace, stops every running chat
+  they had in that workspace, whatever its mode. Those chats return to their
+  owners' Personal workspaces, where each account's level applies; leaving a
+  team therefore also unblocks a chat its level blocked (nodes are not yet
+  tied to workspaces, below).
 - Every change is one line in the audit log (who, whose, which workspace or
   account, from, to); none carries chat content. Two admins changing the
-  same level at once: the second is refused and asked to reload.
+  same level at once, or an admin whose own role or level changed while
+  they decided: refused and asked to reload.
 - The API token, the machine owner's key, is `host` everywhere; on a
   member's chat it gets the member's answer.
 

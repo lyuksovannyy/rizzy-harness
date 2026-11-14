@@ -214,7 +214,9 @@ still shown until the node's next hello.
   row carries `blocked` with the reason.
 
 **Lowering** a ceiling or a workspace level runs the revocation sweep for
-that member: every running turn and every background command of their
+that member, and every command a node acks is checked again once acked
+(`Master::recheck_after_ack`, review L2-1: the sweep reads `running` from
+the mirror and misses a turn whose message was on its way): every running turn and every background command of their
 chats whose mode is now above their level stops, and only those (the sweep
 asks once per owner, workspace, node and recorded mode: review RN-1). A
 server admin demoted falls to their stored ceiling, and the sweep runs as
@@ -222,12 +224,21 @@ for any role change. **A removed member's** chats from that workspace
 return to their Personal workspace (as before), where their ceiling applies
 from their next action; what was running in them for the team (turns,
 background commands) is stopped at the removal
-(`workspaces::stop_removed`).
+(`workspaces::stop_removed`), whatever its mode; deleting a team workspace
+does the same for every member's chats in it (review L2-3). Leaving thus
+also unblocks a chat the team's level blocked (review L2-6, recorded on
+N.1).
 
 **Changes are conditional and audited.** Each level change is written only
 while the level (and, for a member, their role) is still what the guards
-read: two admins changing one member at once, the second gets 409 "this
-level just changed". Each writes one audit line in the same transaction
+read, and while the setter still stands as read (their role, their level
+there, their ceiling, server admin or not; review L2-9): two admins
+changing one member at once, or a grant by someone lowered meanwhile, get
+409. Nobody changes a member whose level is above their own (review L2-10,
+decided): an admin below `host` cannot undo an owner's `host` grant. The
+member list shows each member's level as set and as it counts to those who
+manage members; anyone else sees only their own (review L2-7). Roles and
+levels stay separate (L2-5, decided): the role select says so. Each writes one audit line in the same transaction
 (`level.account`, `level.workspace`: `by` (user id or `api token`), `user`,
 `workspace`, `from`, `to`; no chat content). A role change that makes or
 unmakes an owner or a server admin, disabling an account, an account
@@ -269,9 +280,6 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   hello, when that list has more than one entry.
 * **Levels tied to nodes**: a node attached to a workspace (C.12, N.1), so
   a workspace's levels bound what its members run on its nodes.
-* **A grant decided while the setter's own level is being lowered** can
-  land: the write is conditional on the target's level and role, not on the
-  setter's (the window between the guard's read and the write).
 * **Files one mode writes and another executes.** A `sandbox` session can
   write what a `host` session in the same folder later runs (a script, a
   `Makefile`, `.git/hooks`, `.git/config`): the `host` session then runs it
@@ -295,7 +303,7 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   command runs outside bubblewrap and a `sandbox` session's inside; no
   background command in `host`. `cli/tests/contain.rs`
   `doctor_marks_each_containment_state`, `cli/tests/network_off.rs`.
-* `master/tests/exec_mode_http.rs`: the interim rule and the node list.
+* `master/tests/exec_mode_http.rs`: `host` needs the `host` level whatever one owns (H1), and the node list.
 * `web/src/components/execchoice.test.tsx`; `web/e2e/exec-modes.cjs`
   against the real binary.
 * Part 2: `master/tests/exec_levels_http.rs` (every action refused at
@@ -312,7 +320,7 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   (the warning before a grant, cancel saves nothing), `web/e2e/exec-levels.cjs`
   against the real binary.
 * The security review's fixes (2026-11): `master/tests/exec_mode_http.rs`
-  `host_is_for_server_admins_only`, `a_node_that_did_not_announce_the_mode_gets_no_chat`,
+  `host_needs_the_host_level_not_ownership` (was `host_is_for_server_admins_only`), `a_node_that_did_not_announce_the_mode_gets_no_chat`,
   `a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work`,
   `the_mode_check_on_a_row_fails_closed_and_refuses_host_to_a_member`,
   `the_modes_are_not_shown_to_an_account_without_the_grant`;
