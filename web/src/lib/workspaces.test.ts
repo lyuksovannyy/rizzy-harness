@@ -9,9 +9,9 @@ describe("workspaceName", () => {
   });
 
   it("reads permissions, none without a workspace", () => {
-    expect(can({ permissions: ["agentic", "members"] }, "members")).toBe(true);
-    expect(can({ permissions: ["agentic"] }, "settings")).toBe(false);
-    expect(can(null, "agentic")).toBe(false);
+    expect(can({ permissions: ["routines", "members"] }, "members")).toBe(true);
+    expect(can({ permissions: ["routines"] }, "settings")).toBe(false);
+    expect(can(null, "routines")).toBe(false);
   });
 });
 
@@ -58,15 +58,16 @@ describe("afterChange", () => {
     name: id,
     personal: false,
     role: "member",
-    permissions: ["agentic", "routines"],
+    permissions: ["routines"],
     members: 2,
+    exec_level: "host",
     ...more,
   });
   const personal = ws("p", { personal: true, role: "owner", members: 1 });
 
   it("stays in this tab's workspace, refreshed, whatever another tab made active", () => {
     // Promoted, renamed and joined by someone since this tab loaded it.
-    const fresh = ws("acme", { name: "Acme Labs", role: "admin", permissions: ["agentic", "settings", "members", "routines"], members: 3 });
+    const fresh = ws("acme", { name: "Acme Labs", role: "admin", permissions: ["settings", "members", "routines"], members: 3, exec_level: "host" as const });
     expect(afterChange(ws("acme"), [personal, fresh, ws("beta")], null)).toEqual({ keep: fresh });
     // The server's active workspace is not an input: two tabs cannot pull each other back and forth.
     expect(afterChange(personal, [personal, fresh], null)).toEqual({ keep: personal });

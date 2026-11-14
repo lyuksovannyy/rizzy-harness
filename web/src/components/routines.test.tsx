@@ -59,7 +59,7 @@ const agent = (id: string): Agent => ({
 });
 const AGENTS = [agent("general"), agent("coder")];
 const NODES: NodeInfo[] = [{ node_id: "n1", hostname: "box", version: "1", connected: true, embedded: false, profile: "agentic" }];
-const me: Me = { user_id: "u1", username: "alex", role: "member", can_agentic: true, must_change_password: false };
+const me: Me = { user_id: "u1", username: "alex", role: "member", exec_ceiling: "host" as const, must_change_password: false };
 const features = (webhooks = false): Features => ({
   voice: false,
   memory: false,

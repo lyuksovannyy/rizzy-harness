@@ -23,7 +23,7 @@ fn user(s: &Store, id: &str) {
         username: id.into(),
         password_hash: "$argon2id$x".into(),
         role: Role::Member,
-        can_agentic: false,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
         must_change_password: false,
     })
     .unwrap();

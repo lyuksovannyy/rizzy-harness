@@ -281,7 +281,7 @@ async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &st
             username: owner.into(),
             password_hash: "$argon2id$x".into(),
             role: harness_store::Role::Member,
-            can_agentic: true,
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         })
         .unwrap();
@@ -310,15 +310,12 @@ async fn running_turn(store: &Store, tx: &mpsc::Sender<NodeToMaster>, owner: &st
 }
 
 fn revoke_grant(store: &Store, user: &str) {
-    store
-        .update_user(
-            user,
-            &harness_store::UserPatch {
-                can_agentic: Some(false),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    use harness_core::policy::ExecLevel;
+    assert!(
+        store
+            .set_exec_ceiling(user, ExecLevel::Host, ExecLevel::None, None, "{}")
+            .unwrap()
+    );
 }
 
 /// The next `Cancel` for `sid` on `c`, within `secs`.
@@ -380,7 +377,7 @@ async fn a_turn_known_only_from_the_replay_is_cancelled_when_it_lands() {
             username: "bob".into(),
             password_hash: "$argon2id$x".into(),
             role: harness_store::Role::Member,
-            can_agentic: true,
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         })
         .unwrap();
@@ -452,6 +449,23 @@ async fn next_create(c: &mut mpsc::Receiver<MasterToNode>) -> (String, SessionId
     }
 }
 
+/// The accounts `create_spec` names, at the `sandbox` ceiling: a create's
+/// owner must exist and have a level (N.10a part 2).
+fn people(store: &Store) {
+    for name in ["bob", "carol"] {
+        store
+            .create_user(&harness_store::NewUser {
+                user_id: name.into(),
+                username: name.into(),
+                password_hash: "$argon2id$x".into(),
+                role: harness_store::Role::Member,
+                exec_ceiling: harness_core::policy::ExecLevel::Sandbox,
+                must_change_password: false,
+            })
+            .unwrap();
+    }
+}
+
 fn create_spec(owner: &str) -> harness_master::CreateSpec {
     harness_master::CreateSpec {
         node_id: Some("n1".into()),
@@ -469,6 +483,7 @@ fn create_spec(owner: &str) -> harness_master::CreateSpec {
 #[tokio::test(start_paused = true)]
 async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
     let store = Store::open_in_memory().unwrap();
+    people(&store);
     let m = master_on(&store);
     m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
     let (l, mut c, tx) = open_link("n1", vec![]);
@@ -517,6 +532,7 @@ async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
 #[tokio::test]
 async fn a_create_intent_that_never_lands_is_removed_and_claims_nothing() {
     let store = Store::open_in_memory().unwrap();
+    people(&store);
     let m = master_on(&store);
     m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
     let (l, mut c, tx) = open_link("n1", vec![]);
@@ -560,6 +576,7 @@ async fn a_create_intent_that_never_lands_is_removed_and_claims_nothing() {
 #[tokio::test]
 async fn an_abandoned_command_leaves_no_ack_and_an_unknown_model_is_refused() {
     let store = Store::open_in_memory().unwrap();
+    people(&store);
     let m = master_on(&store);
     m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
     let (l, mut c, _tx) = open_link("n1", vec![]);
@@ -1267,4 +1284,77 @@ async fn a_node_without_background_commands_is_not_sent_their_stop() {
     });
     assert!(cancel_within(&mut c1, sid, 5).await);
     assert_eq!(stop_background_within(&mut c1, sid, 2).await, None);
+}
+
+/// Review L2-1: a prompt checked just before a lowering, whose turn the
+/// node had not started when the sweep looked (`running` still false in the
+/// mirror), runs on unless something looks again. The master checks again
+/// once the node acked the command, and cancels the turn the level no
+/// longer allows.
+#[tokio::test]
+async fn a_prompt_checked_before_a_lowering_is_cancelled_once_acked() {
+    use harness_core::event::TurnStarted;
+    use harness_core::policy::ExecLevel;
+    let store = Store::open_in_memory().unwrap();
+    people(&store);
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    let sid = SessionId::new();
+    send(&tx, event(sid, 1, "")).await;
+    barrier(&store, &tx).await;
+    store.claim_session(sid, Some("bob"), None).unwrap();
+
+    // The prompt passes its check and goes out; the node holds its ack.
+    let m2 = m.clone();
+    let prompt = tokio::spawn(async move {
+        m2.prompt(sid, "hi".into(), harness_master::PromptOpts::default())
+            .await
+    });
+    let req = loop {
+        match tokio::time::timeout(Duration::from_secs(30), c.recv()).await {
+            Ok(Some(MasterToNode::Prompt { req_id, .. })) => break req_id,
+            Ok(Some(_)) => {}
+            other => panic!("no prompt: {other:?}"),
+        }
+    };
+    // Now bob's ceiling goes to none and the sweep runs: it sees no
+    // running turn.
+    assert!(
+        store
+            .set_exec_ceiling("bob", ExecLevel::Sandbox, ExecLevel::None, None, "{}")
+            .unwrap()
+    );
+    harness_master::workspaces::cancel_revoked(&m, &["bob".to_string()]).await;
+    // The node starts the turn and acks the prompt.
+    let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+        cause: None,
+        turn_id: "t1".into(),
+        agent: None,
+    })
+    .into_parts();
+    send(
+        &tx,
+        RawEvent {
+            session_id: sid,
+            seq: 2,
+            ts_ms: 2,
+            kind,
+            payload,
+        },
+    )
+    .await;
+    tx.send(NodeToMaster::Ack {
+        req_id: req,
+        ok: true,
+        error: None,
+    })
+    .await
+    .unwrap();
+    assert!(prompt.await.unwrap().is_ok());
+    assert!(
+        cancel_within(&mut c, sid, 5).await,
+        "the turn the sweep missed runs on at the old level"
+    );
 }

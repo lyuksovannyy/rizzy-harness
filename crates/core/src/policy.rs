@@ -73,6 +73,100 @@ impl ExecMode {
     }
 }
 
+/// What a person may run (O13, N.10a part 2; docs/execution-modes.md): an
+/// account's ceiling, set by server admins, and a member's level in a
+/// workspace, set by its admins. Ordered, so the effective level is the
+/// `min` of the two, and a session's mode must be at most it. Each level
+/// includes the ones before it. `Container` exists as a level, but no node
+/// offers the container mode until N.4, so it allows no mode yet.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecLevel {
+    /// No agent chat at all (every new account and every new member).
+    #[default]
+    None,
+    /// Sessions in an environment an admin defined (rootless Podman, N.4).
+    Container,
+    /// Also `sandbox` sessions (bubblewrap).
+    Sandbox,
+    /// Also `host` sessions: a shell as the node's user, unconfined.
+    Host,
+}
+
+impl ExecLevel {
+    /// Every level, lowest first.
+    pub const ALL: [ExecLevel; 4] = [
+        ExecLevel::None,
+        ExecLevel::Container,
+        ExecLevel::Sandbox,
+        ExecLevel::Host,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ExecLevel::None => "none",
+            ExecLevel::Container => "container",
+            ExecLevel::Sandbox => "sandbox",
+            ExecLevel::Host => "host",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ExecLevel> {
+        Self::ALL.into_iter().find(|l| l.id() == s)
+    }
+
+    /// The level a session of mode `m` needs.
+    pub fn needed_for(m: ExecMode) -> ExecLevel {
+        match m {
+            ExecMode::Sandbox => ExecLevel::Sandbox,
+            ExecMode::Host => ExecLevel::Host,
+        }
+    }
+
+    /// Whether this level may have (create, and drive) a session of mode `m`.
+    pub fn allows(self, m: ExecMode) -> bool {
+        self >= Self::needed_for(m)
+    }
+
+    /// The most confined existing mode this level allows, the one a create
+    /// without a request gets; `None` at `none` and at `container` (no
+    /// container mode exists yet).
+    pub fn default_mode(self) -> Option<ExecMode> {
+        ExecMode::ALL.into_iter().find(|m| self.allows(*m))
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn levels_are_ordered_and_allow_the_modes_below_them() {
+        assert!(ExecLevel::None < ExecLevel::Container);
+        assert!(ExecLevel::Container < ExecLevel::Sandbox);
+        assert!(ExecLevel::Sandbox < ExecLevel::Host);
+        assert_eq!(ExecLevel::default(), ExecLevel::None);
+        for l in ExecLevel::ALL {
+            assert_eq!(ExecLevel::parse(l.id()), Some(l));
+            assert_eq!(serde_json::to_value(l).unwrap(), l.id());
+        }
+        assert_eq!(ExecLevel::parse("root"), None);
+        // `container` allows no mode until N.4.
+        for l in [ExecLevel::None, ExecLevel::Container] {
+            assert!(!l.allows(ExecMode::Sandbox) && !l.allows(ExecMode::Host));
+            assert_eq!(l.default_mode(), None);
+        }
+        assert!(ExecLevel::Sandbox.allows(ExecMode::Sandbox));
+        assert!(!ExecLevel::Sandbox.allows(ExecMode::Host));
+        assert!(ExecLevel::Host.allows(ExecMode::Host));
+        // Never `host` by default.
+        assert_eq!(ExecLevel::Host.default_mode(), Some(ExecMode::Sandbox));
+        assert_eq!(ExecLevel::Sandbox.min(ExecLevel::Host), ExecLevel::Sandbox);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRisk {

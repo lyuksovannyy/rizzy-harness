@@ -2,6 +2,7 @@
 # T.8d review: run the proofs that need the workspace's own crates. They are
 # not part of the test suite: the file is copied into crates/cli/tests/ for
 # the run and the copy is removed again, whatever happens.
+# The step2_*.py scripts here predate the account ceiling (N.10a part 2): they send `can_agentic`, which the server now refuses.
 #
 #   run_rust_proofs.sh [test-name-filter] [-- further arguments of the test binary]
 #   run_rust_proofs.sh long_ --ignored      the 31.5-minute wait for the node's prune

@@ -15,7 +15,7 @@ fn store() -> (Store, String) {
         username: "u1".into(),
         password_hash: "$argon2id$x".into(),
         role: Role::Member,
-        can_agentic: false,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
         must_change_password: false,
     })
     .unwrap();

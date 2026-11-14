@@ -27,6 +27,7 @@ const api = {
   removeWorkspaceMember: vi.fn(),
   addWorkspaceMember: vi.fn(),
   setWorkspaceMemberRole: vi.fn(),
+  setWorkspaceMemberLevel: vi.fn(),
   updateWorkspace: vi.fn(),
   deleteWorkspace: vi.fn(),
   agents: vi.fn(),
@@ -53,8 +54,9 @@ const summary = (role: WorkspaceRole, more: Partial<WorkspaceSummary> = {}): Wor
   name: "Acme",
   personal: false,
   role,
-  permissions: role === "owner" || role === "admin" ? ["agentic", "settings", "members", "routines"] : role === "member" ? ["agentic", "routines"] : [],
+  permissions: role === "owner" || role === "admin" ? ["settings", "members", "routines"] : role === "member" ? ["routines"] : [],
   members: 4,
+  exec_level: "host",
   ...more,
 });
 const detail = (more: Partial<WorkspaceDetail> = {}): WorkspaceDetail => ({
@@ -70,6 +72,7 @@ const member = (id: string, role: WorkspaceRole, display_name: string | null = n
   display_name,
   role,
   joined_ms: 1,
+  exec_level: role === "owner" ? "host" : "none",
 });
 const agent = (id: string, name: string): Agent => ({
   id,
@@ -101,7 +104,7 @@ const me = (role: WorkspaceRole = "admin"): Me => ({
   user_id: "u-alex",
   username: "alex",
   role: "member",
-  can_agentic: true,
+  exec_ceiling: "host" as const,
   must_change_password: false,
   workspace: summary(role),
 });
@@ -237,7 +240,7 @@ describe("Members", () => {
     expect(pick.value).toBe("member");
     expect(off(pick)).toEqual(["owner"]);
     // What each role may do.
-    expect([...host.querySelectorAll(".ws-roles tbody tr")].map((tr) => tr.querySelectorAll("svg").length)).toEqual([4, 4, 2, 0]);
+    expect([...host.querySelectorAll(".ws-roles tbody tr")].map((tr) => tr.querySelectorAll("svg").length)).toEqual([3, 3, 1, 0]);
   });
 
   test("an owner may make owners and manage other owners", async () => {
@@ -279,6 +282,70 @@ describe("Members", () => {
     api.removeWorkspaceMember.mockResolvedValue({ ok: true });
     await click(row("lee").querySelector("button")!);
     expect(api.removeWorkspaceMember).toHaveBeenCalledWith("w-acme", "u-lee");
+  });
+
+  // N.10a part 2: each member's level, set only up to the setter's own,
+  // host only by an owner, never one's own, an owner's always host.
+  const levelOf = (name: string) => host.querySelector<HTMLSelectElement>(`select[aria-label="Level of ${name}"]`);
+  const warning = async () => {
+    for (let i = 0; i < 50 && !document.querySelector("dialog.host-warning"); i++) {
+      await act(async () => new Promise((r) => setTimeout(r, 10)));
+    }
+    return document.querySelector<HTMLDialogElement>("dialog.host-warning");
+  };
+
+  test("an admin offers levels up to their own and never host; owners show host", async () => {
+    api.workspaceMembers.mockResolvedValue({ members: MEMBERS });
+    await render(<WorkspaceMembers {...props("admin", { workspace: summary("admin", { exec_level: "container" }) })} />);
+    expect(levelOf("Kim")!.value).toBe("none");
+    expect(off(levelOf("Kim")!)).toEqual(["sandbox", "host"]);
+    // Her own row: shown, not a choice (nobody changes their own).
+    expect(levelOf("alex")).toBeNull();
+    expect(row("alex").textContent).toContain("None");
+    expect(levelOf("sam")).toBeNull();
+    expect(row("sam").textContent).toContain("Host");
+    api.setWorkspaceMemberLevel.mockResolvedValue({ ...member("kim", "member", "Kim"), exec_level: "container" });
+    await choose(levelOf("Kim")!, "container");
+    expect(api.setWorkspaceMemberLevel).toHaveBeenCalledWith("w-acme", "u-kim", "container");
+    expect(document.querySelector("dialog.host-warning")).toBeNull();
+  });
+
+  test("a member sees only their own level; a level above the admin's own is not theirs to change", async () => {
+    // As a guest: the server sends only her own row's level.
+    const own = { ...member("alex", "guest"), exec_level: "sandbox" as const, effective_level: "none" as const };
+    const others = [own, { ...member("sam", "owner"), exec_level: undefined }, { ...member("kim", "member", "Kim"), exec_level: undefined }];
+    api.workspaceMembers.mockResolvedValue({ members: others });
+    await render(<WorkspaceMembers {...props("guest")} />);
+    expect(levelOf("Kim")).toBeNull();
+    expect(host.querySelector('[aria-label="Level of Kim not shown"]')).not.toBeNull();
+    expect(row("alex").textContent).toContain("counts as None");
+    // As an admin at sandbox: a member the owner gave host is not hers to change.
+    act(() => root.unmount());
+    root = createRoot(host);
+    api.workspaceMembers.mockResolvedValue({ members: [member("alex", "admin"), { ...member("kim", "member", "Kim"), exec_level: "host" as const }] });
+    await render(<WorkspaceMembers {...props("admin", { workspace: summary("admin", { exec_level: "sandbox" }) })} />);
+    expect(levelOf("Kim")!.disabled).toBe(true);
+    // The role select says the role is not the level.
+    expect(roleOf("Kim").title).toContain("not what they may run");
+  });
+
+  test("an owner granting host sees the risks first; cancelling saves nothing", async () => {
+    api.workspaceMembers.mockResolvedValue({ members: MEMBERS });
+    await render(<WorkspaceMembers {...props("owner")} />);
+    expect(off(levelOf("Kim")!)).toEqual([]);
+    await choose(levelOf("Kim")!, "host");
+    const d = (await warning())!;
+    expect(d.textContent).toContain("Let Kim run commands without the sandbox?");
+    expect(d.textContent).toContain("in Acme");
+    expect(d.textContent).toContain("with nothing between them and the machine");
+    expect(api.setWorkspaceMemberLevel).not.toHaveBeenCalled();
+    await click([...d.querySelectorAll("button")].find((b) => b.textContent === "Cancel")!);
+    expect(document.querySelector("dialog.host-warning")).toBeNull();
+    expect(api.setWorkspaceMemberLevel).not.toHaveBeenCalled();
+    expect(levelOf("Kim")!.value).toBe("none");
+    await choose(levelOf("Kim")!, "host");
+    await click([...(await warning())!.querySelectorAll("button")].find((b) => b.textContent === "Grant host")!);
+    expect(api.setWorkspaceMemberLevel).toHaveBeenCalledWith("w-acme", "u-kim", "host");
   });
 });
 
@@ -418,7 +485,7 @@ describe("Server → Workspaces", () => {
     ...more,
   });
   const LIST = [ws("Acme"), ws("w-p", { personal: true, name: "stored", owners: ["alex"], members: 1 })];
-  const admin: Me = { user_id: "u-alex", username: "alex", role: "admin", can_agentic: true, must_change_password: false };
+  const admin: Me = { user_id: "u-alex", username: "alex", role: "admin", exec_ceiling: "host" as const, must_change_password: false };
 
   test("the policy switch saves what the server keeps", async () => {
     api.adminWorkspaces.mockResolvedValue({ workspaces: LIST, members_can_create: true });

@@ -527,3 +527,43 @@ async fn an_image_note_is_one_harness_line() {
          request."
     );
 }
+
+/// The repository's instruction files (`TurnExtra::instructions`) ride
+/// in a person's turn's context block, in front of the master's context
+/// (so a routine's untrusted note stays last), quoted like it; alone when
+/// there is no other context.
+#[tokio::test]
+async fn instruction_files_lead_the_context_block() {
+    let sent = async |instructions: Option<&str>, context: Option<&str>| {
+        let sid = SessionId::new();
+        let host = Host(Mutex::new(vec![]));
+        let rec = Arc::new(Rec {
+            calls: vec![],
+            seen: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(rec.clone(), vec![], NativeConfig::default());
+        let m = message("t1", "hello", vec![]);
+        let mut t = turn(&host, sid, vec![], &m);
+        t.extra.instructions = instructions.map(str::to_string);
+        t.extra.context = context.map(str::to_string);
+        b.run_turn(t).await;
+        let seen = rec.seen.lock().unwrap();
+        seen[0]
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| m.user_text())
+            .unwrap()
+            .to_string()
+    };
+    let both = sent(Some("==> AGENTS.md <==\nfmt"), Some("Person: Ann")).await;
+    assert_eq!(
+        split_context(&both),
+        Some(("==> AGENTS.md <==\nfmt\n\nPerson: Ann".to_string(), "hello"))
+    );
+    let alone = sent(Some("==> AGENTS.md <==\nfmt"), None).await;
+    assert_eq!(
+        split_context(&alone),
+        Some(("==> AGENTS.md <==\nfmt".to_string(), "hello"))
+    );
+}

@@ -421,7 +421,7 @@ export function Shell(props: {
   );
   const gutter = prefs?.backdrop_chats && prefs.backdrop !== "off" ? history : null;
   const workers = nodes.filter((n) => n.connected && n.profile === "agentic");
-  const agenticBlocked = agenticBlockReason(me.can_agentic, me.workspace, workers.length);
+  const agenticBlocked = agenticBlockReason(me.exec_ceiling, me.workspace, workers.length);
   const newChatAgents = agentDefaults(prefs, scopeDefaults);
   const selected = route.kind === "session" ? route.id : null;
 
@@ -714,7 +714,7 @@ export function Shell(props: {
               workers={workers}
               prefs={prefs}
               agenticBlocked={agenticBlocked}
-              hostRight={{ admin: me.role === "admin" }}
+              hostRight={{ level: me.workspace?.exec_level ?? me.exec_ceiling }}
               workspace={workspaceId}
               onSubmit={submit}
               predict={predict}
