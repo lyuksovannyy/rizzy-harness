@@ -140,11 +140,15 @@ fn progress_step(user: &str, messages: &[ChatMsg]) -> Option<(usize, usize)> {
     Some((n, 1 + results))
 }
 
-/// The first line of a sub-agent's answer in a `delegate` result
-/// (`session: <id>\n@<agent> ended (<reason>):\n<answer>`).
+/// The first line of a sub-agent's report in a `delegate` result
+/// (`session: <id>\nSub-agent @<agent> finished: …\n| <report>`).
 fn delegate_answer(result: &str) -> Option<String> {
-    let (_, answer) = result.strip_prefix("session: ")?.split_once("):\n")?;
-    Some(answer.lines().next()?.to_string())
+    let mut lines = result.strip_prefix("session: ")?.lines().skip(1);
+    lines.next()?.strip_prefix("Sub-agent @")?;
+    let first = lines
+        .next()?
+        .strip_prefix(harness_core::event::OUTPUT_QUOTE)?;
+    Some(first.to_string())
 }
 
 pub struct Mock {
