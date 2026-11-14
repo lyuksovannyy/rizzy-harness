@@ -1092,6 +1092,7 @@ async fn a_chat_grant_covers_the_exact_call_in_this_chat_until_removed() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
+    std::fs::create_dir(ws.join("sub")).unwrap();
     std::fs::write(ws.join("notes.txt"), "x\n").unwrap();
     let db = dir.path().join("node.db");
     let call = |workdir: &str| {
