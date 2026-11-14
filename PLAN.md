@@ -1335,8 +1335,23 @@ unversioned, pin the image.
   node). All delegations of one step run **in parallel**; caps are enforced per turn
   (default 4 sub-agents, 200k tokens) and shown in the tool description. Depth is one
   (sub-agents get no delegates). Cancelling the parent cancels its children. The child's
-  final answer comes back as the tool result (Infinity's "report back as a tool
-  result"); the tool card links to the child session as soon as it starts. Built-in
+  turn gets the task, the repository's instruction files and its parent turn's
+  per-turn context from the master (quoted as the parent's is), never the parent's
+  history. A child ends with `finish {status: done|partial|failed, summary, details?}`
+  (offered to children only, handled by the loop, taken only alone in its message; no
+  new event: a `tool_call_started`/`tool_call_finished` pair the node reads back from the
+  child's log, with the text of the message that made it, which leads the report). A
+  child's last allowed step, and the step after the repeated-call guard stops it, offer
+  `finish` alone after a harness note. The tool result is `session: <id>`, the harness's
+  status line (with the child turn's own end text when it did not complete), the child's
+  report with every line behind `| ` (over 24,000 characters: the first three quarters
+  and the last quarter, a note between), then the harness's merge note, made one line;
+  without `finish`, the last text with `done` for a completed turn; a turn that did not
+  complete is `failed`, `finish` or not (`harness_core::subagent`). A child's context
+  frame says a task follows, not the person's message. The status line
+  carries no `[harness]` lead because tool results escape that lead (R-2); the quote
+  alone keeps the child's text from passing as the harness's. The tool card links
+  to the child session as soon as it starts and shows the status when it ends. Built-in
   **Ultracode** delegated to Coder, Scout and Writer (since 2026-11 the **Senior Teamlead**
   and the **Software Developer** delegate). Sub-agent sessions are hidden from
   Recents and link back to their parent.

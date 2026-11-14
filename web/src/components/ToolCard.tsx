@@ -103,6 +103,19 @@ function SourceRows({ sources }: { sources: Source[] }) {
   );
 }
 
+export type ChildStatus = "done" | "partial" | "failed";
+
+const CHILD_STATUS_CLASS: Record<ChildStatus, string> = { done: "ok", partial: "waiting", failed: "failed" };
+
+/** The status a `delegate` result names on its second line, the harness's
+ * (`harness_core::subagent::render`); every line of the sub-agent's own
+ * report is behind "| ", so a status line it wrote is never read here. */
+export function childStatus(output: string): ChildStatus | undefined {
+  const line = output.split("\n")[1] ?? "";
+  const m = /^Sub-agent @\S+ finished: (done|partial|failed)[. ]/.exec(line);
+  return m ? (m[1] as ChildStatus) : undefined;
+}
+
 /** The one-line head (CSS cuts it): a summary that the body spells out in
  * full. Hidden characters and runs of blanks are marked here too. */
 function summary(tool: string, input: Tool["input"]): string {
@@ -202,6 +215,7 @@ export function ToolCard({
   const output = item.result ? item.result.output : item.live_output;
   // A delegated sub-task runs in its own session: link to it.
   const child = item.tool === "delegate" ? /session: ([0-9a-f-]{36})/.exec(output)?.[1] : undefined;
+  const reported = item.tool === "delegate" && item.result ? childStatus(item.result.output) : undefined;
 
   const Icon = item.tool === "web_search" ? Search : Globe;
   return (
@@ -224,9 +238,19 @@ export function ToolCard({
         </button>
       )}
       {child && (
-        <a className="child-link small" href={`#/s/${child}`}>
-          Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
-        </a>
+        <div className="child-row small">
+          <a className="child-link" href={`#/s/${child}`}>
+            Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
+          </a>
+          {reported && (
+            <span
+              className={`tool-status child-status s-${CHILD_STATUS_CLASS[reported]}`}
+              title="What the sub-agent reported; the harness did not check it"
+            >
+              {reported}
+            </span>
+          )}
+        </div>
       )}
       {pending && item.approval && (
         <div className="approval">
