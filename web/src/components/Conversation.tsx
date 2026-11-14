@@ -609,7 +609,7 @@ export default function Conversation(props: {
         <div className="column">
           {todoFor.current === sessionId && (
             <Suspense fallback={null}>
-              <TodoPanel key={sessionId} items={view?.todo ?? []} />
+              <TodoPanel key={sessionId} items={view?.todo ?? []} running={running} />
             </Suspense>
           )}
           {stripFor.current === sessionId && (
