@@ -2643,7 +2643,10 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
     match (tool, risk) {
         ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),
         (_, ToolRisk::Mutating) => format!("`{tool}` can change files or run programs"),
-        (_, ToolRisk::ReadOnly) => format!("approval mode requires asking for `{tool}`"),
+        // `ChatOnly` is never asked about (`needs_approval`).
+        (_, ToolRisk::ReadOnly | ToolRisk::ChatOnly) => {
+            format!("approval mode requires asking for `{tool}`")
+        }
     }
 }
 

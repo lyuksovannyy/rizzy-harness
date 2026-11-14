@@ -17,12 +17,17 @@ use harness_protocol::{MasterToNode, NodeToMaster};
 use harness_store::{Durability, Store};
 
 fn start_config(dir: &std::path::Path) -> NodeConfig {
+    start_with(dir, vec![])
+}
+
+fn start_with(dir: &std::path::Path, denied_tools: Vec<String>) -> NodeConfig {
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
         policy: NodePolicy {
             workspace_roots: vec![dir.into()],
             max_approval_mode: ApprovalMode::Auto,
+            denied_tools,
             ..Default::default()
         },
         store: Store::open(&dir.join("node.db"), Durability::Full).unwrap(),
@@ -72,6 +77,10 @@ async fn until(link: &mut NodeLink, sid: SessionId, pred: impl Fn(&EventKind) ->
 }
 
 async fn create(link: &mut NodeLink, ws: &std::path::Path) -> SessionId {
+    create_in(link, ws, ApprovalMode::Auto).await
+}
+
+async fn create_in(link: &mut NodeLink, ws: &std::path::Path, mode: ApprovalMode) -> SessionId {
     let sid = SessionId::new();
     link.to_node
         .try_send(MasterToNode::Create {
@@ -85,7 +94,7 @@ async fn create(link: &mut NodeLink, ws: &std::path::Path) -> SessionId {
             title: "t".into(),
             cwd: ws.display().to_string(),
             model: None,
-            approval_mode: Some(ApprovalMode::Auto),
+            approval_mode: Some(mode),
         })
         .unwrap();
     until(link, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;
@@ -240,4 +249,40 @@ async fn a_sub_agents_list_is_its_own() {
         "{evs:?}"
     );
     assert_eq!(v.todo, want());
+}
+
+/// The list writes only the chat's own log: no approval is asked for it,
+/// even in `ask_all` (TD-6); a node that denies `todo` still refuses it.
+#[tokio::test]
+async fn the_list_is_never_asked_about_but_a_node_may_deny_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let node = NodeRuntime::start(start_config(dir.path())).await.unwrap();
+    let mut link = attach(&node).await;
+    let sid = create_in(&mut link, &ws, ApprovalMode::AskAll).await;
+    prompt(&link, sid, None, todo_script(plan()));
+    until(&mut link, sid, |k| matches!(k, EventKind::TurnEnded(_))).await;
+    let evs = log(node.store(), sid);
+    assert!(
+        !evs.iter().any(|e| e.kind == "approval_requested"),
+        "{evs:?}"
+    );
+    assert_eq!(SessionView::fold(&evs).unwrap().todo, want());
+    assert!(node.stop(Duration::from_secs(5)).await.is_empty());
+    drop(node);
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let node = NodeRuntime::start(start_with(dir.path(), vec!["todo".into()]))
+        .await
+        .unwrap();
+    let mut link = attach(&node).await;
+    let sid = create_in(&mut link, &ws, ApprovalMode::Auto).await;
+    prompt(&link, sid, None, todo_script(plan()));
+    until(&mut link, sid, |k| matches!(k, EventKind::TurnEnded(_))).await;
+    let evs = log(node.store(), sid);
+    assert!(!evs.iter().any(|e| e.kind == "todo_updated"), "{evs:?}");
+    assert!(SessionView::fold(&evs).unwrap().todo.is_empty());
 }

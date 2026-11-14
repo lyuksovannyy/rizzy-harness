@@ -23,11 +23,11 @@ impl TurnHost for Host {
         Ok(())
     }
     async fn approve(&self, _: &str, _: &str, _: &Value, risk: ToolRisk) -> Decision {
-        // Read-only, as the node's policy treats it under `ask`.
-        if risk == ToolRisk::ReadOnly {
-            Decision::Allow
-        } else {
+        // As a node in `ask` decides.
+        if harness_core::policy::ApprovalMode::Ask.needs_approval(risk) {
             Decision::Deny
+        } else {
+            Decision::Allow
         }
     }
 }

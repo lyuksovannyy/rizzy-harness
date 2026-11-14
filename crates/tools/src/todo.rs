@@ -1,7 +1,7 @@
 //! `todo`: the agent's own task list for the chat (`harness_core::todo`).
 //! The tool only checks the list and hands it to the loop, which records it
 //! in the chat's log before the call's result; nothing outside the chat
-//! changes.
+//! changes, so no approval mode asks about it (`ToolRisk::ChatOnly`).
 
 use harness_core::policy::ToolRisk;
 use harness_core::todo::{self, MAX_CHARS, MAX_ITEMS};
@@ -20,7 +20,8 @@ impl Tool for Todo {
     fn description(&self) -> &'static str {
         "Your task list for this chat; each call replaces the whole list, and it stays with \
          you after older turns are summarised. For multi-step tasks, write the plan before you \
-         start and update it as you go, with at most one item in_progress."
+         start and update it as you go, with at most one item in_progress; clear it with [] when \
+         the work is done."
     }
 
     fn schema(&self) -> Value {
@@ -52,8 +53,9 @@ impl Tool for Todo {
         })
     }
 
+    /// It writes only the chat's own log: never asked about.
     fn risk(&self) -> ToolRisk {
-        ToolRisk::ReadOnly
+        ToolRisk::ChatOnly
     }
 
     async fn run(&self, _ctx: &ToolCtx, input: Value) -> ToolOutcome {

@@ -19,13 +19,16 @@ fn item(content: &str, status: &str) -> Value {
 #[test]
 fn it_is_read_only_and_says_when_to_use_it() {
     assert_eq!(Todo.name(), "todo");
-    assert_eq!(Todo.risk(), ToolRisk::ReadOnly);
+    // It writes only the chat's own log: never asked about (TD-6).
+    assert_eq!(Todo.risk(), ToolRisk::ChatOnly);
     let d = Todo.description();
     assert!(
         d.contains("multi-step") || d.contains("several steps"),
         "{d}"
     );
     assert!(d.contains("replaces"), "{d}");
+    // So the pinned list goes away when the work is (TD-2).
+    assert!(d.contains("clear it with [] when the work is done"), "{d}");
     let s = Todo.schema();
     assert_eq!(s["properties"]["items"]["maxItems"], 50);
 }
