@@ -73,7 +73,7 @@ describe("a denial's note", () => {
     const host = await mount(<ToolCard sessionId="s" item={card()} />);
     type(host.querySelector<HTMLInputElement>("input.deny-note")!, "a draft");
     await act(async () => button(host, "Allow once").click());
-    expect(approve).toHaveBeenCalledWith("s", "a1", "allow", undefined);
+    expect(approve).toHaveBeenCalledWith("s", "a1", "allow");
   });
 
   test("a denied card shows the note it went with", async () => {
@@ -86,7 +86,7 @@ describe("allow for this chat", () => {
   test("offered where the node offers it, and answers allow_chat", async () => {
     const host = await mount(<ToolCard sessionId="s" item={card()} />);
     await act(async () => button(host, "Allow this exact call for this chat").click());
-    expect(approve).toHaveBeenCalledWith("s", "a1", "allow_chat", undefined);
+    expect(approve).toHaveBeenCalledWith("s", "a1", "allow_chat");
   });
 
   test("not offered where the node does not (a sub-agent, ask every call)", async () => {

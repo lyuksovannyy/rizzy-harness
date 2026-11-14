@@ -52,6 +52,10 @@ struct Running {
     compare: bool,
 }
 
+/// Where a person's answer to a waiting approval goes: the decision and the
+/// note that came with a denial.
+type Answer = oneshot::Sender<(Decision, Option<String>)>;
+
 pub(crate) struct Session {
     node: Arc<Inner>,
     id: SessionId,
@@ -77,7 +81,7 @@ pub(crate) struct Session {
     /// A chat that never gets a callback turn (`session_created`).
     no_callbacks: bool,
     turn: Mutex<Option<RunningTurn>>,
-    approvals: Mutex<HashMap<String, oneshot::Sender<(Decision, Option<String>)>>>,
+    approvals: Mutex<HashMap<String, Answer>>,
     /// The person's notes with denials, by call id, until the loop takes
     /// the one of the call it is closing ([`TurnHost::denial_note`]).
     deny_notes: Mutex<HashMap<String, String>>,

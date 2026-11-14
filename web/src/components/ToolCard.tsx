@@ -202,7 +202,8 @@ export function ToolCard({
     setErr(null);
     try {
       const n = d === "deny" ? note.trim() : "";
-      await pageApi.approve(sessionId, item.approval.approval_id, d, n || undefined);
+      if (n) await pageApi.approve(sessionId, item.approval.approval_id, d, n);
+      else await pageApi.approve(sessionId, item.approval.approval_id, d);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
