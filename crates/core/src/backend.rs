@@ -235,4 +235,6 @@ pub trait AgentBackend: Send + Sync {
     fn has_tool(&self, _name: &str) -> bool {
         false
     }
+    /// The session was deleted: drop whatever is kept in memory for it.
+    fn forget_session(&self, _session: crate::SessionId) {}
 }

@@ -9,6 +9,9 @@ mod bash;
 pub mod contain;
 pub mod guard;
 pub use bash::{DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S};
+mod edit;
+#[cfg(test)]
+mod edit_tests;
 pub mod env;
 pub mod filter;
 mod fs;
@@ -19,6 +22,7 @@ pub mod outputs;
 mod publish;
 pub mod sandbox;
 mod search;
+pub mod seen;
 pub mod skills;
 pub mod stream;
 pub mod todo;
@@ -39,8 +43,9 @@ pub use bash::{
     Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, KEPT_OUTPUT_LEAD, STILL_ALIVE_TAIL, ShellChild,
     foreground_schema,
 };
+pub use edit::Edit;
 pub use env::ToolEnv;
-pub use fs::{Edit, Read, Write};
+pub use fs::{Read, Write};
 pub use outline::Outline;
 pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
@@ -195,6 +200,10 @@ pub struct ToolCtx {
     /// The skills the node found for this turn (`skill` loads from them);
     /// `None` where there are none.
     pub skills: Option<Arc<harness_core::skills::Catalogue>>,
+    /// What this session's agent has seen of each file: `edit` and `write`
+    /// check it, `read` and they record it (T.2). A table of its own
+    /// unless the loop binds the session's.
+    pub seen: seen::SessionSeen,
 }
 
 impl ToolCtx {
@@ -219,6 +228,7 @@ impl ToolCtx {
             owned: None,
             background: Default::default(),
             skills: None,
+            seen: Default::default(),
         }
     }
 
@@ -326,6 +336,18 @@ impl ToolCtx {
             ));
         }
         Ok(path)
+    }
+
+    /// The path the file tools' record and lock are keyed on: the real
+    /// path. In the workspace [`Self::resolve`] already gives it; in
+    /// outside mode it does not follow links, so it is walked here, and two
+    /// spellings of one file share one record and one lock.
+    pub(crate) fn seen_key(&self, path: &Path) -> PathBuf {
+        if self.allow_outside_workspace {
+            walk(path, None, "").unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        }
     }
 
     /// Refuse `real` (a real or normalized path) inside a protected folder.
@@ -498,6 +520,9 @@ pub struct ToolOutcome {
     /// A `todo` call's accepted list: the loop records `todo_updated`
     /// before this call's result.
     pub todo: Option<Vec<harness_core::todo::TodoItem>>,
+    /// The file a `read`, `write` or `edit` left the agent knowing: the
+    /// loop records it with the call's result (`tool_call_finished.seen`).
+    pub seen: Option<harness_core::event::FileSeen>,
 }
 
 impl ToolOutcome {
