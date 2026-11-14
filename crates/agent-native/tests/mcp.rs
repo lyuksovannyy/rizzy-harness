@@ -241,3 +241,41 @@ async fn an_agent_without_mcp_starts_no_server_and_unknown_names_are_refused() {
     );
     assert!(host2.asked.lock().unwrap().is_empty());
 }
+
+/// Review M1: a server that prints its `env` token on stderr and exits:
+/// the note saying it did not start goes to the model scrubbed.
+#[tokio::test]
+async fn a_servers_error_output_reaches_the_model_scrubbed() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = "tok-review-m1-secret-77";
+    let mut cfg = ServerConfig::new("python3", &[FAKE, "--say-env", "FAKE_TOKEN"]);
+    cfg.env = serde_json::from_value(json!({ "FAKE_TOKEN": token })).unwrap();
+    let mut m = BTreeMap::new();
+    m.insert("fake".to_string(), cfg);
+    let host = Host {
+        events: Mutex::default(),
+        asked: Mutex::default(),
+        mcp: SessionMcp::new(&m),
+    };
+    let script = Arc::new(Script {
+        calls: vec![],
+        seen: Mutex::default(),
+    });
+    let backend = NativeBackend::new(
+        script.clone(),
+        harness_tools::builtin(),
+        NativeConfig {
+            secrets: harness_core::SecretSet::new(vec![harness_core::secret::Secret::new(
+                token.to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+    backend.run_turn(turn(&host, dir.path(), None)).await;
+    let sent = format!("{:?}", script.seen.lock().unwrap()[0].messages);
+    assert!(sent.contains("is not available"), "{sent}");
+    assert!(sent.contains("auth failed for token"), "{sent}");
+    assert!(!sent.contains(token), "{sent}");
+    let events = format!("{:?}", host.events.lock().unwrap());
+    assert!(!events.contains(token), "{events}");
+}

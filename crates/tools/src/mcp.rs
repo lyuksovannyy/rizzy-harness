@@ -253,8 +253,8 @@ pub fn validate(servers: &BTreeMap<String, ServerConfig>) -> Result<(), String> 
         let at = format!("[mcp_servers.{name}]");
         if !valid_server_name(name) {
             return Err(format!(
-                "{at}: a server name is 1 to 32 of a-z, 0-9, `-` and `_`, starts with a letter or \
-                 digit and holds no `__` (it becomes part of tool names: mcp__{name}__<tool>)"
+                "{at}: a server name is 1 to 32 of a-z, 0-9, `-` and `_`, starts and ends with a \
+                 letter or digit and holds no `__` (it becomes part of tool names: mcp__{name}__<tool>)"
             ));
         }
         if s.command.trim().is_empty() {
@@ -302,6 +302,10 @@ fn valid_server_name(name: &str) -> bool {
         && name
             .bytes()
             .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .last()
             .is_some_and(|b| b.is_ascii_alphanumeric())
         && !name.contains("__")
 }
@@ -403,6 +407,9 @@ impl SessionMcp {
             futures::future::join_all(self.slots.iter().map(|s| s.ensure(ctx, &self.closed))).await;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut text = 0usize;
+        // One name, one tool (review L1): `mcp__a___echo` is both `a_`'s
+        // `echo` and `a`'s `_echo` where node.toml did not refuse `a_`.
+        let mut taken: HashSet<String> = HashSet::new();
         for (slot, res) in self.slots.iter().zip(started) {
             let listed = match res {
                 Ok(l) => l,
@@ -412,13 +419,19 @@ impl SessionMcp {
                 }
             };
             let mut cut = Vec::new();
+            let mut twice = Vec::new();
             for l in listed.tools {
+                if taken.contains(&l.name) {
+                    twice.push(shown(&l.raw));
+                    continue;
+                }
                 let size = l.name.len() + l.description.len() + l.schema_len;
                 if tools.len() >= MAX_TOOLS || text + size > MAX_TOOL_TEXT {
-                    cut.push(l.raw.clone());
+                    cut.push(shown(&l.raw));
                     continue;
                 }
                 text += size;
+                taken.insert(l.name.clone());
                 tools.push(Arc::new(McpTool {
                     slot: slot.clone(),
                     closed: self.closed.clone(),
@@ -429,6 +442,15 @@ impl SessionMcp {
                 }));
             }
             notes.extend(listed.notes);
+            if !twice.is_empty() {
+                notes.push(format!(
+                    "{} tool(s) of MCP server `{}` are not offered: another server's tool has the \
+                     same name in this chat ({})",
+                    twice.len(),
+                    slot.name,
+                    shorten(&twice.join(", "), 300)
+                ));
+            }
             if !cut.is_empty() {
                 notes.push(format!(
                     "{} tool(s) of MCP server `{}` are not offered in this chat ({}): a chat \
@@ -496,6 +518,19 @@ impl SessionMcp {
                 s.kill();
             }
         }
+    }
+
+    /// The server and the server's own name of the tool offered as
+    /// `public` (the approval card shows it: a hashed name says little).
+    pub async fn origin(&self, public: &str) -> Option<(String, String)> {
+        for s in &self.slots {
+            if let State::Up(up) = &*s.state.lock().await
+                && let Some(l) = up.listed.tools.iter().find(|l| l.name == public)
+            {
+                return Some((s.name.clone(), l.raw.clone()));
+            }
+        }
+        None
     }
 
     /// How many server processes are alive.
@@ -736,10 +771,14 @@ impl Slot {
         };
         self.touch();
         match r {
-            Ok(Ok(result)) => render(
-                &self.name,
-                serde_json::to_value(&result).unwrap_or_default(),
-            ),
+            Ok(Ok(result)) => {
+                // Failures far apart do not add up (review N4).
+                self.fails.store(0, Ordering::SeqCst);
+                render(
+                    &self.name,
+                    serde_json::to_value(&result).unwrap_or_default(),
+                )
+            }
             Ok(Err(rmcp::ServiceError::McpError(e))) => ToolOutcome::err(format!(
                 "MCP server `{}` refused the call: {}",
                 self.name, e.message
@@ -847,6 +886,12 @@ impl Tail {
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.0).trim().to_string()
     }
+}
+
+/// A name the server chose, as a note shows it: one line, no hidden or
+/// direction characters, quotation marks as `'` (review L2).
+fn shown(name: &str) -> String {
+    harness_core::event::shown_name(name)
 }
 
 fn shorten(s: &str, max: usize) -> String {
@@ -1150,7 +1195,7 @@ async fn list(
         let schema_len = serde_json::to_string(&schema).map_or(usize::MAX, |s| s.len());
         let is_object = schema.get("type").and_then(Value::as_str) == Some("object");
         if schema_len > MAX_SCHEMA_BYTES || !is_object {
-            big.push(raw_name);
+            big.push(shown(&raw_name));
             continue;
         }
         let description = t

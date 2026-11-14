@@ -3022,6 +3022,20 @@ impl TurnHost for Session {
         // request, and the loop records the key of the call it is running.
         let background_start = is_background_start(tool, input);
         let approval_id = new_id();
+        let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
+        // An MCP tool's card names the server and its own name of the tool
+        // (review N2): a cleaned or hashed public name says little.
+        if let Some(m) = self
+            .mcp
+            .as_ref()
+            .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
+            && let Some((server, raw)) = m.origin(tool).await
+        {
+            reason = format!(
+                "{reason} (server `{server}`, its tool `{}`)",
+                harness_core::event::shown_name(&raw)
+            );
+        }
         let (tx, rx) = oneshot::channel();
         self.approvals
             .lock()
@@ -3033,7 +3047,7 @@ impl TurnHost for Session {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 input: input.clone(),
-                reason: approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode),
+                reason,
                 // "For this turn" would cover every identical start of the
                 // turn (N-2): a background start is asked for each time.
                 turn_allow: !background_start,

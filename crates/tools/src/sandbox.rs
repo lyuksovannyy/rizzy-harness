@@ -2271,7 +2271,8 @@ fn not_enforced(
 }
 
 /// Remove every per-session temp directory (at node start, before any
-/// session runs).
+/// session runs), and with them the `.mcp-*` folders of MCP servers'
+/// request FIFOs a killed node left beside them (`crate::mcp`).
 pub fn reset_tmp(root: &Path) -> Result<(), String> {
     match std::fs::remove_dir_all(root) {
         Ok(()) => {}

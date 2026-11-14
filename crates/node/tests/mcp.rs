@@ -264,9 +264,9 @@ async fn only_node_toml_servers_run_and_a_call_is_asked_about() {
         })
         .collect();
     assert!(
-        reasons
-            .iter()
-            .any(|r| r.starts_with("mcp__fake__echo: ") && r.contains("MCP server")),
+        reasons.iter().any(|r| r.starts_with("mcp__fake__echo: ")
+            && r.contains("MCP server")
+            && r.contains("server `fake`, its tool `echo`")),
         "{reasons:?}"
     );
     assert!(

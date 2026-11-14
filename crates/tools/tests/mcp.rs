@@ -293,3 +293,72 @@ async fn a_stop_or_idle_time_ends_the_process_and_a_closed_set_starts_nothing() 
     }
     assert!(!alive(p));
 }
+
+/// Review L1: `public_name("a_", "echo") == public_name("a", "_echo")`.
+/// node.toml refuses a server name ending in `_` or `-`, and a chat never
+/// carries one name twice: the later tool is left out, with a note.
+#[tokio::test]
+async fn two_servers_never_offer_the_same_name() {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "a_".to_string(),
+        server(&["--tool-names", "echo", "--marker", "first"]),
+    );
+    assert!(mcp::validate(&m).is_err());
+    m.insert(
+        "a".to_string(),
+        server(&["--tool-names", "_echo", "--marker", "second"]),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let l = SessionMcp::new(&m).unwrap().load(&ctx(&dir)).await;
+    let names: Vec<&str> = l.tools.iter().map(|t| t.name()).collect();
+    assert_eq!(names, ["mcp__a___echo"], "{names:?}");
+    let all = l.notes.join("\n");
+    assert!(all.contains("same name"), "{all}");
+    for bad in ["a-", "a_"] {
+        let mut m = BTreeMap::new();
+        m.insert(bad.to_string(), server(&[]));
+        assert!(mcp::validate(&m).is_err(), "{bad}");
+    }
+}
+
+/// Review L2: a tool name is the server's text; in a note it is one line
+/// without hidden or direction characters.
+#[tokio::test]
+async fn server_supplied_names_in_notes_are_one_clean_line() {
+    let mut names: Vec<String> = (0..mcp::MAX_TOOLS).map(|i| format!("t{i}")).collect();
+    // Sorted last by public name, so these are the ones cut.
+    names.push("zz-evil\nline".into());
+    names.push("zz-rev\u{202e}txt".into());
+    let dir = tempfile::tempdir().unwrap();
+    let l = set(server(&["--tool-names", &names.join(",")]))
+        .load(&ctx(&dir))
+        .await;
+    let all = l.notes.join(" ");
+    assert!(all.contains("not offered"), "{all}");
+    assert!(all.contains("zz-evil line"), "{all}");
+    assert!(!all.contains('\n') && !all.contains('\u{202e}'), "{all:?}");
+}
+
+/// Review N4: failures far apart do not add up: a successful call starts
+/// the count again.
+#[tokio::test]
+async fn a_successful_call_starts_the_failure_count_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = set(server(&[]));
+    let l = s.load(&ctx(&dir)).await;
+    let die = tool(&l.tools, "mcp__fake__die");
+    let echo = tool(&l.tools, "mcp__fake__echo");
+    for _ in 0..3 {
+        for _ in 0..mcp::MAX_RESTARTS {
+            let r = die.run(&ctx(&dir), json!({})).await;
+            assert!(
+                !r.ok && !r.output.contains("not started again"),
+                "{}",
+                r.output
+            );
+        }
+        let r = echo.run(&ctx(&dir), json!({"text": "ok"})).await;
+        assert!(r.ok, "{}", r.output);
+    }
+}

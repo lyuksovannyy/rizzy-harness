@@ -1375,7 +1375,13 @@ impl NativeBackend {
             .and_then(|m| m.downcast::<harness_tools::mcp::SessionMcp>().ok())
         {
             Some(m) if !child && agent.is_none_or(|a| a.allows_mcp()) => {
-                let loaded = m.load(&self.start_ctx(&ctx, host)).await;
+                let mut loaded = m.load(&self.start_ctx(&ctx, host)).await;
+                // A note can carry the end of a server's error output: it
+                // reaches the model only scrubbed, as tool output does
+                // (review M1).
+                for n in &mut loaded.notes {
+                    *n = self.config.secrets.scrub(n);
+                }
                 for n in &loaded.notes {
                     if host
                         .emit(EventKind::Error(harness_core::event::ErrorEvent {

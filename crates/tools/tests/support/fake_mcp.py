@@ -11,6 +11,8 @@ other request with "method not found". Flags:
   --hang-init      never answer `initialize`
   --started PATH   append "started <pid>" to PATH when it starts
   --marker WORD    ignored (lets a test find the process in /proc)
+  --say-env NAME   print "token <value of NAME>" to stderr and exit 1 at once
+  --tool-names A,B the tools are these (echo's behaviour), no others
 
 Tools: echo, env, hang, huge, flood, die, image, fail, pid.
 """
@@ -35,6 +37,11 @@ def value(name, default=None):
 if value("--started"):
     with open(value("--started"), "a") as f:
         f.write("started %d\n" % os.getpid())
+
+if value("--say-env"):
+    sys.stderr.write("auth failed for token %s\n" % os.environ.get(value("--say-env"), ""))
+    sys.stderr.flush()
+    sys.exit(1)
 
 out = sys.stdout.buffer
 
@@ -67,6 +74,11 @@ TOOLS = [
 ]
 for i in range(int(value("--tools", "0"))):
     TOOLS.append({"name": "t%d" % i, "description": "Tool %d." % i, "inputSchema": obj()})
+if value("--tool-names"):
+    TOOLS = [
+        {"name": n, "description": "Named.", "inputSchema": obj({"text": {"type": "string"}})}
+        for n in value("--tool-names").split(",")
+    ]
 if flag("--big-schema"):
     TOOLS.append(
         {
@@ -87,6 +99,8 @@ def text(t, error=False):
 def call(name, arguments):
     if name == "echo":
         return text(str(arguments.get("text", "")))
+    if value("--tool-names"):
+        return text("served by %s tool %s" % (value("--marker", "?"), name))
     if name == "env":
         return text("\n".join("%s=%s" % kv for kv in sorted(os.environ.items())))
     if name == "hang":

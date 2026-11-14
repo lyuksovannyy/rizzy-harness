@@ -376,8 +376,20 @@ pub enum PolicyError {
 
 impl NodePolicy {
     /// Whether `denied_tools` refuses `tool` outright.
+    /// `mcp` stands for every MCP tool and `mcp__<server>` for one
+    /// server's (X.3, review N2); any other entry is an exact name.
     pub fn denies(&self, tool: &str) -> bool {
-        self.denied_tools.iter().any(|t| t == tool)
+        let prefix = harness_tools::mcp::PREFIX;
+        self.denied_tools.iter().any(|t| {
+            t == tool
+                || (tool.starts_with(prefix)
+                    && (t == harness_core::agent::MCP_ALL
+                        || (t.starts_with(prefix)
+                            && !t[prefix.len()..].contains("__")
+                            && tool
+                                .strip_prefix(t.as_str())
+                                .is_some_and(|rest| rest.starts_with("__")))))
+        })
     }
 
     /// Load `node.toml`; a missing file means defaults.
@@ -609,6 +621,25 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review N2: `mcp` denies every MCP tool, `mcp__<server>` one
+    /// server's; anything else stays an exact name.
+    #[test]
+    fn denied_tools_can_name_every_mcp_tool_or_one_servers() {
+        let p = |d: &[&str]| NodePolicy {
+            denied_tools: d.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(p(&["mcp"]).denies("mcp__github__create_issue"));
+        assert!(!p(&["mcp"]).denies("bash"));
+        let gh = p(&["mcp__github"]);
+        assert!(gh.denies("mcp__github__create_issue"));
+        assert!(!gh.denies("mcp__git__status"));
+        assert!(!gh.denies("mcp__githubx__a"));
+        let one = p(&["mcp__github__drop"]);
+        assert!(one.denies("mcp__github__drop") && !one.denies("mcp__github__list"));
+        assert!(p(&["bash"]).denies("bash") && !p(&["bash"]).denies("mcp__bash__x"));
+    }
 
     #[test]
     fn mcp_servers_are_read_from_node_toml_and_checked() {
