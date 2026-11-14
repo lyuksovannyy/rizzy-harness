@@ -336,7 +336,9 @@ export function Composer(props: {
 
   const submit = async () => {
     const body = text.trim();
-    if (!body || busy || uploading || sendingImages || props.running || props.readOnly) return;
+    // While a turn runs a message still goes: the agent reads it at its
+    // next step (X.5).
+    if (!body || busy || uploading || sendingImages || props.readOnly) return;
     if (mode === "agentic" && (!cwd.trim() || !nodeId)) {
       setErr(t("composer.folder"));
       return;
@@ -755,11 +757,13 @@ export function Composer(props: {
               })}
             </div>
           )}
-          {props.running && props.onStop ? (
+          {props.running && props.onStop && (
             <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
               <Square size={16} fill="currentColor" />
             </button>
-          ) : (
+          )}
+          {/* While a turn runs, Send joins Stop once there is something to send. */}
+          {(!(props.running && props.onStop) || !!text.trim()) && (
             <button
               type="button"
               className="send"

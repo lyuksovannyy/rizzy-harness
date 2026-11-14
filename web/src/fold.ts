@@ -44,6 +44,7 @@ const KNOWN = new Set([
   "background_started",
   "background_ended",
   "callback_refused",
+  "queued_delivered",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -136,7 +137,13 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (names.length) item.attachments = names;
       if (p.reply != null) item.reply = p.reply;
       if (p.images?.length) item.images = p.images;
+      if (p.queued) item.queued = { seq: e.seq, read: false };
       v.items.push(item);
+      break;
+    }
+    case "queued_delivered": {
+      const seqs = (p.seqs ?? []) as number[];
+      for (const it of v.items) if (it.type === "user" && it.queued && seqs.includes(it.queued.seq)) it.queued.read = true;
       break;
     }
     case "assistant_delta": {

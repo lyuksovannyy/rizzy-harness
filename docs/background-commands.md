@@ -347,8 +347,8 @@ the new risk (§5.3). It is bounded by the two keys above and can be turned off 
 
 **An approval nobody answers** keeps the turn and its slot, exactly as a person's turn waiting on
 an approval does today (`crates/node/src/session.rs:1838-1844`): the card is in "Waiting for
-you", and a person's new message is refused "a turn is already running" until they answer or
-stop it. Background ends in the meantime queue as notes.
+you", and a person's new message waits for the turn (X.5: stored at once, read after the
+call's result; the card still needs its answer). Background ends in the meantime queue as notes.
 
 **Afterwards.** The chat shows a callback turn as started by "bg-3 ended (exit 1)" instead of a
 message bubble, and the attention list carries it until seen, so a person who comes back sees

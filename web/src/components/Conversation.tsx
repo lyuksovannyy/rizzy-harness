@@ -454,7 +454,7 @@ export default function Conversation(props: {
                 switch (it.type) {
                   case "user":
                     return (
-                      <div key={i} className="msg user">
+                      <div key={i} className={it.queued && !it.queued.read ? "msg user waiting" : "msg user"}>
                         {it.reply ? (
                           <ReplyBubble text={it.text} reply={it.reply} block={repliedBlock(view.items, it.reply)} />
                         ) : (
@@ -470,6 +470,11 @@ export default function Conversation(props: {
                           </ul>
                         )}
                         {!!it.images?.length && <BubbleImages images={it.images} />}
+                        {it.queued && !it.queued.read && (
+                          <div className="queued-mark muted" title={t("conv.queuedHint")}>
+                            {t("conv.queued")}
+                          </div>
+                        )}
                       </div>
                     );
                   case "assistant": {

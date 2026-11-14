@@ -100,6 +100,22 @@ automation that only needs one user's access, and do not copy it if no script ne
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
+**Writing while the agent works.** The reply box stays open while a turn
+runs: Enter (or Send, next to Stop) sends the message at once. The node stores
+it before it says yes, so a message that was taken is never lost, and the chat
+shows it where you sent it, marked "sent while working" until the agent has
+read it. The agent reads it before its next model request, right after the
+results of the tools it was running, as your message, marked for it as written
+while it worked; a running command is never interrupted for it. If the agent
+had already given its last answer, your message starts the next turn instead.
+Stop works as before and never restarts anything by itself: a message the
+stopped turn did not read (or one a node restart cut off) goes to the agent
+with your next message, ahead of it. At most 8 messages wait at once; the
+ninth is refused ("a turn is already running…") until the agent reads them.
+An answer to a question card and parallel answers still wait for the turn to
+end, and a message sent during the turn keeps that turn's agent and settings
+(an `@mention` in it does not switch agents).
+
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:
 Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
@@ -1339,9 +1355,10 @@ token). An end recorded more than 60 minutes before the server could resume
 the chat (the server was down, the node away; counted from the older of the
 node's clock and the moment the server first saw it) starts nothing. A callback turn
 runs in the chat's own approval mode (the node's `max_approval_mode` caps it):
-in `ask` its calls wait on their cards like any turn's, with no time limit, and
-your new message is refused "a turn is already running" until you answer or
-press Stop; in `auto` it runs without a click, within the bounds above. It
+in `ask` its calls wait on their cards like any turn's, with no time limit (a
+message you send meanwhile waits for the turn, as in any other, and refills
+its budget; the card still needs your answer); in `auto` it runs without a
+click, within the bounds above. It
 gets no memory (no recall, no project facts, no `remember`) and no page
 context, and nothing the command printed counts as yours: a link it printed is
 not fetched on its say-so.
@@ -2012,6 +2029,15 @@ strip's Stop ending it (needs bubblewrap; port 7786):
 
 ```bash
 node web/e2e/background.cjs target/debug/rizzy-harness
+```
+
+Writing while the agent works: a message sent during a running command is
+taken, marked "sent while working", read after the command's result, and one
+sent during the last answer starts the next turn (needs bubblewrap; port
+7964):
+
+```bash
+node web/e2e/steer.cjs target/debug/rizzy-harness
 ```
 
 A background command that ends while its chat is idle resuming the agent,

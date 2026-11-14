@@ -30,6 +30,8 @@
 //!   in config.toml, tests only, it takes the opening's first quoted line of
 //!   output as the message instead: a model the output steers)
 //! * a message with images -> `I see N image(s).` (the images it was shown)
+//! * a message sent while a turn ran (X.5) -> read like any other, without
+//!   the harness's line after it
 //! * anything else   -> echoes the message back, streamed word by word; an
 //!   answer to a question or form echoes its canonical text
 //!   (`You said: Choice answer · colour: blue`)
@@ -288,7 +290,12 @@ impl Provider for Mock {
         // below read what they typed, so no line of a file is ever part
         // of one (`run:` would hand it to `bash`). Only the echo at the
         // end says the whole message, files included.
-        let said = user;
+        // A message sent while a turn ran ends in the harness's line
+        // saying so (X.5): the echo leaves it out.
+        let said = match user.find(&format!("\n\n{}", harness_core::event::QUEUED_LEAD)) {
+            Some(i) => user[..i].to_string(),
+            None => user,
+        };
         let user = harness_core::event::own_words(&said).to_string();
         // Before the generic tool-result branch: a progress job goes on
         // after each of its own calls.

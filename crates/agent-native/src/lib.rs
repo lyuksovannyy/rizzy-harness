@@ -195,6 +195,21 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         }
         res
     }
+
+    async fn queued_messages(&self) -> Result<Vec<UserMessage>, harness_core::backend::LogError> {
+        if let Some(e) = self.failure() {
+            return Err(e);
+        }
+        let res = self.host.queued_messages().await;
+        if let Err(e) = &res {
+            self.failed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(|| e.clone());
+            self.cancel.cancel();
+        }
+        res
+    }
 }
 
 /// What the loop returns when an append failed; `run_turn` replaces the
@@ -719,6 +734,9 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
     };
     let mut out = Vec::new();
     let mut open: Vec<String> = Vec::new();
+    // Queued messages by seq: sent while a turn ran, read where their
+    // `queued_delivered` stands (X.5).
+    let mut queued: std::collections::HashMap<u64, UserMessage> = Default::default();
     let close_open = |out: &mut Vec<ChatMsg>, open: &mut Vec<String>| {
         for call_id in open.drain(..) {
             out.push(ChatMsg::Tool {
@@ -730,9 +748,19 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
     for e in history {
         let Ok(k) = e.typed() else { continue };
         match k {
+            EventKind::UserMessage(m) if m.queued => {
+                queued.insert(e.seq, m);
+            }
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
                 out.push(images::user_msg(m.model_text(), &m.images));
+            }
+            // As the loop added them when it took them (`queued_msg`).
+            EventKind::QueuedDelivered(d) => {
+                for m in d.seqs.iter().filter_map(|s| queued.remove(s)) {
+                    close_open(&mut out, &mut open);
+                    out.push(queued_msg(&m));
+                }
             }
             EventKind::AssistantMessage(m) if !keep(&m) => {}
             EventKind::AssistantMessage(m) => {
@@ -774,6 +802,14 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
     }
     close_open(&mut out, &mut open);
     out
+}
+
+/// A message the person sent while a turn ran, as the model reads it where
+/// it was delivered: their message under the harness's line saying so
+/// ([`harness_core::event::queued_text`]), with its images. Built from the
+/// event alone, so the log rebuilds the same bytes.
+pub fn queued_msg(m: &UserMessage) -> ChatMsg {
+    images::user_msg(harness_core::event::queued_text(&m.model_text()), &m.images)
 }
 
 /// Tools whose successful output may vouch for a URL (`web_fetch`
@@ -1170,6 +1206,9 @@ impl NativeBackend {
         // images. Anything the node passed in them is ignored.
         let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
         let instructions = ctx.extra.instructions.as_deref().filter(|i| !i.is_empty());
+        // Where this turn's own messages begin: what an earlier turn never
+        // read (X.5), then the person's message or the callback's opening.
+        let mut turn_idx = messages.len();
         match &callback {
             Some(ids) => {
                 provider::open_callback(&mut messages, ids);
@@ -1196,12 +1235,19 @@ impl NativeBackend {
                     Some(c) => provider::with_context(c, &ctx.user_text),
                     None => ctx.user_text.clone(),
                 };
+                // Recorded as read after `turn_started`, where the log has
+                // them on every later request.
+                messages.extend(ctx.extra.queued.iter().map(queued_msg));
                 messages.push(images::user_msg(user_text, &ctx.extra.images));
             }
         }
         let mut user_idx = messages.len() - 1;
+        // The opening took the notes before it into itself.
+        if callback.is_some() {
+            turn_idx = user_idx;
+        }
         let wanted = images::wanted(&messages);
-        let loaded = if wanted.is_empty() {
+        let mut loaded = if wanted.is_empty() {
             Vec::new()
         } else {
             host.images(&wanted).await
@@ -1270,6 +1316,28 @@ impl NativeBackend {
         let mut guard = repeat::RepeatGuard::default();
         let mut repeat_stop = false;
         for _ in 0..max_steps {
+            // What the person wrote while the turn ran (X.5), before each
+            // request: after the step's tool results and their notes, as
+            // the log has it, and only when a request follows.
+            match host.queued_messages().await {
+                Ok(q) if !q.is_empty() => {
+                    // A new request from the person is a change (T.1).
+                    guard.restart();
+                    messages.extend(q.iter().map(queued_msg));
+                    if q.iter().any(|m| !m.images.is_empty()) {
+                        let more: Vec<String> = images::wanted(&messages)
+                            .into_iter()
+                            .filter(|s| !loaded.iter().any(|d| d.sha256 == *s))
+                            .collect();
+                        if !more.is_empty() {
+                            loaded.extend(host.images(&more).await);
+                        }
+                        images::attach(&mut messages, &loaded);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return stopped(usage),
+            }
             let message_id = new_id();
             let mut sent = messages.clone();
             if let Some(k) = keep {
@@ -1403,7 +1471,8 @@ impl NativeBackend {
                         let start = recent.partition_point(|ev| ev.seq <= through_seq);
                         recent = &recent[start..];
                         summary = Some(text);
-                        let this_turn = messages.split_off(user_idx);
+                        let this_turn = messages.split_off(turn_idx);
+                        let own = user_idx - turn_idx;
                         messages = history_msgs(summary.as_deref(), recent);
                         // A callback turn's opening already holds the notes
                         // the rebuilt history ends with.
@@ -1412,7 +1481,8 @@ impl NativeBackend {
                                 messages.pop();
                             }
                         }
-                        user_idx = messages.len();
+                        turn_idx = messages.len();
+                        user_idx = turn_idx + own;
                         messages.extend(this_turn);
                         images::attach(&mut messages, &loaded);
                     }
