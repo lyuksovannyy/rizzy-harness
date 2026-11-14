@@ -180,10 +180,47 @@ pub fn foreground_schema(bash_timeout_max: Duration) -> Value {
                     "Timeout in seconds, from 5 to {} (60 when absent)",
                     bash_timeout_max.as_secs()
                 )
-            }
+            },
+            "workdir": workdir_schema()
         },
         "required": ["command"]
     })
+}
+
+/// `workdir` in both schemas: a folder of the session's to start in
+/// (OpenCode's and DeepSeek's `workdir`), instead of `cd sub &&` on every
+/// call. No shell persists between calls either way.
+fn workdir_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Folder to run the command in, inside the session folder (relative to \
+                        it, or absolute); the session folder when absent"
+    })
+}
+
+/// Where a call with `workdir` starts: the folder `w` names, resolved as
+/// the file tools resolve a path, and inside the session's folder whatever
+/// the node allows the file tools (the shell's grants are that folder's).
+pub fn workdir(ctx: &ToolCtx, w: &str) -> Result<std::path::PathBuf, String> {
+    let refused = |why: &str| format!("not run: workdir `{w}` {why}");
+    let ws = ctx.workspace_dir()?;
+    let dir = ctx
+        .resolve(w)
+        .map_err(|e| refused(&format!("is refused: {e}")))?;
+    // `resolve` leaves links alone where the node allows paths outside.
+    let real = dir
+        .canonicalize()
+        .map_err(|e| refused(&format!("cannot be opened: {e}")))?;
+    if !real.starts_with(&ws) {
+        return Err(refused(&format!(
+            "is outside the session folder {}",
+            ws.display()
+        )));
+    }
+    if !real.is_dir() {
+        return Err(refused("is not a folder"));
+    }
+    Ok(real)
 }
 
 #[async_trait::async_trait]
@@ -224,7 +261,8 @@ impl Tool for Bash {
                 "background": {
                     "type": "boolean",
                     "description": "Keep it running after this call (needs timeout_secs)"
-                }
+                },
+                "workdir": workdir_schema()
             },
             "required": ["command"]
         })
@@ -243,6 +281,14 @@ impl Tool for Bash {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             Some(_) => return ToolOutcome::err("`background` must be true or false"),
+        };
+        let cwd = match input.get("workdir") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(w)) => match workdir(ctx, w) {
+                Ok(d) => Some(d),
+                Err(e) => return ToolOutcome::err(e),
+            },
+            Some(_) => return ToolOutcome::err("`workdir` must be a string"),
         };
         let asked = input.get("timeout_secs").and_then(|v| v.as_u64());
         // A background command must say how long it may run (the owner,
@@ -288,6 +334,7 @@ impl Tool for Bash {
             crate::sandbox::Grants {
                 workspace_write: true,
                 owned: ctx.owned.clone(),
+                cwd,
                 read_identified: crate::skills::shell_reads(ctx),
                 ..Default::default()
             },

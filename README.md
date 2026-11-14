@@ -1488,6 +1488,28 @@ The tool description the model sees states the ceiling. Neither an agent
 definition, a prompt nor the master can raise either; a value outside its
 range stops the node at start.
 
+**Tool arguments are checked before anything runs.** Every call's arguments
+are checked against the schema the model was offered, before the call is
+shown, asked about or run: required arguments, their types, values from a
+fixed list, and arguments the tool does not take (a misspelt `timeout` is no
+longer silently ignored). A number or `true`/`false` sent as a string
+(`"timeout_secs": "300"`) is read as the number or the boolean, and the call
+card, the approval card and the tool all see the corrected value. Anything else
+is sent back to the agent as the call's result, naming the argument and what
+it should be, and nothing runs. A call to a tool that is not on offer lists the
+tools that are. Schema rules the check does not implement (for example an MCP
+server's `pattern` or `oneOf`) never refuse a call; the tool checks those
+itself.
+
+**`bash` in a sub-folder.** `bash` takes an optional `workdir`, a folder inside
+the chat's folder (relative to it, or absolute) to start the command in, so in
+a monorepo the agent does not prefix `cd sub &&` to every command. It is
+resolved like a file tool's path and must stay inside the chat's folder, links
+included (a link out is refused by name, even on a node with
+`allow_outside_workspace`); the shell's grants do not change. It shows on the
+approval card and is part of what "allow for this turn" covers. Background
+commands honour it. Each command still starts a fresh shell.
+
 **Repeated calls.** Within one turn, a call the agent makes again with the same
 arguments that gives the same result is answered with a warning from the
 second time on. The fifth such call is not run (nor offered for approval):
