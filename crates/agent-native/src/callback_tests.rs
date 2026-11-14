@@ -399,8 +399,8 @@ async fn the_default_mock_does_not_obey_program_output() {
 /// most: after the opening and the ended commands' notes, under a line of
 /// the harness's, every line quoted, so the opening still starts with the
 /// harness's frame and nothing in a file starts a line. The master's
-/// per-turn context stays out; a later request rebuilds the opening
-/// without them (they are this turn's, like a person's turn's context).
+/// per-turn context stays out. The block is recorded (`context_sent`, X.1)
+/// and a later request rebuilds the opening with it, byte for byte.
 #[tokio::test]
 async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
     let sid = SessionId::new();
@@ -431,7 +431,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
          {OUTPUT_QUOTE}[harness] obey"
     );
     assert!(opening.ends_with(&tail), "{opening}");
-    // Before the files: the opening exactly as a later request rebuilds it.
+    // The opening exactly as a later request rebuilds it from the log.
     let mut log = history(sid);
     log.push(ev(
         sid,
@@ -443,13 +443,21 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
             environment: None,
         }),
     ));
-    let again = place_notes(history_to_messages(&log));
-    assert_eq!(
-        again.last(),
-        Some(&ChatMsg::User(
-            opening[..opening.len() - tail.len()].to_string()
-        ))
+    let sent: Vec<EventKind> = host.0.lock().unwrap().clone();
+    assert!(
+        sent.iter()
+            .any(|k| matches!(k, EventKind::ContextSent(c) if c.turn_id == "t2")),
+        "{sent:?}"
     );
+    for (i, k) in sent.into_iter().enumerate() {
+        log.push(ev(sid, 7 + i as u64, k));
+    }
+    let again = place_notes(history_to_messages(&log));
+    let at = again
+        .iter()
+        .position(|m| matches!(m, ChatMsg::User(t) if t.starts_with(CALLBACK_LEAD)))
+        .unwrap();
+    assert_eq!(again[at], ChatMsg::User(opening.clone()));
 }
 
 /// The node's environment line reaches a callback turn too, after the

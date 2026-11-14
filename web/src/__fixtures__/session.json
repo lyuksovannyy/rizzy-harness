@@ -871,11 +871,27 @@
       "ts_ms": 1700000000058
     },
     {
+      "kind": "context_sent",
+      "payload": {
+        "sections": [
+          {
+            "digest": "ab12",
+            "key": "instructions"
+          }
+        ],
+        "text": "[harness] Context for this turn, not part of the person's message: the 1 line(s) below ... Their message follows the empty line.\n| Run cargo fmt.",
+        "turn_id": "t6"
+      },
+      "seq": 60,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000059
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 60,
+      "seq": 61,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -907,7 +923,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 60,
+    "head_seq": 61,
     "items": [
       {
         "text": "fix the bug",

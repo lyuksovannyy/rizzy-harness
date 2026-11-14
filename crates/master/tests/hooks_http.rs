@@ -849,9 +849,10 @@ async fn last_prompt(t: &T, after: usize) -> (AgentSpec, String) {
             let prompts: Vec<(AgentSpec, String)> = seen
                 .iter()
                 .filter_map(|m| match m {
-                    MasterToNode::Prompt { agent, context, .. } => {
-                        Some((agent.clone().unwrap(), context.clone().unwrap_or_default()))
-                    }
+                    MasterToNode::Prompt { agent, context, .. } => Some((
+                        agent.clone().unwrap(),
+                        context.as_ref().map(|c| c.joined()).unwrap_or_default(),
+                    )),
                     _ => None,
                 })
                 .collect();

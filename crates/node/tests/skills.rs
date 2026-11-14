@@ -233,7 +233,10 @@ impl Node {
         let before = self.ended(sid);
         self.send(MasterToNode::Prompt {
             savings: None,
-            context: Some("Person: Ann".into()),
+            context: Some(Box::new(harness_core::backend::MasterContext {
+                turn: Some("Person: Ann".into()),
+                standing: vec![],
+            })),
             reply: None,
             agent,
             attachments: vec![],

@@ -197,19 +197,32 @@ pub struct TurnCtx<'a> {
 pub struct TurnExtra {
     /// Token-saving methods in effect for this turn.
     pub savings: crate::savings::Savings,
-    /// Context that changes every turn (memory recall, page context). It is
-    /// sent after the history, not in the system prompt, so the system
-    /// prompt and the history before this turn stay cached. Never stored:
-    /// the next turn resends this turn's message without it, so the cache
-    /// stops at that message.
+    /// The master's context for this message only (the person's settings
+    /// and clock, a routine's note, the untrusted-turn note:
+    /// [`MasterContext::turn`]). Sent with the turn's message in the
+    /// harness's context block (X.1), after the history, never in the
+    /// system prompt; recorded with the block (`context_sent`), so later
+    /// requests rebuild the message with it. Sent every turn it is given.
     pub context: Option<String>,
-    /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), and
-    /// the catalogue of skills after them, read by the node at the start
-    /// of this turn. Set only by the node, never
-    /// from the protocol. Sent after the history like `context`, in front
-    /// of it; a callback turn, which takes no `context`, gets them after
-    /// its opening. Never stored.
+    /// The master's standing parts for this turn (memory, project:
+    /// [`MasterContext::standing`]): each is sent only when it differs
+    /// from what the model was last sent of it since the last summary.
+    /// `None`: the master gave no context this turn (a callback turn, a
+    /// turn that reads queued messages), which withdraws nothing.
+    pub standing: Option<Vec<StandingPart>>,
+    /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), read
+    /// by the node at the start of this turn. Set only by the node, never
+    /// from the protocol. A standing section of the context block (X.1):
+    /// sent when it differs from what the model last got of it since the
+    /// last summary, with a line saying it replaces that.
     pub instructions: Option<String>,
+    /// The list of skills the node found for this turn (`crate::skills`,
+    /// rendered), a standing section like `instructions`. Set only by the
+    /// node.
+    pub skills_list: Option<String>,
+    /// The harness's line saying the person's message asks for a skill
+    /// (`/name`), for this turn only. Set only by the node.
+    pub skill_asked: Option<String>,
     /// One line of the harness's about where the turn runs (the node's
     /// date and time zone, OS, shell, git branch), composed by the node at
     /// the start of this turn. Set only by the node, never from the
@@ -217,8 +230,8 @@ pub struct TurnExtra {
     /// records it, so later requests rebuild that message byte for byte.
     pub environment: Option<String>,
     /// The skills the node found for this turn (`crate::skills`), which
-    /// the `skill` tool loads from; their catalogue is at the end of
-    /// `instructions`. Set only by the node, never from the protocol.
+    /// the `skill` tool loads from; their list is `skills_list`. Set only
+    /// by the node, never from the protocol.
     pub skills: Option<std::sync::Arc<crate::skills::Catalogue>>,
     /// A delegated sub-task's parent book: its labels continue the parent's
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
@@ -242,6 +255,48 @@ pub struct TurnExtra {
     /// right after this turn's `turn_started`, and the loop sends them, in
     /// order, before this turn's own message. Set only by the node.
     pub queued: Vec<crate::event::UserMessage>,
+}
+
+/// The master's context for one person's message (sent with
+/// `session.prompt`). `turn` is for this message only; each standing part
+/// is kept by the loop as a section of its own, re-sent only when it
+/// changed (X.1). Text of the master's and of the people who wrote memory
+/// and the project: the loop quotes all of it under the harness's line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MasterContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standing: Vec<StandingPart>,
+}
+
+impl MasterContext {
+    /// All of its text, standing parts first (for tests and logs).
+    pub fn joined(&self) -> String {
+        self.standing
+            .iter()
+            .map(|p| p.text.as_str())
+            .chain(self.turn.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+/// One standing part of the master's context.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StandingPart {
+    pub part: StandingKey,
+    pub text: String,
+}
+
+/// Which standing part: each is its own section of the context block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandingKey {
+    /// What the model remembers about the chat's owner (`memory::turn_block`).
+    Memory,
+    /// A project chat's brief, facts and board (`projects::turn_context`).
+    Project,
 }
 
 /// How the node's environment line ([`TurnExtra::environment`]) begins.

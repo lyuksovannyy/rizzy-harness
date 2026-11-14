@@ -760,7 +760,9 @@ fn prompt_context(node: &Fake, sid: SessionId) -> Option<String> {
                 session_id,
                 context,
                 ..
-            } if *session_id == sid => Some(context.clone().unwrap_or_default()),
+            } if *session_id == sid => {
+                Some(context.as_ref().map(|c| c.joined()).unwrap_or_default())
+            }
             _ => None,
         })
 }

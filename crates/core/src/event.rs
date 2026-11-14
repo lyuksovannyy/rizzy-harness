@@ -85,6 +85,7 @@ pub enum EventKind {
     QueuedDelivered(QueuedDelivered),
     TodoUpdated(TodoUpdated),
     ApprovalModeChanged(ApprovalModeChanged),
+    ContextSent(ContextSent),
 }
 
 impl EventKind {
@@ -135,6 +136,7 @@ impl EventKind {
             EventKind::QueuedDelivered(_) => "queued_delivered",
             EventKind::TodoUpdated(_) => "todo_updated",
             EventKind::ApprovalModeChanged(_) => "approval_mode_changed",
+            EventKind::ContextSent(_) => "context_sent",
         }
     }
 }
@@ -539,6 +541,40 @@ pub struct UserMessage {
 pub struct QueuedDelivered {
     pub turn_id: String,
     pub seqs: Vec<u64>,
+}
+
+/// The harness's context block a turn's opening message carried (X.1):
+/// the repository's instruction files, the list of skills, the master's
+/// standing parts (memory, project) where they changed, and this turn's
+/// own context. Recorded by the loop through the session's one writer,
+/// after the turn's message and before its first answer, so every later
+/// request rebuilds that message byte for byte from the log (the
+/// provider's prompt cache) and a section that has not changed is not
+/// sent again. Never shown: the UI's fold ignores it, as it never showed
+/// the context. The text passed the node's scrubber before it was sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSent {
+    pub turn_id: String,
+    /// The block exactly as the opening carried it: in front of the
+    /// person's message (or a sub-agent's task) after an empty line, or
+    /// after a callback turn's opening. Put back as it is, never
+    /// re-rendered. A later record for the same turn replaces it (the
+    /// turn's opening was sent again in full after a summary mid-turn).
+    pub text: String,
+    /// The standing sections this block sent or withdrew. The last mark
+    /// of a key since the last summary is what the model's history holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<SectionMark>,
+}
+
+/// One standing section as a [`ContextSent`] left it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SectionMark {
+    /// `instructions`, `skills`, `memory` or `project`.
+    pub key: String,
+    /// SHA-256 of the section's text as sent (hex); empty when the block
+    /// said the section no longer applies.
+    pub digest: String,
 }
 
 /// How the harness's line after a queued message begins.

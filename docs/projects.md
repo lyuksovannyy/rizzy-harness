@@ -143,7 +143,9 @@ The node sends it in front of the person's message under one line of its own,
 `[harness] Context for this turn, not part of the person's message: …`, with every line of
 it behind `| ` and an empty line after it (`provider::with_context`, PLAN.md T43): the
 instructions and card titles are written by other members and cannot close the frame or
-pose as the person's message. Unquoted, it reads:
+pose as the person's message. It is the `project` standing section of the turn's context
+block (PLAN.md T52, X.1): recorded with the turn and sent again only when it changed since
+the last summary, with a line saying it replaces the earlier one. Unquoted, it reads:
 
 ```
 Project "<name>" — <description>

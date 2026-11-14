@@ -544,6 +544,18 @@ fn events() -> Vec<RawEvent> {
             wait_ms: 4000,
             reason: RetryReason::Network,
         }),
+        // What the model was sent with the turn's message (X.1): never
+        // shown, and the wait it is in stays shown.
+        EventKind::ContextSent(ContextSent {
+            turn_id: "t6".into(),
+            text: "[harness] Context for this turn, not part of the person's message: the 1 \
+                   line(s) below ... Their message follows the empty line.\n| Run cargo fmt."
+                .into(),
+            sections: vec![SectionMark {
+                key: "instructions".into(),
+                digest: "ab12".into(),
+            }],
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()

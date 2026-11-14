@@ -1857,7 +1857,11 @@ impl Master {
         // Per-turn context goes after the history, not into the system
         // prompt: a system prompt that changes every turn would make the
         // provider re-read (and bill) the whole conversation each time.
+        // This message's own part (the person's settings and clock, the
+        // untrusted note) apart from the standing parts (memory, project),
+        // which the loop sends again only when they change (X.1).
         let mut turn_context: Vec<String> = context.into_iter().collect();
+        let mut standing: Vec<harness_core::backend::StandingPart> = Vec::new();
         // The agent's memory switches (on the Agents page).
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
         // Incognito chats, chats with an agent whose memory is off, and chats
@@ -1895,7 +1899,10 @@ impl Master {
         let mut noted = Vec::new();
         if allowed.personal {
             let (block, calls) = memory::turn_block(self, &row, &text, allowed).await;
-            turn_context.extend(block);
+            standing.extend(block.map(|text| harness_core::backend::StandingPart {
+                part: harness_core::backend::StandingKey::Memory,
+                text,
+            }));
             noted = calls;
         }
         // A callback turn's opening is rebuilt from the log alone on every
@@ -1904,8 +1911,10 @@ impl Master {
             let remember = allowed.project
                 && agent.allows_tool("remember")
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
-            turn_context
-                .push(projects::turn_context(self, p, &row, &text, allowed, remember).await);
+            standing.push(harness_core::backend::StandingPart {
+                part: harness_core::backend::StandingKey::Project,
+                text: projects::turn_context(self, p, &row, &text, allowed, remember).await,
+            });
         }
         // Last, so it is what the model reads right before answering.
         if untrusted {
@@ -1951,7 +1960,10 @@ impl Master {
             attachments,
             compare,
             savings,
-            context: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
+            context: Some(Box::new(harness_core::backend::MasterContext {
+                turn: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
+                standing,
+            })),
             reply,
             images,
             agent_named: picked,

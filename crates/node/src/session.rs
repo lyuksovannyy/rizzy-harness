@@ -26,9 +26,11 @@ struct RunningTurn {
     cancel: CancellationToken,
     /// Sub-agents started by this turn use the same token-saving methods.
     savings: harness_core::savings::Savings,
-    /// This turn's context from the master (project instructions, facts,
-    /// board, the person's settings): its sub-agents get it too.
+    /// This turn's context from the master (the person's settings, and
+    /// the standing parts: memory, the project's brief and board): its
+    /// sub-agents get it too.
     context: Option<String>,
+    standing: Option<Vec<harness_core::backend::StandingPart>>,
     /// Files this turn published (`publish` is capped per turn).
     publishes: Arc<std::sync::atomic::AtomicUsize>,
     /// Set when the node's stop cancelled this turn (and nothing had
@@ -1047,6 +1049,7 @@ impl Session {
                 cancel: cancel.clone(),
                 savings: extra.savings.clone(),
                 context: extra.context.clone(),
+                standing: extra.standing.clone(),
                 publishes: Arc::default(),
                 by_stop: by_stop.clone(),
                 agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
@@ -1294,6 +1297,7 @@ impl Session {
             savings: extra.savings.clone(),
             // No per-turn context for the turn the node starts (ST-8).
             context: extra.context.clone(),
+            standing: extra.standing.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
             agent_id: agent.map(|a| a.agent_id.clone()),
@@ -1369,6 +1373,7 @@ impl Session {
             savings: savings.clone(),
             // A callback turn takes no context, so it passes none on.
             context: None,
+            standing: None,
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
             agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
@@ -2645,12 +2650,12 @@ impl Session {
         let turn_id = new_id();
         // The parent turn's token-saving methods and its context from the
         // master; never the parent's history.
-        let (savings, context) = self
+        let (savings, context, standing) = self
             .turn
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .map(|t| (t.savings.clone(), t.context.clone()))
+            .map(|t| (t.savings.clone(), t.context.clone(), t.standing.clone()))
             .unwrap_or_default();
         let by_stop = Arc::new(AtomicBool::new(false));
         if let Err(e) = child.claim_turn(RunningTurn {
@@ -2658,6 +2663,7 @@ impl Session {
             cancel: cancel.clone(),
             savings: savings.clone(),
             context: context.clone(),
+            standing: standing.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
             agent_id: Some(agent.agent_id.clone()),
@@ -2691,6 +2697,7 @@ impl Session {
         let extra = TurnExtra {
             savings,
             context,
+            standing,
             refs: Some(refs),
             observed: Some(observed),
             ..Default::default()

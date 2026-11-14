@@ -93,10 +93,11 @@ pub(crate) async fn bounded<T: Send + 'static>(
 }
 
 /// Put what skill discovery found into `extra` (`harness_tools::skills`):
-/// the catalogue after the instruction files and the skills for the tool;
-/// `invoking` (the person's own message) may name one with `/name`. A
-/// discovery that timed out keeps the files, adds a note, and leaves no
-/// catalogue. What went wrong, for the log.
+/// the list (`skills_list`, a section of its own beside the instruction
+/// files: X.1) and the skills for the tool; `invoking` (the person's own
+/// message) may name one with `/name`, said in `skill_asked`. A discovery
+/// that timed out keeps the files, says so in the list's place, and leaves
+/// no catalogue. What went wrong, for the log.
 pub(crate) fn with_skills(
     extra: &mut harness_core::backend::TurnExtra,
     found: Bounded<harness_tools::skills::Found>,
@@ -104,29 +105,21 @@ pub(crate) fn with_skills(
     cap: usize,
 ) -> Vec<String> {
     use harness_tools::skills;
-    let push = |extra: &mut harness_core::backend::TurnExtra, c: String| {
-        extra.instructions = Some(match extra.instructions.take() {
-            Some(t) => format!("{t}\n\n{c}"),
-            None => c,
-        });
-    };
     match found {
         Bounded::Done(mut f) => {
+            // The list without the person's `/name`, which is this turn's
+            // alone: the list stays one standing section (X.1).
+            extra.skills_list = skills::render(&f.catalogue, cap);
             f.catalogue.invoked = invoking.and_then(|t| skills::invoked(t, &f.catalogue));
-            if let Some(c) = skills::render(&f.catalogue, cap) {
-                push(extra, c);
-            }
+            extra.skill_asked = f.catalogue.invoked.as_deref().map(skills::asked_line);
             extra.skills = Some(std::sync::Arc::new(f.catalogue));
             f.problems
         }
         Bounded::TimedOut => {
-            push(
-                extra,
-                format!(
-                    "[skills not read: looking for them took longer than {} s]",
-                    READ_TIMEOUT.as_secs()
-                ),
-            );
+            extra.skills_list = Some(format!(
+                "[skills not read: looking for them took longer than {} s]",
+                READ_TIMEOUT.as_secs()
+            ));
             vec![format!("timed out after {} s", READ_TIMEOUT.as_secs())]
         }
         Bounded::Cancelled => vec![],
@@ -553,8 +546,8 @@ mod tests {
     }
 
     /// Review S3: a skill discovery that timed out keeps the instruction
-    /// files, says so, and sets no catalogue; a finished one adds the
-    /// catalogue after the files.
+    /// files, says so, and sets no catalogue; a finished one sets the list
+    /// beside the files (its own section, X.1) and the `/name` line apart.
     #[test]
     fn a_skill_timeout_keeps_the_files_and_sets_no_catalogue() {
         let mut extra = harness_core::backend::TurnExtra {
@@ -562,9 +555,10 @@ mod tests {
             ..Default::default()
         };
         let problems = with_skills(&mut extra, Bounded::TimedOut, None, 8000);
+        assert_eq!(extra.instructions.as_deref(), Some("FILES"));
         assert_eq!(
-            extra.instructions.as_deref(),
-            Some("FILES\n\n[skills not read: looking for them took longer than 5 s]")
+            extra.skills_list.as_deref(),
+            Some("[skills not read: looking for them took longer than 5 s]")
         );
         assert!(extra.skills.is_none());
         assert_eq!(problems.len(), 1);
@@ -586,11 +580,15 @@ mod tests {
             ..Default::default()
         };
         with_skills(&mut extra, Bounded::Done(found), Some("/a: now"), 8000);
-        let got = extra.instructions.unwrap();
-        assert!(got.starts_with("FILES\n\n"), "{got}");
-        assert!(got.contains("\n- a: A"), "{got}");
-        assert!(got.contains("starts with /a:"), "{got}");
-        assert_eq!(extra.skills.unwrap().skills.len(), 1);
+        assert_eq!(extra.instructions.as_deref(), Some("FILES"));
+        let list = extra.skills_list.unwrap();
+        assert!(list.contains("\n- a: A"), "{list}");
+        assert!(!list.contains("starts with /a"), "{list}");
+        let asked = extra.skill_asked.unwrap();
+        assert!(asked.contains("starts with /a:"), "{asked}");
+        let catalogue = extra.skills.unwrap();
+        assert_eq!(catalogue.skills.len(), 1);
+        assert_eq!(catalogue.invoked.as_deref(), Some("a"));
     }
 
     /// The read is waited for at most its limit, and not past a cancel.

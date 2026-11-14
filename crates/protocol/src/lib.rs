@@ -290,10 +290,13 @@ pub enum MasterToNode {
         /// Token-saving methods for this turn (absent = all off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         savings: Option<harness_core::savings::Savings>,
-        /// Per-turn context (memory recall...), placed after the history so
-        /// the cached prefix does not change. Not stored in the log.
+        /// The master's context for this message (the person's settings,
+        /// memory, the project's brief and board), placed after the history
+        /// so the cached prefix does not change. The loop records what it
+        /// sent of it in the turn's `context_sent` and sends a standing part
+        /// again only when it changed (X.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        context: Option<String>,
+        context: Option<Box<harness_core::backend::MasterContext>>,
         /// An answer to a choices or form block; `text` is then the user's
         /// note (may be empty). The node checks it against its own log.
         #[serde(default, skip_serializing_if = "Option::is_none")]

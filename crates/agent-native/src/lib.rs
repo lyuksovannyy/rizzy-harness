@@ -8,6 +8,7 @@ mod callback_tests;
 #[cfg(test)]
 mod coalesce_tests;
 pub mod compact;
+pub mod context;
 #[cfg(test)]
 mod delegate_availability_tests;
 #[cfg(test)]
@@ -90,15 +91,6 @@ pub const NO_RESULT_RECORDED: &str = "No result was recorded for this call: its 
      while the call was pending or running (the node restarted, or the session's log could not \
      be written). It may have run fully, partly or not at all. Check the current state (files, \
      processes, git status) before you repeat it; do not repeat it blindly.";
-
-/// A turn's own message with the node's environment line in front, as the
-/// loop sends it and the log rebuilds it (`turn_started.environment`).
-fn with_environment(line: Option<&str>, text: String) -> String {
-    match line.filter(|l| !l.is_empty()) {
-        Some(l) => format!("{l}\n\n{text}"),
-        None => text,
-    }
-}
 
 /// The harness's note before a person's turn's wrap-up request, after its
 /// `max_steps` steps.
@@ -286,6 +278,15 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         }
         res
     }
+}
+
+/// The record of the block a turn's opening carried (X.1).
+fn context_sent(turn_id: &str, plan: &context::Plan) -> EventKind {
+    EventKind::ContextSent(harness_core::event::ContextSent {
+        turn_id: turn_id.to_string(),
+        text: plan.text.clone(),
+        sections: plan.marks.clone(),
+    })
 }
 
 /// What the loop returns when an append failed; `run_turn` replaces the
@@ -929,7 +930,7 @@ fn parse_effort(s: &str) -> Option<Effort> {
 /// got a result (interrupted turns) get a synthetic one so the transcript stays
 /// valid for providers that require every call to be answered.
 pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
-    messages_of(history, false)
+    messages_of(history, false, true)
 }
 
 /// [`history_to_messages`] for what a summary replaces (review ST-1): a
@@ -939,16 +940,32 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
 /// summarised part holds the message without its reading, and the kept
 /// part, which [`history_to_messages`] rebuilds, the reading without the
 /// message (it adds nothing there). So the summary carries it, once.
+/// Without the turns' context blocks (X.1): the summary is of the
+/// conversation, and the first turn after it sends every standing section
+/// again.
 pub fn summary_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
-    messages_of(history, true)
+    messages_of(history, true, false)
 }
 
-fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
+fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<ChatMsg> {
     // Parallel answers: only the chosen one (default: the first) is history.
     let mut chosen: std::collections::HashMap<String, String> = Default::default();
+    // The context block each turn's opening carried, its last record
+    // (`context_sent`, X.1), and the turns that have a person's message.
+    let mut block_of: std::collections::HashMap<String, String> = Default::default();
+    let mut with_message: HashSet<String> = HashSet::new();
     for e in history {
-        if let Ok(EventKind::VariantSelected(v)) = e.typed() {
-            chosen.insert(v.group, v.message_id);
+        match e.typed() {
+            Ok(EventKind::VariantSelected(v)) => {
+                chosen.insert(v.group, v.message_id);
+            }
+            Ok(EventKind::ContextSent(c)) if blocks => {
+                block_of.insert(c.turn_id, c.text);
+            }
+            Ok(EventKind::UserMessage(m)) if !m.queued => {
+                with_message.insert(m.turn_id);
+            }
+            _ => {}
         }
     }
     let keep = |m: &AssistantMessage| match &m.variant {
@@ -971,9 +988,10 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
             });
         }
     };
-    // The environment line the turn's message opened with, as
-    // `turn_started` recorded it (the loop's `with_environment`).
-    let mut env: Option<(String, String)> = None;
+    // The person's turn whose opening is still to come, with the
+    // environment line `turn_started` recorded for it: their message, or,
+    // in a turn that only reads queued messages, the last of those.
+    let mut opening: Option<(String, Option<String>)> = None;
     for e in history {
         let Ok(k) = e.typed() else { continue };
         match k {
@@ -982,18 +1000,43 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
             }
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
-                let line = env
+                let env = opening
                     .take()
                     .filter(|(turn, _)| *turn == m.turn_id)
-                    .map(|(_, l)| l);
-                let text = with_environment(line.as_deref(), m.model_text());
+                    .and_then(|(_, l)| l);
+                let block = block_of.get(&m.turn_id).map(String::as_str);
+                let text = context::opening(env.as_deref(), block, &m.model_text());
                 out.push(images::user_msg(text, &m.images));
             }
-            // As the loop added them when it took them (`queued_msg`).
+            // As the loop added them when it took them (`queued_msg`); the
+            // last one opens a turn that has no message of its own, as the
+            // loop sent it.
             EventKind::QueuedDelivered(d) => {
-                for m in d.seqs.iter().filter_map(|s| queued.remove(s)) {
+                let opens = opening.as_ref().is_some_and(|(turn, _)| *turn == d.turn_id)
+                    && !with_message.contains(&d.turn_id);
+                let mut taken: Vec<UserMessage> =
+                    d.seqs.iter().filter_map(|s| queued.remove(s)).collect();
+                // Taken here whatever is left of it: a later reading in
+                // the same turn opens nothing.
+                let env = if opens {
+                    opening.take().and_then(|(_, l)| l)
+                } else {
+                    None
+                };
+                let last = if opens { taken.pop() } else { None };
+                for m in &taken {
                     close_open(&mut out, &mut open);
-                    out.push(queued_msg(&m));
+                    out.push(queued_msg(m));
+                }
+                if let Some(m) = last {
+                    close_open(&mut out, &mut open);
+                    let block = block_of.get(&d.turn_id).map(String::as_str);
+                    let text = context::opening(
+                        env.as_deref(),
+                        block,
+                        &harness_core::event::queued_text(&m.model_text()),
+                    );
+                    out.push(images::user_msg(text, &m.images));
                 }
             }
             EventKind::AssistantMessage(m) if !keep(&m) => {}
@@ -1026,21 +1069,24 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
                 }
             }
             // A callback turn has no `user_message`: its opening stands
-            // where one would, built as the loop built it (T.8d step 3).
+            // where one would, built as the loop built it (T.8d step 3),
+            // its block and environment line after it.
             EventKind::TurnStarted(TurnStarted {
+                turn_id,
                 cause: Some(c),
                 environment,
                 ..
             }) => {
                 close_open(&mut out, &mut open);
+                opening = None;
                 provider::open_callback(&mut out, c.callback_ids());
-                if let (Some(l), Some(ChatMsg::Opening(t))) = (environment, out.last_mut()) {
-                    t.push_str("\n\n");
-                    t.push_str(&l);
+                if let Some(ChatMsg::Opening(t)) = out.last_mut() {
+                    let block = block_of.get(&turn_id).map(String::as_str);
+                    context::after_callback(t, block, environment.as_deref());
                 }
             }
             EventKind::TurnStarted(t) => {
-                env = t.environment.map(|l| (t.turn_id, l));
+                opening = Some((t.turn_id, t.environment));
             }
             _ => {}
         }
@@ -1118,7 +1164,7 @@ fn observed_text(
             }
             other => other.user_text().map(|t| match current {
                 Some((idx, own)) if idx == i => own.to_string(),
-                _ => harness_core::event::own_words(t).to_string(),
+                _ => context::earlier_own_words(t).to_string(),
             }),
         })
         .collect()
@@ -1523,73 +1569,80 @@ impl NativeBackend {
         let mut messages = history_msgs(summary.as_deref(), recent);
         // Per-turn context sits after the history: the system prompt and the
         // history before this turn stay byte-identical (prompt cache). The
-        // context itself is not logged, so the next turn rebuilds this
-        // turn's message without it and its cache stops there; the
-        // environment line is logged (`turn_started`) and rebuilt.
+        // harness's context block (X.1, `context`) goes into this turn's
+        // own message and is logged as sent (`context_sent`), like the
+        // environment line (`turn_started`), so every later request
+        // rebuilds the message byte for byte; a standing section the model
+        // already has since the last summary is not sent again.
         // A callback turn (T.8d step 3) opens with the harness's frame and
         // the ended commands' notes, from the log alone: no person's text,
-        // no per-turn context (it would not rebuild from the log), no
-        // images. Anything the node passed in them is ignored.
+        // no master's context, no images; its block (instruction files and
+        // skills) after the opening. Anything the node passed in the
+        // others is ignored.
         let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
-        let instructions = ctx.extra.instructions.as_deref().filter(|i| !i.is_empty());
         let environment = ctx.extra.environment.as_deref().filter(|e| !e.is_empty());
+        let whose = match (&callback, child) {
+            (Some(_), _) => provider::Whose::Callback,
+            (None, true) => provider::Whose::Task,
+            (None, false) => provider::Whose::Person,
+        };
+        // Quoted under a line of the harness's (R76-1): project text, board
+        // cards, recalled facts and the repository's instruction files are
+        // written by other people and cannot pose as the person's message.
+        // A callback turn tells no MCP notes (they are shown in the chat).
+        let sections = {
+            let mut extra = ctx.extra.clone();
+            if callback.is_some() {
+                extra.context = None;
+                extra.standing = None;
+                extra.skill_asked = None;
+            }
+            let notes: &[String] = if callback.is_some() { &[] } else { &mcp_notes };
+            context::Sections::of(&extra, notes, &self.config.secrets)
+        };
+        let mut plan = context::plan(&sections, &context::had(recent), whose);
+        // The opening as the loop sends it and the log rebuilds it.
+        let callback_base = callback.as_ref().map(|ids| {
+            provider::open_callback(&mut messages, ids);
+            match messages.pop() {
+                Some(ChatMsg::Opening(t)) => t,
+                _ => String::new(),
+            }
+        });
+        let opening_msg = |plan: Option<&context::Plan>| {
+            let block = plan.map(|p| p.text.as_str());
+            match &callback_base {
+                Some(base) => {
+                    let mut t = base.clone();
+                    context::after_callback(&mut t, block, environment);
+                    ChatMsg::Opening(t)
+                }
+                None => images::user_msg(
+                    context::opening(environment, block, &ctx.user_text),
+                    &ctx.extra.images,
+                ),
+            }
+        };
         // Where this turn's own messages begin: what an earlier turn never
         // read (X.5), then the person's message or the callback's opening.
         let mut turn_idx = messages.len();
-        match &callback {
-            Some(ids) => {
-                provider::open_callback(&mut messages, ids);
-                // The repository's instruction files, which the node read
-                // for this turn (review RI-1), after the opening: this
-                // turn's only, like a person's turn's context, so a later
-                // request rebuilds the opening without them.
-                if let (Some(i), Some(ChatMsg::Opening(t))) = (instructions, messages.last_mut()) {
-                    *t = provider::with_instructions_after(t, i);
-                }
-                // The node's environment line, last: the opening still
-                // starts with the harness's frame.
-                if let (Some(env), Some(ChatMsg::Opening(t))) = (environment, messages.last_mut()) {
-                    t.push_str("\n\n");
-                    t.push_str(env);
-                }
-            }
-            None => {
-                // Quoted under a line of the harness's (R76-1): project
-                // text, board cards, recalled facts and the repository's
-                // instruction files are written by other people and cannot
-                // pose as the person's message. The files come first, so
-                // the master's last line (a routine's note) stays last.
-                let context = match (instructions, ctx.extra.context.as_deref()) {
-                    (Some(i), Some(c)) if !c.is_empty() => Some(format!("{i}\n\n{c}")),
-                    (Some(i), _) => Some(i.to_string()),
-                    (None, c) => c.map(str::to_string),
-                };
-                let context = match (context, mcp_notes.is_empty()) {
-                    (c, true) => c,
-                    (c, false) => Some(
-                        c.into_iter()
-                            .chain(std::iter::once(mcp_notes.join("\n")))
-                            .collect::<Vec<_>>()
-                            .join("\n\n"),
-                    ),
-                };
-                let user_text = match &context {
-                    Some(c) if child => provider::with_task_context(c, &ctx.user_text),
-                    Some(c) => provider::with_context(c, &ctx.user_text),
-                    None => ctx.user_text.clone(),
-                };
-                // The node's line about where the turn runs opens it.
-                let user_text = with_environment(environment, user_text);
-                // Recorded as read after `turn_started`, where the log has
-                // them on every later request.
-                messages.extend(ctx.extra.queued.iter().map(queued_msg));
-                messages.push(images::user_msg(user_text, &ctx.extra.images));
-            }
+        if callback.is_none() {
+            // Recorded as read after `turn_started`, where the log has
+            // them on every later request.
+            messages.extend(ctx.extra.queued.iter().map(queued_msg));
         }
+        messages.push(opening_msg(plan.as_ref()));
         let mut user_idx = messages.len() - 1;
         // The opening took the notes before it into itself.
         if callback.is_some() {
             turn_idx = user_idx;
+        }
+        // The block as sent, before any answer: the log rebuilds the
+        // opening with it.
+        if let Some(p) = &plan
+            && host.emit(context_sent(&ctx.turn_id, p)).await.is_err()
+        {
+            return stopped(usage);
         }
         let wanted = images::wanted(&messages);
         let mut loaded = if wanted.is_empty() {
@@ -1894,6 +1947,21 @@ impl NativeBackend {
                         turn_idx = messages.len();
                         user_idx = turn_idx + own;
                         messages.extend(this_turn);
+                        // A standing section this turn did not send because
+                        // a turn now summarised had it is sent again: the
+                        // opening is rebuilt with everything the window
+                        // lacks, and recorded again (the last record of a
+                        // turn is the one its opening is rebuilt with).
+                        let replanned = context::plan(&sections, &context::had(recent), whose);
+                        if replanned != plan {
+                            plan = replanned;
+                            messages[user_idx] = opening_msg(plan.as_ref());
+                            if let Some(p) = &plan
+                                && host.emit(context_sent(&ctx.turn_id, p)).await.is_err()
+                            {
+                                return stopped(usage);
+                            }
+                        }
                         images::attach(&mut messages, &loaded);
                     }
                     if ctx.cancel.is_cancelled() {
@@ -4953,8 +5021,8 @@ mod tests {
     }
 
     /// C43-1, through the loop: every turn carries a per-turn context at
-    /// the head of its user message, which the next turn rebuilds without.
-    /// Turn N+1 still marks a prefix that turn N marked, byte for byte,
+    /// the head of its user message (since X.1 rebuilt with it).
+    /// Turn N+1 marks a prefix that turn N marked, byte for byte,
     /// past the system prompt, so the history is read from the cache and
     /// not written again. Turn N has a tool call, so it sends two requests.
     #[tokio::test]

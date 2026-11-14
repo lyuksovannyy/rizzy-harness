@@ -1016,9 +1016,16 @@ impl NodeRuntime {
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
+                // The master's context: this message's part, and the
+                // standing parts the loop keeps as sections (X.1).
+                let (context, standing) = match context {
+                    Some(c) => (c.turn, Some(c.standing)),
+                    None => (None, None),
+                };
                 let extra = harness_core::backend::TurnExtra {
                     savings: savings.unwrap_or_default(),
                     context,
+                    standing,
                     ..Default::default()
                 };
                 let input = session::Input {

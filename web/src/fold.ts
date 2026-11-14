@@ -49,6 +49,7 @@ const KNOWN = new Set([
   "queued_delivered",
   "todo_updated",
   "approval_mode_changed",
+  "context_sent",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -332,6 +333,9 @@ export function apply(v: SessionView, e: RawEvent): void {
     }
     case "artifact_stage_failed":
       v.items.push({ type: "artifact_failed", path: p.path, name: p.name ?? null, error: p.error });
+      break;
+    // What the model was sent with the turn's message (X.1): never shown.
+    case "context_sent":
       break;
   }
 }

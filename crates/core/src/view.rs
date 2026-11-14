@@ -496,6 +496,9 @@ impl SessionView {
                 );
             }
             EventKind::TodoUpdated(t) => self.todo = t.items,
+            // What the model was sent with the turn's message; the chat
+            // never showed it (X.1).
+            EventKind::ContextSent(_) => {}
             EventKind::ApprovalModeChanged(c) => {
                 if let Some(m) = &mut self.meta {
                     m.approval_mode = c.mode;
